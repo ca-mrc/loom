@@ -177,3 +177,53 @@ async def test_response_send_failure_closes_archive_before_first_body_read(
         assert body.closed, 'response failed before its iterator could close the spool'
     finally:
         body.close()
+
+
+async def test_response_cancellation_drains_active_spool_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+
+    class SlowSpool(io.BytesIO):
+        closed_while_reading = False
+
+        def read(self, size: int = -1) -> bytes:
+            entered.set()
+            try:
+                assert release.wait(5)
+                return super().read(size)
+            finally:
+                finished.set()
+
+        def close(self) -> None:
+            if entered.is_set() and not finished.is_set():
+                self.closed_while_reading = True
+            super().close()
+
+    body = SlowSpool(b'archive')
+    archive = ArchiveBuildResult(body=body, size_bytes=7, sha256='0' * 64)
+    monkeypatch.setattr(trials, 'build_canonical_trial_bundle_archive', lambda **_kwargs: archive)
+    response = await trials.download_trial_bundle(*_route_arguments(monkeypatch))
+
+    async def receive() -> Any:
+        return {'type': 'http.disconnect'}
+
+    async def send(_message: Any) -> None:
+        pass
+
+    task = asyncio.create_task(response({'type': 'http', 'asgi': {'spec_version': '2.4'}}, receive, send))
+    try:
+        assert await asyncio.to_thread(entered.wait, 3)
+        task.cancel()
+        await asyncio.sleep(0.01)
+        first_cancel_drained = not task.done()
+        task.cancel()
+        await asyncio.sleep(0.01)
+        second_cancel_drained = not task.done()
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert await asyncio.to_thread(finished.wait, 3)
+        body.close()
+    assert first_cancel_drained and second_cancel_drained, 'response abandoned an active spool read'
+    assert not body.closed_while_reading, 'response closed the spool while its worker was reading'
+    assert body.closed
