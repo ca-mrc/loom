@@ -314,7 +314,8 @@ def _runtime_init_containers(spec: dict[str, Any]) -> list[dict[str, Any]]:
     """Compare exact init templates after normalizing resource spellings only."""
     normalized = _canonical_quantities({'kind': 'Deployment', 'spec': {'template': {
         'spec': {'initContainers': spec.get('initContainers', [])}}}})
-    return normalized['spec']['template']['spec']['initContainers']
+    result: list[dict[str, Any]] = normalized['spec']['template']['spec']['initContainers']
+    return result
 
 
 def _backlog_cursor(value: str | None) -> str:

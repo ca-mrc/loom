@@ -835,6 +835,47 @@ def test_runtime_workload_https_refuses_unbound_transition_before_io(completed_p
     assert not calls
 
 
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
+@pytest.mark.parametrize('retained', [False], indirect=True)
+def test_runtime_workload_https_only_explicit_rejection_is_retryable(completed_pool, publisher_cloud):
+    runtime, request = runtime_install_request(completed_pool, publisher_cloud)
+    plan = runtime.prepare_runtime_install(request)
+    key = 'Deployment:loom-dev:loom-control-plane'
+    before, desired = copy.deepcopy(plan.originals[key]), copy.deepcopy(plan.stopped[key])
+    before['metadata']['resourceVersion'] = '71'
+    value = copy.deepcopy(desired)
+    value['metadata'].update(uid=before['metadata']['uid'], resourceVersion='72')
+    # Server defaults are accepted, not confused with an ambiguous write.
+    value['spec']['revisionHistoryLimit'] = 10
+    replies = [(200, value, True)]
+    for status, reason in ((409, 'Conflict'), (422, 'Invalid')):
+        rejection = {'apiVersion': 'v1', 'kind': 'Status', 'status': 'Failure', 'code': status, 'reason': reason}
+        replies.extend(((status, rejection, False), (status, {**rejection, 'reason': 'Forbidden'}, None)))
+    replies.extend(((503, value, None), (200, [], None), (200, {}, None)))
+    for field in ('uid', 'security'):
+        changed = copy.deepcopy(value)
+        if field == 'uid':
+            changed['metadata']['uid'] = str(uuid4())
+        else:
+            changed['spec']['template']['spec']['hostNetwork'] = True
+        replies.append((200, changed, None))
+    with runtime_workloads_api(request, lambda *_: None, lambda *_: True) as api:
+        api.client.close()
+        for status, body, expected in replies:
+            calls = []
+            def transport(message, status=status, body=body, calls=calls):
+                calls.append(message)
+                return httpx.Response(status, json=body)
+            api.client = type(completed_pool[3].api.client)(base_url=api.api_server, transport=httpx.MockTransport(transport))
+            if expected is None:
+                with pytest.raises(ValueError, match='development runtime workload update unconfirmed'):
+                    api.patch_workload(key, before, desired)
+            else:
+                assert api.patch_workload(key, before, desired) is expected
+            assert len(calls) == 1
+            api.client.close()
+
+
 @pytest.mark.parametrize('manager_entry', ['foundation'], indirect=True)
 def test_runtime_database_delivery_keeps_old_data_identity_and_separates_credentials(completed_pool):
     from sqlalchemy.engine import make_url
