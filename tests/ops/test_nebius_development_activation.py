@@ -9,42 +9,111 @@ from pathlib import Path
 
 import pytest
 from scripts.ops import nebius_certificates as private_state
+from scripts.ops.nebius_management_stage import _canonical_quantities
 from tests.ops.test_nebius_development_pool_retained import (
     application_management_inputs as application_management_inputs,
+)
+from tests.ops.test_nebius_development_pool_retained import (
     application_material as application_material,
+)
+from tests.ops.test_nebius_development_pool_retained import (
     build_inputs as build_inputs,
+)
+from tests.ops.test_nebius_development_pool_retained import (
     capacity_checks as capacity_checks,
+)
+from tests.ops.test_nebius_development_pool_retained import (
     cloud as cloud,
+)
+from tests.ops.test_nebius_development_pool_retained import (
     collector_cloud as collector_cloud,
+)
+from tests.ops.test_nebius_development_pool_retained import (
     completed_pool as completed_pool,
+)
+from tests.ops.test_nebius_development_pool_retained import (
     connected as connected,
+)
+from tests.ops.test_nebius_development_pool_retained import (
     development_inputs as development_inputs,
+)
+from tests.ops.test_nebius_development_pool_retained import (
     entry as entry,
+)
+from tests.ops.test_nebius_development_pool_retained import (
     handoff as handoff,
+)
+from tests.ops.test_nebius_development_pool_retained import (
     installation as installation,
+)
+from tests.ops.test_nebius_development_pool_retained import (
     inventory as inventory,
+)
+from tests.ops.test_nebius_development_pool_retained import (
     live as live,
+)
+from tests.ops.test_nebius_development_pool_retained import (
     management_inputs as management_inputs,
+)
+from tests.ops.test_nebius_development_pool_retained import (
     manager_entry as manager_entry,
+)
+from tests.ops.test_nebius_development_pool_retained import (
     material as material,
+)
+from tests.ops.test_nebius_development_pool_retained import (
     original_cloud as original_cloud,
+)
+from tests.ops.test_nebius_development_pool_retained import (
     original_development_inputs as original_development_inputs,
+)
+from tests.ops.test_nebius_development_pool_retained import (
     original_manager_entry as original_manager_entry,
+)
+from tests.ops.test_nebius_development_pool_retained import (
     original_platform_inputs as original_platform_inputs,
+)
+from tests.ops.test_nebius_development_pool_retained import (
     original_pool_inputs as original_pool_inputs,
-    platform_inputs as platform_inputs,
-    pool_entry as pool_entry,
-    pool_inputs as pool_inputs,
-    preflight as preflight,
-    provider_checks as provider_checks,
-    publication as publication,
-    published_source as published_source,
-    publisher_cloud as publisher_cloud,
-    retained as retained,
-    route as route,
-    source_checkout as source_checkout,
-    tls_material as tls_material,
+)
+from tests.ops.test_nebius_development_pool_retained import (
     parent_install_fixture,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    platform_inputs as platform_inputs,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    pool_entry as pool_entry,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    pool_inputs as pool_inputs,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    preflight as preflight,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    provider_checks as provider_checks,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    publication as publication,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    published_source as published_source,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    publisher_cloud as publisher_cloud,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    retained as retained,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    route as route,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    source_checkout as source_checkout,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    tls_material as tls_material,
 )
 
 pytestmark = [
@@ -87,7 +156,7 @@ def test_completed_runtime_load_is_readonly_and_keeps_real_successors(completed_
         expected = result.resources[key]
         assert expected['metadata']['uid'] == actual['metadata']['uid']
         if actual['kind'] in {'Deployment', 'CronJob'}:
-            assert expected['spec'] == actual['spec']
+            assert _canonical_quantities(expected)['spec'] == _canonical_quantities(actual)['spec']
     gateway = result.resources['Deployment:loom-nebius-management-dev:loom-pool-gateway']
     assert gateway['spec']['replicas'] == 0
     assert result.resources['Deployment:loom-dev:loom-service']['spec']['replicas'] == 1
@@ -158,3 +227,43 @@ def test_completed_runtime_rejects_history_changing_during_load(completed_runtim
     monkeypatch.setattr(private_state, '_private_read', changed)
     with pytest.raises(ValueError, match='completed development runtime unqualified'):
         module.load_completed_runtime(request)
+
+
+def test_activation_preparation_limits_writes_to_retained_gateway_and_build_namespace(completed_runtime, monkeypatch):
+    _, request, _, _, _ = completed_runtime
+    name = 'scripts.ops.nebius_development_activation'
+    if importlib.util.find_spec(name) is None:
+        pytest.fail('fresh development activation preparation is missing')
+    module = importlib.import_module(name)
+
+    def no_write(*args, **kwargs):
+        pytest.fail('activation preparation attempted a write')
+
+    monkeypatch.setattr(private_state, '_atomic_json', no_write)
+    plan = module.prepare_development_activation(request)
+    spec = request.database.manager.retained.request.registration.spec
+    participant, = spec.participants
+    assert plan.runtime.request == request
+    assert plan.gateway_original['spec']['replicas'] == 0
+    assert plan.gateway_target['spec']['replicas'] == 1
+    assert plan.gateway_target['metadata']['namespace'] == 'loom-nebius-management-dev'
+    pod = plan.gateway_target['spec']['template']['spec']
+    assert pod['serviceAccountName'] == 'loom-pool-gateway'
+    assert pod['containers'][0]['image'] == request.database.manager.publication.bundle.candidate['images']['service']['image_ref']
+    assert {row['metadata']['namespace'] for row in plan.authority.values() if row['kind'] in {'Role', 'RoleBinding'}} == {
+        participant.execution_namespace.name, participant.build_namespace.name}
+    for row in plan.authority.values():
+        if row['kind'] == 'ClusterRole':
+            assert row['rules'] == [{'apiGroups': [''], 'resources': ['namespaces'], 'verbs': ['get'],
+                'resourceNames': sorted([participant.execution_namespace.name, participant.build_namespace.name])}]
+        for subject in row.get('subjects', []):
+            assert subject == {'kind': 'ServiceAccount', 'name': 'loom-pool-gateway', 'namespace': 'loom-nebius-management-dev'}
+    before, after = plan.build_namespace_original, plan.build_namespace_target
+    assert before['metadata']['name'] == after['metadata']['name'] == participant.build_namespace.name
+    assert before['metadata']['uid'] == str(participant.build_namespace.uid)
+    assert before['metadata']['labels']['pod-security.kubernetes.io/enforce'] == 'restricted'
+    assert after['metadata']['labels']['pod-security.kubernetes.io/enforce'] == 'privileged'
+    assert {row['kind'] for row in plan.build_policy.values()} == {
+        'ValidatingAdmissionPolicy', 'ValidatingAdmissionPolicyBinding'}
+    assert plan.input_digest.startswith('sha256:')
+    assert not any(key in plan.authority for key in plan.runtime.resources)
