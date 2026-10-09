@@ -65,7 +65,7 @@ def github_transport(responses, payload, *, location="https://store.blob.core.wi
             assert request.headers["Authorization"] == "Bearer test-github-secret"
             # GitHub rejects otherwise valid requests without a User-Agent.
             assert request.headers.get("User-Agent", "").startswith("loom-")
-            path = request.url.path.removeprefix("/repos/qianyi-sun/loom/")
+            path = request.url.path.removeprefix("/repositories/1281629473/")
             if path == "actions/artifacts/123/zip":
                 return httpx.Response(302, headers={"Location": location})
             return httpx.Response(200, json=responses[path])
@@ -101,8 +101,30 @@ async def test_protected_publication_resolves_actual_squash_not_nonexistent_dev_
     assert bundle.profile["candidate_sha"] == SHA
 
 
+@pytest.mark.parametrize("candidate_repository", ["qianyi-sun/loom", "ca-mrc/loom"])
+async def test_transferred_repository_resolves_old_and_new_publications(publication, candidate_repository):
+    reference, responses, _, keyring, candidate = copy.deepcopy(publication)
+    run = responses[f"actions/runs/{reference['run_id']}/attempts/1"]
+    run["repository"]["full_name"] = "ca-mrc/loom"
+    candidate["repository"] = candidate_repository
+    # Metadata changes do not rewrite a historical publication's source identity.
+    with zipfile.ZipFile(io.BytesIO(publication[2])) as source:
+        profile = source.read("runtime-profile.json")
+    artifact = io.BytesIO()
+    with zipfile.ZipFile(artifact, "w") as target:
+        target.writestr("candidate.json", json.dumps(candidate))
+        target.writestr("runtime-profile.json", profile)
+    payload = artifact.getvalue()
+    reference["artifact_sha256"] = "sha256:" + hashlib.sha256(payload).hexdigest()
+    responses["actions/artifacts/123"].update(
+        digest=reference["artifact_sha256"], size_in_bytes=len(payload),
+    )
+    bundle = await resolve((reference, responses, payload, keyring, candidate))
+    assert bundle.candidate["repository"] == candidate_repository
+
+
 @pytest.mark.parametrize("mutation", [
-    "failed-publication", "wrong-branch", "wrong-workflow", "wrong-repository", "wrong-attempt",
+    "failed-publication", "wrong-branch", "wrong-workflow", "wrong-repository", "wrong-repository-id", "wrong-attempt",
     "unmerged", "other-squash", "other-base", "failed-check", "missing-check", "forged-check-app",
     "newer-failed-check", "expired-artifact", "wrong-artifact-run", "wrong-artifact-digest", "tampered-bytes",
 ])
@@ -122,6 +144,8 @@ async def test_metadata_or_artifact_mismatch_cannot_authorize_candidate(publicat
         run["path"] = ".github/workflows/untrusted.yml"
     elif mutation == "wrong-repository":
         run["head_repository"] = {"full_name": "fork/loom", "id": 1}
+    elif mutation == "wrong-repository-id":
+        run["head_repository"] = {"full_name": "ca-mrc/loom", "id": 1}
     elif mutation == "wrong-attempt":
         run["run_attempt"] = 2
     elif mutation == "unmerged":

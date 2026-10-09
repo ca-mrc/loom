@@ -26,7 +26,7 @@ function Workflow({ channel }: { channel: Channel }): JSX.Element {
         {channel === "web" ? <div className="mt-3 flex flex-wrap items-center gap-2">{auth?.isAuthenticated ? <p className="text-sm font-medium text-emerald-700">Connected as {auth.me?.user.username} · {auth.me?.current_team?.name ?? "Select a team"}</p> : <Link className={ACTION_CLASS} to="/auth/login">Sign in</Link>}<Link className={ACTION_CLASS} to="/settings">Check your team</Link></div> : null}
         {channel === "cli" ? <div className="mt-3 space-y-3">
           <p className="text-sm text-slate-600">Install Git and uv using the full installation guide below, then clone Loom and install the CLI with Python 3.11.</p>
-          <CommandSnippet label="Install CLI" command={`git clone https://github.com/qianyi-sun/loom.git\ncd loom\ngit checkout ${shellQuote(repositoryDocsVersion().ref)}\nuv python install 3.11\nuv sync --locked --all-packages --python 3.11\nsource .venv/bin/activate`} />
+          <CommandSnippet label="Install CLI" command={`git clone https://github.com/ca-mrc/loom.git\ncd loom\ngit checkout ${shellQuote(repositoryDocsVersion().ref)}\nuv python install 3.11\nuv sync --locked --all-packages --python 3.11\nsource .venv/bin/activate`} />
           <p className="text-sm text-slate-600">Set LOOM_USERNAME and LOOM_PASSWORD in your terminal environment using your approved credentials. The command references them without embedding their values.</p>
           <CommandSnippet label="Connect CLI" command={`loom auth login --server ${shellQuote(server)} --username "$LOOM_USERNAME" --password env:LOOM_PASSWORD\nloom auth whoami`} />
 

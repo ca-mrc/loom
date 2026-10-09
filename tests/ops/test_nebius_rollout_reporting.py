@@ -102,6 +102,16 @@ def test_report_does_not_copy_untrusted_evidence_into_annotations_or_summary(mon
     assert json.loads(output.splitlines()[-1])["status"] == "skipped_busy"
 
 
+def test_report_links_follow_current_repository_name(monkeypatch, tmp_path):
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    monkeypatch.setenv("GITHUB_REPOSITORY", "ca-mrc/loom")
+    emit_result({"status": "skipped_busy", "candidate_sha": "a" * 40, "run_id": "123"})
+    body = summary.read_text()
+    assert "https://github.com/ca-mrc/loom/commit/" in body
+    assert "https://github.com/ca-mrc/loom/actions/runs/123" in body
+
+
 @pytest.mark.parametrize("conclusion", ["timed_out", "action_required", "skipped", "neutral"])
 def test_other_publication_outcomes_keep_the_exact_conclusion(capsys, conclusion):
     emit_result({"status": "skipped_publication_unsuccessful", "conclusion": conclusion})

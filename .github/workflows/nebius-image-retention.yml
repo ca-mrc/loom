@@ -21,7 +21,7 @@ concurrency:
 
 jobs:
   maintain:
-    if: github.repository == 'qianyi-sun/loom' && github.ref == 'refs/heads/dev' && vars.NEBIUS_RELEASE_ENABLED == 'true'
+    if: github.repository_id == '1281629473' && github.ref == 'refs/heads/dev' && vars.NEBIUS_RELEASE_ENABLED == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     environment:

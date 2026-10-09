@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Loom architecture docs
-    url: https://github.com/qianyi-sun/loom/blob/dev/docs/architecture/overview.md
+    url: https://github.com/ca-mrc/loom/blob/dev/docs/architecture/overview.md
     about: Read the architecture overview before opening broad-scope or architecture issues.
   - name: Loom releases
-    url: https://github.com/qianyi-sun/loom/releases
+    url: https://github.com/ca-mrc/loom/releases
     about: What shipped and when — check before reporting "missing" features.

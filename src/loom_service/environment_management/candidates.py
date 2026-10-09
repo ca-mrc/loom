@@ -23,12 +23,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from loom.execution_image_admission import ImageAdmissionKeyring, verify_execution_image_admission
 from loom.nebius_candidate_contract import NEBIUS_PLATFORM_IMAGES
+from loom.repository_identity import GITHUB_API_ROOT, is_loom_repository, is_repository_name
 from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1
 from loom_service.environment_management.manager import CandidateBundle
 from loom_service.environment_management.registry import ManagementError
 
-_REPO = "qianyi-sun/loom"
-_API = "https://api.github.com/repos/" + _REPO + "/"
+_API = GITHUB_API_ROOT
 _GATES = frozenset(("repository-checks", "images-gate", "cluster-smoke-gate", "staging-smoke-gate"))
 _MAX_ARTIFACT = 64 * 1024 * 1024
 _MAX_DOCUMENT = 1024 * 1024
@@ -162,15 +162,14 @@ class GitHubCandidateCatalog:
         _require(
             run["id"] == reference.run_id and run["run_attempt"] == reference.run_attempt
             and run["head_sha"] == reference.source_sha and run["head_branch"] == "dev"
-            and run["repository"]["full_name"] == _REPO and run["head_repository"]["full_name"] == _REPO
-            and run["repository"]["id"] == run["head_repository"]["id"]
+            and is_loom_repository(run["repository"]) and is_loom_repository(run["head_repository"])
             and run["path"] == ".github/workflows/nebius-candidate.yml"
             and run["event"] in {"push", "workflow_dispatch"}
             and run["status"] == "completed" and run["conclusion"] == "success"
         )
         _require(
             pr["number"] == reference.pull_request and pr["merged"] is True and pr["state"] == "closed"
-            and pr["base"]["ref"] == "dev" and pr["base"]["repo"]["full_name"] == _REPO
+            and pr["base"]["ref"] == "dev" and is_loom_repository(pr["base"]["repo"])
             and pr["merge_commit_sha"] == reference.source_sha
         )
         await self._checks(pr["head"]["sha"])
@@ -210,7 +209,7 @@ class GitHubCandidateCatalog:
         candidate, profile = documents["candidate.json"], documents["runtime-profile.json"]
         _require(
             candidate["schema_version"] == "loom.nebius-candidate.v1"
-            and candidate["repository"] == _REPO and candidate["source_ref"] == "refs/heads/dev"
+            and is_repository_name(candidate["repository"]) and candidate["source_ref"] == "refs/heads/dev"
             and candidate["workflow_path"] == run["path"] and candidate["run_id"] == reference.run_id
             and candidate["candidate_sha"] == reference.source_sha
             and candidate["registry_prefix"] == self.registry_prefix

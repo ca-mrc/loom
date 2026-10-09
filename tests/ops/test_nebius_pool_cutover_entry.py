@@ -248,7 +248,7 @@ def publication_http(private_cutover, monkeypatch):
         assert request.method == "GET"
         if request.url.host == "api.github.com":
             assert request.headers["Authorization"] == "Bearer " + root.upgrade.original.material["loom-management-publications"]["token"]
-            path = request.url.path.removeprefix("/repos/qianyi-sun/loom/")
+            path = request.url.path.removeprefix("/repositories/1281629473/")
             if path == "actions/artifacts/200/zip":
                 return httpx.Response(302, headers={"Location": "https://loom.blob.core.windows.net/artifact?sig=private-marker"})
             return httpx.Response(200, json=responses[path])

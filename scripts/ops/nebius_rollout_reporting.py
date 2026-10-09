@@ -26,6 +26,12 @@ def activity_counts(result: dict) -> dict[str, int]:
             if type(active.get(key)) is int and active[key] >= 0}
 
 
+def repository_name() -> str:
+    # This reporter stays independent of deployment tooling and credentials.
+    value = os.environ.get("GITHUB_REPOSITORY", REPOSITORY)
+    return value if value in {REPOSITORY, "ca-mrc/loom"} else REPOSITORY
+
+
 def explanation(result: dict) -> str:
     status = result["status"]
     if status == "skipped_publication_unsuccessful" and result.get("conclusion") in PUBLICATION_CONCLUSIONS:
@@ -77,10 +83,10 @@ def emit_result(result: dict) -> None:
              f"Automatic retry: **{'yes' if automatic_retry else 'no'}**.", ""]
     sha = result.get("candidate_sha", result.get("sha", ""))
     if re.fullmatch(r"[0-9a-f]{40}", sha):
-        lines += [f"Candidate: [`{sha[:12]}`](https://github.com/{REPOSITORY}/commit/{sha})", ""]
+        lines += [f"Candidate: [`{sha[:12]}`](https://github.com/{repository_name()}/commit/{sha})", ""]
     run_id = str(result.get("run_id", ""))
     if run_id.isdigit():
-        lines += [f"[Source candidate publication #{run_id}](https://github.com/{REPOSITORY}/actions/runs/{run_id})", ""]
+        lines += [f"[Source candidate publication #{run_id}](https://github.com/{repository_name()}/actions/runs/{run_id})", ""]
     if counts := activity_counts(result):
         lines += ["| Blocking activity | Count |", "| --- | ---: |"]
         lines += [f"| {ACTIVITY[key][0]} | {count} |" for key, count in counts.items()]

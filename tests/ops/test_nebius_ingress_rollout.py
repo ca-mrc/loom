@@ -406,7 +406,7 @@ def test_workflow_exposes_only_fixed_protected_ingress_operations_and_dedicated_
     assert job["permissions"] == {"contents": "read"}
     assert "concurrency" not in job, "ingress must use the same exclusion as application rollout"
     assert workflow["concurrency"]["cancel-in-progress"] == "false"
-    for guard in ("github.repository == 'qianyi-sun/loom'", "github.ref == 'refs/heads/dev'",
+    for guard in ("github.repository_id == '1281629473'", "github.ref == 'refs/heads/dev'",
                   "github.event_name == 'workflow_dispatch'", "inputs.operation == 'ingress'", "inputs.operation == 'ingress-rollback'",
                   "inputs.operation == 'ingress-dns'"):
         assert guard in job["if"]

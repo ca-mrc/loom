@@ -34,6 +34,7 @@ from loom.nebius_task_identity_policy import (
     identity_policy_documents,
     validate_identity_policy,
 )
+from loom.repository_identity import is_repository_name
 
 # Scheduling baseline for future automatic Nebius Terminus tasks, not task limits.
 DEFAULT_TASK_RESOURCE_REQUESTS = {
@@ -1443,7 +1444,7 @@ def _build_platform(
         profile = {**profile, "task_resource_requests": config["task_resource_requests"]}
     if (
         candidate.get("source_ref") not in {"refs/heads/dev", "refs/heads/codex/nebius-main"}
-        or candidate.get("repository") != "qianyi-sun/loom"
+        or not is_repository_name(candidate.get("repository"))
     ):
         raise NebiusPlatformError("candidate must originate from the Nebius integration branch")
     if profile.get("candidate_sha") != candidate.get("candidate_sha"):

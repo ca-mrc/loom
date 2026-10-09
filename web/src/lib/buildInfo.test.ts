@@ -44,7 +44,7 @@ describe("loaded build info (#2009)", () => {
   it("commitUrl links to the exact commit, or null with no revision", () => {
     expect(commitUrl(null)).toBeNull();
     expect(commitUrl("a".repeat(40))).toBe(
-      `https://github.com/qianyi-sun/loom/commit/${"a".repeat(40)}`,
+      `https://github.com/ca-mrc/loom/commit/${"a".repeat(40)}`,
     );
   });
 });

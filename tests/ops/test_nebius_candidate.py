@@ -422,6 +422,21 @@ def test_build_rejects_pr_before_any_process_or_output(
     assert not output.exists()
 
 
+@pytest.mark.parametrize("repository,repository_id", [
+    ("ca-mrc/loom", "42"), ("someone/fork", "1281629473"),
+])
+def test_build_rejects_wrong_repository_before_any_process(tmp_path, monkeypatch, repository, repository_id):
+    monkeypatch.setenv("GITHUB_SHA", "a" * 40)
+    monkeypatch.setenv("GITHUB_REPOSITORY", repository)
+    monkeypatch.setenv("GITHUB_REPOSITORY_ID", repository_id)
+    monkeypatch.setenv("GITHUB_REF", candidate.SOURCE_REF)
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "push")
+    monkeypatch.setenv("GITHUB_WORKFLOW_REF", f"{repository}/{candidate.WORKFLOW}@{candidate.SOURCE_REF}")
+    monkeypatch.setattr(candidate, "_run", lambda *args: pytest.fail("must not run a subprocess"))
+    with pytest.raises(ValueError, match="fixed protected Nebius workflow"):
+        candidate.build(argparse.Namespace(upload_timeout_seconds=900))
+
+
 def runtime_metadata(version: str = "test-1") -> dict[str, str]:
     return {
         "agent_name": "terminus-2", "agent_version": version,
@@ -480,10 +495,11 @@ def test_runtime_release_rejects_bad_binding(tmp_path: Path, fault: str) -> None
             signing_key_id="publisher", keyring_json=trust)
 
 
+@pytest.mark.parametrize("repository", ["qianyi-sun/loom", "ca-mrc/loom"])
 @pytest.mark.parametrize("mode", ["harness-only", "platform"])
 @pytest.mark.parametrize("enabled", [False, True])
 def test_publication_builds_selected_images_and_reuses_platform_admission(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, enabled: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, enabled: bool, repository: str,
 ) -> None:
     import shutil
 
@@ -495,9 +511,10 @@ def test_publication_builds_selected_images_and_reuses_platform_admission(
     digest, _ = candidate.inspect_oci_archive(archive, candidate="a" * 40)
     calls: list[tuple[str, ...]] = []
     for key, value in {
-        "GITHUB_SHA": "a" * 40, "GITHUB_REPOSITORY": candidate.REPOSITORY,
+        "GITHUB_SHA": "a" * 40, "GITHUB_REPOSITORY": repository,
+        "GITHUB_REPOSITORY_ID": "1281629473",
         "GITHUB_REF": candidate.SOURCE_REF, "GITHUB_EVENT_NAME": "workflow_dispatch",
-        "GITHUB_WORKFLOW_REF": f"{candidate.REPOSITORY}/{candidate.WORKFLOW}@{candidate.SOURCE_REF}",
+        "GITHUB_WORKFLOW_REF": f"{repository}/{candidate.WORKFLOW}@{candidate.SOURCE_REF}",
         "GITHUB_RUN_ID": "123", "NEBIUS_REGISTRY_CREDENTIALS_FILE": str(tmp_path / "fake-key"),
         "REGISTRY_AUTH_FILE": str(tmp_path / "fake-auth"),
     }.items():
@@ -557,6 +574,7 @@ def test_publication_builds_selected_images_and_reuses_platform_admission(
     else:
         manifest = json.loads((output / "candidate.json").read_text())
         assert manifest['source_archive_sha256'] == 'sha256:' + 'f' * 64
+        assert manifest['repository'] == repository
         profile = json.loads((output / "runtime-profile.json").read_text())
         assert profile["execution_class_id"] == (
             "linux-amd64-cpu-web-pod-v1" if enabled else "linux-amd64-cpu-pod-v1"

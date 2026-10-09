@@ -13,8 +13,8 @@ from loom.security.redaction import contains_secret_like_content
 PreflightCellStatus = Literal["planned_submit", "blocked", "skipped"]
 
 SCHEMA_VERSION = "agent-benchmark-preflight-plan-v1"
-ISSUE_URL = "https://github.com/qianyi-sun/loom/issues/35"
-COMPATIBILITY_ISSUE_URL = "https://github.com/qianyi-sun/loom/issues/114"
+ISSUE_URL = "https://github.com/ca-mrc/loom/issues/35"
+COMPATIBILITY_ISSUE_URL = "https://github.com/ca-mrc/loom/issues/114"
 
 _SECRET_QUERY_PARAM_RE = re.compile(
     r"(?i)(?:[?&;]|^)"

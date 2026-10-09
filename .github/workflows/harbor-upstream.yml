@@ -1,7 +1,7 @@
 name: Harbor upstream candidate
 
 # GitHub schedules and initial workflow_dispatch require the workflow on the
-# default branch. qianyi-sun/loom currently uses dev, so merging there activates
+# default branch. Loom uses dev, so merging there activates
 # this workflow; no production promotion is needed.
 on:
   schedule:
@@ -22,7 +22,7 @@ permissions:
 
 jobs:
   candidate:
-    if: github.repository == 'qianyi-sun/loom'
+    if: github.repository_id == '1281629473'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:

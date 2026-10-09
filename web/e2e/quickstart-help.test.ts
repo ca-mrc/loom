@@ -37,7 +37,7 @@ async function expectNoOverflow(page: Page): Promise<void> {
 }
 
 async function expectRepoDocs(container: Locator): Promise<void> {
-  const links = container.locator('a[href^="https://github.com/qianyi-sun/loom/blob/"]');
+  const links = container.locator('a[href^="https://github.com/ca-mrc/loom/blob/"]');
   await expect(links.first()).toBeVisible();
   for (const link of await links.all()) {
     await expect(link).toHaveAttribute("href", /\/docs\/[^#]+\.md#[a-z0-9-]+$/);

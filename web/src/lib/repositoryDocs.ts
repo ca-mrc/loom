@@ -31,5 +31,5 @@ export function repositoryDocsVersion(revision: string | null = LOADED_BUILD_INF
 
 export function repositoryDocUrl(id: RepositoryDocId, revision: string | null = LOADED_BUILD_INFO.revision): string {
   const doc = REPOSITORY_DOCS[id];
-  return `https://github.com/qianyi-sun/loom/blob/${repositoryDocsVersion(revision).ref}/${doc.path}#${doc.anchor}`;
+  return `https://github.com/ca-mrc/loom/blob/${repositoryDocsVersion(revision).ref}/${doc.path}#${doc.anchor}`;
 }

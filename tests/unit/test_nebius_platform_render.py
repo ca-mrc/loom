@@ -285,6 +285,17 @@ def test_project_cannot_replace_tenant_quota_parent(platform_inputs: tuple) -> N
         build_platform(config, candidate, profile, {}, repo_root=ROOT)
 
 
+@pytest.mark.parametrize("repository", ["qianyi-sun/loom", "ca-mrc/loom", "someone/fork"])
+def test_repository_migration_preserves_historical_candidates(platform_inputs: tuple, repository: str) -> None:
+    config, candidate, profile = platform_inputs
+    candidate["repository"] = repository
+    if repository == "someone/fork":
+        with pytest.raises(NebiusPlatformError, match="originate"):
+            build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    else:
+        build_platform(config, candidate, profile, {}, repo_root=ROOT)
+
+
 def test_independent_namespace_routing_storage_and_no_secret_material(
     platform_inputs: tuple, tmp_path: Path
 ) -> None:

@@ -6,7 +6,7 @@ import { REPOSITORY_DOCS, repositoryDocUrl, repositoryDocsVersion, type Reposito
 describe("repository documentation links", () => {
   it("pins links to a full loaded-build SHA", () => {
     const revision = "abc123def4".repeat(4);
-    expect(repositoryDocUrl("tasks", revision)).toBe(`https://github.com/qianyi-sun/loom/blob/${revision}/docs/architecture/user-brought-tasksets.md#manifest`);
+    expect(repositoryDocUrl("tasks", revision)).toBe(`https://github.com/ca-mrc/loom/blob/${revision}/docs/architecture/user-brought-tasksets.md#manifest`);
     expect(repositoryDocsVersion(revision).label).toContain("this loaded build");
   });
   it.each([null, "unknown", "abcdef", "dev", "../main", "g".repeat(40)])("explains the dev fallback for %s", (revision) => {

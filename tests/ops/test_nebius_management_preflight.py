@@ -286,7 +286,7 @@ def test_protected_manual_inventory_cannot_select_rollout_or_unprotected_environ
     job = workflow["jobs"]["inspect"]
     assert job["environment"]["name"] == "nebius-integration"
     assert job["permissions"] == {"contents": "read"}
-    for condition in ("github.repository == 'qianyi-sun/loom'", "github.ref == 'refs/heads/dev'",
+    for condition in ("github.repository_id == '1281629473'", "github.ref == 'refs/heads/dev'",
                       "github.event_name == 'workflow_dispatch'", "inputs.operation == 'inspect'"):
         assert condition in job["if"]
     commands = "\n".join(step.get("run", "") for step in job["steps"])

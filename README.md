@@ -262,4 +262,4 @@ Primary runbooks:
 ## License and Contributing
 
 Loom is licensed under Apache-2.0. The canonical development repository is
-[`qianyi-sun/loom`](https://github.com/qianyi-sun/loom).
+[`ca-mrc/loom`](https://github.com/ca-mrc/loom).

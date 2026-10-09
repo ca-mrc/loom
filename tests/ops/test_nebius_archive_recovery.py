@@ -211,6 +211,7 @@ def test_publication_denials_precede_any_launch(monkeypatch, denial):
     monkeypatch.setattr(module, 'source_archive_digest', lambda _: 'sha256:'+'a'*64)
     monkeypatch.setattr(module, 'candidate_follows', lambda *a: denial != 'candidate')
     monkeypatch.setattr(module, 'candidate_schema_head', lambda _: '0000' if denial == 'schema' else request.schema_head)
+    monkeypatch.setattr(module, 'canonical_repository_name', lambda: 'ca-mrc/loom')
     monkeypatch.setattr(module.subprocess, 'run', lambda *a, **k: SimpleNamespace(returncode=0))
     monkeypatch.setattr(module, 'validate_identity', lambda *a, **k: None)
     monkeypatch.setattr(module, 'read_json', lambda _: {'candidate_sha':request.candidate_sha,

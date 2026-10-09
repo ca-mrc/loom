@@ -24,12 +24,32 @@ from scripts.ops.deploy_nebius_platform import DeploymentError, Kubectl, deploy 
 from scripts.ops.nebius_rollout_reporting import emit_result, explanation  # noqa: E402
 
 from loom.nebius_rollout_guard import ACTIVITY_SQL  # noqa: E402
+from loom.repository_identity import (  # noqa: E402
+    REPOSITORY_ID,
+    REPOSITORY_NAMES,
+    is_loom_repository,
+)
 
 REPOSITORY = "qianyi-sun/loom"
 
 
+def repository_name() -> str:
+    """Use the running workflow's current name for presentation links."""
+    value = os.environ.get("GITHUB_REPOSITORY", REPOSITORY)
+    return value if value in REPOSITORY_NAMES else REPOSITORY
+
+
+def canonical_repository_name() -> str:
+    """Resolve a CLI download target without relying on the former URL redirect."""
+    value = github("")
+    if not is_loom_repository(value):
+        raise DeploymentError("GitHub repository identity differs")
+    return value["full_name"]
+
+
 def github(path: str, payload: dict | None = None) -> dict | list:
-    command = ["gh", "api", f"repos/{REPOSITORY}/{path}"]
+    endpoint = f"repositories/{REPOSITORY_ID}" + ("/" + path if path else "")
+    command = ["gh", "api", endpoint]
     if payload is not None:
         command += ["--method", "POST", "--input", "-"]
     result = subprocess.run(command, input=json.dumps(payload) if payload is not None else None,
@@ -178,7 +198,7 @@ def select_publication(run_id: str | None) -> dict:
         raise DeploymentError("publication run ID must be numeric")
     run = github(f"actions/runs/{run_id}")
     if (run["conclusion"] != "success" or run["head_branch"] != "dev"
-        or run["head_repository"]["full_name"] != REPOSITORY
+        or not is_loom_repository(run["head_repository"])
         or run["path"] != ".github/workflows/nebius-candidate.yml"
         or run["event"] not in {"push", "workflow_dispatch"}):
         raise DeploymentError("not a successful same-repository dev publication")
@@ -202,12 +222,12 @@ def select_recovery(run_id: str, directory: Path) -> dict:
         raise DeploymentError("recovery run ID must be numeric")
     run = github(f"actions/runs/{run_id}")
     if (run.get("conclusion") not in {"failure", "timed_out"} or run.get("status") != "completed"
-            or run.get("head_branch") != "dev" or run.get("head_repository", {}).get("full_name") != REPOSITORY
+            or run.get("head_branch") != "dev" or not is_loom_repository(run.get("head_repository"))
             or run.get("path") != ".github/workflows/nebius-rollout.yml"):
         raise DeploymentError("recovery requires a terminal failed same-repository dev rollout")
     directory.mkdir(parents=True, exist_ok=False)
     result = subprocess.run([
-        "gh", "run", "download", run_id, "--repo", REPOSITORY,
+        "gh", "run", "download", run_id, "--repo", canonical_repository_name(),
         "--name", f"nebius-rollout-{run_id}-{run['run_attempt']}", "--dir", str(directory),
     ], capture_output=True, text=True, check=False)
     records = list(directory.glob("deployment-*.json"))
@@ -356,7 +376,7 @@ def rollout(args: argparse.Namespace) -> dict:
         if deployment_id is not None:
             github(f"deployments/{deployment_id}/statuses", {
                 "state": state, "description": description,
-                **({"log_url": f"https://github.com/{REPOSITORY}/actions/runs/{run_id}"} if run_id else {}),
+                **({"log_url": f"https://github.com/{repository_name()}/actions/runs/{run_id}"} if run_id else {}),
                 "environment_url": "https://" + config["public_host"],
                 "auto_inactive": state == "success",
             })
