@@ -599,6 +599,13 @@ or arbitrary manifests. Prepare the exact clean integrated source with
 grants remain unchanged. The operator host needs its existing `kubectl`; probes
 use an explicit private connection, not ambient kubeconfig or credential plugins.
 
+The runtime workflow uses Loom's stable GitHub repository ID, following the
+[organization-transfer contract](nebius-candidate.md#github-organization-transfer).
+Runtime inputs may retain the historical `qianyi-sun/loom` publication name or use
+`ca-mrc/loom`; neither name alone establishes approval. The protected catalog
+still verifies repository identity, successful publication, required checks and
+immutable artifact bytes before installation writes.
+
 The operation schema is `loom.nebius-development-runtime-operation.v1`, with the
 same source/installation/operation/namespace/input-digest fields as pool delivery.
 Its owner-only inputs path is

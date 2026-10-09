@@ -18,6 +18,7 @@ from scripts.ops.nebius_pool_application_delivery import (
     render_application_build_delivery,
 )
 
+from loom.repository_identity import is_repository_name
 from loom_service.environment_management.candidates import ProtectedPublication, _json
 from loom_service.environment_management.deployment import ManagementDeployment
 from loom_service.environment_management.manager import CandidateBundle
@@ -45,7 +46,7 @@ class DevelopmentRuntimePublication:
         if (not selected.candidate_id.int or bundle.candidate_id != selected.candidate_id
                 or source.source_sha != selected.source_sha
                 or candidate.get('schema_version') != 'loom.nebius-candidate.v1'
-                or candidate.get('repository') != 'qianyi-sun/loom'
+                or not is_repository_name(candidate.get('repository'))
                 or candidate.get('source_ref') != 'refs/heads/dev'
                 or candidate.get('candidate_sha') != source.source_sha
                 or candidate.get('source_archive_sha256') != source.source_archive_sha256
