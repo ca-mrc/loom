@@ -753,7 +753,8 @@ def runtime_workloads_api(request, qualifier, readiness):
 
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
 @pytest.mark.parametrize('retained', [False], indirect=True)
-def test_runtime_workload_https_binds_uid_version_and_spec_before_patch(completed_pool, publisher_cloud):
+@pytest.mark.parametrize('late_status', [False, True])
+def test_runtime_workload_https_binds_uid_version_and_spec_before_patch(completed_pool, publisher_cloud, late_status):
     runtime, request = runtime_install_request(completed_pool, publisher_cloud)
     plan, calls, qualifications = runtime.prepare_runtime_install(request), [], []
     key = 'Deployment:loom-dev:loom-control-plane'
@@ -780,6 +781,10 @@ def test_runtime_workload_https_binds_uid_version_and_spec_before_patch(complete
                 'kind': 'ReplicaSetList' if replicas else 'PodList', 'metadata': {'resourceVersion': '75'}, 'items': []})
         assert message.url.path == '/apis/apps/v1/namespaces/loom-dev/deployments/loom-control-plane'
         if message.method == 'GET':
+            if late_status and any(row.url.path.endswith('/pods') for row in calls):
+                changed = copy.deepcopy(current)
+                changed['status']['replicas'] = 1
+                return httpx.Response(200, json=changed)
             return httpx.Response(200, json=current)
         assert message.method == 'PATCH'
         assert message.headers['content-type'] == 'application/json-patch+json'
@@ -808,7 +813,7 @@ def test_runtime_workload_https_binds_uid_version_and_spec_before_patch(complete
         assert api.preview_workload(key, before, desired)['spec']['replicas'] == 0
         assert current['spec']['replicas'] == 1
         assert api.patch_workload(key, before, desired) is True
-        assert api.workload_ready(key, desired) is True
+        assert api.workload_ready(key, desired) is (not late_status)
         assert current['spec']['replicas'] == 0
     assert len([row for row in calls if row.method == 'PATCH']) == 2
     assert len([row for row in calls if row.url.path.endswith(('/replicasets', '/pods'))]) == 2
