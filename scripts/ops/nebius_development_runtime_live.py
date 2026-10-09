@@ -241,17 +241,18 @@ class HTTPSDevelopmentRuntimeWorkloads(ManagementKubernetesTransport):
             pods = self._request('GET', '/api/v1/namespaces/' + namespace + '/pods?limit=1000')
             if children is None or pods is None:
                 raise ValueError('development runtime workload collections unavailable')
-            if deployment and actual['spec']['replicas'] == 1:
-                ready = qualify_started_deployment(current=actual, children=children, pods=pods,
-                    region=self.request.database.foundation.inputs.config['region'])
-            else:
-                ready = qualify_closed_workload_drain(original=self.originals[key], desired=expected,
-                    current=actual, children=children, pods=pods)
+            def observed_ready(current: dict[str, Any]) -> bool:
+                if deployment and current['spec']['replicas'] == 1:
+                    return qualify_started_deployment(current=current, children=children, pods=pods,
+                        region=self.request.database.foundation.inputs.config['region'])
+                return qualify_closed_workload_drain(original=self.originals[key], desired=expected,
+                    current=current, children=children, pods=pods)
+            ready = observed_ready(actual)
             final = self.read_workload(key)
             if (final['metadata']['generation'] != actual['metadata']['generation']
                     or _snapshot(final) != _snapshot(actual)):
                 raise ValueError('development runtime workload changed during observation')
-            if not ready:
+            if not ready or not observed_ready(final):
                 return False
         return self.observe_ready(copy.deepcopy(self.request), self.phase, copy.deepcopy(self.originals[key]),
             copy.deepcopy(expected), actual)
