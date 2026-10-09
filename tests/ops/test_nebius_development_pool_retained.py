@@ -822,7 +822,7 @@ async def test_runtime_cloud_uses_observer_credentials_and_rejects_authority_or_
     cloud.groups[scope.account_id] = [scope.group_id]
     cloud.permits[scope.group_id] = [{'metadata': {'id': 'permit-observer', 'parent_id': scope.group_id},
         'spec': {'resource_id': scope.tenant_id, 'role': 'viewer'}}]
-    operator = tmp_path / 'operator.json'
+    operator = tmp_path / 'runtime-operator.json'
     private_state._write_private(operator, b'{"operator":"private-test"}')
     sessions, reads, closed = [], [], []
     mode = {'damage': None}
