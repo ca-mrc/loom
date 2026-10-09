@@ -735,6 +735,7 @@ async def test_runtime_publication_resolves_protected_bytes_and_rejects_changed_
         completed_pool, publisher_cloud, published_source):
     from dataclasses import replace
 
+    from httpx._client import AsyncClient
     from scripts.ops.nebius_development_preflight import PreparedDevelopmentSource
     from scripts.ops.nebius_development_runtime_render import DevelopmentRuntimePublication
     from tests.unit.test_nebius_candidate_catalog import github_transport
@@ -761,7 +762,7 @@ async def test_runtime_publication_resolves_protected_bytes_and_rejects_changed_
             message.headers['Authorization'] = 'Bearer test-github-secret'
         return await transport.handle_async_request(message)
     # Real GitHub approval, digest and signature validation; only HTTPS is replaced.
-    async with httpx.AsyncClient(transport=httpx.MockTransport(public_read)) as http:
+    async with AsyncClient(transport=httpx.MockTransport(public_read)) as http:
         await module.qualify_runtime_publication(request=request, http=http)
         request.database.manager.publication.bundle.candidate['images']['service']['image_ref'] += '-changed'
         with pytest.raises(ValueError, match='development runtime publication unqualified'):
@@ -772,10 +773,109 @@ async def test_runtime_publication_resolves_protected_bytes_and_rejects_changed_
     request = replace(request, database=database_runtime(completed_pool, publication=publication))
     checks = published_source.responses['commits/' + 'b' * 40 + '/check-runs']['check_runs']
     checks[0]['conclusion'] = 'failure'
-    async with httpx.AsyncClient(transport=httpx.MockTransport(public_read)) as http:
+    async with AsyncClient(transport=httpx.MockTransport(public_read)) as http:
         with pytest.raises(ValueError, match='development runtime publication unqualified') as error:
             await module.qualify_runtime_publication(request=request, http=http)
     assert 'test-github-secret' not in str(error.value)
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
+@pytest.mark.parametrize('retained', [False], indirect=True)
+async def test_runtime_cloud_uses_observer_credentials_and_rejects_authority_or_pool_drift(
+        completed_pool, publisher_cloud, monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from cryptography.hazmat.primitives import serialization
+    from nebius.api.nebius.compute import v1 as compute
+    from nebius.api.nebius.iam import v1 as iam
+    from nebius.api.nebius.mk8s import v1 as mk8s
+    from nebius.api.nebius.quotas import v1 as quotas
+    from nebius.api.nebius.registry import v1 as registry
+    from nebius.sdk import SDK
+    from scripts.ops import nebius_certificates as private_state
+    from scripts.ops import nebius_development_runtime_external as module
+    from tests.unit.test_execution_capacity_collector import (
+        _enum,
+        _node_group_spec,
+        _platform_client,
+        _quota,
+    )
+
+    _, request = runtime_install_request(completed_pool, publisher_cloud)
+    assert hasattr(module, 'qualify_runtime_cloud'), 'concrete runtime cloud qualification is missing'
+    cloud, scope = publisher_cloud, request.collector_scope
+    config = request.database.foundation.inputs.config
+    spec = request.database.manager.retained.request.registration.spec
+    cloud.rows[scope.project_id] = cloud.rows.pop('project-children')
+    cloud.rows[scope.project_id][1]['metadata']['id'] = scope.project_id
+    for _, row in cloud.rows.values():
+        if row['metadata'].get('parent_id') == 'project-children':
+            row['metadata']['parent_id'] = scope.project_id
+    key = serialization.load_pem_private_key(json.loads(request.collector_credential)[
+        'subject-credentials']['private-key'].encode(), password=None)
+    cloud.rows[scope.account_id] = (iam.ServiceAccount, {'metadata': {'id': scope.account_id,
+        'parent_id': scope.project_id}, 'status': {'active': True}})
+    cloud.rows[scope.group_id] = (iam.Group, {'metadata': {'id': scope.group_id, 'parent_id': scope.tenant_id}})
+    cloud.rows[scope.key_id] = (iam.AuthPublicKey, {'metadata': {'id': scope.key_id, 'parent_id': scope.project_id},
+        'spec': {'account': {'service_account': {'id': scope.account_id}}, 'data': key.public_key().public_bytes(
+            serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo).decode()}, 'status': {'state': 'ACTIVE'}})
+    cloud.groups[scope.account_id] = [scope.group_id]
+    cloud.permits[scope.group_id] = [{'metadata': {'id': 'permit-observer', 'parent_id': scope.group_id},
+        'spec': {'resource_id': scope.tenant_id, 'role': 'viewer'}}]
+    operator = tmp_path / 'operator.json'
+    private_state._write_private(operator, b'{"operator":"private-test"}')
+    sessions, reads, closed = [], [], []
+    mode = {'damage': None}
+
+    def sdk_init(self, *, credentials_file_name, **kwargs):
+        self.path = Path(credentials_file_name)
+        self.identity = 'operator' if self.path == operator else json.loads(self.path.read_bytes())['subject-credentials']['sub']
+        assert self.identity in {'operator', scope.account_id}
+        assert self.path.stat().st_mode & 0o077 == 0
+        sessions.append(self)
+    async def sdk_close(self):
+        closed.append(self)
+    monkeypatch.setattr(SDK, '__init__', sdk_init)
+    monkeypatch.setattr(SDK, 'close', sdk_close)
+    for cls, name in [('ProjectServiceClient', 'projects'), ('ServiceAccountServiceClient', 'accounts'),
+            ('GroupServiceClient', 'groups'), ('GroupMembershipServiceClient', 'memberships'),
+            ('AccessPermitServiceClient', 'permits'), ('AuthPublicKeyServiceClient', 'public_keys')]:
+        def client(sdk, name=name):
+            assert sdk.identity == 'operator'
+            return cloud.clients[name]
+        monkeypatch.setattr(iam, cls, client)
+    monkeypatch.setattr(registry, 'RegistryServiceClient', lambda sdk: cloud.clients['registries'])
+
+    async def allowance(sdk, selection, **kwargs):
+        assert sdk.identity == scope.account_id and selection.parent_id == scope.tenant_id
+        reads.append(('quotas', sdk.identity))
+        amounts = {'nodes': 20, 'vcpu': 80, 'memory': 160 * 1024**3, 'storage': 2000 * 1024**3}
+        return SimpleNamespace(items=[_quota(identity[3], identity[4], amounts[name], 0, 1)
+            for name, identity in spec.quota_identities.items()], next_page_token='')
+    async def group(sdk, selection, **kwargs):
+        assert sdk.identity == scope.account_id and selection.id == spec.node_group_id
+        reads.append(('nodegroup', sdk.identity))
+        return SimpleNamespace(metadata=SimpleNamespace(id=spec.node_group_id, resource_version=1,
+            parent_id='foreign-cluster' if mode['damage'] == 'cluster' else config['cluster_id']),
+            spec=_node_group_spec(), status=SimpleNamespace(state=_enum('RUNNING'), node_count=0,
+                target_node_count=0, ready_node_count=0, reconciling=False, events=[]))
+    monkeypatch.setattr(quotas, 'QuotaAllowanceServiceClient',
+        lambda sdk: SimpleNamespace(list=lambda *args, **kwargs: allowance(sdk, *args, **kwargs)))
+    monkeypatch.setattr(mk8s, 'NodeGroupServiceClient',
+        lambda sdk: SimpleNamespace(get=lambda *args, **kwargs: group(sdk, *args, **kwargs)))
+    monkeypatch.setattr(compute, 'PlatformServiceClient', lambda sdk: _platform_client())
+    await module.qualify_runtime_cloud(request=request, operator_credentials=operator)
+    assert reads == [('quotas', scope.account_id), ('nodegroup', scope.account_id)]
+    assert sessions == closed and not sessions[-1].path.exists()
+    assert ('get', request.registry_scope.registry_id) in cloud.calls
+    for damage in ('collector-editor', 'registry-admin', 'cluster'):
+        mode['damage'] = damage
+        cloud.permits[scope.group_id][0]['spec']['role'] = 'editor' if damage == 'collector-editor' else 'viewer'
+        cloud.permits[request.registry_scope.group_id][0]['spec']['role'] = 'admin' if damage == 'registry-admin' else 'editor'
+        with pytest.raises(ValueError, match='development runtime cloud unqualified') as error:
+            await module.qualify_runtime_cloud(request=request, operator_credentials=operator)
+        assert 'PRIVATE KEY' not in str(error.value) and 'private-test' not in str(error.value)
+        assert sessions == closed
 
 
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
