@@ -39,10 +39,10 @@ jobs:
   explain-skip:
     name: Explain why automatic rollout did not start
     if: >-
-      github.repository == 'qianyi-sun/loom' &&
+      github.repository_id == '1281629473' &&
       (github.event_name == 'schedule' && vars.NEBIUS_AUTO_ROLLOUT_ENABLED != 'true' ||
        github.event_name == 'workflow_run' &&
-       github.event.workflow_run.head_repository.full_name == github.repository &&
+       github.event.workflow_run.head_repository.id == 1281629473 &&
        (github.event.workflow_run.conclusion != 'success' || vars.NEBIUS_AUTO_ROLLOUT_ENABLED != 'true'))
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -61,12 +61,12 @@ jobs:
   check:
     name: Check deployment conditions
     if: >-
-      github.repository == 'qianyi-sun/loom' &&
+      github.repository_id == '1281629473' &&
       vars.NEBIUS_AUTO_ROLLOUT_ENABLED == 'true' &&
       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/dev' && (inputs.operation == 'rollout' || inputs.operation == 'recover') ||
        github.event_name == 'schedule' && github.ref == 'refs/heads/dev' ||
        github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.head_repository.full_name == github.repository)
+       github.event.workflow_run.head_repository.id == 1281629473)
     outputs:
       status: ${{ steps.readiness.outputs.status || steps.publication.outputs.status }}
       candidate_sha: ${{ steps.publication.outputs.sha }}
@@ -149,12 +149,12 @@ jobs:
     needs: check
     if: >-
       needs.check.outputs.status == 'ready' &&
-      github.repository == 'qianyi-sun/loom' &&
+      github.repository_id == '1281629473' &&
       vars.NEBIUS_AUTO_ROLLOUT_ENABLED == 'true' &&
       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/dev' && (inputs.operation == 'rollout' || inputs.operation == 'recover') ||
        github.event_name == 'schedule' && github.ref == 'refs/heads/dev' ||
        github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.head_repository.full_name == github.repository)
+       github.event.workflow_run.head_repository.id == 1281629473)
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     environment:
@@ -243,7 +243,7 @@ jobs:
 
   certificate:
     if: >-
-      github.repository == 'qianyi-sun/loom' &&
+      github.repository_id == '1281629473' &&
       github.ref == 'refs/heads/dev' &&
       github.event_name == 'workflow_dispatch' &&
       inputs.operation == 'certificate'
@@ -304,7 +304,7 @@ jobs:
 
   ingress:
     if: >-
-      github.repository == 'qianyi-sun/loom' &&
+      github.repository_id == '1281629473' &&
       github.ref == 'refs/heads/dev' &&
       github.event_name == 'workflow_dispatch' &&
       (inputs.operation == 'ingress' || inputs.operation == 'ingress-rollback' || inputs.operation == 'ingress-dns')
@@ -408,7 +408,7 @@ jobs:
 
   management:
     if: >-
-      github.repository == 'qianyi-sun/loom' &&
+      github.repository_id == '1281629473' &&
       github.ref == 'refs/heads/dev' &&
       github.event_name == 'workflow_dispatch' &&
       (inputs.operation == 'management-preflight' || inputs.operation == 'management-install' ||
@@ -566,7 +566,7 @@ jobs:
 
   development:
     if: >-
-      github.repository == 'qianyi-sun/loom' &&
+      github.repository_id == '1281629473' &&
       github.ref == 'refs/heads/dev' &&
       github.event_name == 'workflow_dispatch' &&
       (inputs.operation == 'development-preflight' || inputs.operation == 'development-install')
@@ -660,7 +660,7 @@ jobs:
 
   development-management:
     if: >-
-      github.repository == 'qianyi-sun/loom' &&
+      github.repository_id == '1281629473' &&
       github.ref == 'refs/heads/dev' &&
       github.event_name == 'workflow_dispatch' &&
       (inputs.operation == 'development-management-preflight' || inputs.operation == 'development-management-install')
@@ -754,7 +754,7 @@ jobs:
 
   development-management-renewal:
     if: >-
-      github.repository == 'qianyi-sun/loom' &&
+      github.repository_id == '1281629473' &&
       github.ref == 'refs/heads/dev' &&
       github.event_name == 'workflow_dispatch' &&
       (inputs.operation == 'development-management-renewal-preflight' || inputs.operation == 'development-management-renewal-renew')
@@ -942,7 +942,7 @@ jobs:
 
   inspect:
     if: >-
-      github.repository == 'qianyi-sun/loom' &&
+      github.repository_id == '1281629473' &&
       github.ref == 'refs/heads/dev' &&
       github.event_name == 'workflow_dispatch' &&
       inputs.operation == 'inspect'

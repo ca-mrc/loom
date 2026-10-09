@@ -112,7 +112,7 @@ describe("VersionInfo (#2009)", () => {
     expect(screen.getByTitle(`Copy ${LOADED_REVISION}`)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "View commit" })).toHaveAttribute(
       "href",
-      `https://github.com/qianyi-sun/loom/commit/${LOADED_REVISION}`,
+      `https://github.com/ca-mrc/loom/commit/${LOADED_REVISION}`,
     );
     expect(screen.getByText("refs/heads/dev")).toBeInTheDocument();
   });

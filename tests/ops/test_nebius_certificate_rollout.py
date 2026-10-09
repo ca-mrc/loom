@@ -115,7 +115,7 @@ def test_certificate_operation_is_protected_and_not_a_route_to_application_rollo
     job = workflow["jobs"]["certificate"]
     assert job["environment"]["name"] == "nebius-integration"
     assert job["permissions"] == {"contents": "read"}
-    for condition in ("github.repository == 'qianyi-sun/loom'", "github.ref == 'refs/heads/dev'",
+    for condition in ("github.repository_id == '1281629473'", "github.ref == 'refs/heads/dev'",
                       "github.event_name == 'workflow_dispatch'", "inputs.operation == 'certificate'"):
         assert condition in job["if"]
     # Automatic application retries never invoke the certificate operation.

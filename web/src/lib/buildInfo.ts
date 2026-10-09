@@ -76,7 +76,7 @@ export function shortRevision(revision: string | null): string {
   return revision.slice(0, 12);
 }
 
-const REPO_COMMIT_BASE_URL = "https://github.com/qianyi-sun/loom/commit/";
+const REPO_COMMIT_BASE_URL = "https://github.com/ca-mrc/loom/commit/";
 
 export function commitUrl(revision: string | null): string | null {
   return revision ? `${REPO_COMMIT_BASE_URL}${revision}` : null;

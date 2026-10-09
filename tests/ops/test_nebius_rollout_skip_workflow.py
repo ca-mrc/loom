@@ -24,13 +24,17 @@ def workflow():
 def selected_jobs(workflow, *, conclusion="success", enabled="true",
                   event="workflow_run", operation="", repository="qianyi-sun/loom",
                   head_repository="qianyi-sun/loom", ref="refs/heads/dev",
-                  check_status="ready", check_result="success"):
+                  check_status="ready", check_result="success", repository_id=None,
+                  head_repository_id=None):
+    trusted_names = {"qianyi-sun/loom", "ca-mrc/loom"}
+    repository_id = repository_id or ("1281629473" if repository in trusted_names else "999")
+    head_repository_id = head_repository_id or (1281629473 if head_repository in trusted_names else 999)
     context = {
         "github": SimpleNamespace(
-            repository=repository, event_name=event, ref=ref,
+            repository=repository, repository_id=repository_id, event_name=event, ref=ref,
             event=SimpleNamespace(workflow_run=SimpleNamespace(
                 conclusion=conclusion,
-                head_repository=SimpleNamespace(full_name=head_repository),
+                head_repository=SimpleNamespace(full_name=head_repository, id=head_repository_id),
             )),
         ),
         "vars": SimpleNamespace(NEBIUS_AUTO_ROLLOUT_ENABLED=enabled),
@@ -85,6 +89,22 @@ def test_manual_rollout_keeps_existing_enablement_requirement(workflow, enabled,
 ])
 def test_ineligible_sources_do_not_start_any_job(workflow, context):
     assert selected_jobs(workflow, conclusion="failure", **context) == set()
+
+
+@pytest.mark.parametrize("repository", ["qianyi-sun/loom", "ca-mrc/loom"])
+def test_repository_transfer_preserves_automatic_rollout(workflow, repository):
+    assert selected_jobs(workflow, repository=repository, head_repository=repository) == {
+        "check", "rollout",
+    }
+
+
+@pytest.mark.parametrize("identity", [
+    {"repository_id": "999"},
+    {"head_repository_id": 999},
+])
+def test_matching_repository_name_does_not_authorize_another_repository(workflow, identity):
+    assert selected_jobs(workflow, repository="ca-mrc/loom", head_repository="ca-mrc/loom",
+                         **identity) == set()
 
 
 def test_explanation_has_no_protected_environment_or_deployment_credentials(workflow):

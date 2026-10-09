@@ -467,7 +467,7 @@ def test_provider_compatibility_matrix_records_status_dimensions() -> None:
     payload = qa_cmd._provider_compatibility_matrix_to_json_payload(matrix)
 
     assert payload["schema_version"] == "provider-harness-compatibility-v1"
-    assert payload["issue"] == "https://github.com/qianyi-sun/loom/issues/114"
+    assert payload["issue"] == "https://github.com/ca-mrc/loom/issues/114"
     assert payload["live_provider_calls"] == "not_run"
 
     cells = {
@@ -568,7 +568,7 @@ def test_provider_compatibility_evidence_override_is_serialized() -> None:
                     "diagnostics": "sanitized",
                     "redaction": "passed",
                     "notes": "smoke used env:YIBUAPI_API_KEY and sanitized debug evidence",
-                    "evidence_url": "https://github.com/qianyi-sun/loom/issues/114#issuecomment-1",
+                    "evidence_url": "https://github.com/ca-mrc/loom/issues/114#issuecomment-1",
                 },
             },
         ],
@@ -591,7 +591,7 @@ def test_provider_compatibility_evidence_override_is_serialized() -> None:
         "diagnostics": "sanitized",
         "redaction": "passed",
         "notes": "smoke used env:YIBUAPI_API_KEY and sanitized debug evidence",
-        "evidence_url": "https://github.com/qianyi-sun/loom/issues/114#issuecomment-1",
+        "evidence_url": "https://github.com/ca-mrc/loom/issues/114#issuecomment-1",
     }
 
 

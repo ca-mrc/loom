@@ -27,6 +27,7 @@ from scripts.ops.nebius_candidate import (  # noqa: E402
 from scripts.ops.nebius_idle_rollout import (  # noqa: E402
     candidate_follows,
     candidate_schema_head,
+    canonical_repository_name,
     select_publication,
 )
 
@@ -37,7 +38,6 @@ from loom_control_plane.pending_archive_recovery import (  # noqa: E402
     ArchiveRecoveryRequest,
 )
 
-REPOSITORY = "qianyi-sun/loom"
 _ENV_REQUIRED = {
     "LOOM_CP_DB_URL", "LOOM_CP_MINIO_ENDPOINT", "LOOM_CP_MINIO_REGION",
     "LOOM_CP_MINIO_ACCESS_KEY", "LOOM_CP_MINIO_SECRET_KEY",
@@ -155,7 +155,7 @@ def qualify_publication(request: ArchiveRecoveryRequest, run_id: str) -> dict[st
             or candidate_schema_head(request.candidate_sha) != request.schema_head):
         raise ValueError("candidate_compatibility_changed")
     with tempfile.TemporaryDirectory(prefix="loom-archive-publication-") as directory:
-        result = subprocess.run(["gh", "run", "download", run_id, "--repo", REPOSITORY,
+        result = subprocess.run(["gh", "run", "download", run_id, "--repo", canonical_repository_name(),
             "--name", selected["artifact"], "--dir", directory], capture_output=True, check=False, timeout=120)
         if result.returncode:
             raise ValueError("publication_download_failed")

@@ -110,7 +110,7 @@ def _compatibility_plan() -> dict[str, Any]:
                 "live_smoke": {
                     "status": "passed",
                     "llm_calls_count": 1,
-                    "evidence_url": "https://github.com/qianyi-sun/loom/issues/114#issuecomment-1",
+                    "evidence_url": "https://github.com/ca-mrc/loom/issues/114#issuecomment-1",
                 },
             },
             {
@@ -158,7 +158,7 @@ def test_preflight_plan_counts_and_reasons_are_deterministic() -> None:
     payload = matrix_preflight_plan_to_json_payload(plan)
 
     assert payload["schema_version"] == "agent-benchmark-preflight-plan-v1"
-    assert payload["issue"] == "https://github.com/qianyi-sun/loom/issues/35"
+    assert payload["issue"] == "https://github.com/ca-mrc/loom/issues/35"
     assert payload["live_provider_calls"] == "not_run"
     assert payload["summary"] == {
         "blocked": 8,

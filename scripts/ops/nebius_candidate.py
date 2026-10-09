@@ -44,6 +44,7 @@ from loom.execution_image_admission import (
     SignedImageAdmissionV1,
 )
 from loom.pipeline.keys import canonical_document
+from loom.repository_identity import REPOSITORY_ID, REPOSITORY_NAMES, is_repository_name
 from loom.service_execution_materialization import (
     ControllerComputeResourcesV1,
     build_nebius_runtime_profile,
@@ -147,7 +148,7 @@ def _trusted_signer(path: Path, key_id: str, keyring_json: str) -> Ed25519Privat
 def validate_source_identity(document: dict[str, Any]) -> None:
     if (
         document.get("schema_version") != "loom.nebius-candidate.v1"
-        or document.get("repository") != REPOSITORY
+        or not is_repository_name(document.get("repository"))
         or document.get("source_ref") not in {SOURCE_REF, "refs/heads/codex/nebius-main"}
         or document.get("workflow_path") != WORKFLOW
         or SHA.fullmatch(str(document.get("candidate_sha"))) is None
@@ -526,11 +527,13 @@ def build(args: argparse.Namespace) -> None:
     if args.upload_timeout_seconds <= 0:
         raise ValueError("upload timeout must be positive")
     candidate = os.environ.get("GITHUB_SHA", "")
+    repository = os.environ.get("GITHUB_REPOSITORY", "")
     if (
-        os.environ.get("GITHUB_REPOSITORY") != REPOSITORY
+        repository not in REPOSITORY_NAMES
+        or os.environ.get("GITHUB_REPOSITORY_ID") != str(REPOSITORY_ID)
         or os.environ.get("GITHUB_REF") != SOURCE_REF
         or os.environ.get("GITHUB_EVENT_NAME") not in {"workflow_dispatch", "push"}
-        or os.environ.get("GITHUB_WORKFLOW_REF") != f"{REPOSITORY}/{WORKFLOW}@{SOURCE_REF}"
+        or os.environ.get("GITHUB_WORKFLOW_REF") != f"{repository}/{WORKFLOW}@{SOURCE_REF}"
         or SHA.fullmatch(candidate) is None
         or _run("git", "rev-parse", "HEAD") != candidate
         or REGISTRY.fullmatch(args.registry_prefix) is None
@@ -554,7 +557,7 @@ def build(args: argparse.Namespace) -> None:
     ownership = {row["image_name"]: row for row in rows}
     document: dict[str, Any] = {
         "schema_version": "loom.nebius-candidate.v1",
-        "repository": REPOSITORY,
+        "repository": repository,
         "source_ref": SOURCE_REF,
         "candidate_sha": candidate,
         "workflow_path": WORKFLOW,

@@ -9,7 +9,7 @@ from scripts.ops import nebius_idle_rollout as rollout
 def publication_api(path, payload=None):
     if path.endswith("/artifacts?per_page=100"):
         return {"artifacts": [{"name": "nebius-candidate-" + "a" * 40 + "-42-2", "expired": False}]}
-    return {"conclusion": "success", "head_branch": "dev", "head_repository": {"full_name": rollout.REPOSITORY},
+    return {"conclusion": "success", "head_branch": "dev", "head_repository": {"full_name": rollout.REPOSITORY, "id": 1281629473},
             "path": ".github/workflows/nebius-candidate.yml", "event": "push", "head_sha": "a" * 40, "run_attempt": 2}
 
 
@@ -19,6 +19,33 @@ def test_selects_exact_successful_attempt_not_workflow_default_sha(monkeypatch):
     result = rollout.select_publication("42")
     assert result == {"status": "ready", "sha": "a" * 40, "run_id": "42",
                       "artifact": "nebius-candidate-" + "a" * 40 + "-42-2"}
+
+
+def test_transferred_publication_keeps_stable_repository_authority(monkeypatch):
+    run = publication_api("run")
+    run["head_repository"] = {"full_name": "ca-mrc/loom", "id": 1281629473}
+    monkeypatch.setattr(rollout, "github", lambda path: publication_api(path) if "/artifacts?" in path else run)
+    monkeypatch.setattr(rollout.subprocess, "run", lambda *a, **kw: SimpleNamespace(returncode=0))
+    assert rollout.select_publication("42")["status"] == "ready"
+    run["head_repository"]["id"] = 42
+    with pytest.raises(rollout.DeploymentError, match="same-repository"):
+        rollout.select_publication("42")
+
+
+def test_github_api_uses_stable_id_without_slug_redirect(monkeypatch):
+    def command(argv, **kwargs):
+        assert argv == ["gh", "api", "repositories/1281629473/actions/runs/42"]
+        return SimpleNamespace(returncode=0, stdout='{"id":42}')
+    monkeypatch.setattr(rollout.subprocess, "run", command)
+    assert rollout.github("actions/runs/42") == {"id": 42}
+
+
+def test_canonical_download_name_is_resolved_from_stable_repository(monkeypatch):
+    monkeypatch.setattr(rollout, "github", lambda path: {"full_name": "ca-mrc/loom", "id": 1281629473})
+    assert rollout.canonical_repository_name() == "ca-mrc/loom"
+    monkeypatch.setattr(rollout, "github", lambda path: {"full_name": "ca-mrc/loom", "id": 42})
+    with pytest.raises(rollout.DeploymentError, match="repository identity"):
+        rollout.canonical_repository_name()
 
 
 def test_harness_only_does_not_rollout(monkeypatch):
@@ -53,9 +80,11 @@ def failed_rollout_record():
 
 
 def recovery_api(path, payload=None):
+    if path == "":
+        return {"full_name": "ca-mrc/loom", "id": 1281629473}
     if path == "actions/runs/91":
         return {"conclusion": "failure", "status": "completed", "head_branch": "dev", "run_attempt": 3,
-                "head_repository": {"full_name": rollout.REPOSITORY}, "path": ".github/workflows/nebius-rollout.yml"}
+                "head_repository": {"full_name": rollout.REPOSITORY, "id": 1281629473}, "path": ".github/workflows/nebius-rollout.yml"}
     if path.startswith("actions/workflows/nebius-candidate.yml/runs?"):
         assert "head_sha=" + "a" * 40 in path
         return {"workflow_runs": [{"id": 42, "head_sha": "a" * 40}]}
@@ -68,7 +97,7 @@ def test_recovery_selects_failed_attempt_evidence_and_original_published_candida
     def command(argv, **kwargs):
         commands.append(argv)
         if argv[:3] == ["gh", "run", "download"]:
-            assert argv[3:8] == ["91", "--repo", rollout.REPOSITORY, "--name", "nebius-rollout-91-3"]
+            assert argv[3:8] == ["91", "--repo", "ca-mrc/loom", "--name", "nebius-rollout-91-3"]
             directory = tmp_path / "recovery"
             (directory / "deployment-test.json").write_text(json.dumps(failed_rollout_record()))
         return SimpleNamespace(returncode=0)

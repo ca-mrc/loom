@@ -61,7 +61,7 @@ CellState = Literal[
 CompatibilityCellStatus = Literal["supported", "skipped", "blocked"]
 
 _COMPATIBILITY_SCHEMA_VERSION = "provider-harness-compatibility-v1"
-_COMPATIBILITY_ISSUE_URL = "https://github.com/qianyi-sun/loom/issues/114"
+_COMPATIBILITY_ISSUE_URL = "https://github.com/ca-mrc/loom/issues/114"
 _PROVIDER_ENDPOINT_TYPES: list[dict[str, str]] = [
     {
         "id": "yibuapi-openai-compatible",

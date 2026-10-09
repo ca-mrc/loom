@@ -156,3 +156,18 @@ registry readback, and deploy that publication bundle through the independent pl
 renderer/deployer. Publication requires no cluster bootstrap.
 
 The publisher exports one OCI archive per image. It extracts that archive into a temporary OCI layout directory for Trivy vulnerability and SBOM reports, then pushes the original archive with Skopeo. Trivy accepts an OCI layout directory through `--input`; an OCI tar archive is not a Docker-save archive. The temporary layout is removed after scanning. The existing scan policy and scanned-to-published digest check are unchanged.
+
+## GitHub organization transfer
+
+Loom's repository identity is GitHub repository ID `1281629473`. Candidate
+publication and rollout workflow guards use this ID across the transfer from
+`qianyi-sun/loom` to `ca-mrc/loom`. Candidate readers accept both names so that
+previous publications remain usable; a different repository ID is rejected even
+when its name matches. GitHub API readers use the numeric repository endpoint,
+and artifact download commands resolve the current repository name.
+
+Deploy the compatible service image before transferring the repository: older
+installed candidate catalogs reject redirects from the former repository URL.
+After transfer, verify the installed `loom-management-publications` token can
+read the repository and candidate artifacts under the new organization. Preserve
+existing registry image names and historical candidate records.

@@ -1,7 +1,7 @@
 # Contributing
 
 > **Canonical repository:** use
-> [`qianyi-sun/loom`](https://github.com/qianyi-sun/loom) for new branches,
+> [`ca-mrc/loom`](https://github.com/ca-mrc/loom) for new branches,
 > pull requests, and issues.
 
 > Loom is public-readiness hardened and is operated as an issue-scoped
