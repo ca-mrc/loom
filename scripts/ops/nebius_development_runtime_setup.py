@@ -172,7 +172,7 @@ def stage_database_runtime(*, request: DevelopmentDatabaseRuntime, api: Manageme
 
 
 def validate_database_runtime_proof(request: DevelopmentDatabaseRuntime, state_dir: Path,
-                                    proof: Any) -> None:
+                                    proof: Any, *, _documents: dict[str, dict[str, Any]] | None = None) -> None:
     """Bind the committed SQL receipt to the recorded fixed Job and private token.
 
     The HTTPS reader must independently qualify the live Job, sole successful Pod,
@@ -180,7 +180,7 @@ def validate_database_runtime_proof(request: DevelopmentDatabaseRuntime, state_d
     satisfying this structural contract is not itself live completion evidence.
     """
     try:
-        documents = database_runtime_documents(request)
+        documents = database_runtime_documents(request) if _documents is None else _documents
         record = _json(private_state._private_read(state_dir / 'stage.json', limit=4 * 1024**2))
         _validate_record(record, {'schema': 'loom.nebius-management-stage.v1',
             'binding': asdict(request.manager.retained.request.retained.binding),
