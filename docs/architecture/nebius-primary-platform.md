@@ -2608,6 +2608,11 @@ ownership/templates and native scheduling/service-account defaults. It rechecks
 controller identity, generation and readiness after those collection reads.
 These observations do not establish process/database configuration or cloud
 access: those remain independent live qualification barriers.
+The GET-only runtime observer compares unchanged foundation/manager/pool
+resources with retained identities, including both database storage bindings.
+Only workload identities with validated runtime phase history may use successor
+templates. An uncertain transition retains both its old and intended template
+as observation options; those options never authorize retry or activation.
 This parent and its component tests are not a protected installation entrypoint:
 phase-aware HTTPS qualification, provider/material access, publication binding
 and installed multi-owner acceptance must still be connected and verified before

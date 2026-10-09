@@ -747,10 +747,15 @@ def test_runtime_observer_checks_retained_data_and_successors_without_replaying_
         assert result['Deployment:loom-dev:loom-control-plane']['spec']['replicas'] == 1
         assert result['Deployment:loom-dev:loom-service']['spec']['replicas'] == 0
         for path, field in (('/api/v1/namespaces/loom-dev/secrets/loom-platform-auth', 'data'),
-                ('/apis/apps/v1/namespaces/loom-dev/deployments/loom-control-plane', 'uid')):
+                ('/apis/apps/v1/namespaces/loom-dev/deployments/loom-control-plane', 'uid'),
+                ('/apis/apps/v1/namespaces/loom-dev/deployments/loom-control-plane', 'original'),
+                ('/api/v1/namespaces/loom-dev', 'uid'),
+                ('/api/v1/namespaces/loom-nebius-management-dev/persistentvolumeclaims/data-loom-postgres-0', 'uid')):
             original = copy.deepcopy(documents[path])
             if field == 'data':
                 documents[path]['data']['secret-store-master-key'] = 'Y2hhbmdlZA=='
+            elif field == 'original':
+                documents[path]['spec'] = copy.deepcopy(parent.plan.originals['Deployment:loom-dev:loom-control-plane']['spec'])
             else:
                 documents[path]['metadata']['uid'] = str(uuid4())
             with pytest.raises(ValueError, match='development runtime live inventory unqualified'):
