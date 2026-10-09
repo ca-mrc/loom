@@ -2613,10 +2613,11 @@ resources with retained identities, including both database storage bindings.
 Only workload identities with validated runtime phase history may use successor
 templates. An uncertain transition retains both its old and intended template
 as observation options; those options never authorize retry or activation.
-This parent and its component tests are not a protected installation entrypoint:
-phase-aware HTTPS qualification, provider/material access, publication binding
-and installed multi-owner acceptance must still be connected and verified before
-the environment can be called operational.
+The protected independent closed-runtime entrypoint connects this parent with
+phase-aware HTTPS qualification, provider/material access and publication binding.
+Its component tests do not establish installed readiness: dev-only activation
+and installed multi-owner acceptance remain required before the environment can
+be called operational.
 
 Management startup loads `pool_profiles_file`, a bounded installer-owned
 `loom.pool-profiles.v1` JSON catalog. It contains separate execution and native

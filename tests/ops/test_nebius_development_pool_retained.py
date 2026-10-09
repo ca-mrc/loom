@@ -2229,7 +2229,13 @@ def test_fresh_actuator_uses_catalog_and_only_read_authority(completed_pool, mon
     for row in container['env']:
         if 'value' in row:
             monkeypatch.setenv(row['name'], row['value'])
-    parsed = ExecutionActuatorSettings(db_url='postgresql+psycopg://loom_actuator:test@db/loom', controller_id='dev-actuator-test')
+    database_ref = settings['LOOM_EXECUTION_ACTUATOR_DB_URL']['valueFrom']['secretKeyRef']
+    worker_secret = database.material[1]
+    assert database_ref['name'] == worker_secret['metadata']['name']
+    database_url = base64.b64decode(worker_secret['data'][database_ref['key']]).decode()
+    monkeypatch.setenv('LOOM_EXECUTION_ACTUATOR_DB_URL', database_url)
+    parsed = ExecutionActuatorSettings(controller_id='dev-actuator-test')
+    assert parsed.db_url == database_url
     assert parsed.global_pool.participant == participant
     assert parsed.task_image_builder == build.settings
     assert parsed.service_account_name == 'loom-execution-attempt'
