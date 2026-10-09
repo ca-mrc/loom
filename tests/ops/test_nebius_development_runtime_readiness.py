@@ -103,7 +103,7 @@ def test_runtime_readiness_waits_for_complete_current_rollout(running, damage):
 
 
 @pytest.mark.parametrize('damage', ['truncated', 'duplicate', 'foreign-namespace', 'owner', 'replica-template',
-    'pod-image', 'pod-service-account', 'host-network', 'sidecar', 'container-security', 'boolean-count'])
+    'pod-image', 'pod-service-account', 'host-network', 'sidecar', 'container-security', 'foreign-toleration', 'boolean-count'])
 def test_runtime_readiness_rejects_unqualified_live_topology(running, damage):
     controller, collections, replica, pod = running
     if damage == 'truncated':
@@ -126,6 +126,8 @@ def test_runtime_readiness_rejects_unqualified_live_topology(running, damage):
         pod['spec']['containers'].append({'name': 'injected', 'image': 'other/image'})
     elif damage == 'container-security':
         pod['spec']['containers'][0]['securityContext']['privileged'] = True
+    elif damage == 'foreign-toleration':
+        pod['spec']['tolerations'] = [{'operator': 'Exists'}]
     else:
         controller['status']['replicas'] = True
     with pytest.raises(ValueError, match='development runtime workload readiness unqualified'):
