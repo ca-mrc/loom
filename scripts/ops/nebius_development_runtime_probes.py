@@ -21,16 +21,23 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from pydantic import PostgresDsn
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_database_readiness import qualify_database_backend, qualify_database_pod
+from scripts.ops.nebius_development_bootstrap import _secret_documents
 from scripts.ops.nebius_development_install import DevelopmentInstallRequest, _storage_observation
 from scripts.ops.nebius_development_runtime_install import DevelopmentRuntimeInstallRequest
 from scripts.ops.nebius_development_runtime_observation import HTTPSDevelopmentRuntimeObserver
 from scripts.ops.nebius_development_runtime_readiness import qualify_started_deployment
 from scripts.ops.nebius_development_stage import DevelopmentStageInput
-from scripts.ops.nebius_ingress_stage import _snapshot, _uid
+from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
+from scripts.ops.nebius_management_material import _documents as management_material
 from scripts.ops.nebius_management_stage import HTTPSManagementStageAPI, _qualified_defaulted
 from scripts.ops.nebius_management_switch import _matches
+from scripts.ops.nebius_pool_migration_guard import (
+    _BOUND_DATABASE_COMMAND,
+    qualify_database_destination,
+)
 from scripts.ops.nebius_pool_runtime_settings import (
     BOUND_POOL_SETTINGS_COMMAND,
     PoolSettingsComponent,
@@ -212,3 +219,66 @@ class HTTPSDevelopmentRuntimeProbes(HTTPSDevelopmentRuntimeObserver):
                 raise ValueError
         except Exception:
             raise ValueError('development runtime process settings unqualified') from None
+
+    def _database_url(self, component: PoolSettingsComponent, workload: dict[str, Any], state_dir: Path) -> str:
+        namespace = workload['metadata']['namespace']
+        variable = {'manager': 'LOOM_SVC_DB_URL', 'service': 'LOOM_SVC_DB_URL',
+            'controller': 'LOOM_CP_DB_URL', 'actuator': 'LOOM_EXECUTION_ACTUATOR_DB_URL'}[component]
+        container, = workload['spec']['template']['spec']['containers']
+        row, = (item for item in container['env'] if item['name'] == variable)
+        reference = row['valueFrom']['secretKeyRef']
+        if (container.get('envFrom') or set(row) != {'name', 'valueFrom'}
+                or set(row['valueFrom']) != {'secretKeyRef'} or set(reference) != {'name', 'key'}):
+            raise ValueError
+        name = reference['name']
+        if component == 'manager':
+            retained = self.manager.retained
+            raw = retained.files[Path(retained.operation['state_dir']) / 'bootstrap/material/material.json']
+            history = _json(raw)
+            expected = management_material(history['material'], retained.binding, history['operation_id'])[name]
+            expected['metadata']['uid'] = history['resources'][name]['uid']
+        elif component in {'service', 'controller'}:
+            foundation = self.request.database.foundation
+            expected = _secret_documents(foundation.bootstrap['material'], foundation.inputs.binding,
+                foundation.binding.operation_id)[name]
+            expected['metadata']['uid'] = foundation.bootstrap['secrets'][name]['uid']
+        else:
+            material = self.request.database.material[1]
+            if (material['metadata']['namespace'], material['metadata']['name']) != (namespace, name):
+                raise ValueError
+            history = _json(private_state._private_read(state_dir / 'database/stage.json', limit=4 * 1024**2))
+            item = history['resources'][_key(material)]
+            if item['status'] != 'created':
+                raise ValueError
+            expected = copy.deepcopy(item['observed'])
+            expected['metadata']['uid'] = item['uid']
+        actual = self._get(expected)
+        if not _matches(actual, expected, _uid(expected)):
+            raise ValueError
+        url = base64.b64decode(actual['data'][reference['key']], validate=True).decode()
+        qualify_database_destination(url, self.manager.binding.namespace if component == 'manager' else 'loom-dev')
+        return url
+
+    def qualify_runtime_database(self, *, key: str, state_dir: Path) -> None:
+        """HMAC the process's typed DB URL, bracketed by exact routed DB/Pod checks."""
+        try:
+            component, workload, before = self._running(key, state_dir)
+            namespace = self.manager.binding.namespace if component == 'manager' else 'loom-dev'
+            before_database = self._database(namespace)
+            url = self._database_url(component, workload, state_dir)
+            expected = url if component == 'actuator' else str(PostgresDsn(url))
+            nonce = secrets.token_hex(32)
+            response = hmac.new(bytes.fromhex(nonce), expected.encode(), 'sha256').hexdigest()
+            container, = workload['spec']['template']['spec']['containers']
+            report = self._exec(before, container['name'], ['python', '-c', _BOUND_DATABASE_COMMAND,
+                'service' if component == 'manager' else component, nonce, response])
+            after_component, after_workload, after = self._running(key, state_dir)
+            if (report != {'status': 'qualified'} or component != after_component
+                    or _snapshot(after_workload) != _snapshot(workload)
+                    or after_workload['metadata']['generation'] != workload['metadata']['generation']
+                    or self._process_identity(after) != self._process_identity(before)
+                    or self._database_url(component, after_workload, state_dir) != url
+                    or self._process_identity(self._database(namespace)) != self._process_identity(before_database)):
+                raise ValueError
+        except Exception:
+            raise ValueError('development runtime process database unqualified') from None
