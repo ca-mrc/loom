@@ -702,6 +702,81 @@ def test_runtime_live_options_preserve_both_sides_of_uncertain_patch_without_ret
     assert api.transition.patches == patches
 
 
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
+@pytest.mark.parametrize('retained', [False], indirect=True)
+def test_runtime_prechild_window_cannot_hide_existing_history_or_another_phase(completed_pool, publisher_cloud):
+    runtime, request, api, state, _ = parent_install_fixture(completed_pool, publisher_cloud)
+    assert runtime.install_development_runtime(request=request, api=api, execute=True)['status'] == 'pending_database'
+    for phase in ('database', 'stop', 'unrecognised'):
+        with pytest.raises(ValueError, match='development runtime workload history unqualified'):
+            runtime.runtime_workload_options(request=request, state_dir=state, _prechild_phase=phase)
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
+@pytest.mark.parametrize('retained', [False], indirect=True)
+def test_runtime_private_entry_binds_source_history_and_separate_material_before_connection(
+        completed_pool, publisher_cloud, monkeypatch):
+    from scripts.ops import nebius_certificates as private_state
+
+    _, request = runtime_install_request(completed_pool, publisher_cloud)
+    name = 'scripts.ops.nebius_development_runtime_entry'
+    if importlib.util.find_spec(name) is None:
+        pytest.fail('protected development runtime entry is missing')
+    entry = importlib.import_module(name)
+    manager = request.database.manager.retained.request.retained
+    owner = Path(manager.operation['inputs_path']).parents[3]
+    root = owner / '.loom/nebius-development-runtime' / manager.binding.installation_id / str(request.database.operation_id)
+    root.mkdir(mode=0o700, parents=True)
+    material = {}
+    for field, raw in (('collector_credential_file', request.collector_credential),
+            ('registry_credential_file', request.registry_credential),
+            ('actuator_password_file', b'runtime-actuator-' + b'p' * 40),
+            ('batch_runner_token_file', b'loom_br_' + b'r' * 64)):
+        path = root / (field + '.private')
+        private_state._write_private(path, raw)
+        material[field] = str(path)
+    source = root / 'development-runtime-source.json'
+    private_state._atomic_json(source, request.database.manager.publication.source.model_dump(mode='json'))
+    monkeypatch.setattr(entry, 'SOURCE_RECORD', source)
+    value = {'schema_version': 'loom.nebius-development-runtime-inputs.v1',
+        'retained': request.database.reference.model_dump(mode='json'),
+        'publication': request.database.manager.publication.publication.model_dump(mode='json'),
+        'candidate': request.database.manager.publication.bundle.candidate,
+        'profile': request.database.manager.publication.bundle.profile,
+        'collector_scope': request.collector_scope.model_dump(mode='json'),
+        'registry_scope': request.registry_scope.model_dump(mode='json'),
+        'operator_connection': completed_pool[1]['operator_connection'], **material}
+    path = root / 'inputs.json'
+    private_state._atomic_json(path, value)
+    operation = {'schema': 'loom.nebius-development-runtime-operation.v1',
+        'source_sha': request.database.manager.publication.source.source_sha,
+        'installation_id': manager.binding.installation_id, 'namespace': manager.binding.namespace,
+        'operation_id': str(request.database.operation_id), 'inputs_path': str(path),
+        'inputs_sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
+    _, actual, files = entry.load_inputs(operation)
+    assert actual == request and all(item.read_bytes() == raw for item, raw in files.items())
+    assert {path, source, *(Path(item) for item in material.values())} <= files.keys()
+    assert request.collector_credential.decode() not in repr(actual)
+    for damage in ('source', 'staging', 'history', 'material'):
+        changed = copy.deepcopy(operation)
+        if damage == 'source':
+            changed['source_sha'] = 'f' * 40
+        elif damage == 'staging':
+            changed['namespace'] = 'loom-staging'
+        elif damage == 'history':
+            edited = copy.deepcopy(value)
+            edited['retained']['operation_sha256'] = 'f' * 64
+            private_state._atomic_json(path, edited)
+            changed['inputs_sha256'] = hashlib.sha256(path.read_bytes()).hexdigest()
+        else:
+            private_state._atomic_json(path, value)
+            changed['inputs_sha256'] = hashlib.sha256(path.read_bytes()).hexdigest()
+            credential = Path(material['collector_credential_file'])
+            private_state._atomic_json(credential, json.loads(request.registry_credential))
+        with pytest.raises(ValueError, match='development runtime private inputs unqualified'):
+            entry.load_inputs(changed)
+
+
 def runtime_http_inventory(request, parent, pool, foundation):
     calls, documents = [], {}
     plurals = {'Secret': 'secrets', 'ConfigMap': 'configmaps', 'Namespace': 'namespaces',
@@ -893,13 +968,22 @@ async def test_runtime_cloud_uses_observer_credentials_and_rejects_authority_or_
 
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
 @pytest.mark.parametrize('retained', [False], indirect=True)
+@pytest.mark.parametrize('completion', ['lost-history', 'complete'])
+@pytest.mark.timeout(300)  # Complete parent with real history/crypto, HTTP boundary only.
 def test_concrete_runtime_parent_qualifies_before_writes_and_resumes_pending_sql(
-        completed_pool, publisher_cloud, published_source, handoff, monkeypatch, tmp_path):
+        completed_pool, publisher_cloud, published_source, handoff, monkeypatch, tmp_path, completion):
+    import hmac
     from types import SimpleNamespace
 
     from httpx._client import AsyncClient, Client
+    from pydantic import PostgresDsn
     from scripts.ops import nebius_development_runtime_install as runtime
     from scripts.ops import nebius_development_runtime_probes as probes
+    from scripts.ops.nebius_pool_migration_guard import _BOUND_DATABASE_COMMAND
+    from scripts.ops.nebius_pool_runtime_settings import (
+        BOUND_POOL_SETTINGS_COMMAND,
+        expected_pool_runtime_settings,
+    )
 
     from loom_service.pool_management.capacity import digest
 
@@ -914,15 +998,58 @@ def test_concrete_runtime_parent_qualifies_before_writes_and_resumes_pending_sql
     state = Path(manager.operation['state_dir']).parent / 'runtime-installation'
     operator, _, cloud_reads, _, _ = runtime_cloud_transport(request, publisher_cloud, monkeypatch, tmp_path)
     calls, documents, get = runtime_http_inventory(request, parent, completed_pool[3].server, handoff[2])
+    populate_runtime_pods(documents)
     populate_database_backends(documents)
-    writes, executions = [], []
+    writes, executions, logs = [], [], {}
+    for row in documents.values():
+        if row['kind'] in {'Deployment', 'CronJob'}:
+            row['metadata'].setdefault('resourceVersion', '1')
+            row['metadata'].setdefault('generation', 1)
+    def reconcile(current):
+        namespace, name = current['metadata']['namespace'], current['metadata']['name']
+        for plural, version, kind in (('pods', 'v1', 'Pod'), ('replicasets', 'apps/v1', 'ReplicaSet')):
+            prefix = '/api/v1' if version == 'v1' else '/apis/' + version
+            path = prefix + '/namespaces/' + namespace + '/' + plural
+            listing = documents.setdefault(path, {'apiVersion': version, 'kind': kind + 'List',
+                'metadata': {'resourceVersion': '1'}, 'items': []})
+            listing['items'] = [row for row in listing['items'] if not row['metadata']['name'].startswith(name + '-a12b34')]
+        count = current['spec']['replicas']
+        current['status'] = {'observedGeneration': current['metadata']['generation'], **{
+            field: count for field in ('replicas', 'readyReplicas', 'updatedReplicas', 'availableReplicas')}}
+        if count:
+            additions = {'current': current}
+            populate_runtime_pods(additions)
+            for path, row in additions.items():
+                if path != 'current':
+                    documents[path]['items'].extend(row['items'])
     def handle(message):
         if message.method == 'GET':
-            if message.url.path.endswith('/pods') and message.url.params.get('labelSelector') == 'app=loom-postgres':
+            if message.url.path in logs:
+                return httpx.Response(200, content=json.dumps(logs[message.url.path]).encode())
+            if message.url.path.endswith('/pods') and message.url.params.get('labelSelector'):
                 listing = copy.deepcopy(documents[message.url.path])
-                listing['items'] = [row for row in listing['items'] if row['metadata']['labels'].get('app') == 'loom-postgres']
+                label, value = message.url.params['labelSelector'].split('=', 1)
+                listing['items'] = [row for row in listing['items'] if row['metadata']['labels'].get(label) == value]
                 return httpx.Response(200, json=listing)
             return get(message)
+        if message.method == 'PATCH':
+            current = copy.deepcopy(documents[message.url.path])
+            for change in json.loads(message.content):
+                target, field = (current['metadata'], change['path'].rsplit('/', 1)[-1]) if change['path'].startswith('/metadata/') else (current, 'spec')
+                if change['op'] == 'test':
+                    assert target[field] == change['value']
+                elif change['op'] == 'remove':
+                    del target[field]
+                else:
+                    target[field] = change['value']
+            if not message.url.query:
+                writes.append(current)
+                current['metadata']['generation'] += 1
+                current['metadata']['resourceVersion'] = str(int(current['metadata']['resourceVersion']) + 1)
+                documents[message.url.path] = current
+                if current['kind'] == 'Deployment':
+                    reconcile(current)
+            return httpx.Response(200, json=current)
         assert message.method == 'POST' and 'staging' not in message.url.path
         row = json.loads(message.content)
         if message.url.params.get('dryRun') == 'All':
@@ -930,18 +1057,44 @@ def test_concrete_runtime_parent_qualifies_before_writes_and_resumes_pending_sql
         writes.append(row)
         parent.store.create_resource(row)
         actual = parent.store.get_resource(row)
+        if actual['kind'] in {'Deployment', 'CronJob'}:
+            actual['metadata'].update(resourceVersion='1', generation=1)
+            if actual['kind'] == 'Deployment':
+                reconcile(actual)
         documents[message.url.path + '/' + row['metadata']['name']] = actual
         return httpx.Response(201, json=actual)
-    monkeypatch.setattr(httpx, 'Client', lambda **kwargs: Client(**kwargs, transport=httpx.MockTransport(handle)))
+    monkeypatch.setattr(httpx, 'Client', lambda **kwargs: Client(**{**kwargs, 'transport': httpx.MockTransport(handle)}))
     monkeypatch.setattr(httpx, 'AsyncClient', lambda **kwargs: AsyncClient(**kwargs,
         transport=runtime_github_transport(published_source)))
     spec = request.database.manager.retained.request.registration.spec
     def execute(argv, **kwargs):
-        assert argv[-1].startswith('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;')
         executions.append(argv)
+        if argv[-1].startswith('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;'):
+            return SimpleNamespace(returncode=0, stderr=b'', stdout=json.dumps({
+                'schema': 'loom.pool-startup-closed.v1', 'operation_id': str(spec.operation_id),
+                'installation_sha256': digest(spec.model_dump(mode='json')), 'read_only': True, 'qualified': True}).encode())
+        command = argv[argv.index('exec'):]
+        component, nonce, response = command[10:]
+        namespace, pod_name = command[2], command[3].removeprefix('pod/')
+        actual = documents['/apis/apps/v1/namespaces/' + namespace + '/deployments/' + pod_name.removesuffix('-a12b34-test')]
+        if command[9] == BOUND_POOL_SETTINGS_COMMAND:
+            participant, = spec.participants
+            machine, = (row for row in spec.machines if row.participant_id == participant.participant_id and row.workload_scope == 'environment')
+            value = expected_pool_runtime_settings(component, actual,
+                token_sha256=machine.token_sha256 if component in {'controller', 'actuator'} else None,
+                catalog_sha256=hashlib.sha256(spec.profiles.model_dump_json().encode()).hexdigest() if component == 'manager' else None)
+            payload = json.dumps(value, sort_keys=True, separators=(',', ':')).encode()
+        else:
+            assert command[9] == _BOUND_DATABASE_COMMAND
+            variable = {'controller': 'LOOM_CP_DB_URL', 'service': 'LOOM_SVC_DB_URL', 'actuator': 'LOOM_EXECUTION_ACTUATOR_DB_URL'}[component]
+            entry, = (row for row in actual['spec']['template']['spec']['containers'][0]['env'] if row['name'] == variable)
+            reference = entry['valueFrom']['secretKeyRef']
+            secret = documents['/api/v1/namespaces/' + namespace + '/secrets/' + reference['name']]
+            url = base64.b64decode(secret['data'][reference['key']]).decode()
+            payload = (url if component == 'actuator' else str(PostgresDsn(url))).encode()
+        assert hmac.new(bytes.fromhex(nonce), payload, 'sha256').hexdigest() == response
         return SimpleNamespace(returncode=0, stderr=b'', stdout=json.dumps({
-            'schema': 'loom.pool-startup-closed.v1', 'operation_id': str(spec.operation_id),
-            'installation_sha256': digest(spec.model_dump(mode='json')), 'read_only': True, 'qualified': True}).encode())
+            'status': 'qualified'}).encode())
     monkeypatch.setattr(probes.subprocess, 'run', execute)
     arguments = dict(request=request, api_server=request.database.foundation.inputs.config['kubernetes_api_server'],
         ssl_context=ssl.create_default_context(cadata=request.database.foundation.bootstrap['material']['loom-platform-db']['ca.crt']),
@@ -955,12 +1108,44 @@ def test_concrete_runtime_parent_qualifies_before_writes_and_resumes_pending_sql
     with module.HTTPSDevelopmentRuntimeAPI(**arguments) as api:
         assert runtime.install_development_runtime(request=request, api=api, execute=True)['status'] == 'pending_database'
         assert len(writes) == 4
-    path = state / 'database/stage.json'
-    path.rename(path.with_name('stage-preserved.json'))
+    if completion == 'lost-history':
+        path = state / 'database/stage.json'
+        path.rename(path.with_name('stage-preserved.json'))
+        with module.HTTPSDevelopmentRuntimeAPI(**arguments) as api:
+            with pytest.raises(ValueError, match='development runtime installation unqualified'):
+                runtime.install_development_runtime(request=request, api=api, execute=True)
+        assert len(writes) == 4, 'a fresh process cannot adopt lost child history'
+        return
+    def complete_job(phase):
+        selected, = (row for row in parent.plan.fixed[phase].values() if row['kind'] == 'Job')
+        job = documents['/apis/batch/v1/namespaces/loom-dev/jobs/' + selected['metadata']['name']]
+        job['status'] = {'conditions': [{'type': 'Complete', 'status': 'True'}], 'succeeded': 1}
+        uid, name = job['metadata']['uid'], job['metadata']['name']
+        pod = {'apiVersion': 'v1', 'kind': 'Pod', **copy.deepcopy(job['spec']['template'])}
+        pod['metadata'].update(name=name + '-test', namespace='loom-dev', uid=str(uuid4()), ownerReferences=[{
+            'apiVersion': 'batch/v1', 'kind': 'Job', 'name': name, 'uid': uid, 'controller': True}])
+        pod['metadata']['labels']['batch.kubernetes.io/controller-uid'] = uid
+        pod['status'] = {'phase': 'Succeeded', **{states: [{'name': row['name'], 'restartCount': 0,
+            'state': {'terminated': {'exitCode': 0}}} for row in pod['spec'].get(containers, [])]
+            for containers, states in (('containers', 'containerStatuses'), ('initContainers', 'initContainerStatuses'))}}
+        path = '/api/v1/namespaces/loom-dev/pods'
+        documents[path]['items'].append(pod)
+        documents[path + '/' + name + '-test'] = pod
+        setattr(parent, phase + '_complete', True)
+        logs[path + '/' + name + '-test/log'] = parent.report(phase, state / phase)[phase]
+    complete_job('database')
     with module.HTTPSDevelopmentRuntimeAPI(**arguments) as api:
-        with pytest.raises(ValueError, match='development runtime installation unqualified'):
-            runtime.install_development_runtime(request=request, api=api, execute=True)
-    assert len(writes) == 4, 'a fresh process cannot adopt lost child history'
+        assert runtime.install_development_runtime(request=request, api=api, execute=True)['status'] == 'pending_catalog'
+    complete_job('catalog')
+    with module.HTTPSDevelopmentRuntimeAPI(**arguments) as api:
+        result = runtime.install_development_runtime(request=request, api=api, execute=True)
+        assert result['status'] == 'development_runtime_installed_closed'
+        assert result['admission_open'] is result['writer_migration_complete'] is False
+    before = len(writes)
+    with module.HTTPSDevelopmentRuntimeAPI(**arguments) as api:
+        assert runtime.install_development_runtime(request=request, api=api, execute=True) == result
+    assert len(writes) == before and len(executions) > 4
+    assert all('staging' not in row['metadata'].get('namespace', '') for row in writes)
 
 
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
@@ -1109,8 +1294,8 @@ def populate_runtime_pods(documents):
     for current in list(documents.values()):
         if current['kind'] != 'Deployment' or current['spec']['replicas'] != 1:
             continue
-        current['metadata']['generation'] = 1
-        current['status'] = {'observedGeneration': 1, 'replicas': 1, 'updatedReplicas': 1,
+        generation = current['metadata'].setdefault('generation', 1)
+        current['status'] = {'observedGeneration': generation, 'replicas': 1, 'updatedReplicas': 1,
             'readyReplicas': 1, 'availableReplicas': 1}
         namespace, name = current['metadata']['namespace'], current['metadata']['name']
         template = copy.deepcopy(current['spec']['template'])
