@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import base64
 import copy
+import hashlib
+import hmac
 import json
 import os
+import secrets
 import shutil
 import ssl
 import subprocess
@@ -23,9 +26,16 @@ from scripts.ops.nebius_database_readiness import qualify_database_backend, qual
 from scripts.ops.nebius_development_install import DevelopmentInstallRequest, _storage_observation
 from scripts.ops.nebius_development_runtime_install import DevelopmentRuntimeInstallRequest
 from scripts.ops.nebius_development_runtime_observation import HTTPSDevelopmentRuntimeObserver
+from scripts.ops.nebius_development_runtime_readiness import qualify_started_deployment
 from scripts.ops.nebius_development_stage import DevelopmentStageInput
-from scripts.ops.nebius_ingress_stage import _uid
-from scripts.ops.nebius_management_stage import HTTPSManagementStageAPI
+from scripts.ops.nebius_ingress_stage import _snapshot, _uid
+from scripts.ops.nebius_management_stage import HTTPSManagementStageAPI, _qualified_defaulted
+from scripts.ops.nebius_management_switch import _matches
+from scripts.ops.nebius_pool_runtime_settings import (
+    BOUND_POOL_SETTINGS_COMMAND,
+    PoolSettingsComponent,
+    expected_pool_runtime_settings,
+)
 from scripts.ops.nebius_pool_startup_database import (
     pool_startup_closed_sql,
     qualify_startup_closed_report,
@@ -140,3 +150,65 @@ class HTTPSDevelopmentRuntimeProbes(HTTPSDevelopmentRuntimeObserver):
                 raise ValueError
         except Exception:
             raise ValueError('development runtime closed database unqualified') from None
+
+    def _running(self, key: str, state_dir: Path) -> tuple[PoolSettingsComponent, dict[str, Any], dict[str, Any]]:
+        """Resolve only a regenerated started target through anchored live history."""
+        desired = copy.deepcopy({**self.plan.targets, **self.plan.fixed['workloads']}[key])
+        if desired['kind'] != 'Deployment':
+            raise ValueError
+        namespace, name = desired['metadata']['namespace'], desired['metadata']['name']
+        component: PoolSettingsComponent
+        if namespace == self.manager.binding.namespace and name == 'loom-service':
+            component = 'manager'
+        elif namespace == 'loom-dev' and name in {'loom-service', 'loom-control-plane'}:
+            component = 'service' if name == 'loom-service' else 'controller'
+        else:
+            participant, = self.request.database.manager.retained.request.registration.spec.participants
+            if (namespace != participant.execution_namespace.name
+                    or name != 'loom-execution-actuator'):
+                raise ValueError
+            component = 'actuator'
+        desired['spec']['replicas'] = 1
+        current = self.inspect(state_dir=state_dir)[key]
+        _qualified_defaulted(desired, current)
+        children = self._read('/apis/apps/v1/namespaces/' + namespace + '/replicasets?limit=1000')
+        pods = self._read('/api/v1/namespaces/' + namespace + '/pods?limit=1000')
+        final = self._get(current)
+        if (not _matches(final, current, _uid(current))
+                or final['metadata']['generation'] != current['metadata']['generation']
+                or not qualify_started_deployment(current=final, children=children, pods=pods,
+                    region=self.request.database.foundation.inputs.config['region'])):
+            raise ValueError
+        labels = current['spec']['selector']['matchLabels']
+        pod, = (row for row in pods['items']
+            if all(row['metadata'].get('labels', {}).get(name) == value for name, value in labels.items()))
+        return component, final, pod
+
+    @staticmethod
+    def _process_identity(pod: dict[str, Any]) -> tuple[Any, ...]:
+        return (_uid(pod), pod['status']['containerStatuses'], pod['status'].get('initContainerStatuses', []))
+
+    def qualify_runtime_settings(self, *, key: str, state_dir: Path) -> None:
+        """Challenge real typed settings/catalog/token readers; never return secrets."""
+        try:
+            component, workload, before = self._running(key, state_dir)
+            spec = self.request.database.manager.retained.request.registration.spec
+            participant, = spec.participants
+            machine, = (row for row in spec.machines
+                if row.participant_id == participant.participant_id and row.workload_scope == 'environment')
+            wanted = expected_pool_runtime_settings(component, workload,
+                token_sha256=machine.token_sha256 if component in {'controller', 'actuator'} else None,
+                catalog_sha256=hashlib.sha256(spec.profiles.model_dump_json().encode()).hexdigest() if component == 'manager' else None)
+            nonce = secrets.token_hex(32)
+            response = hmac.new(bytes.fromhex(nonce), json.dumps(wanted, sort_keys=True,
+                separators=(',', ':')).encode(), 'sha256').hexdigest()
+            container, = workload['spec']['template']['spec']['containers']
+            report = self._exec(before, container['name'], ['python', '-c', BOUND_POOL_SETTINGS_COMMAND, component, nonce, response])
+            after_component, after_workload, after = self._running(key, state_dir)
+            if (report != {'status': 'qualified'} or component != after_component
+                    or _snapshot(after_workload) != _snapshot(workload)
+                    or after_workload['metadata']['generation'] != workload['metadata']['generation']
+                    or self._process_identity(after) != self._process_identity(before)):
+                raise ValueError
+        except Exception:
+            raise ValueError('development runtime process settings unqualified') from None
