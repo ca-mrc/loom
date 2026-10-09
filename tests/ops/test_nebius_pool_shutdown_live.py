@@ -19,11 +19,11 @@ from tests.ops.test_nebius_pool_startup_fence_live import fencing_inputs as fenc
 from tests.ops.test_nebius_pool_startup_fence_live import management_inputs as management_inputs
 from tests.ops.test_nebius_pool_startup_fence_live import platform_inputs as platform_inputs
 from tests.ops.test_nebius_pool_startup_fence_live import retirement_inputs as retirement_inputs
-from tests.ops.test_nebius_pool_startup_fence_live import runtime_inputs as runtime_inputs
 from tests.ops.test_nebius_pool_startup_fence_live import startup_http as startup_http
 from tests.ops.test_nebius_pool_startup_fence_live import (
     unbound_cutover_inputs as unbound_cutover_inputs,
 )
+from tests.support.pool_transport import runtime_inputs as runtime_inputs
 
 
 @pytest.mark.timeout(600)

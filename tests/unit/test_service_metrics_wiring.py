@@ -69,34 +69,22 @@ def test_http_middleware_records_one_observation_per_request() -> None:
 
     from loom_service.app import create_app
 
-    app = create_app(_make_settings())
-    # We can't easily measure "exactly +1" because the lifespan
-    # tries to open a real DB connection. Skip the lifespan by
-    # using a plain TestClient — FastAPI's TestClient enters the
-    # lifespan unless we tell it not to. Use raw_app via
-    # `with TestClient(app) as client` triggers lifespan; without
-    # `with` does NOT. Bare TestClient(app) sufficient for route
-    # exercise.
-    client = TestClient(app, raise_server_exceptions=False)
-    # `/` doesn't need any state, so it'll respond even without
-    # lifespan setup. But the global middleware that wraps it WILL
-    # try to access state... actually no, _root() returns a dict
-    # directly without touching state.
+    request_labels = {"route": "/", "method": "GET", "status_class": "2xx"}
+    latency_labels = {"route": "/", "method": "GET"}
+    request_name = "loom_svc_http_requests_total"
+    latency_name = "loom_svc_http_request_latency_sec_count"
+    before_requests = REGISTRY.get_sample_value(request_name, request_labels) or 0
+    before_latency = REGISTRY.get_sample_value(latency_name, latency_labels) or 0
+
+    # A bare client exercises the real middleware without entering the
+    # database lifespan; `/` is the inline, database-free service manifest.
+    client = TestClient(create_app(_make_settings()))
     try:
-        client.get("/")
-    except Exception:
-        # If lifespan-bypass tripped a deeper assertion, abort the
-        # observation check rather than failing on infra.
-        pytest.skip("TestClient + lifespan-bypass not viable here")
-        return
-    samples = [
-        s for m in REGISTRY.collect()
-        if m.name == "loom_svc_http_requests"
-        for s in m.samples
-        if s.name == "loom_svc_http_requests_total" and s.labels.get("route") == "/"
-    ]
-    # Either we observed it (samples present) or the route wasn't
-    # matched (test-client bypass quirk); both are acceptable as a
-    # sanity check that the metric exists.
-    if samples:
-        assert sum(s.value for s in samples) >= 1
+        response = client.get("/")
+        assert response.status_code == 200
+        assert response.json()["service"] == "loom-service"
+    finally:
+        client.close()
+
+    assert REGISTRY.get_sample_value(request_name, request_labels) == before_requests + 1
+    assert REGISTRY.get_sample_value(latency_name, latency_labels) == before_latency + 1

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from collections.abc import Collection, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -14,6 +15,8 @@ if TYPE_CHECKING or __package__:
         _tracked_paths,
         load_manifest,
         narrow_test_only_changes,
+        select_release_image_matrix,
+        test_shard_matrix,
     )
 else:
     from component_ownership import (
@@ -21,6 +24,8 @@ else:
         _tracked_paths,
         load_manifest,
         narrow_test_only_changes,
+        select_release_image_matrix,
+        test_shard_matrix,
     )
 
 HEAVY_CHECKS = (
@@ -79,6 +84,34 @@ OWNERSHIP_AUTHORITY_PATHS = {
     "scripts/component_ownership.py",
     "tests/ops/test_component_ownership_manifest.py",
 }
+
+# These tools validate repository policy, not an application runtime. Their
+# focused root tests and lint execute the changed tool; unknown tools still
+# retain the stronger fallback below.
+REPOSITORY_POLICY_TOOLS = {
+    "scripts/check_ci_action_pins.py",
+    "scripts/check_ci_upgrade_policy.py",
+    "scripts/check_repository_paths.py",
+}
+GO_INPUT_PREFIXES = (
+    "cmd/loom-build-deadline/", "cmd/loom-llm-gateway-sandbox/",
+    "cmd/loom-sandbox-runtime/", "cmd/loom-guest-runtime/",
+    "cmd/loom-execution-runtime/", "internal/guestchannel/",
+)
+# The Go gateway verifies the same JWT and materialization contracts as these
+# Python producers. Exercise its independent implementation when they change.
+GO_CROSSLANGUAGE_CONTRACTS = {
+    "src/loom/auth.py",
+    "tests/unit/test_auth.py",
+    "tests/unit/test_step_jwt.py",
+    "src/loom/execution_runtime_contract.py",
+    "src/loom/service_execution_materialization.py",
+    "src/loom_llm_gateway/routes/service_execution.py",
+}
+
+
+def _is_go_input(path: str) -> bool:
+    return path in {"go.mod", "go.sum"} or (path.startswith(GO_INPUT_PREFIXES) and path.endswith(".go"))
 
 NEBIUS_IAC_EXACT = {
     "scripts/check_nebius_iac.py",
@@ -402,6 +435,8 @@ def plan_validations(
         if _is_documentation_path(path):
             continue
         test_owner_lanes = _test_owner_lanes(path)
+        policy_tool = path in REPOSITORY_POLICY_TOOLS
+        go_input = _is_go_input(path)
         matched_owner = (
             path in PLANNER_PATHS
             or path in OWNERSHIP_AUTHORITY_PATHS
@@ -409,6 +444,7 @@ def plan_validations(
             or _matches(path, exact=NEBIUS_PLATFORM_EXACT, prefixes=NEBIUS_PLATFORM_PREFIXES)
             or _is_protected_deployment_path(path)
             or bool(test_owner_lanes)
+            or policy_tool or go_input
         )
         for lane in test_owner_lanes:
             reason = f"test-owner:{lane}:{path}"
@@ -430,10 +466,15 @@ def plan_validations(
             for name in HEAVY_CHECKS:
                 select(name, f"dependency-authority:{path}")
             matched_owner = True
-        if path.startswith("tests/contract/") or (not test_owner_lanes and _matches(path, exact=integration_exact, prefixes=integration_prefixes)):
+        if go_input and not path.endswith("_test.go"):
+            select("integration_docker", f"go-runtime:{path}")
+            if select_release_image_matrix(_component_ownership_manifest(), changed_paths=(path,),
+                                           force_all=False, image_set="nebius"):
+                select("images", f"go-runtime:{path}")
+        if not (policy_tool or go_input) and (path.startswith("tests/contract/") or (not test_owner_lanes and _matches(path, exact=integration_exact, prefixes=integration_prefixes))):
             select("integration", f"path:{path}")
             matched_owner = True
-        elif not test_owner_lanes and not _is_frontend_input(path):
+        elif not test_owner_lanes and not _is_frontend_input(path) and not (policy_tool or go_input):
             # Frontend inputs already select browser and image contracts below.
             # They do not change the Python runtime exercised by this lane.
             select("integration", f"non-doc-path:{path}")
@@ -445,7 +486,7 @@ def plan_validations(
             exact=image_exact,
             prefixes=image_prefixes,
         ) and not path.startswith("src/loom_cli/templates/k8s/")
-        if image_match:
+        if image_match and not (go_input and path.endswith("_test.go")):
             select("images", f"path:{path}")
             matched_owner = True
         if not _is_frontend_input(path) and _matches(path, exact=cluster_exact, prefixes=cluster_prefixes):
@@ -501,6 +542,13 @@ def plan_validations(
     backend_paths = tuple(path for path in runtime_paths
                           if not _is_frontend_input(path))
     baseline = {name: bool(backend_paths) for name in BASELINE_CHECKS}
+    python_paths = tuple(path for path in backend_paths
+                         if not _is_go_input(path) and path not in REPOSITORY_POLICY_TOOLS)
+    baseline["tests_root"] = bool(python_paths) or any(path in REPOSITORY_POLICY_TOOLS for path in backend_paths)
+    baseline["tests_packages"] = bool(python_paths)
+    baseline["runtime_payload"] = bool(python_paths)
+    baseline["go_checks"] = any(_is_go_input(path) or path in GO_CROSSLANGUAGE_CONTRACTS
+                                for path in backend_paths)
     # Every Python validation job already syncs/checks the locked workspace.
     # The standalone install lane is for dependency/CI authority changes and
     # full regression, handled by force_baseline below.
@@ -513,9 +561,10 @@ def plan_validations(
     if (runtime_paths == test_inputs and independent_tests is not None
             and not force_baseline and not set(labels) & LABEL_TO_CHECK.keys()):
         owners = {lane for path in independent_tests for lane in _test_owner_lanes(path)}
+        crosslanguage_contract = any(path in GO_CROSSLANGUAGE_CONTRACTS for path in independent_tests)
         baseline.update(tests_root="tests-root" in owners,
                         tests_packages="tests-packages" in owners,
-                        go_checks="go-checks" in owners,
+                        go_checks="go-checks" in owners or crosslanguage_contract,
                         runtime_payload="runtime-payload" in owners,
                         locked_environments=False)
     if force_baseline:
@@ -559,6 +608,7 @@ def main() -> int:
         default="false",
     )
     parser.add_argument("--github-output", type=Path, required=True)
+    parser.add_argument("--test-scope", choices=("all", "nebius"), default=os.environ.get("CI_TEST_SCOPE", "all"))
     args = parser.parse_args()
     labels = json.loads(args.labels_json or "[]")
     if not isinstance(labels, list) or not all(isinstance(label, str) for label in labels):
@@ -572,8 +622,26 @@ def main() -> int:
         pull_request_draft=args.pull_request_draft == "true",
         pull_request_base_changed=args.pull_request_base_changed == "true",
     )
+    outputs = plan.github_outputs()
+    effective_changes = tuple(json.loads(outputs["test_changes"]))
+    tracked_paths = _tracked_paths(REPO_ROOT)
+    for lane, selected_name, matrix_name in (
+        ("tests-root", "tests_root", "tests_root_matrix"),
+        ("integration", "integration", "integration_matrix"),
+        ("integration-docker", "integration_docker", "integration_docker_matrix"),
+        ("cluster-smoke", "cluster_smoke", "cluster_smoke_matrix"),
+    ):
+        matrix = test_shard_matrix(
+            _component_ownership_manifest(), tracked_paths=tracked_paths, lane=lane,
+            repo_root=REPO_ROOT, changed_paths=effective_changes, test_scope=args.test_scope,
+        ) if getattr(plan, selected_name) and plan.gate_mode == "full" else ()
+        outputs[matrix_name] = json.dumps(matrix, separators=(",", ":"))
+        # A compatibility-only edit has no tests in the daily Nebius scope.
+        # Jobs and the final gate must agree on that deliberate empty selection.
+        outputs[selected_name] = str(bool(matrix)).lower()
+        plan = replace(plan, **{selected_name: bool(matrix)})
     with args.github_output.open("a", encoding="utf-8") as handle:
-        for name, value in plan.github_outputs().items():
+        for name, value in outputs.items():
             handle.write(f"{name}={value}\n")
     print(json.dumps(asdict(plan), sort_keys=True))
     return 0

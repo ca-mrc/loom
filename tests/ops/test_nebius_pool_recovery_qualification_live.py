@@ -22,10 +22,12 @@ from tests.ops.test_nebius_pool_role_restoration_live import management_inputs a
 from tests.ops.test_nebius_pool_role_restoration_live import platform_inputs as platform_inputs
 from tests.ops.test_nebius_pool_role_restoration_live import retirement_http as retirement_http
 from tests.ops.test_nebius_pool_role_restoration_live import retirement_inputs as retirement_inputs
-from tests.ops.test_nebius_pool_role_restoration_live import runtime_inputs as runtime_inputs
 from tests.ops.test_nebius_pool_role_restoration_live import startup_http as startup_http
 from tests.ops.test_nebius_pool_role_restoration_live import (
     unbound_cutover_inputs as unbound_cutover_inputs,
+)
+from tests.ops.test_nebius_pool_runtime import (
+    runtime_inputs as runtime_inputs,  # three-owner roster
 )
 from tests.ops.test_nebius_pool_template_restoration import TemplateAPI, restore
 

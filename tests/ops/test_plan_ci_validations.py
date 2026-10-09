@@ -1,9 +1,62 @@
 from pathlib import Path
 
 import pytest
-from scripts.plan_ci_validations import HEAVY_CHECKS, plan_validations
+from scripts.plan_ci_validations import GO_CROSSLANGUAGE_CONTRACTS, HEAVY_CHECKS, plan_validations
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+@pytest.mark.parametrize("path", [
+    "scripts/check_ci_action_pins.py", "scripts/check_ci_upgrade_policy.py",
+    "scripts/check_repository_paths.py",
+])
+def test_owned_repository_policy_tools_do_not_start_runtime_regressions(path: str) -> None:
+    plan = plan_validations(changed_paths=[path], labels=set(), event_name="pull_request")
+    assert plan.tests_root
+    assert not plan.unowned_runtime
+    assert not plan.selected_heavy_checks()
+    assert not any((plan.tests_packages, plan.go_checks, plan.runtime_payload,
+                    plan.nebius_iac, plan.locked_environments))
+
+
+def test_go_runtime_has_its_own_toolchain_and_qualification_route() -> None:
+    plan = plan_validations(changed_paths=["internal/guestchannel/channel.go"],
+                            labels=set(), event_name="pull_request")
+    assert plan.go_checks and plan.integration_docker and plan.images
+    assert not plan.unowned_runtime
+    assert not any((plan.tests_root, plan.tests_packages, plan.runtime_payload,
+                    plan.integration, plan.cluster_smoke, plan.staging_smoke, plan.nebius_iac))
+
+
+def test_go_test_edit_does_not_rebuild_runtime_images() -> None:
+    plan = plan_validations(changed_paths=["internal/guestchannel/channel_test.go"],
+                            labels=set(), event_name="pull_request")
+    assert plan.go_checks
+    assert not plan.selected_heavy_checks()
+
+
+def test_python_runtime_does_not_start_the_unrelated_go_toolchain() -> None:
+    plan = plan_validations(changed_paths=["src/loom_service/routes/benchmarks.py"],
+                            labels=set(), event_name="pull_request")
+    assert plan.tests_root and plan.integration and plan.images and plan.staging_smoke
+    assert not plan.go_checks
+
+
+@pytest.mark.parametrize("path", sorted(GO_CROSSLANGUAGE_CONTRACTS))
+def test_python_gateway_contracts_exercise_the_go_verifier(path, independent_test_repo) -> None:
+    # Independent JWT test edits must retain Go even after test-owner narrowing.
+    independent_test_repo(path)
+    plan = plan_validations(changed_paths=[path], labels=set(), event_name="pull_request")
+    assert plan.go_checks
+
+
+def test_unknown_tool_still_keeps_all_validation_routes() -> None:
+    plan = plan_validations(changed_paths=["scripts/new_unreviewed_runtime_tool.py"],
+                            labels=set(), event_name="pull_request")
+    assert plan.unowned_runtime
+    assert plan.selected_heavy_checks() == set(HEAVY_CHECKS)
+    assert all((plan.tests_root, plan.tests_packages, plan.runtime_payload,
+                plan.go_checks, plan.nebius_iac, plan.locked_environments))
 
 
 @pytest.fixture

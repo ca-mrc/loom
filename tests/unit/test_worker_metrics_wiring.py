@@ -3,7 +3,7 @@ server starts on the configured port at process entry."""
 
 from __future__ import annotations
 
-import socket
+from functools import partial
 
 import pytest
 from prometheus_client import REGISTRY
@@ -44,43 +44,30 @@ def test_main_entry_starts_metrics_http_server(
     asyncio.run (short-circuit it) so the test doesn't need a real
     CP / DB to drive run_worker."""
     from loom_worker import __main__ as worker_main
+    from loom_worker.config import WorkerSettings
 
-    # Pick a free port so we don't conflict with another test run.
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-
+    # The server is intercepted, so no socket or real worker connection opens.
+    port = 19090
     monkeypatch.setenv("LOOM_WORKER_METRICS_PORT", str(port))
-    # The worker has many required env vars (CP URL, worker token,
-    # etc.) — provide them so WorkerSettings() succeeds.
-    monkeypatch.setenv("LOOM_WORKER_CP_URL", "http://cp.x")
-    monkeypatch.setenv("LOOM_WORKER_GATEWAY_URL", "http://gw.x")
     monkeypatch.setenv("LOOM_WORKER_TOKEN", "tok")
-    monkeypatch.setenv("LOOM_WORKER_GATEWAY_AUTH_TOKEN", "gw")
-    monkeypatch.setenv("LOOM_WORKER_MINIO_ENDPOINT", "http://minio.x")
     monkeypatch.setenv("LOOM_WORKER_MINIO_ACCESS_KEY", "x")
     monkeypatch.setenv("LOOM_WORKER_MINIO_SECRET_KEY", "x")
-    monkeypatch.setenv("LOOM_WORKER_CONTROL_PLANE_URL", "http://cp.x")
+    monkeypatch.setattr(worker_main, "WorkerSettings", partial(WorkerSettings, _env_file=None))
 
-    calls: list[int] = []
+    calls: list[tuple[str, int]] = []
 
     def _fake_start_http_server(p: int, *a, **kw) -> None:  # type: ignore[no-untyped-def]
-        calls.append(p)
+        calls.append(("metrics", p))
 
     def _fake_asyncio_run(coro) -> None:  # type: ignore[no-untyped-def]
         # Close the coroutine to avoid the "coroutine was never
         # awaited" RuntimeWarning.
         coro.close()
+        calls.append(("worker", port))
 
     monkeypatch.setattr(worker_main, "start_http_server", _fake_start_http_server)
     monkeypatch.setattr(worker_main.asyncio, "run", _fake_asyncio_run)
 
-    try:
-        worker_main.main()
-    except Exception:
-        pytest.skip("WorkerSettings env vars missing — skip start order check")
-        return
+    worker_main.main()
 
-    assert calls == [port], (
-        f"expected start_http_server({port}); got {calls}"
-    )
+    assert calls == [("metrics", port), ("worker", port)]

@@ -138,6 +138,20 @@ def test_metadata_fails_closed_before_extraction(tmp_path, field, value):
     assert not (tmp_path / "nebius-ingress").exists()
 
 
+def test_noncanonical_kubectl_rejected_before_creating_private_release(tmp_path):
+    executable = tmp_path / "kubectl"
+    executable.write_bytes(b"fixture executable")
+    alias = tmp_path / "kubectl-alias"
+    alias.symlink_to(executable)
+    config = configuration(tmp_path)
+    config["kubectl"] = str(alias)
+    files = inputs(tmp_path)
+    files["installation.json"] = json.dumps(config).encode()
+    with pytest.raises(module().BootstrapError):
+        module().prepare_release(archive(files))
+    assert not (tmp_path / "nebius-ingress").exists()
+
+
 @pytest.mark.parametrize("cluster_id", ["mk8s-e00fixture", "mk8scluster-", "mk8scluster-UPPER", "mk8scluster-a/other"])
 def test_invalid_cluster_identity_rejected_before_creating_private_release(tmp_path, cluster_id):
     files = inputs(tmp_path)

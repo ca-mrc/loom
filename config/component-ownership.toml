@@ -115,36 +115,49 @@ attestation_owners = [
 lane = "tests-root"
 shard_count = 8
 strategy = "stable-hash"
-# PR2305 run37027112403: both two-shard jobs exhausted 40m at 35-36%.
-# Retain the salt and complete files; eight runners divide the expanded lane.
-# This is a capacity correction, not a measured claim about the new balance.
+# Modules over 60s in runs 37808374753 and 37813479317 are placed largest-first
+# on the least-loaded shard (projected 20.1-21.0 min per shard; 164 min total).
+# Separation contracts in test_ci_test_selection.py are respected.
+# Keep stable hashing for the remaining files; new files do not move old files.
+# CI confirms the resulting balance; historical seconds are not a runtime gate.
 salt = "tests-root-v2-8275"
 pins = [
-  # Pair measured hotspots across shards; see #1680 and PR #1731 telemetry.
   { path = "tests/ops/test_ci_secret_isolation.py", shard_index = 0 },
   { path = "tests/ops/test_component_ownership_manifest.py", shard_index = 1 },
-  # Gateway retirement has a 1,200s deadline. Keep the two 600s restoration
-  # cases on separate runners, not one 40m job with no remaining headroom.
-  { path = "tests/ops/test_nebius_pool_role_restoration_live.py", shard_index = 4 },
-  { path = "tests/ops/test_nebius_pool_template_restoration_live.py", shard_index = 5 },
-  # Run37047482162: the old predecessor module, legacy restart and machine
-  # retirement exhausted root1's 40m limit at38%. Preserve all cases, but run
-  # live refresh and connected refresh separately on the shorter root8/root4.
-  { path = "tests/ops/test_nebius_pool_predecessor_live.py", shard_index = 7 },
-  { path = "tests/ops/test_nebius_pool_refresh_connected.py", shard_index = 3 },
-  # Run37424250256: root1 reached36m before completing the repair module.
-  # Keep all four full rollback cases together on the measured12m root5,
-  # separate from repair phase/old-tooling checks; retain all timeout limits.
-  { path = "tests/ops/test_nebius_pool_startup_repair_rollback.py", shard_index = 4 },
-  # Run37480179794: the expanded image matrix exhausted root 3's 40m limit.
-  # Keep history/private/legacy cases on their original shard.
-  { path = "tests/ops/test_nebius_pool_image_cancellation.py", shard_index = 7 },
-  { path = "tests/ops/test_nebius_pool_image_transport.py", shard_index = 6 },
-  # Run37508359269: cancellation alone took 27m27s and root8 exhausted 40m.
-  # Preserve all cases/bodies/deadlines, distribute target fixtures across the
-  # measured 19m/21m roots2/4; leave manager cancellation on root8.
-  { path = "tests/ops/test_nebius_pool_image_cancellation_collector.py", shard_index = 1 },
-  { path = "tests/ops/test_nebius_pool_image_cancellation_gateway.py", shard_index = 3 },
+  { path = "tests/ops/test_nebius_pool_application_connected.py", shard_index = 0 },
+  { path = "tests/ops/test_nebius_pool_image_transport.py", shard_index = 0 },
+  { path = "tests/ops/test_nebius_pool_legacy_reopening_live.py", shard_index = 0 },
+  { path = "tests/ops/test_nebius_pool_legacy_restart.py", shard_index = 0 },
+  { path = "tests/ops/test_ci_test_selection.py", shard_index = 1 },
+  { path = "tests/ops/test_nebius_pool_image_cancellation.py", shard_index = 1 },
+  { path = "tests/ops/test_nebius_pool_startup_repair.py", shard_index = 1 },
+  { path = "tests/ops/test_nebius_pool_template_restoration.py", shard_index = 1 },
+  { path = "tests/ops/test_nebius_pool_database_guard.py", shard_index = 2 },
+  { path = "tests/ops/test_nebius_pool_manager_image_history.py", shard_index = 2 },
+  { path = "tests/ops/test_nebius_pool_restart_qualification_live.py", shard_index = 2 },
+  { path = "tests/ops/test_nebius_pool_cutover_entry.py", shard_index = 3 },
+  { path = "tests/ops/test_nebius_pool_gateway_retirement.py", shard_index = 3 },
+  { path = "tests/ops/test_nebius_pool_image_cancellation_collector.py", shard_index = 3 },
+  { path = "tests/ops/test_nebius_pool_legacy_restart_live.py", shard_index = 3 },
+  { path = "tests/ops/test_nebius_pool_template_restoration_live.py", shard_index = 3 },
+  { path = "tests/ops/test_nebius_pool_origin_history.py", shard_index = 4 },
+  { path = "tests/ops/test_nebius_pool_predecessor_live.py", shard_index = 4 },
+  { path = "tests/ops/test_nebius_pool_shutdown_live.py", shard_index = 4 },
+  { path = "tests/ops/test_nebius_pool_startup_fence_live.py", shard_index = 4 },
+  { path = "tests/ops/test_nebius_pool_predecessor.py", shard_index = 5 },
+  { path = "tests/ops/test_nebius_pool_recovery_qualification_live.py", shard_index = 5 },
+  { path = "tests/ops/test_nebius_pool_shutdown.py", shard_index = 5 },
+  { path = "tests/ops/test_nebius_pool_startup_live.py", shard_index = 5 },
+  { path = "tests/ops/test_nebius_pool_startup_repair_rollback.py", shard_index = 5 },
+  { path = "tests/ops/test_nebius_pool_legacy_reopening.py", shard_index = 6 },
+  { path = "tests/ops/test_nebius_pool_operation.py", shard_index = 6 },
+  { path = "tests/ops/test_nebius_pool_refresh_connected.py", shard_index = 6 },
+  { path = "tests/ops/test_nebius_pool_role_restoration.py", shard_index = 6 },
+  { path = "tests/ops/test_ci_throughput_workflows.py", shard_index = 7 },
+  { path = "tests/ops/test_nebius_pool_activation_live.py", shard_index = 7 },
+  { path = "tests/ops/test_nebius_pool_cutover.py", shard_index = 7 },
+  { path = "tests/ops/test_nebius_pool_gateway_retirement_live.py", shard_index = 7 },
+  { path = "tests/ops/test_nebius_pool_image_cancellation_gateway.py", shard_index = 7 },
 ]
 
 [[test_sharding]]
@@ -159,6 +172,26 @@ pins = [
   # Preserve the existing auth-before-schema ordering within one process.
   { path = "tests/integration/test_username_password_auth.py", shard_index = 3 },
   { path = "tests/integration/test_username_password_schema.py", shard_index = 3 },
+]
+
+[[test_sharding]]
+lane = "integration-docker"
+shard_count = 2
+strategy = "stable-hash"
+salt = "integration-docker-v1-2"
+# Software-guest qualification accounts for the longest measured Docker calls.
+# Keep its shared payload on one runner and TLS/storage/image-build fixtures on
+# the other. Each runner has its own Docker daemon, database and temporary files.
+pins = [
+  { path = "tests/integration/test_guest_sandbox_runtime.py", shard_index = 0 },
+  { path = "tests/integration/test_guest_emulated_auth.py", shard_index = 0 },
+  { path = "tests/integration/test_task_bundle_source_storage.py", shard_index = 1 },
+  { path = "tests/integration/test_task_bundle_source_publisher.py", shard_index = 1 },
+  { path = "tests/integration/test_harbor_native_publish.py", shard_index = 1 },
+  { path = "tests/integration/test_nebius_public_tls.py", shard_index = 1 },
+  { path = "tests/integration/test_nebius_restore.py", shard_index = 1 },
+  { path = "tests/integration/test_nebius_terminus_compat.py", shard_index = 1 },
+  { path = "tests/integration/test_terminus2_continuation_docker.py", shard_index = 1 },
 ]
 
 [[test_sharding]]

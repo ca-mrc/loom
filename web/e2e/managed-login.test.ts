@@ -4,7 +4,7 @@ import { expect, test } from "@playwright/test";
 // HTTPS is browser-visible but fully intercepted: no DNS/TLS/service contact.
 // Serve the actual built entrypoint so fragment scrubbing is exercised before
 // the first frontend-config/auth request, not only in a component harness.
-test("built managed login scrubs the proof before startup and submits it only on click", async ({ page }) => {
+test("built managed login scrubs the proof before startup and submits it only on click", { tag: "@protocol" }, async ({ page }) => {
   const origin = "https://managed-login.example.test";
   const token = "loom_env_login_" + "a".repeat(43);
   const failures: string[] = [];
@@ -64,7 +64,7 @@ test("built managed login scrubs the proof before startup and submits it only on
 });
 
 for (const status of [307, 308]) {
-  test(`managed login refuses ${status} redirects before forwarding its proof`, async ({ page }) => {
+  test(`managed login refuses ${status} redirects before forwarding its proof`, { tag: "@protocol" }, async ({ page }) => {
     const origin = "https://managed-login.example.test";
     const foreign = "https://foreign.example.test";
     const token = "loom_env_login_" + "b".repeat(43);

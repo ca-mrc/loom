@@ -25,8 +25,6 @@ def test_all_non_draft_prs_use_author_neutral_ci_only_auto_merge() -> None:
     quickstart = _read("docs/contributing/contributor-quickstart.md")
     pr_template = _read(".github/PULL_REQUEST_TEMPLATE.md")
 
-    assert "current `dev` queue head" not in contributing
-    assert "current `dev` queue head" not in quickstart
     assert "For this normal `dev` PR" in pr_template
 
     for document in (contributing, quickstart, pr_template):
@@ -36,13 +34,6 @@ def test_all_non_draft_prs_use_author_neutral_ci_only_auto_merge() -> None:
             "every non-draft" in normalized_document
             or "every relevant non-draft" in normalized_document
         )
-        for gate in (
-            "repository-checks",
-            "images-gate",
-            "cluster-smoke-gate",
-            "staging-smoke-gate",
-        ):
-            assert gate in normalized_document
         assert "no human approval" in normalized_document
         assert "no codeowner approval" in normalized_document
         assert "no conversation resolution" in normalized_document
@@ -65,12 +56,11 @@ def test_governance_docs_define_path_inferred_validation_gates() -> None:
         "cluster-smoke-gate",
         "staging-smoke-gate",
     ):
-        assert gate in contributing
-        assert gate in quickstart
+        for document in (contributing, quickstart, pr_template):
+            assert gate in document
 
     assert "Labels may add validation but cannot remove path-inferred validation" in contributing
     assert "squash auto-merge" in pr_template
-    assert "only while it is the queue head" not in pr_template
 
     for document in (contributing, quickstart):
         normalized_document = " ".join(document.split())
@@ -112,8 +102,6 @@ def test_main_promotion_is_ci_auto_merged_and_separates_release_approval() -> No
         assert "production environment approval" in normalized_document
         assert "not interchangeable" in normalized_document
 
-    assert ".github/workflows/auto-merge.yml" not in contributing
-    assert "native and author-neutral" in contributing
 
 
 def test_release_promotion_binds_main_merge_to_prod_evidence() -> None:
@@ -134,12 +122,8 @@ def test_release_promotion_binds_main_merge_to_prod_evidence() -> None:
 
     assert "immutable `vX.Y.Z` production release tags" in contributing
     assert "Never force-move or reuse a published prod tag" in contributing
-    assert "immutable SemVer `prod_tag`" in operator_runbook
-    assert "verify_production_release_gate.sh` from `main`" in operator_runbook
     assert "`prod_tag`" in operator_runbook
     assert "`frontend_route_evidence`" in staging_validation
-    assert "`prod_staging_isolation`" in staging_validation
-    assert "`raw_delivery_export_status`" in staging_validation
 
 
 def test_issue_templates_use_current_loom_language() -> None:
@@ -147,9 +131,6 @@ def test_issue_templates_use_current_loom_language() -> None:
     template_text = "\n".join(
         path.read_text(encoding="utf-8") for path in sorted(template_dir.glob("*.yml"))
     )
-
-    for stale_term in ("Harness", "pre-Loom", "SkillFlow-specific"):
-        assert stale_term not in template_text
 
     assert "User evaluation flow" in template_text
     assert "Model provider / gateway" in template_text

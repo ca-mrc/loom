@@ -54,6 +54,7 @@ def test_contributor_quickstart_documents_nebius_and_compatibility_verification(
     root_job = workflow["jobs"]["tests-root"]
     root_steps = root_job["steps"]
     package_steps = workflow["jobs"]["tests-packages"]["steps"]
+    root_manifest_step = next(step for step in root_steps if step.get("id") == "manifest")
     root_pytest_step = next(
         step for step in root_steps if step.get("name") == "Pytest — manifest-owned root shard"
     )
@@ -63,10 +64,10 @@ def test_contributor_quickstart_documents_nebius_and_compatibility_verification(
 
     text = (REPO_ROOT / "docs/contributing/contributor-quickstart.md").read_text(encoding="utf-8")
     normalized_text = _normalize_command(text)
-    root_shards = root_job["strategy"]["matrix"]["include"]
-    assert {shard["shard_index"] for shard in root_shards} == set(range(8))
-    assert "test-paths --lane tests-root" in root_pytest_step["run"]
-    assert "--shard-index" in root_pytest_step["run"]
+    assert "test-paths --lane tests-root" in root_manifest_step["run"]
+    assert '--shard-index "$SHARD_INDEX" --shard-count "$SHARD_COUNT"' in root_manifest_step["run"]
+    assert '--changed-paths-json "$TEST_CHANGED_PATHS"' in root_manifest_step["run"]
+    assert 'mapfile -t test_paths < "${{ steps.manifest.outputs.paths_file }}"' in root_pytest_step["run"]
     assert "uv run --no-sync pytest" in root_pytest_step["run"]
     assert "test-paths --lane tests-packages" in sibling_pytest_step["run"]
     assert "uv run --no-sync pytest" in sibling_pytest_step["run"]

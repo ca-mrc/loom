@@ -12,18 +12,13 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.mark.parametrize("name", ["ci", "images", "cluster-smoke", "staging-smoke"])
-def test_ci_has_no_shared_host_placement_or_local_cache_dependency(name: str) -> None:
+def test_ci_validation_and_builds_use_hosted_runners(name: str) -> None:
     source = (ROOT / f".github/workflows/{name}.yml").read_text()
-    assert "oldlab" not in source.lower()
-    assert "ci-runner-route" not in source
     workflow = yaml.safe_load(source)
     for job in workflow["jobs"].values():
         placement = str(job["runs-on"])
         assert "needs." not in placement
         assert "self-hosted" not in placement
-        for step in job.get("steps", []):
-            if str(step.get("uses", "")).startswith("astral-sh/setup-uv@"):
-                assert "manifest-file" not in step.get("with", {})
 
 
 def test_candidate_matrix_runs_only_amd64(

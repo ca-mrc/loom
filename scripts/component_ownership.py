@@ -1215,6 +1215,154 @@ def select_test_scope(manifest: Manifest, paths: tuple[str, ...], *, scope: str)
                  if not any(matches_path(path, pattern) for pattern in manifest.compatibility_test_paths))
 
 
+_TEST_SELECTION_METADATA_FILES = frozenset({
+    "scripts/plan_ci_validations.py",
+    "tests/ops/test_plan_ci_validations.py",
+    "tests/ops/test_ci_throughput_workflows.py",
+    "tests/ops/test_component_ownership_manifest.py",
+    "tests/ops/test_ci_test_selection.py",
+    "tests/ops/test_ci_nebius_test_scope.py",
+    "tests/ops/test_nebius_ci_scope.py",
+})
+
+
+def _fixture_reference_source(source: str, *, path: str, changed_paths: set[str]) -> str:
+    """Exclude only audited path metadata, never imports or executable snippets.
+
+    These CI policy tests compare literal test paths with manifests and shards;
+    they do not load those paths as fixture libraries. Other files and string
+    imports remain conservative. A malformed metadata module retains coverage.
+    """
+    if path not in _TEST_SELECTION_METADATA_FILES:
+        return source
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return source
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+
+    def ancestors(node: ast.AST) -> tuple[ast.AST, ...]:
+        chain = []
+        while node in parents:
+            node = parents[node]
+            chain.append(node)
+        return tuple(chain)
+
+    def executable_call(node: ast.AST) -> bool:
+        if not isinstance(node, ast.Call):
+            return False
+        # Container comparisons used by the audited policy tests are metadata.
+        # All other calls, including dynamic loaders and subprocesses, retain
+        # their literal and variable references conservatively.
+        if isinstance(node.func, ast.Name):
+            return node.func.id not in {
+                "any", "all", "set", "tuple", "list", "sorted", "len",
+                "plan_validations", "select_test_scope", "test_shard_matrix", "selected_test_paths",
+            }
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "parametrize":
+            owner = node.func.value
+            if (isinstance(owner, ast.Attribute) and owner.attr == "mark"
+                    and isinstance(owner.value, ast.Name) and owner.value.id == "pytest"):
+                return False
+        return not (isinstance(node.func, ast.Attribute)
+                    and node.func.attr in {"index", "startswith", "endswith", "isdisjoint"})
+
+    def metadata_expression(node: ast.AST) -> bool:
+        # A loader in a generator body is a sibling of the iterable constant.
+        # Inspect that enclosing expression, without treating unrelated calls
+        # elsewhere in the policy module as fixture consumers.
+        expression = node
+        for parent in ancestors(node):
+            if isinstance(parent, ast.stmt):
+                break
+            if isinstance(parent, ast.expr):
+                expression = parent
+        return not any(executable_call(item) for item in ast.walk(expression))
+
+    def metadata_consumer(node: ast.AST) -> bool:
+        chain = ancestors(node)
+        return (metadata_expression(node) and not any(executable_call(parent) or isinstance(
+            parent, (ast.Return, ast.Yield, ast.YieldFrom, ast.Lambda, ast.arguments, ast.arg),
+        ) for parent in chain) and any(
+            isinstance(parent, (ast.Assert, ast.Compare))
+            or (isinstance(parent, ast.Call) and not executable_call(parent)) for parent in chain
+        ))
+
+    def parametrized_metadata(node: ast.Constant, call: ast.Call) -> bool:
+        """Prove the particular parameter is used only as path metadata."""
+        function = parents.get(call)
+        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)) or len(call.args) < 2:
+            return False
+        names_arg, values_arg = call.args[:2]
+        if isinstance(names_arg, ast.Constant) and isinstance(names_arg.value, str):
+            names = tuple(name.strip() for name in names_arg.value.split(","))
+        elif isinstance(names_arg, (ast.Tuple, ast.List)) and all(
+            isinstance(item, ast.Constant) and isinstance(item.value, str) for item in names_arg.elts
+        ):
+            names = tuple(str(item.value) for item in names_arg.elts)
+        else:
+            return False
+        if not isinstance(values_arg, (ast.Tuple, ast.List)):
+            return False
+        for row in values_arg.elts:
+            if node not in ast.walk(row):
+                continue
+            if len(names) == 1:
+                parameter = names[0]
+            elif isinstance(row, (ast.Tuple, ast.List)) and len(row.elts) == len(names):
+                parameter = next((name for name, value in zip(names, row.elts, strict=True)
+                                  if node in ast.walk(value)), "")
+            else:
+                return False
+            return bool(parameter) and all(
+                metadata_consumer(item) for statement in function.body for item in ast.walk(statement)
+                if isinstance(item, ast.Name) and isinstance(item.ctx, ast.Load) and item.id == parameter
+            )
+        return False
+
+    lines = source.splitlines(keepends=True)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value in changed_paths:
+            chain = ancestors(node)
+            if (isinstance(parents.get(node), ast.JoinedStr) or not metadata_expression(node)
+                    or any(executable_call(parent) for parent in chain)):
+                continue
+            # Values returned to callers, function defaults and loop inputs can
+            # reach a loader without retaining the original path identifier.
+            if any(isinstance(parent, (ast.Return, ast.Yield, ast.YieldFrom, ast.Lambda,
+                                       ast.arguments, ast.arg)) for parent in chain):
+                continue
+            decorators = tuple(parent for parent in chain if isinstance(parent, ast.Call)
+                               and isinstance(parent.func, ast.Attribute) and parent.func.attr == "parametrize")
+            if any(not parametrized_metadata(node, call) for call in decorators):
+                continue
+            assigned = next((parent for parent in chain if isinstance(parent, (ast.Assign, ast.AnnAssign))), None)
+            if assigned is None and not any(
+                isinstance(parent, ast.Assert)
+                or (isinstance(parent, ast.Call) and not executable_call(parent))
+                for parent in chain
+            ):
+                continue
+            targets = (assigned.targets if isinstance(assigned, ast.Assign)
+                       else (assigned.target,) if isinstance(assigned, ast.AnnAssign) else ())
+            if targets and not all(isinstance(target, ast.Name) for target in targets):
+                continue
+            names = {target.id for target in targets if isinstance(target, ast.Name)}
+            consumers = (item for item in ast.walk(tree) if isinstance(item, ast.Name)
+                         and isinstance(item.ctx, ast.Load) and item.id in names)
+            if any(not metadata_consumer(item) for item in consumers):
+                continue
+            # Replace just this exact path token, preserving every other string,
+            # import and identifier. Columns in the AST count UTF-8 bytes.
+            assert node.end_lineno is not None and node.end_col_offset is not None
+            if node.lineno == node.end_lineno:
+                index = node.lineno - 1
+                line = lines[index].encode("utf-8")
+                lines[index] = (line[:node.col_offset] + b" " * (node.end_col_offset - node.col_offset)
+                                + line[node.end_col_offset:]).decode("utf-8")
+    return "".join(lines)
+
+
 def narrow_test_only_changes(
     paths: tuple[str, ...], *, changed_paths: tuple[str, ...],
     tracked_paths: tuple[str, ...], repo_root: Path,
@@ -1245,7 +1393,11 @@ def narrow_test_only_changes(
             source = (repo_root / name).read_text(encoding="utf-8")
         except (OSError, UnicodeError):
             return paths
-        if identifiers.search(source):
+        # Metadata filtering only blanks path literals; an unmatched source
+        # cannot gain a changed-module reference from that AST walk.
+        if not identifiers.search(source):
+            continue
+        if identifiers.search(_fixture_reference_source(source, path=name, changed_paths=changed)):
             return paths
     return tuple(path for path in paths if path in changed)
 
@@ -1274,6 +1426,86 @@ def select_affected_test_suites(
             continue
         selected.append(path)
     return tuple(selected)
+
+
+def selected_test_paths(
+    manifest: Manifest, *, tracked_paths: tuple[str, ...], lane: str, repo_root: Path,
+    changed_paths: tuple[str, ...] = (), test_scope: str = "all",
+    shard_index: int = 0, shard_count: int = 1,
+    shard_strategy: str | None = None,
+) -> tuple[str, ...]:
+    """Use one selection contract for planning a matrix and executing its jobs."""
+    paths = test_paths_for_lane(manifest, tracked_paths=tracked_paths, lane=lane)
+    if not paths:
+        raise ManifestError(f"CI lane has no tracked test paths: {lane}")
+    policy = manifest.test_shard_policy(lane) if shard_count > 1 else None
+    if policy is not None and policy.shard_count != shard_count:
+        raise ManifestError(f"test shard count differs from manifest authority: {lane}: "
+                            f"{shard_count} != {policy.shard_count}")
+    if policy is not None and shard_strategy is not None and policy.strategy != shard_strategy:
+        raise ManifestError(f"test shard strategy differs from manifest authority: {lane}: "
+                            f"{shard_strategy} != {policy.strategy}")
+    paths = shard_paths(
+        paths, shard_index=shard_index, shard_count=shard_count,
+        strategy=policy.strategy if policy is not None else shard_strategy or "round-robin",
+        salt=policy.salt if policy is not None else None,
+        pins=policy.pins if policy is not None else (),
+    )
+    paths = narrow_test_only_changes(paths, changed_paths=changed_paths,
+                                    tracked_paths=tracked_paths, repo_root=repo_root)
+    paths = select_affected_test_suites(manifest, paths, changed_paths=changed_paths)
+    return select_test_scope(manifest, paths, scope=test_scope)
+
+
+GUEST_PAYLOAD_TESTS = frozenset({
+    "tests/integration/test_guest_sandbox_runtime.py",
+    "tests/integration/test_guest_emulated_auth.py",
+})
+_TEST_MODULE_IMPORT = re.compile(r"^\s*(?:from|import)\s+(tests(?:\.\w+)+)", re.MULTILINE)
+
+
+def guest_payload_consumers(paths: tuple[str, ...], *, repo_root: Path) -> frozenset[str]:
+    """Return guest payload owners plus test modules that import them, transitively."""
+
+    imports = {}
+    for path in paths:
+        source = (repo_root / path).read_text(encoding="utf-8")
+        imports[path] = {name.replace(".", "/") + ".py" for name in _TEST_MODULE_IMPORT.findall(source)}
+    consumers = set(GUEST_PAYLOAD_TESTS)
+    while True:
+        added = {path for path, modules in imports.items() if path not in consumers and modules & consumers}
+        if not added:
+            return frozenset(consumers)
+        consumers |= added
+
+
+def test_shard_matrix(
+    manifest: Manifest, *, tracked_paths: tuple[str, ...], lane: str, repo_root: Path,
+    changed_paths: tuple[str, ...] = (), test_scope: str = "all",
+) -> tuple[dict[str, Any], ...]:
+    """Start only nonempty shards, retaining stable whole-module assignments."""
+    paths = test_paths_for_lane(manifest, tracked_paths=tracked_paths, lane=lane)
+    if not paths:
+        raise ManifestError(f"CI lane has no tracked test paths: {lane}")
+    selected = narrow_test_only_changes(paths, changed_paths=changed_paths,
+                                       tracked_paths=tracked_paths, repo_root=repo_root)
+    selected = select_affected_test_suites(manifest, selected, changed_paths=changed_paths)
+    selected_set = set(select_test_scope(manifest, selected, scope=test_scope))
+    policy = manifest.test_shard_policy(lane)
+    count = policy.shard_count if policy is not None else 1
+    guest_consumers = guest_payload_consumers(paths, repo_root=repo_root)
+    matrix = []
+    for index in range(count):
+        shard = set(shard_paths(
+            paths, shard_index=index, shard_count=count,
+            strategy=policy.strategy if policy is not None else "round-robin",
+            salt=policy.salt if policy is not None else None,
+            pins=policy.pins if policy is not None else (),
+        )) & selected_set
+        if shard:
+            matrix.append({"shard": f"{index + 1}-of-{count}", "shard_index": index,
+                           "shard_count": count, "guest_payload": bool(shard & guest_consumers)})
+    return tuple(matrix)
 
 
 def test_paths_for_policy(
@@ -1563,53 +1795,16 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             return 0
         if args.command == "test-paths":
-            paths = test_paths_for_lane(
-                manifest,
-                tracked_paths=tracked_paths,
-                lane=args.lane,
-            )
-            if not paths:
-                raise ManifestError(f"CI lane has no tracked test paths: {args.lane}")
-            policy = manifest.test_shard_policy(args.lane) if args.shard_count > 1 else None
-            if policy is not None and policy.shard_count != args.shard_count:
-                raise ManifestError(
-                    f"test shard count differs from manifest authority: {args.lane}: "
-                    f"{args.shard_count} != {policy.shard_count}"
-                )
-            if (
-                policy is not None
-                and args.shard_strategy is not None
-                and args.shard_strategy != policy.strategy
-            ):
-                raise ManifestError(
-                    f"test shard strategy differs from manifest authority: {args.lane}: "
-                    f"{args.shard_strategy} != {policy.strategy}"
-                )
-            paths = shard_paths(
-                paths,
-                shard_index=args.shard_index,
-                shard_count=args.shard_count,
-                strategy=(
-                    policy.strategy if policy is not None else args.shard_strategy or "round-robin"
-                ),
-                salt=policy.salt if policy is not None else None,
-                pins=policy.pins if policy is not None else (),
-            )
-            if not paths:
-                raise ManifestError(
-                    f"CI lane shard has no tracked test paths: {args.lane} "
-                    f"({args.shard_index}/{args.shard_count})"
-                )
             changes = json.loads(args.changed_paths_json)
             if not isinstance(changes, list) or not all(isinstance(path, str) for path in changes):
                 raise ManifestError("changed paths must be a JSON string array")
             changed_paths = tuple(_safe_path(path, context="changed path") for path in changes)
-            paths = narrow_test_only_changes(
-                paths, changed_paths=changed_paths,
-                tracked_paths=tracked_paths, repo_root=repo_root,
+            paths = selected_test_paths(
+                manifest, tracked_paths=tracked_paths, lane=args.lane, repo_root=repo_root,
+                changed_paths=changed_paths, test_scope=args.test_scope,
+                shard_index=args.shard_index, shard_count=args.shard_count,
+                shard_strategy=args.shard_strategy,
             )
-            paths = select_affected_test_suites(manifest, paths, changed_paths=tuple(changed_paths))
-            paths = select_test_scope(manifest, paths, scope=args.test_scope)
             for path in paths:
                 print(path)
             return 0

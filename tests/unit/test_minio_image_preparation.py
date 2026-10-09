@@ -195,3 +195,105 @@ def test_source_cache_is_published_only_after_version_validation(monkeypatch):
     publish_index = next(i for i, command in enumerate(commands) if command[1] == "tag")
     assert validate_index < publish_index
     assert commands[publish_index][-1] == minio_images._source_tag(spec)
+
+
+def test_selection_follows_imports_and_parent_conftests(tmp_path):
+    root = tmp_path
+    (root / "tests/integration").mkdir(parents=True)
+    (root / "tests/support").mkdir()
+    (root / "tests/integration/conftest.py").write_text("from testcontainers.minio import MinioContainer\n")
+    selected = root / "tests/integration/test_selected.py"
+    selected.write_text("from tests.support.fixture import minio_tls\n")
+    (root / "tests/support/fixture.py").write_text("from tests.support.minio_tls import minio_tls\n")
+    (root / "tests/support/minio_tls.py").write_text("IMAGE = 'tls'\n")
+    assert minio_images.selected_fixture_images(["tests/integration/test_selected.py"], root=root) == (
+        minio_images.MINIO_TESTCONTAINERS_IMAGE, minio_images.MINIO_TLS_IMAGE,
+    )
+
+
+def test_fast_integration_does_not_prepare_unused_tls_release():
+    assert minio_images.selected_fixture_images(["tests/integration/test_control_plane_health.py"]) == (
+        minio_images.MINIO_TESTCONTAINERS_IMAGE,
+    )
+
+
+def test_non_storage_selection_and_empty_selection_have_no_cache():
+    assert minio_images.selected_fixture_images([]) == ()
+    assert minio_images.fixture_cache_key(()) == "none"
+
+
+def test_unreadable_selection_fails_toward_both_releases(tmp_path):
+    assert minio_images.selected_fixture_images(["missing.py"], root=tmp_path) == tuple(
+        spec.image for spec in minio_images.SOURCE_FIXTURES
+    )
+
+
+def test_cache_key_changes_with_consumer_release_and_recipe(monkeypatch):
+    old = (minio_images.MINIO_TESTCONTAINERS_IMAGE,)
+    first = minio_images.fixture_cache_key(old)
+    assert first != minio_images.fixture_cache_key((minio_images.MINIO_TLS_IMAGE,))
+    original = minio_images._dockerfile
+    monkeypatch.setattr(minio_images, "_dockerfile", lambda spec: original(spec) + "\n# recipe update\n")
+    assert first != minio_images.fixture_cache_key(old)
+
+
+def test_restored_source_cache_avoids_pull_and_rebuild(monkeypatch, tmp_path):
+    spec = minio_images.SOURCE_FIXTURES[0]
+    archive = tmp_path / (minio_images._source_tag(spec).replace(":", "-") + ".tar")
+    archive.write_bytes(b"docker archive")
+    commands = []
+    loaded = False
+
+    def run(command, **kwargs):
+        nonlocal loaded
+        commands.append(command)
+        if command[1] == "load":
+            loaded = True
+        if "--format" in command:
+            import json
+            return subprocess.CompletedProcess(command, 0 if loaded else 1,
+                stdout=json.dumps(minio_images._labels(spec)) if loaded else "")
+        return subprocess.CompletedProcess(command, 1)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    minio_images.prepare_test_images((spec.image,), cache_dir=tmp_path)
+    assert loaded
+    assert not any(command[1] in ("pull", "build", "save") for command in commands)
+
+
+def test_wrong_recipe_cache_is_discarded_before_normal_preparation(monkeypatch, tmp_path):
+    spec = minio_images.SOURCE_FIXTURES[0]
+    archive = tmp_path / (minio_images._source_tag(spec).replace(":", "-") + ".tar")
+    archive.write_bytes(b"wrong cache")
+    monkeypatch.setattr(subprocess, "run", lambda command, **kwargs: subprocess.CompletedProcess(command, 0))
+    monkeypatch.setattr(minio_images, "_source_fixture_cached", lambda spec: False)
+    prepared = []
+    monkeypatch.setattr(minio_images, "prepare_test_image", lambda image: prepared.append(image))
+    minio_images.prepare_test_images((spec.image,), cache_dir=tmp_path)
+    assert prepared == [spec.image]
+    assert not archive.exists()
+
+
+def test_failed_cache_export_leaves_no_partial_archive(monkeypatch, tmp_path):
+    spec = minio_images.SOURCE_FIXTURES[0]
+    monkeypatch.setattr(minio_images, "_source_fixture_cached", lambda spec: True)
+
+    def run(command, **kwargs):
+        from pathlib import Path
+        Path(command[command.index("--output") + 1]).write_bytes(b"partial")
+        raise subprocess.CalledProcessError(1, command)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    minio_images._save_source_fixture(spec, tmp_path)
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("trusted", [False, True])
+def test_only_trusted_preparation_exports_optional_cache(monkeypatch, tmp_path, trusted):
+    images = (minio_images.MINIO_TESTCONTAINERS_IMAGE,)
+    monkeypatch.setattr(minio_images, "_restore_source_fixture", lambda spec, directory: None)
+    monkeypatch.setattr(minio_images, "prepare_test_image", lambda image: image)
+    exports = []
+    monkeypatch.setattr(minio_images, "_save_source_fixture", lambda spec, directory: exports.append(spec.image))
+    minio_images.prepare_test_images(images, cache_dir=tmp_path, save_cache=trusted)
+    assert exports == (list(images) if trusted else [])
