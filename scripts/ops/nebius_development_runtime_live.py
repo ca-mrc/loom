@@ -20,11 +20,13 @@ from scripts.ops.nebius_development_runtime_install import (
     prepare_runtime_install,
     runtime_transition_inputs,
 )
+from scripts.ops.nebius_development_runtime_readiness import qualify_started_deployment
 from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
 from scripts.ops.nebius_management_material import ManagementBinding
 from scripts.ops.nebius_management_stage import _MARKER, _qualified_defaulted
 from scripts.ops.nebius_management_switch import _matches
 from scripts.ops.nebius_management_transport import ManagementKubernetesTransport
+from scripts.ops.nebius_pool_retirement import qualify_closed_workload_drain
 
 _PATHS = {
     'Secret': ('v1', 'secrets', False), 'ConfigMap': ('v1', 'configmaps', False),
@@ -228,5 +230,28 @@ class HTTPSDevelopmentRuntimeWorkloads(ManagementKubernetesTransport):
         actual = self.read_workload(key)
         if not _matches(actual, expected, _uid(self.originals[key])):
             raise ValueError('development runtime workload readiness differs')
+        namespace = actual['metadata']['namespace']
+        if actual['kind'] == 'Deployment' or actual['spec'].get('suspend') is True:
+            deployment = actual['kind'] == 'Deployment'
+            path = ('/apis/apps/v1/namespaces/' + namespace + '/replicasets' if deployment
+                else '/apis/batch/v1/namespaces/' + namespace + '/jobs')
+            self._private_inputs()
+            children = self._request('GET', path + '?limit=1000')
+            self._private_inputs()
+            pods = self._request('GET', '/api/v1/namespaces/' + namespace + '/pods?limit=1000')
+            if children is None or pods is None:
+                raise ValueError('development runtime workload collections unavailable')
+            if deployment and actual['spec']['replicas'] == 1:
+                ready = qualify_started_deployment(current=actual, children=children, pods=pods,
+                    region=self.request.database.foundation.inputs.config['region'])
+            else:
+                ready = qualify_closed_workload_drain(original=self.originals[key], desired=expected,
+                    current=actual, children=children, pods=pods)
+            final = self.read_workload(key)
+            if (final['metadata']['generation'] != actual['metadata']['generation']
+                    or _snapshot(final) != _snapshot(actual)):
+                raise ValueError('development runtime workload changed during observation')
+            if not ready:
+                return False
         return self.observe_ready(copy.deepcopy(self.request), self.phase, copy.deepcopy(self.originals[key]),
             copy.deepcopy(expected), actual)
