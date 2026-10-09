@@ -884,6 +884,107 @@ def test_runtime_workload_https_only_explicit_rejection_is_retryable(completed_p
             api.client.close()
 
 
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
+@pytest.mark.parametrize('retained', [False], indirect=True)
+def test_runtime_parent_connects_all_https_workload_phases_and_read_only_resume(completed_pool, publisher_cloud):
+    from contextlib import ExitStack
+
+    from scripts.ops.nebius_development_runtime_live import HTTPSDevelopmentRuntimeWorkloads
+
+    runtime, request, api, _, _ = parent_install_fixture(completed_pool, publisher_cloud)
+    calls = []
+    rows = api.store.resources
+
+    def observed(row):
+        result = copy.deepcopy(row)
+        result['metadata'].setdefault('generation', 1)
+        result['metadata'].setdefault('resourceVersion', '1')
+        if result['kind'] == 'Deployment':
+            count = result['spec']['replicas']
+            result['status'] = {'observedGeneration': result['metadata']['generation'], **{
+                field: count for field in ('replicas', 'readyReplicas', 'updatedReplicas', 'availableReplicas')}}
+        return result
+
+    def collections(namespace, kind):
+        items = []
+        for key, row in rows.items():
+            if row['kind'] != 'Deployment' or row['metadata']['namespace'] != namespace:
+                continue
+            parent = observed(row)
+            # Stable IDs across reads; no production helper derives expectations.
+            identity = UUID(hashlib.md5(key.encode(), usedforsecurity=False).hexdigest())
+            name = parent['metadata']['name'] + '-b876c5b4d'
+            labels = {**parent['spec']['template']['metadata']['labels'], 'pod-template-hash': 'b876c5b4d'}
+            count = parent['spec']['replicas']
+            template = copy.deepcopy(parent['spec']['template'])
+            template['metadata']['labels'] = labels
+            if kind == 'ReplicaSet':
+                items.append({'metadata': {'name': name, 'namespace': namespace, 'uid': str(identity), 'generation': 1,
+                    'labels': labels, 'ownerReferences': [{'apiVersion': 'apps/v1', 'kind': 'Deployment',
+                        'name': parent['metadata']['name'], 'uid': parent['metadata']['uid'], 'controller': True}]},
+                    'spec': {'replicas': count, 'selector': {'matchLabels': {
+                        **parent['spec']['selector']['matchLabels'], 'pod-template-hash': 'b876c5b4d'}}, 'template': template},
+                    'status': {'observedGeneration': 1, 'replicas': count, 'readyReplicas': count, 'availableReplicas': count}})
+            elif count:
+                items.append({'metadata': {**template['metadata'], 'name': name + '-pod', 'namespace': namespace,
+                    'uid': str(UUID(int=identity.int + 1)), 'ownerReferences': [{'apiVersion': 'apps/v1', 'kind': 'ReplicaSet',
+                        'name': name, 'uid': str(identity), 'controller': True}]},
+                    'spec': template['spec'], 'status': {'phase': 'Running', 'conditions': [{'type': 'Ready', 'status': 'True'}],
+                        'containerStatuses': [{'name': container['name'], 'ready': True, 'state': {'running': {}}}
+                            for container in template['spec']['containers']],
+                        'initContainerStatuses': [{'name': container['name'], 'state': {'terminated': {'exitCode': 0}}}
+                            for container in template['spec'].get('initContainers', [])]}})
+        return {'apiVersion': 'apps/v1' if kind == 'ReplicaSet' else 'v1', 'kind': kind + 'List',
+            'metadata': {'resourceVersion': '1'}, 'items': items}
+
+    def transport(message):
+        calls.append(message)
+        parts = message.url.path.split('/')
+        namespace, resource = parts[parts.index('namespaces') + 1:][:2]
+        if resource in {'replicasets', 'pods'}:
+            assert message.method == 'GET'
+            return httpx.Response(200, json=collections(namespace, 'ReplicaSet' if resource == 'replicasets' else 'Pod'))
+        key = ('Deployment' if resource == 'deployments' else 'CronJob') + ':' + namespace + ':' + parts[-1]
+        current = observed(rows[key])
+        if message.method == 'GET':
+            return httpx.Response(200, json=current)
+        assert message.method == 'PATCH'
+        for change in json.loads(message.content):
+            target, field = (current['metadata'], change['path'].rsplit('/', 1)[-1]) if change['path'].startswith('/metadata/') else (current, 'spec')
+            if change['op'] == 'test':
+                assert target[field] == change['value']
+            elif change['op'] == 'remove':
+                del target[field]
+            else:
+                assert change['op'] in {'replace', 'add'}
+                target[field] = change['value']
+        if not message.url.query:
+            current['metadata']['resourceVersion'] = str(int(current['metadata']['resourceVersion']) + 1)
+            current['metadata']['generation'] += 1
+            rows[key] = observed(current)
+        return httpx.Response(200, json=current)
+
+    with ExitStack() as stack:
+        def workloads(phase):
+            api.visits.append(phase)
+            client = stack.enter_context(HTTPSDevelopmentRuntimeWorkloads(request=request, phase=phase,
+                api_server=request.database.foundation.inputs.config['kubernetes_api_server'],
+                ssl_context=ssl.create_default_context(), qualify_runtime=lambda *_: None, observe_ready=lambda *_: True))
+            client.client.close()
+            client.client = type(completed_pool[3].api.client)(base_url=client.api_server, transport=httpx.MockTransport(transport))
+            return client
+        api.workloads = workloads
+        api.database_complete = api.catalog_complete = True
+        result = runtime.install_development_runtime(request=request, api=api, execute=True)
+        assert result['status'] == 'development_runtime_installed_closed'
+        assert [phase for phase in api.visits if phase in {'stop', 'replace', 'control', 'start'}] == ['stop', 'replace', 'control', 'start']
+        writes = [row for row in calls if row.method == 'PATCH' and not row.url.query]
+        assert len(writes) == 11  # Three stop, three replace, two control, three start.
+        before = len(calls)
+        assert runtime.install_development_runtime(request=request, api=api, execute=True) == result
+        assert len(calls) == before
+
+
 @pytest.mark.parametrize('manager_entry', ['foundation'], indirect=True)
 def test_runtime_database_delivery_keeps_old_data_identity_and_separates_credentials(completed_pool):
     from sqlalchemy.engine import make_url
