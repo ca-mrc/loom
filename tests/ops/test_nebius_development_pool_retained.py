@@ -760,6 +760,8 @@ def test_runtime_workload_https_binds_uid_version_and_spec_before_patch(complete
     before = copy.deepcopy(plan.originals[key])
     before['metadata']['resourceVersion'] = '71'
     current = copy.deepcopy(before)
+    current['metadata']['generation'] = 1
+    current['status'] = {'observedGeneration': 1}
     desired = plan.stopped[key]
     def qualify(value, phase, writing):
         assert value == request and phase == 'stop'
@@ -771,6 +773,11 @@ def test_runtime_workload_https_binds_uid_version_and_spec_before_patch(complete
         return True
     def transport(message):
         calls.append(message)
+        if message.url.path.endswith(('/replicasets', '/pods')):
+            assert message.method == 'GET' and dict(message.url.params) == {'limit': '1000'}
+            replicas = message.url.path.endswith('/replicasets')
+            return httpx.Response(200, json={'apiVersion': 'apps/v1' if replicas else 'v1',
+                'kind': 'ReplicaSetList' if replicas else 'PodList', 'metadata': {'resourceVersion': '75'}, 'items': []})
         assert message.url.path == '/apis/apps/v1/namespaces/loom-dev/deployments/loom-control-plane'
         if message.method == 'GET':
             return httpx.Response(200, json=current)
@@ -797,13 +804,14 @@ def test_runtime_workload_https_binds_uid_version_and_spec_before_patch(complete
     with runtime_workloads_api(request, qualify, ready) as api:
         api.client.close()
         api.client = type(completed_pool[3].api.client)(base_url=api.api_server, transport=httpx.MockTransport(transport))
-        assert api.read_workload(key) == before
+        assert api.read_workload(key) == current
         assert api.preview_workload(key, before, desired)['spec']['replicas'] == 0
         assert current['spec']['replicas'] == 1
         assert api.patch_workload(key, before, desired) is True
         assert api.workload_ready(key, desired) is True
         assert current['spec']['replicas'] == 0
     assert len([row for row in calls if row.method == 'PATCH']) == 2
+    assert len([row for row in calls if row.url.path.endswith(('/replicasets', '/pods'))]) == 2
     assert True in qualifications
 
 
