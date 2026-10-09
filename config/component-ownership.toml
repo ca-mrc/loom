@@ -347,6 +347,7 @@ source_paths = [
   "src/loom/execution_image_admission.py",
   "src/loom/execution_requirements.py",
   "src/loom/execution_runtime_contract.py",
+  "src/loom/prebuilt_task_images.py",
   "src/loom/family_run/__init__.py",
   "src/loom/family_run/spec.py",
   "src/loom/models/__init__.py",

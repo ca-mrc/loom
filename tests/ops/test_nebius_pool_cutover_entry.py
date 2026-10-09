@@ -65,6 +65,8 @@ from tests.support.execution_image_admission import (
 from tests.unit.test_nebius_management_render import management_inputs as base_management_inputs
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
+from loom.db.schema_startup import service_schema_head
+
 
 @pytest.fixture
 def management_inputs(platform_inputs):
@@ -326,7 +328,7 @@ def connected_cutover_entry(private_cutover, monkeypatch):
     def database_page(target, *, after):
         assert target in migration.guards and after is None
         observed["database_reads"].append("participant")
-        return {"status": "observed", "schema_revision": "0171" if observed["database_failure"] == "participant" else "0175", "rows": []}
+        return {"status": "observed", "schema_revision": "0171" if observed["database_failure"] == "participant" else service_schema_head(), "rows": []}
     def history_page(target, origins):
         assert target in migration.guards and origins == ()
         observed["database_reads"].append("manager")

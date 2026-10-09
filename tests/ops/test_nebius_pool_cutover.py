@@ -24,6 +24,8 @@ from tests.ops.test_nebius_pool_runtime import runtime_inputs as runtime_inputs
 from tests.unit.test_nebius_management_render import management_inputs as management_inputs
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
+from loom.db.schema_startup import service_schema_head
+
 
 def platform_writer_authority(kube_system_uid):
     from scripts.ops.nebius_pool_platform_authority import PoolPlatformAuthority
@@ -662,7 +664,7 @@ def test_https_quiescence_requires_bound_database_pages_and_registered_origin_hi
         assert target in migration.guards and after is None
         participant = next(row for row in migration.registration.spec.participants
             if row.participant_id == target.participant_id)
-        return {'status': 'observed', 'schema_revision': '0171' if damage == 'schema' else '0175', 'rows': [{
+        return {'status': 'observed', 'schema_revision': '0171' if damage == 'schema' else service_schema_head(), 'rows': [{
             'key': 'batch:' + str(participant.participant_id), 'source_matches': True,
             'origin': None if damage == 'unknown_origin' else {
                 'schema_version': 'loom.pool-work-origin.v1', 'data_environment_id': str(participant.environment_id),
@@ -1113,7 +1115,7 @@ def binding_preflight(request, tokens, inventories, *, page_mode=None, qualified
     external = CutoverAPI(request)
     def empty_page(target, *, after):
         assert target in migration.guards and after is None
-        return {"status": "observed", "schema_revision": "0175", "rows": []}
+        return {"status": "observed", "schema_revision": service_schema_head(), "rows": []}
     def empty_history(target, origins):
         assert target in migration.guards and origins == ()
     external.qualify_pending_origins = history_read or empty_history
@@ -1143,7 +1145,7 @@ def test_preflight_qualifies_every_database_before_producer_downtime(cutover_inp
         if damage == "active_access":
             raise ValueError("pool cutover application access active")
         rows = [{"key": "batch:" + str(uuid4()), "source_matches": True, "origin": None}] if damage == "unknown_origin" else []
-        return {"status": "observed", "schema_revision": "0171" if damage == "schema" else "0175", "rows": rows}
+        return {"status": "observed", "schema_revision": "0171" if damage == "schema" else service_schema_head(), "rows": rows}
     def history(target, origins):
         assert target in migration.guards and origins == ()
         seen.append(("history", target.participant_id))

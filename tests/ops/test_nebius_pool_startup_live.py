@@ -25,6 +25,8 @@ from tests.ops.test_nebius_pool_startup import platform_inputs as platform_input
 from tests.ops.test_nebius_pool_startup import retirement_inputs as retirement_inputs
 from tests.ops.test_nebius_pool_startup import runtime_inputs as runtime_inputs
 
+from loom.db.schema_startup import service_schema_head
+
 unbound_cutover_inputs = startup_fixtures.cutover_inputs
 
 
@@ -103,7 +105,7 @@ def startup_http(closed_startup, cutover_binding_inventory):
         return {'status': 'qualified'}
 
     guards = SimpleNamespace(request=migration, guard=guard, runtime_role=runtime_role,
-        cutover_readiness_page=lambda target, after: {'status': 'observed', 'schema_revision': '0175', 'rows': []})
+        cutover_readiness_page=lambda target, after: {'status': 'observed', 'schema_revision': service_schema_head(), 'rows': []})
 
     def respond(message):
         state.calls.append(message)
