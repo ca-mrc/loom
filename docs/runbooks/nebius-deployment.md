@@ -534,6 +534,56 @@ Protected runtime delivery must still bind the catalog, prove sole physical-pool
 authority and explicitly activate admission; do not invoke the legacy staging
 cutover or clear a task guard to substitute for those steps.
 
+For a completed independent manager, the protected `nebius-rollout` operations
+`development-pool-preflight` and `development-pool-install` connect namespace
+creation, closed registration and stopped gateway delivery. They use the
+dedicated `NEBIUS_DEVELOPMENT_POOL_SSH_KEY` and
+`NEBIUS_DEVELOPMENT_POOL_OPERATION_JSON`, never the staging rollout key or an
+arbitrary manifest. Prepare the exact clean integrated source using
+`scripts.ops.nebius_development_pool_rollout --operation preflight
+--requirements LOCKED_REQUIREMENTS --evidence-dir PRIVATE_EVIDENCE
+--prepare-bundle PRIVATE_BUNDLE`. The operator installs only that bundle's
+hash-bound restricted key through `scripts.ops.install_nebius_development_pool_entrypoint`;
+the existing staging and manager grants must remain unchanged.
+
+The operation schema is `loom.nebius-development-pool-operation.v1`. Its
+`source_sha`, `installation_id`, `operation_id`, fixed
+`namespace: loom-nebius-management-dev`, private `inputs_path` and `inputs_sha256`
+pin the selection. Inputs live at
+`OPERATOR_HOME/.loom/nebius-development-pool/INSTALLATION_UUID/OPERATION_UUID/inputs.json`
+with owner-only permissions. The `loom.nebius-development-pool-inputs.v1` input
+contains `retained` original-management history, `operator_connection`, `catalog`
+and private `tokens` keyed by machine UUID. The catalog follows
+`loom.pool-installation.v1` but omits `uid` in both participant namespace bindings:
+only actual namespace-create receipts may supply those values. It must include
+trial/task-image target capabilities and dedicated application-image-build profiles;
+published runtime binary/image identities and the original shared storage/schema
+must match. Task-image profiles read ordinary TaskSet bundles from
+`buckets.artifacts`; application-image profiles read personal application archives
+from `buckets.source`. These are distinct intake paths even though both use the
+shared build pool. Do not point task-image profiles at the application-source
+bucket. Both build-profile kinds must use the final owned placement labels:
+`loom.nebius/node-os: linux` and `loom.nebius/node-arch: amd64` for `x86_64`, or
+`loom.nebius/node-arch: arm64` for `arm64`. Do not use reserved
+`kubernetes.io/os` or `kubernetes.io/arch` labels in these profiles; native build
+rendering translates them, but admission requires the final selector to match
+the immutable catalog exactly. Additional placement labels are preserved.
+Credentials must already be issued and unexpired before initial
+namespace/registration writes. Registration also checks validity using database
+time; completed registration evidence remains readable after credential expiry.
+
+Preflight performs GET-only qualification and creates no installation state.
+Install may report `pending_registration`; repeat the same protected operation
+after the registration Job completes. Keep the original anchor and all private
+phase evidence. Missing or conflicting history, foreign resources, changed private
+inputs and unresolved CREATEs are blocked; do not delete state, change operation
+IDs or retry by hand. Completion is `development_pool_installed_closed`, with
+`admission_open: false` and `writer_migration_complete: false`. There are no running
+new workers, Job-write grants, cloud-resource changes or staging mutations.
+This operation does not yet enable application builds or tasks: the protected
+manager/participant activation, build isolation, observer and sole-writer checks
+must still be completed before live multi-owner acceptance.
+
 Subsequent lifecycle changes use the same management context:
 
 ```bash

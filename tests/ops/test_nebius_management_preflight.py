@@ -280,6 +280,7 @@ def test_protected_manual_inventory_cannot_select_rollout_or_unprotected_environ
         "development-preflight", "development-install",
         "development-management-preflight", "development-management-install",
         "development-management-renewal-preflight", "development-management-renewal-renew",
+        "development-pool-preflight", "development-pool-install",
     ]
     assert "inputs.operation == 'rollout'" in workflow["jobs"]["rollout"]["if"]
     job = workflow["jobs"]["inspect"]

@@ -2630,6 +2630,32 @@ not a deployed CLI or a replacement for runtime delivery, sole-writer qualificat
 and admission activation. Its completion explicitly reports admission closed and
 writer migration incomplete.
 
+The protected independent-dev **pool installer** composes that internal stage
+without legacy cutover history. Its private intent contains a complete task and
+application-build catalog, but no operator-supplied execution namespace UIDs.
+Before writes it checks the original publication/runtime digest, shared source and
+schema bindings, trial/task-image target capabilities, dedicated builder support
+and all machine-token hashes. Initial namespace/registration writes require
+currently issued, unexpired credentials; replay of a retained registration receipt
+does not reinterpret credential expiry as missing installation history. It then
+creates only the two fixed dev execution/build namespaces and binds their actual
+UIDs into the frozen registration. Both namespaces remain restricted at this stage.
+
+Only after the exact closed SQL commit receipt does it deliver immutable,
+scope-specific machine Secrets, the profile catalog, a gateway ServiceAccount and
+a zero-replica gateway Deployment. It grants no RBAC and does not modify the
+running manager, shared service/control plane, collector, physical pool or staging.
+One original-installation anchor and phase journal prevent changed inputs, lost
+state or uncertain creates from starting another installation. Earlier material
+is rechecked after later resource creation before reporting completion.
+
+`development_pool_installed_closed` means only that this stopped installation is
+retained and qualified. Catalog-bound manager/participant successors, build
+isolation and read grants, a qualified observer and sole physical-writer authority
+are still required before admission and runtime activation. The installed
+source-to-build-to-deploy-to-task/result and concurrent-owner acceptance tests
+remain the operational readiness criteria.
+
 The migration's initial closure stage binds every qualified data participant and
 its retained control-plane Deployment/namespace identity. Environment classes do
 not imply a fixed number of installed databases. The protected preflight must
