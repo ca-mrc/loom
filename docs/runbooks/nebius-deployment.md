@@ -630,7 +630,7 @@ Before qualifying a managed multi-person installation, dispatch the existing
 protected Nebius workflow from `dev` with the explicit inspection operation:
 
 ```bash
-gh workflow run nebius-rollout.yml --repo qianyi-sun/loom --ref dev -f operation=inspect
+gh workflow run nebius-rollout.yml --repo ca-mrc/loom --ref dev -f operation=inspect
 ```
 
 This uses the same protected `nebius-integration` environment, pinned SSH host and
@@ -824,7 +824,7 @@ made transactional by these hooks.
 `nebius-rollout` supports the manual `certificate` operation on protected `dev`:
 
 ```bash
-gh workflow run nebius-rollout.yml --repo qianyi-sun/loom --ref dev -f operation=certificate
+gh workflow run nebius-rollout.yml --repo ca-mrc/loom --ref dev -f operation=certificate
 ```
 
 The certificate operation requires its own protected `NEBIUS_CERTIFICATE_SSH_KEY`.
