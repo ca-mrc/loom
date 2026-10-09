@@ -8,6 +8,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+from loom.agent.terminus2.provenance import HARBOR_COMPAT_SHA
 from loom.driver.base import Driver
 from loom.models.exec import ExecResult as LoomExecResult
 
@@ -26,7 +27,8 @@ def _import_harbor() -> None:
         import harbor  # noqa: F401
     except ImportError as exc:
         raise ImportError(
-            "terminus-2 requires harbor@527d50d in the worker image. See deploy/Dockerfile.worker.",
+            f"terminus-2 requires harbor@{HARBOR_COMPAT_SHA} in the runtime image. "
+            "See deploy/Dockerfile.harbor-runtime.",
         ) from exc
 
 

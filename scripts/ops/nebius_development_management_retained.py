@@ -99,7 +99,8 @@ def load_retained_management(reference: RetainedManagementReference) -> Retained
                 or inputs.deployment.installation.foundation.platform_config['environment'] != 'development'
                 or inputs.deployment.installation.provider_runtime is not None
                 or app is None or app.shared.platform_namespace != 'loom-dev'
-                or app.runtime.build is not None or app.runtime.source_upload is not None):
+                or app.runtime.build is not None
+                or (app.runtime.source_upload is None) != (inputs.source_files is None)):
             raise ValueError()
         identity = {'schema': 'loom.nebius-development-management-install.v1',
             'input_digest': reference.installation_input_digest, 'state_dir': str(state), 'binding': asdict(inputs.binding)}
@@ -206,6 +207,10 @@ def load_retained_management(reference: RetainedManagementReference) -> Retained
             'application_material': asdict(application_material), 'shared_namespace_uid': str(inputs.shared_namespace_uid),
             'tls_material': asdict(tls_material), 'qualification_digest': qualification,
             **({'shared_public_route': True} if inputs.shared_public_route else {})}
+        if inputs.source_files is not None:
+            if set(inputs.source_files) != {'access-key', 'secret-key'}:
+                raise ValueError()
+            original['source_material'] = _json(application_data('loom-applications-source-')['credentials.json'].encode())
         if digest(original) != reference.installation_input_digest or any(
                 private_state._private_read(path, limit=4 * 1024**2) != raw for path, raw in files.items()):
             raise ValueError()

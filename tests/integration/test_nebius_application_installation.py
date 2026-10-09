@@ -167,10 +167,22 @@ async def test_configured_management_starts_one_application_worker_and_supervise
             assert (await client.get('/api/v1/applications')).json() == {'items': []}
             ready = await client.get('/api/v1/health/ready')
             assert ready.status_code == 200 and ready.json()['application_provisioner'] == 'ready'
+            capabilities = await client.get('/api/v1/application-capabilities')
+            assert capabilities.status_code == 200, capabilities.text
+            assert capabilities.json()['application_lifecycle'] == 'worker_healthy'
+            assert capabilities.json()['source_upload'] == 'not_configured'
+            assert capabilities.json()['image_builds'] == 'not_configured'
+            assert capabilities.json()['execution'] == 'not_checked'
             runtime.task.cancel()
             await asyncio.gather(runtime.task, return_exceptions=True)
             stopped = await client.get('/api/v1/health/ready')
             assert stopped.status_code == 503 and stopped.json()['application_provisioner'] == 'not-ready'
+            capabilities = await client.get('/api/v1/application-capabilities')
+            assert capabilities.json()['application_lifecycle'] == 'worker_unhealthy'
+            assert capabilities.json()['execution'] == 'not_checked'
+            del app.state.application_runtime
+            capabilities = await client.get('/api/v1/application-capabilities')
+            assert capabilities.json()['application_lifecycle'] == 'worker_unavailable'
             assert (await client.get('/api/v1/health')).status_code == 200
     assert len(created) == 1 and created[0].closed
     assert runtime.kubernetes.http.is_closed and runtime.object_verifier.http.is_closed

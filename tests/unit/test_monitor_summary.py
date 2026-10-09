@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from loom_service.routes.monitor import _resource_trials_stmt
 
 
@@ -29,6 +31,40 @@ def test_ordinary_user_capacity_exposes_logical_target_without_private_binding()
     assert isinstance(observation, dict)
     assert observation["active_nodes"] == 0
     assert "node_group_id" not in observation
+
+
+@pytest.mark.parametrize("admin", [False, True])
+def test_capacity_projection_preserves_execution_and_explicit_owner_identity(admin: bool) -> None:
+    from loom_service.routes.monitor import _public_execution_capacity
+
+    classes = (
+        "linux-amd64-cpu-web-pod-v1",
+        "linux-amd64-cpu-guest-web-v1",
+        "linux-amd64-cpu-guest-auth-web-v1",
+    )
+    targets = [
+        {
+            "target_id": f"target-{index}",
+            "execution_class_id": execution_class,
+            "capacity_owner_target_id": "target-0",
+            "pool_id": "nebius-cpu",
+            "environment": "development",
+            "region": "eu-north1",
+            "cluster_id": "private-cluster",
+            "spec_json": {"namespace_name": "private-namespace"},
+        }
+        for index, execution_class in enumerate(classes)
+    ]
+    # An independent capacity owner in the same pool and region must stay separate.
+    targets.append({**targets[0], "target_id": "independent", "capacity_owner_target_id": "independent"})
+
+    projected = _public_execution_capacity({"targets": targets}, {}, admin=admin)
+
+    assert [row["execution_class_id"] for row in projected] == [*classes, classes[0]]
+    assert [row["capacity_owner_target_id"] for row in projected] == [
+        "target-0", "target-0", "target-0", "independent",
+    ]
+    assert all(not {"cluster_id", "spec_json"} & row.keys() for row in projected)
 
 
 def test_node_activity_distinguishes_occupancy_from_capacity_and_drain_intent() -> None:

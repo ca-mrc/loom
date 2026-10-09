@@ -49,6 +49,19 @@ def digest(value):
     ).hexdigest()
 
 
+def _body_properties(body):
+    if isinstance(body, bytes):
+        return len(body), digest_bytes(body)
+    position = body.tell()
+    body.seek(0)
+    size, checksum = 0, hashlib.sha256()
+    while chunk := body.read(1024 * 1024):
+        size += len(chunk)
+        checksum.update(chunk)
+    body.seek(position)
+    return size, "sha256:" + checksum.hexdigest()
+
+
 @pytest.fixture
 async def recovery(monkeypatch, tmp_path, isolated_migration_postgres_url, shared_minio, request):
     cfg = shared_minio.get_config()
@@ -86,14 +99,31 @@ async def recovery(monkeypatch, tmp_path, isolated_migration_postgres_url, share
         lease = await _reserve(session, trial_id=trial_id, target=target, now=now)
         trial = await session.get(Trial, trial_id)
         result_body = b'{"reward":0}'
-        result_sha = digest_bytes(result_body)
+        params = getattr(request.node, "callspec", SimpleNamespace(params={})).params
+        if payload_size := params.get("large_payload_bytes"):
+            # Real oversized JSON, generated and uploaded with bounded memory.
+            result_body = (tmp_path / "large-result.json").open("w+b")
+            request.addfinalizer(result_body.close)
+            prefix_body, suffix_body = b'{"reward":0,"padding":"', b'"}'
+            result_body.write(prefix_body)
+            left = payload_size - len(prefix_body) - len(suffix_body)
+            chunk = b"x" * (1024 * 1024)
+            while left:
+                count = min(left, len(chunk))
+                result_body.write(chunk[:count])
+                left -= count
+            result_body.write(suffix_body)
+            result_body.seek(0)
+        result_size, result_sha = _body_properties(result_body)
+        # Metadata-only overflow cases must refuse before reading storage.
+        result_size = params.get("registered_payload_bytes", result_size)
         stored_files = [{"file_index": 0, "relative_path": "result.json", "role": "semantic_document",
                          "archive_format": "none", "media_type": "application/json",
-                         "size_bytes": len(result_body), "sha256": result_sha}]
+                         "size_bytes": result_size, "sha256": result_sha}]
         artifact_manifest = {"schema_version": "loom.artifact-manifest.v1", "artifact_id": str(artifact_id),
             "artifact_name": "trial_bundle", "artifact_type": "loom.trial-artifact-bundle.v1",
-            "content_sha256": result_sha, "stored_size_bytes": len(result_body),
-            "unpacked_size_bytes": len(result_body), "file_count": 1, "stored_files": stored_files,
+            "content_sha256": result_sha, "stored_size_bytes": result_size,
+            "unpacked_size_bytes": result_size, "file_count": 1, "stored_files": stored_files,
             "lineage_artifact_ids": [], "lineage_digests": []}
         producer = {"commit_kind": "service_execution_output", "team_id": str(trial.team_id),
             "service_execution_lease_id": str(lease.id), "service_execution_generation": 1,
@@ -108,7 +138,7 @@ async def recovery(monkeypatch, tmp_path, isolated_migration_postgres_url, share
                            "artifact_type": "loom.trial-artifact-bundle.v1",
                            "manifest_sha256": canonical_digest(artifact_manifest),
                            "content_sha256": result_sha, "stored_files": stored_files}],
-            "total_bytes": len(result_body), "input_lineage_artifact_ids": [], "input_lineage_digests": [],
+            "total_bytes": result_size, "input_lineage_artifact_ids": [], "input_lineage_digests": [],
             "request_digest": "sha256:" + "e" * 64}
         source_fault = getattr(request.node, "callspec", SimpleNamespace(params={})).params.get("source_fault")
         if source_fault == "manifest":
@@ -121,15 +151,16 @@ async def recovery(monkeypatch, tmp_path, isolated_migration_postgres_url, share
             producer["candidate_sha"] = "b" * 40
         prefix = f"trials/{trial.team_id}/{trial_id}/attempts/1/bundles/{artifact_id}/"
         trajectory_prefix = f"{trial.team_id}/{trial_id}/attempts/1/"
-        for key, body in [(prefix + "files/result.json", result_body),
+        for body_index, (key, body) in enumerate([(prefix + "files/result.json", result_body),
                           (prefix + "source/_manifest.json", canonical_document(root_manifest)),
                           (trajectory_prefix + "events.jsonl", b'{"seq":1}\n'),
-                          (trajectory_prefix + "atif.json", b'{"steps":[]}')]:
-            version = s3.put_object(Bucket=bucket, Key=key, Body=body)["VersionId"]
+                          (trajectory_prefix + "atif.json", b'{"steps":[]}')]):
+            body_size, body_sha = _body_properties(body)
+            version = s3.put_object(Bucket=bucket, Key=key, Body=body, ContentLength=body_size)["VersionId"]
             objects.append(DataLifecycleObject(id=uuid4(), authority_id=authority_id,
                 environment="development", namespace="loom", bucket=bucket, object_key=key,
-                version_id=None, content_sha256=hashlib.sha256(body).hexdigest(),
-                size_bytes=len(body), created_at=now))
+                version_id=None, content_sha256=body_sha.removeprefix("sha256:"),
+                size_bytes=result_size if body_index == 0 else body_size, created_at=now))
             versions.append(version)
             bodies.append(body)
         file_rows = [{"relative_path": name, "media_type": "application/json",
@@ -174,9 +205,9 @@ async def recovery(monkeypatch, tmp_path, isolated_migration_postgres_url, share
             service_execution_task_revision_sha256=producer["task_revision_sha256"],
             service_execution_command_identity_sha256=producer["command_identity_sha256"],
             idempotency_key=str(upload_id), request_digest="sha256:" + "e" * 64,
-            prefix=f"source/{upload_id}/", state="committed", expected_total_max_bytes=1024,
+            prefix=f"source/{upload_id}/", state="committed", expected_total_max_bytes=max(1024, result_size),
             expires_at=now + timedelta(days=1), committed_at=now, canonical_manifest_json=root_manifest,
-            actual_total_bytes=len(result_body),
+            actual_total_bytes=result_size,
             manifest_sha256=lease.output_manifest_sha256,
             committed_marker_sha256=lease.output_marker_sha256))
         session.add(DataLifecycleAuthority(id=authority_id, environment="development",
@@ -187,7 +218,7 @@ async def recovery(monkeypatch, tmp_path, isolated_migration_postgres_url, share
             artifact_type="loom.trial-artifact-bundle.v1", name="trial_bundle",
             control_producer_kind="service_execution", control_producer_id=lease.id,
             artifact_upload_session_id=upload_id, manifest_sha256=canonical_digest(artifact_manifest),
-            stored_size_bytes=len(result_body), unpacked_size_bytes=len(result_body), file_count=1,
+            stored_size_bytes=result_size, unpacked_size_bytes=result_size, file_count=1,
             content_hash=result_sha, storage=storage,
             artifact_metadata={"materialization_state": "committed"},
             lifecycle_authority_id=authority_id, created_at=now))
@@ -691,7 +722,7 @@ def add_equivalent_versions(r, count=2, index=0):
     return versions
 
 
-@pytest.mark.parametrize("count", [2, 5, 8])
+@pytest.mark.parametrize("count", [2, 5, 8, 18, 32])
 async def test_equivalent_versions_adopt_latest_with_complete_audit_and_replay(recovery, count):
     r = recovery
     versions = add_equivalent_versions(r, count)
@@ -732,10 +763,11 @@ async def test_identical_versions_still_require_explicit_inventory(recovery):
     assert await snapshot(r) == before
 
 
+@pytest.mark.parametrize("count", [2, 18])
 @pytest.mark.parametrize("fault", ["corrupt_older_copy", "nonlatest", "missing", "extra", "delete_marker"])
-async def test_equivalent_inventory_rejects_conflicts_before_any_repair(recovery, fault):
+async def test_equivalent_inventory_rejects_conflicts_before_any_repair(recovery, fault, count):
     r = recovery
-    versions = add_equivalent_versions(r)
+    versions = add_equivalent_versions(r, count)
     obj = r.objects[0]
     if fault == "corrupt_older_copy":
         bad = r.s3.put_object(Bucket=r.bucket, Key=obj.object_key, Body=b"x" * len(r.bodies[0]))["VersionId"]
@@ -805,7 +837,7 @@ async def test_all_equivalent_copies_count_toward_verification_budget(recovery, 
 @pytest.mark.parametrize("invalid", [[], ["latest"], ["latest"] * 2,
     ["latest", "null"], ["latest", " null "], ["latest", ""], ["latest", 1],
     ["latest", "x" * 1025], ["latest", "bad\nversion"], ["a", "b"],
-    ["latest", *[str(i) for i in range(8)]]])
+    ["latest", *[str(i) for i in range(32)]]])
 async def test_equivalent_version_request_requires_complete_bounded_concrete_set(recovery, invalid):
     r = recovery
     r.payload["objects"][0].update(version_id="latest", equivalent_version_ids=invalid)
@@ -921,3 +953,341 @@ async def test_equivalent_inventory_is_bound_to_preview_and_audit(recovery):
     assert response.status_code == 409, response.text
     assert "operation_id_conflict" in response.text
     assert await snapshot(r) == after
+
+
+def single_object_payload(r):
+    from loom.db.schema_startup import service_schema_head
+
+    payload = copy.deepcopy(r.payload)
+    payload.update(mode="single_large_object_v1", team_id=r.index["team_id"],
+                   candidate_sha="c" * 40, schema_head=service_schema_head())
+    payload["objects"] = payload["objects"][:1]
+    return payload
+
+
+async def recover_single_object(r, payload):
+    from loom_control_plane.object_version_recovery import SingleObjectRecoveryRequest
+
+    return await r.app.state.object_version_recovery.recover(
+        SingleObjectRecoveryRequest.model_validate(payload), sessions=r.sessions, client=r.s3,
+        actor="operator:single_large_object_v1", artifacts_bucket=r.bucket, trajectories_bucket=r.bucket,
+    )
+
+
+@pytest.mark.parametrize("large_payload_bytes", [257 * 1024 * 1024])
+async def test_single_operator_recovers_real_large_payload_without_widening_http(recovery, large_payload_bytes):
+    r = recovery
+    before = await snapshot(r)
+    ordinary = {**r.payload, "objects": r.payload["objects"][:1]}
+    response = await r.client.post(URL, headers=HEADERS, json=ordinary)
+    assert response.status_code == 409 and response.json()["detail"] == "byte_limit_exceeded"
+    payload = single_object_payload(r)
+    response = await r.client.post(URL, headers=HEADERS, json=payload)
+    assert response.status_code == 422
+    assert await snapshot(r) == before
+
+    preview = await recover_single_object(r, payload)
+    assert preview["status"] == "preview"
+    assert preview["plan"]["objects"][0]["size_bytes"] == large_payload_bytes
+    assert preview["plan"]["request"]["mode"] == "single_large_object_v1"
+    assert await snapshot(r) == before
+    result = await recover_single_object(r, {**payload, "apply": True, "plan_sha256": preview["plan_sha256"]})
+    assert result["status"] == "applied"
+    after = await snapshot(r)
+    assert after[2] == [r.versions[0], None, None, None]
+    assert after[0]["files"][0]["version_id"] == r.versions[0]
+    assert after[1]["artifacts"][0]["version_id"] == r.versions[0]
+    assert after[0]["source_evidence"] == before[0]["source_evidence"]
+    assert after[4] == before[4]
+    assert len(after[3]) == 1
+    assert after[3][0][1]["plan"]["request"] == preview["plan"]["request"]
+
+
+async def test_single_operator_refuses_another_team_before_verification(recovery):
+    from loom_control_plane.object_version_recovery import RecoveryConflictError
+
+    r = recovery
+    before = await snapshot(r)
+    payload = {**single_object_payload(r), "team_id": str(uuid4())}
+    with pytest.raises(RecoveryConflictError, match="operator_team_conflict"):
+        await recover_single_object(r, payload)
+    assert await snapshot(r) == before
+
+
+@pytest.mark.parametrize("registered_payload_bytes,copies", [(4 * 1024**3 + 1, 1), (2 * 1024**3 + 1, 2)])
+async def test_single_operator_metadata_overflow_refuses_before_storage(
+    recovery, registered_payload_bytes, copies, monkeypatch,
+):
+    from loom_control_plane.object_version_recovery import RecoveryConflictError
+
+    r = recovery
+    payload = single_object_payload(r)
+    if copies == 2:
+        latest = r.s3.put_object(Bucket=r.bucket, Key=r.objects[0].object_key, Body=r.bodies[0])["VersionId"]
+        payload["objects"][0].update(version_id=latest, equivalent_version_ids=[r.versions[0], latest])
+    before = await snapshot(r)
+
+    def unexpected_read(**kwargs):
+        pytest.fail("over-budget metadata must refuse before S3 verification")
+
+    monkeypatch.setattr(r.s3, "get_object", unexpected_read)
+    with pytest.raises(RecoveryConflictError, match="byte_limit_exceeded"):
+        await recover_single_object(r, payload)
+    assert await snapshot(r) == before
+
+
+@pytest.fixture
+def operator_platform(tmp_path):
+    (tmp_path / "environment.json").write_text(json.dumps({"environment": "development", "namespace": "loom"}))
+    (tmp_path / "profile.json").write_text(json.dumps({"candidate_sha": "c" * 40}))
+    return tmp_path
+
+
+async def operate_single(r, platform, payload=None, *, readback=False):
+    from loom_control_plane.large_object_version_recovery import operate_single_object
+    from loom_control_plane.object_version_recovery import SingleObjectRecoveryRequest
+
+    return await operate_single_object(
+        SingleObjectRecoveryRequest.model_validate(payload or single_object_payload(r)),
+        sessions=r.sessions, client=r.s3, artifacts_bucket=r.bucket, trajectories_bucket=r.bucket,
+        platform=platform, readback=readback,
+    )
+
+
+async def test_operator_preview_apply_and_read_only_audit(recovery, operator_platform, monkeypatch):
+    from loom_control_plane.object_version_recovery import ObjectVersionRecovery
+
+    r = recovery
+    before = await snapshot(r)
+    preview = await operate_single(r, operator_platform)
+    assert preview["status"] == "preview" and await snapshot(r) == before
+    payload = {**single_object_payload(r), "apply": True, "plan_sha256": preview["plan_sha256"]}
+    applied = await operate_single(r, operator_platform, payload)
+    assert applied["status"] == "applied"
+    after = await snapshot(r)
+
+    async def no_recovery(*args, **kwargs):
+        pytest.fail("readback must never invoke recovery")
+
+    monkeypatch.setattr(ObjectVersionRecovery, "recover", no_recovery)
+    monkeypatch.setattr(r.s3, "get_object", lambda **kwargs: pytest.fail("readback must not read storage"))
+    (operator_platform / "profile.json").write_text(json.dumps({"candidate_sha": "d" * 40}))
+    result = await operate_single(r, operator_platform, payload, readback=True)
+    assert result == {**applied, "status": "committed"}
+    assert await snapshot(r) == after
+
+
+@pytest.mark.parametrize("damage", ["candidate", "database_schema", "namespace"])
+async def test_operator_refuses_platform_drift_before_storage(recovery, operator_platform, monkeypatch, damage):
+    from loom_control_plane.object_version_recovery import RecoveryConflictError
+
+    r = recovery
+    before = await snapshot(r)
+    if damage == "candidate":
+        (operator_platform / "profile.json").write_text(json.dumps({"candidate_sha": "d" * 40}))
+    elif damage == "namespace":
+        (operator_platform / "environment.json").write_text(json.dumps({"environment": "development", "namespace": "foreign"}))
+    else:
+        async with r.sessions.begin() as session:
+            await session.execute(text("UPDATE alembic_version SET version_num = '0001'"))
+    monkeypatch.setattr(r.s3, "get_object", lambda **kwargs: pytest.fail("must refuse before reads"))
+    with pytest.raises(RecoveryConflictError, match=r"schema_binding_changed|platform_binding_changed"):
+        await operate_single(r, operator_platform)
+    assert await snapshot(r) == before
+
+
+async def test_operator_refuses_held_rollout_without_changing_owner(recovery, operator_platform):
+    from loom.nebius_rollout_guard import acquire, observe
+    from loom_control_plane.object_version_recovery import RecoveryConflictError
+
+    r = recovery
+    async with r.sessions.begin() as session:
+        lease = await session.get(ServiceExecutionLease, r.lease_id)
+        lease.revoked_at = datetime.now(UTC)
+        lease.cleanup_state = "complete"
+        lease.cleanup_requested_at = lease.revoked_at
+        lease.cleanup_deadline_at = lease.revoked_at + timedelta(minutes=5)
+        await session.flush()
+        result = await acquire(session, owner="foreign-rollout", candidate="d" * 40)
+        assert result["status"] == "acquired"
+    before = await snapshot(r)
+    with pytest.raises(RecoveryConflictError, match="rollout_guard_held"):
+        await operate_single(r, operator_platform)
+    async with r.sessions() as session:
+        assert await observe(session, owner="foreign-rollout", candidate="d" * 40) == {"status": "held"}
+    assert await snapshot(r) == before
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_operator_serializes_and_keeps_locks_until_reader_exits(
+    recovery, operator_platform, monkeypatch, cancel,
+):
+    from loom.nebius_rollout_guard import acquire
+    from loom_control_plane.object_version_recovery import RecoveryConflictError
+
+    r = recovery
+    preview = await operate_single(r, operator_platform)
+    payload = {**single_object_payload(r), "apply": True, "plan_sha256": preview["plan_sha256"]}
+    before = await snapshot(r)
+    started, release, finished = threading.Event(), threading.Event(), threading.Event()
+    original = r.s3.get_object
+
+    def delayed(**kwargs):
+        started.set()
+        try:
+            assert release.wait(30)
+            return original(**kwargs)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(r.s3, "get_object", delayed)
+    task = asyncio.create_task(operate_single(r, operator_platform, payload))
+    try:
+        assert await asyncio.to_thread(started.wait, 5)
+        if cancel:
+            task.cancel()
+            await asyncio.sleep(0)
+            task.cancel()  # Repeated cancellation must not drop the lock either.
+            await asyncio.sleep(0)
+        assert not task.done()
+        with pytest.raises(RecoveryConflictError, match="large_recovery_busy"):
+            await operate_single(r, operator_platform)
+        async with r.sessions.begin() as session:
+            assert await acquire(session, owner="cannot-interrupt", candidate="d" * 40) == {
+                "status": "skipped_busy", "reason": "admission_in_progress"}
+        assert await snapshot(r) == before
+    finally:
+        release.set()
+        results = await asyncio.gather(task, return_exceptions=True)
+    assert finished.is_set()
+    if cancel:
+        assert isinstance(results[0], asyncio.CancelledError)
+        assert await snapshot(r) == before
+        assert (await operate_single(r, operator_platform))["status"] == "preview"
+    else:
+        assert results[0]["status"] == "applied"
+
+
+async def test_operator_lost_lock_connection_cannot_commit(recovery, operator_platform, monkeypatch):
+    from sqlalchemy.exc import SQLAlchemyError
+
+    from loom_control_plane.large_object_version_recovery import LOCK_KEY
+
+    r = recovery
+    preview = await operate_single(r, operator_platform)
+    payload = {**single_object_payload(r), "apply": True, "plan_sha256": preview["plan_sha256"]}
+    before = await snapshot(r)
+    started, release = threading.Event(), threading.Event()
+    original = r.s3.get_object
+
+    def delayed(**kwargs):
+        started.set()
+        assert release.wait(30)
+        return original(**kwargs)
+
+    monkeypatch.setattr(r.s3, "get_object", delayed)
+    task = asyncio.create_task(operate_single(r, operator_platform, payload))
+    try:
+        assert await asyncio.to_thread(started.wait, 5)
+        async with r.sessions() as session:
+            pids = list(await session.scalars(text(
+                "SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND classid = :high "
+                "AND objid = :low AND granted"
+            ), {"high": LOCK_KEY >> 32, "low": LOCK_KEY & 0xFFFFFFFF}))
+            assert len(pids) == 1
+            assert await session.scalar(text("SELECT pg_terminate_backend(:pid)"), {"pid": pids[0]})
+    finally:
+        release.set()
+        results = await asyncio.gather(task, return_exceptions=True)
+    assert isinstance(results[0], SQLAlchemyError)
+    assert await snapshot(r) == before
+
+
+@pytest.mark.parametrize("large_payload_bytes", [129 * 1024 * 1024])
+@pytest.mark.parametrize("corrupt_earlier_copy", [False, True])
+async def test_operator_verifies_every_complete_large_copy(
+    recovery, operator_platform, large_payload_bytes, corrupt_earlier_copy,
+):
+    from loom_control_plane.object_version_recovery import RecoveryConflictError
+
+    r = recovery
+    obj, body = r.objects[0], r.bodies[0]
+    earlier = r.versions[0]
+    if corrupt_earlier_copy:
+        body.seek(-3, 2)
+        body.write(b"y")  # Same size; the differing byte is near EOF.
+        body.seek(0)
+        earlier = r.s3.put_object(Bucket=r.bucket, Key=obj.object_key, Body=body)["VersionId"]
+        r.s3.delete_object(Bucket=r.bucket, Key=obj.object_key, VersionId=r.versions[0])
+        body.seek(-3, 2)
+        body.write(b"x")
+    body.seek(0)
+    latest = r.s3.put_object(Bucket=r.bucket, Key=obj.object_key, Body=body)["VersionId"]
+    payload = single_object_payload(r)
+    payload["objects"][0].update(version_id=latest, equivalent_version_ids=[earlier, latest])
+    before = await snapshot(r)
+    if corrupt_earlier_copy:
+        with pytest.raises(RecoveryConflictError, match="stored_content_conflict"):
+            await operate_single(r, operator_platform, payload)
+        assert await snapshot(r) == before
+        return
+    preview = await operate_single(r, operator_platform, payload)
+    assert preview["plan"]["objects"][0]["size_bytes"] == large_payload_bytes
+    assert preview["plan"]["objects"][0]["equivalent_version_ids"] == sorted([earlier, latest])
+    assert await snapshot(r) == before
+    applied = await operate_single(r, operator_platform, {**payload, "apply": True, "plan_sha256": preview["plan_sha256"]})
+    assert applied["status"] == "applied"
+    after = await snapshot(r)
+    assert after[2] == [latest, None, None, None] and after[4] == before[4]
+    assert len(r.s3.list_object_versions(Bucket=r.bucket, Prefix=obj.object_key)["Versions"]) == 2
+
+
+async def test_operator_readback_of_absent_audit_cannot_recover(recovery, operator_platform, monkeypatch):
+    from loom_control_plane.object_version_recovery import ObjectVersionRecovery
+
+    r = recovery
+    before = await snapshot(r)
+
+    async def forbidden(*args, **kwargs):
+        pytest.fail("readback must never invoke recovery")
+
+    monkeypatch.setattr(ObjectVersionRecovery, "recover", forbidden)
+    payload = {**single_object_payload(r), "apply": True, "plan_sha256": "sha256:" + "f" * 64}
+    assert await operate_single(r, operator_platform, payload, readback=True) == {
+        "status": "not_committed", "operation_id": payload["operation_id"]}
+    assert await snapshot(r) == before
+
+
+async def test_operator_rechecks_platform_after_admission(recovery, operator_platform, monkeypatch):
+    from loom_control_plane import large_object_version_recovery as module
+    from loom_control_plane.object_version_recovery import RecoveryConflictError
+
+    r = recovery
+    before = await snapshot(r)
+    original = module.admission_open
+
+    async def changed_while_connecting(session):
+        result = await original(session)
+        (operator_platform / "profile.json").write_text(json.dumps({"candidate_sha": "d" * 40}))
+        return result
+
+    monkeypatch.setattr(module, "admission_open", changed_while_connecting)
+    with pytest.raises(RecoveryConflictError, match="platform_binding_changed"):
+        await operate_single(r, operator_platform)
+    assert await snapshot(r) == before
+
+
+async def test_aggregate_version_copy_overflow_is_rejected_before_state_loading(recovery):
+    r = recovery
+    # A single-version object counts too. Fake registry IDs would reach the
+    # database's owner/not-found refusal if request validation let this through.
+    r.payload['objects'] = [
+        {'registry_id': str(uuid4()), 'version_id': 'v0',
+         'equivalent_version_ids': [f'v{v}' for v in range(32)]}
+        for _ in range(8)
+    ] + [{'registry_id': str(uuid4()), 'version_id': 'v0'}]
+    before = await snapshot(r)
+    response = await r.client.post(URL, headers=HEADERS, json=r.payload)
+    assert response.status_code == 422, response.text
+    assert 'version copy limit' in response.text
+    assert await snapshot(r) == before

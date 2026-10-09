@@ -2804,6 +2804,7 @@ async def test_scheduler_reserves_one_verifier_after_parent_cleanup(
 
 async def _fail_verifier_natively(
     sessions: async_sessionmaker[AsyncSession], *, lease_id: UUID, at: datetime,
+    historical_regression: bool = False,
 ) -> None:
     from loom_control_plane.service_execution import (
         finalize_failed_service_execution,
@@ -2813,7 +2814,13 @@ async def _fail_verifier_natively(
     async with sessions() as session, session.begin():
         lease = await session.get(ServiceExecutionLease, lease_id)
         assert lease is not None
-        await record_kubernetes_observation(
+        if historical_regression:
+            await record_kubernetes_observation(
+                session, lease_id=lease.id, generation=lease.generation, observed_at=at,
+                payload={"normalized_state": "pending", "job_uid": f"verifier-{lease.verifier_retry}",
+                         "resource_version": "created"},
+            )
+        failure, _ = await record_kubernetes_observation(
             session, lease_id=lease.id, generation=lease.generation, observed_at=at,
             payload={
                 "normalized_state": "failed", "job_uid": lease.job_uid, "pod_uid": lease.pod_uid,
@@ -2822,6 +2829,21 @@ async def _fail_verifier_natively(
                 "reason": "BackoffLimitExceeded", "message": "verifier Job terminated",
             },
         )
+        if historical_regression:
+            await record_kubernetes_observation(
+                session, lease_id=lease.id, generation=lease.generation,
+                payload={**failure.payload_json, "normalized_state": "pending",
+                         "resource_version": "delayed-pending", "reason": None, "message": None},
+                observed_at=at + timedelta(seconds=6),
+            )
+            lease.observed_state = "creating"
+            lease.error_class = lease.error_code = lease.error_message = None
+            await session.flush()
+            _, duplicate = await record_kubernetes_observation(
+                session, lease_id=lease.id, generation=lease.generation,
+                payload=failure.payload_json, observed_at=at + timedelta(minutes=5),
+            )
+            assert duplicate and lease.observed_state == "failed"
         assert await finalize_failed_service_execution(
             session, lease_id=lease.id, generation=lease.generation,
             observed_at=at + timedelta(minutes=5),
@@ -2840,8 +2862,10 @@ async def _delete_lease(sessions: async_sessionmaker[AsyncSession], *, lease_id:
         row.deleted_at = at
 
 
+@pytest.mark.parametrize("historical_regression", [False, True])
 async def test_natively_failed_verifier_retries_on_a_new_lease_until_exhausted(
     postgres_url: str, _stub_verifier_plan: list[ExecutionRuntimePlanV1],
+    historical_regression: bool,
 ) -> None:
     engine = create_async_engine(postgres_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
@@ -2863,7 +2887,9 @@ async def test_natively_failed_verifier_retries_on_a_new_lease_until_exhausted(
                 await session.commit()
             assert [item.verifier_retry for item in reserved] == [retry]
             verifiers.append(reserved[0])
-            await _fail_verifier_natively(sessions, lease_id=reserved[0].id, at=clock)
+            await _fail_verifier_natively(
+                sessions, lease_id=reserved[0].id, at=clock, historical_regression=historical_regression,
+            )
             clock += timedelta(minutes=6)
             async with sessions() as session:
                 trial = await session.get(Trial, trial_id)

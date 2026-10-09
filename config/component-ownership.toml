@@ -671,6 +671,10 @@ source_paths = [
   "deploy/patches/**",
   "packages/loom-launcher/loom_launcher/**",
   "scripts/ops/prepare_harbor_model_cost_map.py",
+  "config/harbor-runtime.json",
+  "scripts/ops/harbor_upstream.py",
+  "tests/support/terminus_conformance_probe.py",
+  "tests/support/terminus_continuation_probe.py",
   "src/loom/**",
 ]
 smoke_owner = "worker-runtime-conformance"

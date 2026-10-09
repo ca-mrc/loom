@@ -254,9 +254,24 @@ async def test_guest_status_and_resource_allocation_resolve_owner_without_rebind
         assert plan.node_resource_allocation.target_id == guest[1].target_id
         status = await fetch_execution_capacity_status(session, now=now + timedelta(seconds=2))
         rows = {row["target_id"]: row for row in status["targets"]}
+        assert rows[owner[1].target_id]["capacity_owner_target_id"] == owner[1].target_id
+        assert rows[owner[1].target_id]["execution_class_id"] == owner[1].execution_class_id
+        assert rows[guest[1].target_id]["execution_class_id"] == guest[1].execution_class_id
         assert rows[guest[1].target_id]["capacity_owner_target_id"] == owner[1].target_id
         assert rows[guest[1].target_id]["target_scope"] == placement["target_scope"]
         assert rows[guest[1].target_id]["observation"]["id"] == rows[owner[1].target_id]["observation"]["id"]
+
+
+async def test_singleton_capacity_status_exposes_its_own_capacity_identity(native_setup):
+    sessions, _ = native_setup
+    now = datetime.now(UTC)
+    async with sessions() as session, session.begin():
+        _, target = await _seed_ready_trial(session, now=now)
+        status = await fetch_execution_capacity_status(session, now=now)
+        row = next(row for row in status["targets"] if row["target_id"] == target.target_id)
+        assert row["capacity_owner_target_id"] == target.target_id
+        assert row["execution_class_id"] == target.execution_class_id
+        assert "target_scope" not in row
 
 
 async def test_collector_policy_endpoint_returns_current_family_only_for_owner(native_setup, monkeypatch):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -20,6 +21,7 @@ from loom.application_source_upload import (
     ApplicationSourceUploadRequestV1,
     ApplicationSourceUploadV1,
 )
+from loom.nebius_application_capabilities import ApplicationCapabilitiesV1
 from loom.nebius_application_contract import (
     ApplicationCreateRequestV1,
     ApplicationOperationRequestV1,
@@ -28,6 +30,10 @@ from loom.nebius_application_contract import (
     ApplicationStatusV1,
 )
 from loom.nebius_application_evidence import ApplicationOperationEvidenceV1
+from loom.nebius_application_versions import (
+    ApplicationReleaseCompatibilityV1,
+    ApplicationVersionsV1,
+)
 from loom_cli import server_client
 from loom_cli.application_source import PackagedApplicationSource
 from loom_cli.server_client import assert_2xx
@@ -42,6 +48,27 @@ def _source_request(source: PackagedApplicationSource) -> ApplicationSourceUploa
 def _same_source(receipt: ApplicationSourceUploadV1, request: ApplicationSourceUploadRequestV1) -> None:
     if any(getattr(receipt, name) != value for name, value in request.model_dump().items()):
         raise ValueError("application source identity mismatch")
+
+
+def _schema_error(response: httpx.Response) -> None:
+    if response.status_code != 409:
+        return
+    try:
+        payload = response.json()
+    except ValueError:
+        return
+    detail = payload.get("detail") if isinstance(payload, dict) else None
+    if not isinstance(detail, dict) or detail.get("code") != "application_schema_mismatch":
+        return
+    revisions = []
+    for name in ("release_schema_revision", "shared_schema_revision"):
+        value = detail.get(name)
+        revisions.append(value if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_]{1,64}", value) else "unknown")
+    raise server_client.HttpStatusError(
+        f"Application schema mismatch: release {revisions[0]}, configured shared schema {revisions[1]}. "
+        "Use loom dev app check-release RELEASE_ID to select a compatible release. "
+        "Test migrations against a disposable local database; shared migrations require the platform operator.",
+    )
 
 
 @dataclass(frozen=True)
@@ -68,6 +95,21 @@ class ApplicationClient:
                  traceback: TracebackType | None) -> None:
         self.http.close()
 
+    def capabilities(self) -> ApplicationCapabilitiesV1:
+        response = self.http.get("/api/v1/application-capabilities")
+        if response.status_code // 100 != 2:
+            # Error bodies are outside the typed report and can contain private
+            # upstream material. This diagnostic needs only a bounded status.
+            hint = "Try this read-only command again or ask the platform operator to inspect the manager."
+            if response.status_code in {401, 403}:
+                hint = "Use an authenticated management context with an attributed user and read:own permission."
+            elif response.status_code == 404:
+                hint = "Select a management context whose server supports application capabilities."
+            raise server_client.HttpStatusError(
+                f"Could not read application capabilities: HTTP {response.status_code}. {hint}",
+            )
+        return ApplicationCapabilitiesV1.model_validate(response.json())
+
     def create_source_upload(self, source: PackagedApplicationSource, *, idempotency_key: str) -> ApplicationSourceUploadV1:
         request = _source_request(source)
         response = self.http.post("/api/v1/application-sources", json=request.model_dump(mode="json"),
@@ -75,6 +117,30 @@ class ApplicationClient:
         receipt = ApplicationSourceUploadV1.model_validate(assert_2xx(response, action="prepare personal source upload"))
         _same_source(receipt, request)
         return receipt
+
+    def _read_diagnostic(self, path: str) -> object:
+        response = self.http.get(path)
+        if response.status_code // 100 != 2:
+            raise server_client.HttpStatusError(
+                f"Could not read application report: HTTP {response.status_code}. "
+                "Use a management context with read:own permission and a server supporting this command. "
+                "Try this read-only command again or ask the platform operator to inspect the manager.",
+            )
+        result: object = response.json()
+        return result
+
+    def versions(self, application_id: UUID) -> ApplicationVersionsV1:
+        result = ApplicationVersionsV1.model_validate(self._read_diagnostic(f"/api/v1/applications/{application_id}/versions"))
+        if result.status.registration.application_id != application_id:
+            raise ValueError("application version identity mismatch")
+        return result
+
+    def check_release(self, release_id: UUID) -> ApplicationReleaseCompatibilityV1:
+        result = ApplicationReleaseCompatibilityV1.model_validate(
+            self._read_diagnostic(f"/api/v1/application-releases/{release_id}/compatibility"))
+        if result.release.release_id != release_id:
+            raise ValueError("application release identity mismatch")
+        return result
 
     def source_upload_status(self, upload_id: UUID) -> ApplicationSourceUploadV1:
         receipt = ApplicationSourceUploadV1.model_validate(assert_2xx(
@@ -143,6 +209,7 @@ class ApplicationClient:
     def create(self, request: ApplicationCreateRequestV1, *, idempotency_key: str) -> ApplicationOperationV1:
         response = self.http.post("/api/v1/applications", json=request.model_dump(mode="json"),
                                   headers={"Idempotency-Key": idempotency_key})
+        _schema_error(response)
         result = ApplicationOperationV1.model_validate(assert_2xx(response, action="create personal application"))
         if result.action != "create":
             raise ValueError("application action mismatch")
@@ -165,6 +232,7 @@ class ApplicationClient:
                    idempotency_key: str) -> ApplicationOperationV1:
         response = self.http.post(f"/api/v1/applications/{application_id}/operations",
             json=request.model_dump(mode="json"), headers={"Idempotency-Key": idempotency_key})
+        _schema_error(response)
         result = ApplicationOperationV1.model_validate(assert_2xx(response, action="change personal application"))
         if result.application_id != application_id or result.action != request.action:
             raise ValueError("application operation mismatch")

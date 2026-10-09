@@ -329,11 +329,33 @@ and a blind retry. `development_management_preflight_qualified` permits no readi
 claim; `pending` names the unfinished phase; `blocked` exposes only a closed stage.
 `development_management_installed` records the completed manager installation,
 not active source builds, task execution or multi-owner acceptance. Shared-dev
-public access is opt-in as described below. Initial manager inputs must leave both source upload and image-build
-runtime unconfigured; their credentials and shared-pool admission belong to the
-later activation. Unsupported initial selections are rejected before bootstrap.
+public access and source intake are opt-in as described below. Initial manager
+inputs must leave image-build runtime and the pool catalog unconfigured;
+shared-pool admission belongs to later activation. Unsupported initial selections
+are rejected before bootstrap.
 Manager-only certificate renewal has the separate path below. Its installed proof
 remains required before operational acceptance.
+
+For source intake on a **fresh** independent manager, configure
+`deployment.installation.applications.runtime.source_upload` with
+`credentials_file: /var/run/loom-application-source-credentials/credentials.json`
+and `spool_directory: /run/loom-application-source/spool`. Set `max_inflight` to
+the desired upload concurrency (1–16); the existing capacity check includes
+2 GiB of ephemeral spool space per concurrent upload, not a new PVC.
+In the same private input document, set `source_files` to an object with exactly
+`access-key` and `secret-key`, each naming its own protected local credential
+file. Use the **existing shared dev source identity**, not an operator, data,
+backup or staging key. Preflight matches these values to the retained and
+live-qualified independent foundation and checks its provider scope. Do not
+include credential values in workflow inputs or published evidence.
+
+The installer creates an immutable source-only Secret in
+`loom-nebius-management-dev` before starting the manager. No bucket or IAM policy
+is added. Omitting both settings preserves source-disabled behavior. This is an
+initial-install choice, not a replay-time switch. A verified upload is not a
+ready build or CI-approved release: application image builds and task execution
+remain disabled pending separately qualified activation. TLS renewal reads the
+retained Secret evidence without requiring the original source credential files.
 
 For a **fresh** independent manager, set `shared_public_route: true` in the private
 input document to expose the shared dev web/API as its final installation phase.
@@ -501,6 +523,16 @@ to reject symlinks, foreign ownership and broader permissions. Apply renderer
 changes through a qualified protected transition, never by editing a retained
 cutover's inputs or manually patching its live workload.
 Do not hand-mount credentials or treat the renderer as installation authority.
+
+The internal independent-dev pool-registration stage can qualify a completed dev
+manager and register its shared-development participant in that manager's database
+with admission **closed**. It reuses retained installation history and the existing
+fixed registration Job, not legacy migration receipts. It is not exposed as a
+standalone operator command. A closed receipt does not authorize task/build
+submission or allow the initial installer to be replayed with changed settings.
+Protected runtime delivery must still bind the catalog, prove sole physical-pool
+authority and explicitly activate admission; do not invoke the legacy staging
+cutover or clear a task guard to substitute for those steps.
 
 Subsequent lifecycle changes use the same management context:
 
@@ -2015,7 +2047,7 @@ recovery or completion descendant.
 The tooling source and protected publication source must be the same integrated
 commit. The bundle builder derives its single Alembic head from that source and
 binds `manager-schema.json` in the immutable bundle. Entry requires the existing
-pool's manager revision `0174`; a different head requires a separate migration,
+pool's manager revision `0175`; a different head requires a separate migration,
 which this action cannot perform. The retained publication reader and keyring
 must verify the new image before operator connections are opened.
 
@@ -2106,7 +2138,7 @@ latest image-repair anchor, and retains its exact binding, image publication,
 execution profile and journal. A tooling continuation cannot enroll a new image
 repair, reference another tooling continuation, or change the installation,
 namespace or original pool operation. The new bundle must independently prove
-schema revision `0174`; the original image publication must still qualify. It
+schema revision `0175`; the original image publication must still qualify. It
 uses the original dispatch lock and the same fixed image-update/activation paths.
 Unknown writes remain readback-only. Current identity, metadata, spec and version
 checks remain mandatory, including when a fresh observation replaces a stale

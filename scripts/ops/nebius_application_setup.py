@@ -71,6 +71,7 @@ class ApplicationSetupRequest:
     repo_root: Path
     material: ApplicationSetupMaterial | None = None
     development_public_route: bool = False
+    source_material: dict[str, str] | None = None
 
 
 def _material_documents(request: ApplicationSetupRequest, phases: dict[str, list[dict[str, Any]]]
@@ -107,6 +108,17 @@ def _material_documents(request: ApplicationSetupRequest, phases: dict[str, list
                 'ca_pem': material.ca_pem, 'database_name': material.database_name,
                 'secret_store_master_keys': material.secret_store_master_keys}, sort_keys=True)}),
     ]
+    if application.runtime.source_upload is not None:
+        source = request.source_material
+        if (source is None or set(source) != {'access-key', 'secret-key'}
+                or any(not isinstance(value, str) or not 1 <= len(value) <= 4096
+                    or not value.isascii() or any(ord(char) < 33 or ord(char) == 127 for char in value)
+                    for value in source.values())):
+            raise ValueError('application source material invalid')
+        bundles.append(('loom-applications-source-' + suffix, request.binding.namespace,
+            {'credentials.json': json.dumps(source, sort_keys=True, separators=(',', ':'))}))
+    elif request.source_material is not None:
+        raise ValueError('application source material requires configured upload')
     return [{'apiVersion': 'v1', 'kind': 'Secret', 'type': 'Opaque', 'immutable': True,
         'metadata': {'name': name, 'namespace': namespace,
             'labels': {'loom.nebius/application-installation': request.binding.installation_id}},

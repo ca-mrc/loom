@@ -45,7 +45,6 @@ from loom.db.schema import (
 )
 from loom.execution_diagnosis_store import execution_failure_groups, read_trial_execution_failure
 from loom.execution_resource_allocation import resource_allocation_summary
-from loom.execution_runtime_contract import ExecutionRuntimePlanV1
 from loom.execution_selection import execution_selection_readback
 from loom.model_switch_store import load_model_switch_plan, plan_snapshot_from_row
 from loom.models.types import ModelSpec
@@ -91,6 +90,10 @@ from loom_service.stale_running_debug import trial_stale_running_debug_context
 from loom_service.submission_compat import validate_submission_agent_task_compatibility
 from loom_service.task_image_preparation import task_image_preparation_for_trial
 from loom_service.trial_bundles import canonical_bundle_for_trial
+from loom_service.trial_execution_provenance import (
+    trial_execution_provenance,
+    validated_runtime_plan,
+)
 from loom_service.trial_progress import load_trial_progress
 from loom_service.trial_timing import trial_started_at
 from loom_service.usage_accounting import (
@@ -782,11 +785,7 @@ async def get_trial(
             .limit(1)
         )
     ).scalar_one_or_none()
-    runtime_plan = (
-        ExecutionRuntimePlanV1.model_validate(materialization.runtime_contract_json)
-        if materialization is not None and materialization.runtime_contract_json
-        else None
-    )
+    runtime_plan = validated_runtime_plan(materialization)
     task_environment = (
         task.config.get("environment", {})
         if task is not None and isinstance(task.config, dict)
@@ -1014,6 +1013,9 @@ async def get_trial(
         .scalars()
         .all()
     )
+    base["execution_provenance"] = trial_execution_provenance(
+        trial, materialization, artifacts=service_execution_artifacts,
+    ).model_dump(mode="json")
     # The worker's TrajectoryWriter writes events.jsonl under
     # `<trajectories_bucket>/<team_id>/<trial_id>/events.jsonl`;
     # finalize.py writes ATIF to the same bucket at `atif.json`.

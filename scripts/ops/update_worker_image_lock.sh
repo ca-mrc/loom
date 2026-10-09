@@ -34,13 +34,14 @@ LITELLM_HASH="$(awk '/^litellm-.*\.whl:/{getline; print}' "${TMP_HASH}" | sed 's
 OPENAI_VER="$(docker run --rm "${IMAGE}" python -c 'import importlib.metadata as m; print(m.version("openai"))')"
 LITELLM_VER="$(docker run --rm "${IMAGE}" python -c 'import importlib.metadata as m; print(m.version("litellm"))')"
 HARBOR_SHA="$(grep '^ARG HARBOR_COMPAT_SHA=' "${DOCKERFILE}" | cut -d= -f2)"
+HARBOR_VERSION="$(docker run --rm "${IMAGE}" python -c 'import importlib.metadata as m; print(m.version("harbor"))')"
 
 cat > "${WHEELS}" <<EOF
 {
   "schema_version": "1",
   "python_version": "3.12",
   "harbor_compat_sha": "${HARBOR_SHA}",
-  "harbor_runtime_version": "0.18.0",
+  "harbor_runtime_version": "${HARBOR_VERSION}",
   "packages": {
     "openai": {
       "version": "${OPENAI_VER}",

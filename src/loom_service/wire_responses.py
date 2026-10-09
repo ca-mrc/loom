@@ -11,6 +11,8 @@ from typing import Any, Literal, NotRequired
 from pydantic import ConfigDict, with_config
 from typing_extensions import TypedDict
 
+from loom_service.trial_execution_provenance import TrialExecutionProvenance
+
 
 @with_config(ConfigDict(extra="allow"))
 class GetHealthResponse(TypedDict):
@@ -234,6 +236,8 @@ class MonitorSummaryServiceExecutionTargetsItem(TypedDict):
     desired_state: str
     health_status: str
     target_id: NotRequired[str]
+    execution_class_id: NotRequired[str]
+    capacity_owner_target_id: NotRequired[str]
     policy: MonitorSummaryServiceExecutionTargetsItemPolicyVariant0 | None
     observation: MonitorSummaryServiceExecutionTargetsItemObservationVariant0 | None
     command_backlog: int | float
@@ -566,6 +570,7 @@ class BatchExecutionSelection(TypedDict):
 
 @with_config(ConfigDict(extra="allow"))
 class TrialDetail(Trial):
+    execution_provenance: NotRequired[TrialExecutionProvenance]
     execution_selection: NotRequired[TrialExecutionSelection]
     task_environment_preparation: NotRequired[list[TrialDetailTaskEnvironmentPreparationItem]]
     owner_team: NotRequired[TrialDetailOwnerTeam]

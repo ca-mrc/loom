@@ -13,7 +13,7 @@ import json
 import re
 import time
 from dataclasses import dataclass
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -43,6 +43,8 @@ from loom.pipeline.keys import canonical_digest, canonical_document
 
 ACTION = "object_version_recovery"
 MAX_BYTES = 256 * 1024 * 1024
+SINGLE_OBJECT_MAX_BYTES = 4 * 1024**3
+MAX_VERSION_COPIES = 256
 MAX_METADATA_BYTES = 4 * 1024 * 1024
 VERIFICATION_SECONDS = 90
 Digest = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
@@ -58,7 +60,7 @@ class ObjectVersion(BaseModel):
 
     registry_id: UUID
     version_id: VersionId
-    equivalent_version_ids: list[VersionId] | None = Field(default=None, min_length=2, max_length=8)
+    equivalent_version_ids: list[VersionId] | None = Field(default=None, min_length=2, max_length=32)
 
     @field_validator("registry_id", mode="before")
     @classmethod
@@ -111,6 +113,11 @@ class RecoveryRequest(BaseModel):
     def validate_request(self) -> RecoveryRequest:
         if len({item.registry_id for item in self.objects}) != len(self.objects):
             raise ValueError("registry IDs must be unique")
+        # Preserve the former 32 objects x 8 versions worst-case work, while
+        # allowing larger complete inventories for fewer objects. Empty objects
+        # still incur verification requests and count toward this bound.
+        if sum(len(item.equivalent_version_ids or [item.version_id]) for item in self.objects) > MAX_VERSION_COPIES:
+            raise ValueError("version copy limit exceeded")
         if self.apply and self.plan_sha256 is None:
             raise ValueError("apply requires a verified preview plan digest")
         return self
@@ -120,6 +127,35 @@ class RecoveryRequest(BaseModel):
         result = self.model_dump(mode="json", exclude={"apply", "plan_sha256"}, exclude_none=True)
         result["objects"] = sorted(result["objects"], key=lambda item: item["registry_id"])
         return result
+
+
+class SingleObjectRecoveryRequest(RecoveryRequest):
+    """Installed operator scope; the ordinary HTTP model rejects these fields."""
+
+    mode: Literal["single_large_object_v1"]
+    team_id: UUID
+    candidate_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
+    schema_head: str = Field(pattern=r"^[0-9]{4}$")
+
+    @field_validator("team_id", mode="before")
+    @classmethod
+    def parse_team_uuid(cls, value: object) -> object:
+        return UUID(value) if isinstance(value, str) else value
+
+    @model_validator(mode="after")
+    def validate_operator_scope(self) -> SingleObjectRecoveryRequest:
+        if self.team_id.int == 0:
+            raise ValueError("a concrete team ID is required")
+        if len(self.objects) != 1:
+            raise ValueError("single-object recovery requires exactly one object")
+        if len(self.objects[0].equivalent_version_ids or [self.objects[0].version_id]) > 2:
+            raise ValueError("single-object recovery permits at most two complete copies")
+        return self
+
+
+def verification_byte_limit(request: object) -> int:
+    """Only the validated operator type selects the fixed larger policy."""
+    return SINGLE_OBJECT_MAX_BYTES if isinstance(request, SingleObjectRecoveryRequest) else MAX_BYTES
 
 
 def metadata_digest(value: Any) -> str:
@@ -255,6 +291,8 @@ async def _load(
     authority = await session.get(DataLifecycleAuthority, artifact.lifecycle_authority_id, with_for_update=locked)
     _require(all(row is not None for row in (lease, trial, upload, authority)), "owner_missing")
     assert lease is not None and trial is not None and upload is not None and authority is not None
+    if isinstance(request, SingleObjectRecoveryRequest):
+        _require(request.team_id == trial.team_id, "operator_team_conflict")
     ids = [item.registry_id for item in request.objects]
     objects = list((await session.scalars(select(DataLifecycleObject).where(
         DataLifecycleObject.id.in_(ids),
@@ -311,7 +349,7 @@ async def _load(
             DataLifecycleObject.object_key == obj.object_key,
             DataLifecycleObject.id != obj.id,
         ).limit(1)) is None, "competing_registry_object")
-    _require(sum(obj.size_bytes for obj in objects) <= MAX_BYTES, "byte_limit_exceeded")
+    _require(sum(obj.size_bytes for obj in objects) <= verification_byte_limit(request), "byte_limit_exceeded")
     return state
 
 
@@ -384,7 +422,7 @@ def _plan(
     proposed = {item.registry_id: item for item in request.objects}
     # The storage budget charges every copy, including versions not adopted.
     _require(sum(obj.size_bytes * len(proposed[obj.id].equivalent_version_ids or [proposed[obj.id].version_id])
-        for obj in state.objects) <= MAX_BYTES, "byte_limit_exceeded")
+        for obj in state.objects) <= verification_byte_limit(request), "byte_limit_exceeded")
     changes = []
     for obj in state.objects:
         refs = references.get((obj.bucket, obj.object_key), [])
@@ -483,6 +521,7 @@ def _verify_objects(client: Any, plan: dict[str, Any]) -> None:
 class ObjectVersionRecovery:
     def __init__(self) -> None:
         self._verification_slot = asyncio.Semaphore(1)
+        self._verification_workers: set[asyncio.Future[None]] = set()
 
     async def _verify(self, client: Any, plan: dict[str, Any]) -> None:
         # Cancellation abandons read-only storage work, never database work. Keep
@@ -490,8 +529,10 @@ class ObjectVersionRecovery:
         async with asyncio.timeout(VERIFICATION_SECONDS):
             await self._verification_slot.acquire()
             future = asyncio.get_running_loop().run_in_executor(None, _verify_objects, client, plan)
+            self._verification_workers.add(future)
 
             def finished(result: asyncio.Future[None]) -> None:
+                self._verification_workers.discard(result)
                 self._verification_slot.release()
                 if not result.cancelled():
                     result.exception()
@@ -499,9 +540,37 @@ class ObjectVersionRecovery:
             future.add_done_callback(finished)
             await asyncio.shield(future)
 
+    async def wait_for_verification(self) -> None:
+        """Keep external fences until abandoned read workers actually finish."""
+        cancelled = False
+        while self._verification_workers:
+            try:
+                await asyncio.shield(asyncio.gather(*self._verification_workers, return_exceptions=True))
+            except asyncio.CancelledError:
+                # Repeated cancellation must not release the caller's DB locks.
+                cancelled = True
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def readback(
+        self, request: RecoveryRequest, *, sessions: async_sessionmaker[AsyncSession],
+    ) -> dict[str, Any]:
+        """Observe one exact audit without storage verification or repair replay."""
+        _require(request.apply, "readback_requires_apply_request")
+        async with asyncio.timeout(15), sessions() as session:
+            await session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
+            await session.execute(text("SET LOCAL statement_timeout = '5s'"))
+            state = await _load(session, request, locked=False)
+            audit = await session.get(AdminAuditEvent, request.operation_id)
+            if audit is None:
+                return {"status": "not_committed", "operation_id": str(request.operation_id)}
+            result = self._replay(audit, request, state, metadata_digest(request.identity()))
+            return {**result, "status": "committed"}
+
     async def recover(
         self, request: RecoveryRequest, *, sessions: async_sessionmaker[AsyncSession],
         client: Any, actor: str, artifacts_bucket: str, trajectories_bucket: str,
+        apply_session: AsyncSession | None = None,
     ) -> dict[str, Any]:
         request_digest = metadata_digest(request.identity())
         async with asyncio.timeout(15), sessions() as session:
@@ -519,27 +588,41 @@ class ObjectVersionRecovery:
         await self._verify(client, plan)
         if not request.apply:
             return {"status": "preview", "plan_sha256": plan_digest, "plan": plan}
+        if apply_session is not None:
+            # Installed operators own this transaction and its admission locks.
+            # A lost lock connection must never commit on a different connection.
+            _require(apply_session.in_transaction(), "apply_transaction_required")
+            async with asyncio.timeout(15):
+                return await self._apply(request, apply_session, plan, plan_digest, request_digest,
+                    actor=actor, artifacts_bucket=artifacts_bucket, trajectories_bucket=trajectories_bucket)
         async with asyncio.timeout(15), sessions() as session, session.begin():
             # READ COMMITTED after waiting on the locks observes earlier winners.
             await session.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
-            state = await _load(session, request, locked=True)
-            audit = await session.get(AdminAuditEvent, request.operation_id)
-            if audit is not None:
-                return self._replay(audit, request, state, request_digest)
-            current_plan, storage, index = _plan(state, request, artifacts_bucket=artifacts_bucket,
-                                                 trajectories_bucket=trajectories_bucket)
-            _require(metadata_digest(current_plan) == plan_digest, "state_changed_during_verification")
-            state.artifact.storage, state.trial.trajectory_index = storage, index
-            versions = {item.registry_id: item.version_id for item in request.objects}
-            for obj in state.objects:
-                obj.version_id = versions[obj.id]
-            await session.flush()
-            session.add(AdminAuditEvent(id=request.operation_id, actor=actor, action=ACTION,
-                target_type="artifact", target_id=str(request.artifact_id),
-                request_id=str(request.operation_id), event_metadata={
-                    "request_sha256": request_digest, "plan_sha256": plan_digest, "plan": plan,
-                    "after_state_sha256": state.digest(),
-                }))
+            return await self._apply(request, session, plan, plan_digest, request_digest,
+                actor=actor, artifacts_bucket=artifacts_bucket, trajectories_bucket=trajectories_bucket)
+
+    async def _apply(
+        self, request: RecoveryRequest, session: AsyncSession, plan: dict[str, Any],
+        plan_digest: str, request_digest: str, *, actor: str, artifacts_bucket: str, trajectories_bucket: str,
+    ) -> dict[str, Any]:
+        state = await _load(session, request, locked=True)
+        audit = await session.get(AdminAuditEvent, request.operation_id)
+        if audit is not None:
+            return self._replay(audit, request, state, request_digest)
+        current_plan, storage, index = _plan(state, request, artifacts_bucket=artifacts_bucket,
+                                             trajectories_bucket=trajectories_bucket)
+        _require(metadata_digest(current_plan) == plan_digest, "state_changed_during_verification")
+        state.artifact.storage, state.trial.trajectory_index = storage, index
+        versions = {item.registry_id: item.version_id for item in request.objects}
+        for obj in state.objects:
+            obj.version_id = versions[obj.id]
+        await session.flush()
+        session.add(AdminAuditEvent(id=request.operation_id, actor=actor, action=ACTION,
+            target_type="artifact", target_id=str(request.artifact_id),
+            request_id=str(request.operation_id), event_metadata={
+                "request_sha256": request_digest, "plan_sha256": plan_digest, "plan": plan,
+                "after_state_sha256": state.digest(),
+            }))
         return {"status": "applied", "operation_id": str(request.operation_id),
                 "plan_sha256": plan_digest, "plan": plan}
 

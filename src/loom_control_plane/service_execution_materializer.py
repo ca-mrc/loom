@@ -1098,6 +1098,9 @@ class ServiceExecutionMaterializer:
             if trial is None:
                 raise MaterializationIntegrityError("source_identity_missing")
             attempt_source = await _load_source(session, lease)
+            artifact = await session.get(Artifact, attempt_source.artifact_id)
+            if artifact is not None:
+                await self._qualify_before_copy(session, lease, trial, artifact)
             try:
                 task = await resolve_service_execution_task_snapshot(session, lease=lease, trial=trial)
             except ServiceExecutionTaskSnapshotError as exc:
@@ -1302,11 +1305,21 @@ class ServiceExecutionMaterializer:
             preserve_trial_outcome=_legacy_verifier_reward_projection(runtime_result),
         )
 
+    async def _qualify_before_copy(
+        self, session: AsyncSession, lease: ServiceExecutionLease, trial: Trial, artifact: Artifact,
+    ) -> None:
+        from loom_control_plane.pending_archive_retry import qualify_requeued_archive
+
+        await qualify_requeued_archive(session, self, lease, trial, artifact)
+
     async def _qualify_commit(
         self, session: AsyncSession, lease: ServiceExecutionLease, trial: Trial,
         artifact: Artifact, result: MaterializationResult,
     ) -> None:
-        """Optional operator qualification under the ordinary commit locks."""
+        """Retain recovery qualification under the ordinary commit locks."""
+        from loom_control_plane.pending_archive_retry import qualify_requeued_archive
+
+        await qualify_requeued_archive(session, self, lease, trial, artifact, result)
 
     async def _commit(self, claim: MaterializationClaim, result: MaterializationResult) -> bool:
         now = datetime.now(UTC)
