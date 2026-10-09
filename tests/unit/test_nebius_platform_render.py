@@ -11,6 +11,30 @@ from loom.nebius_platform_render import NebiusPlatformError, build_platform, wri
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def test_private_foundation_does_not_project_absent_recovery_profile(platform_inputs: tuple) -> None:
+    from loom.nebius_development_foundation import render_development_foundation
+
+    config, candidate, profile = platform_inputs
+    config.update(namespace="loom-dev", execution_namespace="loom-nebius-dev-execution")
+    candidate["source_ref"] = "refs/heads/dev"
+    files = render_development_foundation(config, candidate, profile, {}, repo_root=ROOT).files
+    documents = [doc for group in files.values() for doc in group]
+    maps = {doc["metadata"]["name"]: doc["data"] for doc in documents if doc["kind"] == "ConfigMap"}
+    assert set(maps["loom-platform-config"]) == {"environment.json"}
+    for doc in documents:
+        if doc["kind"] not in {"Deployment", "StatefulSet", "Job"}:
+            continue
+        pod = doc["spec"]["template"]["spec"]
+        for volume in pod.get("volumes", []):
+            projection = volume.get("configMap")
+            if projection and projection["name"] in maps:
+                assert all(item["key"] in maps[projection["name"]]
+                           for item in projection.get("items", []))
+        if doc["metadata"]["name"] == "loom-control-plane":
+            assert not any(mount["mountPath"] == "/var/run/loom-platform"
+                           for mount in pod["containers"][0]["volumeMounts"])
+
+
 @pytest.mark.parametrize("environment", ["development", "staging"])
 def test_control_plane_mount_reaches_both_installed_recovery_consumers(
     platform_inputs: tuple, tmp_path: Path, monkeypatch, environment: str,
