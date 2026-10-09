@@ -1815,7 +1815,10 @@ def test_runtime_parent_connects_all_https_workload_phases_and_read_only_resume(
 
 @pytest.mark.parametrize('manager_entry', ['foundation'], indirect=True)
 def test_runtime_database_delivery_keeps_old_data_identity_and_separates_credentials(completed_pool):
+    import asyncio
+
     from sqlalchemy.engine import make_url
+    from sqlalchemy.ext.asyncio import create_async_engine
 
     calls = len(completed_pool[3].server.calls)
     prepared = database_runtime(completed_pool)
@@ -1833,6 +1836,13 @@ def test_runtime_database_delivery_keeps_old_data_identity_and_separates_credent
     assert (database.username, database.password, database.host, database.database) == (
         'loom_actuator', 'runtime-actuator-' + 'p' * 40, 'loom-postgres.loom-dev.svc', 'loom')
     assert dict(database.query) == {'sslmode': 'verify-full', 'sslrootcert': '/var/run/loom-db/ca.crt'}
+    # The actuator consumes this exact Secret URL without driver normalization.
+    # Engine construction is lazy: exercise its real async driver, no DB access.
+    engine = create_async_engine(material['actuator-url'], pool_pre_ping=True)
+    try:
+        assert engine.dialect.is_async
+    finally:
+        asyncio.run(engine.dispose())
     original = foundation.bootstrap['material']['loom-platform-db']
     assert material['ca.crt'] == original['ca.crt']
     assert original['postgres-password'] not in repr(material)
