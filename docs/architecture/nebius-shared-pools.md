@@ -602,11 +602,20 @@ disabled-catalog Job must prove completion before the shared API, read-only
 actuator and collector start. No phase grants the gateway write authority, opens
 pool admission or mutates staging.
 
-Each workload transition retains server-defaulted targets and original UIDs;
-the transport must use resourceVersion/UID compare-and-swap. Unknown write
+Each workload transition retains server-defaulted targets and original UIDs.
+The phase-bound HTTPS transport regenerates its allowed originals and targets
+from the parent history; every JSON patch atomically tests UID, resourceVersion
+and prior spec. Only a qualified Kubernetes conflict/invalid response permits a
+retry. Unknown write
 outcomes are only read back. Completed phases retain checksums and Job receipts,
 and are inspected instead of replayed after later startup intentionally changes
 their live specifications. Missing or altered recovery history fails closed.
+The workload transport checks complete namespace ReplicaSet/Pod inventories for
+drain and replacement readiness, including lingering terminating Pods, exact
+ownership/templates and native scheduling/service-account defaults. It rechecks
+controller identity, generation and readiness after those collection reads.
+These observations do not establish process/database configuration or cloud
+access: those remain independent live qualification barriers.
 This parent and its component tests are not a protected installation entrypoint:
 phase-aware HTTPS qualification, provider/material access, publication binding
 and installed multi-owner acceptance must still be connected and verified before
