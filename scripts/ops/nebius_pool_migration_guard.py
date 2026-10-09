@@ -345,7 +345,7 @@ SET LOCAL statement_timeout='10s'; SET LOCAL lock_timeout='2s'; SET LOCAL search
 DO $pool_cutover_readiness$
 DECLARE access_ready BOOLEAN;
 BEGIN
-    IF (SELECT version_num FROM public.alembic_version) IS DISTINCT FROM '0175'
+    IF (SELECT version_num FROM public.alembic_version) IS DISTINCT FROM '0176'
     THEN RAISE EXCEPTION 'pool cutover schema unqualified'; END IF;
     IF NOT pg_try_advisory_xact_lock({LOCK_KEY}) OR EXISTS (
         SELECT 1 FROM public.nebius_rollout_guard
@@ -390,7 +390,7 @@ WITH pending AS (
     SELECT key,origin,source_matches FROM pending WHERE key COLLATE "C">'{cursor}' COLLATE "C"
      ORDER BY key COLLATE "C" LIMIT 128
 )
-SELECT json_build_object('status','observed','schema_revision','0175',
+SELECT json_build_object('status','observed','schema_revision','0176',
     'rows',COALESCE(json_agg(page ORDER BY key COLLATE "C"),'[]'::json)) FROM page;
 ROLLBACK;
 """
@@ -404,7 +404,7 @@ def qualify_cutover_readiness_page(report: Any, *, participant: PoolParticipantV
     """
     cursor = _backlog_cursor(after)
     if (not isinstance(report, dict) or set(report) != {"status", "schema_revision", "rows"}
-            or report["status"] != "observed" or report["schema_revision"] != "0175"
+            or report["status"] != "observed" or report["schema_revision"] != "0176"
             or not isinstance(report["rows"], list) or len(report["rows"]) > 128):
         raise ValueError("pool_cutover_database_report_unqualified")
     origins = []
@@ -468,7 +468,7 @@ DO $pool_runtime_role$
 DECLARE item RECORD;
 BEGIN
     {closure}
-    IF (SELECT version_num FROM alembic_version) IS DISTINCT FROM '0175'
+    IF (SELECT version_num FROM alembic_version) IS DISTINCT FROM '0176'
     THEN RAISE EXCEPTION 'pool runtime role database is not closed and idle'; END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='loom_actuator' AND rolcanlogin
         AND NOT (rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls))

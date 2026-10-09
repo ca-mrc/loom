@@ -463,7 +463,10 @@ async def test_audit_uses_the_worker_compatibility_gate(tmp_path: Path) -> None:
     session, object_store, task_rows, bundles = _tb21_audit_fixture(tmp_path)
     row = next(row for row in task_rows if row.id.endswith("/chess-best-move"))
     bundle = bundles["chess-best-move/"]
-    (bundle / "Dockerfile").write_text(
+    # This prebuilt task does not consume a default workspace Dockerfile.
+    # Verifier recipes still pass through the worker's blocking compatibility gate.
+    (bundle / "tests").mkdir()
+    (bundle / "tests" / "Dockerfile").write_text(
         "FROM python:3.12-slim\nRUN sed -i 's/x/y/' /etc/resolv.conf\n",
     )
     row.checksum = sha256_of_dir(bundle)

@@ -12,6 +12,7 @@ from uuid import UUID
 
 import pytest
 
+from loom.db.schema_startup import service_schema_head
 from tests.integration.test_execution_actuator_k3s import _load_client, _start_k3s
 from tests.ops.test_nebius_pool_cutover import collector_inputs as collector_inputs
 from tests.ops.test_nebius_pool_cutover import cutover_inputs as cutover_inputs
@@ -151,7 +152,7 @@ async def test_real_connected_cutover_stages_closed_workloads_and_replays_withou
 
             def cutover_readiness_page(self, target, *, after):
                 assert target in self.request.guards and after is None
-                return {"status": "observed", "schema_revision": "0175", "rows": []}
+                return {"status": "observed", "schema_revision": service_schema_head(), "rows": []}
 
         class Checks:
             def qualify_binding(self, actual, manager):

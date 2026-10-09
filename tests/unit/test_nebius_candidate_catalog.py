@@ -194,3 +194,38 @@ async def test_profile_signature_rechecked_against_current_trust(publication):
     reference, responses, payload, _, candidate = publication
     with pytest.raises(ManagementError, match="candidate_publication_invalid"):
         await resolve((reference, responses, payload, '{"schema_version":1,"keys":[]}', candidate))
+
+
+@pytest.mark.parametrize("change", ["valid", "missing-admission", "tampered-signature", "undeclared-image"])
+async def test_protected_publication_qualifies_only_explicit_signed_task_pins(publication, tmp_path, change):
+    from scripts.ops.nebius_candidate import _private_key, _sign_admission
+
+    from loom_service.environment_management.registry import ManagementError
+
+    reference, responses, payload, keyring, candidate = copy.deepcopy(publication)
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        profile = json.loads(archive.read("runtime-profile.json"))
+    source = "ghcr.io/terminal-bench/task:rev6"
+    image = "ghcr.io/terminal-bench/task@sha256:" + "9" * 64
+    original = profile["image_admission"]["admissions"][0]["statement"]
+    signed = _sign_admission({**original, "image_ref": image}, original["policy_sha256"],
+        original["provenance_sha256"], key=_private_key(tmp_path / "signer.pem"), signing_key_id="publisher").model_dump(mode="json")
+    if change != "undeclared-image":
+        profile["prebuilt_image_pins"] = {source: image}
+    if change != "missing-admission":
+        profile["image_admission"]["admissions"].append(signed)
+    if change == "tampered-signature":
+        signed["signature_base64"] = "A" * 88
+    artifact = io.BytesIO()
+    with zipfile.ZipFile(artifact, "w") as archive:
+        archive.writestr("candidate.json", json.dumps(candidate))
+        archive.writestr("runtime-profile.json", json.dumps(profile))
+    payload = artifact.getvalue()
+    reference["artifact_sha256"] = "sha256:" + hashlib.sha256(payload).hexdigest()
+    responses["actions/artifacts/123"].update(digest=reference["artifact_sha256"], size_in_bytes=len(payload))
+    prepared = (reference, responses, payload, keyring, candidate)
+    if change == "valid":
+        assert (await resolve(prepared)).profile["prebuilt_image_pins"] == {source: image}
+    else:
+        with pytest.raises(ManagementError, match="candidate_publication_invalid"):
+            await resolve(prepared)

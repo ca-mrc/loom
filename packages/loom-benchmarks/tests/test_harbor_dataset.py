@@ -81,10 +81,14 @@ def test_download_harbor_dataset_records_resolved_package_digests(
             self, ref: str, *, output_dir: Path, export: bool,
         ) -> list[Downloaded]:
             download_calls.append((ref, output_dir, export))
-            return [
-                Downloaded(task_id, output_dir / task_id.name)
-                for task_id in self.metadata.task_ids
-            ]
+            result = []
+            for task_id in self.metadata.task_ids:
+                path = output_dir / task_id.name
+                path.mkdir()
+                (path / "task.toml").write_text("# native task unchanged\n")
+                result.append(Downloaded(task_id, path))
+            (output_dir / "metric.py").write_text("# dataset metric unchanged\n")
+            return result
 
     package_module = types.ModuleType("harbor.registry.client.package")
     package_module.PackageDatasetClient = Client  # type: ignore[attr-defined]
@@ -100,6 +104,10 @@ def test_download_harbor_dataset_records_resolved_package_digests(
     )
     materialization = asyncio.run(download_harbor_dataset(source, tmp_path))
 
+    for name in ("a", "b"):
+        assert (tmp_path / "tasks" / name / "task.toml").read_text() == "# native task unchanged\n"
+        assert not (tmp_path / name).exists()
+    assert (tmp_path / "metric.py").read_text() == "# dataset metric unchanged\n"
     assert materialization.root == tmp_path
     assert materialization.dataset == source.locator
     assert materialization.revision == "6"
@@ -155,7 +163,8 @@ def test_download_harbor_dataset_rejects_missing_metadata_version(
 def test_missing_harbor_publisher_dependency_is_actionable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delitem(sys.modules, "harbor.registry.client.package", raising=False)
+    # Force the dependency boundary even when Harbor is installed for operator smoke.
+    monkeypatch.setitem(sys.modules, "harbor.registry.client.package", None)
     monkeypatch.delitem(sys.modules, "harbor.registry.client", raising=False)
     monkeypatch.delitem(sys.modules, "harbor.registry", raising=False)
     monkeypatch.delitem(sys.modules, "harbor", raising=False)

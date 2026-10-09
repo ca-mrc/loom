@@ -25,10 +25,11 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
+from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import delete, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
@@ -239,6 +240,29 @@ class ProviderModelManualCreate(BaseModel):
     family: str | None = Field(default=None, max_length=128)
     context_length: int | None = Field(default=None, gt=0)
     capabilities: dict[str, object] = Field(default_factory=dict)
+
+
+class ProviderModelMetadataUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    context_length: int = Field(gt=0, le=2_000_000)
+    specification_url: str = Field(min_length=1, max_length=2048, pattern=r"^https://[^\s]+$")
+
+    @field_validator("specification_url")
+    @classmethod
+    def public_specification(cls, value: str) -> str:
+        parsed = urlsplit(value)
+        if (
+            not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError(
+                "provide a public HTTPS specification URL without credentials or query"
+            )
+        return value
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -1210,6 +1234,50 @@ async def refresh_models(
         missing=missing,
         items=[_cache_row_to_entry(r) for r in refreshed_rows],
     )
+
+
+@router.patch(
+    "/provider-connections/{connection_id}/models/{model_id:path}/metadata",
+    response_model=ProviderModelCacheEntry,
+)
+async def update_cached_model_metadata(
+    request: Request,
+    connection_id: UUID,
+    model_id: str,
+    payload: ProviderModelMetadataUpdate,
+    sc: SessionAndCtx,
+    x_loom_admin_actor: str | None = Header(default=None),
+) -> ProviderModelCacheEntry:
+    """Declare a verified capability without changing discovery or entitlement.
+
+    The specification URL is retained as operator evidence, never fetched or
+    interpreted as paid preflight success. Existing discovery and hide state
+    are preserved; this cannot insert a model that has not been cached.
+    """
+    session, ctx = sc
+    _require_provider_management(ctx)
+    row = await _get_active_connection(session, connection_id, ctx)
+    _require_provider_owner_or_admin(ctx, row)
+    cache = await _get_cached_model_or_404(session, row.id, model_id)
+    cache.context_length = payload.context_length
+    cache.capabilities = {
+        **(cache.capabilities or {}),
+        "context_specification_url": payload.specification_url,
+    }
+    await write_admin_audit_event(
+        session,
+        actor=_provider_audit_actor(ctx, x_loom_admin_actor),
+        action="provider_model.metadata",
+        target_type="provider_model",
+        target_id=f"{row.id}:{model_id}",
+        request=request,
+        metadata={
+            "context_length": payload.context_length,
+            "specification_url": payload.specification_url,
+        },
+    )
+    await session.commit()
+    return _cache_row_to_entry(cache)
 
 
 @router.post(

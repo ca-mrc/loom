@@ -15,6 +15,12 @@ Harbor Hub packages; HF row datasets continue using their existing adapters.
 Hub intake also records the fetched dataset metadata version and per-task
 package digest supplied by the existing package client.
 
+The pinned Hub client exports task directories directly under its output root.
+Loom materialization moves those unchanged directories under `tasks/`, matching
+the adapter source layout. Dataset-level files remain at the root beside the
+resolved package metadata; they are not treated as executable task bundles.
+Refresh any cache created with the older flat layout before preparing a benchmark.
+
 The official TB4 descriptor is
 [`config/harbor-sources/terminal-bench-4.0.0.json`](../../config/harbor-sources/terminal-bench-4.0.0.json).
 It identifies commit `452bf305c6daa62fc59061d22133a7cbc7c1572e`, release
@@ -133,3 +139,9 @@ Issue #2282 remains open for reusable runtime materialization/collection,
 H100 admission/placement and actual capacity observation, representative native
 oracle equivalence, run/export readback and separately authorized bounded live
 acceptance. The import census is not deployed or executable benchmark acceptance.
+
+When a task selects a prebuilt image with no explicit build or Compose
+definition, findings in its unused default Dockerfile remain source warnings.
+They cannot establish a failure of an image that Loom does not build. Explicit
+build recipes and verifier Dockerfiles retain their blocking checks; immutable
+image and architecture admission still qualify the actual execution image.

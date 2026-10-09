@@ -11,6 +11,8 @@ from sqlalchemy import create_engine, delete, insert, inspect, select, text, upd
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
+from loom.db.schema_startup import service_schema_head
+
 
 @pytest.mark.parametrize("table", ["execution_leases", "task_image_materializations", "task_image_materialization_attempts"])
 def test_pool_downgrade_refuses_parent_read_locks_without_waiting(isolated_migration_postgres_url, table):
@@ -27,7 +29,7 @@ def test_pool_downgrade_refuses_parent_read_locks_without_waiting(isolated_migra
             with pytest.raises(DBAPIError, match="could not obtain lock"):
                 command.downgrade(config, "0171")
         with engine.connect() as connection:
-            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0175"
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == service_schema_head()
     finally:
         engine.dispose()
 

@@ -15,6 +15,7 @@ from tests.ops.test_nebius_pool_runtime import runtime_inputs as runtime_inputs
 from tests.unit.test_nebius_management_render import management_inputs as management_inputs
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
+from loom.db.schema_startup import service_schema_head
 from loom.nebius_pool_priority import PoolWorkOriginV1
 
 
@@ -43,7 +44,7 @@ def management_history(database_guard, monkeypatch):
         database=replace(previous.target.database, statefulset=copy.deepcopy(database), service=copy.deepcopy(service)))
     origin = PoolWorkOriginV1(data_environment_id=request.registration.spec.participants[0].environment_id,
         submission_id=uuid4(), kind='environment', application=None)
-    report = {'schema': 'loom.pool-management-history.v1', 'schema_revision': '0175', 'read_only': True,
+    report = {'schema': 'loom.pool-management-history.v1', 'schema_revision': service_schema_head(), 'read_only': True,
         'rows': [{'ordinal': 1, 'origin': origin.model_dump(mode='json'), 'application': None, 'operation': None}]}
     state = SimpleNamespace(request=request, target=target, participant=previous.target, origin=origin, report=report,
         database=database, service=service, pod=pod, secret=secret, calls=[], executed=False, after_drift=False)

@@ -31,7 +31,7 @@ SOURCES = (*("scripts/ops/" + name + ".py" for name in (
     "nebius_management_live", "nebius_management_material", "nebius_management_prerequisites",
     "nebius_management_proofs", "nebius_management_stage", "nebius_management_storage",
     "nebius_management_supplied", "nebius_management_transport", "nebius_registry_auth",
-    "nebius_candidate", "collect_nebius_runtime_evidence_via_gateway", "mirror_nebius_release_via_gateway",
+    "nebius_candidate", "prepare_prebuilt_task_images", "collect_nebius_runtime_evidence_via_gateway", "mirror_nebius_release_via_gateway",
 )), "deploy/k8s/nebius-execution-actuator.yaml", "deploy/k8s/nebius-capacity-collector.yaml")
 SOURCES += tuple("scripts/ops/" + name + ".py" for name in (
     "nebius_development_management_gateway",

@@ -1,0 +1,455 @@
+{
+  "schema_version": "loom.tb21-prebuilt-images.v1",
+  "dataset": "terminal-bench/terminal-bench-2-1",
+  "revision": "6",
+  "metadata_version": "sha256:7d7bdc1cbedad549fc1140404bd4dc45e5fd0ea7c4186773687d177ad3a0699a",
+  "tasks": [
+    {
+      "task": "terminal-bench/adaptive-rejection-sampler",
+      "image": "alexgshaw/adaptive-rejection-sampler:20251031"
+    },
+    {
+      "task": "terminal-bench/bn-fit-modify",
+      "image": "alexgshaw/bn-fit-modify:20251031"
+    },
+    {
+      "task": "terminal-bench/break-filter-js-from-html",
+      "image": "alexgshaw/break-filter-js-from-html:20251031"
+    },
+    {
+      "task": "terminal-bench/build-cython-ext",
+      "image": "alexgshaw/build-cython-ext:20251031"
+    },
+    {
+      "task": "terminal-bench/build-pmars",
+      "image": "alexgshaw/build-pmars:20251031"
+    },
+    {
+      "task": "terminal-bench/build-pov-ray",
+      "image": "alexgshaw/build-pov-ray:20251031"
+    },
+    {
+      "task": "terminal-bench/caffe-cifar-10",
+      "image": "alexgshaw/caffe-cifar-10:20260403"
+    },
+    {
+      "task": "terminal-bench/cancel-async-tasks",
+      "image": "alexgshaw/cancel-async-tasks:20251031"
+    },
+    {
+      "task": "terminal-bench/chess-best-move",
+      "image": "alexgshaw/chess-best-move:20251031"
+    },
+    {
+      "task": "terminal-bench/circuit-fibsqrt",
+      "image": "alexgshaw/circuit-fibsqrt:20251031"
+    },
+    {
+      "task": "terminal-bench/cobol-modernization",
+      "image": "alexgshaw/cobol-modernization:20251031"
+    },
+    {
+      "task": "terminal-bench/code-from-image",
+      "image": "alexgshaw/code-from-image:20251031"
+    },
+    {
+      "task": "terminal-bench/compile-compcert",
+      "image": "alexgshaw/compile-compcert:20260403"
+    },
+    {
+      "task": "terminal-bench/configure-git-webserver",
+      "image": "alexgshaw/configure-git-webserver:20251031"
+    },
+    {
+      "task": "terminal-bench/constraints-scheduling",
+      "image": "alexgshaw/constraints-scheduling:20251031"
+    },
+    {
+      "task": "terminal-bench/count-dataset-tokens",
+      "image": "alexgshaw/count-dataset-tokens:20251031"
+    },
+    {
+      "task": "terminal-bench/crack-7z-hash",
+      "image": "alexgshaw/crack-7z-hash:20251031"
+    },
+    {
+      "task": "terminal-bench/custom-memory-heap-crash",
+      "image": "alexgshaw/custom-memory-heap-crash:20251031"
+    },
+    {
+      "task": "terminal-bench/db-wal-recovery",
+      "image": "alexgshaw/db-wal-recovery:20251031"
+    },
+    {
+      "task": "terminal-bench/distribution-search",
+      "image": "alexgshaw/distribution-search:20251031"
+    },
+    {
+      "task": "terminal-bench/dna-assembly",
+      "image": "alexgshaw/dna-assembly:20251031"
+    },
+    {
+      "task": "terminal-bench/dna-insert",
+      "image": "alexgshaw/dna-insert:20251031"
+    },
+    {
+      "task": "terminal-bench/extract-elf",
+      "image": "alexgshaw/extract-elf:20251031"
+    },
+    {
+      "task": "terminal-bench/extract-moves-from-video",
+      "image": "alexgshaw/extract-moves-from-video:20260403"
+    },
+    {
+      "task": "terminal-bench/feal-differential-cryptanalysis",
+      "image": "alexgshaw/feal-differential-cryptanalysis:20251031"
+    },
+    {
+      "task": "terminal-bench/feal-linear-cryptanalysis",
+      "image": "alexgshaw/feal-linear-cryptanalysis:20251031"
+    },
+    {
+      "task": "terminal-bench/filter-js-from-html",
+      "image": "alexgshaw/filter-js-from-html:20251031"
+    },
+    {
+      "task": "terminal-bench/financial-document-processor",
+      "image": "alexgshaw/financial-document-processor:20251031"
+    },
+    {
+      "task": "terminal-bench/fix-code-vulnerability",
+      "image": "alexgshaw/fix-code-vulnerability:20251031"
+    },
+    {
+      "task": "terminal-bench/fix-git",
+      "image": "alexgshaw/fix-git:20260403"
+    },
+    {
+      "task": "terminal-bench/fix-ocaml-gc",
+      "image": "alexgshaw/fix-ocaml-gc:20251031"
+    },
+    {
+      "task": "terminal-bench/gcode-to-text",
+      "image": "alexgshaw/gcode-to-text:20251031"
+    },
+    {
+      "task": "terminal-bench/git-leak-recovery",
+      "image": "alexgshaw/git-leak-recovery:20251031"
+    },
+    {
+      "task": "terminal-bench/git-multibranch",
+      "image": "alexgshaw/git-multibranch:20251031"
+    },
+    {
+      "task": "terminal-bench/gpt2-codegolf",
+      "image": "alexgshaw/gpt2-codegolf:20251031"
+    },
+    {
+      "task": "terminal-bench/headless-terminal",
+      "image": "alexgshaw/headless-terminal:20251031"
+    },
+    {
+      "task": "terminal-bench/hf-model-inference",
+      "image": "alexgshaw/hf-model-inference:20260430"
+    },
+    {
+      "task": "terminal-bench/install-windows-3.11",
+      "image": "alexgshaw/install-windows-3.11:20251031"
+    },
+    {
+      "task": "terminal-bench/kv-store-grpc",
+      "image": "alexgshaw/kv-store-grpc:20251031"
+    },
+    {
+      "task": "terminal-bench/large-scale-text-editing",
+      "image": "alexgshaw/large-scale-text-editing:20251031"
+    },
+    {
+      "task": "terminal-bench/largest-eigenval",
+      "image": "alexgshaw/largest-eigenval:20251031"
+    },
+    {
+      "task": "terminal-bench/llm-inference-batching-scheduler",
+      "image": "alexgshaw/llm-inference-batching-scheduler:20251031"
+    },
+    {
+      "task": "terminal-bench/log-summary-date-ranges",
+      "image": "alexgshaw/log-summary-date-ranges:20251031"
+    },
+    {
+      "task": "terminal-bench/mailman",
+      "image": "alexgshaw/mailman:20251031"
+    },
+    {
+      "task": "terminal-bench/make-doom-for-mips",
+      "image": "alexgshaw/make-doom-for-mips:20251031"
+    },
+    {
+      "task": "terminal-bench/make-mips-interpreter",
+      "image": "alexgshaw/make-mips-interpreter:20251031"
+    },
+    {
+      "task": "terminal-bench/mcmc-sampling-stan",
+      "image": "alexgshaw/mcmc-sampling-stan:20251031"
+    },
+    {
+      "task": "terminal-bench/merge-diff-arc-agi-task",
+      "image": "alexgshaw/merge-diff-arc-agi-task:20251031"
+    },
+    {
+      "task": "terminal-bench/model-extraction-relu-logits",
+      "image": "alexgshaw/model-extraction-relu-logits:20251031"
+    },
+    {
+      "task": "terminal-bench/modernize-scientific-stack",
+      "image": "alexgshaw/modernize-scientific-stack:20251031"
+    },
+    {
+      "task": "terminal-bench/mteb-leaderboard",
+      "image": "alexgshaw/mteb-leaderboard:20260430"
+    },
+    {
+      "task": "terminal-bench/mteb-retrieve",
+      "image": "alexgshaw/mteb-retrieve:20260430"
+    },
+    {
+      "task": "terminal-bench/multi-source-data-merger",
+      "image": "alexgshaw/multi-source-data-merger:20251031"
+    },
+    {
+      "task": "terminal-bench/nginx-request-logging",
+      "image": "alexgshaw/nginx-request-logging:20251031"
+    },
+    {
+      "task": "terminal-bench/openssl-selfsigned-cert",
+      "image": "alexgshaw/openssl-selfsigned-cert:20251031"
+    },
+    {
+      "task": "terminal-bench/overfull-hbox",
+      "image": "alexgshaw/overfull-hbox:20260403"
+    },
+    {
+      "task": "terminal-bench/password-recovery",
+      "image": "alexgshaw/password-recovery:20251031"
+    },
+    {
+      "task": "terminal-bench/path-tracing",
+      "image": "alexgshaw/path-tracing:20251031"
+    },
+    {
+      "task": "terminal-bench/path-tracing-reverse",
+      "image": "alexgshaw/path-tracing-reverse:20251031"
+    },
+    {
+      "task": "terminal-bench/polyglot-c-py",
+      "image": "alexgshaw/polyglot-c-py:20251031"
+    },
+    {
+      "task": "terminal-bench/polyglot-rust-c",
+      "image": "alexgshaw/polyglot-rust-c:20251031"
+    },
+    {
+      "task": "terminal-bench/portfolio-optimization",
+      "image": "alexgshaw/portfolio-optimization:20251031"
+    },
+    {
+      "task": "terminal-bench/protein-assembly",
+      "image": "alexgshaw/protein-assembly:20260403"
+    },
+    {
+      "task": "terminal-bench/prove-plus-comm",
+      "image": "alexgshaw/prove-plus-comm:20251031"
+    },
+    {
+      "task": "terminal-bench/pypi-server",
+      "image": "alexgshaw/pypi-server:20251031"
+    },
+    {
+      "task": "terminal-bench/pytorch-model-cli",
+      "image": "alexgshaw/pytorch-model-cli:20251031"
+    },
+    {
+      "task": "terminal-bench/pytorch-model-recovery",
+      "image": "alexgshaw/pytorch-model-recovery:20260430"
+    },
+    {
+      "task": "terminal-bench/qemu-alpine-ssh",
+      "image": "alexgshaw/qemu-alpine-ssh:20251031"
+    },
+    {
+      "task": "terminal-bench/qemu-startup",
+      "image": "alexgshaw/qemu-startup:20251031"
+    },
+    {
+      "task": "terminal-bench/query-optimize",
+      "image": "alexgshaw/query-optimize:20251031"
+    },
+    {
+      "task": "terminal-bench/raman-fitting",
+      "image": "alexgshaw/raman-fitting:20251031"
+    },
+    {
+      "task": "terminal-bench/regex-chess",
+      "image": "alexgshaw/regex-chess:20251031"
+    },
+    {
+      "task": "terminal-bench/regex-log",
+      "image": "alexgshaw/regex-log:20251031"
+    },
+    {
+      "task": "terminal-bench/reshard-c4-data",
+      "image": "alexgshaw/reshard-c4-data:20251031"
+    },
+    {
+      "task": "terminal-bench/rstan-to-pystan",
+      "image": "alexgshaw/rstan-to-pystan:20251031"
+    },
+    {
+      "task": "terminal-bench/sam-cell-seg",
+      "image": "alexgshaw/sam-cell-seg:20251031"
+    },
+    {
+      "task": "terminal-bench/sanitize-git-repo",
+      "image": "alexgshaw/sanitize-git-repo:20251031"
+    },
+    {
+      "task": "terminal-bench/schemelike-metacircular-eval",
+      "image": "alexgshaw/schemelike-metacircular-eval:20251031"
+    },
+    {
+      "task": "terminal-bench/sparql-university",
+      "image": "alexgshaw/sparql-university:20251031"
+    },
+    {
+      "task": "terminal-bench/sqlite-db-truncate",
+      "image": "alexgshaw/sqlite-db-truncate:20251031"
+    },
+    {
+      "task": "terminal-bench/sqlite-with-gcov",
+      "image": "alexgshaw/sqlite-with-gcov:20251031"
+    },
+    {
+      "task": "terminal-bench/torch-pipeline-parallelism",
+      "image": "alexgshaw/torch-pipeline-parallelism:20251031"
+    },
+    {
+      "task": "terminal-bench/torch-tensor-parallelism",
+      "image": "alexgshaw/torch-tensor-parallelism:20251031"
+    },
+    {
+      "task": "terminal-bench/train-fasttext",
+      "image": "alexgshaw/train-fasttext:20251031"
+    },
+    {
+      "task": "terminal-bench/tune-mjcf",
+      "image": "alexgshaw/tune-mjcf:20251031"
+    },
+    {
+      "task": "terminal-bench/video-processing",
+      "image": "alexgshaw/video-processing:20251031"
+    },
+    {
+      "task": "terminal-bench/vulnerable-secret",
+      "image": "alexgshaw/vulnerable-secret:20251031"
+    },
+    {
+      "task": "terminal-bench/winning-avg-corewars",
+      "image": "alexgshaw/winning-avg-corewars:20251031"
+    },
+    {
+      "task": "terminal-bench/write-compressor",
+      "image": "alexgshaw/write-compressor:20251031"
+    }
+  ],
+  "images": [
+    "alexgshaw/adaptive-rejection-sampler:20251031",
+    "alexgshaw/bn-fit-modify:20251031",
+    "alexgshaw/break-filter-js-from-html:20251031",
+    "alexgshaw/build-cython-ext:20251031",
+    "alexgshaw/build-pmars:20251031",
+    "alexgshaw/build-pov-ray:20251031",
+    "alexgshaw/caffe-cifar-10:20260403",
+    "alexgshaw/cancel-async-tasks:20251031",
+    "alexgshaw/chess-best-move:20251031",
+    "alexgshaw/circuit-fibsqrt:20251031",
+    "alexgshaw/cobol-modernization:20251031",
+    "alexgshaw/code-from-image:20251031",
+    "alexgshaw/compile-compcert:20260403",
+    "alexgshaw/configure-git-webserver:20251031",
+    "alexgshaw/constraints-scheduling:20251031",
+    "alexgshaw/count-dataset-tokens:20251031",
+    "alexgshaw/crack-7z-hash:20251031",
+    "alexgshaw/custom-memory-heap-crash:20251031",
+    "alexgshaw/db-wal-recovery:20251031",
+    "alexgshaw/distribution-search:20251031",
+    "alexgshaw/dna-assembly:20251031",
+    "alexgshaw/dna-insert:20251031",
+    "alexgshaw/extract-elf:20251031",
+    "alexgshaw/extract-moves-from-video:20260403",
+    "alexgshaw/feal-differential-cryptanalysis:20251031",
+    "alexgshaw/feal-linear-cryptanalysis:20251031",
+    "alexgshaw/filter-js-from-html:20251031",
+    "alexgshaw/financial-document-processor:20251031",
+    "alexgshaw/fix-code-vulnerability:20251031",
+    "alexgshaw/fix-git:20260403",
+    "alexgshaw/fix-ocaml-gc:20251031",
+    "alexgshaw/gcode-to-text:20251031",
+    "alexgshaw/git-leak-recovery:20251031",
+    "alexgshaw/git-multibranch:20251031",
+    "alexgshaw/gpt2-codegolf:20251031",
+    "alexgshaw/headless-terminal:20251031",
+    "alexgshaw/hf-model-inference:20260430",
+    "alexgshaw/install-windows-3.11:20251031",
+    "alexgshaw/kv-store-grpc:20251031",
+    "alexgshaw/large-scale-text-editing:20251031",
+    "alexgshaw/largest-eigenval:20251031",
+    "alexgshaw/llm-inference-batching-scheduler:20251031",
+    "alexgshaw/log-summary-date-ranges:20251031",
+    "alexgshaw/mailman:20251031",
+    "alexgshaw/make-doom-for-mips:20251031",
+    "alexgshaw/make-mips-interpreter:20251031",
+    "alexgshaw/mcmc-sampling-stan:20251031",
+    "alexgshaw/merge-diff-arc-agi-task:20251031",
+    "alexgshaw/model-extraction-relu-logits:20251031",
+    "alexgshaw/modernize-scientific-stack:20251031",
+    "alexgshaw/mteb-leaderboard:20260430",
+    "alexgshaw/mteb-retrieve:20260430",
+    "alexgshaw/multi-source-data-merger:20251031",
+    "alexgshaw/nginx-request-logging:20251031",
+    "alexgshaw/openssl-selfsigned-cert:20251031",
+    "alexgshaw/overfull-hbox:20260403",
+    "alexgshaw/password-recovery:20251031",
+    "alexgshaw/path-tracing-reverse:20251031",
+    "alexgshaw/path-tracing:20251031",
+    "alexgshaw/polyglot-c-py:20251031",
+    "alexgshaw/polyglot-rust-c:20251031",
+    "alexgshaw/portfolio-optimization:20251031",
+    "alexgshaw/protein-assembly:20260403",
+    "alexgshaw/prove-plus-comm:20251031",
+    "alexgshaw/pypi-server:20251031",
+    "alexgshaw/pytorch-model-cli:20251031",
+    "alexgshaw/pytorch-model-recovery:20260430",
+    "alexgshaw/qemu-alpine-ssh:20251031",
+    "alexgshaw/qemu-startup:20251031",
+    "alexgshaw/query-optimize:20251031",
+    "alexgshaw/raman-fitting:20251031",
+    "alexgshaw/regex-chess:20251031",
+    "alexgshaw/regex-log:20251031",
+    "alexgshaw/reshard-c4-data:20251031",
+    "alexgshaw/rstan-to-pystan:20251031",
+    "alexgshaw/sam-cell-seg:20251031",
+    "alexgshaw/sanitize-git-repo:20251031",
+    "alexgshaw/schemelike-metacircular-eval:20251031",
+    "alexgshaw/sparql-university:20251031",
+    "alexgshaw/sqlite-db-truncate:20251031",
+    "alexgshaw/sqlite-with-gcov:20251031",
+    "alexgshaw/torch-pipeline-parallelism:20251031",
+    "alexgshaw/torch-tensor-parallelism:20251031",
+    "alexgshaw/train-fasttext:20251031",
+    "alexgshaw/tune-mjcf:20251031",
+    "alexgshaw/video-processing:20251031",
+    "alexgshaw/vulnerable-secret:20251031",
+    "alexgshaw/winning-avg-corewars:20251031",
+    "alexgshaw/write-compressor:20251031"
+  ]
+}

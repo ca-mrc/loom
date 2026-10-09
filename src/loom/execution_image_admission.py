@@ -69,7 +69,7 @@ class SignedImageAdmissionV1(_Strict):
 
 class ExecutionImageAdmissionBundleV1(_Strict):
     schema_version: str = Field(pattern=r"^loom\.execution-image-admission\.v1$")
-    admissions: tuple[SignedImageAdmissionV1, ...] = Field(min_length=1, max_length=34)
+    admissions: tuple[SignedImageAdmissionV1, ...] = Field(min_length=1, max_length=128)
 
     @model_validator(mode="after")
     def _unique_images(self) -> ExecutionImageAdmissionBundleV1:

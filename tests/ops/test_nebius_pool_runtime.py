@@ -33,6 +33,27 @@ def desired_profile(request, service):
         "image_admission": signed_image_admission_bundle(refs)})
 
 
+def test_new_published_task_pins_are_consumed_by_protected_runtime_wiring(runtime_inputs):
+    from scripts.ops.nebius_pool_runtime import wire_participant
+
+    from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1
+
+    request, actuators, services, _ = runtime_inputs
+    identity = request.guards[0].participant_id
+    original = copy.deepcopy(services[identity])
+    profile = desired_profile(request, services[identity])
+    image = "ghcr.io/terminal-bench/task@sha256:" + "9" * 64
+    payload = profile.model_dump(mode="json")
+    payload.update(prebuilt_image_pins={"ghcr.io/terminal-bench/task:rev6": image},
+        image_admission=signed_image_admission_bundle((*profile.published_image_refs(), image)).model_dump(mode="json"))
+    prepared = ServiceExecutionRuntimeProfileV1.model_validate(payload)
+    result = wire_participant(request=request, participant_id=identity, management_origin="https://manage.example.com",
+        actuator=actuators[identity], service=services[identity], runtime_profile=prepared)
+    assert services[identity] == original
+    delivered = json.loads(env(result["service"])["LOOM_SVC_SERVICE_EXECUTION_RUNTIME_PROFILE_JSON"]["value"])
+    assert delivered["prebuilt_image_pins"] == prepared.prebuilt_image_pins
+
+
 @pytest.fixture
 def runtime_inputs(platform_inputs, management_inputs, request):
     return runtime_inputs_for_environments(

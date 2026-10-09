@@ -225,7 +225,5 @@ class GitHubCandidateCatalog:
                  and runtime.runtime_image_ref == images["execution_runtime"]
                  and runtime.agent_image_ref == images["harbor_runtime"])
         verify_execution_image_admission(runtime.image_admission, keyring=self.keyring,
-                                         required_image_refs=[images[name] for name in (
-                                             "service", "execution_runtime", "harbor_runtime",
-                                         )])
+                                         required_image_refs=runtime.published_image_refs())
         return CandidateBundle(reference.candidate_id, candidate, profile)

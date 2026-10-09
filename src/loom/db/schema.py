@@ -8080,6 +8080,68 @@ class GatewayDispatchReceipt(Base):
     gateway_http_status: Mapped[int | None] = mapped_column(Integer)
 
 
+class HarborBaselineSession(Base):
+    """A bounded external benchmark run; never a Loom Trial or worker lease."""
+
+    __tablename__ = "harbor_baseline_sessions"
+    __table_args__ = (
+        CheckConstraint(
+            "max_calls > 0 AND max_total_tokens > 0 AND max_input_tokens > 0 "
+            "AND max_output_tokens > 0",
+            name="harbor_baseline_limits_check",
+        ),
+        CheckConstraint(
+            "calls_reserved >= 0 AND tokens_reserved >= 0 AND cost_reserved_usd >= 0",
+            name="harbor_baseline_counters_check",
+        ),
+        CheckConstraint(
+            "budget_usd IS NULL OR budget_usd > 0", name="harbor_baseline_budget_check"
+        ),
+    )
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    team_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("teams.id", ondelete="RESTRICT")
+    )
+    provider_connection_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("provider_connections.id", ondelete="RESTRICT")
+    )
+    model: Mapped[str] = mapped_column(Text)
+    label: Mapped[str] = mapped_column(Text)
+    token_hash: Mapped[bytes] = mapped_column(LargeBinary, unique=True)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now()
+    )
+    expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    blocked_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    max_calls: Mapped[int] = mapped_column(Integer)
+    max_input_tokens: Mapped[int] = mapped_column(Integer)
+    max_output_tokens: Mapped[int] = mapped_column(Integer)
+    max_total_tokens: Mapped[int] = mapped_column(BigInteger)
+    budget_usd: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    calls_reserved: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    tokens_reserved: Mapped[int] = mapped_column(BigInteger, server_default=text("0"))
+    cost_reserved_usd: Mapped[Decimal] = mapped_column(Numeric(18, 6), server_default=text("0"))
+
+
+class HarborBaselineDispatch(Base):
+    """Durable pre-dispatch reservation, retained on ambiguous provider outcomes."""
+
+    __tablename__ = "harbor_baseline_dispatches"
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    baseline_session_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("harbor_baseline_sessions.id", ondelete="RESTRICT"),
+        index=True,
+    )
+    reserved_tokens: Mapped[int] = mapped_column(BigInteger)
+    reserved_cost_usd: Mapped[Decimal] = mapped_column(Numeric(18, 6))
+    outcome: Mapped[str] = mapped_column(Text, server_default="reserved")
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now()
+    )
+
+
 class LlmCall(Base):
     """One row per LLM call routed through the Gateway. Written by every
     dialect endpoint after the upstream provider returns. Read by the
@@ -8089,7 +8151,8 @@ class LlmCall(Base):
     __tablename__ = "llm_calls"
     __table_args__ = (
         CheckConstraint(
-            "(trial_id IS NOT NULL)::integer + (execution_attempt_id IS NOT NULL)::integer = 1",
+            "(trial_id IS NOT NULL)::integer + (execution_attempt_id IS NOT NULL)::integer "
+            "+ (baseline_session_id IS NOT NULL)::integer = 1",
             name="llm_calls_exactly_one_subject_check",
         ),
         Index("llm_calls_execution_attempt_idx", "execution_attempt_id", "captured_at"),
@@ -8101,6 +8164,12 @@ class LlmCall(Base):
         PgUUID(as_uuid=True),
         ForeignKey("execution_attempts.id", ondelete="RESTRICT"),
         nullable=True,
+    )
+    baseline_session_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("harbor_baseline_sessions.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
     )
     step_id: Mapped[str] = mapped_column(Text, nullable=False)
     model: Mapped[str] = mapped_column(Text, nullable=False)
