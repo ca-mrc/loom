@@ -770,7 +770,7 @@ def test_runtime_closed_database_probe_is_bound_readonly_and_independent_of_mana
         completed_pool, publisher_cloud, monkeypatch):
     from types import SimpleNamespace
 
-    from loom.nebius_platform_render import digest
+    from loom_service.pool_management.capacity import digest
 
     _, request = runtime_install_request(completed_pool, publisher_cloud)
     name = 'scripts.ops.nebius_development_runtime_probes'
@@ -846,7 +846,8 @@ def test_runtime_closed_database_probe_is_bound_readonly_and_independent_of_mana
     monkeypatch.setattr(module.subprocess, 'run', execute)
     with module.HTTPSDevelopmentRuntimeProbes(request=request,
             api_server=request.database.foundation.inputs.config['kubernetes_api_server'],
-            ssl_context=ssl.create_default_context(), token='operator-test') as probes:
+            ssl_context=ssl.create_default_context(cadata=request.database.foundation.bootstrap['material']['loom-platform-db']['ca.crt']),
+            token='operator-test') as probes:
         for connection in (probes, probes.manager, probes.foundation):
             connection.client.close()
             connection.client = type(completed_pool[3].api.client)(base_url=connection.api_server, transport=httpx.MockTransport(handle))
