@@ -848,7 +848,7 @@ jobs:
 
   development-pool:
     if: >-
-      github.repository == 'qianyi-sun/loom' &&
+      github.repository_id == '1281629473' &&
       github.ref == 'refs/heads/dev' &&
       github.event_name == 'workflow_dispatch' &&
       (inputs.operation == 'development-pool-preflight' || inputs.operation == 'development-pool-install')
