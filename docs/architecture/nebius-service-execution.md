@@ -758,6 +758,11 @@ source, lifecycle and projection qualification before copying and under commit
 locks, and requires immutable versions for every published object. A failed retry
 preserves the original Trial outcome and never admits another storage requeue.
 
+Installed recovery commands bind to the Control Plane's read-only projection of
+`profile.json` and `environment.json` at `/var/run/loom-platform`. Only these two
+keys from the deployment-owned `loom-platform-config` are mounted there; the API,
+gateway and task Pods do not receive this recovery configuration mount.
+
 Each Control Plane runs the configured number of materialization workers
 (default eight); `FOR UPDATE SKIP LOCKED` claims keep those workers and multiple
 Control Plane replicas mutually exclusive without imposing a serial transfer

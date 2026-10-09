@@ -272,6 +272,10 @@ claim. After the repaired candidate and migration `0175` are installed through
 normal protected rollout, the supported follow-up is
 `python -m loom_control_plane.pending_archive_retry` in the installed Control
 Plane, with its unchanged runtime environment and mounted platform configuration.
+The Control Plane mounts only `profile.json` and `environment.json` from
+`loom-platform-config`, read-only at `/var/run/loom-platform`; use that directory
+for `--platform`. Both archive retry and large-object recovery require this
+installed binding. Do not substitute caller-written files for the mounted data.
 The Job renderer now requires explicit lifecycle environment/namespace settings;
 preflight rejects mismatched existing lifecycle ownership.
 
