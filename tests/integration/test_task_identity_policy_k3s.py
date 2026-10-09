@@ -15,8 +15,12 @@ from tests.unit.test_service_execution_materialization import _provenance
 from tests.unit.test_task_sandbox_identity import _identity_task
 
 
-def _pod(namespace: str, *, user: str = "root", home: str | None = None) -> dict:
-    from loom.service_execution_materialization import compile_service_execution_plan
+def _pod(namespace: str, *, user: str = "root", home: str | None = None, deferred: bool = False) -> dict:
+    from loom.execution_runtime_contract import RuntimeHandoffInputV1
+    from loom.service_execution_materialization import (
+        compile_deferred_verifier_plan,
+        compile_service_execution_plan,
+    )
 
     lease = _lease(namespace)
     job = render_execution_job(lease, target=ExecutionTargetRuntime(target_id=lease.target_id, namespace=namespace))
@@ -26,6 +30,11 @@ def _pod(namespace: str, *, user: str = "root", home: str | None = None) -> dict
         task=task, trial=trial, profile=profile.model_copy(update={"supports_task_identity": True}),
         source_provenance=_provenance(), task_revision_sha256="sha256:" + "c" * 64,
     )
+    if deferred:
+        plan = compile_deferred_verifier_plan(plan, task, verifier_timeout_seconds=120,
+            handoff_input=RuntimeHandoffInputV1(
+                manifest_sha256="sha256:" + "d" * 64, file_count=1, total_bytes=10,
+            ))
     template["spec"]["initContainers"].extend(_sidecar(sidecar) for sidecar in plan.sidecars)
     template["spec"]["volumes"].extend(
         {"name": sidecar.role_name + "-socket", "emptyDir": {}} for sidecar in plan.sidecars
@@ -138,7 +147,10 @@ def test_private_root_policy_accepts_only_the_constrained_pod_shape(tmp_path: Pa
                 "name": document["metadata"]["name"] + "-policy-check",
             }, "spec": deepcopy(template["spec"])})
         assert len(platform_pods) == 2
-        admitted_shapes = [*platform_pods, _pod(namespace, user="0:1001", home="/root")]
+        admitted_shapes = [
+            *platform_pods, _pod(namespace, user="0:1001", home="/root"),
+            _pod(namespace, deferred=True), _pod(namespace, user="1001:1002", home="/home/miles", deferred=True),
+        ]
         failures = []
         for admitted in admitted_shapes:
             result = apply([admitted], dry_run=True)

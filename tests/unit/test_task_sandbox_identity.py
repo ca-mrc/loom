@@ -126,6 +126,37 @@ def test_deferred_verifier_owns_only_verifier_outputs_and_the_attempt_skips_the_
     assert not _defers_verification(verifier)
 
 
+@pytest.mark.parametrize("user", ["root", "1001:1002"])
+def test_deferred_verifier_command_and_probes_use_its_mounted_socket(user):
+    from loom.service_execution_materialization import compile_deferred_verifier_plan
+
+    task, trial, profile = _identity_task(user, "/root" if user == "root" else "/home/miles")
+    plan = compile_service_execution_plan(
+        task=task, trial=trial, profile=profile.model_copy(update={"supports_task_identity": True}),
+        source_provenance=_provenance(), task_revision_sha256="sha256:" + "c" * 64,
+    )
+    original = plan.canonical_payload()
+    verifier = compile_deferred_verifier_plan(plan, task, verifier_timeout_seconds=120, handoff_input=_HANDOFF)
+    sandbox = next(s for s in verifier.sidecars if s.private_sandbox)
+    container = _sidecar(sandbox)
+    socket = "/loom/sandboxes/verifier-sandbox/sandbox.sock"
+    assert container["name"] == "verifier-sandbox"
+    assert container["command"] == [
+        "/loom/bin/loom-sandbox-runtime", "--socket", socket,
+        "--exec-timeout-seconds", plan.sidecars[-1].argv[-1],
+    ]
+    for name in ("startupProbe", "readinessProbe"):
+        assert container[name]["exec"]["command"] == [
+            "/loom/bin/loom-sandbox-runtime", "--check-socket", socket,
+        ]
+    assert {"name": "verifier-sandbox-socket", "mountPath": socket.rsplit("/", 1)[0]} in container["volumeMounts"]
+    assert sandbox.image_ref == plan.sidecars[-1].image_ref
+    assert sandbox.resources == plan.sidecars[-1].resources
+    assert sandbox.startup_probe.failure_threshold == plan.sidecars[-1].startup_probe.failure_threshold
+    assert sandbox.readiness_probe.timeout_seconds == plan.sidecars[-1].readiness_probe.timeout_seconds
+    assert plan.canonical_payload() == original
+
+
 def test_identity_cannot_apply_to_an_ordinary_sidecar_or_the_controller():
     task, trial, profile = _inputs()
     plan = compile_service_execution_plan(

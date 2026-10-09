@@ -424,6 +424,10 @@ python -I -m loom.service_execution_sandbox_task verify-sandbox \
 That plan restores the public state into `verifier-sandbox`, injects private
 inputs, and grades without rerunning the agent. The verifier command must never
 be recovered by editing the preceding harness argv.
+The sandbox runtime and its startup/readiness probes all use the child's
+`/loom/sandboxes/verifier-sandbox/sandbox.sock`, matching its private volume
+mount and admission policy. Compiling the child leaves the frozen agent plan
+unchanged, including its original task-sandbox socket.
 
 The control-plane scheduler calls the deferred compiler once the agent pod is
 deleted and reserves the child verifier lease automatically

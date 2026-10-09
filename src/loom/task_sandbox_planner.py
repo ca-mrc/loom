@@ -380,7 +380,25 @@ def compile_deferred_verifier_plan(
         user, task.environment.environment.get("HOME"),
         default_uid=agent_plan.run_as_user, default_gid=agent_plan.run_as_group,
     )
-    verifier_sandbox = task_sandbox.model_copy(update={"role_name": VERIFIER_SANDBOX, "identity": identity})
+    def verifier_argv(argv: tuple[str, ...]) -> tuple[str, ...]:
+        return tuple(
+            f"/loom/sandboxes/{VERIFIER_SANDBOX}/sandbox.sock"
+            if item == f"/loom/sandboxes/{TASK_SANDBOX}/sandbox.sock" else item
+            for item in argv
+        )
+
+    # The renderer derives the mounted socket from role_name. Retarget the
+    # runtime and both probes together while preserving the frozen attempt.
+    verifier_sandbox = task_sandbox.model_copy(update={
+        "role_name": VERIFIER_SANDBOX, "identity": identity,
+        "argv": verifier_argv(task_sandbox.argv),
+        "startup_probe": task_sandbox.startup_probe.model_copy(update={
+            "argv": verifier_argv(task_sandbox.startup_probe.argv),
+        }),
+        "readiness_probe": task_sandbox.readiness_probe.model_copy(update={
+            "argv": verifier_argv(task_sandbox.readiness_probe.argv),
+        }),
+    })
     outputs = [
         item if item == TASK_EGRESS_OUTPUT
         else item.model_copy(update={"required": item.relative_path == "verifier/output.json"})
