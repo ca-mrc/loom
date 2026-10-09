@@ -11,12 +11,42 @@ import os
 import struct
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import yaml
 from tests.ops.test_nebius_development_management_gateway import archive
+from tests.unit.test_nebius_candidate_catalog import publication as publication
+
+
+@pytest.mark.parametrize('repository', ['qianyi-sun/loom', 'ca-mrc/loom', 'fork/loom', None, ['ca-mrc/loom']])
+def test_runtime_publication_preserves_historical_and_current_names_only(publication, repository):
+    from scripts.ops.nebius_development_preflight import PreparedDevelopmentSource
+    from scripts.ops.nebius_development_runtime_render import DevelopmentRuntimePublication
+
+    from loom_service.environment_management.candidates import ProtectedPublication
+    from loom_service.environment_management.manager import CandidateBundle
+
+    reference, _, payload, _, candidate = publication
+    with zipfile.ZipFile(io.BytesIO(payload)) as source:
+        profile = json.loads(source.read('runtime-profile.json'))
+    # The base catalog fixture predates source-archive publication. Runtime
+    # delivery additionally binds the reviewed source archive's checksum.
+    candidate = candidate | {'repository': repository, 'source_archive_sha256': 'sha256:' + 'c' * 64}
+    selected = ProtectedPublication.model_validate(reference)
+    source = PreparedDevelopmentSource(source_sha=selected.source_sha,
+        source_archive_sha256=candidate['source_archive_sha256'])
+    target = DevelopmentRuntimePublication(source, selected, CandidateBundle(selected.candidate_id, candidate, profile))
+    if repository in ('qianyi-sun/loom', 'ca-mrc/loom'):
+        qualified = target.validate(candidate['registry_prefix'])
+        assert qualified.bundle.candidate['repository'] == repository
+        assert qualified.source.source_sha == selected.source_sha
+        assert qualified.bundle.candidate == candidate
+    else:
+        with pytest.raises(ValueError, match='development runtime publication differs'):
+            target.validate(candidate['registry_prefix'])
 
 
 def module(suffix='gateway'):
