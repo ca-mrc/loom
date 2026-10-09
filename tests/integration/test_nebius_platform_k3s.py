@@ -23,6 +23,69 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+@pytest.mark.timeout(240)
+def test_control_plane_recovery_config_is_projected_read_only(tmp_path: Path, platform_inputs) -> None:
+    import hashlib
+    import time
+
+    from tests.integration.test_execution_actuator_k3s import _docker, _import_image
+
+    config, candidate, profile = platform_inputs
+    files = build_platform(config, candidate, profile, {}, repo_root=Path(__file__).resolve().parents[2])
+    documents = [doc for batch in files.values() for doc in batch]
+    cp = next(doc for doc in documents if doc["kind"] == "Deployment"
+              and doc["metadata"]["name"] == "loom-control-plane")["spec"]["template"]["spec"]
+    mounts = [row for row in cp["containers"][0]["volumeMounts"]
+              if row["mountPath"] == "/var/run/loom-platform"]
+    assert len(mounts) == 1, "recovery configuration is absent from the real Control Plane Pod"
+    volume = next(row for row in cp["volumes"] if row["name"] == mounts[0]["name"])
+    cm = next(doc for doc in documents if doc["kind"] == "ConfigMap"
+              and doc["metadata"]["name"] == volume["configMap"]["name"])
+    # Reuse the pinned Alpine base already used by the integration fixtures.
+    source = "alpine@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40"
+    tag = "docker.io/library/loom-config-probe:" + uuid4().hex
+    container = _start_k3s()
+    try:
+        _, core, _ = _load_client(container)
+        _docker("pull", source)
+        _docker("tag", source, tag)
+        image = _import_image(container, tag=tag, root=tmp_path, ordinal=0)
+        namespace = next(doc for doc in documents if doc["kind"] == "Namespace"
+                         and doc["metadata"]["name"] == config["namespace"])
+        core.create_namespace(namespace)
+        core.create_namespaced_config_map(config["namespace"], cm)
+        command = """set -eu
+cd /var/run/loom-platform
+sha256sum profile.json environment.json
+if (echo changed > profile.json) 2>/dev/null; then exit 1; fi
+test ! -e keyring.json
+echo projection-read-only
+"""
+        name = "loom-recovery-config-probe"
+        pod = {"apiVersion": "v1", "kind": "Pod", "metadata": {"name": name}, "spec": {
+            "restartPolicy": "Never", "automountServiceAccountToken": False,
+            "securityContext": deepcopy(cp["securityContext"]), "volumes": [deepcopy(volume)],
+            "containers": [{"name": "probe", "image": image, "imagePullPolicy": "Never",
+                "command": ["sh", "-c", command], "volumeMounts": deepcopy(mounts),
+                "securityContext": deepcopy(cp["containers"][0]["securityContext"])}],
+        }}
+        core.create_namespaced_pod(config["namespace"], pod)
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline:
+            observed = core.read_namespaced_pod(name, config["namespace"])
+            if observed.status.phase in {"Succeeded", "Failed"}:
+                break
+            time.sleep(1)
+        assert observed.status.phase == "Succeeded", observed.status
+        logs = core.read_namespaced_pod_log(name, config["namespace"])
+        for key in ("profile.json", "environment.json"):
+            assert hashlib.sha256(cm["data"][key].encode()).hexdigest() + "  " + key in logs
+        assert "projection-read-only" in logs
+    finally:
+        container.stop()
+        subprocess.run(["docker", "image", "rm", tag], capture_output=True, check=False)
+
+
 @pytest.mark.parametrize("mode", ["standalone", "management", "application", "development-foundation"])
 def test_complete_platform_resources_and_pods_pass_server_admission(
     request: pytest.FixtureRequest, tmp_path: Path, mode: str,

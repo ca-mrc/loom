@@ -11,6 +11,51 @@ from loom.nebius_platform_render import NebiusPlatformError, build_platform, wri
 ROOT = Path(__file__).resolve().parents[2]
 
 
+@pytest.mark.parametrize("environment", ["development", "staging"])
+def test_control_plane_mount_reaches_both_installed_recovery_consumers(
+    platform_inputs: tuple, tmp_path: Path, monkeypatch, environment: str,
+) -> None:
+    from loom.db.schema_startup import service_schema_head
+    from loom_control_plane.large_object_version_recovery import qualify_platform
+    from loom_control_plane.pending_archive_retry import qualify_retry_platform
+    from tests.unit.test_large_object_version_recovery_cli import request as object_request
+    from tests.unit.test_pending_archive_retry import requeued
+
+    config, candidate, profile = platform_inputs
+    config["environment"] = environment
+    files = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    deployments = {doc["metadata"]["name"]: doc["spec"]["template"]["spec"]
+                   for doc in files["40-services.yaml"] if doc["kind"] == "Deployment"}
+    pod = deployments["loom-control-plane"]
+    mount = [row for row in pod["containers"][0]["volumeMounts"]
+             if row["mountPath"] == "/var/run/loom-platform"]
+    assert len(mount) == 1, "installed recovery CLI has no platform configuration mount"
+    assert mount[0]["readOnly"] is True and "subPath" not in mount[0]
+    volume = next(row for row in pod["volumes"] if row["name"] == mount[0]["name"])
+    projection = volume["configMap"]
+    assert projection["name"] == "loom-platform-config"
+    assert projection["items"] == [
+        {"key": "profile.json", "path": "profile.json"},
+        {"key": "environment.json", "path": "environment.json"},
+    ]
+    cm = next(doc for doc in files["10-config-network.yaml"]
+              if doc["kind"] == "ConfigMap" and doc["metadata"]["name"] == projection["name"])
+    for item in projection["items"]:
+        (tmp_path / item["path"]).write_text(cm["data"][item["key"]])
+    env = {row["name"]: row.get("value") for row in pod["containers"][0]["env"]}
+    monkeypatch.setenv("LOOM_ENV", env["LOOM_ENV"])
+    monkeypatch.setenv("LOOM_NAMESPACE", env["LOOM_NAMESPACE"])
+    _, retry, _, _, _ = requeued()
+    retry = retry.model_copy(update={"candidate_sha": candidate["candidate_sha"],
+                                    "schema_head": service_schema_head()})
+    qualify_retry_platform(retry, tmp_path)
+    qualify_platform(object_request(candidate_sha=candidate["candidate_sha"]), tmp_path)
+    for name, other in deployments.items():
+        if name != "loom-control-plane":
+            assert not any(row["mountPath"] == "/var/run/loom-platform"
+                           for row in other["containers"][0].get("volumeMounts", []))
+
+
 @pytest.mark.parametrize("configured_default", [None, {
     "controller": {"cpu_millis": 100, "memory_mib": 256, "ephemeral_storage_mib": 256},
     "task_sandbox": {"cpu_millis": 400, "memory_mib": 512, "ephemeral_storage_mib": 512},
