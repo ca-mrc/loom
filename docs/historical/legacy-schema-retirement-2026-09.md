@@ -1,4 +1,10 @@
-# Legacy structure cleanup inventory
+# Legacy schema retirement (migration 0171)
+
+Historical record of the September 2026 schema retirement. Retired shared-cluster
+backends remain unsupported. The observations below describe that snapshot,
+not the current deployment or permission to modify retained data. Current
+[migration policy](../../database/README.md) and
+[deployment procedures](../runbooks/nebius-deployment.md) govern upgrades.
 
 Tracking: [#2231](https://github.com/qianyi-sun/loom/issues/2231), implemented in
 one [PR #2232](https://github.com/qianyi-sun/loom/pull/2232).
@@ -97,7 +103,7 @@ The operator's local evidence receipts are
 `.loom/evidence/legacy-object-inventory-20260928.json`; these ignored files are not
 repository fixtures. Repeat the inventory on the exact target before rollout.
 
-Run `.venv/bin/python scripts/ops/inventory_legacy_structures.py` with the target
+Run `uv run --no-sync python scripts/ops/inventory_legacy_structures.py` with the target
 `LOOM_DB_URL` supplied by the protected operator environment. Never put the DSN
 in command arguments or issue comments. The tool uses a repeatable-read/read-only
 transaction, statement/lock limits and `row_security=off`; timed-out or
@@ -152,7 +158,7 @@ Focused disposable PostgreSQL 16 / MinIO coverage verifies:
   pinned newer object version and trial. No model reruns are involved.
 
 The PR records exact commands/results. These are local verification and live
-read-only observations, not deployed acceptance. Issue #2231 remains open until
-protected merge and the required target-environment acceptance are recorded.
+read-only observations, not deployed acceptance. Protected merge and target-environment acceptance are tracked separately in
+issue #2231; this record does not assert their current status.
 Live data reclamation, if a later inventory finds eligible records, still needs
 its exact scope, retention disposition and existing GC authority.

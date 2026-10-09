@@ -11,7 +11,7 @@ Compose development remain supported; users can select external inference APIs.
 | Find a component or protocol contract | [Architecture index](architecture/README.md) |
 | Author tasks, agents or provider integrations | [Integration guides](integrations/README.md) |
 | Deploy, diagnose or recover Loom | [Operator runbook](runbooks/operator-runbook.md) and [procedure index](runbooks/README.md) |
-| Develop and validate a change | [Contributor quickstart](contributing/contributor-quickstart.md) and [contribution policy](../CONTRIBUTING.md) |
+| Develop and validate a change | [Contributor guides](contributing/README.md), [quickstart](contributing/contributor-quickstart.md) and [contribution policy](../CONTRIBUTING.md) |
 | Build your own frontend/API against shared development data | [Personal application workflow](runbooks/personal-development.md) |
 | Find code, configuration or migration history | [Repository map](contributing/repository-layout.md) |
 | Understand benchmark reward semantics | [Score contract](score-alignment/README.md) |
@@ -37,7 +37,9 @@ The [domain model](agent/domain-model.md) defines the shared terms.
 
 The [platform contract](architecture/nebius-primary-platform.md) and
 [native execution contract](architecture/nebius-service-execution.md) define
-hosted behavior. Desktop/GUI and Behavior GPU hosted workloads are unsupported;
+hosted behavior. [Personal applications](architecture/nebius-personal-applications.md)
+and [shared pools](architecture/nebius-shared-pools.md) have separate lifecycle
+and capacity contracts. Desktop/GUI and Behavior GPU hosted workloads are unsupported;
 other classes still require conversion as recorded by the
 [compatibility inventory](evidence/service-workload-compatibility-v2.json).
 Retired shared-cluster paths are not fallbacks. Local functionality and retained
