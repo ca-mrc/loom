@@ -293,9 +293,29 @@ native container and guest (QEMU) execution (#2362).
   - Codex's provider-side `web_search` tool is disabled
     (`-c web_search="disabled"`). It would otherwise search the web outside
     the task's network policy.
+  - Reasoning summaries (`-c model_reasoning_summary="detailed"`) are
+    requested only for OpenAI reasoning models (gpt-5, o-series, codex-*).
+    Other models reject the parameter. Providers expose summaries, never raw
+    reasoning, and only when the model produces one.
 - **Capture** (`trace_format="codex"`).
   - The raw `exec --json` stream is native evidence
     (`artifacts/codex/events.jsonl`, required, bounded at 64 MiB).
+  - After Codex exits, its own session log (`CODEX_HOME/sessions/**/rollout-*.jsonl`)
+    is copied out as optional native evidence (`artifacts/codex/session.jsonl`,
+    same bound). It holds what the exec stream omits: full tool-call arguments
+    (including `apply_patch` text), complete tool outputs and reasoning
+    summaries.
+  - **Canonical ATIF.** Materialization builds the Codex ATIF from the session
+    log with `loom.codex_atif`, a port of Harbor's Codex converter at the
+    controller's pinned Harbor commit (parity is tested against Harbor's own
+    output). One step per model request: message, reasoning summary, tool
+    calls, observations (tool output and exit code) and Codex's per-request
+    token metrics. `clean_trajectory` drops Codex's injected context messages
+    (sandbox permissions, environment and AGENTS.md context), per-step `extra`
+    metadata and tool-output timing headers. Loom adds its own identity, the
+    verifier result (`metadata`) and the Gateway ledger accounting
+    (`accounting`), not Harbor's LiteLLM price estimate. Without a session
+    log, the generic projection is used.
   - Completed items become typed events: `command_execution` becomes a
     `shell` `ToolUseEvent`, `file_change` becomes an `apply_patch`
     `ToolUseEvent`, and messages, reasoning and errors become

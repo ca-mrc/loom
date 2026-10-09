@@ -13,10 +13,12 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import re
+import shlex
 import sys
 from collections.abc import AsyncIterator, Mapping
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from uuid import UUID
 
@@ -39,6 +41,12 @@ from loom.trajectory.llm_call_events import llm_call_diagnostic_counts, llm_call
 CODEX_USAGE_SCHEMA = "loom.service-execution-codex-usage.v1"
 CODEX_EXTRA_CONFIG = ('web_search="disabled"',)
 CODEX_NATIVE_EVENTS = Path("codex/events.jsonl")
+# Codex's own session log: full tool arguments, outputs and reasoning
+# summaries, from which the canonical ATIF is built (`loom.codex_atif`).
+CODEX_SESSION = Path("codex/session.jsonl")
+# Reasoning summaries are only accepted by OpenAI reasoning models; requesting
+# one from another model fails the call (`reasoning.summary` unsupported).
+_REASONING_MODEL = re.compile(r"(?:^|/)(?:gpt-5|o1|o3|o4|codex-)")
 # Bound the native evidence and any single mapped text field.
 MAX_NATIVE_BYTES = 64 * 1024 * 1024
 _MAX_TEXT = 64 * 1024
@@ -163,6 +171,37 @@ def parse_codex_events(
     return events
 
 
+def codex_extra_config(model: ModelSpec) -> tuple[str, ...]:
+    """Codex `-c` overrides for this model."""
+    if _REASONING_MODEL.search(model.name):
+        return (*CODEX_EXTRA_CONFIG, 'model_reasoning_summary="detailed"')
+    return CODEX_EXTRA_CONFIG
+
+
+async def collect_session(driver: Any, workspace: Path) -> bool:
+    """Copy Codex's session log out of the sandbox, if there is exactly one.
+
+    Best effort: the log enriches the trajectory, while the exec stream and
+    the Gateway ledger remain the required evidence.
+    """
+    sessions = PurePosixPath(CODEX_HOME) / "sessions"
+    try:
+        listing = await driver.exec(f"find {sessions} -type f -name 'rollout-*.jsonl' 2>/dev/null", timeout_sec=60)
+        paths = [line.strip() for line in listing.stdout.decode().splitlines() if line.strip()]
+        if len(paths) != 1:
+            print(f"codex session log not collected ({len(paths)} candidates)", file=sys.stderr)
+            return False
+        size = await driver.exec(f"wc -c < {shlex.quote(paths[0])}", timeout_sec=60)
+        if size.return_code != 0 or int(size.stdout.decode().strip() or 0) > MAX_NATIVE_BYTES:
+            print("codex session log not collected (unreadable or over its evidence limit)", file=sys.stderr)
+            return False
+        await driver.download(PurePosixPath(paths[0]), workspace / CODEX_SESSION)
+        return True
+    except Exception as exc:  # optional evidence must not fail the run
+        print(f"codex session log not collected: {type(exc).__name__}", file=sys.stderr)
+        return False
+
+
 def codex_environment(model_environment: Mapping[str, str], trial: TrialConfig) -> dict[str, str]:
     from loom.request_params import sanitize_request_extras
 
@@ -216,7 +255,7 @@ async def run_codex(
         model=LauncherModelSpec(provider=model.provider, name=model.name, tier=model.tier, region=model.region),
         env=environment,
         # Provider-side web search would bypass the task's network policy.
-        extra_config=CODEX_EXTRA_CONFIG,
+        extra_config=codex_extra_config(model),
     )
     # The adapter's default home is inside the task workdir, which the
     # verifier grades. Native execution keeps it outside.
@@ -265,6 +304,7 @@ async def run_codex(
             await handle.kill()
             raise
     finally:
+        await collect_session(driver, workspace)
         try:
             for call in ledger_calls(await ledger(trial_id), trial=trial_config, trial_id=trial_id):
                 record(call)
@@ -279,9 +319,12 @@ async def run_codex(
 
 __all__ = [
     "CODEX_NATIVE_EVENTS",
+    "CODEX_SESSION",
     "CODEX_USAGE_SCHEMA",
     "codex_environment",
+    "codex_extra_config",
     "codex_usage",
+    "collect_session",
     "ledger_calls",
     "map_codex_event",
     "parse_codex_events",

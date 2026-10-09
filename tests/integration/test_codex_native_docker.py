@@ -19,11 +19,17 @@ import httpx
 import pytest
 
 import loom.service_execution_sandbox_task as controller
+from loom.codex_atif import clean_trajectory, harbor_trajectory
 from loom.hosted_harness import CODEX, CODEX_INSTALL_ROOT
 from loom.models.trajectory import AgentThoughtEvent, ToolUseEvent
 from loom.models.trial import TrialConfig
 from loom.models.types import ModelSpec
-from loom.service_execution_codex import CODEX_NATIVE_EVENTS, parse_codex_events, run_codex
+from loom.service_execution_codex import (
+    CODEX_NATIVE_EVENTS,
+    CODEX_SESSION,
+    parse_codex_events,
+    run_codex,
+)
 from tests.integration.test_sandbox_process_streaming_docker import locked_down_sandbox
 from tests.integration.test_task_identity_installation_docker import native_binary  # noqa: F401
 from tests.unit.test_service_execution_terminus_plan import _inputs
@@ -155,6 +161,16 @@ async def test_real_codex_installs_and_runs_a_command_in_the_sandbox(
     assert any(isinstance(e, AgentThoughtEvent) and e.content == "wrote proof.txt" for e in events)
     usage = json.loads((output / "usage.json").read_text())
     assert usage["schema_version"] == "loom.service-execution-codex-usage.v1" and usage["call_count"] == 0
+    # Codex's own session log is collected and converts into ATIF steps with
+    # the full command and its observation.
+    converted = harbor_trajectory((output / CODEX_SESSION).read_bytes(), model_name="gpt-4.1-mini")
+    assert converted is not None
+    steps = clean_trajectory(converted)["steps"]
+    assert steps[0]["source"] == "user" and steps[0]["message"] == "Write proof.txt."
+    call = next(c for s in steps for c in s.get("tool_calls", []))
+    assert call["function_name"] == "exec_command" and "proof.txt" in call["arguments"]["cmd"]
+    result = next(r for s in steps for r in s.get("observation", {}).get("results", []))
+    assert result["content"] == "from-codex\n" and result["exit_code"] == 0
 
 
 async def test_real_codex_installs_and_runs_in_a_guest(codex_release, monkeypatch, tmp_path: Path) -> None:
