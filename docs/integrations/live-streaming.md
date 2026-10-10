@@ -72,8 +72,8 @@ Replay uses bounded pages and yields between pages. Connection deadlines and
 disconnects remain effective while draining a backlog; a `reconnect` event
 reports the last delivered sequence, so clients can resume with `after_seq=N`.
 An invalid or nonadvancing source sequence ends the stream without claiming
-completion. Disconnect, cancellation, read failure and normal completion all
-close the stream's LISTEN subscription.
+completion. After LISTEN setup succeeds, disconnect, cancellation, read failure
+and normal completion close the subscription.
 
 Example (bash):
 
