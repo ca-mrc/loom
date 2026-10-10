@@ -3980,8 +3980,10 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
 
 
 @pytest.mark.timeout(240)
+@pytest.mark.parametrize('connection', ['protocol', 'database'])
 @pytest.mark.parametrize('forward_point', ['partial-acquire', 'partial-release'])
-def test_shared_recovery_fence_preserves_forward_history_and_observes_unknown_writes(shared_operation, forward_point):
+def test_shared_recovery_fence_preserves_forward_history_and_observes_unknown_writes(
+        shared_operation, forward_point, connection, shared_guard_transport, shared_runtime, completed_pool, handoff, monkeypatch):
     """Own recovery authority; only remote transactions and other phases doubled."""
     import importlib.util
 
@@ -3994,6 +3996,11 @@ def test_shared_recovery_fence_preserves_forward_history_and_observes_unknown_wr
     name = 'scripts.ops.nebius_shared_pool_recovery_fence'
     assert importlib.util.find_spec(name) is not None, 'shared terminal recovery fence is missing'
     module = __import__(name, fromlist=['advance_shared_recovery_fence'])
+    live = None
+    if connection == 'database':
+        name = 'scripts.ops.nebius_shared_pool_recovery_fence_live'
+        assert importlib.util.find_spec(name) is not None, 'fixed shared recovery transactions are missing'
+        live = __import__(name, fromlist=['SharedPoolRecoveryFenceTransport'])
     args, bindings = shared_operation
     manager = args['runtime'].database.manager.retained.request.retained
     state = Path(manager.operation['state_dir']).parent / 'shared-pool-handoff'
@@ -4039,9 +4046,14 @@ def test_shared_recovery_fence_preserves_forward_history_and_observes_unknown_wr
             raise TimeoutError('simulated committed or uncommitted guard fence reply loss')
 
     remote = Remote()
+    guard_api, database_model = shared_guard_transport
+    if connection == 'database':
+        _shared_recovery_database_io(remote=remote, bindings=bindings, guard_api=guard_api, database_model=database_model,
+            shared_runtime=shared_runtime, completed_pool=completed_pool, handoff=handoff, monkeypatch=monkeypatch)
 
     class API(SharedPhaseAPI):
         interrupted = False
+        fence_api = remote if connection == 'protocol' else None
 
         def prepare(self, phase, bound, directory):
             if phase == 'forward-guards':
@@ -4092,7 +4104,10 @@ def test_shared_recovery_fence_preserves_forward_history_and_observes_unknown_wr
                 private_state._atomic_json(path, record)
                 return False
             if phase == 'recovery-fence':
-                return module.advance_shared_recovery_fence(bindings=bound, api=remote, state_dir=directory)
+                if self.fence_api is None:
+                    self.fence_api = live.SharedPoolRecoveryFenceTransport(bindings=bound,
+                        kubeconfig=guard_api.kubeconfig, executable=Path(guard_api.prefix[0]), qualify=remote.verify_retained)
+                return module.advance_shared_recovery_fence(bindings=bound, api=self.fence_api, state_dir=directory)
             return super().advance(phase, bound, directory)
 
     api = API(parent)
@@ -4113,12 +4128,12 @@ def test_shared_recovery_fence_preserves_forward_history_and_observes_unknown_wr
         parent.run_shared_pool_operation(**kwargs)
     assert effects == []
     remote.local[roster[0]] = original
-    remote.migration = None
+    api.fence_api.migration = None
     checks = remote.checks
     with pytest.raises(ValueError):
         parent.run_shared_pool_operation(**kwargs)
     assert remote.checks == checks and effects == []
-    remote.migration = bindings.migration
+    api.fence_api.migration = bindings.migration
     previous = remote.mode
     remote.mode = 'global' if previous == 'closed' else 'closed'
     with pytest.raises(ValueError):
@@ -4157,8 +4172,74 @@ def test_shared_recovery_fence_preserves_forward_history_and_observes_unknown_wr
     module.validate_shared_recovery_fence(bindings=bindings, state_dir=child, complete=True)
     assert all(path.read_bytes() == raw for path, raw in frozen.items())
     with pytest.raises(ValueError):
-        module.advance_shared_recovery_fence(bindings=bindings, api=remote, state_dir=child)
+        module.advance_shared_recovery_fence(bindings=bindings, api=api.fence_api, state_dir=child)
     assert effects == expected_effects
+
+
+def _shared_recovery_database_io(*, remote, bindings, guard_api, database_model,
+        shared_runtime, completed_pool, handoff, monkeypatch):
+    """Replace only external kubectl I/O, retaining real DB identity and SQL checks."""
+    import json
+    import subprocess
+    from types import SimpleNamespace
+
+    from scripts.ops.nebius_pool_activation_database import (
+        fence_pool_activation_sql,
+        pool_activation_state_sql,
+    )
+    from scripts.ops.nebius_pool_guard_activation import pool_guard_activation_sql
+    from tests.ops.test_nebius_development_pool_retained import (
+        populate_database_backends,
+        runtime_http_inventory,
+    )
+
+    from loom.nebius_platform_render import digest
+
+    runtime, parent = shared_runtime
+    _, inventory, _ = runtime_http_inventory(runtime, parent, completed_pool[3].server, handoff[2])
+    namespace = bindings.migration.registration.binding.namespace
+    documents = {path: row for path, row in inventory.items() if '/namespaces/' + namespace + '/' in path}
+    documents['/api/v1/namespaces/' + namespace] = {'apiVersion': 'v1', 'kind': 'Namespace',
+        'metadata': {'name': namespace, 'uid': bindings.migration.registration.binding.namespace_uid}}
+    for row in documents.values():
+        if row['kind'] == 'Deployment':
+            row['spec']['replicas'] = 0
+            row['status'] = {'readyReplicas': 0}  # No healthy manager/gateway process is available.
+    populate_database_backends(documents)
+    database_model.documents.update(documents)
+    spec = bindings.migration.registration.spec
+    fallback = subprocess.run
+
+    def run(argv, **kwargs):
+        assert argv[:len(guard_api.prefix)] == guard_api.prefix
+        args = argv[len(guard_api.prefix):]
+        if args[0] == 'get':
+            return fallback(argv, **kwargs)
+        assert args[:2] == ['exec', '-n'] and args[3:8] == ['pod/loom-postgres-0', '-c', 'loom-postgres', '--', 'psql']
+        assert args[8:-2] == ['-X', '-qAt', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', 'loom']
+        assert args[-2] == '-c'
+        current_namespace, query = args[2], args[-1]
+        if current_namespace == namespace:
+            if query == fence_pool_activation_sql(spec):
+                remote.fence_pool()
+            else:
+                assert query == pool_activation_state_sql(spec)
+            value = {'schema': 'loom.pool-activation-state.v1', 'operation_id': str(spec.operation_id),
+                'installation_sha256': digest(spec.model_dump(mode='json')), 'state': remote.pool_state()}
+        else:
+            target, = (row for row in bindings.migration.guards if row.namespace == current_namespace)
+            participant = str(target.participant_id)
+            if query == pool_guard_activation_sql(spec.operation_id, target.participant_id,
+                    bindings.migration.registration.candidate['candidate_sha'], action='fence'):
+                remote.fence_guard(participant)
+            else:
+                assert query == pool_guard_activation_sql(spec.operation_id, target.participant_id,
+                    bindings.migration.registration.candidate['candidate_sha'], action='observe')
+            value = {'schema': 'loom.pool-local-guard.v1', 'operation_id': str(spec.operation_id),
+                'participant_id': participant, 'status': remote.guard_state(participant)}
+        return SimpleNamespace(returncode=0, stdout=json.dumps(value).encode(), stderr=b'')
+
+    monkeypatch.setattr(subprocess, 'run', run)
 
 
 @pytest.mark.timeout(420)
