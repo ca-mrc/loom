@@ -1066,6 +1066,25 @@ readbacks follow the last retained-authority check so a change during that check
 cannot pass unnoticed. Completed recovery keeps its historical drain receipt
 valid, but cannot resume this observer or dispatch the completed child again.
 
+The shared recovery-stop child selects only the captured staging roots and the
+new runtime's fixed consumers, collector, manager and gateway. Its predecessor
+choices come from frozen forward receipts, including both sides of an uncertain
+startup PATCH. PostgreSQL and unrelated backup workloads are outside this phase.
+Each fixed UID/resourceVersion/spec-tested PATCH both stops or suspends its root
+and adds a distinct shared-recovery marker. Even an already-stopped root therefore
+gets a real version barrier against delayed forward updates. The protected
+transport records the selected predecessor and stop intent after fresh authority,
+drain and dry-run checks, immediately before dispatch. Pre-dispatch busy checks
+leave the record prepared; unknown dispatched writes are read back without
+redispatch. An interruption after durable intent but before dispatch is also
+ambiguous; an exception alone cannot safely clear that intent. The child requires
+actual descendant-process drain and a fresh database drain before completion.
+Its read-only observer repeats both checks through the dependent revocation
+phase, rejecting reappearing descendants or new ledger activity without replaying
+completed stop writes. Observation ends when restoration starts or recovery is
+terminal. The child does not restore templates, grant rights or
+reopen intake; those remain dependent terminal recovery steps.
+
 The shared Role child reduces only the two source-qualified staging worker/build
 Roles, preserving their UIDs and existing bindings. Each rules-and-annotations
 PATCH tests the current UID, resourceVersion and rules. Mutation intent precedes
