@@ -6367,6 +6367,88 @@ def test_shared_recovery_restarts_only_current_staging_with_real_pod_readiness(s
         assert len(attempts) == calls
 
 
+def _exercise_completed_recovery_readers(bindings):
+    """A fresh process may read completed authority without recreating old mutators."""
+    import json
+    import ssl
+
+    import httpx
+    from scripts.ops.nebius_development_runtime_live import runtime_resource_path
+    from scripts.ops.nebius_shared_pool_recovery_gateway import HTTPSSharedRecoveryGateway
+    from scripts.ops.nebius_shared_pool_recovery_roles import HTTPSSharedRecoveryRoles
+    from scripts.ops.nebius_shared_pool_recovery_workloads import MARKER
+
+    catalog = {_key(row): copy.deepcopy(row) for row in bindings.plan.staging.attachment.resources
+        if row['kind'] in {'Role', 'ClusterRole', 'RoleBinding', 'ClusterRoleBinding'}}
+    for key in bindings.plan.staging_role_originals:
+        catalog[key]['metadata'].setdefault('annotations', {})[MARKER] = str(bindings.migration.registration.spec.operation_id)
+        catalog[key]['metadata']['resourceVersion'] = '202'
+    identity = bindings.migration.registration.binding
+    namespaces = {'kube-system': identity.kube_system_uid, identity.namespace: identity.namespace_uid,
+        **{guard.namespace: str(guard.namespace_uid) for guard in bindings.migration.guards},
+        **{ns.name: str(ns.uid) for participant in bindings.migration.registration.spec.participants
+            for ns in (participant.execution_namespace, participant.build_namespace)}}
+    calls = []
+
+    def handle(message):
+        path = message.url.path
+        calls.append((message.method, path))
+        if path.startswith('/api/v1/namespaces/'):
+            assert message.method == 'GET'
+            namespace = path.rsplit('/', 1)[-1]
+            return httpx.Response(200, json={'apiVersion': 'v1', 'kind': 'Namespace',
+                'metadata': {'name': namespace, 'uid': namespaces[namespace], 'resourceVersion': '1'}})
+        kinds = {'roles': 'Role', 'rolebindings': 'RoleBinding', 'clusterroles': 'ClusterRole', 'clusterrolebindings': 'ClusterRoleBinding'}
+        for resource, kind in kinds.items():
+            if path == '/apis/rbac.authorization.k8s.io/v1/' + resource:
+                assert message.method == 'GET'
+                return httpx.Response(200, json={'apiVersion': 'rbac.authorization.k8s.io/v1', 'kind': kind + 'List',
+                    'metadata': {'resourceVersion': '71'}, 'items': [row for row in catalog.values() if row['kind'] == kind]})
+        if path == '/apis/authorization.k8s.io/v1/selfsubjectrulesreviews':
+            assert message.method == 'POST'
+            _, _, account_namespace, account = message.headers['Impersonate-User'].split(':')
+            namespace = json.loads(message.content)['spec']['namespace']
+            rules = []
+            for row in catalog.values():
+                if not row['kind'].endswith('Binding') or (row['kind'] == 'RoleBinding' and row['metadata']['namespace'] != namespace):
+                    continue
+                if not any(subject['kind'] == 'ServiceAccount' and (subject['namespace'], subject['name']) == (account_namespace, account)
+                        for subject in row.get('subjects', [])):
+                    continue
+                reference = row['roleRef']
+                key = reference['kind'] + ':' + (row['metadata']['namespace'] if reference['kind'] == 'Role' else '-') + ':' + reference['name']
+                rules.extend(copy.deepcopy(catalog[key]['rules']))
+            return httpx.Response(201, json={'apiVersion': 'authorization.k8s.io/v1', 'kind': 'SelfSubjectRulesReview',
+                'spec': {}, 'status': {'incomplete': False, 'resourceRules': rules, 'nonResourceRules': []}})
+        assert message.method == 'GET', 'completed readers must not replay Kubernetes writes'
+        value = next((row for row in catalog.values() if path == runtime_resource_path(row) + '/' + row['metadata']['name']), None)
+        return httpx.Response(404) if value is None else httpx.Response(200, json=value)
+
+    config = bindings.plan.development.runtime.request.database.foundation.inputs.config
+    with HTTPSSharedRecoveryGateway(bindings=bindings, machines=None,
+            api_server=config['kubernetes_api_server'], ssl_context=ssl.create_default_context()) as gateway:
+        gateway.client.close()
+        gateway.client = type(gateway.client)(base_url=gateway.api_server, transport=httpx.MockTransport(handle))
+        gateway.verify_permissions()
+        with HTTPSSharedRecoveryRoles(bindings=bindings, templates=None, gateway=gateway,
+                qualify_runtime=lambda *_: pytest.fail('completed reader must not call the former write-phase qualifier'),
+                api_server=config['kubernetes_api_server'], ssl_context=ssl.create_default_context()) as roles:
+            roles.client.close()
+            roles.client = type(roles.client)(base_url=roles.api_server, transport=httpx.MockTransport(handle))
+            roles.verify_permissions()
+            key = next(iter(bindings.plan.staging_role_originals))
+            saved = catalog[key]['rules']
+            catalog[key]['rules'] = []
+            with pytest.raises(ValueError):
+                roles.verify_permissions()  # Completed receipts cannot excuse current missing rights.
+            catalog[key]['rules'] = saved
+            with pytest.raises(ValueError):
+                roles.restore_role(key, record_intent=lambda *_: pytest.fail('completed Role writer must not dispatch'))
+        with pytest.raises(ValueError):
+            gateway.qualify()  # Write-phase qualification still requires the active revoke phase.
+    assert any(method == 'POST' for method, _ in calls)
+
+
 @pytest.mark.timeout(600)
 @pytest.mark.parametrize('committed', [False, True])
 def test_shared_recovery_reopens_only_staging_once_and_requires_fresh_terminal_health(
@@ -6477,6 +6559,7 @@ def test_shared_recovery_reopens_only_staging_once_and_requires_fresh_terminal_h
     class API(SharedPhaseAPI):
         reopen_api = None
         interrupt_verification = False
+        completed_readers_checked = False
 
         def qualify(self, bound, record, *, recovering):
             super().qualify(bound, record, recovering=recovering)
@@ -6519,6 +6602,9 @@ def test_shared_recovery_reopens_only_staging_once_and_requires_fresh_terminal_h
                 private_state._atomic_json(path, record)
                 return True
             if phase in {'recovery-reopen', 'recovery-verify'}:
+                if not self.completed_readers_checked:
+                    _exercise_completed_recovery_readers(bound)
+                    self.completed_readers_checked = True
                 if self.reopen_api is None:
                     self.reopen_api = module.SharedRecoveryReopeningTransport(bindings=bound, guards=guard_api,
                         history=history, qualify=remote.verify_retained,
@@ -6560,7 +6646,18 @@ def test_shared_recovery_reopens_only_staging_once_and_requires_fresh_terminal_h
     assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-guards'
     frozen = {path: path.read_bytes() for path in state.glob('forward-*/**/*.json')}
     api.block, kwargs['action'] = 'recovery-verify', 'recover'
-    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'recovery-reopen'
+    try:
+        result = parent.run_shared_pool_operation(**kwargs)
+    except ValueError as exc:
+        import traceback
+
+        frames, cause = [], exc
+        while cause is not None:
+            frames.extend(f'{type(cause).__name__}:{Path(frame.filename).name}:{frame.lineno}:{frame.name}'
+                for frame in traceback.extract_tb(cause.__traceback__))
+            cause = cause.__context__
+        raise AssertionError('reopening failed at ' + ', '.join(frames)) from None
+    assert result['phase'] == 'recovery-reopen'
     assert not remote.dispatches and _read(child / 'reopen.json')['status'] == 'prepared'
     remote.healthy, remote.late_busy = True, True
     assert api.reopen_api.release_staging(record_intent=lambda: pytest.fail('busy release must not consume intent')) is False
