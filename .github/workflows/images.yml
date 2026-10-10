@@ -284,6 +284,9 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
+      - name: Configure credential-free Docker Hub mirror
+        run: python3 scripts/configure_ci_registry_mirror.py
+
       - name: Download exact verified Trivy binary
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -379,6 +382,8 @@ jobs:
               --driver-opt network=host
               --buildkitd-config /etc/buildkit/loom-ci.toml
             )
+          else
+            buildx_args+=(--buildkitd-config config/ci-buildkit.toml)
           fi
           "${buildx_args[@]}"
           docker buildx inspect

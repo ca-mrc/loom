@@ -216,6 +216,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Configure credential-free Docker Hub mirror
+        run: python3 scripts/configure_ci_registry_mirror.py
+
       - name: Select nonempty cluster manifest
         id: manifest
         shell: bash
