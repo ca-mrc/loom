@@ -1154,6 +1154,26 @@ rights remain observable through subsequent pending recovery, but restoration
 writes cannot replay. This child does not restart workloads or reopen either
 staging or the cancelled dev/global ledger.
 
+Current-staging restart consumes the completed template and Role restoration
+receipts. Its targets are the captured current specs with the recovery marker
+retained, dispatched in reverse stop order: service, controller, actuators, then
+collector. An originally dormant root remains dormant and needs no write. Every
+new dev, manager and gateway root remains pinned to its stopped recovery spec.
+Actual Deployment/ReplicaSet/Pod checks prove running readiness or stopped drain;
+the protected parent additionally supplies current runtime/database challenges,
+including any restored active collector. Fresh complete namespace collections
+bracket those challenges, pinning each fixed root's related child/Pod identities,
+templates and status. A replacement or late loss of readiness causes a wait;
+unrelated namespace Pod activity does not invalidate that fixed-root evidence.
+Captured Roles and effective gateway
+denial are rechecked, and current recovery SQL drain is required before mutations.
+Busy previews leave intent unconsumed. UID/version/metadata/spec-tested updates
+use late intent; unknown results are read back without another dispatch. A pending
+Pod prevents starting the next root. Read-only readiness remains available during
+subsequent reopening and does not incorrectly require reopened staging work to
+stay idle. This child cannot release either participant guard or reopen the
+cancelled global ledger.
+
 The shared Role child reduces only the two source-qualified staging worker/build
 Roles, preserving their UIDs and existing bindings. Each rules-and-annotations
 PATCH tests the current UID, resourceVersion and rules. Mutation intent precedes
