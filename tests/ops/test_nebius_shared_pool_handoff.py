@@ -891,7 +891,7 @@ def test_shared_parent_restricts_current_roles_once_and_checks_foreign_effective
     originals = bindings.plan.staging_role_originals
     roles = copy.deepcopy(originals)
     writes, attempts, reviews, qualifications = [], [], [], []
-    mode = {'delete_receipt': True, 'saved_receipt': None, 'reject': True, 'lose_reply': True,
+    mode = {'delete_receipt': True, 'delete_at_intent': False, 'saved_receipt': None, 'reject': True, 'lose_reply': True,
         'lose_read': False, 'extra_grant': True, 'incomplete': False, 'change_binding': False}
     manager = args['runtime'].database.manager.retained.request.retained
     state = Path(manager.operation['state_dir']).parent / 'shared-pool-handoff'
@@ -918,7 +918,7 @@ def test_shared_parent_restricts_current_roles_once_and_checks_foreign_effective
             assert namespace in namespaces
             return httpx.Response(200, json={'apiVersion': 'v1', 'kind': 'Namespace',
                 'metadata': {'name': namespace, 'uid': namespaces[namespace], 'resourceVersion': '1',
-                    'labels': {'loom.nebius/installation-id': identity.installation_id,
+                    'labels': {'loom.nebius/management-installation': identity.installation_id,
                         'pod-security.kubernetes.io/enforce': 'restricted'}}})
         if path in ('/apis/rbac.authorization.k8s.io/v1/rolebindings',
                 '/apis/rbac.authorization.k8s.io/v1/clusterrolebindings'):
@@ -1007,8 +1007,9 @@ def test_shared_parent_restricts_current_roles_once_and_checks_foreign_effective
                 def qualify(current, writing):
                     assert current == bindings
                     qualifications.append(writing)
-                    if writing and mode['delete_receipt']:
-                        mode['delete_receipt'] = False
+                    if writing and (mode['delete_receipt'] or (mode['delete_at_intent']
+                            and 'intent' in json.loads(receipt.read_bytes())['roles'].values())):
+                        mode['delete_receipt'], mode['delete_at_intent'] = False, False
                         mode['saved_receipt'] = receipt.read_bytes()
                         receipt.unlink()  # Fault injection only in this test's private history.
 
@@ -1028,10 +1029,33 @@ def test_shared_parent_restricts_current_roles_once_and_checks_foreign_effective
         assert not attempts and not receipt.exists() and mode['saved_receipt'] is not None
         # Restore this controlled pre-dispatch fixture to test other faults.
         # Production never recreates lost started history.
+        prepared_checkpoint = mode['saved_receipt']
+        receipt.write_bytes(prepared_checkpoint)
+        receipt.chmod(0o600)
+        mode['delete_at_intent'] = True
+        with pytest.raises(ValueError, match='shared pool operation unconfirmed'):
+            parent.run_shared_pool_operation(**kwargs)
+        assert not attempts and not receipt.exists()
         receipt.write_bytes(mode['saved_receipt'])
         receipt.chmod(0o600)
+        # Even with restored intent, an unobserved effect is never redispatched.
+        with pytest.raises(ValueError, match='shared pool operation unconfirmed'):
+            parent.run_shared_pool_operation(**kwargs)
+        assert not attempts
+        receipt.write_bytes(prepared_checkpoint)  # Controlled fixture rewind only.
+        namespaces['kube-system'] = str(uuid4())
+        with pytest.raises(ValueError, match='shared pool operation unconfirmed'):
+            parent.run_shared_pool_operation(**kwargs)
+        assert not attempts
+        namespaces['kube-system'] = identity.kube_system_uid
         assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-roles'
         assert len(attempts) == 1 and writes == []  # Definite rejection permits a later retry.
+        first = sorted(roles)[0]
+        roles[first]['rules'].append({'apiGroups': [''], 'resources': ['secrets'], 'verbs': ['get']})
+        with pytest.raises(ValueError, match='shared pool operation unconfirmed'):
+            parent.run_shared_pool_operation(**kwargs)
+        assert len(attempts) == 1 and writes == []
+        roles[first]['rules'].pop()
         with pytest.raises(ValueError, match='shared pool operation unconfirmed'):
             parent.run_shared_pool_operation(**kwargs)
         assert len(writes) == 1

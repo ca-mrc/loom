@@ -939,6 +939,19 @@ These transitions still require the connected parent's fresh process, database,
 drain and whole-pool authority checks; historical receipts alone are not runtime
 readiness or recovery authority.
 
+The shared Role child reduces only the two source-qualified staging worker/build
+Roles, preserving their UIDs and existing bindings. Each rules-and-annotations
+PATCH tests the current UID, resourceVersion and rules. Mutation intent precedes
+dispatch; an unknown response can only be resolved by reading the exact target.
+Only a complete definite rejection permits another attempt. Lost child history,
+changed namespace identity or a changed original Role fails closed.
+Completion additionally reviews every captured staging ServiceAccount's effective
+permissions, including namespaces reached through foreign account/group bindings.
+Exact Role, binding and child-receipt readbacks bracket these bounded, nonpersisted
+reviews. Additional named write grants, incomplete resolution or concurrent binding
+changes reject completion. This child grants no gateway rights and does not replace
+the parent's fresh whole-pool writer census and process-drain checks.
+
 Recovery is a separately anchored, terminal direction. Its marker freezes both
 the forward journal and all existing child receipts, including prepared or
 unfinished children. It cannot erase completed success or resume forward work
