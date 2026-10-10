@@ -40,13 +40,15 @@ async def credential(sessions, *, role="participant", participant_config=None, c
         await session.execute(insert(NebiusPoolBinding).values(
             pool_id=pool_id, installation_id=participant_config.installation_id if participant_config else uuid4(),
             cluster_id=cluster_id or "cluster-" + uuid4().hex,
-            node_group_id="group-1", policy_revision=1, admission_epoch=1, mode="global",
+            node_group_id="group-1", policy_revision=1,
+            admission_epoch=participant_config.admission_epoch if participant_config else 1, mode="global",
             binding_json={"protected": True}, binding_sha256="a" * 64))
         await session.execute(insert(NebiusPoolParticipant).values(
             participant_id=participant_id, pool_id=pool_id,
             environment_id=participant_config.environment_id if participant_config else uuid4(),
             incarnation=participant_config.incarnation if participant_config else uuid4(),
-            binding_revision=1, admission_epoch=1, phase="active",
+            binding_revision=participant_config.binding_revision if participant_config else 1,
+            admission_epoch=participant_config.admission_epoch if participant_config else 1, phase="active",
             binding_json=participant_config.model_dump(mode="json") if participant_config else {"protected": True},
             binding_sha256=canonical_digest(participant_config).removeprefix("sha256:") if participant_config else "b" * 64))
         await session.execute(insert(NebiusPoolMachine).values(
