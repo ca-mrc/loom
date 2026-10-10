@@ -6476,6 +6476,15 @@ def test_shared_recovery_reopens_only_staging_once_and_requires_fresh_terminal_h
 
     class API(SharedPhaseAPI):
         reopen_api = None
+        interrupt_verification = False
+
+        def qualify(self, bound, record, *, recovering):
+            super().qualify(bound, record, recovering=recovering)
+            path = state / 'recovery-verify/verify.json'
+            if (self.interrupt_verification and path.exists() and _read(path)['status'] == 'observed'
+                    and record['recovery']['recovery-verify']['status'] == 'started'):
+                self.interrupt_verification = False
+                raise TimeoutError('simulated interruption after saving verification')
 
         def prepare(self, phase, bound, directory):
             if phase == 'recovery-revoke':
@@ -6584,6 +6593,7 @@ def test_shared_recovery_reopens_only_staging_once_and_requires_fresh_terminal_h
         result = parent.run_shared_pool_operation(**kwargs)
         assert result['phase'] == ('recovery-verify' if committed else 'recovery-reopen')
         assert remote.dispatches == [staging_id]
+        api.reopen_api = None  # A reconstructed transport must not redispatch either outcome.
     remote.local[staging_id] = 'open'  # Resolve the deferred commit without replay.
     remote.local_counts[staging_id]['trials'] = 1
     assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'recovery-verify'
@@ -6598,6 +6608,13 @@ def test_shared_recovery_reopens_only_staging_once_and_requires_fresh_terminal_h
     with pytest.raises(ValueError):
         parent.run_shared_pool_operation(**kwargs)
     remote.machines = 'revoked'
+    api.interrupt_verification = True
+    with pytest.raises(ValueError):
+        parent.run_shared_pool_operation(**kwargs)
+    assert _read(state / 'recovery-verify/verify.json')['status'] == 'observed'
+    remote.healthy = False
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'recovery-verify'
+    remote.healthy = True
     remote.reads.clear()
     result = parent.run_shared_pool_operation(**kwargs)
     assert result['status'] == 'staging_restored_dev_closed' and result['admission_open'] is False
