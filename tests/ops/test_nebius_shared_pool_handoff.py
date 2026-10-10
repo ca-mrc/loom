@@ -428,3 +428,99 @@ def test_shared_guard_binding_uses_live_dev_database_and_real_bound_guard_reader
         finally:
             child.write_bytes(raw)
             child.chmod(0o600)
+
+
+@pytest.mark.timeout(420)
+def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writers(
+        shared_runtime, staging_history, staging_observation, completed_pool, handoff):
+    """A historical template or a stopped clone must not hide a live writer."""
+    import ssl
+
+    import httpx
+    from scripts.ops.nebius_management_transport import ManagementKubernetesTransport
+    from tests.ops.test_nebius_development_pool_retained import runtime_http_inventory
+    from tests.ops.test_nebius_pool_cutover import writer_descendant
+
+    request, parent = shared_runtime
+    _, documents, _ = runtime_http_inventory(request, parent, completed_pool[3].server, handoff[2])
+    kinds = {'Deployment': 'deployments', 'StatefulSet': 'statefulsets', 'CronJob': 'cronjobs',
+        'DaemonSet': 'daemonsets', 'ReplicaSet': 'replicasets', 'ReplicationController': 'replicationcontrollers',
+        'Job': 'jobs', 'Pod': 'pods'}
+    roots = {_key(row): copy.deepcopy(row) for row in (*staging_history.context.request.platform_consumers,
+        *staging_history.completion.workloads.values(), *documents.values(), *staging_observation['resources'])
+        if row['kind'] in {'Deployment', 'StatefulSet', 'CronJob'}}
+    inventory = {plural: [] for plural in kinds.values()}
+    for row in roots.values():
+        row['metadata']['resourceVersion'] = '401'
+        inventory[kinds[row['kind']]].append(row)
+    controller = roots['Deployment:' + staging_observation['namespace'] + ':loom-control-plane']
+    replica = writer_descendant(controller, 'ReplicaSet')
+    inventory['replicasets'].append(replica)
+    inventory['pods'].append(writer_descendant(replica, 'Pod'))
+    calls, mode = [], {'revision': '500'}
+
+    def respond(message):
+        calls.append(message)
+        assert message.method == 'GET'
+        if message.url.path == '/api/v1/namespaces/kube-system':
+            return httpx.Response(200, json={'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {
+                'name': 'kube-system', 'uid': request.database.manager.retained.request.registration.binding.kube_system_uid}})
+        plural = message.url.path.rsplit('/', 1)[-1]
+        kind, = (kind for kind, name in kinds.items() if name == plural)
+        version = message.url.params.get('resourceVersion')
+        if plural != 'deployments':
+            assert version == '500' and message.url.params['resourceVersionMatch'] == 'Exact'
+        return httpx.Response(200, json={'apiVersion': 'v1' if plural in {'pods', 'replicationcontrollers'}
+            else 'batch/v1' if plural in {'jobs', 'cronjobs'} else 'apps/v1', 'kind': kind + 'List',
+            'metadata': {'resourceVersion': mode['revision'], 'continue': ''}, 'items': inventory[plural]})
+
+    with ManagementKubernetesTransport(api_server=request.database.foundation.inputs.config['kubernetes_api_server'],
+            ssl_context=ssl.create_default_context()) as transport:
+        transport.client.close()
+        transport.client = httpx.Client(base_url=transport.api_server, transport=httpx.MockTransport(respond))
+        from scripts.ops.nebius_shared_pool_handoff_live import observe_shared_pool_workloads
+
+        def observe():
+            return observe_shared_pool_workloads(runtime=request, observation=staging_observation,
+                legacy=staging_history, repo_root=ROOT, transport=transport)
+
+        result = observe()
+        assert result.resource_version == '500'
+        assert result.workloads.keys() == roots.keys()
+        assert result.workloads[_key(controller)] == controller
+        gateway, = (row for row in staging_history.completion.workloads.values()
+            if row['metadata']['name'] == 'loom-pool-gateway')
+        assert result.workloads[_key(gateway)]['spec']['replicas'] == 0
+        original = copy.deepcopy(inventory)
+        for damage in ('clone', 'cronjob', 'root_uid', 'old_template', 'revived_gateway', 'missing_root', 'revision'):
+            inventory.clear()
+            inventory.update(copy.deepcopy(original))
+            if damage == 'clone':
+                clone = copy.deepcopy(inventory['pods'][0])
+                clone['metadata'].update(name='unexpected-writer', uid=str(uuid4()), ownerReferences=[])
+                inventory['pods'].append(clone)
+            elif damage == 'cronjob':
+                rogue = copy.deepcopy(next(row for row in inventory['cronjobs']
+                    if row['metadata']['name'] == 'loom-execution-capacity-collector'))
+                rogue['metadata'].update(name='unexpected-schedule', uid=str(uuid4()))
+                rogue['spec']['suspend'] = True
+                rogue['spec']['jobTemplate']['spec']['template']['spec']['serviceAccountName'] = 'foreign-account'
+                inventory['cronjobs'].append(rogue)
+            elif damage == 'missing_root':
+                inventory['deployments'] = [row for row in inventory['deployments'] if _key(row) != _key(controller)]
+            elif damage == 'revision':
+                mode['revision'] = '501'
+            else:
+                key = _key(gateway) if damage == 'revived_gateway' else _key(controller)
+                row, = (row for row in inventory['deployments'] if _key(row) == key)
+                if damage == 'root_uid':
+                    row['metadata']['uid'] = str(uuid4())
+                elif damage == 'old_template':
+                    row['spec'] = copy.deepcopy(staging_history.completion.workloads[key]['spec'])
+                    assert row['spec'] != controller['spec']
+                else:
+                    row['spec']['replicas'] = 1
+            with pytest.raises(ValueError, match='shared pool workload census unqualified'):
+                observe()
+            mode['revision'] = '500'
+        assert calls and all(row.method == 'GET' for row in calls)
