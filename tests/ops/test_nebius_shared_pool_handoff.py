@@ -282,6 +282,8 @@ def test_shared_handoff_binds_real_completed_dev_and_current_staging(shared_runt
     assert len(result.migration.guards) == 2
     assert {row.namespace for row in result.migration.guards} == {'loom-dev', staging_observation['namespace']}
     assert all(row['spec'].get('replicas', 0) == 0 for row in result.staging_targets.values())
+    collector, = (row for row in result.staging_targets.values() if row['kind'] == 'CronJob')
+    assert collector['spec']['suspend'] is True
     assert all(row['metadata']['namespace'] != 'loom-dev' for row in result.staging_targets.values())
     controller = result.staging_targets['Deployment:' + staging_observation['namespace'] + ':loom-control-plane']
     settings = {row['name']: row.get('value') for row in controller['spec']['template']['spec']['containers'][0]['env']}
@@ -292,3 +294,124 @@ def test_shared_handoff_binds_real_completed_dev_and_current_staging(shared_runt
     assert bound.management_origin == 'https://' + request.database.manager.deployment.public_host
     assert api.store.resources == writes
     assert all(path.read_bytes() == raw for path, raw in before.items())
+
+
+@pytest.mark.timeout(420)
+def test_shared_guard_binding_uses_live_dev_database_and_real_bound_guard_reader(
+        shared_runtime, staging_history, staging_observation, completed_pool, handoff, monkeypatch, tmp_path):
+    """An unbound dev guard must not fall back to the old controller-only path."""
+    import base64
+    import json
+    import ssl
+    import subprocess
+    from types import SimpleNamespace
+    from urllib.parse import parse_qs, urlsplit
+
+    import httpx
+    from scripts.ops.nebius_development_runtime_observation import HTTPSDevelopmentRuntimeObserver
+    from scripts.ops.nebius_pool_migration_guard import KubectlPoolGuardAPI
+    from tests.ops.test_nebius_development_pool_retained import (
+        populate_database_backends,
+        runtime_http_inventory,
+    )
+
+    request, parent = shared_runtime
+    calls, documents, original_handler = runtime_http_inventory(request, parent, completed_pool[3].server, handoff[2])
+    populate_database_backends(documents)
+    credential_path = '/api/v1/namespaces/loom-dev/secrets/loom-platform-db'
+    actuator_secret = request.database.material[1]
+    actuator_path = '/api/v1/namespaces/' + actuator_secret['metadata']['namespace'] + '/secrets/' + actuator_secret['metadata']['name']
+    for path in (credential_path, actuator_path):
+        documents[path]['metadata']['resourceVersion'] = '301'
+    mode = {'late_version': False, 'reads': 0}
+
+    def respond(message):
+        if mode['late_version'] and message.url.path == credential_path:
+            mode['reads'] += 1
+            if mode['reads'] == 2:
+                documents[credential_path]['metadata']['resourceVersion'] = '302'
+        return original_handler(message)
+
+    # Keep real history, HTTPS observer and guard implementation. Only their
+    # external Kubernetes/psql transport is simulated.
+    with HTTPSDevelopmentRuntimeObserver(request=request,
+            api_server=request.database.foundation.inputs.config['kubernetes_api_server'],
+            ssl_context=ssl.create_default_context()) as observer:
+        for connection in (observer, observer.manager, observer.foundation):
+            connection.client.close()
+            connection.client = type(completed_pool[3].api.client)(base_url=connection.api_server,
+                transport=httpx.MockTransport(respond))
+        from scripts.ops.nebius_shared_pool_handoff_live import observe_shared_pool_guard_bindings
+
+        def observe():
+            return observe_shared_pool_guard_bindings(runtime=request, observation=staging_observation,
+                legacy=staging_history, repo_root=ROOT, development=observer)
+
+        bound = observe()
+        guard, = (row for row in bound.migration.guards if row.namespace == 'loom-dev')
+        database = guard.database
+        assert database is not None
+        assert str(database.credential_uid) == documents[credential_path]['metadata']['uid']
+        assert database.credential_resource_version == '301'
+        assert str(database.actuator_credential_uid) == documents[actuator_path]['metadata']['uid']
+        assert database.actuator_credential_resource_version == '301'
+        for kind, row in (('StatefulSet', database.statefulset), ('Service', database.service)):
+            assert row['kind'] == kind and row['metadata']['namespace'] == 'loom-dev'
+            assert row['metadata']['name'] == 'loom-postgres'
+        staged, = (row for row in bound.migration.guards if row.namespace != 'loom-dev')
+        assert staged == bound.plan.staging.attachment.guard
+        kubeconfig = tmp_path / 'guard-kubeconfig'
+        kubeconfig.write_text('test-only-private-kubeconfig')
+        kubeconfig.chmod(0o600)
+        commands = []
+
+        def kubectl(command, **kwargs):
+            commands.append(command)
+            start = next(index for index, item in enumerate(command) if item in {'get', 'exec'})
+            args = command[start:]
+            if args[0] == 'exec':
+                assert args[1:7] == ['-n', 'loom-dev', 'pod/loom-postgres-0', '-c', 'loom-postgres', '--']
+                assert args[7] == 'psql'
+                assert str(bound.migration.registration.spec.operation_id) in args[-1]
+                assert bound.migration.registration.candidate['candidate_sha'] in args[-1]
+                value = {'status': 'open'}
+            elif args[1] == '--raw':
+                url = urlsplit(args[2])
+                value = copy.deepcopy(documents[url.path])
+                query = parse_qs(url.query)
+                if 'labelSelector' in query:
+                    label, wanted = query['labelSelector'][0].split('=', 1)
+                    value['items'] = [row for row in value['items'] if row['metadata']['labels'].get(label) == wanted]
+            else:
+                kind, name = args[1:3]
+                namespace = args[args.index('-n') + 1] if '-n' in args else None
+                if kind == 'namespace' and name == 'kube-system':
+                    value = {'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': name,
+                        'uid': bound.migration.registration.binding.kube_system_uid}}
+                else:
+                    plural = {'namespace': 'namespaces', 'secret': 'secrets', 'statefulset': 'statefulsets', 'service': 'services'}[kind]
+                    prefix = '/apis/apps/v1' if kind == 'statefulset' else '/api/v1'
+                    value = documents[prefix + ('/namespaces/' + namespace if namespace else '') + '/' + plural + '/' + name]
+            return SimpleNamespace(returncode=0, stdout=json.dumps(value).encode())
+
+        with monkeypatch.context() as transport:
+            transport.setattr(subprocess, 'run', kubectl)
+            api = KubectlPoolGuardAPI(request=bound.migration, kubeconfig=kubeconfig, executable=Path('/usr/bin/kubectl'))
+            assert api.guard(guard, 'observe') == {'status': 'open'}
+        assert sum('exec' in row for row in commands) == 1
+        assert calls and all(row.method == 'GET' for row in calls)
+        assert base64.b64decode(documents[credential_path]['data']['cp-url']).decode() not in repr(bound)
+
+        original = copy.deepcopy(documents[credential_path])
+        for damage in ('uid', 'data'):
+            if damage == 'uid':
+                documents[credential_path]['metadata']['uid'] = str(uuid4())
+            else:
+                documents[credential_path]['data']['cp-url'] = base64.b64encode(b'foreign-database').decode()
+            with pytest.raises(ValueError, match='shared pool guard bindings unqualified'):
+                observe()
+            documents[credential_path] = copy.deepcopy(original)
+        mode.update(late_version=True, reads=0)
+        with pytest.raises(ValueError, match='shared pool guard bindings unqualified'):
+            observe()
+        assert all(row.method == 'GET' for row in calls)
