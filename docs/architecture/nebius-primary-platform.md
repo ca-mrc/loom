@@ -29,6 +29,14 @@ comes from the staging class. This binding neither relabels historical rows nor
 changes the frontend, data, credentials or retention policy. Other mappings are
 rejected. Its protected registration and compatible published runtime are
 prerequisites to handoff, not proof that the handoff has happened.
+Current-source staging attachment re-renders the captured configuration with the
+protected common baseline candidate and requires matching namespace/resource
+identities, configuration and ordinary/guest actuator templates. It derives the
+execution and task-image profiles without changing target IDs or storage, and
+narrows their placement to the selected physical group and published architecture.
+It retains old operation annotations and current templates for subsequent history
+qualification. This preparation performs no writes and is not a writer census,
+guard acquisition, runtime upgrade or completed handoff.
 Staging also selects seven-day ephemeral lifecycle authority and mandatory fresh
 storage-capacity admission. The standalone Nebius renderer does not qualify that
 evidence or retention/cleanup path; rendering and deployment smoke are not proof

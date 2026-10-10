@@ -53,6 +53,16 @@ The participant's published runtime must support the binding before handoff.
 It does not constitute the full classification/data/retention correction above,
 and does not authorize ordinary standalone rollout to overwrite shared-pool wiring.
 
+Prepare staging attachment from its current protected resource observation and the
+same published baseline selected for common management/dev installation. Candidate,
+image, target, namespace UID and rendered-configuration drift fail preparation;
+do not upgrade staging implicitly to make the attachment pass. The derived profiles
+keep staging storage and target IDs, including configured guest/auth siblings.
+Retained retirement markers must be qualified against completed history by the
+forward handoff, not stripped or used to replay old templates. Re-read current
+resources, provider placement and the complete writer inventory before the guard;
+an offline attachment result alone cannot authorize migration.
+
 Personal applications must bind to a genuinely development-owned foundation,
 never to staging's database, credentials or runtime just because its historical
 input says `development`. A correctly classified staging foundation is rejected
