@@ -1111,6 +1111,18 @@ def test_concrete_runtime_parent_qualifies_before_writes_and_resumes_pending_sql
         selected['metadata']['uid'] = original_uid
         assert runtime.install_development_runtime(request=request, api=api, execute=True)['status'] == 'pending_database'
         assert len(writes) == 4 and all(row['kind'] in {'Secret', 'ConfigMap', 'Job'} for row in writes)
+        # Bound real history validation work per child boundary. Repeated full
+        # reconstructions here multiply across every workload GET and PATCH.
+        validations = []
+        validate_child = runtime._validate_runtime_child
+        def counted_validation(request, plan, state, phase, item):
+            validations.append(phase)
+            return validate_child(request, plan, state, phase, item)
+        with monkeypatch.context() as counted:
+            counted.setattr(runtime, '_validate_runtime_child', counted_validation)
+            api._child_qualify(request, 'database', False)
+        assert validations == ['database', 'database'], 'validate history once before and once after live reads'
+        assert len(writes) == 4
     # A new process can observe the pending Job but must not repeat any writes.
     with module.HTTPSDevelopmentRuntimeAPI(**arguments) as api:
         assert runtime.install_development_runtime(request=request, api=api, execute=True)['status'] == 'pending_database'
