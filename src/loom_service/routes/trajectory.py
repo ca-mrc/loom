@@ -433,7 +433,8 @@ class _ListenSubscription:
     the drain task is cancelled and the connection is closed. The
     connection is opened lazily inside `__aenter__` so a connection
     failure can be caught + the route can degrade to pure-poll mode
-    without blowing up the request.
+    without blowing up the request. Failed or cancelled entry closes
+    partially acquired resources before propagating the original error.
     """
 
     def __init__(self, dsn: str, trial_id: UUID) -> None:
@@ -445,25 +446,31 @@ class _ListenSubscription:
         self.wake = asyncio.Event()
 
     async def __aenter__(self) -> _ListenSubscription:
-        # Autocommit is required for LISTEN — the connection is a
-        # streaming consumer, not transaction-scoped.
-        self._conn = await psycopg.AsyncConnection.connect(
-            self._dsn, autocommit=True,
-        )
-        await self._conn.execute(f"LISTEN {_LISTEN_CHANNEL}")
-        push_ok = await notify_round_trip(self._conn, timeout_sec=1.0)
-        if push_ok:
-            _PUSH_MODE_GAUGE.labels(watcher="trajectory").set(1)
-        else:
-            logger.error(
-                "trajectory_listen_selftest_failed — NOTIFY round-trip timed out; "
-                "SSE stream will fall back to poll-only mode. "
-                "Check that the LISTEN connection is not routed through "
-                "pgbouncer transaction mode.",
+        try:
+            # Autocommit is required for LISTEN — the connection is a
+            # streaming consumer, not transaction-scoped.
+            self._conn = await psycopg.AsyncConnection.connect(
+                self._dsn, autocommit=True,
             )
-            _PUSH_MODE_GAUGE.labels(watcher="trajectory").set(0)
-        self._push_mode = push_ok
-        self._drain_task = asyncio.create_task(self._drain())
+            await self._conn.execute(f"LISTEN {_LISTEN_CHANNEL}")
+            push_ok = await notify_round_trip(self._conn, timeout_sec=1.0)
+            if push_ok:
+                _PUSH_MODE_GAUGE.labels(watcher="trajectory").set(1)
+            else:
+                logger.error(
+                    "trajectory_listen_selftest_failed — NOTIFY round-trip timed out; "
+                    "SSE stream will fall back to poll-only mode. "
+                    "Check that the LISTEN connection is not routed through "
+                    "pgbouncer transaction mode.",
+                )
+                _PUSH_MODE_GAUGE.labels(watcher="trajectory").set(0)
+            self._push_mode = push_ok
+            self._drain_task = asyncio.create_task(self._drain())
+        except BaseException:
+            # Context managers do not call __aexit__ when __aenter__ fails.
+            # Include cancellation, which must clean up rather than fall back.
+            await self.__aexit__()
+            raise
         return self
 
     async def __aexit__(self, *_exc: object) -> None:
