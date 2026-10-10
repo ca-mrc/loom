@@ -44,7 +44,11 @@ from loom.task_image_materialization import ensure_task_image_materializations
 from loom.terminal_bench_normalize import (
     normalize_terminal_bench_task_toml,
 )
-from loom.trajectory.storage import ObjectStore, bundle_file_metadata_sha256
+from loom.trajectory.storage import (
+    ObjectStore,
+    bundle_file_metadata_sha256,
+    discard_staged_bundle_file_metadata,
+)
 from loom_benchmark_tool.db_url import normalize_db_url
 from loom_benchmark_tool.upload import upload_task_dir
 from loom_cli.benchmark_types import AdapterBenchmarkEntry, PreparedAdapterBenchmark
@@ -194,6 +198,7 @@ async def publish_local_benchmark(
                         )
                     else:
                         adapt_stats = None
+                    discard_staged_bundle_file_metadata(staged)
                     checksum = task_checksum(staged)
                     metadata_digest = bundle_file_metadata_sha256(staged).removeprefix(
                         "sha256:",

@@ -48,6 +48,23 @@ _BUNDLE_FILE_METADATA_MAX_BYTES = 4 * 1024 * 1024
 _SAFE_BUNDLE_FILE_MODES = frozenset({0o644, 0o755})
 
 
+def discard_staged_bundle_file_metadata(task_dir: Path) -> None:
+    """Discard reserved transport metadata before hashing an owned staging tree.
+
+    This sidecar records transport modes, not authored content. Its previous
+    bytes may describe an older tree and must not enter authored input identity.
+    Call only on a private copy, never the user's source or a shared cache.
+    """
+    sidecar = task_dir / BUNDLE_FILE_METADATA_NAME
+    try:
+        mode = sidecar.lstat().st_mode
+    except FileNotFoundError:
+        return
+    if not stat.S_ISREG(mode):
+        raise ValueError("bundle file metadata sidecar is not a regular file")
+    sidecar.unlink()
+
+
 def _remove_expect_header(*, params: dict[str, Any], **_kwargs: Any) -> None:
     headers = params.get("headers")
     if headers is None:

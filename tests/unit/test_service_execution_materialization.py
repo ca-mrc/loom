@@ -253,6 +253,45 @@ def test_input_manifest_sorts_by_utf8_relative_path_not_pathlib(
     ]
 
 
+def test_input_manifest_omits_only_top_level_transport_metadata(tmp_path: Path) -> None:
+    (tmp_path / ".loom-bundle-files.v1.json").write_text("stale transport metadata")
+    (tmp_path / ".authored").write_text("authored dotfile")
+    nested = tmp_path / "inputs" / ".loom-bundle-files.v1.json"
+    nested.parent.mkdir()
+    nested.write_text("authored nested file")
+    nested.chmod(0o755)
+    (tmp_path / "task.toml").write_text("task")
+
+    manifest = build_service_execution_input_manifest(tmp_path, task_checksum=_REVISION)
+
+    assert [(item.relative_path, item.mode) for item in manifest.files] == [
+        (".authored", "0644"),
+        ("inputs/.loom-bundle-files.v1.json", "0755"),
+        ("task.toml", "0644"),
+    ]
+    for item in manifest.files:
+        body = (tmp_path / item.relative_path).read_bytes()
+        assert item.size_bytes == len(body)
+        assert item.sha256 == "sha256:" + hashlib.sha256(body).hexdigest()
+
+
+@pytest.mark.parametrize("entry", ["symlink", "fifo"])
+@pytest.mark.parametrize("name", [".loom-bundle-files.v1.json", "authored-input"])
+def test_input_manifest_rejects_nonregular_files_even_at_transport_path(
+    tmp_path: Path, entry: str, name: str,
+) -> None:
+    import os
+
+    (tmp_path / "task.toml").write_text("task")
+    path = tmp_path / name
+    if entry == "symlink":
+        path.symlink_to(tmp_path / "task.toml")
+    else:
+        os.mkfifo(path)
+    with pytest.raises(ValueError, match="non-regular file"):
+        build_service_execution_input_manifest(tmp_path, task_checksum=_REVISION)
+
+
 def test_prepare_service_execution_input_manifest_binding_matches_body(
     tmp_path: Path,
 ) -> None:

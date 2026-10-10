@@ -243,6 +243,11 @@ It verifies that binding and the transferred bundle revision; ordinary uploads
 do not need the benchmark publisher's `.loom-bundle-files.v1.json` sidecar when
 `source_provenance.service_execution_input` is present. Benchmark sources
 without an input-manifest binding retain the sidecar path.
+A task-root `.loom-bundle-files.v1.json` is reserved transport metadata, so
+benchmark publication and TaskSet bundle upload remove it from their private
+staging trees before computing the task checksum and service input inventory.
+The source directory or uploaded archive is preserved. Authored dotfiles and
+nested files with the same name remain inputs.
 A missing or corrupt bound manifest fails preparation; it does not fall back to
 unbound modes or a different source revision.
 

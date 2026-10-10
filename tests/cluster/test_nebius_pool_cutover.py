@@ -12,6 +12,7 @@ from uuid import UUID
 
 import pytest
 
+from tests.cluster.pool_cutover_diagnostics import observe_cutover_stage
 from tests.integration.test_execution_actuator_k3s import _load_client, _start_k3s
 from tests.ops.test_nebius_pool_cutover import collector_inputs as collector_inputs
 from tests.ops.test_nebius_pool_cutover import cutover_inputs as cutover_inputs
@@ -286,31 +287,16 @@ async def test_real_connected_cutover_stages_closed_workloads_and_replays_withou
                 return preview(key, before, desired)
 
             api.preview_workload = preview_after_status_update
+            stage_invocation = 0
 
             def observed_stage():
-                # Only disposable-fixture source locations; never exception
-                # values, credentials, manifests or production diagnostics.
-                try:
+                nonlocal stage_invocation
+                stage_invocation += 1
+                # The exception retains its failed inventory and journal frames.
+                # Emit only fixture identities/phase enums, without another read.
+                with observe_cutover_stage(stage_invocation):
                     return stage_pool_cutover(request=request, tokens=tokens, api=api,
                         state_dir=tmp_path / "cutover", anchor_dir=tmp_path / "anchor")
-                except Exception as error:
-                    failures = []
-                    seen = set()
-                    current = error
-                    while current is not None and id(current) not in seen:
-                        seen.add(id(current))
-                        frame = current.__traceback__
-                        while frame is not None:
-                            code = frame.tb_frame.f_code
-                            if code.co_filename.endswith(("nebius_pool_cutover_live.py", "nebius_pool_role_fencing.py")):
-                                failures.append((code.co_name, frame.tb_lineno, type(current).__name__))
-                                key = frame.tb_frame.f_locals.get('key')
-                                if isinstance(current, KeyError) and isinstance(key, str) and key.startswith(('Role:', 'ClusterRole:')):
-                                    failures.append(('unresolved RBAC reference', key))
-                            frame = frame.tb_next
-                        current = current.__context__
-                    print("disposable cutover qualification locations:", failures)
-                    raise
 
             deadline = time.monotonic() + 120
             first = True

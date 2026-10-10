@@ -40,6 +40,7 @@ from loom.terminal_bench_normalize import (
     is_terminal_bench_shape,
     normalize_terminal_bench_task_toml,
 )
+from loom.trajectory.storage import discard_staged_bundle_file_metadata
 
 
 @dataclass
@@ -145,6 +146,7 @@ def _inspect_task(path: Path, report: TaskCompatibilityReport, *, execution_prof
             shutil.copytree(path.parent, staged, symlinks=False)
             adapted, _ = adapt_bundle_for_nebius_terminus(staged, normalized)
             _record_changes(normalized, adapted, raw, report)
+            discard_staged_bundle_file_metadata(staged)
             _, provenance = prepare_service_execution_input_manifest(
                 staged, task_checksum=task_checksum(staged), bucket="validate-local",
                 manifest_key=f"{report.task_id}/service-execution-input.json",
