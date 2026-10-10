@@ -43,6 +43,7 @@ from loom.taskset.transform_sandbox import (
 )
 from loom.taskset.upstream_rows import UpstreamFetchError, iter_upstream_rows
 from loom.terminal_bench_normalize import normalize_terminal_bench_task_toml
+from loom.trajectory.storage import discard_staged_bundle_file_metadata
 
 _NOOP_VERIFIER = b"#!/bin/sh\nexit 0\n"
 _UNSAFE_TASK_ID = re.compile(r"[^a-zA-Z0-9._-]+")
@@ -471,6 +472,7 @@ def _materialize_bundle_upload(
                             for issue in compatibility_issues
                         )
                         continue
+                    discard_staged_bundle_file_metadata(bundle_dir)
                     checksum = task_checksum(bundle_dir)
                     bundle_prefix = f"{output_tasks_prefix}{short_id}"
                     cumulative_bytes = _upload_bundle_dir(

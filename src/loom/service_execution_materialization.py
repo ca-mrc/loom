@@ -71,6 +71,7 @@ from loom.task_sandbox_planner import (
     guest_capabilities,
     plan_admissions,
 )
+from loom.trajectory.storage import BUNDLE_FILE_METADATA_NAME
 from loom.verifier_runtime import resolve_verifier_env_mode
 
 
@@ -340,11 +341,14 @@ def build_service_execution_input_manifest(
     for path in file_paths:
         if path.is_symlink() or not path.is_file():
             raise ValueError("service execution input contains a non-regular file")
+        relative_path = path.relative_to(bundle_dir).as_posix()
+        if relative_path == BUNDLE_FILE_METADATA_NAME:
+            continue  # Regenerated transport metadata is not an authored input.
         body = path.read_bytes()
         mode = "0755" if stat.S_IMODE(path.stat().st_mode) & 0o111 else "0644"
         files.append(
             ServiceExecutionInputFileV1(
-                relative_path=path.relative_to(bundle_dir).as_posix(),
+                relative_path=relative_path,
                 size_bytes=len(body),
                 sha256="sha256:" + hashlib.sha256(body).hexdigest(),
                 mode=mode,

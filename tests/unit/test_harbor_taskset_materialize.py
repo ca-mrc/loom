@@ -7,8 +7,8 @@ from uuid import uuid4
 
 import pytest
 
-from loom.models.taskset import UserTaskSetManifest
 from loom.models.task_checksum import task_checksum
+from loom.models.taskset import UserTaskSetManifest
 from loom.taskset.materialize import materialize_task_set
 from loom_execution_actuator.task_image_runtime import download_bundle
 

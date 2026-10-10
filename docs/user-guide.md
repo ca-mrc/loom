@@ -1703,7 +1703,12 @@ and registers task rows with those sources. The two digests cover both file
 contents and Loom's generated executable-mode metadata. A failed database
 transaction can therefore leave only an unreferenced revision; it cannot
 overwrite the bytes referenced by the live row. The worker uses the existing
-object-store materializer at runtime. If a
+object-store materializer at runtime. A task-root `.loom-bundle-files.v1.json`
+is reserved transport metadata: publishing discards it only from the private
+staging copy and regenerates it from the authored file modes. It is excluded
+from the published task checksum and service input inventory. Authored dotfiles
+and nested files with that name remain task inputs; the local source stays
+unchanged. If a
 task declares `environment.dockerfile`, that Dockerfile and its build context
 are part of the uploaded bundle. Service-mode trial workers are **pull-only**:
 they wait for a ready x86_64 materialization in the loopback registry
