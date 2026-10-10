@@ -169,6 +169,43 @@ def test_blocked_refresh_entry_reports_only_bound_phase_not_provider_payload(com
     assert 'private-provider-payload' not in json.dumps(report)
 
 
+@pytest.mark.parametrize('message,expected,typed', [
+    ('pool cutover publication unqualified', 'refresh_pool_publication', True),
+    ('pool cutover operator readers unqualified', 'refresh_pool_operator_readers', True),
+    ('pool cutover runtime databases unqualified', 'refresh_pool_runtime_databases', True),
+    ('pool cutover runtime telemetry unqualified', 'refresh_pool_runtime_telemetry', True),
+    ('pool cutover runtime telemetry tls_api_verify_20 unqualified', 'refresh_pool_runtime_telemetry_tls_api_verify_20', True),
+    ('pool cutover management database unqualified', 'refresh_pool_management_database', True),
+    ('pool cutover provider unqualified', 'refresh_pool_provider', True),
+    ('pool cutover connected scope unqualified', 'refresh_pool_connected_scope', True),
+    ('pool cutover context changed before connection', 'refresh_pool_private_inputs', True),
+    ('pool cutover context changed during publication', 'refresh_pool_private_inputs', True),
+    ('private-provider-payload', 'refresh_connection', True),
+    ('pool cutover publication unqualified: private-provider-payload', 'refresh_connection', True),
+    ('pool cutover publication unqualified', 'refresh_connection', False),
+])
+def test_blocked_refresh_preserves_only_typed_allowlisted_pool_connection_errors(
+        completed_upgrade, monkeypatch, capsys, message, expected, typed):
+    from scripts.ops import nebius_management_entry as entry
+    from scripts.ops import nebius_management_refresh_entry as refresh
+    from scripts.ops.nebius_management_gateway import safe_report
+
+    metadata, _, path = private_refresh(load(completed_upgrade[0]))
+
+    @contextmanager
+    def unavailable(_context, _operation):
+        raise (entry.EntryError if typed else RuntimeError)(message) from RuntimeError('private-provider-payload')
+        yield
+
+    monkeypatch.setattr(refresh, 'connected_refresh_api', unavailable)
+    assert entry.main(str(path), 'preflight') == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report == {'status': 'blocked', 'stage': expected, **{key: metadata[key]
+        for key in ('source_sha', 'candidate', 'installation_id', 'namespace', 'operation_id')}}
+    assert 'private-provider-payload' not in json.dumps(report)
+    assert safe_report(json.dumps(report).encode(), metadata) == report
+
+
 @pytest.mark.parametrize('damage', [False, True])
 def test_refresh_entry_carries_only_valid_capacity_failure_details(completed_upgrade, monkeypatch, capsys, damage):
     from scripts.ops import nebius_management_entry as entry
