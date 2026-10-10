@@ -4241,6 +4241,8 @@ def _shared_recovery_database_io(*, remote, bindings, guard_api, database_model,
                     remote.retire_machines()
                 value = {'schema': 'loom.pool-machine-retirement.v1', 'operation_id': str(spec.operation_id),
                     'installation_sha256': digest(spec.model_dump(mode='json')), 'state': remote.machines}
+                if machine_queries[query] == 'observe':
+                    remote.after_machine_observation()
                 return SimpleNamespace(returncode=0, stdout=json.dumps(value).encode(), stderr=b'')
             if query == pool_recovery_drain_sql(spec):
                 remote.reads.append('pool')
@@ -4794,6 +4796,9 @@ def test_shared_recovery_machine_revocation_uses_fixed_sql_and_current_stop_drai
         mode = 'closed'
         machines = 'active'
         dispatches = 0
+        busy_after_machine_read = False
+        change_receipt_after_machine_read = False
+        open_during_qualification = False
 
         def __init__(self):
             self.local = dict.fromkeys(roster, 'open')
@@ -4803,7 +4808,20 @@ def test_shared_recovery_machine_revocation_uses_fixed_sql_and_current_stop_drai
                 'execution_outboxes', 'build_outboxes'), 0) for key in roster}
 
         def verify_retained(self):
-            pass  # The complete writer/provider parent is a separate integration boundary.
+            # The complete writer/provider parent is a separate integration
+            # boundary; inject a race in its final callback, not a fake verdict.
+            if self.open_during_qualification:
+                self.open_during_qualification = False
+                self.local[roster[0]] = 'open'
+
+        def after_machine_observation(self):
+            if self.busy_after_machine_read:
+                self.busy_after_machine_read = False
+                self.pool_counts['active_requests'] = 1
+            if self.change_receipt_after_machine_read:
+                self.change_receipt_after_machine_read = False
+                receipt = child / 'machines.json'
+                receipt.write_bytes(receipt.read_bytes() + b'\n')
 
         def pool_state(self):
             return self.mode
@@ -4947,6 +4965,29 @@ def test_shared_recovery_machine_revocation_uses_fixed_sql_and_current_stop_drai
         assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'recovery-revoke'
         assert remote.dispatches == 0 and _read(child / 'machines.json')['status'] == 'prepared'
         mode['retain_pod'] = False
+        # Exercise the sealed transport independently of the controller's
+        # earlier drain: work arriving after its machine read must remain a
+        # known pre-dispatch wait, without publishing intent.
+        remote.busy_after_machine_read = True
+        assert api.machine_api.retire_machines(record_intent=lambda: pytest.fail('busy transport must not publish intent')) is False
+        assert remote.dispatches == 0 and _read(child / 'machines.json')['status'] == 'prepared'
+        remote.pool_counts['active_requests'] = 0
+        remote.open_during_qualification = True
+        with pytest.raises(ValueError):
+            api.machine_api.machine_authority()
+        remote.local[roster[0]] = 'fenced'
+        receipt = child / 'machines.json'
+        raw = receipt.read_bytes()
+        remote.change_receipt_after_machine_read = True
+        with pytest.raises(ValueError):
+            api.machine_api.machine_authority()
+        receipt.write_bytes(raw)
+        displaced = receipt.with_suffix('.held')
+        receipt.rename(displaced)
+        with pytest.raises(ValueError):
+            parent.run_shared_pool_operation(**kwargs)
+        assert remote.dispatches == 0 and not receipt.exists()
+        displaced.rename(receipt)
         remote.machines = 'revoked'
         with pytest.raises(ValueError):
             parent.run_shared_pool_operation(**kwargs)  # Cannot adopt unexplained revocation without this child's intent.
