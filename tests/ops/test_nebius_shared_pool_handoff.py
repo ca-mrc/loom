@@ -1797,6 +1797,7 @@ def test_shared_gateway_stages_exact_grants_then_starts_once_under_closed_parent
             if mode['extra_permission']:
                 rules.append({'apiGroups': [''], 'resources': ['secrets'], 'verbs': ['get']})
             return httpx.Response(201, json={'apiVersion': 'authorization.k8s.io/v1', 'kind': 'SelfSubjectRulesReview',
+                'spec': {},
                 'status': {'incomplete': False, 'resourceRules': rules, 'nonResourceRules': [], 'evaluationError': ''}})
         if request.method == 'POST':
             row = json.loads(request.content)
@@ -1906,8 +1907,17 @@ def test_shared_gateway_stages_exact_grants_then_starts_once_under_closed_parent
             parent.run_shared_pool_operation(**kwargs)
         assert creates == list(fixed) and patches == []
         mode['extra_permission'] = False
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError) as startup_error:
             parent.run_shared_pool_operation(**kwargs)
+        if not patches:
+            import traceback
+
+            frames, cause = [], startup_error.value
+            while cause is not None:
+                frames.extend(f'{Path(frame.filename).name}:{frame.lineno}:{frame.name}'
+                    for frame in traceback.extract_tb(cause.__traceback__))
+                cause = cause.__context__
+            pytest.fail('gateway failed before intended PATCH fault: ' + ', '.join(frames), pytrace=False)
         assert patches == [_key(gateway)]
         assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-gateway'
         assert challenges == []  # No process challenge before actual rollout readiness.
