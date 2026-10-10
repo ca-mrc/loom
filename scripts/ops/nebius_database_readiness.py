@@ -148,4 +148,3 @@ def qualify_database_backend(*, namespace: str, service: dict[str, Any],
         seen.add(address)
     if seen != expected:
         raise ValueError
-
