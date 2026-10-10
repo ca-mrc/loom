@@ -4197,6 +4197,7 @@ def _shared_recovery_database_io(*, remote, bindings, guard_api, database_model,
         pool_activation_state_sql,
     )
     from scripts.ops.nebius_pool_guard_activation import pool_guard_activation_sql
+    from scripts.ops.nebius_pool_machine_database import pool_machine_retirement_sql
     from scripts.ops.nebius_pool_recovery_database import (
         participant_recovery_drain_sql,
         pool_recovery_drain_sql,
@@ -4221,6 +4222,7 @@ def _shared_recovery_database_io(*, remote, bindings, guard_api, database_model,
     populate_database_backends(documents)
     database_model.documents.update(documents)
     spec = bindings.migration.registration.spec
+    machine_queries = {pool_machine_retirement_sql(spec, action=action): action for action in ('observe', 'revoke')}
     fallback = subprocess.run
 
     def run(argv, **kwargs):
@@ -4233,6 +4235,13 @@ def _shared_recovery_database_io(*, remote, bindings, guard_api, database_model,
         assert args[-2] == '-c'
         current_namespace, query = args[2], args[-1]
         if current_namespace == namespace:
+            if query in machine_queries:
+                assert remote.mode == 'fenced' and not any(remote.pool_counts.values())
+                if machine_queries[query] == 'revoke':
+                    remote.retire_machines()
+                value = {'schema': 'loom.pool-machine-retirement.v1', 'operation_id': str(spec.operation_id),
+                    'installation_sha256': digest(spec.model_dump(mode='json')), 'state': remote.machines}
+                return SimpleNamespace(returncode=0, stdout=json.dumps(value).encode(), stderr=b'')
             if query == pool_recovery_drain_sql(spec):
                 remote.reads.append('pool')
                 assert remote.mode == 'fenced'
@@ -4744,6 +4753,214 @@ def test_shared_recovery_stop_fences_delayed_forward_cas_without_replaying_unkno
         with pytest.raises(ValueError):
             stop.advance_shared_recovery_workloads(bindings=bindings, api=api.stop_api, state_dir=child)
         assert writes == before
+
+
+@pytest.mark.timeout(600)
+@pytest.mark.parametrize('committed', [False, True])
+def test_shared_recovery_machine_revocation_uses_fixed_sql_and_current_stop_drain(
+        shared_operation, shared_guard_transport, shared_runtime, completed_pool, handoff, monkeypatch, committed):
+    """Actual revoke/SQL/drain transports; prior stop effects and parent census doubled."""
+    import importlib.util
+    import ssl
+    from contextlib import ExitStack
+
+    import httpx
+    from scripts.ops import nebius_certificates as private_state
+    from scripts.ops import nebius_shared_pool_guards as guards
+    from scripts.ops import nebius_shared_pool_operation as parent
+    from scripts.ops import nebius_shared_pool_recovery_drain as drain
+    from scripts.ops import nebius_shared_pool_recovery_fence as fence
+    from scripts.ops import nebius_shared_pool_recovery_workloads as stop
+    from scripts.ops.nebius_development_runtime_install import _read
+    from scripts.ops.nebius_development_runtime_live import runtime_resource_path
+    from scripts.ops.nebius_ingress_stage import _snapshot, _uid
+    from scripts.ops.nebius_shared_pool_recovery_fence_live import SharedPoolRecoveryFenceTransport
+    from tests.ops.test_nebius_development_pool_retained import populate_runtime_pods
+
+    name = 'scripts.ops.nebius_shared_pool_recovery_machines'
+    assert importlib.util.find_spec(name) is not None, 'shared recovery machine retirement is missing'
+    machines = __import__(name, fromlist=['SharedRecoveryMachineTransport'])
+    args, bindings = shared_operation
+    runtime = args['runtime']
+    manager = runtime.database.manager.retained.request.retained
+    state = Path(manager.operation['state_dir']).parent / 'shared-pool-handoff'
+    child = state / 'recovery-revoke'
+    roster = tuple(str(target.participant_id) for target in bindings.migration.guards)
+    documents, http_calls = {}, []
+    mode = {'retain_pod': False}
+    retained_pod = None
+
+    class Remote:
+        mode = 'closed'
+        machines = 'active'
+        dispatches = 0
+
+        def __init__(self):
+            self.local = dict.fromkeys(roster, 'open')
+            self.reads = []
+            self.pool_counts = dict.fromkeys(('unstarted_requests', 'active_requests', 'unconfirmed_creates', 'unqualified_releases'), 0)
+            self.local_counts = {key: dict.fromkeys(('trials', 'executions', 'builds', 'build_cleanup',
+                'execution_outboxes', 'build_outboxes'), 0) for key in roster}
+
+        def verify_retained(self):
+            pass  # The complete writer/provider parent is a separate integration boundary.
+
+        def pool_state(self):
+            return self.mode
+
+        def guard_state(self, participant):
+            return self.local[participant]
+
+        def fence_pool(self):
+            self.mode = 'fenced'
+
+        def fence_guard(self, participant):
+            self.local[participant] = 'fenced'
+
+        def retire_machines(self):
+            assert _read(child / 'machines.json')['status'] == 'intent'
+            assert not mode['retain_pod'] and set(self.local.values()) == {'fenced'}
+            self.dispatches += 1
+            if committed:
+                self.machines = 'revoked'
+            raise TimeoutError('simulated machine retirement reply loss')
+
+    remote = Remote()
+    guard_api, database_model = shared_guard_transport
+    _shared_recovery_database_io(remote=remote, bindings=bindings, guard_api=guard_api, database_model=database_model,
+        shared_runtime=shared_runtime, completed_pool=completed_pool, handoff=handoff, monkeypatch=monkeypatch)
+
+    def inventory(rows):
+        documents.clear()
+        for original in rows.values():
+            row = copy.deepcopy(original)
+            meta = row['metadata']
+            meta.update(generation=2, resourceVersion='2')
+            if row['kind'] == 'Deployment':
+                row['status'] = {'observedGeneration': 2, **{field: row['spec']['replicas']
+                    for field in ('replicas', 'readyReplicas', 'updatedReplicas', 'availableReplicas')}}
+            documents[runtime_resource_path(row) + '/' + meta['name']] = row
+            for version, resource, kind in (('apps/v1', 'replicasets', 'ReplicaSet'), ('v1', 'pods', 'Pod'), ('batch/v1', 'jobs', 'Job')):
+                prefix = '/api/v1' if version == 'v1' else '/apis/' + version
+                documents.setdefault(prefix + '/namespaces/' + meta['namespace'] + '/' + resource,
+                    {'apiVersion': version, 'kind': kind + 'List', 'metadata': {'resourceVersion': '2'}, 'items': []})
+        populate_runtime_pods(documents)
+
+    def handle(message):
+        assert message.method == 'GET', 'machine revocation must not replay Kubernetes stop writes'
+        http_calls.append(message.url.path)
+        value = copy.deepcopy(documents[message.url.path])
+        if mode['retain_pod'] and message.url.path == '/api/v1/namespaces/' + retained_pod['metadata']['namespace'] + '/pods':
+            value['items'].append(copy.deepcopy(retained_pod))
+        return httpx.Response(200, json=value)
+
+    children = {
+        'recovery-fence': (fence.prepare_shared_recovery_fence, fence.validate_shared_recovery_fence),
+        'recovery-drain': (drain.prepare_shared_recovery_drain, drain.validate_shared_recovery_drain),
+        'recovery-stop': (stop.prepare_shared_recovery_workloads, stop.validate_shared_recovery_workloads),
+        'recovery-revoke': (machines.prepare_shared_recovery_machines, machines.validate_shared_recovery_machines),
+    }
+    with ExitStack() as stack:
+        class API(SharedPhaseAPI):
+            fence_api = None
+            machine_api = None
+            machines_done = False
+
+            def prepare(self, phase, bound, directory):
+                if phase == 'forward-guards':
+                    guards.prepare_shared_pool_guards(bindings=bound, state_dir=directory)
+                else:
+                    children[phase][0](bindings=bound, state_dir=directory)
+
+            def validate_prepared_phase(self, phase, directory):
+                if phase == 'forward-guards':
+                    guards.validate_shared_pool_guards(bindings=bindings, state_dir=directory, complete=False)
+                else:
+                    children[phase][1](bindings=bindings, state_dir=directory, complete=False, prepared=True)
+
+            def validate_phase(self, phase, directory, *, complete):
+                if phase == 'forward-guards':
+                    guards.validate_shared_pool_guards(bindings=bindings, state_dir=directory, complete=complete)
+                else:
+                    children[phase][1](bindings=bindings, state_dir=directory, complete=complete)
+
+            def advance(self, phase, bound, directory):
+                nonlocal retained_pod
+                if phase == self.block:
+                    return False
+                if phase == 'recovery-fence':
+                    self.fence_api = SharedPoolRecoveryFenceTransport(bindings=bound, kubeconfig=guard_api.kubeconfig,
+                        executable=Path(guard_api.prefix[0]), qualify=remote.verify_retained)
+                    return fence.advance_shared_recovery_fence(bindings=bound, api=self.fence_api, state_dir=directory)
+                if phase == 'recovery-drain':
+                    return drain.advance_shared_recovery_drain(bindings=bound, guards=self.fence_api.guards,
+                        history=self.fence_api.history, state_dir=directory, qualify=remote.verify_retained)
+                if phase == 'recovery-stop':
+                    # Deliberately double the earlier stop effects, not the
+                    # current HTTP process-drain or SQL transaction under test.
+                    sources = stop._sources(bound, state)
+                    inventory({key: choices[0] for key, choices in sources.items()})
+                    retained_pod = copy.deepcopy(next(pod for row in documents.values() if row['kind'] == 'PodList' for pod in row['items']))
+                    record = _read(directory / 'stop.json')
+                    stopped = {}
+                    for key, choices in sources.items():
+                        before = _snapshot(choices[0])
+                        before['metadata']['uid'] = _uid(choices[0])
+                        expected = stop._stopped(bound, before)
+                        record['resources'][key] = {'status': 'stopped', 'before': before,
+                            'before_resource_version': '1', 'expected': expected}
+                        stopped[key] = copy.deepcopy(expected)
+                        stopped[key]['metadata']['uid'] = _uid(before)
+                    private_state._atomic_json(directory / 'stop.json', record)
+                    inventory(stopped)
+                    return True
+                assert phase == 'recovery-revoke'
+                if self.machine_api is None:
+                    def current_drain():
+                        return drain.observe_shared_recovery_drain(bindings=bound, guards=self.fence_api.guards,
+                            history=self.fence_api.history, state_dir=state, qualify=remote.verify_retained)
+                    observer = stack.enter_context(stop.HTTPSSharedRecoveryWorkloads(bindings=bound,
+                        api_server=runtime.database.foundation.inputs.config['kubernetes_api_server'],
+                        ssl_context=ssl.create_default_context(), qualify_runtime=lambda *_: remote.verify_retained(),
+                        recovery_drained=current_drain, observe_ready=lambda *_: True))
+                    connection_type = type(observer.client)
+                    observer.client.close()
+                    observer.client = connection_type(base_url=observer.api_server, transport=httpx.MockTransport(handle))
+                    self.machine_api = machines.SharedRecoveryMachineTransport(bindings=bound, workloads=observer,
+                        guards=self.fence_api.guards, history=self.fence_api.history)
+                self.machines_done = machines.advance_shared_recovery_machines(bindings=bound, api=self.machine_api, state_dir=directory)
+                return False  # Gateway RBAC retirement is still required; never restore staging here.
+
+        api = API(parent)
+        api.block = 'forward-guards'
+        kwargs = {**args, 'bindings': bindings, 'api': api, 'action': 'install'}
+        assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-guards'
+        api.block = 'recovery-revoke'
+        kwargs['action'] = 'recover'
+        assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'recovery-revoke'
+        api.block = None
+        remote.pool_counts['active_requests'] = 1
+        assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'recovery-revoke'
+        assert remote.dispatches == 0 and _read(child / 'machines.json')['status'] == 'prepared'
+        remote.pool_counts['active_requests'] = 0
+        mode['retain_pod'] = True
+        assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'recovery-revoke'
+        assert remote.dispatches == 0 and _read(child / 'machines.json')['status'] == 'prepared'
+        mode['retain_pod'] = False
+        remote.machines = 'revoked'
+        with pytest.raises(ValueError):
+            parent.run_shared_pool_operation(**kwargs)  # Cannot adopt unexplained revocation without this child's intent.
+        assert remote.dispatches == 0
+        remote.machines = 'active'
+        assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'recovery-revoke'
+        assert remote.dispatches == 1 and api.machines_done is committed
+        assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'recovery-revoke'
+        assert remote.dispatches == 1  # Neither an unknown nor a completed transaction is reissued.
+        remote.machines = 'revoked'  # The deferred transaction may now have committed.
+        assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'recovery-revoke'
+        assert api.machines_done is True and remote.dispatches == 1
+        machines.validate_shared_recovery_machines(bindings=bindings, state_dir=child, complete=True)
+        assert http_calls and _read(state / 'operation.json')['recovery']['recovery-restore-workloads']['status'] == 'prepared'
 
 
 @pytest.mark.timeout(420)
