@@ -736,6 +736,12 @@ LOOM_NEBIUS_WEB_IMAGE=loom-web-tls:test uv run --extra dev pytest -q -s \
   tests/integration/test_nebius_public_tls.py
 ```
 
+The smoke reads its generated public certificate inside the TLS container as
+the image's normal user. Caddy's private storage directories stay restricted;
+the host test runner does not need root or relaxed certificate permissions.
+An exact published image digest can also be supplied through
+`LOOM_NEBIUS_WEB_IMAGE` to qualify that candidate's TLS behavior locally.
+
 Live acceptance separately checks the published candidate, PVC binding, both
 web-container readiness states, Caddy's successful issuance log and stored
 certificate expiry, and trusted public HTTPS. A still-valid bootstrap certificate
