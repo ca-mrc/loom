@@ -672,6 +672,150 @@ def test_shared_parent_recovery_freezes_forward_history_and_is_terminal(shared_o
 
 
 @pytest.mark.timeout(420)
+def test_shared_parent_connects_current_staging_workload_transitions_without_replaying_unknown_patch(shared_operation):
+    import importlib.util
+    import json
+    import ssl
+    from contextlib import ExitStack
+
+    import httpx
+    from scripts.ops import nebius_shared_pool_operation as parent
+    from scripts.ops.nebius_development_runtime_live import runtime_resource_path
+    from scripts.ops.nebius_ingress_stage import _snapshot
+    from tests.ops.test_nebius_development_pool_retained import populate_runtime_pods
+
+    name = 'scripts.ops.nebius_shared_pool_workloads'
+    assert importlib.util.find_spec(name) is not None, 'shared current-staging workload child is missing'
+    module = __import__(name, fromlist=['HTTPSSharedStagingWorkloads'])
+    args, bindings = shared_operation
+    runtime = args['runtime']
+    original = copy.deepcopy(bindings.plan.staging.originals)
+    rows, documents, writes = copy.deepcopy(original), {}, []
+    mode = {'lose_reply': True, 'lose_read': False}
+    phases = {'forward-stop', 'forward-wire', 'forward-start'}
+
+    def refresh():
+        documents.clear()
+        for row in rows.values():
+            meta = row['metadata']
+            meta.setdefault('generation', 1)
+            if row['kind'] == 'Deployment':
+                row['status'] = {'observedGeneration': meta['generation'], **{field: row['spec']['replicas']
+                    for field in ('replicas', 'readyReplicas', 'updatedReplicas', 'availableReplicas')}}
+            documents[runtime_resource_path(row) + '/' + meta['name']] = copy.deepcopy(row)
+            namespace = meta['namespace']
+            for version, resource, kind in (('apps/v1', 'replicasets', 'ReplicaSet'),
+                    ('v1', 'pods', 'Pod'), ('batch/v1', 'jobs', 'Job')):
+                prefix = '/api/v1' if version == 'v1' else '/apis/' + version
+                documents.setdefault(prefix + '/namespaces/' + namespace + '/' + resource,
+                    {'apiVersion': version, 'kind': kind + 'List', 'metadata': {'resourceVersion': '1'}, 'items': []})
+        populate_runtime_pods(documents)
+
+    refresh()
+
+    def handle(message):
+        path = message.url.path
+        assert path in documents, 'workload child must not operate on other resources'
+        if message.method == 'GET':
+            if mode['lose_read']:
+                mode['lose_read'] = False
+                raise httpx.ReadError('simulated first readback loss')
+            return httpx.Response(200, json=documents[path])
+        assert message.method == 'PATCH'
+        current = copy.deepcopy(documents[path])
+        key = _key(current)
+        changes = json.loads(message.content)
+        assert changes[:3] == [
+            {'op': 'test', 'path': '/metadata/uid', 'value': original[key]['metadata']['uid']},
+            {'op': 'test', 'path': '/metadata/resourceVersion', 'value': current['metadata']['resourceVersion']},
+            {'op': 'test', 'path': '/spec', 'value': current['spec']},
+        ]
+        for change in changes:
+            target, field = (current['metadata'], change['path'].rsplit('/', 1)[-1]) if change['path'].startswith('/metadata/') else (current, 'spec')
+            if change['op'] == 'test':
+                assert target[field] == change['value']
+            elif change['op'] == 'remove':
+                del target[field]
+            else:
+                assert change['op'] in {'add', 'replace'}
+                target[field] = change['value']
+        if message.url.params.get('dryRun') == 'All':
+            return httpx.Response(200, json=current)
+        assert not message.url.query
+        current['metadata']['resourceVersion'] = str(int(current['metadata']['resourceVersion']) + 1)
+        current['metadata']['generation'] += 1
+        rows[key] = current
+        writes.append(key)
+        refresh()
+        if mode['lose_reply']:
+            mode['lose_reply'], mode['lose_read'] = False, True
+            raise httpx.ReadError('simulated lost committed PATCH response')
+        return httpx.Response(200, json=documents[path])
+
+    with ExitStack() as stack:
+        class ConnectedWorkloadsAPI(SharedPhaseAPI):
+            def prepare(self, phase, bound, state):
+                if phase in phases:
+                    module.prepare_shared_staging_workloads(bindings=bound, phase=phase, state_dir=state)
+                else:
+                    super().prepare(phase, bound, state)
+
+            def validate_prepared_phase(self, phase, state):
+                if phase in phases:
+                    module.validate_shared_staging_workloads(bindings=bindings, phase=phase, state_dir=state,
+                        complete=False, prepared=True)
+                else:
+                    super().validate_prepared_phase(phase, state)
+
+            def validate_phase(self, phase, state, *, complete):
+                if phase in phases:
+                    module.validate_shared_staging_workloads(bindings=bindings, phase=phase, state_dir=state, complete=complete)
+                else:
+                    super().validate_phase(phase, state, complete=complete)
+
+            def advance(self, phase, bound, state):
+                if phase not in phases:
+                    return super().advance(phase, bound, state)
+                api = stack.enter_context(module.HTTPSSharedStagingWorkloads(bindings=bound, phase=phase,
+                    api_server=runtime.database.foundation.inputs.config['kubernetes_api_server'],
+                    ssl_context=ssl.create_default_context(), qualify_runtime=lambda *_: None, observe_ready=lambda *_: True))
+                api.client.close()
+                api.client = httpx.Client(base_url=api.api_server, transport=httpx.MockTransport(handle))
+                return module.advance_shared_staging_workloads(bindings=bound, phase=phase, api=api, state_dir=state)
+
+        api = ConnectedWorkloadsAPI(parent)
+        api.block = 'forward-build-policy'
+        kwargs = {**args, 'bindings': bindings, 'api': api, 'action': 'install'}
+        manager = runtime.database.manager.retained.request.retained
+        state = Path(manager.operation['state_dir']).parent / 'shared-pool-handoff'
+        with pytest.raises(ValueError, match='shared pool operation unconfirmed'):
+            parent.run_shared_pool_operation(**kwargs)
+        assert len(writes) == 1
+        record = json.loads((state / 'operation.json').read_bytes())
+        assert record['forward']['forward-stop']['status'] == 'started'
+        choices = module.shared_forward_staging_options(bindings=bindings, state_dir=state)
+        assert len(choices[writes[0]]) == 2  # Both original and committed target, never a guessed outcome.
+        result = parent.run_shared_pool_operation(**kwargs)
+        assert result['status'] == 'pending' and result['phase'] == 'forward-build-policy'
+        deployments = {key for key, row in original.items() if row['kind'] == 'Deployment'}
+        collector, = (key for key, row in original.items() if row['kind'] == 'CronJob')
+        assert writes.count(collector) == 1  # Remains stopped; do not patch or start it again.
+        assert set(writes) == set(original)
+        assert all(writes.count(key) == 3 for key in deployments)
+        assert rows[collector]['spec']['suspend'] is True
+        for key in deployments:
+            wanted = copy.deepcopy(bindings.plan.staging_targets[key])
+            wanted['spec']['replicas'] = 1
+            assert _snapshot(rows[key]) == _snapshot(wanted)
+            assert rows[key]['metadata']['uid'] == original[key]['metadata']['uid']
+        choices = module.shared_forward_staging_options(bindings=bindings, state_dir=state)
+        assert all(len(options) == 1 and _snapshot(options[0]) == _snapshot(rows[key]) for key, options in choices.items())
+        before = list(writes)
+        assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-build-policy'
+        assert writes == before
+
+
+@pytest.mark.timeout(420)
 def test_shared_handoff_binds_real_completed_dev_and_current_staging(shared_runtime, staging_history, staging_observation):
     import base64
 
