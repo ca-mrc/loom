@@ -280,7 +280,14 @@ def test_pool_opening_uses_qualified_gateway_once(management_history, projected_
     _gateway_runtime_case(management_history, projected_gateway, monkeypatch, damage, action='open')
 
 
-def _gateway_runtime_case(management_history, projected_gateway, monkeypatch, damage, *, action):
+@pytest.mark.parametrize('damage', [None, 'template', 'unrecorded_metadata'])
+def test_gateway_runtime_accepts_journal_metadata_but_not_template_or_live_metadata_drift(
+        management_history, projected_gateway, monkeypatch, damage):
+    _gateway_runtime_case(management_history, projected_gateway, monkeypatch, damage,
+        action='probe', journal_metadata=True)
+
+
+def _gateway_runtime_case(management_history, projected_gateway, monkeypatch, damage, *, action, journal_metadata=False):
     """The new gateway has no running predecessor; only its scalar start is valid."""
     import hashlib
     import json
@@ -321,6 +328,8 @@ def _gateway_runtime_case(management_history, projected_gateway, monkeypatch, da
     rows['LOOM_POOL_GATEWAY_KUBERNETES']['value'] = json.dumps(projected['kubernetes'])
     expected = copy.deepcopy(original)
     expected['spec']['replicas'] = 1
+    if journal_metadata:
+        expected['metadata'].setdefault('annotations', {})['loom.nebius/development-activation-operation'] = str(uuid4())
     current = copy.deepcopy(expected)
     current['status'] = {'observedGeneration': 1, 'replicas': 1, 'updatedReplicas': 1, 'availableReplicas': 1, 'readyReplicas': 1}
     replica = {'apiVersion': 'apps/v1', 'kind': 'ReplicaSet', 'metadata': {'name': name + '-abc', 'namespace': namespace,
@@ -349,6 +358,8 @@ def _gateway_runtime_case(management_history, projected_gateway, monkeypatch, da
         current['status']['readyReplicas'] = 0
     elif damage == 'uid':
         current['metadata']['uid'] = str(uuid4())
+    elif damage == 'unrecorded_metadata':
+        current['metadata']['annotations']['loom.nebius/development-activation-operation'] = str(uuid4())
     elif damage == 'replica_owner':
         replica['metadata']['ownerReferences'][0]['uid'] = str(uuid4())
     elif damage in {'template', 'account', 'name', 'registration', 'db_reference'}:
