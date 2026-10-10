@@ -1018,6 +1018,18 @@ challenge. Lost create or PATCH replies are read back without redispatch. This
 child neither opens the capacity ledger nor releases participant guards; those
 steps still require fresh whole-pool capacity and runtime qualification.
 
+The shared opening child uses its own parent phase and preceding receipt hashes,
+not a fabricated legacy cutover/startup journal. It reuses the existing
+one-dispatch activation engine: persist opening intent, observe GLOBAL, then
+release each recorded participant's guard in roster order. Unknown transaction
+outcomes are observed without repeating writes. Interrupted local preparation
+can resume; missing or changed started receipts cannot be recreated. This
+controller requires the exact migration-bound transport and a separate current
+shared-runtime qualification barrier; retained history alone cannot release
+intake. The internal phase controller still needs the concrete shared-parent transport and
+active-runtime qualification before it can authorize installed opening. Recovery
+has separate terminal authority and never rewrites completed forward evidence.
+
 The shared Role child reduces only the two source-qualified staging worker/build
 Roles, preserving their UIDs and existing bindings. Each rules-and-annotations
 PATCH tests the current UID, resourceVersion and rules. Mutation intent precedes
