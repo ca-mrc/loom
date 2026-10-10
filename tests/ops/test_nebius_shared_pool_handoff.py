@@ -5117,7 +5117,7 @@ def test_shared_recovery_gateway_closes_partial_grants_without_replaying_unknown
                 if binding['kind'] == 'RoleBinding' and binding['metadata']['namespace'] != namespace:
                     continue
                 reference = binding['roleRef']
-                key = reference['kind'] + ':' + (binding['metadata']['namespace'] if reference['kind'] == 'Role' else '') + ':' + reference['name']
+                key = reference['kind'] + ':' + (binding['metadata']['namespace'] if reference['kind'] == 'Role' else '-') + ':' + reference['name']
                 if key in rows:
                     rules.extend(copy.deepcopy(rows[key]['rules']))
             return httpx.Response(201, json={'apiVersion': 'authorization.k8s.io/v1', 'kind': 'SelfSubjectRulesReview',
@@ -5226,11 +5226,13 @@ def test_shared_recovery_gateway_closes_partial_grants_without_replaying_unknown
                     private_state._atomic_json(path, record)
                     return True
                 if phase in workload_phases:
+                    from scripts.ops.nebius_management_stage import _comparison_snapshot
+
                     _, targets = staging._inputs(bound, state, phase, staging._frame(bound, state))
                     path = directory / 'transition.json'
                     record = _read(path)
                     for key, row in record['resources'].items():
-                        row.update(status='applied', expected=_snapshot(targets[key]))
+                        row.update(status='applied', expected=_comparison_snapshot(targets[key]))
                     private_state._atomic_json(path, record)
                     return True
                 if phase in children:
@@ -5276,37 +5278,51 @@ def test_shared_recovery_gateway_closes_partial_grants_without_replaying_unknown
         api = API(parent)
         api.block = 'recovery-restore-workloads'
         kwargs = {**args, 'bindings': bindings, 'api': api, 'action': 'install'}
-        with pytest.raises(ValueError):
-            parent.run_shared_pool_operation(**kwargs)
-        assert mode['pending_original'] is not None and role_keys[0] in stored
+
+        def run_operation():
+            try:
+                return parent.run_shared_pool_operation(**kwargs)
+            except ValueError as exc:
+                import traceback
+
+                frames, cause = [], exc
+                while cause is not None:
+                    frames.extend(f'{Path(frame.filename).name}:{frame.lineno}:{frame.name}'
+                        for frame in traceback.extract_tb(cause.__traceback__))
+                    cause = cause.__context__
+                raise ValueError('gateway failure at ' + ', '.join(frames)) from None
+
+        with pytest.raises(ValueError) as failure:
+            run_operation()
+        assert mode['pending_original'] is not None and role_keys[0] in stored, str(failure.value)
         original_uid = _uid(stored[role_keys[0]])
         frozen = {path: path.read_bytes() for path in state.glob('forward-*/**/*.json')}
         mode['forward'] = False
         kwargs['action'] = 'recover'
-        assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'recovery-revoke'
+        assert run_operation()['phase'] == 'recovery-revoke'
         assert mode['patches'] == 0 and mode['barriers'] == 0
         assert _read(child / 'gateway.json')['roles'][role_keys[0]]['status'] == 'original'
         mode['busy'] = False
-        assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'recovery-revoke'
+        assert run_operation()['phase'] == 'recovery-revoke'
         assert mode['patches'] == 1 and mode['pending_patch'] is not None
-        assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'recovery-revoke'
+        assert run_operation()['phase'] == 'recovery-revoke'
         assert mode['patches'] == 1
         assert patch(*mode['pending_patch'], persist=True).status_code == 200
         if winner == 'pending':
-            assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'recovery-revoke'
+            assert run_operation()['phase'] == 'recovery-revoke'
             assert mode['barriers'] == 1 and mode['pending_barrier'] is not None
-            assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'recovery-revoke'
+            assert run_operation()['phase'] == 'recovery-revoke'
             assert mode['barriers'] == 1
             assert create(mode['pending_barrier'], persist=True).status_code == 201
-        with pytest.raises(ValueError):
-            parent.run_shared_pool_operation(**kwargs)  # Real effective review must reject the extra named writer.
-        assert 'foreign-gateway-test' in reviews
+        with pytest.raises(ValueError) as failure:
+            run_operation()  # Real effective review must reject the extra named writer.
+        assert 'foreign-gateway-test' in reviews, str(failure.value)
         assert _uid(stored[role_keys[0]]) == original_uid
         for key in role_keys:
             if key in stored:
                 assert [rule['verbs'] for rule in stored[key]['rules']] == [['get'], ['get'], ['get', 'list']]
         mode['foreign'] = False
-        assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'recovery-restore-workloads'
+        assert run_operation()['phase'] == 'recovery-restore-workloads'
         if winner == 'binding':
             assert create(mode['pending_original'], persist=True).status_code == 201
             api.gateway_api.verify_permissions()  # A late binding can now grant only the pinned read rights.
