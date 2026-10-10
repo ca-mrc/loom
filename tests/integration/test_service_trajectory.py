@@ -887,6 +887,7 @@ async def test_stream_wakes_on_listen_notify_mid_run(
     traj_setup: tuple[FastAPI, str, UUID, UUID],
     postgres_url: str,
     tail_count: int,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """End-to-end LISTEN/NOTIFY. Open the SSE stream against a
     running trial that already has its initial-replay row in
@@ -900,6 +901,7 @@ async def test_stream_wakes_on_listen_notify_mid_run(
     from sqlalchemy import update as sa_update
 
     from loom.db.schema import Trial, TrialEvent
+    from loom_service.routes import trajectory
 
     app, raw, team_id, completed_trial_id = traj_setup
 
@@ -939,10 +941,23 @@ async def test_stream_wakes_on_listen_notify_mid_run(
         },
     ])
 
+    replay_drained = asyncio_local.Event()
+    read_events = trajectory._read_events_from_postgres
+
+    async def observe_initial_replay(*args, **kwargs):
+        # Observe the actual database query without replacing its result. The
+        # final commit must follow a running-state read, even on a slow runner.
+        events = await read_events(*args, **kwargs)
+        if kwargs["trial_id"] == trial_id and kwargs["after_seq"] == 300 and not events:
+            replay_drained.set()
+        return events
+
+    monkeypatch.setattr(trajectory, "_read_events_from_postgres", observe_initial_replay)
+    monkeypatch.setattr(trajectory, "_DEFAULT_SSE_POLL_INTERVAL_SEC", 30.0)
+
     async def insert_then_terminate() -> None:
-        """+0.3s after stream open: insert a NOTIFY-target event,
-        then flip the trial to `succeeded` so the stream closes."""
-        await asyncio_local.sleep(0.3)
+        """Commit the final events after initial replay, waking the LISTEN reader."""
+        await replay_drained.wait()
         sync = create_engine(postgres_url)
         slx = sessionmaker(sync)
         with slx() as s:
@@ -967,17 +982,21 @@ async def test_stream_wakes_on_listen_notify_mid_run(
             s.commit()
         sync.dispose()
 
-    side_task = asyncio_local.create_task(insert_then_terminate())
-
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc", timeout=10.0,
-    ) as ac:
-        r = await ac.get(
-            f"/api/v1/trials/{trial_id}/stream?after_seq=299",
-            headers={"Authorization": f"Bearer {raw}"},
-        )
-    await side_task
+    async with asyncio_local.TaskGroup() as tasks:
+        tasks.create_task(insert_then_terminate())
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://svc", timeout=10.0,
+        ) as ac:
+            # ASGITransport has no network read timeout; bound the coroutine itself.
+            # A fallback-only reader waits 30 seconds and cannot pass this check.
+            r = await asyncio_local.wait_for(
+                ac.get(
+                    f"/api/v1/trials/{trial_id}/stream?after_seq=299",
+                    headers={"Authorization": f"Bearer {raw}"},
+                ),
+                timeout=10.0,
+            )
 
     assert r.status_code == 200
     messages = _parse_sse(r.text)
