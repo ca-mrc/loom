@@ -478,6 +478,37 @@ def test_runtime_parent_freezes_complete_fixed_inventory_before_writes(completed
 
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
 @pytest.mark.parametrize('retained', [False], indirect=True)
+@pytest.mark.parametrize('connected', [False, True], indirect=True, ids=['dev-first', 'staging-first'])
+def test_common_catalog_runtime_preparation_and_resume_leave_staging_untouched(completed_pool, publisher_cloud):
+    runtime, request, api, state, _ = parent_install_fixture(completed_pool, publisher_cloud)
+    spec = request.database.manager.retained.request.registration.spec
+    dev, = [row for row in spec.participants if row.environment_class == 'development']
+    staging, = [row for row in spec.participants if row.environment_class == 'staging']
+    plan = runtime.prepare_runtime_install(request)
+    documents = [doc for phase in plan.fixed.values() for doc in phase.values()] + list(plan.targets.values())
+    assert {doc['metadata'].get('namespace') for doc in documents} <= {
+        None, 'loom-dev', 'loom-nebius-management-dev', dev.execution_namespace.name, dev.build_namespace.name}
+    for doc in documents:
+        if doc['kind'] in {'RoleBinding', 'ClusterRoleBinding'}:
+            assert {row.get('namespace') for row in doc['subjects']} <= {dev.execution_namespace.name}
+    policy, = [doc for doc in documents if doc['kind'] == 'ValidatingAdmissionPolicy']
+    assert staging.build_namespace.name not in json.dumps(policy)
+    assert 'retained-staging-artifacts' not in json.dumps(policy)
+    assert runtime.install_development_runtime(request=request, api=api, execute=True)['status'] == 'pending_database'
+    api.database_complete = api.catalog_complete = True
+    result = runtime.install_development_runtime(request=request, api=api, execute=True)
+    assert result['status'] == 'development_runtime_installed_closed'
+    assert result['admission_open'] is False and result['writer_migration_complete'] is False
+    created, patches = list(api.store.creates), list(api.transition.patches)
+    assert runtime.install_development_runtime(request=request, api=api, execute=True) == result
+    assert api.store.creates == created and api.transition.patches == patches
+    assert all(doc['metadata'].get('namespace') not in {
+        staging.execution_namespace.name, staging.build_namespace.name, 'loom-nebius-platform'}
+        for doc in api.store.resources.values())
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
+@pytest.mark.parametrize('retained', [False], indirect=True)
 @pytest.mark.parametrize('damage', ['shared-account', 'shared-key', 'shared-group', 'shared-private-key', 'changed-database'])
 def test_runtime_parent_rejects_shared_cloud_authority_or_changed_predecessor(completed_pool, publisher_cloud, damage):
     from dataclasses import replace
