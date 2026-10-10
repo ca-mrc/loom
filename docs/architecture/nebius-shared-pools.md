@@ -951,16 +951,18 @@ These transitions still require the connected parent's fresh process, database,
 drain and whole-pool authority checks; historical receipts alone are not runtime
 readiness or recovery authority.
 
-The pre-gateway forward writer observer reuses the complete revision-bound census
+The pre-opening forward writer observer reuses the complete revision-bound census
 but derives its permitted workloads and Roles from these child receipts. A
 planned successor is not accepted before dispatch intent; an uncertain PATCH
 admits only its recorded before/after states, and a completed transition admits
-only the successor. Staging's new reader grants must be absent before their
-create intent, then match that exact operation-marked object, and finally retain
-their recorded created UID. Child receipt bytes and the parent phase are checked
+only the successor. Staging's new reader grants and the new gateway's grants must
+be absent before their create intent, then match that exact operation-marked
+object, and finally retain their recorded created UID. Child receipt bytes and the parent phase are checked
 again after observation, including started children not yet covered by completed
-byte pins. This observer performs no mutations and rejects recovery or started
-gateway/activation phases; those require their own successor authority checks.
+byte pins. Gateway startup likewise accepts only the recorded stopped or started
+workload while its PATCH is uncertain, then only its applied successor. This
+observer performs no mutations and rejects recovery or started activation phases;
+those require their own successor authority checks.
 
 The pre-gateway process observer likewise follows the actual guard, workload and
 database receipts. It keeps the old manager revoked and the new manager CLOSED,
@@ -988,12 +990,16 @@ propagation is pending, not permission to relax the label. No Pod, policy or RBA
 resource is created. Unknown PATCH outcomes are read back without redispatch;
 the exact successor and fresh policy enforcement are checked before completion.
 
-Shared runtime observations derive the permitted namespace successor from that
-child's intent and completion receipt, checking its bytes and parent history
-again after remote reads. The ordinary CLOSED-runtime observer remains strict
-without this binding. The shared probe adapter carries the same binding through
-nested process checks; permitting a successor only in the outer inventory is
-not enough. Gateway/open and recovery stages still require their own successors.
+Shared runtime observations derive the permitted namespace and gateway workload
+successors from their children's intent and completion receipts, checking all
+receipt bytes and parent history again after remote reads. Only the completed
+installation's matching predecessor can be replaced in this inventory; unrelated
+resources retain their original identities. The ordinary CLOSED-runtime observer
+remains strict without this binding. The shared probe adapter carries the same
+binding through nested process checks; permitting a successor only in the outer
+inventory is not enough. Live gateway grants are checked separately by the writer
+census; the development inventory gains no staging read scope. Pool opening and
+recovery stages still require their own successors.
 
 The shared gateway child creates only its catalog-derived grants and starts the
 already-installed, stopped gateway through the existing create-only and workload

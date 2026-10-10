@@ -108,7 +108,8 @@ def shared_forward_build_namespace_view(*, bindings: SharedPoolGuardBindings, st
     """Receipt-bound namespace choices, not an arbitrary inventory override.
 
     Includes parent history and receipt bytes so a caller can bracket a remote
-    observation. Gateway/open/recovery successors need their own authority.
+    observation. This projects only the namespace; the combined runtime view
+    separately qualifies gateway successors. Opening/recovery remain excluded.
     """
     frame = _frame(bindings, state_dir)
     plan = bindings.plan.development
@@ -116,7 +117,7 @@ def shared_forward_build_namespace_view(*, bindings: SharedPoolGuardBindings, st
     recovery = Path(manager.operation['anchor_dir']) / 'shared-pool-recovery.json'
     if (frame['outcome'] != 'pending' or recovery.exists() or recovery.is_symlink()
             or any(frame['forward'][phase]['status'] != 'prepared'
-                for phase in ('forward-gateway', 'forward-activate', 'forward-verify'))):
+                for phase in ('forward-activate', 'forward-verify'))):
         raise ValueError
     status, files = 'prepared', {}
     child = state_dir / _PHASE

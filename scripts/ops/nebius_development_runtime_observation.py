@@ -116,8 +116,8 @@ class HTTPSDevelopmentRuntimeObserver(ManagementKubernetesTransport):
                 raise ValueError
             shared_view = None
             if _shared_handoff is not None:
-                from scripts.ops.nebius_shared_pool_build_activation import (
-                    shared_forward_build_namespace_view,
+                from scripts.ops.nebius_shared_pool_runtime_observation import (
+                    shared_forward_runtime_view,
                 )
 
                 completed = _shared_handoff.plan.development.runtime
@@ -125,9 +125,11 @@ class HTTPSDevelopmentRuntimeObserver(ManagementKubernetesTransport):
                         or state_dir != completed.state_dir or _prechild_phase is not None):
                     raise ValueError
                 shared_state = Path(manager.operation['state_dir']).parent / 'shared-pool-handoff'
-                shared_view = shared_forward_build_namespace_view(bindings=_shared_handoff, state_dir=shared_state)
-                if choices.keys() & shared_view[2].keys():
-                    raise ValueError
+                shared_view = shared_forward_runtime_view(bindings=_shared_handoff, state_dir=shared_state)
+                for key in choices.keys() & shared_view[2].keys():
+                    predecessor = completed.resources[key]
+                    if len(choices[key]) != 1 or not _matches(choices[key][0], predecessor, _uid(predecessor)):
+                        raise ValueError
                 choices = {**choices, **shared_view[2]}
             # Reuse only namespace/storage predicates from the predecessor APIs,
             # never their original-only workload/readiness verification.
@@ -184,7 +186,7 @@ class HTTPSDevelopmentRuntimeObserver(ManagementKubernetesTransport):
             if _runtime_history_view(request=self.request, plan=self.plan, state_dir=state_dir,
                     _prechild_phase=_prechild_phase) != view:
                 raise ValueError
-            if _shared_handoff is not None and shared_forward_build_namespace_view(
+            if _shared_handoff is not None and shared_forward_runtime_view(
                     bindings=_shared_handoff, state_dir=shared_state) != shared_view:
                 raise ValueError
             self._private_inputs()

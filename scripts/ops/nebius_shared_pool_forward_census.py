@@ -1,9 +1,9 @@
-"""Read-only, receipt-bound writer census before shared gateway activation.
+"""Read-only, receipt-bound writer census before shared pool opening.
 
 The initial census cannot survive intentional workload or Role transitions.
 This observer derives only the actual child journals' before/after choices and
 rechecks them after the complete snapshot. It neither attests process drain nor
-authorizes recovery or the later gateway/active pool successors.
+authorizes recovery or active pool successors.
 """
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from scripts.ops.nebius_management_transport import ManagementKubernetesTransport
+from scripts.ops.nebius_shared_pool_gateway import shared_forward_gateway_view
 from scripts.ops.nebius_shared_pool_handoff_live import (
     SharedPoolGuardBindings,
     SharedPoolWriterObservation,
@@ -36,13 +37,20 @@ def _forward_options(bindings: SharedPoolGuardBindings, state: Path
     recovery = Path(manager.operation['anchor_dir']) / 'shared-pool-recovery.json'
     if (frame['outcome'] != 'pending' or recovery.exists() or recovery.is_symlink()
             or any(frame['forward'][phase]['status'] != 'prepared'
-                for phase in ('forward-gateway', 'forward-activate', 'forward-verify'))):
+                for phase in ('forward-activate', 'forward-verify'))):
         raise ValueError
     roots: WriterOptions = {key: (row,) for key, row in
         _resource_roots(bindings.plan, frozenset({'Deployment', 'StatefulSet', 'CronJob'})).items()}
     roots.update(shared_forward_staging_options(bindings=bindings, state_dir=state))
+    gateway = shared_forward_gateway_view(bindings=bindings, state_dir=state)
+    if gateway[0] != frame or not gateway[2].keys() <= roots.keys():
+        raise ValueError
+    roots.update(gateway[2])
     authority: WriterOptions = {key: (row,) for key, row in _authority_roots(bindings.plan).items()}
     authority.update(shared_forward_role_options(bindings=bindings, state_dir=state))
+    if authority.keys() & gateway[3].keys():
+        raise ValueError
+    authority.update(gateway[3])
     fresh = bindings.plan.staging_reader_authority
     if authority.keys() & fresh.keys():
         raise ValueError
@@ -67,7 +75,9 @@ def _forward_options(bindings: SharedPoolGuardBindings, state: Path
     receipts = {phase: _files(state / phase, allow_empty=True)
         for phase in ('forward-stop', 'forward-roles', 'forward-material', 'forward-wire', 'forward-start')
         if (state / phase).exists() or (state / phase).is_symlink()}
-    if _frame(bindings, state) != frame:
+    receipts['forward-gateway'] = gateway[1]
+    if (_frame(bindings, state) != frame
+            or shared_forward_gateway_view(bindings=bindings, state_dir=state) != gateway):
         raise ValueError
     return frame, roots, authority, receipts
 

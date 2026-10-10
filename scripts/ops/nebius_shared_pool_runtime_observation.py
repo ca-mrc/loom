@@ -14,6 +14,25 @@ from scripts.ops.nebius_development_runtime_probes import HTTPSDevelopmentRuntim
 from scripts.ops.nebius_shared_pool_handoff_live import SharedPoolGuardBindings
 
 
+def shared_forward_runtime_view(*, bindings: SharedPoolGuardBindings, state_dir: Path
+        ) -> tuple[dict[str, Any], dict[str, dict[str, str]], dict[str, tuple[dict[str, Any], ...]]]:
+    """Bind both dev successors without widening the dev reader to staging.
+
+    Live writer authority is checked by the separate revision-bound census;
+    this inventory retains only the namespace and gateway workload projections.
+    All relevant receipt bytes and the shared parent bracket remote reads.
+    """
+    from scripts.ops.nebius_shared_pool_build_activation import shared_forward_build_namespace_view
+    from scripts.ops.nebius_shared_pool_gateway import shared_forward_gateway_view
+
+    build = shared_forward_build_namespace_view(bindings=bindings, state_dir=state_dir)
+    gateway = shared_forward_gateway_view(bindings=bindings, state_dir=state_dir)
+    if (build[0] != gateway[0] or build[2].keys() & gateway[2].keys()
+            or shared_forward_build_namespace_view(bindings=bindings, state_dir=state_dir) != build):
+        raise ValueError('shared runtime successor history changed')
+    return build[0], {'forward-build-policy': build[1], 'forward-gateway': gateway[1]}, {**build[2], **gateway[2]}
+
+
 class HTTPSSharedPoolRuntimeProbes(HTTPSDevelopmentRuntimeProbes):
     def __init__(self, *, bindings: SharedPoolGuardBindings, api_server: str,
             ssl_context: ssl.SSLContext, token: str,
