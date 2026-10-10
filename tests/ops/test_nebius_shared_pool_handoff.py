@@ -3979,6 +3979,188 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
     assert len(calls) == before
 
 
+@pytest.mark.timeout(240)
+@pytest.mark.parametrize('forward_point', ['partial-acquire', 'partial-release'])
+def test_shared_recovery_fence_preserves_forward_history_and_observes_unknown_writes(shared_operation, forward_point):
+    """Own recovery authority; only remote transactions and other phases doubled."""
+    import importlib.util
+
+    from scripts.ops import nebius_certificates as private_state
+    from scripts.ops import nebius_shared_pool_activation as activation
+    from scripts.ops import nebius_shared_pool_guards as guards
+    from scripts.ops import nebius_shared_pool_operation as parent
+    from scripts.ops.nebius_development_runtime_install import _read
+
+    name = 'scripts.ops.nebius_shared_pool_recovery_fence'
+    assert importlib.util.find_spec(name) is not None, 'shared terminal recovery fence is missing'
+    module = __import__(name, fromlist=['advance_shared_recovery_fence'])
+    args, bindings = shared_operation
+    manager = args['runtime'].database.manager.retained.request.retained
+    state = Path(manager.operation['state_dir']).parent / 'shared-pool-handoff'
+    child = state / 'recovery-fence'
+    roster = tuple(str(target.participant_id) for target in bindings.migration.guards)
+    effects = []
+
+    class Remote:
+        migration = bindings.migration
+        mode = 'closed' if forward_point == 'partial-acquire' else 'global'
+        local = dict.fromkeys(roster, 'open' if forward_point == 'partial-acquire' else 'held')
+        local[roster[0]] = 'held' if forward_point == 'partial-acquire' else 'open'
+        checks = 0
+        damage = None
+
+        def verify_retained(self):
+            self.checks += 1
+
+        def qualify_runtime(self):
+            pytest.fail('terminal fencing must remain possible with an unhealthy gateway')
+
+        def pool_state(self):
+            if self.damage == 'receipt-bytes':
+                path = child / 'fence.json'
+                path.write_bytes(path.read_bytes() + b'\n')
+            return self.mode
+
+        def guard_state(self, participant):
+            return self.local[participant]
+
+        def fence_pool(self):
+            assert _read(child / 'fence.json')['pool'] == 'intent'
+            assert (Path(manager.operation['anchor_dir']) / 'shared-pool-recovery.json').exists()
+            effects.append(('pool', None))
+            raise TimeoutError('simulated unconfirmed pool fence')
+
+        def fence_guard(self, participant):
+            assert self.mode == 'fenced'
+            assert _read(child / 'fence.json')['guards'][participant] == 'intent'
+            effects.append(('guard', participant))
+            if participant == roster[0]:
+                self.local[participant] = 'fenced'
+            raise TimeoutError('simulated committed or uncommitted guard fence reply loss')
+
+    remote = Remote()
+
+    class API(SharedPhaseAPI):
+        interrupted = False
+
+        def prepare(self, phase, bound, directory):
+            if phase == 'forward-guards':
+                guards.prepare_shared_pool_guards(bindings=bound, state_dir=directory)
+            elif phase == 'forward-activate':
+                activation.prepare_shared_pool_activation(bindings=bound, state_dir=directory)
+            elif phase == 'recovery-fence':
+                module.prepare_shared_recovery_fence(bindings=bound, state_dir=directory)
+                if not self.interrupted:
+                    self.interrupted = True
+                    raise TimeoutError('simulated interrupted local preparation')
+            else:
+                super().prepare(phase, bound, directory)
+
+        def validate_prepared_phase(self, phase, directory):
+            if phase == 'forward-guards':
+                assert set(guards.validate_shared_pool_guards(bindings=bindings, state_dir=directory, complete=False)['guards'].values()) == {'prepared'}
+            elif phase == 'forward-activate':
+                activation.validate_shared_pool_activation(bindings=bindings, state_dir=directory, complete=False, prepared=True)
+            elif phase == 'recovery-fence':
+                module.validate_shared_recovery_fence(bindings=bindings, state_dir=directory, complete=False, prepared=True)
+            else:
+                super().validate_prepared_phase(phase, directory)
+
+        def validate_phase(self, phase, directory, *, complete):
+            if phase == 'forward-guards':
+                guards.validate_shared_pool_guards(bindings=bindings, state_dir=directory, complete=complete)
+            elif phase == 'forward-activate':
+                activation.validate_shared_pool_activation(bindings=bindings, state_dir=directory, complete=complete)
+            elif phase == 'recovery-fence':
+                module.validate_shared_recovery_fence(bindings=bindings, state_dir=directory, complete=complete)
+            else:
+                super().validate_phase(phase, directory, complete=complete)
+
+        def advance(self, phase, bound, directory):
+            if phase == 'forward-guards':
+                path = directory / 'guards.json'
+                record = _read(path)
+                record['guards'].update(dict.fromkeys(roster, 'held') if forward_point == 'partial-release'
+                    else {roster[0]: 'acquire_intent'})
+                private_state._atomic_json(path, record)
+                return forward_point == 'partial-release'
+            if phase == 'forward-activate':
+                path = directory / 'activation.json'
+                record = _read(path)
+                record['opening'] = 'opened'
+                record['guards'][roster[0]]['release'] = 'intent'
+                private_state._atomic_json(path, record)
+                return False
+            if phase == 'recovery-fence':
+                return module.advance_shared_recovery_fence(bindings=bound, api=remote, state_dir=directory)
+            return super().advance(phase, bound, directory)
+
+    api = API(parent)
+    kwargs = {**args, 'bindings': bindings, 'api': api, 'action': 'install'}
+    expected = 'forward-guards' if forward_point == 'partial-acquire' else 'forward-activate'
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == expected
+    frozen = {path: path.read_bytes() for path in state.glob('forward-*/*') if path.is_file()}
+    with pytest.raises((ValueError, FileNotFoundError)):
+        module.prepare_shared_recovery_fence(bindings=bindings, state_dir=child)
+    assert not child.exists() and effects == []
+    kwargs['action'] = 'recover'
+    with pytest.raises(ValueError):
+        parent.run_shared_pool_operation(**kwargs)
+    assert child.exists() and effects == []  # Only local preparation was interrupted.
+    original = remote.local[roster[0]]
+    remote.local[roster[0]] = 'foreign'
+    with pytest.raises(ValueError):
+        parent.run_shared_pool_operation(**kwargs)
+    assert effects == []
+    remote.local[roster[0]] = original
+    remote.migration = None
+    checks = remote.checks
+    with pytest.raises(ValueError):
+        parent.run_shared_pool_operation(**kwargs)
+    assert remote.checks == checks and effects == []
+    remote.migration = bindings.migration
+    previous = remote.mode
+    remote.mode = 'global' if previous == 'closed' else 'closed'
+    with pytest.raises(ValueError):
+        parent.run_shared_pool_operation(**kwargs)
+    assert effects == []
+    remote.mode = previous
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'recovery-fence'
+    assert effects == [('pool', None)]
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'recovery-fence'
+    assert effects == [('pool', None)]  # An unknown fence is never retried.
+    receipt = child / 'fence.json'
+    saved, checks = receipt.read_bytes(), remote.checks
+    receipt.unlink()
+    with pytest.raises(ValueError):
+        parent.run_shared_pool_operation(**kwargs)
+    assert remote.checks == checks and not receipt.exists()
+    receipt.write_bytes(saved)
+    receipt.chmod(0o600)
+    remote.damage = 'receipt-bytes'
+    with pytest.raises(ValueError):
+        parent.run_shared_pool_operation(**kwargs)
+    assert effects == [('pool', None)]
+    receipt.write_bytes(saved)
+    receipt.chmod(0o600)
+    remote.damage = None
+    remote.mode = 'fenced'  # A delayed pool-fence commit is now observable.
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'recovery-fence'
+    expected_effects = [('pool', None), *(('guard', key) for key in roster)]
+    assert effects == expected_effects and remote.local[roster[0]] == 'fenced'
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'recovery-fence'
+    assert effects == expected_effects
+    remote.local[roster[1]] = 'fenced'
+    api.block = 'recovery-drain'
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'recovery-drain'
+    assert effects == expected_effects
+    module.validate_shared_recovery_fence(bindings=bindings, state_dir=child, complete=True)
+    assert all(path.read_bytes() == raw for path, raw in frozen.items())
+    with pytest.raises(ValueError):
+        module.advance_shared_recovery_fence(bindings=bindings, api=remote, state_dir=child)
+    assert effects == expected_effects
+
+
 @pytest.mark.timeout(420)
 async def test_shared_provider_uses_installed_observer_and_retains_scale_zero(
         shared_runtime, staging_history, staging_observation, completed_pool, handoff,
