@@ -39,7 +39,7 @@ Local HTTP, management mode and legacy managed-child configuration reject it.
 Unset retains legacy behavior; configured services never fall back to legacy
 session hashes. Changing the generation requires a protected lifecycle operation
 that stops/revokes old processes; editing a value alone is not revocation.
-See [application-scoped authentication](nebius-primary-platform.md#application-scoped-browser-authentication).
+See [application-scoped authentication](nebius-personal-applications.md#application-scoped-browser-authentication).
 
 `render_config` supports scalar values plus the schema's list and table field
 forms. Descriptions are copied into generated configuration surfaces, so they

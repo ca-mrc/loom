@@ -6,9 +6,10 @@ uv mirror integration have been removed from the repository. CI does not need
 Nebius worker nodes or access to a shared development host.
 
 The four protected source checks remain `repository-checks`, `images-gate`,
-`cluster-smoke-gate`, and `staging-smoke-gate`. GitHub-native squash auto-merge
-still requires the current PR head on the current base; there is no bypass or
-replacement gate publisher.
+`cluster-smoke-gate`, and `staging-smoke-gate`. GitHub's native queue validates
+the merge-group SHA against the current base before squash integration; PR-head
+checks establish queue eligibility. There is no bypass or replacement gate
+publisher. See [merge authority](../contributing/required-checks.md).
 
 Python root, package and integration tests run without coverage instrumentation
 by default. Use the existing `ci:coverage-summary` selector or dispatch CI with
@@ -20,7 +21,7 @@ Historical tests are available through CI dispatch `legacy_compatibility=true`.
 
 Dev PR image builds select from the seven AMD64 Nebius platform images.
 Retired personal-development fleet images have no publication lane. Main
-production publication retains its protected contract. macOS CLI
+production promotion retains its protected contract. macOS CLI
 compatibility remains a separate developer-host check.
 
 This repository change does not stop existing runner services or cancel running

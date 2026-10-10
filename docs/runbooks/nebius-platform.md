@@ -1313,7 +1313,7 @@ account for that head before consuming remaining capacity; unsupported,
 cancelled, expired or superseded work does not fence admission. Waiting does not
 increment build attempts or create/cost counters. Deploy the matching controller
 and all capacity writers before claiming live fairness. See the
-[native fairness contract](../architecture/nebius-primary-platform.md#native-task-image-capacity-fairness).
+[native fairness contract](../architecture/nebius-shared-pools.md#native-task-image-capacity-fairness).
 
 Kubernetes may omit default-false host namespace and volume-mount flags and
 canonicalize volume sizes (for example, `7168Mi` to `7Gi`). The native controller

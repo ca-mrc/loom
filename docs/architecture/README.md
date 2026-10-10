@@ -8,7 +8,9 @@ architecture and retained data.
 
 ## Core execution
 
-- **[Platform contract](nebius-primary-platform.md)** — Nebius-only scope, workload gaps, lineage and native build fairness.
+- **[Platform contract](nebius-primary-platform.md)** — Nebius-only scope, management services, workload gaps and database lineage.
+- **[Personal applications](nebius-personal-applications.md)** — shared development foundation, frontend/API lifecycle, source builds and credentials.
+- **[Shared pools and native capacity](nebius-shared-pools.md)** — observations, global reservations, protected lifecycle and native build fairness.
 
 - **[Overview](overview.md)** — components, execution modes, and main data
   flows.
@@ -17,6 +19,7 @@ architecture and retained data.
 - **[Nebius service execution](nebius-service-execution.md)** — accepted
   provider-neutral workload/execution contract, regional target topology,
   isolation decision, compatibility inventory, and migration authority gates.
+- **[Guest execution](guest-execution.md)** — trial-owned kernels for isolated Docker, image builds and core generation, with target qualification requirements.
 - **[CLI mode](cli-mode.md)** — stateless local execution through
   `Trial.run()`.
 - **[Trajectories and ATIF](trajectory-and-atif.md)** — append-only event
@@ -36,6 +39,7 @@ architecture and retained data.
   readiness, publication, and user-owned benchmark intake.
 - **[User-brought TaskSets](user-brought-tasksets.md)** — team-owned TaskSet
   registration and materialization within the current trust boundary.
+- **[Harbor native intake](harbor-native-intake.md)** — source identity, import validation and task-image preparation.
 - **[Agent adapter](agent-adapter.md)** — `loom-launcher`, built-in agents, and
   per-trial installation caching.
 - **[Hosted agent harnesses](hosted-agent-harness.md)** — Nebius controller
@@ -110,6 +114,7 @@ architecture and retained data.
   diagnostics presentation rules.
 - **[Frontend error recovery](frontend-error-recovery.md)** — safe recovery
   boundaries and browser diagnostics.
+- **[Frontend domain boundaries](frontend-domain-boundaries.md)** — API, query and state ownership within the web application.
 - **[Frontend quality gate](frontend-quality-gate.md)** — required type,
   test, build, accessibility, and route checks.
 - **[Observability](observability.md)** — metrics, dashboards, alerts, and

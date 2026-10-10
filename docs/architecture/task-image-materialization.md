@@ -16,7 +16,7 @@ prevent an update from changing an in-flight build.
 for an execution target. It uses the same capacity admission transaction lock
 as native trials and records renewable waits when capacity is unavailable.
 A waiting record is not a reservation or proof of executable capacity. See
-[native capacity fairness](nebius-primary-platform.md#native-task-image-capacity-fairness).
+[native capacity fairness](nebius-shared-pools.md#native-task-image-capacity-fairness).
 
 The native renderer owns Job resources, source inputs, build configuration and
 registry output identity. Supported architecture and workload requirements must

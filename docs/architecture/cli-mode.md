@@ -80,7 +80,7 @@ Use `loom dev app status APPLICATION_ID` for retained application/operation stat
 and `loom dev app build-status BUILD_ID` for a particular build. Personal
 application versions select frontend/API images; they do not replace shared
 controllers or select a task's execution image. See the
-[application contract](nebius-primary-platform.md#personal-application-control).
+[application contract](nebius-personal-applications.md#personal-application-control).
 
 The [personal development workflow](../runbooks/personal-development.md) walks
 through source capture, building, deployment, login, tasks and retained teardown.
