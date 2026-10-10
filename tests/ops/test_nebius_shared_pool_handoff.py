@@ -966,7 +966,8 @@ def test_shared_drain_checks_both_databases_and_retains_qualified_paged_backlog(
     closed_reads = []
     with HTTPSDevelopmentRuntimeProbes(request=runtime,
             api_server=runtime.database.foundation.inputs.config['kubernetes_api_server'],
-            ssl_context=ssl.create_default_context(), token='private-test-kubernetes-token') as probes:
+            ssl_context=ssl.create_default_context(cadata=runtime.database.foundation.bootstrap['material']['loom-platform-db']['ca.crt']),
+            token='private-test-kubernetes-token') as probes:
         for connection in (probes, probes.manager, probes.foundation):
             connection.client.close()
             connection.client = type(completed_pool[3].api.client)(base_url=connection.api_server,
@@ -2001,8 +2002,9 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
 
 
 @pytest.mark.timeout(420)
+@pytest.mark.parametrize('forward_census', [False, True], ids=['initial', 'forward'])
 def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writers(
-        shared_runtime, staging_history, staging_observation, completed_pool, handoff):
+        shared_runtime, staging_history, staging_observation, completed_pool, handoff, shared_operation, forward_census):
     """A historical template or a stopped clone must not hide a live writer."""
     import json
     import ssl
@@ -2079,6 +2081,8 @@ def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writ
         version = message.url.params.get('resourceVersion')
         if plural != 'roles':
             assert version == '500' and message.url.params['resourceVersionMatch'] == 'Exact'
+        if plural == 'pods' and mode.get('during_read') is not None:
+            mode.pop('during_read')()
         return httpx.Response(200, json={'apiVersion': 'v1' if plural in {'pods', 'replicationcontrollers'}
             else 'batch/v1' if plural in {'jobs', 'cronjobs'} else 'rbac.authorization.k8s.io/v1'
             if kind in rbac_kinds else 'apps/v1', 'kind': kind + 'List',
@@ -2090,6 +2094,9 @@ def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writ
         transport.client.close()
         transport.client = type(completed_pool[3].api.client)(base_url=transport.api_server,
             transport=httpx.MockTransport(respond))
+        if forward_census:
+            _exercise_forward_writer_census(shared_operation, transport, inventory, kinds, calls, mode)
+            return
         from scripts.ops.nebius_shared_pool_handoff_live import observe_shared_pool_writers
 
         def observe():
@@ -2227,6 +2234,159 @@ def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writ
             mode['revision'] = '500'
         staging_observation['resources'] = original_capture
         assert calls and all(row.method == 'GET' for row in calls)
+
+
+def _exercise_forward_writer_census(shared_operation, transport, inventory, kinds, calls, mode):
+    """Observe real parent/child receipts; remote transitions are fixture state.
+
+    Accepting an unrecorded successor, an old template after completion, or a
+    changed receipt during the census must fail independently of the mutator.
+    """
+    import importlib.util
+    import json
+
+    from scripts.ops import nebius_certificates as private_state
+    from scripts.ops import nebius_shared_pool_operation as parent
+    from scripts.ops import nebius_shared_pool_roles as roles
+    from scripts.ops import nebius_shared_pool_workloads as workloads
+    from scripts.ops.nebius_ingress_stage import _snapshot
+
+    name = 'scripts.ops.nebius_shared_pool_forward_census'
+    assert importlib.util.find_spec(name) is not None, 'phase-bound shared writer census is missing'
+    module = __import__(name, fromlist=['observe_shared_pool_forward_writers'])
+    args, bindings = shared_operation
+    manager = args['runtime'].database.manager.retained.request.retained
+    state = Path(manager.operation['state_dir']).parent / 'shared-pool-handoff'
+
+    class CensusPhaseAPI(SharedPhaseAPI):
+        def prepare(self, phase, bound, child):
+            if phase == 'forward-stop':
+                workloads.prepare_shared_staging_workloads(bindings=bound, phase=phase, state_dir=child)
+            elif phase == 'forward-roles':
+                roles.prepare_shared_staging_roles(bindings=bound, state_dir=child)
+            else:
+                super().prepare(phase, bound, child)
+
+        def validate_prepared_phase(self, phase, child):
+            if phase == 'forward-stop':
+                workloads.validate_shared_staging_workloads(bindings=bindings, phase=phase,
+                    state_dir=child, complete=False, prepared=True)
+            elif phase == 'forward-roles':
+                roles.validate_shared_staging_roles(bindings=bindings, state_dir=child, complete=False, prepared=True)
+            else:
+                super().validate_prepared_phase(phase, child)
+
+        def validate_phase(self, phase, child, *, complete):
+            if phase == 'forward-stop':
+                workloads.validate_shared_staging_workloads(bindings=bindings, phase=phase, state_dir=child, complete=complete)
+            elif phase == 'forward-roles':
+                roles.validate_shared_staging_roles(bindings=bindings, state_dir=child, complete=complete)
+            else:
+                super().validate_phase(phase, child, complete=complete)
+
+        def advance(self, phase, bound, child):
+            if phase == 'forward-stop':
+                return all(row['status'] == 'applied' for row in json.loads((child / 'transition.json').read_bytes())['resources'].values())
+            if phase == 'forward-roles':
+                return all(status == 'restricted' for status in json.loads((child / 'roles.json').read_bytes())['roles'].values())
+            return super().advance(phase, bound, child)
+
+    api = CensusPhaseAPI(parent)
+    api.block = 'forward-database'
+    kwargs = {**args, 'bindings': bindings, 'api': api, 'action': 'install'}
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-stop'
+
+    def observe():
+        return module.observe_shared_pool_forward_writers(bindings=bindings, state_dir=state, transport=transport)
+
+    initial = observe()
+    assert initial.resource_version == '500'
+    journal = state / 'forward-stop/transition.json'
+    stopped = json.loads(journal.read_bytes())
+    key = next(key for key, row in bindings.plan.staging.originals.items() if row['kind'] == 'Deployment')
+    actual = next(row for row in inventory['deployments'] if _key(row) == key)
+    original = copy.deepcopy(actual)
+    expected = _snapshot(bindings.plan.staging.stopped[key])
+
+    def replace_live(actual, wanted):
+        identity = {field: actual['metadata'][field] for field in ('uid', 'resourceVersion')}
+        actual.clear()
+        actual.update(copy.deepcopy(wanted))
+        actual['metadata'].update(identity)
+
+    replace_live(actual, expected)
+    with pytest.raises(ValueError):
+        observe()  # No intent exists yet: matching a planned target is insufficient.
+    replace_live(actual, original)
+    stopped['resources'][key].update(status='intent', expected=expected)
+    private_state._atomic_json(journal, stopped)
+    assert observe().workloads[key] == original
+    replace_live(actual, expected)
+    assert observe().workloads[key] == actual  # A lost PATCH reply permits either recorded side.
+    actual['spec']['template']['spec']['containers'][0]['image'] = 'foreign.invalid/image:latest'
+    with pytest.raises(ValueError):
+        observe()
+    replace_live(actual, expected)
+    raw = journal.read_bytes()
+    journal.unlink()
+    before = len(calls)
+    with pytest.raises(ValueError):
+        observe()
+    assert len(calls) == before
+    journal.write_bytes(raw)
+    journal.chmod(0o600)
+    mode['during_read'] = journal.unlink
+    with pytest.raises(ValueError):
+        observe()  # Started children are not covered by completed-child byte pins.
+    journal.write_bytes(raw)
+    journal.chmod(0o600)
+
+    for key, target in bindings.plan.staging.stopped.items():
+        wanted = _snapshot(target)
+        stopped['resources'][key].update(status='applied', expected=wanted)
+        row = next(row for row in inventory[kinds[target['kind']]] if _key(row) == key)
+        replace_live(row, wanted)
+    private_state._atomic_json(journal, stopped)
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-roles'
+    observe()
+    key = min(bindings.plan.staging_role_originals)
+    role = next(row for row in inventory['roles'] if _key(row) == key)
+    original_role = copy.deepcopy(role)
+    target_role = bindings.plan.staging_role_targets[key]
+    role_path = state / 'forward-roles/roles.json'
+    role_record = json.loads(role_path.read_bytes())
+    replace_live(role, target_role)
+    with pytest.raises(ValueError):
+        observe()
+    role_record['roles'][key] = 'intent'
+    private_state._atomic_json(role_path, role_record)
+    assert observe().authority[key] == role
+    replace_live(role, original_role)
+    assert observe().authority[key] == original_role
+    for key, target in bindings.plan.staging_role_targets.items():
+        role_record['roles'][key] = 'restricted'
+        row = next(row for row in inventory['roles'] if _key(row) == key)
+        replace_live(row, target)
+    private_state._atomic_json(role_path, role_record)
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-database'
+    observe()
+    successor = copy.deepcopy(role)
+    replace_live(role, original_role)
+    with pytest.raises(ValueError):
+        observe()  # Completion must not retain the old write grant as an alternative.
+    replace_live(role, successor)
+    reader = copy.deepcopy(next(iter(bindings.plan.staging_reader_authority.values())))
+    reader['metadata'].update(uid=str(uuid4()), resourceVersion='401')
+    inventory[kinds[reader['kind']]].append(reader)
+    with pytest.raises(ValueError):
+        observe()  # Even planned new authority is foreign until its retained create intent.
+    inventory[kinds[reader['kind']]].remove(reader)
+    api.block = 'recovery-fence'
+    assert parent.run_shared_pool_operation(**{**kwargs, 'action': 'recover'})['phase'] == 'recovery-fence'
+    before = len(calls)
+    with pytest.raises(ValueError):
+        observe()
+    assert len(calls) == before
 
 
 @pytest.mark.timeout(420)
