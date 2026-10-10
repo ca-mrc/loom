@@ -995,6 +995,16 @@ without this binding. The shared probe adapter carries the same binding through
 nested process checks; permitting a successor only in the outer inventory is
 not enough. Gateway/open and recovery stages still require their own successors.
 
+The shared gateway child creates only its catalog-derived grants and starts the
+already-installed, stopped gateway through the existing create-only and workload
+compare-and-swap engines. Dispatch intent pins the grant operation and defaults
+before the first create; missing started receipts cannot be reconstructed.
+Effective permission reviews must pass before startup previews, the actual PATCH,
+and completion. Real Deployment/descendant readiness precedes the parent's runtime
+challenge. Lost create or PATCH replies are read back without redispatch. This
+child neither opens the capacity ledger nor releases participant guards; those
+steps still require fresh whole-pool capacity and runtime qualification.
+
 The shared Role child reduces only the two source-qualified staging worker/build
 Roles, preserving their UIDs and existing bindings. Each rules-and-annotations
 PATCH tests the current UID, resourceVersion and rules. Mutation intent precedes
