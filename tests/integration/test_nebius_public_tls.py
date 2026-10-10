@@ -76,6 +76,7 @@ def test_built_web_tls_bootstrap_renewal_restart_and_proxy(tmp_path: Path) -> No
         pytest.skip("set LOOM_NEBIUS_WEB_IMAGE to the locally built candidate web image")
     prefix = "loom-tls-" + uuid.uuid4().hex[:10]
     names: list[str] = []
+    network_created = False
 
     def docker(*args: str) -> str:
         return subprocess.check_output(
@@ -176,6 +177,7 @@ HTTPServer(('0.0.0.0',8090),Handler).serve_forever()
 
     try:
         docker("network", "create", prefix)
+        network_created = True
         run(
             "backend",
             "--network",
@@ -297,6 +299,10 @@ HTTPServer(('0.0.0.0',8090),Handler).serve_forever()
         for name in reversed(names):
             subprocess.run(["docker", "rm", "-f", name], capture_output=True, check=False)
         try:
+            remaining = docker(
+                "ps", "-a", "--filter", f"name={prefix}-", "--format", "{{.Names}}",
+            )
+            assert not remaining, f"Refusing TLS storage cleanup with remaining containers: {remaining}"
             # Private directories also prevent the host runner from cleaning its
             # temporary directory. Remove only this fixture's data as its owner,
             # after stopping every writer; keep the storage permissions intact.
@@ -306,4 +312,5 @@ HTTPServer(('0.0.0.0',8090),Handler).serve_forever()
                 "-c", "rm -rf /data/*",
             )
         finally:
-            subprocess.run(["docker", "network", "rm", prefix], capture_output=True, check=False)
+            if network_created:
+                docker("network", "rm", prefix)
