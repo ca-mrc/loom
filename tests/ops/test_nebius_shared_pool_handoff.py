@@ -1977,6 +1977,37 @@ def test_shared_gateway_stages_exact_grants_then_starts_once_under_closed_parent
             assert len(reads) == before
             receipt.write_bytes(saved)
             receipt.chmod(0o600)
+            changed_during_read = []
+
+            def changing_read(message):
+                result = read(message)
+                if not changed_during_read:
+                    # Same parsed record, different retained bytes: semantic
+                    # equality alone must not hide a concurrent journal write.
+                    receipt.write_bytes(saved + b'\n')
+                    changed_during_read.append(True)
+                return result
+
+            for connection in (observer, observer.manager, observer.foundation):
+                connection.client.close()
+                connection.client = type(completed_pool[3].api.client)(base_url=connection.api_server,
+                    transport=httpx.MockTransport(changing_read))
+            with pytest.raises(ValueError):
+                observer.inspect(state_dir=plan.runtime.state_dir, _shared_handoff=bindings)
+            assert changed_during_read
+            receipt.write_bytes(saved)
+            receipt.chmod(0o600)
+        from scripts.ops.nebius_shared_pool_runtime_observation import HTTPSSharedPoolRuntimeProbes
+
+        populate_runtime_pods(inventory)
+        with HTTPSSharedPoolRuntimeProbes(bindings=bindings,
+                api_server=runtime.database.foundation.inputs.config['kubernetes_api_server'], token='fixture-token',
+                ssl_context=ssl.create_default_context(cadata=runtime.database.foundation.bootstrap['material']['loom-platform-db']['ca.crt'])) as probes:
+            for connection in (probes, probes.manager, probes.foundation):
+                connection.client.close()
+                connection.client = type(completed_pool[3].api.client)(base_url=connection.api_server, transport=httpx.MockTransport(read))
+            component, _, pod = probes._running('Deployment:loom-dev:loom-control-plane', plan.runtime.state_dir)
+            assert component == 'controller' and pod['status']['phase'] == 'Running'
         assert all(message.method == 'GET' for message in reads)
         mode['runtime_ready'] = True
         assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-activate'
