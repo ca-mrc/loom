@@ -863,13 +863,31 @@ separate captured database binding, which still needs live requalification.
 These observations neither acquire a guard nor prove writer fencing, provider
 authority, process readiness or an operational shared pool.
 
-The initial workload census reads every built-in workload collection at one
+The initial writer census reads all RBAC and built-in workload collections at one
 API-server revision, including terminal Pods. Its retained roots include current
 staging, completed dev, and the retired old manager/gateway. It rejects changed
-root identities/templates, detached processes using their ServiceAccounts, and
-undeclared schedules in worker namespaces, even suspended schedules. This is
-workload accounting, not proof of RBAC/provider exclusivity or process drain;
-it cannot be replayed unchanged after an intentional handoff transition.
+root identities/templates, detached processes using their ServiceAccounts,
+undeclared schedules in worker namespaces (even suspended schedules), and
+additional named, group, or cross-namespace writer grants. Old gateway Roles
+must still match their completed reduction, not their former write authority.
+Only renderer-qualified staging resources become approved roots; an extra entry
+in the captured inventory does not authorize that resource. Retained one-shot
+installation Jobs qualify by exact historical UID/template and terminal Job and
+associated-container state, not a management-account exception. Collected Jobs
+may be absent, but surviving orphan Pods do not qualify through missing parents.
+These completed Jobs are census evidence, never stop or restart targets.
+Native controllers and operator groups require the existing explicit, UID-bound
+platform trust. This does not prove external-credential/provider exclusivity,
+effective post-fencing permissions or process drain; it cannot be replayed
+unchanged after an intentional handoff transition.
+
+The shared preflight reuses the runtime's authenticated provider read with the
+installed collector identity, bracketed by current runtime/material and retained
+history checks. The returned node-group and quota identities must match the
+registered common pool, with an available provider and ready/scaling autoscaler.
+A zero-size group or exhausted quota is not rejected merely for lacking spare
+capacity. This read neither reserves capacity nor proves provider-writer
+exclusivity; opening still requires fresh aggregate admission evidence.
 
 Authenticated Kubernetes/worker identity and capacity observations remain
 mandatory. Detailed kubelet samples retain the existing optional-telemetry

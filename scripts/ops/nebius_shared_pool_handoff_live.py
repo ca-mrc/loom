@@ -15,12 +15,14 @@ from urllib.parse import urlencode
 from uuid import UUID
 
 from scripts.ops.nebius_development_bootstrap import _secret_documents
+from scripts.ops.nebius_development_runtime_external import qualify_runtime_cloud
 from scripts.ops.nebius_development_runtime_install import DevelopmentRuntimeInstallRequest
 from scripts.ops.nebius_development_runtime_observation import HTTPSDevelopmentRuntimeObserver
 from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
 from scripts.ops.nebius_management_prerequisites import inventory_resources
 from scripts.ops.nebius_management_switch import _matches
 from scripts.ops.nebius_management_transport import ManagementKubernetesTransport
+from scripts.ops.nebius_pool_gateway_retirement import _gateway_record
 from scripts.ops.nebius_pool_migration import (
     PoolGuardDatabase,
     PoolMigrationRequest,
@@ -30,6 +32,7 @@ from scripts.ops.nebius_pool_platform_authority import platform_controller_subje
 from scripts.ops.nebius_pool_predecessor import CompletedPoolCutover
 from scripts.ops.nebius_pool_role_fencing import (
     POOL_WRITER_WORKLOAD_COLLECTIONS,
+    qualify_pool_writer_bindings,
     qualify_pool_writer_workloads,
 )
 from scripts.ops.nebius_shared_pool_handoff import (
@@ -38,6 +41,8 @@ from scripts.ops.nebius_shared_pool_handoff import (
 )
 
 from loom.nebius_platform_render import digest
+from loom_control_plane.execution_placement import quota_identity
+from loom_execution_capacity_collector.contracts import ProviderCapacitySnapshot
 
 
 @dataclass(frozen=True, repr=False)
@@ -129,14 +134,15 @@ def observe_shared_pool_guard_bindings(*, runtime: DevelopmentRuntimeInstallRequ
 
 
 @dataclass(frozen=True, repr=False)
-class SharedPoolWorkloadObservation:
+class SharedPoolWriterObservation:
     plan: SharedPoolHandoffPlan
     resource_version: str
     workloads: dict[str, dict[str, Any]]
+    authority: dict[str, dict[str, Any]]
     input_digest: str
 
 
-def _workload_roots(plan: SharedPoolHandoffPlan) -> dict[str, dict[str, Any]]:
+def _resource_roots(plan: SharedPoolHandoffPlan, kinds: frozenset[str]) -> dict[str, dict[str, Any]]:
     """Current fixed consumers, including the retired old manager/gateway.
 
     Current staging replaces historical staging templates; completed dev runtime
@@ -145,7 +151,7 @@ def _workload_roots(plan: SharedPoolHandoffPlan) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
 
     def add(row: dict[str, Any]) -> None:
-        if row['kind'] in {'Deployment', 'StatefulSet', 'CronJob'}:
+        if row['kind'] in kinds:
             _uid(row)
             result[_key(row)] = copy.deepcopy(row)
 
@@ -174,12 +180,34 @@ def _workload_roots(plan: SharedPoolHandoffPlan) -> dict[str, dict[str, Any]]:
     return result
 
 
-def observe_shared_pool_workloads(*, runtime: DevelopmentRuntimeInstallRequest,
-        observation: dict[str, Any], legacy: CompletedPoolCutover, repo_root: Path,
-        transport: ManagementKubernetesTransport) -> SharedPoolWorkloadObservation:
-    """GET-only, exact-revision built-in workload census before the first guard.
+def _authority_roots(plan: SharedPoolHandoffPlan) -> dict[str, dict[str, Any]]:
+    kinds = frozenset({'Role', 'RoleBinding', 'ClusterRole', 'ClusterRoleBinding'})
+    legacy = plan.staging.legacy
+    result = {_key(row): copy.deepcopy(row) for row in (*legacy.context.original.retained.values(),
+        *legacy.context.predecessor.retained.values()) if row['kind'] in kinds}
+    result.update(_resource_roots(plan, kinds))
+    # Read the completed old gateway's reduced authority, never its pre-recovery
+    # grants or a name-based exemption. The completed legacy chain was qualified
+    # before this read and is checked again before returning the observation.
+    originals, targets, _, record = _gateway_record(legacy.context.request,
+        state=Path(legacy.context.operation['state_dir']), anchor=Path(legacy.context.operation['anchor_dir']))
+    if record is None or any(item['phase'] != 'restricted' for item in record['roles'].values()):
+        raise ValueError
+    for key, original in originals.items():
+        row = copy.deepcopy(targets.get(key, original))
+        row['metadata']['uid'] = _uid(original)
+        if key in result and result[key] != row:
+            raise ValueError
+        result[key] = row
+    return result
 
-    RBAC, external credentials, provider ownership and process drain are separate
+
+def observe_shared_pool_writers(*, runtime: DevelopmentRuntimeInstallRequest,
+        observation: dict[str, Any], legacy: CompletedPoolCutover, repo_root: Path,
+        transport: ManagementKubernetesTransport) -> SharedPoolWriterObservation:
+    """GET-only RBAC and built-in workload census before the first guard.
+
+    External credentials, provider ownership and process drain are separate
     mandatory checks. This initial observation cannot authorize a later mutation
     or be replayed after the parent intentionally transitions workloads.
     """
@@ -188,7 +216,11 @@ def observe_shared_pool_workloads(*, runtime: DevelopmentRuntimeInstallRequest,
             legacy=legacy, repo_root=repo_root)
         if transport.api_server.rstrip('/') != runtime.database.foundation.inputs.config['kubernetes_api_server'].rstrip('/'):
             raise ValueError
-        roots = _workload_roots(plan)
+        roots = _resource_roots(plan, frozenset({'Deployment', 'StatefulSet', 'CronJob'}))
+        legacy_jobs = (*legacy.context.original.retained.values(), *legacy.context.predecessor.retained.values())
+        retained_jobs = {_key(row): copy.deepcopy(row) for row in legacy_jobs if row['kind'] == 'Job'}
+        retained_jobs.update(_resource_roots(plan, frozenset({'Job'})))
+        authority = _authority_roots(plan)
         binding = plan.migration.registration.binding
 
         def cluster() -> None:
@@ -211,10 +243,13 @@ def observe_shared_pool_workloads(*, runtime: DevelopmentRuntimeInstallRequest,
             revision = current
             return page
 
+        permissions = {resource: inventory_resources(read, 'rbac.authorization.k8s.io/v1', resource, kind)
+            for resource, kind in (('roles', 'Role'), ('clusterroles', 'ClusterRole'),
+                ('rolebindings', 'RoleBinding'), ('clusterrolebindings', 'ClusterRoleBinding'))}
         inventory = {resource: inventory_resources(read, api, resource, kind, include_terminal_pods=True)
             for api, resource, kind in POOL_WRITER_WORKLOAD_COLLECTIONS}
         subjects = set()
-        for row in roots.values():
+        for row in (*roots.values(), *retained_jobs.values()):
             pod = (row['spec']['jobTemplate']['spec']['template']['spec'] if row['kind'] == 'CronJob'
                 else row['spec']['template']['spec'])
             subjects.add((row['metadata']['namespace'], pod.get('serviceAccountName', 'default')))
@@ -225,16 +260,69 @@ def observe_shared_pool_workloads(*, runtime: DevelopmentRuntimeInstallRequest,
         # guest actuators whose names differ from the ordinary actuator.
         producers = controllers | frozenset(_uid(row) for row in roots.values()
             if row['metadata']['namespace'] in namespaces)
+        qualify_pool_writer_bindings(permissions, originals={}, targets={}, expected_subjects={},
+            subjects=frozenset(subjects), writer_namespaces=namespaces, staged_authority=authority,
+            kube_system_uid=binding.kube_system_uid, platform_authority=legacy.context.request.platform_authority)
         qualify_pool_writer_workloads(inventory, originals=roots, expected=roots,
             subjects=frozenset(subjects), writer_namespaces=namespaces,
             controller_uids=controllers, producer_uids=producers,
-            platform_subjects=platform_controller_subjects(legacy.context.request.platform_authority))
+            platform_subjects=platform_controller_subjects(legacy.context.request.platform_authority),
+            retained_jobs=retained_jobs)
         current = {_key(row): row for rows in inventory.values() for row in rows if _key(row) in roots}
+        current_authority = {_key(row): row for rows in permissions.values() for row in rows if _key(row) in authority}
         cluster()
         if (revision is None or prepare_shared_pool_handoff(runtime=runtime, observation=observation,
                 legacy=legacy, repo_root=repo_root) != plan):
             raise ValueError
-        checksum = digest({'handoff': plan.input_digest, 'resource_version': revision, 'workloads': current})
-        return SharedPoolWorkloadObservation(plan, revision, copy.deepcopy(current), checksum)
+        checksum = digest({'handoff': plan.input_digest, 'resource_version': revision,
+            'workloads': inventory, 'permissions': permissions})
+        return SharedPoolWriterObservation(plan, revision, copy.deepcopy(current), copy.deepcopy(current_authority), checksum)
     except Exception:
-        raise ValueError('shared pool workload census unqualified') from None
+        raise ValueError('shared pool writer census unqualified') from None
+
+
+@dataclass(frozen=True, repr=False)
+class SharedPoolProviderObservation:
+    plan: SharedPoolHandoffPlan
+    provider: ProviderCapacitySnapshot
+    input_digest: str
+
+
+async def observe_shared_pool_provider(*, runtime: DevelopmentRuntimeInstallRequest,
+        observation: dict[str, Any], legacy: CompletedPoolCutover, repo_root: Path,
+        development: HTTPSDevelopmentRuntimeObserver, operator_credentials: Path) -> SharedPoolProviderObservation:
+    """Read the registered physical group with the installed observer's key.
+
+    Available zero-size and currently scaling groups qualify, even with no spare
+    quota. This does not reserve headroom, publish capacity, prove external writer
+    exclusivity or authorize pool opening. The parent still needs fresh aggregate
+    capacity and fenced-writer/process evidence after its guarded transition.
+    """
+    try:
+        plan = prepare_shared_pool_handoff(runtime=runtime, observation=observation,
+            legacy=legacy, repo_root=repo_root)
+        completed = plan.development.runtime
+
+        def inspect() -> dict[str, dict[str, Any]]:
+            if (development.request != runtime or development.plan != completed.plan
+                    or development.api_server.rstrip('/') != runtime.database.foundation.inputs.config[
+                        'kubernetes_api_server'].rstrip('/')):
+                raise ValueError
+            return {_key(row): {'uid': _uid(row), 'document': _snapshot(row)}
+                for row in development.inspect(state_dir=completed.state_dir).values()}
+
+        before = inspect()  # Includes the installed collector Secret/configuration.
+        snapshot = await qualify_runtime_cloud(request=runtime, operator_credentials=operator_credentials)
+        spec = plan.migration.registration.spec
+        if (snapshot.node_group is None or snapshot.node_group.id != spec.node_group_id
+                or {key: quota_identity(value) for key, value in snapshot.quota_resources.items()} != spec.quota_identities
+                or snapshot.provider_capacity_state != 'available'
+                or snapshot.autoscaler_state not in {'ready', 'scaling'}):
+            raise ValueError
+        if (inspect() != before or prepare_shared_pool_handoff(runtime=runtime, observation=observation,
+                legacy=legacy, repo_root=repo_root) != plan):
+            raise ValueError
+        checksum = digest({'handoff': plan.input_digest, 'provider': snapshot.model_dump(mode='json'), 'workloads': before})
+        return SharedPoolProviderObservation(plan, snapshot, checksum)
+    except Exception:
+        raise ValueError('shared pool provider unqualified') from None

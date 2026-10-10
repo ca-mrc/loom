@@ -182,6 +182,31 @@ def qualify_retained_writer_bindings(request: PoolRoleFenceRequest,
             if row["kind"] == "RoleBinding":
                 key = "Role:" + row["metadata"]["namespace"] + ":" + row["roleRef"]["name"]
                 expected_subjects[key] = {(item["namespace"], item["name"]) for item in row["subjects"]}
+        qualify_pool_writer_bindings(inventory, originals=originals, targets=targets,
+            expected_subjects=expected_subjects, subjects=frozenset(subjects),
+            writer_namespaces=frozenset(writer_namespaces), staged_authority=staged,
+            kube_system_uid=request.retirement.migration.registration.binding.kube_system_uid,
+            platform_authority=platform_authority)
+    except Exception:
+        raise ValueError("pool_retained_writer_binding_inventory_unqualified") from None
+
+
+def qualify_pool_writer_bindings(inventory: dict[str, list[dict[str, Any]]], *,
+                                 originals: dict[str, dict[str, Any]], targets: dict[str, dict[str, Any]],
+                                 expected_subjects: dict[str, set[tuple[str, str]]],
+                                 subjects: frozenset[tuple[str, str]], writer_namespaces: frozenset[str],
+                                 staged_authority: dict[str, dict[str, Any]], kube_system_uid: str,
+                                 platform_authority: PoolPlatformAuthority | None) -> None:
+    """Shared census mechanics; only the protected parent supplies approved roots.
+
+    Current handoff grants and phase-bound retired grants use the same complete
+    RBAC checks without pretending the current operation is an old retirement.
+    No writer is fenced by this read-only validation.
+    """
+    try:
+        staged = staged_authority
+        if set(originals) != set(targets) or set(originals) != set(expected_subjects) or originals.keys() & staged.keys():
+            raise ValueError
         kinds = {"roles": "Role", "clusterroles": "ClusterRole",
             "rolebindings": "RoleBinding", "clusterrolebindings": "ClusterRoleBinding"}
         if set(inventory) != set(kinds):
@@ -200,7 +225,11 @@ def qualify_retained_writer_bindings(request: PoolRoleFenceRequest,
                     raise ValueError
                 documents[key], uids = row, uids | {uid}
         platform = qualify_platform_authority(platform_authority,
-            kube_system_uid=request.retirement.migration.registration.binding.kube_system_uid, documents=documents)
+            kube_system_uid=kube_system_uid, documents=documents)
+        for key, wanted in staged.items():
+            actual = documents[key]
+            if key != _key(wanted) or 'aggregationRule' in actual or not _matches(actual, wanted, _uid(wanted)):
+                raise ValueError
         for key, original in originals.items():
             actual = documents[key]
             if not any(_matches(actual, wanted, _uid(original)) for wanted in (original, targets[key])):
@@ -281,7 +310,8 @@ def _terminal_platform_job(job: dict[str, Any], pods: list[dict[str, Any]],
     """Prove a native singleton Job and every associated process are inert.
 
     This is census evidence only: no adoption, deletion or retirement target.
-    The caller limits it to retained CP identities outside worker namespaces.
+    The caller limits it to retained CP identities outside worker namespaces
+    or exact one-shot Jobs from qualified completed installation history.
     """
     uid, spec, status = _uid(job), job["spec"], job.get("status", {})
     if (job["metadata"].get("ownerReferences", []) != []
@@ -369,7 +399,8 @@ def qualify_pool_writer_workloads(inventory: dict[str, list[dict[str, Any]]], *,
                                   originals: dict[str, dict[str, Any]], expected: dict[str, dict[str, Any]],
                                   subjects: frozenset[tuple[str, str]], writer_namespaces: frozenset[str],
                                   controller_uids: frozenset[str], producer_uids: frozenset[str],
-                                  platform_subjects: frozenset[tuple[str, str]] = frozenset()) -> None:
+                                  platform_subjects: frozenset[tuple[str, str]] = frozenset(),
+                                  retained_jobs: dict[str, dict[str, Any]] | None = None) -> None:
     """Census mechanics shared by retained retirement and forward handoff.
 
     The protected caller derives roots, identities and allowed current templates
@@ -421,6 +452,22 @@ def qualify_pool_writer_workloads(inventory: dict[str, list[dict[str, Any]]], *,
         for key, original in originals.items():
             uid = _uid(original)
             if keys.get(key) != uid or not _matches(documents[uid], expected[key], uid):
+                raise ValueError
+            roots.add(uid)
+
+        # Completed one-shot installation Jobs can outlive their installers.
+        # Qualify only recorded identities/templates, never every Job using
+        # the same account. Garbage-collected Jobs need no root; any surviving
+        # Pods still have to prove their ancestry below.
+        for key, job in (retained_jobs or {}).items():
+            uid = _uid(job)
+            if (key != _key(job) or job['kind'] != 'Job' or key in originals
+                    or uid in root_uids):
+                raise ValueError
+            if key not in keys:
+                continue
+            if (keys[key] != uid or not _matches(documents[uid], job, uid)
+                    or not _terminal_platform_job(documents[uid], inventory['pods'], identities)):
                 raise ValueError
             roots.add(uid)
 
