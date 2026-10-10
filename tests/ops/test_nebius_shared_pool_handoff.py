@@ -2962,6 +2962,167 @@ def _exercise_forward_processes(*, bindings, development, documents, mode, check
     assert len(commands) == before
 
 
+@pytest.mark.timeout(180)
+def test_shared_activation_binds_own_parent_and_never_replays_unknown_writes(shared_operation):
+    """Real phase journals; only preceding phases and remote transactions doubled.
+
+    This checks shared-parent authority and one-dispatch ordering, not installed
+    runtime readiness or the concrete database transport's SQL qualification.
+    """
+    import importlib.util
+    import json
+
+    from scripts.ops import nebius_certificates as private_state
+    from scripts.ops import nebius_shared_pool_operation as parent
+
+    name = 'scripts.ops.nebius_shared_pool_activation'
+    assert importlib.util.find_spec(name) is not None, 'shared-parent activation connection is missing'
+    module = __import__(name, fromlist=['advance_shared_pool_activation'])
+    args, bindings = shared_operation
+    manager = args['runtime'].database.manager.retained.request.retained
+    state = Path(manager.operation['state_dir']).parent / 'shared-pool-handoff'
+    child = state / 'forward-activate'
+    roster = tuple(str(target.participant_id) for target in bindings.migration.guards)
+    effects = []
+
+    class Remote:
+        mode = 'closed'
+        guards = dict.fromkeys(roster, 'held')
+        failure = ('open', None, 'before')
+        qualified = False
+
+        def verify_retained(self):
+            if not self.qualified:
+                raise ValueError('simulated current authority loss')
+
+        def read_workload(self, key):
+            pytest.fail('shared activation must not reconstruct old startup workloads')
+
+        def qualify_runtime(self):
+            self.verify_retained()
+            assert self.mode == 'closed' and set(self.guards.values()) == {'held'}
+
+        def pool_state(self):
+            return self.mode
+
+        def guard_state(self, participant):
+            return self.guards[participant]
+
+        def _write(self, operation, participant=None):
+            record = json.loads((child / 'activation.json').read_bytes())
+            frame = json.loads((state / 'operation.json').read_bytes())
+            assert frame['forward']['forward-activate']['status'] == 'started'
+            assert not (Path(manager.operation['anchor_dir']) / 'shared-pool-recovery.json').exists()
+            if operation == 'open':
+                assert record['opening'] == 'intent'
+                assert self.mode == 'closed' and set(self.guards.values()) == {'held'}
+            else:
+                assert operation == 'release'
+                assert self.mode == 'global' and record['opening'] == 'opened'
+                assert record['guards'][participant] == {'release': 'intent', 'fence': 'prepared'}
+                assert self.guards[participant] == 'held'
+            effects.append((operation, participant))
+            if self.failure == (operation, participant, 'before'):
+                raise TimeoutError('simulated lost transaction before acknowledgement')
+            if operation == 'open':
+                self.mode = 'global'
+            else:
+                self.guards[participant] = 'open'
+            if self.failure == (operation, participant, 'after'):
+                raise TimeoutError('simulated committed transaction reply loss')
+
+        def open_pool(self):
+            self._write('open')
+
+        def release_guard(self, participant):
+            self._write('release', participant)
+
+        def fence_pool(self):
+            pytest.fail('forward child cannot acquire recovery authority')
+
+        def fence_guard(self, participant):
+            pytest.fail('forward child cannot acquire recovery authority')
+
+    remote = Remote()
+
+    class API(SharedPhaseAPI):
+        def prepare(self, phase, bound, directory):
+            if phase == 'forward-activate':
+                module.prepare_shared_pool_activation(bindings=bound, state_dir=directory)
+            else:
+                super().prepare(phase, bound, directory)
+
+        def validate_prepared_phase(self, phase, directory):
+            if phase == 'forward-activate':
+                module.validate_shared_pool_activation(bindings=bindings, state_dir=directory, complete=False, prepared=True)
+            else:
+                super().validate_prepared_phase(phase, directory)
+
+        def validate_phase(self, phase, directory, *, complete):
+            if phase == 'forward-activate':
+                module.validate_shared_pool_activation(bindings=bindings, state_dir=directory, complete=complete)
+            else:
+                super().validate_phase(phase, directory, complete=complete)
+
+        def advance(self, phase, bound, directory):
+            if phase == 'forward-activate':
+                return module.advance_shared_pool_activation(bindings=bound, api=remote, state_dir=directory)
+            return super().advance(phase, bound, directory)
+
+    api = API(parent)
+    api.block = 'forward-verify'
+    kwargs = dict(**args, bindings=bindings, api=api, action='install')
+    with pytest.raises(ValueError):
+        module.prepare_shared_pool_activation(bindings=bindings, state_dir=child)
+    with pytest.raises(ValueError):
+        parent.run_shared_pool_operation(**kwargs)
+    assert effects == []
+    assert json.loads((child / 'activation.json').read_bytes())['opening'] == 'prepared'
+    remote.qualified = True
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-activate'
+    assert effects == [('open', None)]
+    remote.failure = None
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-activate'
+    assert effects == [('open', None)]  # An unknown opening is never replayed.
+    retained = (child / 'activation.json').read_bytes()
+    for loss in ('missing', 'roster', 'released-before-opening', 'recovery'):
+        record = json.loads(retained)
+        if loss == 'missing':
+            (child / 'activation.json').unlink()
+        else:
+            if loss == 'roster':
+                del record['guards'][roster[0]]
+            elif loss == 'released-before-opening':
+                record['guards'][roster[0]]['release'] = 'released'
+            else:
+                record['cancellation'] = 'intent'
+            private_state._atomic_json(child / 'activation.json', record)
+        with pytest.raises(ValueError):
+            parent.run_shared_pool_operation(**kwargs)
+        assert effects == [('open', None)]
+        (child / 'activation.json').write_bytes(retained)
+        (child / 'activation.json').chmod(0o600)
+    remote.mode = 'global'  # A later read settles the first opening.
+    remote.qualified = False
+    with pytest.raises(ValueError):
+        parent.run_shared_pool_operation(**kwargs)
+    assert effects == [('open', None)]  # Global alone is insufficient authority.
+    remote.qualified = True
+    remote.failure = ('release', roster[0], 'before')
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-activate'
+    remote.failure = None
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-activate'
+    assert effects == [('open', None), ('release', roster[0])]
+    remote.guards[roster[0]] = 'open'
+    remote.failure = ('release', roster[1], 'after')
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-verify'
+    assert effects == [('open', None), *(('release', key) for key in roster)]
+    assert set(remote.guards.values()) == {'open'}
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-verify'
+    assert effects == [('open', None), *(('release', key) for key in roster)]
+    module.validate_shared_pool_activation(bindings=bindings, state_dir=child, complete=True)
+
+
 @pytest.mark.timeout(420)
 @pytest.mark.parametrize('forward_census', [False, True], ids=['initial', 'forward'])
 def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writers(
