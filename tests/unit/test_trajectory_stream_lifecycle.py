@@ -35,6 +35,8 @@ async def _stream(
             return SimpleNamespace(scalar_one_or_none=lambda: trial)
 
     class Listen:
+        _push_mode = False
+
         async def __aenter__(self):
             return subscription
 
@@ -118,7 +120,8 @@ async def test_backlog_yields_to_other_tasks_before_reading_next_page(monkeypatc
     assert subscription.closed
 
 
-async def test_empty_terminal_read_cannot_complete_after_connection_deadline(monkeypatch):
+@pytest.mark.parametrize("state", ["succeeded", "running"])
+async def test_empty_read_cannot_wait_or_complete_after_connection_deadline(monkeypatch, state):
     clock = SimpleNamespace(now=0.0)
     monkeypatch.setattr(trajectory.asyncio, "get_running_loop", lambda: SimpleNamespace(time=lambda: clock.now))
     monkeypatch.setattr(trajectory, "_DEFAULT_SSE_MAX_CONNECTION_SEC", 10.0)
@@ -127,7 +130,11 @@ async def test_empty_terminal_read_cannot_complete_after_connection_deadline(mon
         clock.now = 10.0
         return []
 
-    stream, subscription = await _stream(monkeypatch, read)
+    async def unexpected_wait(*_args):
+        pytest.fail("polling wait started after the connection deadline")
+
+    monkeypatch.setattr(trajectory.asyncio, "sleep", unexpected_wait)
+    stream, subscription = await _stream(monkeypatch, read, state=state)
     frames = [frame async for frame in stream]
     assert frames[-1].startswith(b"event: reconnect")
     assert _payload(frames[-1]) == {"reason": "max_connection_sec", "last_seq": -1}

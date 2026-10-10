@@ -987,8 +987,7 @@ async def test_stream_wakes_on_listen_notify_mid_run(
     ]
     parsed = [json.loads(m["data"]) for m in data_messages]
     seqs = [e["seq"] for e in parsed]
-    # Both events landed: seq=300 from the opening Postgres read
-    # AND seq=301 from the LISTEN consumer waking the loop.
+    # The opening event and the entire atomically committed terminal tail land.
     assert seqs == list(range(300, 301 + tail_count))
     assert parsed[1].get("marker") == "fired-by-notify"
     # Final state event present.

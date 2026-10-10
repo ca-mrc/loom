@@ -46,8 +46,9 @@ frontend's EventSource-unavailable fallback.
 SSE live stream. Emits an initial replay for events matching
 `after_seq`, then streams new events as they land in the
 `trial_events` table via a Postgres LISTEN connection on the
-`trial_events_inserted` channel. The connection closes when the
-trial reaches a terminal state OR the client disconnects OR the
+`trial_events_inserted` channel. The connection completes after the trial is
+terminal and all available event pages have been drained. It also closes if the
+client disconnects or the
 connection has been open for 600 s (client reconnects with the last
 seen seq).
 
@@ -59,13 +60,20 @@ so proxies do not buffer chunks.
 | Event kind      | Emitted when                    | Data body                                        |
 |-----------------|---------------------------------|--------------------------------------------------|
 | _(default)_     | A new trajectory event arrives  | Full typed event body (same shape as `/events`). |
-| `complete`      | Trial reaches terminal state    | `{ "final_state": "succeeded", "last_seq": N }`  |
+| `complete`      | Terminal Trial's event backlog is drained | `{ "final_state": "succeeded", "last_seq": N }`  |
 | `reconnect`     | 600 s connection budget hit     | `{ "reason": "max_connection_sec", "last_seq": N }` |
 
-Every message carries an `id: <seq>` line so browser EventSource
+Every trajectory event carries an `id: <seq>` line so browser EventSource
 auto-reconnect includes `Last-Event-ID` on the next attempt. The
 server does not currently consume that header; clients should also
 dedupe by seq on their side (the SPA hook does).
+
+Replay uses bounded pages and yields between pages. Connection deadlines and
+disconnects remain effective while draining a backlog; a `reconnect` event
+reports the last delivered sequence, so clients can resume with `after_seq=N`.
+An invalid or nonadvancing source sequence ends the stream without claiming
+completion. Disconnect, cancellation, read failure and normal completion all
+close the stream's LISTEN subscription.
 
 Example (bash):
 
