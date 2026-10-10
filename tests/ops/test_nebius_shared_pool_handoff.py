@@ -2251,6 +2251,7 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
     from scripts.ops import nebius_shared_pool_handoff_live as module
     from scripts.ops.deploy_nebius_platform import rollout_guard_observation_sql
     from scripts.ops.nebius_development_runtime_probes import HTTPSDevelopmentRuntimeProbes
+    from scripts.ops.nebius_pool_gateway_probe import BOUND_GATEWAY_KUBERNETES_COMMAND
     from scripts.ops.nebius_pool_legacy_settings import (
         BOUND_LEGACY_SETTINGS_COMMAND,
         expected_legacy_runtime_settings,
@@ -2265,7 +2266,12 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
         BOUND_POOL_SETTINGS_COMMAND,
         expected_pool_runtime_settings,
     )
+    from scripts.ops.nebius_pool_startup_capacity import (
+        BOUND_POOL_CAPACITY_COMMAND,
+        expected_startup_capacity,
+    )
     from scripts.ops.nebius_pool_startup_database import pool_startup_closed_sql
+    from scripts.ops.nebius_shared_pool_runtime_observation import HTTPSSharedPoolRuntimeProbes
     from tests.ops.test_nebius_development_pool_retained import (
         populate_database_backends,
         populate_runtime_pods,
@@ -2334,6 +2340,10 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
             row['metadata'].setdefault('resourceVersion', '301')
     populate_runtime_pods(documents)
     populate_database_backends(documents)
+    for row in documents.values():
+        if row['kind'] == 'Deployment' and row['spec']['replicas'] == 0:
+            row['metadata'].setdefault('generation', 1)
+            row['status'] = {'observedGeneration': row['metadata']['generation']}
     for listing in list(documents.values()):
         if listing['kind'] == 'ReplicaSetList':
             for row in listing['items']:
@@ -2437,20 +2447,53 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
                     secret, = (row for row in documents.values() if row['kind'] == 'Secret'
                         and row['metadata']['uid'] == str(staging.database.actuator_credential_uid))
                     secret['metadata']['resourceVersion'] = 'late-rotation'
+            elif args[9] in {BOUND_GATEWAY_KUBERNETES_COMMAND, BOUND_POOL_CAPACITY_COMMAND}:
+                assert args[7:9] == ['python', '-c'] and namespace == manager_namespace and args[5] == 'gateway'
+                name = 'loom-pool-gateway'
+                workload = documents['/apis/apps/v1/namespaces/' + namespace + '/deployments/' + name]
+                machine, = (row for row in spec.machines if row.role == 'gateway')
+                if args[9] == BOUND_GATEWAY_KUBERNETES_COMMAND:
+                    assert len(args) == 13
+                    settings = expected_pool_runtime_settings('gateway', workload, token_sha256=machine.token_sha256)
+                    wanted = {key: settings[key] for key in ('pool_id', 'installation_id', 'machine_id', 'admission_epoch', 'kubernetes')}
+                    wanted['namespaces'] = {ns.name: str(ns.uid) for participant in spec.participants
+                        for ns in (participant.execution_namespace, participant.build_namespace)}
+                    assert json.loads(args[10]) == sorted(wanted['namespaces'])
+                    check = 'kubernetes'
+                else:
+                    assert len(args) == 12
+                    wanted = expected_startup_capacity(spec)
+                    check = 'capacity'
+                payload = json.dumps(wanted, sort_keys=True, separators=(',', ':')).encode()
+                assert hmac.new(bytes.fromhex(args[-2]), payload, 'sha256').hexdigest() == args[-1]
+                checked.add((check, namespace, name))
+                value = {'status': 'wrong' if mode['damage'] == 'gateway-' + check else 'qualified'}
+                if check == 'capacity':
+                    pods = documents['/api/v1/namespaces/' + namespace + '/pods']['items']
+                    if mode['damage'] == 'late-gateway-secret':
+                        documents['/api/v1/namespaces/' + namespace + '/secrets/loom-platform-db']['metadata']['resourceVersion'] = 'late-rotation'
+                    elif mode['damage'] in {'late-gateway-restart', 'late-gateway-database-restart'}:
+                        pod, = (row for row in pods if row['metadata']['name'] == (
+                            'loom-postgres-0' if mode['damage'] == 'late-gateway-database-restart' else name + '-a12b34-test'))
+                        pod['status']['containerStatuses'][0]['restartCount'] += 1
+                    elif mode['damage'] == 'late-gateway-receipt':
+                        path = mode['gateway_receipt']
+                        path.write_bytes(path.read_bytes() + b'\n')
             else:
                 assert args[7:9] == ['python', '-c']
                 code, component, nonce, response = args[9:]
                 name = args[3].removeprefix('pod/').removesuffix('-a12b34-test')
-                role = roles[namespace, name]
+                role = 'gateway' if name == 'loom-pool-gateway' and namespace == manager_namespace else roles[namespace, name]
                 workload = documents['/apis/apps/v1/namespaces/' + namespace + '/deployments/' + name]
                 if code == _BOUND_DATABASE_COMMAND:
                     assert component == ('service' if role == 'manager' else role)
-                    variable = {'service': 'LOOM_SVC_DB_URL', 'controller': 'LOOM_CP_DB_URL', 'actuator': 'LOOM_EXECUTION_ACTUATOR_DB_URL'}[component]
+                    variable = {'service': 'LOOM_SVC_DB_URL', 'controller': 'LOOM_CP_DB_URL',
+                        'actuator': 'LOOM_EXECUTION_ACTUATOR_DB_URL', 'gateway': 'LOOM_POOL_GATEWAY_DB_URL'}[component]
                     env, = (row for row in workload['spec']['template']['spec']['containers'][0]['env'] if row['name'] == variable)
                     reference = env['valueFrom']['secretKeyRef']
                     secret = documents['/api/v1/namespaces/' + namespace + '/secrets/' + reference['name']]
                     url = base64.b64decode(secret['data'][reference['key']]).decode()
-                    payload = (url if component == 'actuator' else str(PostgresDsn(url))).encode()
+                    payload = (url if component in {'actuator', 'gateway'} else str(PostgresDsn(url))).encode()
                     assert url not in str(argv)
                     check = 'database'
                 else:
@@ -2462,15 +2505,17 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
                     else:
                         assert code == BOUND_POOL_SETTINGS_COMMAND
                         participant_id = staging.participant_id if staging_process else dev.participant_id
-                        machine, = (row for row in spec.machines if row.participant_id == participant_id and row.workload_scope == 'environment')
+                        machine, = (row for row in spec.machines if (row.role == 'gateway' if component == 'gateway'
+                            else row.participant_id == participant_id and row.workload_scope == 'environment'))
                         settings = expected_pool_runtime_settings(component, workload,
-                            token_sha256=machine.token_sha256 if component in {'controller', 'actuator'} else None,
+                            token_sha256=machine.token_sha256 if component in {'controller', 'actuator', 'gateway'} else None,
                             catalog_sha256=hashlib.sha256(spec.profiles.model_dump_json().encode()).hexdigest() if component == 'manager' else None)
                     payload = json.dumps(settings, sort_keys=True, separators=(',', ':')).encode()
                     check = 'settings'
                 assert hmac.new(bytes.fromhex(nonce), payload, 'sha256').hexdigest() == response
                 checked.add((check, namespace, name))
-                value = {'status': 'wrong' if mode['damage'] == check + ':' + namespace else 'qualified'}
+                value = {'status': 'wrong' if (mode['damage'] == check + ':' + namespace
+                    or (role == 'gateway' and mode['damage'] == 'gateway-' + check)) else 'qualified'}
                 if mode['damage'] == 'late-old-secret':
                     documents[old_secret_path]['metadata']['resourceVersion'] = 'changed'
             assert args[7] in {'psql', 'python'}
@@ -2511,9 +2556,16 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
             *((check, namespace, name) for namespace, name in roles for check in ('settings', 'database'))}
         assert 'private-test-only' not in repr(result)
         if forward_processes:
-            _exercise_forward_processes(bindings=result.bindings, development=probes, documents=documents,
-                mode=mode, checked=checked, commands=commands, add=add,
-                args=dict(runtime=request, observation=staging_observation, legacy=staging_history, repo_root=ROOT))
+            with HTTPSSharedPoolRuntimeProbes(bindings=result.bindings,
+                    api_server=request.database.foundation.inputs.config['kubernetes_api_server'],
+                    ssl_context=ssl.create_default_context(cadata=request.database.foundation.bootstrap['material']['loom-platform-db']['ca.crt']),
+                    token='operator-test') as shared_probes:
+                for connection in (shared_probes, shared_probes.manager, shared_probes.foundation):
+                    connection.client.close()
+                    connection.client = type(completed_pool[3].api.client)(base_url=connection.api_server, transport=httpx.MockTransport(handle))
+                _exercise_forward_processes(bindings=result.bindings, development=shared_probes, documents=documents,
+                    mode=mode, checked=checked, commands=commands, add=add,
+                    args=dict(runtime=request, observation=staging_observation, legacy=staging_history, repo_root=ROOT))
             return
         baseline = copy.deepcopy(documents)
         for damage in ('old-active', 'new-not-closed', 'guard-held', 'settings:' + staging.namespace,
@@ -2532,14 +2584,21 @@ def _exercise_forward_processes(*, bindings, development, documents, mode, check
     """Real parent, process transports and readiness validators; no live effects."""
     import importlib.util
     import json
+    import ssl
 
+    import httpx
     from scripts.ops import nebius_certificates as private_state
+    from scripts.ops import nebius_shared_pool_build_activation as build_child
     from scripts.ops import nebius_shared_pool_database as database
+    from scripts.ops import nebius_shared_pool_gateway as gateway_child
     from scripts.ops import nebius_shared_pool_guards as guards
     from scripts.ops import nebius_shared_pool_operation as parent
     from scripts.ops import nebius_shared_pool_workloads as workloads
-    from scripts.ops.nebius_management_stage import _comparison_snapshot
+    from scripts.ops.nebius_development_runtime_live import runtime_resource_path
+    from scripts.ops.nebius_management_stage import _comparison_snapshot, _stage_fixed_documents
     from tests.ops.test_nebius_development_pool_retained import populate_runtime_pods
+
+    from loom.nebius_platform_render import digest
 
     name = 'scripts.ops.nebius_shared_pool_forward_processes'
     assert importlib.util.find_spec(name) is not None, 'phase-bound shared process observation is missing'
@@ -2555,6 +2614,10 @@ def _exercise_forward_processes(*, bindings, development, documents, mode, check
                 workloads.prepare_shared_staging_workloads(bindings=bound, phase=phase, state_dir=child)
             elif phase == 'forward-database':
                 database.prepare_shared_staging_database(bindings=bound, state_dir=child)
+            elif phase == 'forward-build-policy':
+                build_child.prepare_shared_build_activation(bindings=bound, state_dir=child)
+            elif phase == 'forward-gateway':
+                gateway_child.prepare_shared_gateway(bindings=bound, state_dir=child)
             else:
                 super().prepare(phase, bound, child)
 
@@ -2567,6 +2630,10 @@ def _exercise_forward_processes(*, bindings, development, documents, mode, check
                     state_dir=child, complete=False, prepared=True)
             elif phase == 'forward-database':
                 database.validate_shared_staging_database(bindings=bindings, state_dir=child, complete=False, prepared=True)
+            elif phase == 'forward-build-policy':
+                build_child.validate_shared_build_activation(bindings=bindings, state_dir=child, complete=False, prepared=True)
+            elif phase == 'forward-gateway':
+                gateway_child.validate_shared_gateway(bindings=bindings, state_dir=child, complete=False, prepared=True)
             else:
                 super().validate_prepared_phase(phase, child)
 
@@ -2577,6 +2644,10 @@ def _exercise_forward_processes(*, bindings, development, documents, mode, check
                 workloads.validate_shared_staging_workloads(bindings=bindings, phase=phase, state_dir=child, complete=complete)
             elif phase == 'forward-database':
                 database.validate_shared_staging_database(bindings=bindings, state_dir=child, complete=complete)
+            elif phase == 'forward-build-policy':
+                build_child.validate_shared_build_activation(bindings=bindings, state_dir=child, complete=complete)
+            elif phase == 'forward-gateway':
+                gateway_child.validate_shared_gateway(bindings=bindings, state_dir=child, complete=complete)
             else:
                 super().validate_phase(phase, child, complete=complete)
 
@@ -2587,6 +2658,10 @@ def _exercise_forward_processes(*, bindings, development, documents, mode, check
                 return all(row['status'] == 'applied' for row in json.loads((child / 'transition.json').read_bytes())['resources'].values())
             if phase == 'forward-database':
                 return json.loads((child / 'database.json').read_bytes())['status'] == 'staged'
+            if phase == 'forward-build-policy':
+                return json.loads((child / 'build-policy.json').read_bytes())['status'] == 'activated'
+            if phase == 'forward-gateway':
+                return False
             return super().advance(phase, bound, child)
 
     api = ProcessPhaseAPI(parent)
@@ -2755,6 +2830,89 @@ def _exercise_forward_processes(*, bindings, development, documents, mode, check
             observe()
         documents.clear()
         documents.update(baseline)
+    mode['damage'] = None
+    build_path = state / 'forward-build-policy/build-policy.json'
+    build_record = json.loads(build_path.read_bytes())
+    build_record['status'] = 'activated'
+    private_state._atomic_json(build_path, build_record)
+    plan = bindings.plan.development
+    build_namespace = '/api/v1/namespaces/' + plan.build_namespace_original['metadata']['name']
+    namespace = copy.deepcopy(plan.build_namespace_target)
+    namespace['metadata']['uid'] = plan.build_namespace_original['metadata']['uid']
+    documents[build_namespace] = namespace
+    api.block = 'forward-gateway'
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-gateway'
+    checked.clear()
+    assert observe().pending_workloads == ()
+    gateway_key = _key(plan.gateway_original)
+    gateway_path = path_for(plan.gateway_original)
+    gateway = documents[gateway_path]
+    original_gateway = copy.deepcopy(gateway)
+    started = _comparison_snapshot(plan.gateway_target)
+    replace_live(gateway, started)
+    with pytest.raises(ValueError):
+        observe()  # A planned but unrecorded start is not process authority.
+    gateway.clear()
+    gateway.update(original_gateway)
+    fixed, stored = plan.authority, {}
+    paths = {runtime_resource_path(row) + '/' + row['metadata']['name']: key for key, row in fixed.items()}
+
+    def grants(message):
+        if message.method == 'GET':
+            key = paths[message.url.path]
+            return httpx.Response(200, json=stored[key]) if key in stored else httpx.Response(404)
+        assert message.method == 'POST'
+        row = json.loads(message.content)
+        key = _key(row)
+        assert key in fixed and message.url.path == runtime_resource_path(fixed[key])
+        row['metadata'].update(uid=str(uuid4()), resourceVersion='501')
+        if message.url.params.get('dryRun') != 'All':
+            assert not message.url.query and key not in stored
+            stored[key] = row
+        return httpx.Response(201, json=row)
+
+    with gateway_child.HTTPSSharedGateway(bindings=bindings,
+            api_server=args['runtime'].database.foundation.inputs.config['kubernetes_api_server'],
+            ssl_context=ssl.create_default_context(), qualify_runtime=lambda *_: None,
+            observe_ready=lambda *_: False) as delivery:
+        delivery.client.close()
+        delivery.client = type(development.client)(base_url=delivery.api_server, transport=httpx.MockTransport(grants))
+        _stage_fixed_documents(documents=fixed, revision=digest(fixed), phase='forward-gateway-authority',
+            binding=delivery.binding, api=delivery, state_dir=state / 'forward-gateway/authority')
+    start_path = state / 'forward-gateway/start/transition.json'
+    start_record = json.loads(start_path.read_bytes())
+    start_record['resources'][gateway_key].update(status='intent', expected=started)
+    private_state._atomic_json(start_path, start_record)
+    assert observe().pending_workloads == ()  # The PATCH may not have committed.
+    replace_live(gateway, started)
+    checked.clear()
+    assert observe().pending_workloads == (gateway_key,)
+    assert not any(isinstance(row, tuple) and row[-1] == 'loom-pool-gateway' for row in checked)
+    runtime = {gateway_path: gateway}
+    populate_runtime_pods(runtime)
+    for path, value in runtime.items():
+        if value['kind'] in {'PodList', 'ReplicaSetList'}:
+            documents[path]['items'].extend(value['items'])
+            for row in value['items']:
+                if row['kind'] == 'ReplicaSet':
+                    add(row)
+                else:
+                    row['spec']['nodeName'] = 'platform-test'
+    checked.clear()
+    assert observe().pending_workloads == ()
+    assert {(check, manager.binding.namespace, 'loom-pool-gateway')
+        for check in ('settings', 'database', 'kubernetes', 'capacity')} <= checked
+    mode['gateway_receipt'] = start_path
+    for damage in ('gateway-settings', 'gateway-database', 'gateway-kubernetes', 'gateway-capacity',
+            'late-gateway-secret', 'late-gateway-restart', 'late-gateway-database-restart', 'late-gateway-receipt'):
+        baseline, receipt = copy.deepcopy(documents), start_path.read_bytes()
+        mode['damage'] = damage
+        with pytest.raises(ValueError):
+            observe()
+        documents.clear()
+        documents.update(baseline)
+        start_path.write_bytes(receipt)
+        start_path.chmod(0o600)
     mode['damage'] = None
     guard_path.unlink()
     before = len(commands)
