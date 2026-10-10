@@ -338,8 +338,24 @@ rerun. Nonzero permanent-unavailable count or bytes means corrupt source
 evidence is being retained for diagnosis and must not be silently garbage
 collected.
 
-Retention runs only through the lifecycle GC inventory/approval path after
-object deletion has been verified. Its metadata delete order is
+Outside staging, native canonical Trial and Artifact records are created with
+pinned lifecycle authorities and no expiry. Ordinary source-spool cleanup
+removes the temporary upload copies after canonical acknowledgement and the
+retention deadline; it does not expire the canonical results or their history.
+
+The [staging lifecycle operator](../historical/staging-data-lifecycle.md) is
+retired. Its collector and GC journal accept only the staging environment; they
+are not a supported Nebius canonical-data deletion path. Do not invoke the old
+operator or change an authority's environment, pin or expiry to make it eligible.
+[Bucket expiration](../architecture/storage-retention.md),
+[image retention](nebius-image-retention.md) and provider-secret reclamation
+have separate scopes and do not establish canonical Trial-data deletion.
+Applicable retention, exact-version deletion and retry qualification remains
+tracked in [#2034](https://github.com/ca-mrc/loom/issues/2034). Policy readback or a
+successful pass with no eligible objects does not prove reclamation.
+
+For retained historical GC journals, object deletion precedes metadata removal.
+The historical metadata delete order is
 `execution_leases` first (database cascades command, event, and history rows),
 then resource usage, trial events, LLM calls, artifacts, Trials, and Batches.
 Never delete command/event/history rows independently, and never downgrade
