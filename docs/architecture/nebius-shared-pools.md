@@ -1132,6 +1132,28 @@ template needs no write. Completed restoration can still be observed while Roles
 are restored, but cannot replay writes or observe across the subsequent restart.
 This phase grants no Role and does not start workloads or reopen intake.
 
+The following Role-restoration child restores only the two captured current
+staging Roles. It preserves their UIDs, labels and annotations, adding the
+distinct recovery marker in a UID/version/rules/metadata-tested PATCH. This is
+also required when an uncertain forward reduction still looks uncommitted:
+the version change invalidates that delayed reduction before staging can reopen.
+Completed stopped-template and revocation receipts bind the child, while fresh
+process/SQL drain, effective gateway denial and the protected parent's current
+writer qualification remain preconditions for dispatch. Unknown PATCH replies
+are observed without redispatch; a busy preview leaves intent unconsumed.
+
+Restoration never creates or changes bindings. It rejects foreign inbound
+bindings to the fixed writer Roles before granting rights. Bounded impersonated
+reviews qualify each retained staging ServiceAccount against its own fixed
+bindings, not the union of every writer's rights; foreign account/group bindings
+expand the reviewed namespaces, and extra named writes or incomplete reviews
+fail closed. Partially installed forward namespace-reader material contributes
+only when actually present and justified by its frozen creation receipt. Exact
+Role/binding/namespace and receipt readbacks bracket qualification. Completed
+rights remain observable through subsequent pending recovery, but restoration
+writes cannot replay. This child does not restart workloads or reopen either
+staging or the cancelled dev/global ledger.
+
 The shared Role child reduces only the two source-qualified staging worker/build
 Roles, preserving their UIDs and existing bindings. Each rules-and-annotations
 PATCH tests the current UID, resourceVersion and rules. Mutation intent precedes
