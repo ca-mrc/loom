@@ -91,14 +91,18 @@ class HTTPSDevelopmentRuntimeProbes(HTTPSDevelopmentRuntimeObserver):
         finally:
             self.scratch.cleanup()
 
-    def _exec(self, pod: dict[str, Any], container: str, command: list[str]) -> dict[str, Any]:
+    def _exec(self, pod: dict[str, Any], container: str, command: list[str], *, max_output_bytes: int = 65536) -> dict[str, Any]:
         """Internal fixed-command transport; never accepts an operator command."""
+        # Full, bounded origin-history pages can be larger than scalar process
+        # challenges. The default cap remains unchanged for every existing probe.
+        if type(max_output_bytes) is not int or max_output_bytes not in {65536, 4 * 1024**2}:
+            raise ValueError
         self._private_inputs()
         value = subprocess.run([*self.prefix, 'exec', '-n', pod['metadata']['namespace'],
             'pod/' + pod['metadata']['name'], '-c', container, '--', *command],
             capture_output=True, timeout=40, check=False, env={'PATH': os.defpath, 'LANG': 'C.UTF-8'})
         self._private_inputs()
-        if value.returncode or value.stderr or len(value.stdout) > 65536:
+        if value.returncode or value.stderr or len(value.stdout) > max_output_bytes:
             raise ValueError
         return _json(value.stdout)
 

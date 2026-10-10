@@ -928,6 +928,18 @@ Both guard and workload children revalidate their active receipt before and
 after live qualification. Losing or changing that receipt cannot recreate a
 started operation or authorize another write.
 
+The drain child reads both participants' actual idle/schema/access checks and
+every page of queued origins through their retained database backends. It checks
+those origins against the distinct new management database's source history;
+qualified queued work is retained, not cancelled or required to disappear.
+Exact held guards and the new manager's CLOSED registration bracket the reads,
+and the management database process identity is rechecked for each history page.
+History responses have the existing bounded 4-MiB allowance; ordinary scalar
+probes retain their 64-KiB limit. The saved drain receipt records historical
+backlog counts, never ongoing permission to mutate. Later pre-opening barriers
+must call the fresh observer again and separately qualify current writers and
+processes.
+
 The current-staging workload child connects stop, wiring and restart through the
 existing HTTPS UID/resourceVersion/spec compare-and-swap engine. Each later step
 consumes the actual completed predecessor receipt, including server defaults and
