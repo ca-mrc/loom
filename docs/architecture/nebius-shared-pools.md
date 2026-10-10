@@ -908,6 +908,23 @@ around the observations. Actuator telemetry retains its optional-sampling rules.
 This is initial read-only preflight evidence, not guard, drain, mutation or
 recovery authority, and does not establish installed multi-owner acceptance.
 
+The internal shared-handoff phase controller freezes the source/history and
+database-bound participant identities in a separate anchor under the new manager.
+It requires the complete forward and recovery adapter set before starting. Each
+child retains its own mutation intent and uncertain-result readback; completed
+children are validated and byte-pinned, never dispatched again. Initial preflight
+requires the untouched predecessor. Resumption instead uses phase-aware checks,
+including fresh drain and authority checks before dependent mutations.
+
+Recovery is a separately anchored, terminal direction. Its marker freezes both
+the forward journal and all existing child receipts, including an unfinished
+child. It cannot erase completed success or resume forward work afterward.
+Recovery completion means staging restored and new shared admission closed, not
+that the cancelled ledger can be installed or opened again. A later attempt needs
+a separately qualified successor. This controller is not a protected deployment
+entry point: concrete live forward/recovery adapters, rollout continuity and
+installed multi-owner acceptance are still required.
+
 Authenticated Kubernetes/worker identity and capacity observations remain
 mandatory. Detailed kubelet samples retain the existing optional-telemetry
 contract; unavailable samples are not zero usage or evidence of certificate trust.

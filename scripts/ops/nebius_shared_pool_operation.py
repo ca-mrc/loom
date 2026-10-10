@@ -132,6 +132,12 @@ def _history(bindings: SharedPoolGuardBindings) -> None:
             raise ValueError
 
 
+def _frozen_forward(state: Path, record: dict[str, Any]) -> dict[str, Any]:
+    return {'forward_sha256': digest(record['forward']), 'forward_files': {
+        phase: _files(state / phase) for phase, item in record['forward'].items()
+        if item['status'] != 'prepared'}}
+
+
 def _record(*, state: Path, marker: Path, recovery_marker: Path, identity: dict[str, Any],
         api: SharedPoolOperationAPI) -> tuple[dict[str, Any], bool]:
     if not marker.exists() and not marker.is_symlink():
@@ -150,7 +156,7 @@ def _record(*, state: Path, marker: Path, recovery_marker: Path, identity: dict[
         raise ValueError
     recovering = recovery_marker.exists() or recovery_marker.is_symlink()
     if recovering:
-        if _read(recovery_marker) != {**identity, 'forward_sha256': digest(record['forward'])} or record['outcome'] == _COMPLETE:
+        if _read(recovery_marker) != {**identity, **_frozen_forward(state, record)} or record['outcome'] == _COMPLETE:
             raise ValueError
     elif record['outcome'] == _RECOVERED:
         raise ValueError
@@ -235,7 +241,8 @@ def run_shared_pool_operation(*, runtime: DevelopmentRuntimeInstallRequest, obse
                 api.preflight(copy.deepcopy(bindings))
             if read() != (record, recovering):
                 raise ValueError
-            return {**base, 'status': 'shared_pool_preflight_qualified'}
+            return {**base, 'status': 'shared_pool_preflight_qualified',
+                'admission_open': record['outcome'] == _COMPLETE, 'writer_migration_complete': record['outcome'] == _COMPLETE}
         # The lock is outside every completed installation history and prevents
         # install/recovery from competing across local protected invocations.
         with private_state._locked_state(anchor / 'shared-pool-handoff-lock'):
@@ -253,7 +260,7 @@ def run_shared_pool_operation(*, runtime: DevelopmentRuntimeInstallRequest, obse
             if read() != (record, recovering):
                 raise ValueError
             if action == 'recover' and not recovering:
-                private_state._atomic_json(recovery_marker, {**identity, 'forward_sha256': digest(record['forward'])})
+                private_state._atomic_json(recovery_marker, {**identity, **_frozen_forward(state, record)})
                 recovering = True
             phases = RECOVERY_PHASES if recovering else FORWARD_PHASES
             direction = 'recovery' if recovering else 'forward'
