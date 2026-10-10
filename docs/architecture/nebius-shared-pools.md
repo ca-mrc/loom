@@ -911,7 +911,12 @@ recovery authority, and does not establish installed multi-owner acceptance.
 The internal shared-handoff phase controller freezes the source/history and
 database-bound participant identities in a separate anchor under the new manager.
 It requires the complete forward and recovery adapter set before starting. Each
-child retains its own mutation intent and uncertain-result readback; completed
+child first prepares local receipts while its parent phase still has no dispatch
+authority. Interruptions before, during directory creation, or after receipt
+publication can resume without repeating remote effects. The parent records the
+phase started only after validating that preparation. Missing or changed started
+history remains an error, never permission to recreate it. Each child then
+retains its own mutation intent and uncertain-result readback; completed
 children are validated and byte-pinned, never dispatched again. Initial preflight
 requires the untouched predecessor. Resumption instead uses phase-aware checks,
 including fresh drain and authority checks before dependent mutations.
@@ -921,8 +926,9 @@ guards; an uncertain acquisition is observed without issuing it again. This
 child does not replay registration or release either participant's guard.
 
 Recovery is a separately anchored, terminal direction. Its marker freezes both
-the forward journal and all existing child receipts, including an unfinished
-child. It cannot erase completed success or resume forward work afterward.
+the forward journal and all existing child receipts, including prepared or
+unfinished children. It cannot erase completed success or resume forward work
+afterward.
 Recovery completion means staging restored and new shared admission closed, not
 that the cancelled ledger can be installed or opened again. A later attempt needs
 a separately qualified successor. This controller is not a protected deployment

@@ -50,7 +50,10 @@ class SharedPoolOperationAPI(Protocol):
     treating an earlier zero backlog as durable permission to write.
 
     ``validate_phase`` verifies the child's semantic identity, not just its
-    bytes. ``advance`` persists each mutation's intent before dispatch and reads
+    bytes. ``prepare`` creates local receipts only, before parent dispatch
+    authority exists; ``validate_prepared_phase`` must reject any mutation
+    intent or effect in those receipts. Interrupted preparation can resume.
+    ``advance`` persists each mutation's intent before dispatch and reads
     uncertain results on resumption. True means the whole child is complete;
     False means pending, never permission to skip to the following phase.
     """
@@ -59,6 +62,8 @@ class SharedPoolOperationAPI(Protocol):
 
     def preflight(self, bindings: SharedPoolGuardBindings) -> None: ...
     def qualify(self, bindings: SharedPoolGuardBindings, record: dict[str, Any], *, recovering: bool) -> None: ...
+    def prepare(self, phase: str, bindings: SharedPoolGuardBindings, state: Path) -> None: ...
+    def validate_prepared_phase(self, phase: str, state: Path) -> None: ...
     def validate_phase(self, phase: str, state: Path, *, complete: bool) -> None: ...
     def advance(self, phase: str, bindings: SharedPoolGuardBindings, state: Path) -> bool: ...
 
@@ -70,7 +75,7 @@ def _directory(path: Path) -> None:
         raise ValueError
 
 
-def _files(state: Path) -> dict[str, str]:
+def _files(state: Path, *, allow_empty: bool = False) -> dict[str, str]:
     """Pin every child receipt, including nested intents, not only its summary."""
     _directory(state)
     result = {}
@@ -87,7 +92,7 @@ def _files(state: Path) -> dict[str, str]:
                 raise ValueError
             continue
         result[str(path.relative_to(state))] = hashlib.sha256(raw).hexdigest()
-    if not result:
+    if not result and not allow_empty:
         raise ValueError
     return result
 
@@ -134,8 +139,8 @@ def _history(bindings: SharedPoolGuardBindings) -> None:
 
 def _frozen_forward(state: Path, record: dict[str, Any]) -> dict[str, Any]:
     return {'forward_sha256': digest(record['forward']), 'forward_files': {
-        phase: _files(state / phase) for phase, item in record['forward'].items()
-        if item['status'] != 'prepared'}}
+        phase: _files(state / phase, allow_empty=record['forward'][phase]['status'] == 'prepared')
+        for phase in FORWARD_PHASES if (state / phase).exists() or (state / phase).is_symlink()}}
 
 
 def _record(*, state: Path, marker: Path, recovery_marker: Path, identity: dict[str, Any],
@@ -154,6 +159,9 @@ def _record(*, state: Path, marker: Path, recovery_marker: Path, identity: dict[
             or any(record[key] != value for key, value in identity.items())
             or record['outcome'] not in {'pending', _COMPLETE, _RECOVERED}):
         raise ValueError
+    for direction, phases in (('forward', FORWARD_PHASES), ('recovery', RECOVERY_PHASES)):
+        if not isinstance(record[direction], dict) or set(record[direction]) != set(phases):
+            raise ValueError
     recovering = recovery_marker.exists() or recovery_marker.is_symlink()
     if recovering:
         if _read(recovery_marker) != {**identity, **_frozen_forward(state, record)} or record['outcome'] == _COMPLETE:
@@ -163,8 +171,6 @@ def _record(*, state: Path, marker: Path, recovery_marker: Path, identity: dict[
     permitted = {'operation.json'}
     for direction, phases in (('forward', FORWARD_PHASES), ('recovery', RECOVERY_PHASES)):
         sequence = record[direction]
-        if not isinstance(sequence, dict) or set(sequence) != set(phases):
-            raise ValueError
         unfinished = False
         for phase in phases:
             item = sequence[phase]
@@ -175,8 +181,20 @@ def _record(*, state: Path, marker: Path, recovery_marker: Path, identity: dict[
                 raise ValueError
             child = state / phase
             if item['status'] == 'prepared':
-                if item['files'] is not None or child.exists() or child.is_symlink():
+                if item['files'] is not None:
                     raise ValueError
+                if child.exists() or child.is_symlink():
+                    if unfinished or (direction == 'recovery' and not recovering):
+                        raise ValueError
+                    permitted.add(phase)
+                    files = _files(child, allow_empty=True)
+                    # Parent authority is still prepared: no remote dispatch
+                    # may have occurred. A directory alone is also a resumable
+                    # interruption before atomic receipt publication.
+                    if files:
+                        api.validate_prepared_phase(phase, child)
+                    if _files(child, allow_empty=True) != files:
+                        raise ValueError
             else:
                 permitted.add(phase)
                 complete = item['status'] == 'complete'
@@ -206,6 +224,9 @@ def run_shared_pool_operation(*, runtime: DevelopmentRuntimeInstallRequest, obse
     """
     try:
         if action not in {'preflight', 'install', 'recover'} or api.supported_phases != frozenset((*FORWARD_PHASES, *RECOVERY_PHASES)):
+            raise ValueError
+        if any(not callable(getattr(api, method, None)) for method in (
+                'preflight', 'qualify', 'prepare', 'validate_prepared_phase', 'validate_phase', 'advance')):
             raise ValueError
         bindings = copy.deepcopy(bindings)
         _qualify_bindings(runtime=runtime, observation=observation, legacy=legacy, repo_root=repo_root, bindings=bindings)
@@ -272,6 +293,14 @@ def run_shared_pool_operation(*, runtime: DevelopmentRuntimeInstallRequest, obse
                     raise ValueError
                 item = record[direction][phase]
                 if item['status'] == 'prepared':
+                    api.prepare(phase, copy.deepcopy(bindings), state / phase)
+                    if read() != (record, recovering):
+                        raise ValueError
+                    _files(state / phase)  # Empty is valid to resume, not to dispatch.
+                    api.validate_prepared_phase(phase, state / phase)
+                    qualify(record, recovering)
+                    if read() != (record, recovering):
+                        raise ValueError
                     item['status'] = 'started'
                     private_state._atomic_json(state / 'operation.json', record)
                 complete = api.advance(phase, copy.deepcopy(bindings), state / phase)

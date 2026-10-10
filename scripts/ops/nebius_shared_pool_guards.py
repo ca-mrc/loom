@@ -12,7 +12,7 @@ from typing import Any
 
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_development_runtime_install import _read
-from scripts.ops.nebius_pool_migration import migration_contract
+from scripts.ops.nebius_pool_migration import PoolGuardTarget, migration_contract
 from scripts.ops.nebius_pool_migration_guard import KubectlPoolGuardAPI
 from scripts.ops.nebius_shared_pool_handoff_live import SharedPoolGuardBindings
 from scripts.ops.nebius_shared_pool_operation import FORWARD_PHASES, RECOVERY_PHASES
@@ -52,41 +52,58 @@ def validate_shared_pool_guards(*, bindings: SharedPoolGuardBindings, state_dir:
     return record
 
 
+def _parent(bindings: SharedPoolGuardBindings, state: Path, status: str) -> dict[str, Any]:
+    identity = _identity(bindings, state)
+    manager = bindings.plan.development.runtime.request.database.manager.retained.request.retained
+    anchor = Path(manager.operation['anchor_dir'])
+    parent_identity = {'schema': 'loom.nebius-shared-pool-handoff.v1', 'operation_id': identity['operation_id'],
+        'input_digest': bindings.input_digest, 'state_dir': str(state.parent)}
+    parent = {**parent_identity, 'outcome': 'pending',
+        'forward': {phase: {'status': status if phase == 'forward-guards' else 'prepared', 'files': None}
+            for phase in FORWARD_PHASES},
+        'recovery': {phase: {'status': 'prepared', 'files': None} for phase in RECOVERY_PHASES}}
+    if (status not in {'prepared', 'started'} or _read(anchor / 'shared-pool-handoff.json') != parent_identity
+            or _read(state.parent / 'operation.json') != parent
+            or (anchor / 'shared-pool-recovery.json').exists() or (anchor / 'shared-pool-recovery.json').is_symlink()):
+        raise ValueError
+    return parent
+
+
+def prepare_shared_pool_guards(*, bindings: SharedPoolGuardBindings, state_dir: Path) -> None:
+    """Prepare only local evidence while parent dispatch authority is absent."""
+    identity = _identity(bindings, state_dir)
+    _parent(bindings, state_dir, 'prepared')
+    with private_state._locked_state(state_dir):
+        path = state_dir / 'guards.json'
+        if not path.exists() and not path.is_symlink():
+            private_state._atomic_json(path, {**identity,
+                'guards': {str(target.participant_id): 'prepared' for target in bindings.migration.guards}})
+        record = validate_shared_pool_guards(bindings=bindings, state_dir=state_dir, complete=False)
+        if set(record['guards'].values()) != {'prepared'}:
+            raise ValueError
+        _parent(bindings, state_dir, 'prepared')
+
+
 def advance_shared_pool_guards(*, bindings: SharedPoolGuardBindings, api: KubectlPoolGuardAPI,
         state_dir: Path, qualify: Callable[[], None]) -> bool:
     """Acquire once per exact intent; unknown outcomes allow observation only."""
     try:
         identity = _identity(bindings, state_dir)
-        manager = bindings.plan.development.runtime.request.database.manager.retained.request.retained
-        anchor = Path(manager.operation['anchor_dir'])
-        parent_identity = {'schema': 'loom.nebius-shared-pool-handoff.v1', 'operation_id': identity['operation_id'],
-            'input_digest': bindings.input_digest, 'state_dir': str(state_dir.parent)}
-        parent = {**parent_identity, 'outcome': 'pending',
-            'forward': {phase: {'status': 'started' if phase == 'forward-guards' else 'prepared', 'files': None}
-                for phase in FORWARD_PHASES},
-            'recovery': {phase: {'status': 'prepared', 'files': None} for phase in RECOVERY_PHASES}}
 
         def scope() -> None:
-            if (api.request != bindings.migration or _identity(bindings, state_dir) != identity
-                    or _read(anchor / 'shared-pool-handoff.json') != parent_identity
-                    or _read(state_dir.parent / 'operation.json') != parent
-                    or (anchor / 'shared-pool-recovery.json').exists()
-                    or (anchor / 'shared-pool-recovery.json').is_symlink()):
+            if api.request != bindings.migration or _identity(bindings, state_dir) != identity:
                 raise ValueError
+            _parent(bindings, state_dir, 'started')
             qualify()
-            if _read(state_dir.parent / 'operation.json') != parent:
-                raise ValueError
+            _parent(bindings, state_dir, 'started')
 
         scope()
         with private_state._locked_state(state_dir):
             path = state_dir / 'guards.json'
             scope()
-            if not path.exists() and not path.is_symlink():
-                private_state._atomic_json(path, {**identity,
-                    'guards': {str(target.participant_id): 'prepared' for target in bindings.migration.guards}})
             record = validate_shared_pool_guards(bindings=bindings, state_dir=state_dir, complete=False)
 
-            def observed(target: Any) -> str:
+            def observed(target: PoolGuardTarget) -> str:
                 scope()
                 report = api.guard(target, 'observe')
                 if report not in ({'status': 'open'}, {'status': 'held'}):
