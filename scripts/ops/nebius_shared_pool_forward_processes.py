@@ -77,7 +77,7 @@ def _scope(bindings: SharedPoolGuardBindings, state: Path) -> _ProcessScope:
         staging_acl = record['status'] == 'staged'
     workloads = shared_forward_staging_options(bindings=bindings, state_dir=state)
     receipts = {phase: _files(state / phase, allow_empty=True)
-        for phase in ('forward-guards', 'forward-stop', 'forward-database', 'forward-wire', 'forward-start')
+        for phase in ('forward-guards', 'forward-stop', 'forward-database', 'forward-wire', 'forward-start', 'forward-build-policy')
         if (state / phase).exists() or (state / phase).is_symlink()}
     if _frame(bindings, state) != frame:
         raise ValueError

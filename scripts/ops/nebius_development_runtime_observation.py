@@ -8,7 +8,7 @@ from __future__ import annotations
 import copy
 import ssl
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_development_bootstrap import _secret_documents
@@ -34,6 +34,9 @@ from scripts.ops.nebius_management_switch import _matches
 from scripts.ops.nebius_management_transport import ManagementKubernetesTransport
 
 from loom_service.environment_management.candidates import _json
+
+if TYPE_CHECKING:
+    from scripts.ops.nebius_shared_pool_handoff_live import SharedPoolGuardBindings
 
 _READ_PATHS = {**_PATHS, 'Namespace': ('v1', 'namespaces', True), 'Service': ('v1', 'services', False),
     'StatefulSet': ('apps/v1', 'statefulsets', False), 'Ingress': ('networking.k8s.io/v1', 'ingresses', False),
@@ -95,7 +98,8 @@ class HTTPSDevelopmentRuntimeObserver(ManagementKubernetesTransport):
         return result
 
     def inspect(self, *, state_dir: Path, _prechild_phase: str | None = None,
-                _expected_record: dict[str, Any] | None = None) -> dict[str, dict[str, Any]]:
+                _expected_record: dict[str, Any] | None = None,
+                _shared_handoff: SharedPoolGuardBindings | None = None) -> dict[str, dict[str, Any]]:
         """Exact namespace/storage/material roots with recorded workload successors.
 
         Never require a replaced API/manager to equal its old template. All
@@ -110,6 +114,21 @@ class HTTPSDevelopmentRuntimeObserver(ManagementKubernetesTransport):
             record, choices, _ = view
             if _expected_record is not None and record != _expected_record:
                 raise ValueError
+            shared_view = None
+            if _shared_handoff is not None:
+                from scripts.ops.nebius_shared_pool_build_activation import (
+                    shared_forward_build_namespace_view,
+                )
+
+                completed = _shared_handoff.plan.development.runtime
+                if (self.request != completed.request or self.plan != completed.plan
+                        or state_dir != completed.state_dir or _prechild_phase is not None):
+                    raise ValueError
+                shared_state = Path(manager.operation['state_dir']).parent / 'shared-pool-handoff'
+                shared_view = shared_forward_build_namespace_view(bindings=_shared_handoff, state_dir=shared_state)
+                if choices.keys() & shared_view[2].keys():
+                    raise ValueError
+                choices = {**choices, **shared_view[2]}
             # Reuse only namespace/storage predicates from the predecessor APIs,
             # never their original-only workload/readiness verification.
             HTTPSManagementStageAPI.verify_identity(self.manager, manager.binding)
@@ -164,6 +183,9 @@ class HTTPSDevelopmentRuntimeObserver(ManagementKubernetesTransport):
                 observed[key] = actual
             if _runtime_history_view(request=self.request, plan=self.plan, state_dir=state_dir,
                     _prechild_phase=_prechild_phase) != view:
+                raise ValueError
+            if _shared_handoff is not None and shared_forward_build_namespace_view(
+                    bindings=_shared_handoff, state_dir=shared_state) != shared_view:
                 raise ValueError
             self._private_inputs()
             return observed

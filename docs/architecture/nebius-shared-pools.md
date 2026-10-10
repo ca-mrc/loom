@@ -978,6 +978,23 @@ restart or a newly appearing descendant invalidates the earlier challenge.
 Writer census, fresh queue drain, provider qualification,
 gateway opening and recovery remain separate required connections.
 
+The shared build-activation child changes only the recorded development build
+namespace's enforcement label and activation annotation. Before the UID and
+resourceVersion-tested PATCH, it checks the installed policy/binding UIDs, exact
+semantics and current compilation status, then requires that policy to deny a
+server-dry-run Pod that otherwise passes restricted Pod Security. A generic
+403 or denial by another policy is insufficient. An accepted probe means
+propagation is pending, not permission to relax the label. No Pod, policy or RBAC
+resource is created. Unknown PATCH outcomes are read back without redispatch;
+the exact successor and fresh policy enforcement are checked before completion.
+
+Shared runtime observations derive the permitted namespace successor from that
+child's intent and completion receipt, checking its bytes and parent history
+again after remote reads. The ordinary CLOSED-runtime observer remains strict
+without this binding. The shared probe adapter carries the same binding through
+nested process checks; permitting a successor only in the outer inventory is
+not enough. Gateway/open and recovery stages still require their own successors.
+
 The shared Role child reduces only the two source-qualified staging worker/build
 Roles, preserving their UIDs and existing bindings. Each rules-and-annotations
 PATCH tests the current UID, resourceVersion and rules. Mutation intent precedes

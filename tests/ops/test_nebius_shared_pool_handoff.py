@@ -1521,7 +1521,8 @@ def test_shared_parent_restricts_current_roles_once_and_checks_foreign_effective
 
 
 @pytest.mark.timeout(420)
-def test_shared_build_activation_requires_effective_policy_and_never_repeats_unknown_patch(shared_operation, completed_pool):
+def test_shared_build_activation_requires_effective_policy_and_never_repeats_unknown_patch(
+        shared_operation, shared_runtime, completed_pool, handoff):
     """Missing policy enforcement must never expose the rootless-build exception."""
     import importlib
     import json
@@ -1563,7 +1564,9 @@ def test_shared_build_activation_requires_effective_policy_and_never_repeats_unk
             pod = json.loads(request.content)
             assert pod['kind'] == 'Pod' and pod['metadata']['namespace'] == original['metadata']['name']
             assert pod['spec']['automountServiceAccountToken'] is False
-            if not mode['deny']:
+            if mode.get('flap_before_patch'):
+                mode['probe_count'] = mode.get('probe_count', 0) + 1
+            if not mode['deny'] or (mode.get('flap_before_patch') and mode['probe_count'] == 2):
                 return httpx.Response(201, json=pod)
             policy = documents[policy_path]['metadata']['name']
             reason = 'Only sequential prepare, build and publish phases are allowed.'
@@ -1589,6 +1592,8 @@ def test_shared_build_activation_requires_effective_policy_and_never_repeats_unk
             if patch['op'] in {'add', 'replace'}:
                 current['metadata'][patch['path'].split('/')[-1]] = copy.deepcopy(patch['value'])
         current['metadata']['resourceVersion'] = '803'
+        if mode.get('lose_policy_after_patch'):
+            mode['deny'] = False
         if mode['response_lost']:
             mode['response_lost'] = False
             raise httpx.ReadTimeout('simulated response loss after namespace commit')
@@ -1649,16 +1654,69 @@ def test_shared_build_activation_requires_effective_policy_and_never_repeats_unk
     assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-build-policy'
     assert patches == []
     documents[policy_path]['status']['observedGeneration'] = 1
+    mode['flap_before_patch'] = True
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-build-policy'
+    assert patches == []  # Known loss of enforcement before dispatch remains a safe wait.
+    mode['flap_before_patch'] = False
     mode['conflict'] = True
     assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-build-policy'
     assert len(patches) == 1
-    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-gateway'
+    mode['lose_policy_after_patch'] = True
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-build-policy'
+    assert len(patches) == 2  # Completion requires fresh enforcement after the PATCH too.
+    mode['deny'] = True
+    api.prepare_failure = ('forward-gateway', 'before')
+    with pytest.raises(ValueError):
+        parent.run_shared_pool_operation(**kwargs)
     assert len(patches) == 2  # Rejected CAS retried; lost committed response was read back.
-    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-gateway'
-    assert len(patches) == 2
     assert documents[namespace_path]['metadata']['labels'] == plan.build_namespace_target['metadata']['labels']
     assert any(method == 'POST' for method, _, _ in calls)
     assert not any(method in {'DELETE', 'PUT'} for method, _, _ in calls)
+
+    from scripts.ops.nebius_development_runtime_observation import HTTPSDevelopmentRuntimeObserver
+    from tests.ops.test_nebius_development_pool_retained import runtime_http_inventory
+
+    # The original installer remains strict. Only the anchored shared handoff
+    # may recognize this exact successor; arbitrary label changes still fail.
+    runtime = args['runtime']
+    _, inventory, read = runtime_http_inventory(runtime, shared_runtime[1], completed_pool[3].server, handoff[2])
+    inventory[namespace_path] = copy.deepcopy(documents[namespace_path])
+    with HTTPSDevelopmentRuntimeObserver(request=runtime,
+            api_server=runtime.database.foundation.inputs.config['kubernetes_api_server'],
+            ssl_context=ssl.create_default_context()) as observer:
+        for connection in (observer, observer.manager, observer.foundation):
+            connection.client.close()
+            connection.client = type(completed_pool[3].api.client)(base_url=connection.api_server, transport=httpx.MockTransport(read))
+        with pytest.raises(ValueError):
+            observer.inspect(state_dir=plan.runtime.state_dir)
+        assert observer.inspect(state_dir=plan.runtime.state_dir, _shared_handoff=bindings)
+        inventory[namespace_path]['metadata']['labels']['pod-security.kubernetes.io/warn'] = 'privileged'
+        with pytest.raises(ValueError):
+            observer.inspect(state_dir=plan.runtime.state_dir, _shared_handoff=bindings)
+        inventory[namespace_path] = copy.deepcopy(documents[namespace_path])
+        receipt = Path(runtime.database.manager.retained.request.retained.operation['state_dir']).parent / 'shared-pool-handoff/forward-build-policy/build-policy.json'
+        saved = receipt.read_bytes()
+        receipt.unlink()
+        with pytest.raises(ValueError):
+            observer.inspect(state_dir=plan.runtime.state_dir, _shared_handoff=bindings)
+        receipt.write_bytes(saved)
+        receipt.chmod(0o600)
+    from scripts.ops.nebius_shared_pool_runtime_observation import HTTPSSharedPoolRuntimeProbes
+    from tests.ops.test_nebius_development_pool_retained import populate_runtime_pods
+
+    populate_runtime_pods(inventory)
+    with HTTPSSharedPoolRuntimeProbes(bindings=bindings,
+            api_server=runtime.database.foundation.inputs.config['kubernetes_api_server'], token='fixture-token',
+            ssl_context=ssl.create_default_context(cadata=runtime.database.foundation.bootstrap['material']['loom-platform-db']['ca.crt'])) as probes:
+        for connection in (probes, probes.manager, probes.foundation):
+            connection.client.close()
+            connection.client = type(completed_pool[3].api.client)(base_url=connection.api_server, transport=httpx.MockTransport(read))
+        component, deployment, pod = probes._running('Deployment:loom-dev:loom-control-plane', plan.runtime.state_dir)
+        assert component == 'controller' and deployment['metadata']['name'] == 'loom-control-plane'
+        assert pod['status']['phase'] == 'Running'
+    api.prepare_failure = None
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-gateway'
+    assert len(patches) == 2
 
 
 @pytest.mark.timeout(420)

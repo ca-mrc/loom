@@ -47,6 +47,7 @@ def documents(namespace, catalog):
 def test_pooled_build_policy_compiles_and_constrains_both_native_workloads(build_inputs, runtime_overhead):
     from kubernetes import client, utils
     from kubernetes.client.exceptions import ApiException
+    from scripts.ops.nebius_shared_pool_build_activation import build_policy_rejection_probe
 
     namespace, catalog, pods = policy_inputs(build_inputs)
     if runtime_overhead is not None:
@@ -75,6 +76,11 @@ def test_pooled_build_policy_compiles_and_constrains_both_native_workloads(build
                 'labels': {'pod-security.kubernetes.io/enforce': 'restricted'}}})
             core.create_namespaced_service_account(ns, {'metadata': {'name': 'build-sa'},
                 'automountServiceAccountToken': False})
+        # The handoff probe must pass PSA restricted in the absence of our
+        # policy; an unrelated PSA denial must not qualify policy enforcement.
+        probe = build_policy_rejection_probe(namespace=namespace, service_account='build-sa',
+            config=catalog.task_images[0].settings.job_config())
+        core.create_namespaced_pod(namespace, probe, dry_run='All')
         # A rootless build is correctly forbidden before the dedicated policy.
         with pytest.raises(ApiException) as caught:
             core.create_namespaced_pod(namespace, pods[0], dry_run='All')
@@ -88,6 +94,15 @@ def test_pooled_build_policy_compiles_and_constrains_both_native_workloads(build
                 assert not policy.status.type_checking.expression_warnings
                 break
             assert time.monotonic() < deadline, 'build policy compilation did not finish'
+            time.sleep(0.1)
+        while True:
+            try:
+                core.create_namespaced_pod(namespace, probe, dry_run='All')
+            except ApiException as exc:
+                assert exc.status == 403 and policies[0]['metadata']['name'] in exc.body, exc.body
+                assert 'Only sequential prepare, build and publish phases are allowed.' in exc.body
+                break
+            assert time.monotonic() < deadline, 'pre-activation probe was not denied by the fixed policy'
             time.sleep(0.1)
         core.patch_namespace(namespace, {'metadata': {'labels': {'pod-security.kubernetes.io/enforce': 'privileged'}}})
         invalid = copy.deepcopy(pods[0])
