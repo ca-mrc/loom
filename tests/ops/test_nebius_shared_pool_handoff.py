@@ -2244,12 +2244,16 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
     """
     import importlib.util
     import json
+    import ssl
 
+    import httpx
     from scripts.ops import nebius_certificates as private_state
+    from scripts.ops import nebius_shared_pool_material as material
     from scripts.ops import nebius_shared_pool_operation as parent
     from scripts.ops import nebius_shared_pool_roles as roles
     from scripts.ops import nebius_shared_pool_workloads as workloads
-    from scripts.ops.nebius_ingress_stage import _snapshot
+    from scripts.ops.nebius_development_runtime_live import runtime_resource_path
+    from scripts.ops.nebius_management_stage import _comparison_snapshot
 
     name = 'scripts.ops.nebius_shared_pool_forward_census'
     assert importlib.util.find_spec(name) is not None, 'phase-bound shared writer census is missing'
@@ -2260,35 +2264,45 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
 
     class CensusPhaseAPI(SharedPhaseAPI):
         def prepare(self, phase, bound, child):
-            if phase == 'forward-stop':
+            if phase in {'forward-stop', 'forward-wire', 'forward-start'}:
                 workloads.prepare_shared_staging_workloads(bindings=bound, phase=phase, state_dir=child)
             elif phase == 'forward-roles':
                 roles.prepare_shared_staging_roles(bindings=bound, state_dir=child)
+            elif phase == 'forward-material':
+                material.prepare_shared_staging_material(bindings=bound, state_dir=child)
             else:
                 super().prepare(phase, bound, child)
 
         def validate_prepared_phase(self, phase, child):
-            if phase == 'forward-stop':
+            if phase in {'forward-stop', 'forward-wire', 'forward-start'}:
                 workloads.validate_shared_staging_workloads(bindings=bindings, phase=phase,
                     state_dir=child, complete=False, prepared=True)
             elif phase == 'forward-roles':
                 roles.validate_shared_staging_roles(bindings=bindings, state_dir=child, complete=False, prepared=True)
+            elif phase == 'forward-material':
+                material.validate_shared_staging_material(bindings=bindings, state_dir=child, complete=False, prepared=True)
             else:
                 super().validate_prepared_phase(phase, child)
 
         def validate_phase(self, phase, child, *, complete):
-            if phase == 'forward-stop':
+            if phase in {'forward-stop', 'forward-wire', 'forward-start'}:
                 workloads.validate_shared_staging_workloads(bindings=bindings, phase=phase, state_dir=child, complete=complete)
             elif phase == 'forward-roles':
                 roles.validate_shared_staging_roles(bindings=bindings, state_dir=child, complete=complete)
+            elif phase == 'forward-material':
+                material.validate_shared_staging_material(bindings=bindings, state_dir=child, complete=complete)
             else:
                 super().validate_phase(phase, child, complete=complete)
 
         def advance(self, phase, bound, child):
-            if phase == 'forward-stop':
+            if phase in {'forward-stop', 'forward-wire', 'forward-start'}:
                 return all(row['status'] == 'applied' for row in json.loads((child / 'transition.json').read_bytes())['resources'].values())
             if phase == 'forward-roles':
                 return all(status == 'restricted' for status in json.loads((child / 'roles.json').read_bytes())['roles'].values())
+            if phase == 'forward-material':
+                child_state = material.validate_shared_staging_material(bindings=bindings, state_dir=child, complete=False)
+                return child_state['stage'] is not None and all(row['status'] == 'created'
+                    for row in child_state['stage']['resources'].values())
             return super().advance(phase, bound, child)
 
     api = CensusPhaseAPI(parent)
@@ -2297,7 +2311,17 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
     assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-stop'
 
     def observe():
-        return module.observe_shared_pool_forward_writers(bindings=bindings, state_dir=state, transport=transport)
+        try:
+            return module.observe_shared_pool_forward_writers(bindings=bindings, state_dir=state, transport=transport)
+        except ValueError as exc:
+            import traceback
+
+            frames, cause = [], exc
+            while cause is not None:
+                frames.extend(f'{Path(frame.filename).name}:{frame.lineno}:{frame.name}'
+                    for frame in traceback.extract_tb(cause.__traceback__))
+                cause = cause.__context__
+            raise ValueError('census failure at ' + ', '.join(frames)) from None
 
     initial = observe()
     assert initial.resource_version == '500'
@@ -2306,7 +2330,7 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
     key = next(key for key, row in bindings.plan.staging.originals.items() if row['kind'] == 'Deployment')
     actual = next(row for row in inventory['deployments'] if _key(row) == key)
     original = copy.deepcopy(actual)
-    expected = _snapshot(bindings.plan.staging.stopped[key])
+    expected = _comparison_snapshot(bindings.plan.staging.stopped[key])
 
     def replace_live(actual, wanted):
         identity = {field: actual['metadata'][field] for field in ('uid', 'resourceVersion')}
@@ -2342,7 +2366,7 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
     journal.chmod(0o600)
 
     for key, target in bindings.plan.staging.stopped.items():
-        wanted = _snapshot(target)
+        wanted = _comparison_snapshot(target)
         stopped['resources'][key].update(status='applied', expected=wanted)
         row = next(row for row in inventory[kinds[target['kind']]] if _key(row) == key)
         replace_live(row, wanted)
@@ -2381,6 +2405,82 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
     with pytest.raises(ValueError):
         observe()  # Even planned new authority is foreign until its retained create intent.
     inventory[kinds[reader['kind']]].remove(reader)
+
+    api.block = 'forward-build-policy'
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-material'
+    observe()
+    fixed = {**bindings.plan.staging_material, **bindings.plan.staging_reader_authority}
+    stored = {}
+    paths = {runtime_resource_path(row) + '/' + row['metadata']['name']: key for key, row in fixed.items()}
+
+    def material_request(message):
+        if message.method == 'GET':
+            key = paths[message.url.path]
+            return httpx.Response(200, json=stored[key]) if key in stored else httpx.Response(404)
+        assert message.method == 'POST'
+        row = json.loads(message.content)
+        key = _key(row)
+        assert key in fixed and message.url.path == runtime_resource_path(fixed[key])
+        row['metadata'].update(uid=str(uuid4()), resourceVersion='401')
+        if message.url.params.get('dryRun') != 'All':
+            assert not message.url.query and key not in stored
+            stored[key] = row
+            if key in bindings.plan.staging_reader_authority:
+                inventory[kinds[row['kind']]].append(row)
+                observe()  # The child still has create_intent, including an unobserved UID.
+        return httpx.Response(201, json=row)
+
+    with material.HTTPSSharedStagingMaterial(bindings=bindings,
+            api_server=args['runtime'].database.foundation.inputs.config['kubernetes_api_server'],
+            ssl_context=ssl.create_default_context(), qualify_runtime=lambda *_: observe()) as delivery:
+        delivery.client.close()
+        delivery.client = type(transport.client)(base_url=delivery.api_server, transport=httpx.MockTransport(material_request))
+        try:
+            assert material.advance_shared_staging_material(bindings=bindings, api=delivery, state_dir=state / 'forward-material')
+        except ValueError as exc:
+            import traceback
+
+            frames, cause = [], exc
+            while cause is not None:
+                frames.extend(f'{Path(frame.filename).name}:{frame.lineno}:{frame.name}'
+                    for frame in traceback.extract_tb(cause.__traceback__))
+                cause = cause.__context__
+            pytest.fail('census material integration failed at ' + ', '.join(frames), pytrace=False)
+    result = observe()
+    assert set(bindings.plan.staging_reader_authority) <= result.authority.keys()
+    for key in bindings.plan.staging_reader_authority:
+        row = stored[key]
+        original_uid = row['metadata']['uid']
+        row['metadata']['uid'] = str(uuid4())
+        with pytest.raises(ValueError):
+            observe()  # A completed create no longer permits a same-name replacement.
+        row['metadata']['uid'] = original_uid
+
+    for phase in ('forward-wire', 'forward-start'):
+        assert parent.run_shared_pool_operation(**kwargs)['phase'] == phase
+        observe()
+        path = state / phase / 'transition.json'
+        record = json.loads(path.read_bytes())
+        for key, item in record['resources'].items():
+            row = next(row for row in inventory['deployments'] if _key(row) == key)
+            wanted = _comparison_snapshot(bindings.plan.staging_targets[key] if phase == 'forward-wire' else row)
+            if phase == 'forward-start':
+                wanted['spec']['replicas'] = bindings.plan.staging.originals[key]['spec']['replicas']
+            item.update(status='intent', expected=wanted)
+            private_state._atomic_json(path, record)
+            replace_live(row, wanted)
+            observe()
+            item['status'] = 'applied'
+            private_state._atomic_json(path, record)
+        observe()
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-build-policy'
+    observe()
+    api.block = 'forward-gateway'
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-gateway'
+    before = len(calls)
+    with pytest.raises(ValueError):
+        observe()  # Gateway activation needs its own exact authority projection.
+    assert len(calls) == before
     api.block = 'recovery-fence'
     assert parent.run_shared_pool_operation(**{**kwargs, 'action': 'recover'})['phase'] == 'recovery-fence'
     before = len(calls)
