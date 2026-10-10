@@ -280,7 +280,9 @@ def _prepare(*, participant: PoolParticipantV1, observation: dict[str, Any], can
             credential_uid=database_uid, credential_resource_version=database_version,
             actuator_credential_uid=actuator_uid, actuator_credential_resource_version=actuator_version))
     return StagingPoolAttachment(participant.model_copy(deep=True), guard, runtime_profile, profiles,
-        tuple(actuators), config, tuple(resources))
+        # Captured extras are not renderer-qualified consumers or authority.
+        # The live writer census must account for them independently.
+        tuple(actuators), config, tuple(indexed[key] for key in expected))
 
 
 def prepare_staging_pool_attachment(*, participant: PoolParticipantV1, observation: dict[str, Any], candidate: dict[str, Any],
