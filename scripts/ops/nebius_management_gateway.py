@@ -17,7 +17,7 @@ from uuid import UUID
 from scripts.ops.nebius_certificate_gateway import _directory, _read, _write, run_private
 
 SOURCES = (*( "scripts/ops/" + name + ".py" for name in (
-    "nebius_certificate_gateway", "nebius_certificates", "nebius_dns_challenge", "nebius_dns_publication",
+    "nebius_certificate_gateway", "nebius_certificates", "nebius_database_readiness", "nebius_dns_challenge", "nebius_dns_publication",
     "nebius_ingress_bootstrap", "nebius_ingress_gateway", "nebius_ingress_stage", "nebius_ingress_cutover",
     "nebius_ingress_image", "nebius_ingress_operation", "nebius_ingress_probe",
     "nebius_management_gateway", "nebius_management_entry", "nebius_management_transport",

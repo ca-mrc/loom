@@ -584,6 +584,69 @@ This operation does not yet enable application builds or tasks: the protected
 manager/participant activation, build isolation, observer and sole-writer checks
 must still be completed before live multi-owner acceptance.
 
+### Independent closed-runtime delivery
+
+After the pool installer, `development-runtime-preflight` and
+`development-runtime-install` connect the fresh runtime through the protected
+`nebius-rollout` workflow. They use their own
+`NEBIUS_DEVELOPMENT_RUNTIME_SSH_KEY` and
+`NEBIUS_DEVELOPMENT_RUNTIME_OPERATION_JSON`; neither accepts a staging operation
+or arbitrary manifests. Prepare the exact clean integrated source with
+`scripts.ops.nebius_development_runtime_rollout --operation preflight
+--requirements LOCKED_REQUIREMENTS --evidence-dir PRIVATE_EVIDENCE
+--prepare-bundle PRIVATE_BUNDLE`, then grant only that bundle's digest using
+`scripts.ops.install_nebius_development_runtime_entrypoint`. Existing operator
+grants remain unchanged. The operator host needs its existing `kubectl`; probes
+use an explicit private connection, not ambient kubeconfig or credential plugins.
+
+The runtime workflow uses Loom's stable GitHub repository ID, following the
+[organization-transfer contract](nebius-candidate.md#github-organization-transfer).
+Runtime inputs may retain the historical `qianyi-sun/loom` publication name or use
+`ca-mrc/loom`; neither name alone establishes approval. The protected catalog
+still verifies repository identity, successful publication, required checks and
+immutable artifact bytes before installation writes.
+
+The operation schema is `loom.nebius-development-runtime-operation.v1`, with the
+same source/installation/operation/namespace/input-digest fields as pool delivery.
+Its owner-only inputs path is
+`OPERATOR_HOME/.loom/nebius-development-runtime/INSTALLATION_UUID/OPERATION_UUID/inputs.json`.
+The `loom.nebius-development-runtime-inputs.v1` document contains:
+
+- `retained`: the completed pool operation path and SHA-256.
+- `publication`, `candidate`, `profile`: the exact protected publication matching
+  the tooling source record. Live GitHub approval, digest and signature are checked.
+- `collector_scope` and `collector_credential_file`: the dedicated tenant-viewer
+  collector identity. The provider probe uses this identity, not the operator.
+- `registry_scope` and `registry_credential_file`: a separate registry-only editor
+  identity whose registry contains both immutable build-profile repositories.
+- `actuator_password_file` and `batch_runner_token_file`: privately retained fresh
+  runtime material. Existing database-role passwords are not rotated.
+- `operator_connection`: explicit Kubernetes endpoint, CA and operator credential
+  files. Optional `cache_files` contains only the configured build-cache access and
+  secret keys; omit it when no cache is configured.
+
+Preflight performs read-only qualification and writes no installation state.
+Installation stages the fixed SQL setup, material, read-only authority and build
+isolation, then records each stopped/replaced/started workload transition. It may
+report `pending_database`, `pending_stop`, `pending_replace`, `pending_control`,
+`pending_catalog` or `pending_start`. Repeat the unchanged protected operation
+after the corresponding workload or Job progresses. Preserve the parent anchor
+and every child journal; do not delete an uncertain operation or adopt a resource
+manually. Completed replay observes the recorded successors without replaying
+old workload specifications or writes.
+
+`development_runtime_installed_closed` still reports `admission_open: false` and
+`writer_migration_complete: false`. It is **not operational acceptance**: the
+gateway remains stopped, actuator Kubernetes grants remain read-only and the build namespace
+remains restricted. Sole-writer qualification, constrained build activation,
+authenticated worker/API identity, real source/build/deployment/task/result and
+concurrent-owner acceptance are separate prerequisites. Detailed kubelet samples
+retain the optional telemetry semantics described below: unavailable samples are
+not zero usage and do not require a certificate-refresh project before execution.
+API, identity and local trust-configuration failures remain blocking; TLS checks
+must not be disabled. This operation never clears staging
+guards or takes over another environment's capacity writer.
+
 Subsequent lifecycle changes use the same management context:
 
 ```bash

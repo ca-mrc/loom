@@ -98,6 +98,25 @@ def test_repository_transfer_preserves_automatic_rollout(workflow, repository):
     }
 
 
+@pytest.mark.parametrize("repository", ["qianyi-sun/loom", "ca-mrc/loom"])
+@pytest.mark.parametrize("operation", ["development-runtime-preflight", "development-runtime-install"])
+def test_runtime_dispatch_survives_transfer_without_selecting_staging(workflow, repository, operation):
+    assert selected_jobs(workflow, repository=repository, event="workflow_dispatch",
+                         operation=operation, enabled="false") == {"development-runtime"}
+
+
+@pytest.mark.parametrize("repository", ["qianyi-sun/loom", "ca-mrc/loom"])
+@pytest.mark.parametrize("context", [
+    {"repository_id": "999"},
+    {"ref": "refs/heads/feature"},
+    {"event": "pull_request"},
+    {"operation": "development-pool-install"},
+])
+def test_runtime_dispatch_rejects_foreign_identity_or_operation(workflow, repository, context):
+    inputs = dict(repository=repository, event="workflow_dispatch", operation="development-runtime-install")
+    assert "development-runtime" not in selected_jobs(workflow, **(inputs | context))
+
+
 @pytest.mark.parametrize("identity", [
     {"repository_id": "999"},
     {"head_repository_id": 999},

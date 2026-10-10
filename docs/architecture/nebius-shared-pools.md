@@ -521,6 +521,119 @@ These settings
 do not register participants, install profiles, grant Kubernetes authority or
 perform the protected writer migration.
 
+The admin-only `GET /admin/service-execution/catalog/{target_id}` reads the stored
+execution class and target definitions, their recorded digests, and current
+desired/observed health from one database query. Missing targets return 404.
+This supports exact catalog readback after the idempotent catalog POST, including
+recovery from an uncertain response. Reading a catalog does not enable a target,
+refresh its health, create capacity policy, or establish global-pool readiness.
+
+Fresh development runtime setup uses this API through a fixed, restricted catalog
+Job, separately from its SQL setup Job. The catalog Job carries only the retained
+development administrator credential, not SQL or Kubernetes credentials. Its
+ConfigMap and Job are regenerated from the retained installation and qualified
+executable publication before create-only staging. An uncertain create is resolved
+only by exact recorded readback, not a second create. Completion requires the
+recorded Job's sole successful, unrestarted Pod (including its credential-copy
+initializer), exact workload identity, bounded matching receipt and unchanged
+prerequisites. The internal catalog transport requires the runtime parent's
+phase-aware qualification after the closed control plane is replaced; original
+workload equality is not a valid successor check. These delivery components do
+not themselves start workers, grant Job-write permission or open admission.
+
+The fresh runtime network projection adds only development-scoped policies to the
+retained foundation. Its execution namespace, installation and pool labels must
+all match: the actuator may reach dev PostgreSQL on 5432, and execution-unit Pods
+may reach the dev LLM/credential gateway on 9100. Native task egress retains the
+existing DNS-and-gateway-only contract, with no direct database, API or control
+plane access. Existing shared-internal, personal API and public ingress policies
+remain intact; build and foreign namespaces receive no new access. These fixed
+documents do not change staging, activate workers or qualify live networking.
+
+Build admission is derived from the same closed catalog, scoped to the exclusive
+development build namespace. The fail-closed Pod policy accepts actual pooled
+task/application Jobs, including their absolute-deadline wrappers. Only the
+credential-free rootless build phase may use SETUID/SETGID and unconfined
+seccomp/AppArmor; trusted prepare/publish retain pinned images, commands and
+separate credential mounts. Admission fixes resource requests/limits, observed
+RuntimeClass overhead, node placement, service account and ordinary scheduling
+priority. It also covers ephemeral-container and resource-resize updates and
+prevents termination messages from reading credential mounts.
+
+This policy complements the protected pool gateway; it is not request admission,
+claim-content validation, a PID quota or permission to operate the pool. Trusted
+ConfigMap writers, bounded reservation deadlines, exec/bind RBAC, immutable live
+RuntimeClass identity and the sole-writer transition remain installer/runtime
+prerequisites. Merely rendering the policy does not relax Pod Security: the
+protected parent must prove native enforcement before its journaled namespace
+label change, and must qualify required materials/networking before startup.
+
+The fresh collector's immutable credential Secret is separate from operator,
+database, source and registry material. Read-only cloud qualification binds its
+inline SDK private key to the registered active public key and retained dev
+project/tenant/region. The account must have exactly one tenant-owned group with
+exactly the existing Terraform observer permit: tenant `viewer`, needed for quota
+allowance reads. Extra memberships or write permits are rejected. Existing
+non-expiring observer keys are supported; expiring keys require a startup margin.
+Secret rendering alone proves neither live IAM authority nor usable capacity:
+the connected parent must qualify provider state and read the actual pool using
+that credential before starting the suspended observer.
+
+Native build material is projected into the closed catalog's build namespace.
+Task source copies only the retained artifacts credential; personal application
+source copies only the retained source credential. Conflicting Secret names are
+rejected instead of merging authorities. An enabled cache requires explicit
+material for one disposable cache bucket, distinct from data/source/backup;
+unused cache material is rejected. Registry publication accepts only an inline
+Nebius identity bound to the catalog repositories and a live-qualified registry
+`editor` permit, never project/tenant write permission. Object-access checks and
+actual publication/pull verification remain runtime/installed prerequisites.
+The fixed projection includes tokenless build service accounts and the existing
+DNS/public HTTP(S)-only native egress policy, but no namespace PSA changes,
+legacy actuator write grants, workload start or per-environment capacity quota.
+
+The connected runtime parent freezes the entire inventory and original workload
+UIDs before its first write. An independent marker binds the operation and input
+digest to private phase journals. SQL setup must finish before material, read-only
+authority, isolation and stopped workloads are installed. The original development
+manager/API/control plane are stopped and drained before their replacement
+templates are applied. The closed manager and control plane then start; the fixed
+disabled-catalog Job must prove completion before the shared API, read-only
+actuator and collector start. No phase grants the gateway write authority, opens
+pool admission or mutates staging.
+
+Each workload transition retains server-defaulted targets and original UIDs.
+The phase-bound HTTPS transport regenerates its allowed originals and targets
+from the parent history; every JSON patch atomically tests UID, resourceVersion
+and prior spec. Only a qualified Kubernetes conflict/invalid response permits a
+retry. Unknown write
+outcomes are only read back. Completed phases retain checksums and Job receipts,
+and are inspected instead of replayed after later startup intentionally changes
+their live specifications. Missing or altered recovery history fails closed.
+The workload transport checks complete namespace ReplicaSet/Pod inventories for
+drain and replacement readiness, including lingering terminating Pods, exact
+ownership/templates and native scheduling/service-account defaults. It rechecks
+controller identity, generation and readiness after those collection reads.
+These observations do not establish process/database configuration or cloud
+access: those remain independent live qualification barriers.
+The GET-only runtime observer compares unchanged foundation/manager/pool
+resources with retained identities, including both database storage bindings.
+Only workload identities with validated runtime phase history may use successor
+templates. An uncertain transition retains both its old and intended template
+as observation options; those options never authorize retry or activation.
+Each observation validates runtime history once before and once after its live
+reads, comparing the parent record, workload options and raw child-journal
+checksums. These views are not cached across child or pre-write boundaries.
+Every private-input check still reopens and compares all retained files, with
+the same ownership, permissions and link checks. Reads use the known retained
+byte length, capped at 4 MiB, plus one byte for growth detection; small inputs
+do not allocate the maximum buffer on every resource observation.
+The protected independent closed-runtime entrypoint connects this parent with
+phase-aware HTTPS qualification, provider/material access and publication binding.
+Its component tests do not establish installed readiness: dev-only activation
+and installed multi-owner acceptance remain required before the environment can
+be called operational.
+
 Management startup loads `pool_profiles_file`, a bounded installer-owned
 `loom.pool-profiles.v1` JSON catalog. It contains separate execution and native
 build entries keyed by the registered profile UUID, plus public image-admission
@@ -659,12 +772,61 @@ One original-installation anchor and phase journal prevent changed inputs, lost
 state or uncertain creates from starting another installation. Earlier material
 is rechecked after later resource creation before reporting completion.
 
+A read-only completed-pool reader binds the original private input and source
+record to its anchored parent, phase checksums, actual namespace UIDs and exact
+closed-registration receipt. It exposes recorded resource snapshots for later
+runtime transitions without replaying installation or rerendering historical
+delivery. Retired operator credential files do not invalidate this history.
+Reading it is not live qualification or authority to start a workload; a successor
+must independently compare the retained identities with the installed resources.
+The manager preparation derives its build settings from this same catalog and
+keeps the original database, cloud, shared-data and existing source Secret
+references. If source intake was not installed, source credential delivery is
+still a prerequisite. The prepared Deployment remains stopped; preparation does
+not grant build access, open admission or replace live identity checks.
+
+Fresh runtime database setup has a separate fixed command: it creates only the
+missing actuator login and batch-submission token, without migrations or changes
+to service/control-plane/gateway passwords. A single transaction binds its
+operation, database identity and token digest to the role. Replay authenticates
+the retained password and checks the exact current grants and token; it never
+rotates credentials or repairs drift. Delegable/default grants are rejected.
+The protected closed-runtime parent delivers this fixed Job only after qualifying
+the dev database and retained private material. The primitive itself is not
+installed readiness evidence.
+
+The independent closed-runtime parent consumes the completed pool and original
+foundation/manager histories. Its protected entry freezes exact source-bound
+publication, fresh material and every fixed target before writes. Child resource
+creation and UID/resourceVersion/spec-checked transitions requalify the same
+namespace, storage, material and closed database bindings. Read-only IAM checks
+keep the tenant-viewer collector and registry-only publisher separate; a native
+pool read uses the actual collector credential. It neither publishes capacity nor
+creates cloud grants. Each durable phase checks current publication/cloud
+authority; repeated resource observations reuse the frozen plan while rechecking
+private bytes and live identities.
+
+SQL/catalog completion requires an exact owned successful Job/Pod and bounded
+receipt. Running manager, service, control-plane and actuator processes prove
+their typed settings and namespace-local database URLs through nonce-bound
+challenges. Pod replacement, restart, controller lag or a changed database route
+invalidates the observation. Anchored successor history permits interrupted
+transition readback without requiring replaced templates to match the original
+installer forever. A missing child journal after restart remains an error.
+
 `development_pool_installed_closed` means only that this stopped installation is
-retained and qualified. Catalog-bound manager/participant successors, build
-isolation and read grants, a qualified observer and sole physical-writer authority
-are still required before admission and runtime activation. The installed
+retained and qualified. `development_runtime_installed_closed` additionally
+qualifies the catalog-bound manager/participant successors, fixed build isolation,
+read grants and collector identity. Neither receipt grants Job-write authority,
+relaxes build-namespace PSA, starts the gateway or proves sole physical-writer
+authority. Those activation steps must not interfere with staging. The installed
 source-to-build-to-deploy-to-task/result and concurrent-owner acceptance tests
 remain the operational readiness criteria.
+Authenticated Kubernetes/worker identity and capacity observations remain
+mandatory. Detailed kubelet samples retain the existing optional-telemetry
+contract; unavailable samples are not zero usage or evidence of certificate trust.
+Do not make a new kubelet certificate-refresh mechanism an execution prerequisite,
+and do not weaken TLS or identity validation to obtain samples.
 
 The migration's initial closure stage binds every qualified data participant and
 its retained control-plane Deployment/namespace identity. Environment classes do
