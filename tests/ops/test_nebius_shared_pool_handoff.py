@@ -1720,7 +1720,8 @@ def test_shared_build_activation_requires_effective_policy_and_never_repeats_unk
 
 
 @pytest.mark.timeout(600)
-def test_shared_gateway_stages_exact_grants_then_starts_once_under_closed_parent(shared_operation, completed_pool):
+def test_shared_gateway_stages_exact_grants_then_starts_once_under_closed_parent(
+        shared_operation, completed_pool, shared_runtime, handoff):
     """A grant or PATCH reply loss must not start a second writer or replay effects."""
     import importlib
     import json
@@ -1728,10 +1729,16 @@ def test_shared_gateway_stages_exact_grants_then_starts_once_under_closed_parent
     from contextlib import ExitStack
 
     import httpx
+    from scripts.ops import nebius_certificates as private_state
+    from scripts.ops import nebius_shared_pool_build_activation as build_child
     from scripts.ops import nebius_shared_pool_operation as parent
     from scripts.ops.nebius_development_runtime_live import runtime_resource_path
+    from scripts.ops.nebius_development_runtime_observation import HTTPSDevelopmentRuntimeObserver
     from scripts.ops.nebius_management_switch import _stable
-    from tests.ops.test_nebius_development_pool_retained import populate_runtime_pods
+    from tests.ops.test_nebius_development_pool_retained import (
+        populate_runtime_pods,
+        runtime_http_inventory,
+    )
 
     name = 'scripts.ops.nebius_shared_pool_gateway'
     assert importlib.util.find_spec(name) is not None, 'shared gateway child is missing'
@@ -1851,6 +1858,8 @@ def test_shared_gateway_stages_exact_grants_then_starts_once_under_closed_parent
     with ExitStack() as stack:
         class API(SharedPhaseAPI):
             def prepare(self, phase, bound, directory):
+                if phase == 'forward-build-policy':
+                    return build_child.prepare_shared_build_activation(bindings=bound, state_dir=directory)
                 if phase != 'forward-gateway':
                     return super().prepare(phase, bound, directory)
                 module.prepare_shared_gateway(bindings=bound, state_dir=directory)
@@ -1859,18 +1868,28 @@ def test_shared_gateway_stages_exact_grants_then_starts_once_under_closed_parent
                     raise TimeoutError('simulated interruption after effect-free child preparation')
 
             def validate_prepared_phase(self, phase, directory):
-                if phase == 'forward-gateway':
+                if phase == 'forward-build-policy':
+                    build_child.validate_shared_build_activation(bindings=bindings, state_dir=directory, complete=False, prepared=True)
+                elif phase == 'forward-gateway':
                     module.validate_shared_gateway(bindings=bindings, state_dir=directory, complete=False, prepared=True)
                 else:
                     super().validate_prepared_phase(phase, directory)
 
             def validate_phase(self, phase, directory, *, complete):
-                if phase == 'forward-gateway':
+                if phase == 'forward-build-policy':
+                    build_child.validate_shared_build_activation(bindings=bindings, state_dir=directory, complete=complete)
+                elif phase == 'forward-gateway':
                     module.validate_shared_gateway(bindings=bindings, state_dir=directory, complete=complete)
                 else:
                     super().validate_phase(phase, directory, complete=complete)
 
             def advance(self, phase, bound, directory):
+                if phase == 'forward-build-policy':
+                    # Only this preceding phase's remote effect is doubled;
+                    # gateway and inventory readers consume its real receipt.
+                    record = build_child.validate_shared_build_activation(bindings=bound, state_dir=directory, complete=False)
+                    private_state._atomic_json(directory / 'build-policy.json', {**record, 'status': 'activated'})
+                    return True
                 if phase != 'forward-gateway':
                     return super().advance(phase, bound, directory)
                 def ready(request, selected, original, expected, actual):
@@ -1925,6 +1944,40 @@ def test_shared_gateway_stages_exact_grants_then_starts_once_under_closed_parent
         refresh()
         assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-gateway'
         assert challenges and patches == [_key(gateway)]
+        reads, inventory, read = runtime_http_inventory(runtime, shared_runtime[1], completed_pool[3].server, handoff[2])
+        namespace = copy.deepcopy(plan.build_namespace_target)
+        namespace['metadata']['uid'] = plan.build_namespace_original['metadata']['uid']
+        inventory['/api/v1/namespaces/' + namespace['metadata']['name']] = namespace
+        inventory[gateway_path] = copy.deepcopy(gateway)
+        with HTTPSDevelopmentRuntimeObserver(request=runtime,
+                api_server=runtime.database.foundation.inputs.config['kubernetes_api_server'],
+                ssl_context=ssl.create_default_context()) as observer:
+            for connection in (observer, observer.manager, observer.foundation):
+                connection.client.close()
+                connection.client = type(completed_pool[3].api.client)(base_url=connection.api_server, transport=httpx.MockTransport(read))
+            with pytest.raises(ValueError):
+                observer.inspect(state_dir=plan.runtime.state_dir)  # Ordinary installation remains strict.
+            observed = observer.inspect(state_dir=plan.runtime.state_dir, _shared_handoff=bindings)
+            assert observed[_key(gateway)] == gateway
+            for damage in ('uid', 'image'):
+                changed = inventory[gateway_path]
+                if damage == 'uid':
+                    changed['metadata']['uid'] = str(uuid4())
+                else:
+                    changed['spec']['template']['spec']['containers'][0]['image'] = 'foreign.invalid/image:latest'
+                with pytest.raises(ValueError):
+                    observer.inspect(state_dir=plan.runtime.state_dir, _shared_handoff=bindings)
+                inventory[gateway_path] = copy.deepcopy(gateway)
+            receipt = child / 'start/transition.json'
+            saved = receipt.read_bytes()
+            receipt.unlink()
+            before = len(reads)
+            with pytest.raises(ValueError):
+                observer.inspect(state_dir=plan.runtime.state_dir, _shared_handoff=bindings)
+            assert len(reads) == before
+            receipt.write_bytes(saved)
+            receipt.chmod(0o600)
+        assert all(message.method == 'GET' for message in reads)
         mode['runtime_ready'] = True
         assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-activate'
         assert patches == [_key(gateway)] and creates == list(fixed)
@@ -2933,6 +2986,8 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
     from scripts.ops import nebius_shared_pool_workloads as workloads
     from scripts.ops.nebius_development_runtime_live import runtime_resource_path
     from scripts.ops.nebius_management_stage import _comparison_snapshot, _stage_fixed_documents
+
+    from loom.nebius_platform_render import digest
 
     name = 'scripts.ops.nebius_shared_pool_forward_census'
     assert importlib.util.find_spec(name) is not None, 'phase-bound shared writer census is missing'
