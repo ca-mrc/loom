@@ -3391,8 +3391,7 @@ def test_shared_activation_binds_own_parent_and_never_replays_unknown_writes(sha
 
 
 @pytest.mark.timeout(420)
-@pytest.mark.parametrize('forward_census', [False, True,
-    pytest.param('recovery', marks=pytest.mark.timeout(900))], ids=['initial', 'forward', 'recovery'])
+@pytest.mark.parametrize('forward_census', [False, True, 'recovery'], ids=['initial', 'forward', 'recovery'])
 def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writers(
         shared_runtime, staging_history, staging_observation, completed_pool, handoff, shared_operation, forward_census):
     """A historical template or a stopped clone must not hide a live writer."""
@@ -4026,6 +4025,7 @@ def _exercise_recovery_writer_census(kwargs, state, transport, inventory, kinds,
         'recovery-restore-roles': (roles.prepare_shared_recovery_roles, roles.validate_shared_recovery_roles, 'roles.json'),
         'recovery-restart': (restart.prepare_shared_recovery_restart, restart.validate_shared_recovery_restart, 'restart.json'),
         'recovery-reopen': (reopening.prepare_shared_recovery_reopening, reopening.validate_shared_recovery_reopening, 'reopen.json'),
+        'recovery-verify': (reopening.prepare_shared_recovery_verification, reopening.validate_shared_recovery_verification, 'verify.json'),
     }
 
     class API(forward_api):
@@ -4074,6 +4074,9 @@ def _exercise_recovery_writer_census(kwargs, state, transport, inventory, kinds,
                 path = directory / 'machines.json'
                 private_state._atomic_json(path, {**_read(path), 'status': 'revoked'})
                 return all(row['status'] == 'restricted' for row in _read(directory / 'gateway.json')['roles'].values())
+            if phase in {'recovery-reopen', 'recovery-verify'}:
+                record = _read(directory / children[phase][2])
+                return record['status'] == ('released' if phase == 'recovery-reopen' else 'observed')
             if phase in children:
                 record = _read(directory / children[phase][2])
                 return all(row['status'] in {'stopped', 'restored', 'started'}
@@ -4201,6 +4204,29 @@ def _exercise_recovery_writer_census(kwargs, state, transport, inventory, kinds,
     inventory['clusterroles'].remove(foreign)
     inventory['clusterrolebindings'].remove(foreign_binding)
     observe()
+    captured = next(iter(bindings.plan.staging.originals.values()))
+    original_spec = copy.deepcopy(captured['spec'])
+    mode['during_read'] = lambda: captured['spec'].update({'unapproved': True})
+    try:
+        with pytest.raises(ValueError):
+            observe()  # Nested caller-owned plan objects cannot change mid-read.
+    finally:
+        captured['spec'] = original_spec
+    # Terminal recovery retains the same read-only census authority, not the
+    # forward view or permission to replay completed recovery mutations.
+    private_state._atomic_json(receipt, {**_read(receipt), 'status': 'released'})
+    api.block = 'recovery-verify'
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'recovery-verify'
+    observe()
+    receipt = state / 'recovery-verify/verify.json'
+    private_state._atomic_json(receipt, {**_read(receipt), 'status': 'observed'})
+    api.block = None
+    assert parent.run_shared_pool_operation(**kwargs)['status'] == 'staging_restored_dev_closed'
+    assert observe().workloads[gateway_key]['spec']['replicas'] == 0
+    from scripts.ops.nebius_shared_pool_forward_census import observe_shared_pool_forward_writers
+
+    with pytest.raises(ValueError):
+        observe_shared_pool_forward_writers(bindings=bindings, state_dir=state, transport=transport)
     assert calls and all(call.method == 'GET' for call in calls)
 
 
