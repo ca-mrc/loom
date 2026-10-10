@@ -624,7 +624,14 @@ async def run_service_execution_scheduler_loop(
 ) -> None:
     """Continuously reserve converted service tasks; cancellation stops the loop."""
 
-    while True:
+    task = asyncio.current_task()
+
+    def cancellation_requested() -> bool:
+        # Python 3.11 dependency waits can return a completed result while
+        # consuming CancelledError. Preserve shutdown at each work boundary.
+        return task is not None and task.cancelling() > 0
+
+    while not cancellation_requested():
         try:
             # Deferred verifiers reuse an existing route and admitted capacity,
             # so both local and global admission modes reserve them here.
@@ -636,6 +643,8 @@ async def run_service_execution_scheduler_loop(
                     maximum_deadline_seconds=maximum_deadline_seconds,
                 )
                 await session.commit()
+            if cancellation_requested():
+                return
             for verifier in verifiers:
                 _LOG.info("service_execution_verifier_reserved", extra={
                     "trial_id": str(verifier.trial_id), "parent_lease_id": str(verifier.parent_lease_id),
@@ -643,7 +652,10 @@ async def run_service_execution_scheduler_loop(
             if global_selector is not None:
                 # A selection is not a lease. Empty/failed global selection never
                 # falls through to the environment-local capacity writer.
-                if await global_selector.select_next() is not None:
+                selected = await global_selector.select_next()
+                if cancellation_requested():
+                    return
+                if selected is not None:
                     continue
                 await asyncio.sleep(interval_seconds)
                 continue
@@ -666,6 +678,8 @@ async def run_service_execution_scheduler_loop(
             return
         except Exception as exc:
             _LOG.warning("service_execution_scheduler_error: %s", exc, exc_info=True)
+        if cancellation_requested():
+            return
         await asyncio.sleep(interval_seconds)
 
 
