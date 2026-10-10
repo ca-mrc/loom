@@ -118,6 +118,7 @@ class Server:
         self.pod = None
         self.damage_report = False
         self.drift_on_log = False
+        self.namespace_uid_overrides = {}
 
     def handle(self, message):
         self.calls.append(message)
@@ -132,6 +133,7 @@ class Server:
             for row in registration.spec.participants:
                 for item in (row.execution_namespace, row.build_namespace):
                     identities[item.name] = str(item.uid)
+            identities.update(self.namespace_uid_overrides)
             return httpx.Response(200, json={'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {
                 'name': name, 'uid': identities[name], 'labels': {
                     'loom.nebius/management-installation': binding.installation_id,
@@ -257,6 +259,18 @@ def test_complete_catalog_registers_closed_without_writing_staging(registered):
     writes = len(posted)
     assert run(registered) == result
     assert len([call for call in registered.server.calls if call.method == 'POST']) == writes
+
+
+@pytest.mark.parametrize('registered', ['with-staging'], indirect=True)
+@pytest.mark.parametrize('namespace', ['loom-nebius-platform-execution', 'loom-nebius-platform-execution-build'])
+def test_complete_catalog_rechecks_staging_namespace_uid_before_registration(registered, namespace):
+    registered.server.namespace_uid_overrides[namespace] = str(uuid4())
+    with pytest.raises(ValueError, match='development pool registration'):
+        run(registered)
+    assert any(call.method == 'GET' and call.url.path == '/api/v1/namespaces/' + namespace
+        for call in registered.server.calls)
+    assert all(call.method == 'GET' for call in registered.server.calls)
+    assert not registered.server.store.creates
 
 
 def test_registration_preview_is_read_only_and_uses_independent_management(registered):

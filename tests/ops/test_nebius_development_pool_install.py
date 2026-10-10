@@ -38,6 +38,7 @@ from tests.ops.test_nebius_development_pool_registration import provider_checks 
 from tests.ops.test_nebius_development_pool_registration import retained as retained
 from tests.ops.test_nebius_development_pool_registration import route as route
 from tests.ops.test_nebius_development_pool_registration import tls_material as tls_material
+from tests.ops.test_nebius_development_pool_registration import with_staging
 from tests.unit.test_nebius_application_image_renderer import build_inputs as build_inputs
 
 
@@ -93,6 +94,44 @@ def pool_inputs(retained, build_inputs):
 def prepare(pool_inputs):
     reference, catalog, tokens = pool_inputs
     return module().prepare_intent(reference=reference, catalog=catalog, tokens=tokens)
+
+
+@pytest.mark.parametrize('staging_first', [False, True])
+def test_common_catalog_preparation_preserves_staging_without_delivering_its_authority(pool_inputs, staging_first):
+    from loom_service.pool_management.installation import PoolInstallation
+
+    reference, catalog, tokens = pool_inputs
+    for field in ('execution_namespace', 'build_namespace'):
+        catalog['participants'][0][field]['uid'] = str(uuid4())
+    combined = with_staging(PoolInstallation.model_validate(catalog)).model_dump(mode='json')
+    dev, staging = combined['participants']
+    for field in ('execution_namespace', 'build_namespace'):
+        dev[field].pop('uid')
+    staging_machine, = [row for row in combined['machines'] if row['participant_id'] == staging['participant_id']]
+    tokens[UUID(staging_machine['machine_id'])] = 'staging-test-only-token'
+    staging_profile_ids = {row['profile_id'] for row in staging['targets']}
+    for profile in combined['profiles']['task_images']:
+        if profile['profile_id'] in staging_profile_ids:
+            profile['settings']['source_bucket'] = 'retained-staging-artifacts'
+    if staging_first:
+        combined['participants'].reverse()
+    intent = module().prepare_intent(reference=reference, catalog=combined, tokens=tokens)
+    assert intent.catalog == combined
+    namespaces = module().namespace_documents(intent)
+    assert {row['metadata']['name'] for row in namespaces.values()} == {
+        dev['execution_namespace']['name'], dev['build_namespace']['name']}
+    uids = {row['metadata']['name']: str(uuid4()) for row in namespaces.values()}
+    request = module().bind_namespaces(intent, uids)
+    retained_staging, = [row for row in request.registration.spec.participants if row.environment_class == 'staging']
+    assert retained_staging.model_dump(mode='json') == staging
+    documents = module().delivery_documents(intent, request)
+    assert {doc['metadata']['namespace'] for phase in documents.values() for doc in phase.values()} <= {
+        'loom-nebius-management-dev', 'loom-dev', dev['execution_namespace']['name'], dev['build_namespace']['name']}
+    assert not any(doc['metadata']['labels'].get('loom.nebius/pool-machine') == staging_machine['machine_id']
+        for doc in documents['material'].values())
+    gateway, = documents['workload'].values()
+    assert gateway['spec']['replicas'] == 0 and 'authority' not in documents
+    assert not any(token in repr(intent) for token in tokens.values())
 
 
 @pytest.mark.parametrize('damage', ['missing', 'architecture', 'os', 'reserved'])
