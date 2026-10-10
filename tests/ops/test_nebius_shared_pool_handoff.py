@@ -400,14 +400,14 @@ def test_shared_guard_binding_uses_live_dev_database_and_real_bound_guard_reader
             assert api.guard(guard, 'observe') == {'status': 'open'}
         assert sum('exec' in row for row in commands) == 1
         assert calls and all(row.method == 'GET' for row in calls)
-        assert base64.b64decode(documents[credential_path]['data']['cp-url']).decode() not in repr(bound)
+        assert base64.b64decode(documents[credential_path]['data']['control-plane-url']).decode() not in repr(bound)
 
         original = copy.deepcopy(documents[credential_path])
         for damage in ('uid', 'data'):
             if damage == 'uid':
                 documents[credential_path]['metadata']['uid'] = str(uuid4())
             else:
-                documents[credential_path]['data']['cp-url'] = base64.b64encode(b'foreign-database').decode()
+                documents[credential_path]['data']['control-plane-url'] = base64.b64encode(b'foreign-database').decode()
             with pytest.raises(ValueError, match='shared pool guard bindings unqualified'):
                 observe()
             documents[credential_path] = copy.deepcopy(original)
@@ -415,3 +415,16 @@ def test_shared_guard_binding_uses_live_dev_database_and_real_bound_guard_reader
         with pytest.raises(ValueError, match='shared pool guard bindings unqualified'):
             observe()
         assert all(row.method == 'GET' for row in calls)
+        mode['late_version'] = False
+        documents[credential_path] = copy.deepcopy(original)
+        child = bound.plan.development.runtime.state_dir / 'start' / 'transition.json'
+        raw = child.read_bytes()
+        child.unlink()
+        before_reads = len(calls)
+        try:
+            with pytest.raises(ValueError, match='shared pool guard bindings unqualified'):
+                observe()
+            assert len(calls) == before_reads
+        finally:
+            child.write_bytes(raw)
+            child.chmod(0o600)

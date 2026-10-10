@@ -851,6 +851,18 @@ preparation derives gateway grants, its startup target and the build-namespace
 PSA successor. It is not a protected activation command: live sole-writer,
 effective-policy, opening/fencing and installed acceptance remain unconnected.
 
+Forward handoff preparation combines this completed dev runtime with the current
+source-qualified staging predecessor and its completed legacy history. The
+GET-only dev binding observation reuses the retained-runtime observer and pins
+the actual database, Service and both credential identities. Secret resource
+versions are captured before the observation and compared afterward; changed
+values, UIDs, versions or private history reject the binding. The resulting
+database-bound guard target uses the existing namespace-local guard reader,
+without falling back to an unbound controller command. Staging retains its
+separate captured database binding, which still needs live requalification.
+These observations neither acquire a guard nor prove writer fencing, provider
+authority, process readiness or an operational shared pool.
+
 Authenticated Kubernetes/worker identity and capacity observations remain
 mandatory. Detailed kubelet samples retain the existing optional-telemetry
 contract; unavailable samples are not zero usage or evidence of certificate trust.
