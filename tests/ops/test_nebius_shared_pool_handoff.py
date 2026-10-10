@@ -430,6 +430,261 @@ def test_shared_guard_binding_uses_live_dev_database_and_real_bound_guard_reader
             child.chmod(0o600)
 
 
+@pytest.mark.timeout(600)
+def test_shared_process_preflight_reads_current_databases_and_retired_authority(
+        shared_runtime, staging_history, staging_observation, completed_pool, handoff, monkeypatch):
+    """Reject active old authority, failed real challenges and changed bindings.
+
+    Only Kubernetes transport and remote process output are doubled. Omitting a
+    required probe or using old staging templates must fail this connected test.
+    """
+    import base64
+    import hmac
+    import json
+    import ssl
+    import subprocess
+    from types import SimpleNamespace
+    from urllib.parse import parse_qs, urlsplit
+
+    import httpx
+    from pydantic import PostgresDsn
+    from scripts.ops import nebius_shared_pool_handoff_live as module
+    from scripts.ops.deploy_nebius_platform import rollout_guard_observation_sql
+    from scripts.ops.nebius_development_runtime_probes import HTTPSDevelopmentRuntimeProbes
+    from scripts.ops.nebius_pool_legacy_settings import (
+        BOUND_LEGACY_SETTINGS_COMMAND,
+        expected_legacy_runtime_settings,
+    )
+    from scripts.ops.nebius_pool_machine_database import pool_machine_retirement_sql
+    from scripts.ops.nebius_pool_migration_guard import (
+        _BOUND_DATABASE_COMMAND,
+        _BOUND_TELEMETRY_COMMAND,
+    )
+    from scripts.ops.nebius_pool_runtime_settings import (
+        BOUND_POOL_SETTINGS_COMMAND,
+        expected_pool_runtime_settings,
+    )
+    from scripts.ops.nebius_pool_startup_database import pool_startup_closed_sql
+    from tests.ops.test_nebius_development_pool_retained import (
+        populate_database_backends,
+        populate_runtime_pods,
+        runtime_http_inventory,
+    )
+    from tests.ops.test_nebius_management_refresh_predecessor import history_credential
+
+    from loom.nebius_platform_render import digest
+
+    assert hasattr(module, 'observe_shared_pool_processes'), 'connected SQL/process preflight is missing'
+    request, parent = shared_runtime
+    calls, documents, fallback = runtime_http_inventory(request, parent, completed_pool[3].server, handoff[2])
+    plan = module.prepare_shared_pool_handoff(runtime=request, observation=staging_observation,
+        legacy=staging_history, repo_root=ROOT)
+    attachment = plan.staging.attachment
+    staging, dev = attachment.guard, next(row for row in plan.migration.guards if row.namespace == 'loom-dev')
+    spec = plan.migration.registration.spec
+    old = staging_history.context
+    old_spec = old.inputs.installation
+    old_namespace = old.original.upgrade.setup.binding.namespace
+    manager_namespace = request.database.manager.retained.request.retained.binding.namespace
+
+    def add(row):
+        plural = {'Secret': 'secrets', 'Namespace': 'namespaces', 'Deployment': 'deployments',
+            'StatefulSet': 'statefulsets', 'Service': 'services', 'ReplicaSet': 'replicasets'}[row['kind']]
+        prefix = '/api/v1' if row['apiVersion'] == 'v1' else '/apis/' + row['apiVersion']
+        namespace = row['metadata'].get('namespace')
+        path = prefix + ('/namespaces/' + namespace if namespace else '') + '/' + plural + '/' + row['metadata']['name']
+        documents[path] = copy.deepcopy(row)
+        return path
+
+    for row in attachment.resources:
+        if row['kind'] in {'Namespace', 'Deployment', 'StatefulSet', 'Service'}:
+            add(row)
+    # Recover the old manager DB and credential from its genuine installation.
+    journal = json.loads((old.original.upgrade.original_state / 'database/stage.json').read_bytes())
+    for item in journal['resources'].values():
+        row = copy.deepcopy(item['observed'])
+        row['metadata']['uid'] = item['uid']
+        add(row)
+    old_secret_path = add(history_credential(old.original))
+    add({'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': old_namespace,
+        'uid': old.original.upgrade.setup.binding.namespace_uid}})
+    add({'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': 'kube-system',
+        'uid': plan.migration.registration.binding.kube_system_uid}})
+    # Current staging secrets correspond to its captured UID/resourceVersions.
+    for row in plan.staging.originals.values():
+        if row['kind'] != 'Deployment':
+            continue
+        namespace = row['metadata']['namespace']
+        actuator = namespace != staging.namespace
+        variable = 'LOOM_EXECUTION_ACTUATOR_DB_URL' if actuator else (
+            'LOOM_CP_DB_URL' if row['metadata']['name'] == 'loom-control-plane' else 'LOOM_SVC_DB_URL')
+        env, = (env for env in row['spec']['template']['spec']['containers'][0]['env'] if env['name'] == variable)
+        reference = env['valueFrom']['secretKeyRef']
+        path = '/api/v1/namespaces/' + namespace + '/secrets/' + reference['name']
+        if path not in documents:
+            add({'apiVersion': 'v1', 'kind': 'Secret', 'metadata': {'namespace': namespace, 'name': reference['name'],
+                'uid': str(staging.database.actuator_credential_uid if actuator else staging.database.credential_uid),
+                'resourceVersion': staging.database.actuator_credential_resource_version if actuator else staging.database.credential_resource_version},
+                'data': {}})
+        documents[path]['data'][reference['key']] = base64.b64encode(
+            f'postgresql+psycopg://loom:private-test-only@loom-postgres.{staging.namespace}.svc:5432/loom'.encode()).decode()
+    for row in documents.values():
+        if row['kind'] == 'Secret':
+            row['metadata'].setdefault('resourceVersion', '301')
+    populate_runtime_pods(documents)
+    populate_database_backends(documents)
+    for listing in list(documents.values()):
+        if listing['kind'] == 'ReplicaSetList':
+            for row in listing['items']:
+                add(row)
+        if listing['kind'] == 'PodList':
+            for row in listing['items']:
+                row['spec']['nodeName'] = 'platform-test'
+    node_uid = str(uuid4())
+    documents['/api/v1/nodes'] = {'apiVersion': 'v1', 'kind': 'NodeList', 'metadata': {'resourceVersion': '401'},
+        'items': [{'apiVersion': 'v1', 'kind': 'Node', 'metadata': {'name': 'platform-test', 'uid': node_uid, 'labels': {}}}]}
+
+    def read(path):
+        url = urlsplit(path)
+        value = copy.deepcopy(documents[url.path])
+        selector = parse_qs(url.query).get('labelSelector')
+        if selector:
+            label, wanted = selector[0].split('=', 1)
+            value['items'] = [row for row in value['items'] if row['metadata'].get('labels', {}).get(label) == wanted]
+        return value
+
+    def handle(message):
+        assert message.method == 'GET'
+        if message.url.path in documents:
+            calls.append(message)
+            return httpx.Response(200, json=read(str(message.url)))
+        return fallback(message)
+
+    commands, checked = [], set()
+    mode = {'damage': None}
+    roles = {(manager_namespace, 'loom-service'): 'manager', ('loom-dev', 'loom-service'): 'service',
+        ('loom-dev', 'loom-control-plane'): 'controller',
+        (next(row for row in spec.participants if row.participant_id == dev.participant_id).execution_namespace.name,
+            'loom-execution-actuator'): 'actuator'}
+    for row in plan.staging.originals.values():
+        if row['kind'] == 'Deployment':
+            namespace, name = row['metadata']['namespace'], row['metadata']['name']
+            roles[namespace, name] = 'controller' if name == 'loom-control-plane' else 'service' if name == 'loom-service' else 'actuator'
+
+    def execute(argv, **kwargs):
+        start = next(index for index, item in enumerate(argv) if item in {'exec', 'get'})
+        args = argv[start:]
+        commands.append(args)
+        if args[0] == 'get':
+            if args[1] == '--raw':
+                value = read(args[2])
+            else:
+                kind, name = args[1:3]
+                namespace = args[args.index('-n') + 1] if '-n' in args else None
+                plural = {'namespace': 'namespaces', 'deployment': 'deployments', 'replicaset': 'replicasets',
+                    'secret': 'secrets', 'service': 'services', 'statefulset': 'statefulsets'}[kind]
+                prefix = '/apis/apps/v1' if kind in {'deployment', 'replicaset', 'statefulset'} else '/api/v1'
+                value = read(prefix + ('/namespaces/' + namespace if namespace else '') + '/' + plural + '/' + name)
+        else:
+            assert args[:2] == ['exec', '-n'] and args[4] == '-c' and args[6] == '--'
+            namespace = args[2]
+            if args[7] == 'psql':
+                assert args[3] == 'pod/loom-postgres-0' and args[5] == 'loom-postgres'
+                sql = args[-1]
+                if namespace == old_namespace:
+                    assert sql == pool_machine_retirement_sql(old_spec, action='observe')
+                    value = {'schema': 'loom.pool-machine-retirement.v1', 'operation_id': str(old_spec.operation_id),
+                        'installation_sha256': digest(old_spec.model_dump(mode='json')),
+                        'state': 'active' if mode['damage'] == 'old-active' else 'revoked'}
+                    checked.add('old-revoked')
+                elif namespace == manager_namespace:
+                    assert sql == pool_startup_closed_sql(spec)
+                    value = {'schema': 'loom.pool-startup-closed.v1', 'operation_id': str(spec.operation_id),
+                        'installation_sha256': digest(spec.model_dump(mode='json')), 'read_only': True,
+                        'qualified': mode['damage'] != 'new-not-closed'}
+                    checked.add('new-closed')
+                else:
+                    assert namespace in {'loom-dev', staging.namespace}
+                    assert sql == rollout_guard_observation_sql(owner=str(spec.operation_id), candidate=request.database.foundation.inputs.candidate['candidate_sha'])
+                    value = {'status': 'held' if mode['damage'] == 'guard-held' else 'open'}
+                    checked.add(('guard', namespace))
+            elif args[9] == _BOUND_TELEMETRY_COMMAND:
+                assert args[10] == attachment.participant.execution_namespace.name
+                assert args[-2:] == ['platform-test', node_uid]
+                value = {'status': 'blocked', 'stage': 'counters'}
+                checked.add('telemetry')
+            else:
+                assert args[7:9] == ['python', '-c']
+                code, component, nonce, response = args[9:]
+                name = args[3].removeprefix('pod/').removesuffix('-a12b34-test')
+                role = roles[namespace, name]
+                workload = documents['/apis/apps/v1/namespaces/' + namespace + '/deployments/' + name]
+                if code == _BOUND_DATABASE_COMMAND:
+                    assert component == ('service' if role == 'manager' else role)
+                    variable = {'service': 'LOOM_SVC_DB_URL', 'controller': 'LOOM_CP_DB_URL', 'actuator': 'LOOM_EXECUTION_ACTUATOR_DB_URL'}[component]
+                    env, = (row for row in workload['spec']['template']['spec']['containers'][0]['env'] if row['name'] == variable)
+                    reference = env['valueFrom']['secretKeyRef']
+                    secret = documents['/api/v1/namespaces/' + namespace + '/secrets/' + reference['name']]
+                    url = base64.b64decode(secret['data'][reference['key']]).decode()
+                    payload = (url if component == 'actuator' else str(PostgresDsn(url))).encode()
+                    assert url not in str(argv)
+                    check = 'database'
+                else:
+                    assert component == role
+                    if namespace in {staging.namespace, attachment.participant.execution_namespace.name}:
+                        assert code == BOUND_LEGACY_SETTINGS_COMMAND
+                        settings = expected_legacy_runtime_settings(component, workload)
+                    else:
+                        assert code == BOUND_POOL_SETTINGS_COMMAND
+                        machine, = (row for row in spec.machines if row.participant_id == dev.participant_id and row.workload_scope == 'environment')
+                        settings = expected_pool_runtime_settings(component, workload,
+                            token_sha256=machine.token_sha256 if component in {'controller', 'actuator'} else None,
+                            catalog_sha256=hashlib.sha256(spec.profiles.model_dump_json().encode()).hexdigest() if component == 'manager' else None)
+                    payload = json.dumps(settings, sort_keys=True, separators=(',', ':')).encode()
+                    check = 'settings'
+                assert hmac.new(bytes.fromhex(nonce), payload, 'sha256').hexdigest() == response
+                checked.add((check, namespace, name))
+                value = {'status': 'wrong' if mode['damage'] == check + ':' + namespace else 'qualified'}
+                if mode['damage'] == 'late-old-secret':
+                    documents[old_secret_path]['metadata']['resourceVersion'] = 'changed'
+            assert args[7] in {'psql', 'python'}
+        return SimpleNamespace(returncode=0, stdout=json.dumps(value).encode(), stderr=b'')
+
+    monkeypatch.setattr(subprocess, 'run', execute)
+    history = {path: path.read_bytes() for path in plan.history}
+    with HTTPSDevelopmentRuntimeProbes(request=request,
+            api_server=request.database.foundation.inputs.config['kubernetes_api_server'],
+            ssl_context=ssl.create_default_context(cadata=request.database.foundation.bootstrap['material']['loom-platform-db']['ca.crt']),
+            token='operator-test') as probes:
+        for connection in (probes, probes.manager, probes.foundation):
+            connection.client.close()
+            connection.client = type(completed_pool[3].api.client)(base_url=connection.api_server, transport=httpx.MockTransport(handle))
+
+        def observe():
+            return module.observe_shared_pool_processes(runtime=request, observation=staging_observation,
+                legacy=staging_history, repo_root=ROOT, development=probes,
+                kubeconfig=Path(probes.prefix[probes.prefix.index('--kubeconfig') + 1]), executable=Path(probes.prefix[0]))
+
+        result = observe()
+        assert result.bindings.plan == plan
+        assert result.guard_states == {'loom-dev': 'open', staging.namespace: 'open'}
+        assert result.retired_authority == 'revoked'
+        assert checked == {'old-revoked', 'new-closed', 'telemetry', ('guard', 'loom-dev'), ('guard', staging.namespace),
+            *((check, namespace, name) for namespace, name in roles for check in ('settings', 'database'))}
+        assert 'private-test-only' not in repr(result)
+        baseline = copy.deepcopy(documents)
+        for damage in ('old-active', 'new-not-closed', 'guard-held', 'settings:' + staging.namespace,
+                'database:loom-dev', 'late-old-secret'):
+            mode['damage'] = damage
+            with pytest.raises(ValueError, match='shared pool process preflight unqualified'):
+                observe()
+            documents.clear()
+            documents.update(copy.deepcopy(baseline))
+    assert calls and all(row.method == 'GET' for row in calls)
+    assert all(row[0] in {'get', 'exec'} for row in commands)
+    assert all(path.read_bytes() == raw for path, raw in history.items())
+
+
 @pytest.mark.timeout(420)
 def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writers(
         shared_runtime, staging_history, staging_observation, completed_pool, handoff):
