@@ -924,6 +924,20 @@ Its concrete guard child uses the existing database-bound command adapter and
 records acquisition intent before dispatch. Busy participants retain earlier
 guards; an uncertain acquisition is observed without issuing it again. This
 child does not replay registration or release either participant's guard.
+Both guard and workload children revalidate their active receipt before and
+after live qualification. Losing or changing that receipt cannot recreate a
+started operation or authorize another write.
+
+The current-staging workload child connects stop, wiring and restart through the
+existing HTTPS UID/resourceVersion/spec compare-and-swap engine. Each later step
+consumes the actual completed predecessor receipt, including server defaults and
+the original resource UIDs. The old collector is suspended once and remains
+suspended; only the captured Deployments are wired and restarted. Unknown PATCH
+outcomes are read back without reissuing the PATCH. Phase-aware observation accepts
+only the recorded original or intended successor while a write is uncertain.
+These transitions still require the connected parent's fresh process, database,
+drain and whole-pool authority checks; historical receipts alone are not runtime
+readiness or recovery authority.
 
 Recovery is a separately anchored, terminal direction. Its marker freezes both
 the forward journal and all existing child receipts, including prepared or

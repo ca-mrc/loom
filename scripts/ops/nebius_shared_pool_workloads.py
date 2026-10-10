@@ -239,8 +239,15 @@ class HTTPSSharedStagingWorkloads(HTTPSDevelopmentRuntimeWorkloads):
         frame = _active(self.bindings, self.state, self.phase, 'started')
         if _inputs(self.bindings, self.state, self.phase, frame) != (self.originals, self.targets):
             raise ValueError('shared staging workload projection changed')
+        path = self.state / self.phase / 'transition.json'
+        child = _read(path)
+        validate_runtime_transition(child, originals=self.originals, targets=self.targets,
+            input_digest=self.bindings.input_digest, phase=_PHASES[self.phase])
         super()._qualify(writing=writing)
-        if _active(self.bindings, self.state, self.phase, 'started') != frame:
+        # The reusable transition engine can initialize a brand-new journal.
+        # This parent already prepared one: losing/changing it during a live
+        # qualification must never turn back into bootstrap or a repeated write.
+        if _read(path) != child or _active(self.bindings, self.state, self.phase, 'started') != frame:
             raise ValueError('shared staging workload phase changed')
 
 

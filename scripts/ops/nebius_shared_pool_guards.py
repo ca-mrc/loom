@@ -94,8 +94,11 @@ def advance_shared_pool_guards(*, bindings: SharedPoolGuardBindings, api: Kubect
             if api.request != bindings.migration or _identity(bindings, state_dir) != identity:
                 raise ValueError
             _parent(bindings, state_dir, 'started')
+            child = validate_shared_pool_guards(bindings=bindings, state_dir=state_dir, complete=False)
             qualify()
             _parent(bindings, state_dir, 'started')
+            if validate_shared_pool_guards(bindings=bindings, state_dir=state_dir, complete=False) != child:
+                raise ValueError
 
         scope()
         with private_state._locked_state(state_dir):
