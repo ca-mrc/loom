@@ -341,6 +341,157 @@ class SharedPhaseAPI:
         return True
 
 
+@pytest.fixture
+def shared_guard_transport(shared_operation, tmp_path, monkeypatch):
+    """Actual bound guard adapter; only kubectl's external transport is doubled."""
+    import base64
+    import hmac
+    import json
+    import subprocess
+    from types import SimpleNamespace
+    from urllib.parse import parse_qs, urlsplit
+
+    from pydantic import PostgresDsn
+    from scripts.ops.deploy_nebius_platform import rollout_guard_observation_sql
+    from scripts.ops.nebius_pool_migration_guard import _BOUND_GUARD_COMMAND, KubectlPoolGuardAPI
+    from tests.ops.test_nebius_development_pool_retained import (
+        populate_database_backends,
+        populate_runtime_pods,
+    )
+
+    _, bindings = shared_operation
+    request = bindings.migration
+    documents = {}
+
+    def add(document):
+        kind = document['kind']
+        plural = {'Namespace': 'namespaces', 'Deployment': 'deployments', 'StatefulSet': 'statefulsets',
+            'Service': 'services', 'Secret': 'secrets', 'ReplicaSet': 'replicasets'}[kind]
+        prefix = '/api/v1' if document['apiVersion'] == 'v1' else '/apis/' + document['apiVersion']
+        namespace = document['metadata'].get('namespace')
+        path = prefix + ('/namespaces/' + namespace if namespace else '') + '/' + plural + '/' + document['metadata']['name']
+        documents[path] = copy.deepcopy(document)
+
+    add({'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': 'kube-system',
+        'uid': request.registration.binding.kube_system_uid}})
+    urls = {}
+    for target in request.guards:
+        add({'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': target.namespace, 'uid': str(target.namespace_uid)}})
+        for row in (target.controller, target.database.statefulset, target.database.service):
+            add(row)
+        env, = (row for row in target.controller['spec']['template']['spec']['containers'][0]['env']
+            if row['name'] == 'LOOM_CP_DB_URL')
+        reference = env['valueFrom']['secretKeyRef']
+        urls[target.namespace] = f'postgresql+psycopg://loom_cp:private-test@loom-postgres.{target.namespace}.svc:5432/loom'
+        add({'apiVersion': 'v1', 'kind': 'Secret', 'metadata': {'name': reference['name'], 'namespace': target.namespace,
+            'uid': str(target.database.credential_uid), 'resourceVersion': target.database.credential_resource_version},
+            'data': {reference['key']: base64.b64encode(urls[target.namespace].encode()).decode()}})
+    populate_runtime_pods(documents)
+    populate_database_backends(documents)
+    for row in list(documents.values()):
+        if row['kind'] == 'ReplicaSetList':
+            for replica in row['items']:
+                add(replica)
+    kubeconfig = tmp_path / 'shared-guard-kubeconfig'
+    kubeconfig.write_text('private-test-config')
+    kubeconfig.chmod(0o600)
+    api = KubectlPoolGuardAPI(request=request, kubeconfig=kubeconfig, executable=Path('/usr/bin/kubectl'))
+    model = SimpleNamespace(held=set(), busy=None, uncertain=None, acquires=[], documents=documents)
+
+    def run(argv, **kwargs):
+        assert argv[:len(api.prefix)] == api.prefix
+        args = argv[len(api.prefix):]
+        if args[0] == 'get':
+            if args[1] == '--raw':
+                url = urlsplit(args[2])
+                value = copy.deepcopy(documents[url.path])
+                selector = parse_qs(url.query).get('labelSelector')
+                if selector:
+                    label, wanted = selector[0].split('=', 1)
+                    value['items'] = [row for row in value['items'] if row['metadata'].get('labels', {}).get(label) == wanted]
+            else:
+                kind, name = args[1:3]
+                namespace = args[args.index('-n') + 1] if '-n' in args else None
+                plural = {'namespace': 'namespaces', 'deployment': 'deployments', 'statefulset': 'statefulsets',
+                    'service': 'services', 'secret': 'secrets', 'replicaset': 'replicasets'}[kind]
+                prefix = '/apis/apps/v1' if kind in {'deployment', 'statefulset', 'replicaset'} else '/api/v1'
+                value = documents[prefix + ('/namespaces/' + namespace if namespace else '') + '/' + plural + '/' + name]
+        else:
+            assert args[:2] == ['exec', '-n'] and args[6] == '--'
+            namespace = args[2]
+            if args[7] == 'psql':
+                assert args[3:6] == ['pod/loom-postgres-0', '-c', 'loom-postgres']
+                assert args[-1] == rollout_guard_observation_sql(owner=str(request.registration.spec.operation_id),
+                    candidate=request.registration.candidate['candidate_sha'])
+                value = {'status': 'held' if namespace in model.held else 'open'}
+            else:
+                assert args[3:6] == ['pod/loom-control-plane-a12b34-test', '-c', 'loom-control-plane']
+                assert args[7:11] == ['python', '-c', _BOUND_GUARD_COMMAND, 'acquire']
+                assert args[11:13] == [str(request.registration.spec.operation_id), request.registration.candidate['candidate_sha']]
+                assert hmac.new(bytes.fromhex(args[13]), str(PostgresDsn(urls[namespace])).encode(), 'sha256').hexdigest() == args[14]
+                model.acquires.append(namespace)
+                if namespace == model.uncertain:
+                    raise TimeoutError('simulated unknown guard acquisition')
+                if namespace == model.busy:
+                    value = {'status': 'skipped_busy'}
+                else:
+                    model.held.add(namespace)
+                    value = {'status': 'acquired'}
+        return SimpleNamespace(returncode=0, stdout=json.dumps(value).encode(), stderr=b'')
+
+    monkeypatch.setattr(subprocess, 'run', run)
+    return api, model
+
+
+@pytest.mark.timeout(420)
+def test_shared_guard_child_retains_busy_and_unknown_acquisitions_without_registering_again(shared_operation, shared_guard_transport):
+    import importlib.util
+
+    from scripts.ops import nebius_shared_pool_operation as parent
+    from scripts.ops.nebius_development_runtime_install import _read
+
+    name = 'scripts.ops.nebius_shared_pool_guards'
+    assert importlib.util.find_spec(name) is not None, 'concrete shared guard child is missing'
+    module = __import__(name, fromlist=['advance_shared_pool_guards'])
+    args, bindings = shared_operation
+    guards, model = shared_guard_transport
+
+    class ConnectedGuardAPI(SharedPhaseAPI):
+        def validate_phase(self, phase, state, *, complete):
+            if phase == 'forward-guards':
+                module.validate_shared_pool_guards(bindings=bindings, state_dir=state, complete=complete)
+            else:
+                super().validate_phase(phase, state, complete=complete)
+
+        def advance(self, phase, bound, state):
+            if phase == 'forward-guards':
+                return module.advance_shared_pool_guards(bindings=bound, api=guards, state_dir=state,
+                    qualify=lambda: self.qualify(bound, _read(state.parent / 'operation.json'), recovering=False))
+            return super().advance(phase, bound, state)
+
+    api = ConnectedGuardAPI(parent)
+    api.block = 'forward-drain'
+    kwargs = {**args, 'bindings': bindings, 'api': api, 'action': 'install'}
+    first, second = (target.namespace for target in bindings.migration.guards)
+    model.busy = second
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-guards'
+    assert model.held == {first} and model.acquires == [first, second]
+    assert api.events == []
+    model.busy, model.uncertain = None, second
+    for _ in range(2):
+        with pytest.raises(ValueError, match='shared pool operation unconfirmed'):
+            parent.run_shared_pool_operation(**kwargs)
+    assert model.acquires == [first, second, second]
+    assert api.events == []
+    # A late committed acquisition is observed, not dispatched again.
+    model.held.add(second)
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-drain'
+    assert model.acquires == [first, second, second]
+    before = list(model.acquires)
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-drain'
+    assert model.acquires == before
+
+
 @pytest.mark.timeout(420)
 def test_shared_parent_anchors_all_phases_and_never_replays_completed_effects(shared_operation):
     import importlib.util
