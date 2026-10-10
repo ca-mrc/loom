@@ -1521,6 +1521,147 @@ def test_shared_parent_restricts_current_roles_once_and_checks_foreign_effective
 
 
 @pytest.mark.timeout(420)
+def test_shared_build_activation_requires_effective_policy_and_never_repeats_unknown_patch(shared_operation, completed_pool):
+    """Missing policy enforcement must never expose the rootless-build exception."""
+    import importlib
+    import json
+    import ssl
+
+    import httpx
+    from scripts.ops import nebius_shared_pool_operation as parent
+
+    name = 'scripts.ops.nebius_shared_pool_build_activation'
+    assert importlib.util.find_spec(name) is not None, 'shared build activation is not connected'
+    module = importlib.import_module(name)
+    args, bindings = shared_operation
+    plan = bindings.plan.development
+    original = plan.build_namespace_original
+    namespace_path = '/api/v1/namespaces/' + original['metadata']['name']
+    documents = {namespace_path: copy.deepcopy(original)}
+    documents[namespace_path]['metadata']['resourceVersion'] = '801'
+    for row in plan.build_policy.values():
+        plural = 'validatingadmissionpolicies' if row['kind'] == 'ValidatingAdmissionPolicy' else 'validatingadmissionpolicybindings'
+        path = '/apis/admissionregistration.k8s.io/v1/' + plural + '/' + row['metadata']['name']
+        documents[path] = copy.deepcopy(row)
+        documents[path]['metadata'].update(generation=1, resourceVersion='802')
+        if row['kind'] == 'ValidatingAdmissionPolicy':
+            documents[path]['status'] = {'observedGeneration': 1, 'typeChecking': {'expressionWarnings': []}}
+            policy_path = path
+    registration = bindings.migration.registration.binding
+    documents['/api/v1/namespaces/kube-system'] = {'apiVersion': 'v1', 'kind': 'Namespace',
+        'metadata': {'name': 'kube-system', 'uid': registration.kube_system_uid}}
+    calls, patches = [], []
+    mode = {'deny': False, 'response_lost': True, 'conflict': False}
+
+    def handler(request):
+        calls.append((request.method, request.url.path, dict(request.url.params)))
+        if request.method == 'GET':
+            assert not request.url.params
+            return httpx.Response(200, json=copy.deepcopy(documents[request.url.path]))
+        if request.method == 'POST':
+            assert request.url.path == namespace_path + '/pods' and dict(request.url.params) == {'dryRun': 'All'}
+            pod = json.loads(request.content)
+            assert pod['kind'] == 'Pod' and pod['metadata']['namespace'] == original['metadata']['name']
+            assert pod['spec']['automountServiceAccountToken'] is False
+            if not mode['deny']:
+                return httpx.Response(201, json=pod)
+            policy = documents[policy_path]['metadata']['name']
+            reason = 'Only sequential prepare, build and publish phases are allowed.'
+            message = 'denied by policy ' + (policy if mode['deny'] != 'foreign' else 'foreign-policy') + ': ' + reason
+            return httpx.Response(403, json={'apiVersion': 'v1', 'kind': 'Status', 'status': 'Failure',
+                'reason': 'Forbidden', 'code': 403, 'message': message})
+        assert request.method == 'PATCH' and request.url.path == namespace_path and not request.url.params
+        body = json.loads(request.content)
+        current = documents[namespace_path]
+        assert body[:3] == [
+            {'op': 'test', 'path': '/metadata/uid', 'value': original['metadata']['uid']},
+            {'op': 'test', 'path': '/metadata/resourceVersion', 'value': current['metadata']['resourceVersion']},
+            {'op': 'test', 'path': '/metadata/labels', 'value': original['metadata']['labels']},
+        ]
+        assert all(item['path'] in {'/metadata/uid', '/metadata/resourceVersion', '/metadata/labels',
+            '/metadata/annotations'} for item in body)
+        patches.append(body)
+        if mode['conflict']:
+            mode['conflict'] = False
+            return httpx.Response(409, json={'apiVersion': 'v1', 'kind': 'Status', 'status': 'Failure',
+                'reason': 'Conflict', 'code': 409})
+        for patch in body:
+            if patch['op'] in {'add', 'replace'}:
+                current['metadata'][patch['path'].split('/')[-1]] = copy.deepcopy(patch['value'])
+        current['metadata']['resourceVersion'] = '803'
+        if mode['response_lost']:
+            mode['response_lost'] = False
+            raise httpx.ReadTimeout('simulated response loss after namespace commit')
+        return httpx.Response(200, json=copy.deepcopy(current))
+
+    class API(SharedPhaseAPI):
+        def prepare(self, phase, bound, state):
+            if phase == 'forward-build-policy':
+                module.prepare_shared_build_activation(bindings=bound, state_dir=state)
+            else:
+                super().prepare(phase, bound, state)
+
+        def validate_prepared_phase(self, phase, state):
+            if phase == 'forward-build-policy':
+                module.validate_shared_build_activation(bindings=bindings, state_dir=state, complete=False, prepared=True)
+            else:
+                super().validate_prepared_phase(phase, state)
+
+        def validate_phase(self, phase, state, *, complete):
+            if phase == 'forward-build-policy':
+                module.validate_shared_build_activation(bindings=bindings, state_dir=state, complete=complete)
+            else:
+                super().validate_phase(phase, state, complete=complete)
+
+        def advance(self, phase, bound, state):
+            if phase != 'forward-build-policy':
+                return super().advance(phase, bound, state)
+            with module.HTTPSSharedBuildActivation(bindings=bound,
+                    api_server=args['runtime'].database.foundation.inputs.config['kubernetes_api_server'],
+                    ssl_context=ssl.create_default_context(), qualify_runtime=lambda current, writing: None) as api:
+                api.client.close()
+                api.client = type(completed_pool[3].api.client)(base_url=api.api_server, transport=httpx.MockTransport(handler))
+                return module.advance_shared_build_activation(bindings=bound, api=api, state_dir=state)
+
+    api = API(parent)
+    api.block = 'forward-gateway'
+    kwargs = dict(**args, bindings=bindings, api=api, action='install')
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-build-policy'
+    assert patches == [] and documents[namespace_path]['metadata']['labels']['pod-security.kubernetes.io/enforce'] == 'restricted'
+    mode['deny'] = 'foreign'
+    with pytest.raises(ValueError):
+        parent.run_shared_pool_operation(**kwargs)
+    assert patches == []
+    mode['deny'] = True
+    for damage in ('warning', 'uid', 'selector'):
+        saved = copy.deepcopy(documents[policy_path])
+        if damage == 'warning':
+            documents[policy_path]['status']['typeChecking']['expressionWarnings'] = [{'warning': 'invalid'}]
+        elif damage == 'uid':
+            documents[policy_path]['metadata']['uid'] = str(uuid4())
+        else:
+            documents[policy_path]['spec']['matchConditions'] = [{'name': 'skip', 'expression': 'false'}]
+        with pytest.raises(ValueError):
+            parent.run_shared_pool_operation(**kwargs)
+        documents[policy_path] = saved
+        assert patches == []
+    documents[policy_path]['status']['observedGeneration'] = 0
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-build-policy'
+    assert patches == []
+    documents[policy_path]['status']['observedGeneration'] = 1
+    mode['conflict'] = True
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-build-policy'
+    assert len(patches) == 1
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-gateway'
+    assert len(patches) == 2  # Rejected CAS retried; lost committed response was read back.
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-gateway'
+    assert len(patches) == 2
+    assert documents[namespace_path]['metadata']['labels'] == plan.build_namespace_target['metadata']['labels']
+    assert any(method == 'POST' for method, _, _ in calls)
+    assert not any(method in {'DELETE', 'PUT'} for method, _, _ in calls)
+
+
+@pytest.mark.timeout(420)
 def test_shared_handoff_binds_real_completed_dev_and_current_staging(shared_runtime, staging_history, staging_observation):
     import base64
 
