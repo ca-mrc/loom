@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import socket
+from types import SimpleNamespace
 
 import psycopg.waiting as waiting
 import pytest
@@ -16,6 +17,7 @@ from loom_control_plane import service_execution_scheduler as scheduler
     ("selection", True, False),
     ("selection", True, True),
     ("local_commit", False, False),
+    ("local_commit", False, True),
 ])
 async def test_scheduler_stops_when_readiness_consumes_cancellation(
         monkeypatch, cancel_at, global_mode, selected):
@@ -72,6 +74,8 @@ async def test_scheduler_stops_when_readiness_consumes_cancellation(
 
     async def reserve_local(*args, **kwargs):
         operations.append("reserve_local")
+        if selected:
+            return SimpleNamespace(target_id="local-target", selected_pool_id="nebius-cpu")
         return None
 
     monkeypatch.setattr(waiting, "wait_for", cancel_on_completion)
