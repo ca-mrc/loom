@@ -983,9 +983,14 @@ aggregate capacity are challenged in the actual gateway process. The database
 target comes from the new manager's completed installation, never the retired
 manager's upgrade history. Gateway/container and manager/database process
 identities, the manager credential and receipt bytes are checked again after the
-consumer readbacks. A completed startup cannot excuse lost gateway readiness as
-an in-flight wait. Writer census, fresh queue drain, provider qualification,
-pool opening and recovery remain separate required connections.
+consumer and final pool/guard readbacks. A completed startup cannot excuse lost
+gateway readiness as an in-flight wait. During activation, this observer selects
+the exact CLOSED/GLOBAL and held/open alternatives from the opening receipt. A
+GLOBAL pool uses active-authority and read-only active-capacity challenges, not
+the startup idle-journal check: an already released participant may have charged
+work. Unrecorded opening, foreign guards and reactivated old authority fail.
+Writer census, fresh pre-opening queue drain, provider qualification, opening
+transactions and recovery remain separate required connections.
 
 The shared build-activation child changes only the recorded development build
 namespace's enforcement label and activation annotation. Before the UID and
@@ -1029,9 +1034,14 @@ outcomes are observed without repeating writes. Interrupted local preparation
 can resume; missing or changed started receipts cannot be recreated. This
 controller requires the exact migration-bound transport and a separate current
 shared-runtime qualification barrier; retained history alone cannot release
-intake. The internal phase controller still needs the concrete shared-parent transport and
-active-runtime qualification before it can authorize installed opening. Recovery
-has separate terminal authority and never rewrites completed forward evidence.
+intake. Its fixed opening/release adapter uses the shared probes' private
+connection and the new manager's pinned database target. Each write requires
+current process/database/capacity checks as well as the protected parent's
+writer/provider qualification; neither a saved health result nor retained history
+can substitute. The adapter accepts no caller SQL and has no deployment entry
+point. The full protected parent must still connect both forward and recovery
+operations before installed opening is available. Recovery has separate terminal
+authority and never rewrites completed forward evidence.
 
 The shared Role child reduces only the two source-qualified staging worker/build
 Roles, preserving their UIDs and existing bindings. Each rules-and-annotations
