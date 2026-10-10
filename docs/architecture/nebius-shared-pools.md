@@ -962,6 +962,19 @@ qualified database Pod and Service backend after staging's controller stops,
 without requiring a controller exec or a direct database connection. Receipt
 loss during requalification blocks dispatch or completion.
 
+The material child delivers only staging's two immutable machine Secrets and its
+fixed namespace-reader ClusterRole and binding. It reuses the create-only staging
+engine; existing dev/manager material is neither read nor delivered again by this
+child. Local preparation performs no API call. After parent start, exact dry-run
+previews prepare the real stage receipt; an interrupted preview may resume because
+it has no persisted remote effect. Before the first create, a separate dispatch
+marker pins that receipt's operation and defaults, and the preparation receipt
+records that dispatch is enabled. From that point all receipts are mandatory.
+Unknown create outcomes permit exact readback only, never another POST; existing
+objects without this retained create intent cannot be adopted. Receipt checks
+bracket both live qualification and HTTPS requests. This does not grant gateway
+write authority or replace the parent's whole-pool admission checks.
+
 Recovery is a separately anchored, terminal direction. Its marker freezes both
 the forward journal and all existing child receipts, including prepared or
 unfinished children. It cannot erase completed success or resume forward work
