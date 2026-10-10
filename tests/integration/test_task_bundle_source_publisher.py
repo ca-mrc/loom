@@ -109,6 +109,8 @@ async def test_local_publisher_excludes_stale_transport_sidecar_from_authored_in
     finally:
         await engine.dispose()
     assert (task_dir / BUNDLE_FILE_METADATA_NAME).read_bytes() == stale_metadata
+    for name, body in authored.items():
+        assert (task_dir / name).read_bytes() == body
 
 
 def _prepare(tmp_path, minio_tls, *, versioning=True):

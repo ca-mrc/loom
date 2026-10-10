@@ -10,6 +10,7 @@ import pytest
 from loom.models.taskset import UserTaskSetManifest
 from loom.models.task_checksum import task_checksum
 from loom.taskset.materialize import materialize_task_set
+from loom_execution_actuator.task_image_runtime import download_bundle
 
 
 class ObjectStore:
@@ -19,10 +20,18 @@ class ObjectStore:
         self.objects = {"tasksets/user/team/slice/bundle.tar.gz": archive}
 
     def get_object(self, *, Bucket, Key):  # noqa: N803 - boto3 protocol
-        return {"Body": io.BytesIO(self.objects[Key])}
+        return {"Body": io.BytesIO(self.objects[Key]), "ContentLength": len(self.objects[Key])}
 
     def put_object(self, *, Bucket, Key, Body, ContentType):  # noqa: N803 - boto3 protocol
         self.objects[Key] = Body
+
+    def get_paginator(self, operation):
+        assert operation == "list_objects_v2"
+        return self
+
+    def paginate(self, *, Bucket, Prefix):  # noqa: N803 - boto3 protocol
+        return [{"Contents": [{"Key": key, "Size": len(body)} for key, body in self.objects.items()
+                              if key.startswith(Prefix)]}]
 
 
 @pytest.mark.parametrize("bundle_root,expected_id", [("tasks/alpha", "alpha"), ("", "slice")])
@@ -86,3 +95,12 @@ def test_taskset_intake_uses_stable_source_identity_and_preserves_authored_bytes
     assert binding["total_bytes"] == sum(map(len, files.values()))
     prefix = task.source.removeprefix("s3://artifacts/")
     assert {key.removeprefix(prefix) for key in store.objects if key.startswith(prefix)} == set(files)
+    restored = tmp_path / "native-restored"
+    download_bundle({
+        "task_source": task.source, "task_checksum": task.checksum,
+        "task_source_provenance": task.source_provenance, "source_bucket": "artifacts",
+    }, store, restored)
+    assert task_checksum(restored) == expected_checksum
+    for name, content in files.items():
+        assert (restored / name).read_bytes() == content
+    assert store.objects["tasksets/user/team/slice/bundle.tar.gz"] == archive.getvalue()

@@ -48,6 +48,10 @@ _BUNDLE_FILE_METADATA_MAX_BYTES = 4 * 1024 * 1024
 _SAFE_BUNDLE_FILE_MODES = frozenset({0o644, 0o755})
 
 
+def discard_staged_bundle_file_metadata(task_dir: Path) -> None:
+    raise NotImplementedError
+
+
 def _remove_expect_header(*, params: dict[str, Any], **_kwargs: Any) -> None:
     headers = params.get("headers")
     if headers is None:
