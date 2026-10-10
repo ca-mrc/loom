@@ -895,6 +895,173 @@ def test_shared_parent_connects_current_staging_workload_transitions_without_rep
 
 
 @pytest.mark.timeout(420)
+def test_shared_material_child_preserves_dev_and_never_replays_uncertain_creates(shared_operation):
+    """Real fixed stage engine/HTTPS transport, with only remote effects doubled."""
+    import importlib.util
+    import json
+    import ssl
+    from contextlib import ExitStack
+
+    import httpx
+    from scripts.ops import nebius_shared_pool_operation as parent
+    from scripts.ops.nebius_development_runtime_live import runtime_resource_path
+    from scripts.ops.nebius_ingress_stage import _snapshot
+
+    name = 'scripts.ops.nebius_shared_pool_material'
+    assert importlib.util.find_spec(name) is not None, 'shared staging material child is missing'
+    module = __import__(name, fromlist=['HTTPSSharedStagingMaterial'])
+    args, bindings = shared_operation
+    runtime = args['runtime']
+    fixed = {**bindings.plan.staging_material, **bindings.plan.staging_reader_authority}
+    assert sorted(row['kind'] for row in fixed.values()) == ['ClusterRole', 'ClusterRoleBinding', 'Secret', 'Secret']
+    manager = runtime.database.manager.retained.request.retained
+    state = Path(manager.operation['state_dir']).parent / 'shared-pool-handoff'
+    directory = state / 'forward-material'
+    receipt, initialized, dispatched = (directory / filename for filename in ('stage.json', 'material.json', 'dispatch.json'))
+    stored, posts, defaults = {}, [], []
+    mode = {'prepare_loss': True, 'default_loss': True, 'erase_stage': True,
+        'saved_stage': None, 'reply_loss': True, 'read_loss': False}
+    paths = {runtime_resource_path(row) + '/' + row['metadata']['name']: key for key, row in fixed.items()}
+
+    def handle(message):
+        if message.method == 'GET':
+            assert message.url.path in paths, 'material stage must never read or rewrite installed dev/manager resources'
+            key = paths[message.url.path]
+            if mode['read_loss']:
+                mode['read_loss'] = False
+                raise httpx.ReadError('simulated lost create readback')
+            return httpx.Response(200, json=stored[key]) if key in stored else httpx.Response(404)
+        assert message.method == 'POST'
+        document = json.loads(message.content)
+        key = _key(document)
+        assert key in fixed and message.url.path == runtime_resource_path(fixed[key])
+        actual = copy.deepcopy(document)
+        actual['metadata'].update(uid=str(uuid4()), resourceVersion='1')
+        if message.url.params.get('dryRun') == 'All':
+            defaults.append(key)
+            if mode['default_loss']:
+                mode['default_loss'] = False
+                raise httpx.ReadError('simulated lost effect-free default preview')
+            return httpx.Response(201, json=actual)
+        assert not message.url.query and key not in stored
+        assert json.loads(initialized.read_bytes())['dispatch'] is True and dispatched.is_file()
+        assert json.loads(receipt.read_bytes())['resources'][key]['status'] == 'create_intent'
+        posts.append(key)
+        stored[key] = actual
+        if mode['reply_loss']:
+            mode['reply_loss'], mode['read_loss'] = False, True
+            raise httpx.ReadError('simulated lost committed create reply')
+        return httpx.Response(201, json=actual)
+
+    with ExitStack() as stack:
+        class ConnectedMaterialAPI(SharedPhaseAPI):
+            def prepare(self, phase, bound, child):
+                if phase == 'forward-material':
+                    module.prepare_shared_staging_material(bindings=bound, state_dir=child)
+                    if mode['prepare_loss']:
+                        mode['prepare_loss'] = False
+                        raise TimeoutError('simulated interruption after local preparation')
+                else:
+                    super().prepare(phase, bound, child)
+
+            def validate_prepared_phase(self, phase, child):
+                if phase == 'forward-material':
+                    module.validate_shared_staging_material(bindings=bindings, state_dir=child, complete=False, prepared=True)
+                else:
+                    super().validate_prepared_phase(phase, child)
+
+            def validate_phase(self, phase, child, *, complete):
+                if phase == 'forward-material':
+                    module.validate_shared_staging_material(bindings=bindings, state_dir=child, complete=complete)
+                else:
+                    super().validate_phase(phase, child, complete=complete)
+
+            def transport(self, bound):
+                def qualify_runtime(request, phase, writing):
+                    assert request == runtime and phase == 'forward-material'
+                    if writing and mode['erase_stage'] and json.loads(initialized.read_bytes())['dispatch']:
+                        mode['erase_stage'] = False
+                        mode['saved_stage'] = receipt.read_bytes()
+                        receipt.unlink()  # Fault injection in this test's private child evidence.
+                api = stack.enter_context(module.HTTPSSharedStagingMaterial(bindings=bound,
+                    api_server=runtime.database.foundation.inputs.config['kubernetes_api_server'],
+                    ssl_context=ssl.create_default_context(), qualify_runtime=qualify_runtime))
+                connection_type = type(api.client)
+                api.client.close()
+                api.client = connection_type(base_url=api.api_server, transport=httpx.MockTransport(handle))
+                return api
+
+            def advance(self, phase, bound, child):
+                if phase != 'forward-material':
+                    return super().advance(phase, bound, child)
+                return module.advance_shared_staging_material(bindings=bound, api=self.transport(bound), state_dir=child)
+
+        api = ConnectedMaterialAPI(parent)
+        api.block = 'forward-wire'
+        kwargs = {**args, 'bindings': bindings, 'api': api, 'action': 'install'}
+        with pytest.raises(ValueError, match='shared pool operation unconfirmed'):
+            parent.run_shared_pool_operation(**kwargs)
+        assert initialized.is_file() and not receipt.exists() and not dispatched.exists()
+        assert defaults == posts == []  # Preparing the child cannot even invoke a dry-run.
+        first = next(iter(fixed))
+        stored[first] = copy.deepcopy(fixed[first])
+        stored[first]['metadata']['uid'] = str(uuid4())
+        with pytest.raises(ValueError, match='shared pool operation unconfirmed'):
+            parent.run_shared_pool_operation(**kwargs)
+        assert defaults == posts == []  # Existing material is never adopted.
+        stored.clear()  # Reset only this controlled test transport's foreign-resource scenario.
+        with pytest.raises(ValueError, match='shared pool operation unconfirmed'):
+            parent.run_shared_pool_operation(**kwargs)
+        assert defaults == [first] and posts == [] and not receipt.exists()
+        with pytest.raises(ValueError, match='shared pool operation unconfirmed'):
+            parent.run_shared_pool_operation(**kwargs)
+        assert posts == [] and not receipt.exists() and mode['saved_stage'] is not None
+        assert json.loads(initialized.read_bytes())['dispatch'] is True and dispatched.is_file()
+        receipt.write_bytes(mode['saved_stage'])
+        receipt.chmod(0o600)
+        with pytest.raises(ValueError, match='shared pool operation unconfirmed'):
+            parent.run_shared_pool_operation(**kwargs)
+        assert posts == []  # A saved create intent without its object cannot be replayed.
+        # Rewind only this controlled pre-effect fixture for the independent
+        # lost-response scenario. Production cannot reset dispatch history.
+        prepared = json.loads(mode['saved_stage'])
+        for item in prepared['resources'].values():
+            item['status'] = 'prepared'
+        receipt.write_text(json.dumps(prepared))
+        preparing = json.loads(initialized.read_bytes())
+        preparing['dispatch'] = False
+        initialized.write_text(json.dumps(preparing))
+        dispatched.unlink()
+        with pytest.raises(ValueError, match='shared pool operation unconfirmed'):
+            parent.run_shared_pool_operation(**kwargs)
+        assert posts == [first] and set(stored) == {first}
+        for path in (initialized, dispatched, receipt):
+            content = path.read_bytes()
+            path.unlink()
+            with pytest.raises(ValueError, match='shared pool operation unconfirmed'):
+                parent.run_shared_pool_operation(**kwargs)
+            assert posts == [first]
+            path.write_bytes(content)
+            path.chmod(0o600)
+        with pytest.raises(ValueError):
+            foreign = next(row for row in bindings.plan.development.runtime.resources.values() if row['kind'] == 'Secret')
+            api.transport(bindings).create_resource(foreign)
+        assert posts == [first]
+        assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-wire'
+        assert posts == list(fixed) and set(stored) == set(fixed)
+        for key, row in stored.items():
+            actual = _snapshot(row)
+            actual['metadata']['annotations'].pop('loom.nebius/management-stage-operation')
+            if not actual['metadata']['annotations']:
+                actual['metadata'].pop('annotations')
+            assert actual == fixed[key]
+        reader, = (row for row in stored.values() if row['kind'] == 'ClusterRole')
+        assert reader['rules'][0]['verbs'] == ['get'] and reader['rules'][0]['resources'] == ['namespaces']
+        assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-wire'
+        assert posts == list(fixed)
+
+
+@pytest.mark.timeout(420)
 def test_shared_database_child_stages_only_staging_and_reads_unknown_commits(shared_operation, shared_guard_transport):
     """Real bound DB adapter and parent; no replay of dev's completed SQL stage."""
     import importlib.util
