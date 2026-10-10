@@ -92,10 +92,22 @@ const { events, status } = useTrialEventStream(trialId);
 
 The hook dedupes by event seq (browser auto-reconnect can replay
 already-seen events) and closes the connection on unmount or on the
-`complete` event. `TrialDetail` uses this hook by default and falls
-back to `useAdaptivePolling` against `/trajectory?cursor=N` when
-`status === 'error'` — appropriate for environments where corporate
-proxies strip `text/event-stream`.
+`complete` event. When the server requests `reconnect`, the hook closes
+that source and opens a replacement after one second, using the highest
+locally accepted seq as `after_seq`. Existing events remain visible;
+the control frame's `last_seq` cannot advance the cursor past received data.
+Only one source or pending rollover retry is owned at a time. Ordinary
+transport errors retain the browser's native EventSource retry behavior.
+
+Changing the trial ID or API base clears events, cursor and status.
+Disabling the same scope closes its source and cancels any pending retry;
+reenabling resumes from its retained cursor. Cleanup and completion invalidate
+callbacks from retired sources. `TrialDetail` also keys its trajectory viewer
+by trial ID, so navigation already remounts that viewer.
+
+`TrialDetail` uses this hook by default and offers the paginated
+`/trajectory?cursor=N` fallback when `status === 'error'` — appropriate
+for environments where corporate proxies strip `text/event-stream`.
 
 ## Under the hood
 
