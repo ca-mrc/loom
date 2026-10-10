@@ -1493,6 +1493,12 @@ which is always rolled back; this is non-mutating qualification, not a SQL
 `READ ONLY` transaction. Pod/backend/credential identity and closed authority are
 rechecked afterward. The result is not a saved capacity grant: admission opening
 must requalify current evidence under its own locked transition.
+The shared handoff also has a fixed read-only active-capacity challenge. It uses
+the same authenticated registration/freshness checks but requires GLOBAL, does
+not require an empty work journal and always rolls back. This lets qualification
+continue after one participant resumes and obtains a reservation. The closed
+probe still rejects GLOBAL, the active probe rejects CLOSED, and only the
+separate opening command may commit the CLOSED-to-GLOBAL transition.
 The internal fixed opening primitive repeats that qualification and changes only
 the exact `closed/R` registration to `global/R` in the same transaction. Token
 expiry and every connected observation's freshness are checked again at the SQL

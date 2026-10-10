@@ -55,6 +55,7 @@ from scripts.ops.nebius_pool_recovery_database import (
 from scripts.ops.nebius_pool_runtime_settings import expected_pool_runtime_settings
 from scripts.ops.nebius_pool_startup_capacity import (
     BOUND_POOL_ACTIVATION_COMMAND,
+    BOUND_POOL_ACTIVE_CAPACITY_COMMAND,
     BOUND_POOL_CAPACITY_COMMAND,
     expected_startup_capacity,
 )
@@ -426,10 +427,10 @@ class KubectlPoolHistoryAPI(KubectlPoolGuardAPI):
         except Exception:
             raise PoolMigrationError('management_legacy_settings') from None
 
-    def qualify_gateway_runtime(self, *, original: dict[str, Any], expected: dict[str, Any]) -> None:
-        self._qualified_gateway(original=original, expected=expected)
+    def qualify_gateway_runtime(self, *, original: dict[str, Any], expected: dict[str, Any], active: bool = False) -> None:
+        self._qualified_gateway(original=original, expected=expected, active=active)
 
-    def _qualified_gateway(self, *, original: dict[str, Any], expected: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    def _qualified_gateway(self, *, original: dict[str, Any], expected: dict[str, Any], active: bool = False) -> tuple[dict[str, Any], dict[str, Any]]:
         """Bind the journal's closed gateway child to its actual running settings.
 
         The startup parent supplies the retained child identity, not an operator
@@ -438,7 +439,7 @@ class KubectlPoolHistoryAPI(KubectlPoolGuardAPI):
         effective RBAC remains a separate barrier.
         """
         try:
-            if (digest(migration_contract(self.request)) != self.contract_sha256
+            if (type(active) is not bool or digest(migration_contract(self.request)) != self.contract_sha256
                     or digest(_target_contract(self.target)) != self.history_sha256
                     or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
                 raise ValueError
@@ -480,7 +481,7 @@ class KubectlPoolHistoryAPI(KubectlPoolGuardAPI):
             response = hmac.new(bytes.fromhex(nonce),
                 json.dumps(expected_startup_capacity(spec), sort_keys=True, separators=(',', ':')).encode(), 'sha256').hexdigest()
             report = self._run(['exec', '-n', self.target.namespace, 'pod/' + before['metadata']['name'], '-c', 'gateway', '--',
-                'python', '-c', BOUND_POOL_CAPACITY_COMMAND, nonce, response])
+                'python', '-c', BOUND_POOL_ACTIVE_CAPACITY_COMMAND if active else BOUND_POOL_CAPACITY_COMMAND, nonce, response])
             if report != {'status': 'qualified'}:
                 raise ValueError
             if (_uid(self._runtime(self.target, original=original, expected=expected)) != _uid(before)

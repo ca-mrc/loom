@@ -2,7 +2,7 @@
 
 Reuse admission's exact registration, observation freshness and physical quota
 checks. Row/advisory locks use READ COMMITTED, not a SQL READ ONLY transaction.
-The probe always rolls back. The separate opening command repeats qualification
+The closed and active probes always roll back. The separate opening command repeats qualification
 in its own transaction and commits only the closed-to-global mode transition.
 Neither command exposes a caller-selected action or public activation endpoint.
 """
@@ -33,8 +33,9 @@ def expected_startup_capacity(spec: PoolInstallation) -> dict[str, Any]:
 
 _BOUND_POOL_CAPACITY_BODY = '''import asyncio, hashlib, hmac, json, re, sys
 
-async def probe(*, activate):
-    if len(sys.argv) != 3 or any(re.fullmatch("[0-9a-f]{64}", value) is None for value in sys.argv[1:]):
+async def probe(*, activate, expected_mode):
+    if (expected_mode not in ("closed", "global") or (activate and expected_mode != "closed")
+            or len(sys.argv) != 3 or any(re.fullmatch("[0-9a-f]{64}", value) is None for value in sys.argv[1:])):
         raise ValueError()
     from datetime import timedelta
     from sqlalchemy import exists, func, select, text, update
@@ -62,7 +63,7 @@ async def probe(*, activate):
                         principal.role, principal.participant_id, principal.pool_id, principal.installation_id,
                         principal.machine_id, principal.pool_epoch, principal.pool_mode) != (
                         "gateway", None, settings.pool_id, settings.installation_id,
-                        settings.machine_id, settings.admission_epoch, "closed"):
+                        settings.machine_id, settings.admission_epoch, expected_mode):
                     raise ValueError()
                 await authorize_pool_machine(session, principal, role="gateway", pool_id=settings.pool_id)
                 now = await session.scalar(select(func.clock_timestamp()))
@@ -108,12 +109,15 @@ async def probe(*, activate):
 '''
 
 
-def _command(*, activate: bool) -> str:
-    failure = "Pool activation unconfirmed; preserve recovery evidence" if activate else "Pool startup capacity unqualified"
+def _command(*, activate: bool, active: bool = False) -> str:
+    if activate and active:
+        raise ValueError('opening requires the closed pool')
+    failure = ("Pool activation unconfirmed; preserve recovery evidence" if activate else
+        "Pool active capacity unqualified" if active else "Pool startup capacity unqualified")
     return _BOUND_POOL_CAPACITY_BODY + f'''
 async def run():
     async with asyncio.timeout(25):
-        return await probe(activate={activate!r})
+        return await probe(activate={activate!r}, expected_mode={'global' if active else 'closed'!r})
 
 try:
     print(json.dumps(asyncio.run(run())))
@@ -124,4 +128,5 @@ except Exception:
 
 
 BOUND_POOL_CAPACITY_COMMAND = _command(activate=False)
+BOUND_POOL_ACTIVE_CAPACITY_COMMAND = _command(activate=False, active=True)
 BOUND_POOL_ACTIVATION_COMMAND = _command(activate=True)
