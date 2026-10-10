@@ -52,6 +52,18 @@ def configure_daemon(config_path: Path) -> None:
     print(f"Docker Hub pulls use {MIRROR}; image references and digests are unchanged")
 
 
+def require_local_context() -> None:
+    """A persisted context can select a remote daemon without environment overrides."""
+    result = subprocess.run(
+        ["docker", "context", "inspect", "--format", "{{json .Endpoints.docker.Host}}"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    if json.loads(result.stdout) != "unix:///var/run/docker.sock":
+        raise ValueError("Requires the runner's local Docker daemon at /var/run/docker.sock")
+
+
 def main() -> int:
     if (
         os.environ.get("GITHUB_ACTIONS") != "true"
@@ -63,6 +75,7 @@ def main() -> int:
         print("Requires a GitHub-hosted Linux runner with its local Docker daemon", file=sys.stderr)
         return 1
     try:
+        require_local_context()
         configure_daemon(Path("/etc/docker/daemon.json"))
     except (OSError, ValueError, subprocess.CalledProcessError) as exc:
         print(f"CI registry mirror setup failed: {exc}", file=sys.stderr)
