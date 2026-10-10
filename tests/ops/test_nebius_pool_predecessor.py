@@ -113,7 +113,8 @@ def finish_cutover(operation, *, legacy=False, source_credentials=None):
 
 
 @pytest.mark.timeout(420)
-def test_forward_staging_predecessor_uses_current_source_without_replaying_legacy_history(private_cutover, platform_inputs):
+@pytest.mark.parametrize('renamed_target', [False, True])
+def test_forward_staging_predecessor_uses_current_source_without_replaying_legacy_history(private_cutover, platform_inputs, tmp_path, renamed_target):
     from dataclasses import replace
 
     from scripts.ops.nebius_pool_predecessor import PoolPredecessorV1, load_completed_pool
@@ -133,7 +134,8 @@ def test_forward_staging_predecessor_uses_current_source_without_replaying_legac
     guard, = [row for row in context.inputs.guards if row.participant_id == old.participant_id]
     config, _, _ = copy.deepcopy(platform_inputs)
     config.update(namespace=guard.namespace, execution_namespace=old.execution_namespace.name,
-        target_id=old.targets[0].target_id, cluster_id=context.inputs.installation.cluster_id,
+        target_id='replacement-target' if renamed_target else old.targets[0].target_id,
+        cluster_id=context.inputs.installation.cluster_id,
         execution_node_group_id=context.inputs.installation.node_group_id,
         task_image_builder={'registry_repository': 'cr.eu-north1.nebius.cloud/current/task-images', 'max_concurrent': 2})
     candidate = copy.deepcopy(context.inputs.candidate)
@@ -164,6 +166,7 @@ def test_forward_staging_predecessor_uses_current_source_without_replaying_legac
     staged.update(participant_id=str(uuid4()), pool_id=catalog['pool_id'], installation_id=catalog['installation_id'],
         environment_class='staging', legacy_catalog_environment='development', admission_epoch=catalog['admission_epoch'])
     staged['targets'][0]['workload_kinds'] = ['trial', 'verifier', 'task_image_build']
+    staged['targets'][0]['target_id'] = config['target_id']
     attachment = prepare_staging_pool_attachment(participant=PoolParticipantV1.model_validate(staged),
         observation=observation, candidate=candidate, cluster_id=config['cluster_id'],
         node_group_id=config['execution_node_group_id'], repo_root=Path(__file__).resolve().parents[2])
@@ -183,6 +186,14 @@ def test_forward_staging_predecessor_uses_current_source_without_replaying_legac
     from scripts.ops.nebius_shared_pool_handoff import prepare_staging_forward
 
     before = {path: path.read_bytes() for path in legacy.history}
+    if renamed_target:
+        # A perfectly self-consistent new renderer/catalog cannot silently
+        # replace an immutable old execution-target identity during handoff.
+        with pytest.raises(ValueError, match='shared pool staging predecessor unqualified'):
+            prepare_staging_forward(registration=registration, observation=observation, legacy=legacy,
+                repo_root=Path(__file__).resolve().parents[2])
+        assert {path: path.read_bytes() for path in legacy.history} == before
+        return
     result = prepare_staging_forward(registration=registration, observation=observation, legacy=legacy,
         repo_root=Path(__file__).resolve().parents[2])
     assert {path: path.read_bytes() for path in legacy.history} == before
@@ -195,7 +206,26 @@ def test_forward_staging_predecessor_uses_current_source_without_replaying_legac
         for name, value in result.originals[key]['metadata'].get('annotations', {}).items():
             assert stopped['metadata']['annotations'][name] == value
         assert stopped['spec']['suspend' if stopped['kind'] == 'CronJob' else 'replicas'] in (True, 0)
-        assert result.originals[key]['metadata']['uid'] == stopped['metadata']['uid']
+    # The real anchored engine must accept, replay and restore these exact
+    # projections; only its external Kubernetes transport is doubled.
+    from scripts.ops.nebius_development_runtime_transition import advance_runtime_workloads
+    from scripts.ops.nebius_ingress_stage import _snapshot
+    from tests.ops.test_nebius_development_runtime_transition import RuntimeAPI
+
+    api = RuntimeAPI(result.originals)
+    api.ready = True
+    options = dict(originals=result.originals, targets=result.stopped, input_digest=result.input_digest,
+        phase='stop', api=api, state_dir=tmp_path / 'forward-stop')
+    assert advance_runtime_workloads(**options) is True
+    assert advance_runtime_workloads(**options) is True
+    assert api.patches == list(result.originals)
+    assert advance_runtime_workloads(originals=copy.deepcopy(api.rows),
+        targets={key: _snapshot(row) for key, row in result.originals.items()},
+        input_digest=result.input_digest, phase='replace', api=api, state_dir=tmp_path / 'forward-restore') is True
+    for key, original in result.originals.items():
+        assert _snapshot(api.rows[key]) == _snapshot(original)
+        assert api.rows[key]['metadata']['uid'] == original['metadata']['uid']
+    assert {path: path.read_bytes() for path in legacy.history} == before
     altered = copy.deepcopy(observation)
     current = next(row for row in altered['resources'] if _key(row) == _key(controller))
     current['metadata']['uid'] = str(uuid4())
