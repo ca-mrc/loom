@@ -13,9 +13,12 @@ import platform
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from urllib.error import HTTPError
 from urllib.request import urlopen
 
 
@@ -33,13 +36,30 @@ def download(item: dict[str, object], directory: Path) -> Path:
     url = str(item["url"])
     if not url.startswith("https://"):
         raise ValueError(f"archive URL must use HTTPS: {url}")
-    with urlopen(url, timeout=120) as response, partial.open("wb") as output:
-        shutil.copyfileobj(response, output)
-    if partial.stat().st_size != item["bytes"] or digest(partial) != expected:
-        partial.unlink()
-        raise ValueError(f"archive content does not match source lock: {url}")
-    partial.replace(destination)
-    return destination
+    try:
+        for attempt in range(1, 4):
+            try:
+                with urlopen(url, timeout=120) as response, partial.open("wb") as output:
+                    shutil.copyfileobj(response, output)
+            except HTTPError as error:
+                error.close()
+                partial.unlink(missing_ok=True)
+                print(
+                    f"guest archive {expected}: HTTP {error.code}, attempt {attempt}/3",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                if error.code not in {502, 503, 504} or attempt == 3:
+                    raise
+                time.sleep(attempt)
+            else:
+                break
+        if partial.stat().st_size != item["bytes"] or digest(partial) != expected:
+            raise ValueError(f"archive content does not match source lock: {url}")
+        partial.replace(destination)
+        return destination
+    finally:
+        partial.unlink(missing_ok=True)
 
 
 def run(*args: str | Path) -> str:
