@@ -621,6 +621,9 @@ resources with retained identities, including both database storage bindings.
 Only workload identities with validated runtime phase history may use successor
 templates. An uncertain transition retains both its old and intended template
 as observation options; those options never authorize retry or activation.
+Each observation validates runtime history once before and once after its live
+reads, comparing the parent record, workload options and raw child-journal
+checksums. These views are not cached across child or pre-write boundaries.
 The protected independent closed-runtime entrypoint connects this parent with
 phase-aware HTTPS qualification, provider/material access and publication binding.
 Its component tests do not establish installed readiness: dev-only activation

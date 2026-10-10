@@ -1196,6 +1196,26 @@ def test_runtime_observer_checks_retained_data_and_successors_without_replaying_
         monkeypatch.setattr(nebius_development_runtime_setup, 'database_runtime_documents',
             lambda *_: pytest.fail('read-only observation re-rendered the frozen plan'))
         assert observer.inspect(state_dir=state) == result
+        # A child callback's parent frame must match before any live reads.
+        before = len(calls)
+        with pytest.raises(ValueError, match='development runtime live inventory unqualified'):
+            observer.inspect(state_dir=state, _expected_record={})
+        assert len(calls) == before
+        # A valid active journal can change without changing parent metadata or
+        # workload choices. Compare its bytes across the live observation too.
+        child = runtime._child_path(state, 'catalog')
+        original_child = child.read_bytes()
+        get = observer._get
+        def change_child_during_read(document):
+            actual = get(document)
+            child.write_bytes(original_child + b'\n')
+            return actual
+        with monkeypatch.context() as changed:
+            changed.setattr(observer, '_get', change_child_during_read)
+            with pytest.raises(ValueError, match='development runtime live inventory unqualified'):
+                observer.inspect(state_dir=state)
+        child.write_bytes(original_child)
+        assert observer.inspect(state_dir=state) == result
         for path, field in (('/api/v1/namespaces/loom-dev/secrets/loom-platform-auth', 'data'),
                 ('/apis/apps/v1/namespaces/loom-dev/deployments/loom-control-plane', 'uid'),
                 ('/apis/apps/v1/namespaces/loom-dev/deployments/loom-control-plane', 'original'),

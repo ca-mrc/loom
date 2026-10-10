@@ -70,8 +70,8 @@ class HTTPSDevelopmentRuntimeAPI(HTTPSDevelopmentRuntimeProbes):
         await qualify_runtime_cloud(request=self.request, operator_credentials=self.operator_credentials)
         self._private_inputs()
 
-    def _observe(self, *, prechild: str | None = None) -> None:
-        self.inspect(state_dir=self.state, _prechild_phase=prechild)
+    def _observe(self, *, prechild: str | None = None, expected_record: dict[str, Any] | None = None) -> None:
+        self.inspect(state_dir=self.state, _prechild_phase=prechild, _expected_record=expected_record)
         self.qualify_closed_pool()
         self._private_inputs()
 
@@ -107,9 +107,7 @@ class HTTPSDevelopmentRuntimeAPI(HTTPSDevelopmentRuntimeProbes):
             prechild = phase
         else:
             self.seen_children.add(phase)
-        if _runtime_record(self.request, self.plan, self.state, self.anchor, _prechild_phase=prechild) != disk:
-            raise ValueError('development runtime child history differs')
-        self._observe(prechild=prechild)
+        self._observe(prechild=prechild, expected_record=disk)
 
     def resources(self, phase: str) -> HTTPSDevelopmentRuntimeResources:
         return self.children.enter_context(HTTPSDevelopmentRuntimeResources(request=self.request, phase=phase,

@@ -21,9 +21,8 @@ from scripts.ops.nebius_development_runtime_install import (
     DevelopmentRuntimeInstallRequest,
     _child_path,
     _read,
-    _runtime_record,
+    _runtime_history_view,
     prepare_runtime_install,
-    runtime_workload_options,
 )
 from scripts.ops.nebius_development_runtime_live import _PATHS
 from scripts.ops.nebius_development_stage import DevelopmentStageInput
@@ -92,7 +91,8 @@ class HTTPSDevelopmentRuntimeObserver(ManagementKubernetesTransport):
             raise ValueError
         return result
 
-    def inspect(self, *, state_dir: Path, _prechild_phase: str | None = None) -> dict[str, dict[str, Any]]:
+    def inspect(self, *, state_dir: Path, _prechild_phase: str | None = None,
+                _expected_record: dict[str, Any] | None = None) -> dict[str, dict[str, Any]]:
         """Exact namespace/storage/material roots with recorded workload successors.
 
         Never require a replaced API/manager to equal its old template. All
@@ -102,10 +102,11 @@ class HTTPSDevelopmentRuntimeObserver(ManagementKubernetesTransport):
             self._private_inputs()
             database, manager = self.request.database, self.manager.retained
             foundation = database.foundation
-            anchor = Path(manager.operation['anchor_dir'])
-            record = _runtime_record(self.request, self.plan, state_dir, anchor, _prechild_phase=_prechild_phase)
-            choices = runtime_workload_options(request=self.request, state_dir=state_dir,
-                _prechild_phase=_prechild_phase, _plan=self.plan)
+            view = _runtime_history_view(request=self.request, plan=self.plan, state_dir=state_dir,
+                _prechild_phase=_prechild_phase)
+            record, choices, _ = view
+            if _expected_record is not None and record != _expected_record:
+                raise ValueError
             # Reuse only namespace/storage predicates from the predecessor APIs,
             # never their original-only workload/readiness verification.
             HTTPSManagementStageAPI.verify_identity(self.manager, manager.binding)
@@ -158,9 +159,8 @@ class HTTPSDevelopmentRuntimeObserver(ManagementKubernetesTransport):
                 if not any(_matches(actual, expected, _uid(expected)) for expected in options):
                     raise ValueError
                 observed[key] = actual
-            if (_runtime_record(self.request, self.plan, state_dir, anchor, _prechild_phase=_prechild_phase) != record
-                    or runtime_workload_options(request=self.request, state_dir=state_dir,
-                        _prechild_phase=_prechild_phase, _plan=self.plan) != choices):
+            if _runtime_history_view(request=self.request, plan=self.plan, state_dir=state_dir,
+                    _prechild_phase=_prechild_phase) != view:
                 raise ValueError
             self._private_inputs()
             return observed

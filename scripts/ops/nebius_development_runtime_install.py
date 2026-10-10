@@ -323,6 +323,47 @@ def _runtime_record(request: DevelopmentRuntimeInstallRequest, plan: Development
     return {**identity, 'phases': {phase: {'status': 'prepared', 'sha256': None, 'proof': None} for phase in _PHASES}}
 
 
+def _runtime_history_view(*, request: DevelopmentRuntimeInstallRequest, plan: DevelopmentRuntimePlan,
+                          state_dir: Path, _prechild_phase: str | None = None
+                          ) -> tuple[dict[str, Any], dict[str, tuple[dict[str, Any], ...]], dict[Path, str]]:
+    """Validate one history view; callers compare views around their observations.
+
+    Include raw child hashes because an active journal can change while its
+    parent record and allowed workload choices remain identical. No view is
+    reused across qualification boundaries.
+    """
+    anchor = Path(request.database.manager.retained.request.retained.operation['anchor_dir'])
+    record = _runtime_record(request, plan, state_dir, anchor, _prechild_phase=_prechild_phase)
+    paths = {_child_path(state_dir, phase) for phase, item in record['phases'].items()
+        if item['status'] != 'prepared' and phase != _prechild_phase}
+    hashes = {path: _hash(path) for path in paths}
+    result: dict[str, tuple[dict[str, Any], ...]] = {key: (copy.deepcopy(row),) for key, row in plan.originals.items()}
+    for phase in _PHASES:
+        if record['phases'][phase]['status'] == 'prepared' or phase == _prechild_phase:
+            continue
+        child = _read(_child_path(state_dir, phase))
+        if phase == 'workloads':
+            for key, item in child['resources'].items():
+                if item['status'] == 'created':
+                    original = copy.deepcopy(item['observed'])
+                    original['metadata']['uid'] = item['uid']
+                    _uid(original)
+                    result[key] = (original,)
+        elif phase not in plan.fixed:
+            before, _ = runtime_transition_inputs(plan, state_dir, phase)
+            for key, item in child['resources'].items():
+                original = before[key]
+                if item['status'] == 'prepared':
+                    result[key] = (original,)
+                else:
+                    expected = copy.deepcopy(item['expected'])
+                    expected['metadata']['uid'] = _uid(original)
+                    result[key] = (expected,) if item['status'] == 'applied' else (original, expected)
+    if any(_hash(path) != value for path, value in hashes.items()):
+        raise ValueError
+    return record, result, hashes
+
+
 def runtime_workload_options(*, request: DevelopmentRuntimeInstallRequest,
                              state_dir: Path, _prechild_phase: str | None = None,
                              _plan: DevelopmentRuntimePlan | None = None) -> dict[str, tuple[dict[str, Any], ...]]:
@@ -338,37 +379,10 @@ def runtime_workload_options(*, request: DevelopmentRuntimeInstallRequest,
         # private input pin on each read. Re-rendering that same plan twice per
         # observation recursively reloads all prior installation histories.
         plan = prepare_runtime_install(request) if _plan is None else _plan
-        anchor = Path(request.database.manager.retained.request.retained.operation['anchor_dir'])
-        record = _runtime_record(request, plan, state_dir, anchor, _prechild_phase=_prechild_phase)
-        paths = {_child_path(state_dir, phase) for phase, item in record['phases'].items()
-            if item['status'] != 'prepared' and phase != _prechild_phase}
-        hashes = {path: _hash(path) for path in paths}
-        result: dict[str, tuple[dict[str, Any], ...]] = {key: (copy.deepcopy(row),) for key, row in plan.originals.items()}
-        for phase in _PHASES:
-            if record['phases'][phase]['status'] == 'prepared' or phase == _prechild_phase:
-                continue
-            child = _read(_child_path(state_dir, phase))
-            if phase == 'workloads':
-                for key, item in child['resources'].items():
-                    if item['status'] == 'created':
-                        original = copy.deepcopy(item['observed'])
-                        original['metadata']['uid'] = item['uid']
-                        _uid(original)
-                        result[key] = (original,)
-            elif phase not in plan.fixed:
-                before, _ = runtime_transition_inputs(plan, state_dir, phase)
-                for key, item in child['resources'].items():
-                    original = before[key]
-                    if item['status'] == 'prepared':
-                        result[key] = (original,)
-                    else:
-                        expected = copy.deepcopy(item['expected'])
-                        expected['metadata']['uid'] = _uid(original)
-                        result[key] = (expected,) if item['status'] == 'applied' else (original, expected)
-        if (_runtime_record(request, plan, state_dir, anchor, _prechild_phase=_prechild_phase) != record
-                or any(_hash(path) != value for path, value in hashes.items())):
+        view = _runtime_history_view(request=request, plan=plan, state_dir=state_dir, _prechild_phase=_prechild_phase)
+        if _runtime_history_view(request=request, plan=plan, state_dir=state_dir, _prechild_phase=_prechild_phase) != view:
             raise ValueError
-        return result
+        return view[1]
     except Exception:
         raise ValueError('development runtime workload history unqualified') from None
 
