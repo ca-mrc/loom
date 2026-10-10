@@ -889,6 +889,20 @@ A zero-size group or exhausted quota is not rejected merely for lacking spare
 capacity. This read neither reserves capacity nor proves provider-writer
 exclusivity; opening still requires fresh aggregate admission evidence.
 
+The SQL/process preflight connects those bindings to the existing real probes.
+Both participant guards must be open; observation never acquires or releases them.
+The new manager must have its exact closed registration and active credentials.
+The historical manager instead must pass the read-only retirement check: its
+fenced revision, exact revoked credentials and empty charged/uncertain-work
+journal. It must not satisfy startup readiness or renew retired credentials.
+The new manager and dev consumers undergo actual settings/database challenges;
+current staging service, controller and every actuator are checked against their
+source-qualified current templates, not obsolete rollback templates. Database
+backends, credential identities, private history and guard states are rechecked
+around the observations. Actuator telemetry retains its optional-sampling rules.
+This is initial read-only preflight evidence, not guard, drain, mutation or
+recovery authority, and does not establish installed multi-owner acceptance.
+
 Authenticated Kubernetes/worker identity and capacity observations remain
 mandatory. Detailed kubelet samples retain the existing optional-telemetry
 contract; unavailable samples are not zero usage or evidence of certificate trust.

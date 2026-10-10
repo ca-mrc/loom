@@ -1,8 +1,8 @@
 """Current identity bindings for the protected shared-pool forward handoff.
 
-These GET-only observations do not acquire guards or attest sole-writer ownership.
-The connected parent must separately qualify SQL/process/provider state, persist
-its phase intent, and repeat current authority checks before any mutation.
+These read-only observations do not acquire guards or attest sole-writer ownership.
+The connected parent must combine the identity, census, SQL/process and provider
+evidence, persist its phase intent, and repeat authority checks before mutation.
 """
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from scripts.ops.nebius_development_bootstrap import _secret_documents
 from scripts.ops.nebius_development_runtime_external import qualify_runtime_cloud
 from scripts.ops.nebius_development_runtime_install import DevelopmentRuntimeInstallRequest
 from scripts.ops.nebius_development_runtime_observation import HTTPSDevelopmentRuntimeObserver
+from scripts.ops.nebius_development_runtime_probes import HTTPSDevelopmentRuntimeProbes
 from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
 from scripts.ops.nebius_management_prerequisites import inventory_resources
 from scripts.ops.nebius_management_switch import _matches
@@ -27,6 +28,11 @@ from scripts.ops.nebius_pool_migration import (
     PoolGuardDatabase,
     PoolMigrationRequest,
     migration_contract,
+)
+from scripts.ops.nebius_pool_migration_guard import KubectlPoolGuardAPI
+from scripts.ops.nebius_pool_origin_history import (
+    KubectlPoolHistoryAPI,
+    derive_management_history_target,
 )
 from scripts.ops.nebius_pool_platform_authority import platform_controller_subjects
 from scripts.ops.nebius_pool_predecessor import CompletedPoolCutover
@@ -326,3 +332,115 @@ async def observe_shared_pool_provider(*, runtime: DevelopmentRuntimeInstallRequ
         return SharedPoolProviderObservation(plan, snapshot, checksum)
     except Exception:
         raise ValueError('shared pool provider unqualified') from None
+
+
+@dataclass(frozen=True, repr=False)
+class SharedPoolProcessObservation:
+    bindings: SharedPoolGuardBindings
+    guard_states: dict[str, str]
+    retired_authority: str
+    telemetry: dict[str, Any]
+    input_digest: str
+
+
+def observe_shared_pool_processes(*, runtime: DevelopmentRuntimeInstallRequest,
+        observation: dict[str, Any], legacy: CompletedPoolCutover, repo_root: Path,
+        development: HTTPSDevelopmentRuntimeProbes, kubeconfig: Path,
+        executable: Path) -> SharedPoolProcessObservation:
+    """Qualify current DB/process state without changing intake or credentials.
+
+    The new manager must be CLOSED with its exact active registration; the old
+    one must instead retain its completed revocation and empty work journal.
+    Current staging is challenged against its source-qualified running baseline,
+    not the old recovery templates. This is pre-handoff evidence only: the parent
+    still owns fresh guard acquisition, drain, fencing and anchored recovery.
+    """
+    try:
+        def bind() -> SharedPoolGuardBindings:
+            return observe_shared_pool_guard_bindings(runtime=runtime, observation=observation,
+                legacy=legacy, repo_root=repo_root, development=development)
+
+        bound = bind()
+        plan, migration = bound.plan, bound.migration
+        completed = plan.development.runtime
+        guards = KubectlPoolGuardAPI(request=migration, kubeconfig=kubeconfig, executable=executable)
+
+        def open_guards() -> dict[str, str]:
+            states = {target.namespace: guards.guard(target, 'observe')['status'] for target in migration.guards}
+            if any(state != 'open' for state in states.values()):
+                raise ValueError
+            return states
+
+        states = open_guards()
+        old_namespace = legacy.context.original.upgrade.setup.binding.namespace
+        credential = guards._get('secret', 'loom-platform-db', old_namespace)
+        history_target = derive_management_history_target(original=legacy.context.original,
+            predecessor=legacy.context.predecessor, credential=credential)
+        history = KubectlPoolHistoryAPI(request=legacy.context.request.fencing.retirement.migration,
+            target=history_target, kubeconfig=kubeconfig, executable=executable)
+        if history.machine_retirement('observe') != 'revoked':
+            raise ValueError
+        development.qualify_closed_pool()
+        participant = plan.staging.attachment.participant
+        dev_participant, = (row for row in migration.registration.spec.participants
+            if row.participant_id != participant.participant_id)
+        for namespace, name in ((migration.registration.binding.namespace, 'loom-service'),
+                ('loom-dev', 'loom-service'), ('loom-dev', 'loom-control-plane'),
+                (dev_participant.execution_namespace.name, 'loom-execution-actuator')):
+            key = 'Deployment:' + namespace + ':' + name
+            development.qualify_runtime_settings(key=key, state_dir=completed.state_dir)
+            development.qualify_runtime_database(key=key, state_dir=completed.state_dir)
+
+        target, = (row for row in migration.guards if row.participant_id == participant.participant_id)
+        database = target.database
+        if (database is None or database.actuator_credential_uid is None
+                or database.actuator_credential_resource_version is None):
+            raise ValueError
+        credential_reads = {}
+        # Keep each consumer's reference, including guest actuators. Guard reads
+        # cover the controller credential, not the separately scoped actuators.
+        for key, original in plan.staging.originals.items():
+            if original['kind'] != 'Deployment':
+                continue
+            actuator = original['metadata']['namespace'] == participant.execution_namespace.name
+            variable = 'LOOM_EXECUTION_ACTUATOR_DB_URL' if actuator else (
+                'LOOM_CP_DB_URL' if original['metadata']['name'] == 'loom-control-plane' else 'LOOM_SVC_DB_URL')
+            credential_reads[key] = (original, variable,
+                database.actuator_credential_uid if actuator else database.credential_uid,
+                database.actuator_credential_resource_version if actuator else database.credential_resource_version)
+
+        def staging_urls() -> dict[str, str]:
+            return {key: guards._workload_database_url(original, url_variable=variable,
+                credential_uid=uid, credential_resource_version=version)
+                for key, (original, variable, uid, version) in credential_reads.items()}
+
+        before_urls = staging_urls()
+        for original in plan.staging.originals.values():
+            if original['kind'] != 'Deployment':
+                continue  # The collector has no persistent process to challenge.
+            actuator = original['metadata']['namespace'] == participant.execution_namespace.name
+            guards.qualify_runtime_database(target, original=original,
+                credential_uid=database.actuator_credential_uid if actuator else database.credential_uid,
+                credential_resource_version=database.actuator_credential_resource_version if actuator else database.credential_resource_version)
+            guards.qualify_runtime_legacy_settings(target, original=original, expected=original)
+            if actuator:
+                guards.qualify_runtime_telemetry(target, original=original)
+
+        # A probe may take time: repeat ledger/guard and credential checks after
+        # all remote reads, then requalify retained private history and dev binds.
+        development.qualify_closed_pool()
+        if (history.machine_retirement('observe') != 'revoked'
+                or guards._get('secret', 'loom-platform-db', old_namespace) != credential
+                or open_guards() != states):
+            raise ValueError
+        after = bind()
+        if (after.plan != plan or migration_contract(after.migration) != migration_contract(migration)
+                or staging_urls() != before_urls):
+            raise ValueError
+        telemetry = guards.telemetry_report()
+        checksum = digest({'bindings': bound.input_digest, 'guards': states, 'retired_authority': 'revoked',
+            'telemetry': telemetry, 'old_credential_uid': _uid(credential),
+            'old_credential_resource_version': credential['metadata']['resourceVersion']})
+        return SharedPoolProcessObservation(bound, states, 'revoked', telemetry, checksum)
+    except Exception:
+        raise ValueError('shared pool process preflight unqualified') from None
