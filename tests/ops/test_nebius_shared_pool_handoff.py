@@ -1730,6 +1730,7 @@ def test_shared_gateway_stages_exact_grants_then_starts_once_under_closed_parent
 
     import httpx
     from scripts.ops import nebius_certificates as private_state
+    from scripts.ops import nebius_shared_pool_activation as activation_child
     from scripts.ops import nebius_shared_pool_build_activation as build_child
     from scripts.ops import nebius_shared_pool_operation as parent
     from scripts.ops.nebius_development_runtime_live import runtime_resource_path
@@ -1858,6 +1859,8 @@ def test_shared_gateway_stages_exact_grants_then_starts_once_under_closed_parent
     with ExitStack() as stack:
         class API(SharedPhaseAPI):
             def prepare(self, phase, bound, directory):
+                if phase == 'forward-activate':
+                    return activation_child.prepare_shared_pool_activation(bindings=bound, state_dir=directory)
                 if phase == 'forward-build-policy':
                     return build_child.prepare_shared_build_activation(bindings=bound, state_dir=directory)
                 if phase != 'forward-gateway':
@@ -1868,7 +1871,9 @@ def test_shared_gateway_stages_exact_grants_then_starts_once_under_closed_parent
                     raise TimeoutError('simulated interruption after effect-free child preparation')
 
             def validate_prepared_phase(self, phase, directory):
-                if phase == 'forward-build-policy':
+                if phase == 'forward-activate':
+                    activation_child.validate_shared_pool_activation(bindings=bindings, state_dir=directory, complete=False, prepared=True)
+                elif phase == 'forward-build-policy':
                     build_child.validate_shared_build_activation(bindings=bindings, state_dir=directory, complete=False, prepared=True)
                 elif phase == 'forward-gateway':
                     module.validate_shared_gateway(bindings=bindings, state_dir=directory, complete=False, prepared=True)
@@ -1876,7 +1881,9 @@ def test_shared_gateway_stages_exact_grants_then_starts_once_under_closed_parent
                     super().validate_prepared_phase(phase, directory)
 
             def validate_phase(self, phase, directory, *, complete):
-                if phase == 'forward-build-policy':
+                if phase == 'forward-activate':
+                    activation_child.validate_shared_pool_activation(bindings=bindings, state_dir=directory, complete=complete)
+                elif phase == 'forward-build-policy':
                     build_child.validate_shared_build_activation(bindings=bindings, state_dir=directory, complete=complete)
                 elif phase == 'forward-gateway':
                     module.validate_shared_gateway(bindings=bindings, state_dir=directory, complete=complete)
@@ -1884,6 +1891,8 @@ def test_shared_gateway_stages_exact_grants_then_starts_once_under_closed_parent
                     super().validate_phase(phase, directory, complete=complete)
 
             def advance(self, phase, bound, directory):
+                if phase == 'forward-activate':
+                    return False
                 if phase == 'forward-build-policy':
                     # Only this preceding phase's remote effect is doubled;
                     # gateway and inventory readers consume its real receipt.
@@ -2017,6 +2026,40 @@ def test_shared_gateway_stages_exact_grants_then_starts_once_under_closed_parent
         assert patches == [_key(gateway)] and creates == list(fixed)
         assert {namespace for participant in bindings.migration.registration.spec.participants
             for namespace in (participant.execution_namespace.name, participant.build_namespace.name)} <= set(reviews)
+        activation_path = child.parent / 'forward-activate/activation.json'
+        activation_bytes = activation_path.read_bytes()
+        with HTTPSSharedPoolRuntimeProbes(bindings=bindings,
+                api_server=runtime.database.foundation.inputs.config['kubernetes_api_server'], token='fixture-token',
+                ssl_context=ssl.create_default_context(cadata=runtime.database.foundation.bootstrap['material']['loom-platform-db']['ca.crt'])) as probes:
+            for connection in (probes, probes.manager, probes.foundation):
+                connection.client.close()
+                connection.client = type(completed_pool[3].api.client)(base_url=connection.api_server, transport=httpx.MockTransport(read))
+            assert probes._running('Deployment:loom-dev:loom-control-plane', plan.runtime.state_dir)[0] == 'controller'
+            activation_path.unlink()
+            before = len(reads)
+            with pytest.raises(ValueError):
+                probes.inspect(state_dir=plan.runtime.state_dir)
+            assert len(reads) == before
+            activation_path.write_bytes(activation_bytes)
+            activation_path.chmod(0o600)
+            changed = []
+
+            def change_activation_during_read(message):
+                response = read(message)
+                if not changed:
+                    activation_path.write_bytes(activation_bytes + b'\n')
+                    changed.append(True)
+                return response
+
+            for connection in (probes, probes.manager, probes.foundation):
+                connection.client.close()
+                connection.client = type(completed_pool[3].api.client)(base_url=connection.api_server,
+                    transport=httpx.MockTransport(change_activation_during_read))
+            with pytest.raises(ValueError):
+                probes.inspect(state_dir=plan.runtime.state_dir)
+            assert changed
+            activation_path.write_bytes(activation_bytes)
+            activation_path.chmod(0o600)
 
 
 @pytest.mark.timeout(420)
@@ -2251,6 +2294,7 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
     from scripts.ops import nebius_shared_pool_handoff_live as module
     from scripts.ops.deploy_nebius_platform import rollout_guard_observation_sql
     from scripts.ops.nebius_development_runtime_probes import HTTPSDevelopmentRuntimeProbes
+    from scripts.ops.nebius_pool_activation_database import pool_activation_state_sql
     from scripts.ops.nebius_pool_gateway_probe import BOUND_GATEWAY_KUBERNETES_COMMAND
     from scripts.ops.nebius_pool_legacy_settings import (
         BOUND_LEGACY_SETTINGS_COMMAND,
@@ -2260,6 +2304,7 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
     from scripts.ops.nebius_pool_migration_guard import (
         _BOUND_DATABASE_COMMAND,
         _BOUND_TELEMETRY_COMMAND,
+        pool_guard_activation_sql,
         pool_runtime_role_sql,
     )
     from scripts.ops.nebius_pool_runtime_settings import (
@@ -2267,10 +2312,14 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
         expected_pool_runtime_settings,
     )
     from scripts.ops.nebius_pool_startup_capacity import (
+        BOUND_POOL_ACTIVE_CAPACITY_COMMAND,
         BOUND_POOL_CAPACITY_COMMAND,
         expected_startup_capacity,
     )
-    from scripts.ops.nebius_pool_startup_database import pool_startup_closed_sql
+    from scripts.ops.nebius_pool_startup_database import (
+        pool_active_authority_sql,
+        pool_startup_closed_sql,
+    )
     from scripts.ops.nebius_shared_pool_runtime_observation import HTTPSSharedPoolRuntimeProbes
     from tests.ops.test_nebius_development_pool_retained import (
         populate_database_backends,
@@ -2423,7 +2472,18 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
                         'state': 'active' if mode['damage'] == 'old-active' else 'revoked'}
                     checked.add('old-revoked')
                 elif namespace == manager_namespace:
-                    assert sql == pool_startup_closed_sql(spec)
+                    if sql == pool_activation_state_sql(spec):
+                        value = {'schema': 'loom.pool-activation-state.v1', 'operation_id': str(spec.operation_id),
+                            'installation_sha256': digest(spec.model_dump(mode='json')), 'state': mode.get('pool_state', 'closed')}
+                        checked.add('pool-state')
+                        return SimpleNamespace(returncode=0, stdout=json.dumps(value).encode(), stderr=b'')
+                    if sql == pool_active_authority_sql(spec):
+                        value = {'schema': 'loom.pool-active-authority.v1', 'operation_id': str(spec.operation_id),
+                            'installation_sha256': digest(spec.model_dump(mode='json')), 'read_only': True,
+                            'qualified': mode.get('pool_state') == 'global' and mode['damage'] != 'new-not-active'}
+                        checked.add('new-active')
+                        return SimpleNamespace(returncode=0, stdout=json.dumps(value).encode(), stderr=b'')
+                    assert sql == pool_startup_closed_sql(spec) and mode.get('pool_state', 'closed') == 'closed'
                     value = {'schema': 'loom.pool-startup-closed.v1', 'operation_id': str(spec.operation_id),
                         'installation_sha256': digest(spec.model_dump(mode='json')), 'read_only': True,
                         'qualified': mode['damage'] != 'new-not-closed'}
@@ -2444,9 +2504,16 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
                                 workload['spec']['template']['spec']['containers'][0]['image'] = 'foreign.invalid/image:latest'
                 else:
                     assert namespace in {'loom-dev', staging.namespace}
+                    participant = next(row for row in plan.migration.guards if row.namespace == namespace)
                     if sql == rollout_guard_observation_sql(owner=str(spec.operation_id), candidate=request.database.foundation.inputs.candidate['candidate_sha']):
                         value = {'status': 'held' if mode['damage'] == 'guard-held' or namespace in mode.get('held', set()) else 'open'}
                         checked.add(('guard', namespace))
+                    elif sql == pool_guard_activation_sql(spec.operation_id, participant.participant_id,
+                            request.database.foundation.inputs.candidate['candidate_sha'], action='observe'):
+                        value = {'schema': 'loom.pool-local-guard.v1', 'operation_id': str(spec.operation_id),
+                            'participant_id': str(participant.participant_id), 'status': 'foreign' if mode['damage'] == 'guard-foreign'
+                            else 'held' if namespace in mode.get('held', set()) else 'open'}
+                        checked.add(('active-guard', namespace))
                     else:
                         assert forward_processes and sql == pool_runtime_role_sql(owner=str(spec.operation_id),
                             candidate=request.database.foundation.inputs.candidate['candidate_sha'], action='inspect')
@@ -2461,7 +2528,7 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
                     secret, = (row for row in documents.values() if row['kind'] == 'Secret'
                         and row['metadata']['uid'] == str(staging.database.actuator_credential_uid))
                     secret['metadata']['resourceVersion'] = 'late-rotation'
-            elif args[9] in {BOUND_GATEWAY_KUBERNETES_COMMAND, BOUND_POOL_CAPACITY_COMMAND}:
+            elif args[9] in {BOUND_GATEWAY_KUBERNETES_COMMAND, BOUND_POOL_CAPACITY_COMMAND, BOUND_POOL_ACTIVE_CAPACITY_COMMAND}:
                 assert args[7:9] == ['python', '-c'] and namespace == manager_namespace and args[5] == 'gateway'
                 name = 'loom-pool-gateway'
                 workload = documents['/apis/apps/v1/namespaces/' + namespace + '/deployments/' + name]
@@ -2476,8 +2543,10 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
                     check = 'kubernetes'
                 else:
                     assert len(args) == 12
+                    active = mode.get('pool_state', 'closed') == 'global'
+                    assert args[9] == (BOUND_POOL_ACTIVE_CAPACITY_COMMAND if active else BOUND_POOL_CAPACITY_COMMAND)
                     wanted = expected_startup_capacity(spec)
-                    check = 'capacity'
+                    check = 'active-capacity' if active else 'capacity'
                 payload = json.dumps(wanted, sort_keys=True, separators=(',', ':')).encode()
                 assert hmac.new(bytes.fromhex(args[-2]), payload, 'sha256').hexdigest() == args[-1]
                 checked.add((check, namespace, name))
@@ -2603,6 +2672,7 @@ def _exercise_forward_processes(*, bindings, development, documents, mode, check
 
     import httpx
     from scripts.ops import nebius_certificates as private_state
+    from scripts.ops import nebius_shared_pool_activation as activation_child
     from scripts.ops import nebius_shared_pool_build_activation as build_child
     from scripts.ops import nebius_shared_pool_database as database
     from scripts.ops import nebius_shared_pool_gateway as gateway_child
@@ -2623,7 +2693,11 @@ def _exercise_forward_processes(*, bindings, development, documents, mode, check
 
     class ProcessPhaseAPI(SharedPhaseAPI):
         def prepare(self, phase, bound, child):
-            if phase == 'forward-guards':
+            if phase == 'forward-activate':
+                if self.prepare_failure == (phase, 'before'):
+                    raise ValueError('simulated preparation interruption')
+                activation_child.prepare_shared_pool_activation(bindings=bound, state_dir=child)
+            elif phase == 'forward-guards':
                 guards.prepare_shared_pool_guards(bindings=bound, state_dir=child)
             elif phase in {'forward-stop', 'forward-wire', 'forward-start'}:
                 workloads.prepare_shared_staging_workloads(bindings=bound, phase=phase, state_dir=child)
@@ -2637,7 +2711,9 @@ def _exercise_forward_processes(*, bindings, development, documents, mode, check
                 super().prepare(phase, bound, child)
 
         def validate_prepared_phase(self, phase, child):
-            if phase == 'forward-guards':
+            if phase == 'forward-activate':
+                activation_child.validate_shared_pool_activation(bindings=bindings, state_dir=child, complete=False, prepared=True)
+            elif phase == 'forward-guards':
                 value = guards.validate_shared_pool_guards(bindings=bindings, state_dir=child, complete=False)
                 assert set(value['guards'].values()) == {'prepared'}
             elif phase in {'forward-stop', 'forward-wire', 'forward-start'}:
@@ -2653,7 +2729,9 @@ def _exercise_forward_processes(*, bindings, development, documents, mode, check
                 super().validate_prepared_phase(phase, child)
 
         def validate_phase(self, phase, child, *, complete):
-            if phase == 'forward-guards':
+            if phase == 'forward-activate':
+                activation_child.validate_shared_pool_activation(bindings=bindings, state_dir=child, complete=complete)
+            elif phase == 'forward-guards':
                 guards.validate_shared_pool_guards(bindings=bindings, state_dir=child, complete=complete)
             elif phase in {'forward-stop', 'forward-wire', 'forward-start'}:
                 workloads.validate_shared_staging_workloads(bindings=bindings, phase=phase, state_dir=child, complete=complete)
@@ -2667,6 +2745,9 @@ def _exercise_forward_processes(*, bindings, development, documents, mode, check
                 super().validate_phase(phase, child, complete=complete)
 
         def advance(self, phase, bound, child):
+            if phase == 'forward-activate':
+                record = json.loads((child / 'activation.json').read_bytes())
+                return record['opening'] == 'opened' and all(row['release'] == 'released' for row in record['guards'].values())
             if phase == 'forward-guards':
                 return set(json.loads((child / 'guards.json').read_bytes())['guards'].values()) == {'held'}
             if phase in {'forward-stop', 'forward-wire', 'forward-start'}:
@@ -2955,6 +3036,41 @@ def _exercise_forward_processes(*, bindings, development, documents, mode, check
     with pytest.raises(ValueError):
         observe()  # A completed startup cannot claim an in-flight readiness wait.
     documents[gateway_path]['status']['readyReplicas'] = 1
+    api.prepare_failure = None
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-activate'
+    assert observe().pool_state == 'closed'
+    mode['pool_state'] = 'global'
+    with pytest.raises(ValueError):
+        observe()  # A live open pool cannot qualify before its opening intent.
+    mode['pool_state'] = 'closed'
+    activation_path = state / 'forward-activate/activation.json'
+    activation = json.loads(activation_path.read_bytes())
+    activation['opening'] = 'intent'
+    private_state._atomic_json(activation_path, activation)
+    assert observe().pool_state == 'closed'
+    mode['pool_state'] = 'global'
+    checked.clear()
+    assert observe().pool_state == 'global'
+    assert 'new-active' in checked and 'new-closed' not in checked
+    assert ('active-capacity', manager.binding.namespace, 'loom-pool-gateway') in checked
+    activation['opening'] = 'opened'
+    for target in bindings.migration.guards:
+        key = str(target.participant_id)
+        activation['guards'][key]['release'] = 'intent'
+        private_state._atomic_json(activation_path, activation)
+        assert observe().guard_states[target.namespace] == 'held'
+        mode['held'].remove(target.namespace)
+        assert observe().guard_states[target.namespace] == 'open'
+        activation['guards'][key]['release'] = 'released'
+        private_state._atomic_json(activation_path, activation)
+    api.block = 'forward-verify'
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-verify'
+    assert observe().pool_state == 'global'
+    for damage in ('new-not-active', 'guard-foreign', 'gateway-active-capacity', 'old-active'):
+        mode['damage'] = damage
+        with pytest.raises(ValueError):
+            observe()
+    mode['damage'] = None
     guard_path.unlink()
     before = len(commands)
     with pytest.raises(ValueError):
@@ -3098,6 +3214,9 @@ def test_shared_activation_binds_own_parent_and_never_replays_unknown_writes(sha
     assert effects == []
     assert json.loads((child / 'activation.json').read_bytes())['opening'] == 'prepared'
     assert json.loads((state / 'operation.json').read_bytes())['forward']['forward-activate']['status'] == 'prepared'
+    view = module.shared_forward_activation_view(bindings=bindings, state_dir=state)
+    assert view.pool_states == ('closed',)
+    assert view.guard_states == {target.namespace: ('held',) for target in bindings.migration.guards}
     with pytest.raises(ValueError):
         parent.run_shared_pool_operation(**kwargs)
     assert effects == []  # Preparation resumed, but live qualification failed.
@@ -3107,6 +3226,7 @@ def test_shared_activation_binds_own_parent_and_never_replays_unknown_writes(sha
     remote.failure = None
     assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-activate'
     assert effects == [('open', None)]  # An unknown opening is never replayed.
+    assert module.shared_forward_activation_view(bindings=bindings, state_dir=state).pool_states == ('closed', 'global')
     remote.migration = bindings.plan.staging.legacy.context.request.fencing.retirement.migration
     with pytest.raises(ValueError):
         parent.run_shared_pool_operation(**kwargs)
@@ -3154,6 +3274,10 @@ def test_shared_activation_binds_own_parent_and_never_replays_unknown_writes(sha
     remote.failure = None
     assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-activate'
     assert effects == [('open', None), ('release', roster[0])]
+    view = module.shared_forward_activation_view(bindings=bindings, state_dir=state)
+    assert view.pool_states == ('global',)
+    assert view.guard_states == {target.namespace: (('held', 'open') if str(target.participant_id) == roster[0] else ('held',))
+        for target in bindings.migration.guards}
     remote.guards[roster[0]] = 'open'
     remote.failure = ('release', roster[1], 'after')
     assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-verify'
@@ -3162,6 +3286,11 @@ def test_shared_activation_binds_own_parent_and_never_replays_unknown_writes(sha
     assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-verify'
     assert effects == [('open', None), *(('release', key) for key in roster)]
     module.validate_shared_pool_activation(bindings=bindings, state_dir=child, complete=True)
+    view = module.shared_forward_activation_view(bindings=bindings, state_dir=state)
+    assert view.pool_states == ('global',) and view.guard_states == {target.namespace: ('open',) for target in bindings.migration.guards}
+    api.block = None
+    assert parent.run_shared_pool_operation(**kwargs)['status'] == 'shared_pool_handoff_complete'
+    assert module.shared_forward_activation_view(bindings=bindings, state_dir=state).frame['outcome'] == 'shared_pool_handoff_complete'
 
 
 @pytest.mark.timeout(420)
@@ -3411,6 +3540,7 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
 
     import httpx
     from scripts.ops import nebius_certificates as private_state
+    from scripts.ops import nebius_shared_pool_activation as activation_child
     from scripts.ops import nebius_shared_pool_gateway as gateway_child
     from scripts.ops import nebius_shared_pool_material as material
     from scripts.ops import nebius_shared_pool_operation as parent
@@ -3430,7 +3560,9 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
 
     class CensusPhaseAPI(SharedPhaseAPI):
         def prepare(self, phase, bound, child):
-            if phase in {'forward-stop', 'forward-wire', 'forward-start'}:
+            if phase == 'forward-activate':
+                activation_child.prepare_shared_pool_activation(bindings=bound, state_dir=child)
+            elif phase in {'forward-stop', 'forward-wire', 'forward-start'}:
                 workloads.prepare_shared_staging_workloads(bindings=bound, phase=phase, state_dir=child)
             elif phase == 'forward-roles':
                 roles.prepare_shared_staging_roles(bindings=bound, state_dir=child)
@@ -3442,7 +3574,9 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
                 super().prepare(phase, bound, child)
 
         def validate_prepared_phase(self, phase, child):
-            if phase in {'forward-stop', 'forward-wire', 'forward-start'}:
+            if phase == 'forward-activate':
+                activation_child.validate_shared_pool_activation(bindings=bindings, state_dir=child, complete=False, prepared=True)
+            elif phase in {'forward-stop', 'forward-wire', 'forward-start'}:
                 workloads.validate_shared_staging_workloads(bindings=bindings, phase=phase,
                     state_dir=child, complete=False, prepared=True)
             elif phase == 'forward-roles':
@@ -3455,7 +3589,9 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
                 super().validate_prepared_phase(phase, child)
 
         def validate_phase(self, phase, child, *, complete):
-            if phase in {'forward-stop', 'forward-wire', 'forward-start'}:
+            if phase == 'forward-activate':
+                activation_child.validate_shared_pool_activation(bindings=bindings, state_dir=child, complete=complete)
+            elif phase in {'forward-stop', 'forward-wire', 'forward-start'}:
                 workloads.validate_shared_staging_workloads(bindings=bindings, phase=phase, state_dir=child, complete=complete)
             elif phase == 'forward-roles':
                 roles.validate_shared_staging_roles(bindings=bindings, state_dir=child, complete=complete)
@@ -3476,6 +3612,8 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
                 return child_state['stage'] is not None and all(row['status'] == 'created'
                     for row in child_state['stage']['resources'].values())
             if phase == 'forward-gateway':
+                return all(row['status'] == 'applied' for row in json.loads((child / 'start/transition.json').read_bytes())['resources'].values())
+            if phase == 'forward-activate':
                 return False
             return super().advance(phase, bound, child)
 
@@ -3721,6 +3859,21 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
     with pytest.raises(ValueError):
         observe()  # Completed startup no longer admits the stopped predecessor.
     replace_live(live_gateway, started_gateway)
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-activate'
+    assert observe().workloads[gateway_key] == live_gateway
+    activation_path = state / 'forward-activate/activation.json'
+    activation_bytes = activation_path.read_bytes()
+    for mutation in ('bytes', 'missing'):
+        def change(mutation=mutation):
+            if mutation == 'bytes':
+                activation_path.write_bytes(activation_bytes + b'\n')
+            else:
+                activation_path.unlink()
+        mode['during_read'] = change
+        with pytest.raises(ValueError):
+            observe()
+        activation_path.write_bytes(activation_bytes)
+        activation_path.chmod(0o600)
     api.block = 'recovery-fence'
     assert parent.run_shared_pool_operation(**{**kwargs, 'action': 'recover'})['phase'] == 'recovery-fence'
     before = len(calls)
