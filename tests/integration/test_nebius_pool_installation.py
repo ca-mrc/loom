@@ -108,6 +108,31 @@ async def test_complete_builder_installation_retains_distinct_scopes_and_replays
         assert (await session.get(NebiusPoolMachine, builder_id)).workload_scope == "application_builder"
 
 
+async def test_legacy_staging_catalog_is_bound_in_closed_registration_and_exact_replay(sessions):
+    from loom.nebius_pool_contract import PoolParticipantV1
+    from loom_service.pool_management.installation import PoolInstallation, register_installation
+
+    config, raw = installation(("staging", "development"))
+    config["participants"][0]["legacy_catalog_environment"] = "development"
+    spec = PoolInstallation.model_validate(config)
+    async with sessions.begin() as session:
+        receipt = await register_installation(session, spec)
+    async with sessions.begin() as session:
+        assert await register_installation(session, spec) == receipt
+        row = await session.get(NebiusPoolParticipant, spec.participants[0].participant_id)
+        assert PoolParticipantV1.model_validate(row.binding_json) == spec.participants[0]
+        assert row.binding_json["environment_class"] == "staging"
+        assert row.binding_json["legacy_catalog_environment"] == "development"
+        machine, = [item for item in spec.machines if item.participant_id == row.participant_id]
+        principal = await resolve_pool_machine(session, "Bearer " + raw[machine.machine_id])
+        assert principal.participant_binding_sha256 == row.binding_sha256
+        assert principal.pool_mode == "closed"
+    del config["participants"][0]["legacy_catalog_environment"]
+    with pytest.raises(ValueError):
+        async with sessions.begin() as session:
+            await register_installation(session, PoolInstallation.model_validate(config))
+
+
 @pytest.mark.parametrize("damage", ["missing-builder", "duplicate-builder", "missing-environment", "duplicate-environment",
     "foreign-builder", "observer-builder", "gateway-builder", "wrong-class", "missing-profile", "orphan-profile",
     "orphan-builder", "foreign-namespace", "foreign-node-group", "mixed-target"])

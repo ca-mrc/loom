@@ -181,6 +181,62 @@ def test_execution_only_sibling_uses_same_participant_without_another_builder(gu
     assert settings.task_image_builder is None
 
 
+@pytest.mark.parametrize('runtime_inputs', [('staging', 'development')], indirect=True)
+@pytest.mark.parametrize('scheduler_environment', ['development', 'staging'])
+def test_legacy_staging_wiring_preserves_catalog_and_guest_ids(
+    guest_runtime_inputs, monkeypatch, scheduler_environment,
+):
+    from scripts.ops.nebius_pool_runtime import wire_participant
+
+    from loom_control_plane.config import ControlPlaneSettings
+    from loom_execution_actuator.config import ExecutionActuatorSettings
+    from loom_service.pool_management.installation import PoolInstallation
+
+    request, actuators, services, _, guest = guest_runtime_inputs
+    spec = request.registration.spec.model_dump(mode='json')
+    spec['participants'][0]['legacy_catalog_environment'] = 'development'
+    request = replace(request, registration=replace(request.registration, spec=PoolInstallation.model_validate(spec)))
+    controller = copy.deepcopy(request.guards[0].controller)
+    env(controller)['LOOM_CP_SERVICE_EXECUTION_SCHEDULER_ENVIRONMENT']['value'] = scheduler_environment
+    request = replace(request, guards=(replace(request.guards[0], controller=controller), *request.guards[1:]))
+    participant = request.registration.spec.participants[0]
+    identity = participant.participant_id
+    before = copy.deepcopy((controller, actuators[identity], services[identity], guest))
+    options = dict(request=request, participant_id=identity, management_origin='https://manage.example.com',
+        actuator=actuators[identity], service=services[identity], runtime_profile=desired_profile(request, services[identity]),
+        guest_actuators=(guest,))
+    if scheduler_environment != 'development':
+        with pytest.raises(ValueError, match='pool_participant_runtime_unqualified'):
+            wire_participant(**options)
+        return
+    result = wire_participant(**options)
+    assert (controller, actuators[identity], services[identity], guest) == before
+    for name, row in env(result['control_plane']).items():
+        if 'value' in row:
+            monkeypatch.setenv(name, row['value'])
+    monkeypatch.setenv('LOOM_CP_DB_URL', 'postgresql+psycopg://test:test@localhost/test')
+    monkeypatch.setenv('LOOM_CP_MINIO_ACCESS_KEY', 'fixture')
+    monkeypatch.setenv('LOOM_CP_MINIO_SECRET_KEY', 'fixture')
+    settings = ControlPlaneSettings(_env_file=None)
+    assert settings.service_execution_scheduler_environment == 'development'
+    assert settings.global_pool.participant.environment_class == 'staging'
+    assert settings.global_pool.participant == participant
+    monkeypatch.setenv('LOOM_CP_SERVICE_EXECUTION_SCHEDULER_ENVIRONMENT', 'staging')
+    with pytest.raises(ValueError, match='global pool runtime differs from scheduler identity'):
+        ControlPlaneSettings(_env_file=None)
+    for component, original in [('actuator', actuators[identity]), ('guest_actuator', guest)]:
+        with monkeypatch.context() as worker_env:
+            for name, row in env(result[component]).items():
+                if 'value' in row:
+                    worker_env.setenv(name, row['value'])
+            worker_env.setenv('LOOM_EXECUTION_ACTUATOR_DB_URL', 'postgresql+psycopg://test:test@localhost/test')
+            worker_env.setenv('LOOM_EXECUTION_ACTUATOR_CONTROLLER_ID', 'legacy-staging-test')
+            worker = ExecutionActuatorSettings(_env_file=None)
+            assert worker.global_pool == settings.global_pool
+            assert worker.target_id == env(original)['LOOM_EXECUTION_ACTUATOR_TARGET_ID']['value']
+            assert result[component]['spec']['replicas'] == 0
+
+
 @pytest.fixture
 def auth_runtime_inputs(guest_runtime_inputs, platform_inputs):
     """Retain the actual second guest rendered for emulated authentication."""
