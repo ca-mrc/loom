@@ -4447,6 +4447,7 @@ def test_shared_recovery_stop_fences_delayed_forward_cas_without_replaying_unkno
     name = 'scripts.ops.nebius_shared_pool_recovery_workloads'
     assert importlib.util.find_spec(name) is not None, 'connected terminal shared workload stop is missing'
     stop = __import__(name, fromlist=['HTTPSSharedRecoveryWorkloads'])
+    assert callable(getattr(stop, 'observe_shared_recovery_workload_drain', None)), 'dependent recovery needs current process drain'
     args, bindings = shared_operation
     runtime = args['runtime']
     completed = bindings.plan.development.runtime
@@ -4587,6 +4588,7 @@ def test_shared_recovery_stop_fences_delayed_forward_cas_without_replaying_unkno
     with ExitStack() as stack:
         class API(SharedPhaseAPI):
             fence_api = None
+            stop_api = None
 
             def prepare(self, phase, bound, directory):
                 if phase == 'forward-guards':
@@ -4655,6 +4657,7 @@ def test_shared_recovery_stop_fences_delayed_forward_cas_without_replaying_unkno
                 connection.client.close()
                 connection.client = connection_type(base_url=connection.api_server, transport=httpx.MockTransport(handle))
                 if phase == 'recovery-stop':
+                    self.stop_api = connection
                     return stop.advance_shared_recovery_workloads(bindings=bound, api=connection, state_dir=directory)
                 return forward.advance_shared_staging_workloads(bindings=bound, phase=phase, api=connection, state_dir=directory)
 
@@ -4673,6 +4676,36 @@ def test_shared_recovery_stop_fences_delayed_forward_cas_without_replaying_unkno
         assert writes == before
         assert all(row['status'] == 'prepared' for row in _read(child / 'stop.json')['resources'].values())
         remote.pool_counts['active_requests'] = 0
+        # Missing/byte-altered frozen evidence must never be reconstructed by
+        # recovery, even when its decoded JSON would still be equivalent.
+        receipt = state / 'forward-start' / 'transition.json'
+        retained = receipt.read_bytes()
+        displaced = receipt.with_suffix('.held')
+        receipt.rename(displaced)
+        with pytest.raises(ValueError):
+            parent.run_shared_pool_operation(**kwargs)
+        assert writes == before
+        displaced.rename(receipt)
+        receipt.write_bytes(retained + b'\n')
+        with pytest.raises(ValueError):
+            parent.run_shared_pool_operation(**kwargs)
+        assert writes == before
+        receipt.write_bytes(retained)
+        # A later root drifting must prevent any earlier root from being
+        # stopped, not merely fail when iteration eventually reaches it.
+        last = next(reversed(roots))
+        original = copy.deepcopy(rows[last])
+        for changed in ('uid', 'template'):
+            if changed == 'uid':
+                rows[last]['metadata']['uid'] = str(uuid4())
+            else:
+                rows[last]['spec']['template']['spec']['containers'][0]['image'] = 'unqualified.invalid/replacement:latest'
+            refresh()
+            with pytest.raises(ValueError):
+                parent.run_shared_pool_operation(**kwargs)
+            assert writes == before
+            rows[last] = copy.deepcopy(original)
+            refresh()
         with pytest.raises(ValueError):
             parent.run_shared_pool_operation(**kwargs)
         assert len(writes) == len(before) + 1
@@ -4695,6 +4728,21 @@ def test_shared_recovery_stop_fences_delayed_forward_cas_without_replaying_unkno
         stop.validate_shared_recovery_workloads(bindings=bindings, state_dir=child, complete=True)
         before = list(writes)
         assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'recovery-revoke'
+        assert writes == before
+        # A completed receipt proves past shutdown only. The following revoke
+        # phase needs the same actual HTTP descendant checks and fresh SQL drain.
+        def current_drain():
+            return stop.observe_shared_recovery_workload_drain(bindings=bindings, api=api.stop_api, state_dir=child)
+        assert current_drain() is True
+        remote.pool_counts['active_requests'] = 1
+        assert current_drain() is False
+        remote.pool_counts['active_requests'] = 0
+        mode['retain_pod'] = True
+        assert current_drain() is False
+        mode['retain_pod'] = False
+        assert current_drain() is True
+        with pytest.raises(ValueError):
+            stop.advance_shared_recovery_workloads(bindings=bindings, api=api.stop_api, state_dir=child)
         assert writes == before
 
 
