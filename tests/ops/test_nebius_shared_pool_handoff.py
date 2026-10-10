@@ -5689,7 +5689,7 @@ def test_shared_recovery_restores_current_roles_with_delayed_forward_barrier(sha
         **{guard.namespace: str(guard.namespace_uid) for guard in bindings.migration.guards},
         **{ns.name: str(ns.uid) for participant in bindings.migration.registration.spec.participants
             for ns in (participant.execution_namespace, participant.build_namespace)}}
-    mode = {'recovering': False, 'busy': False, 'busy_preview': True, 'extra': False, 'missing': False,
+    mode = {'recovering': False, 'busy': False, 'busy_preview': True, 'late_fault': None, 'writing_calls': 0, 'extra': False, 'missing': False,
         'incomplete': False, 'gateway_writer': False, 'pending_forward': None, 'pending_restore': None, 'calls': 0}
     attempts, effects, reviews, qualification = [], [], [], []
 
@@ -5761,6 +5761,8 @@ def test_shared_recovery_restores_current_roles_with_delayed_forward_barrier(sha
         for key, row in {**catalog, **bindings.plan.staging_reader_authority}.items():
             if path == runtime_resource_path(row) + '/' + row['metadata']['name']:
                 if message.method == 'GET':
+                    if not mode['recovering'] and committed and mode['pending_forward'] is not None:
+                        raise httpx.ReadError('simulated lost committed forward readback')
                     value = roles.get(key, current_bindings.get(key, catalog.get(key)))
                     return httpx.Response(404) if value is None else httpx.Response(200, json=value)
                 assert message.method == 'PATCH' and key in originals
@@ -5820,7 +5822,9 @@ def test_shared_recovery_restores_current_roles_with_delayed_forward_barrier(sha
                     super().prepare(phase, bound, directory)
 
             def validate_prepared_phase(self, phase, directory):
-                if phase in children:
+                if phase == 'forward-guards':
+                    children[phase][1](bindings=bindings, state_dir=directory, complete=False)
+                elif phase in children:
                     children[phase][1](bindings=bindings, state_dir=directory, complete=False, prepared=True)
                 elif phase in {'forward-stop', 'recovery-revoke'}:
                     self.validate_phase(phase, directory, complete=False)
@@ -5878,8 +5882,12 @@ def test_shared_recovery_restores_current_roles_with_delayed_forward_barrier(sha
                             record['resources'][key] = {'status': 'stopped', 'before': before,
                                 'before_resource_version': '1', 'expected': stop._stopped(bound, before)}
                     elif phase == 'recovery-restore-workloads':
-                        for row in record['resources'].values():
-                            row['status'] = 'restored'  # Before wiring, captured stopped templates are already identical.
+                        from scripts.ops.nebius_management_switch import _stable
+
+                        before, targets = templates._inputs(bound, state)
+                        for key, row in record['resources'].items():
+                            row.update(status='restored', before_resource_version=
+                                '2' if _stable(before[key]) != _stable(targets[key]) else None)
                     private_state._atomic_json(path, record)
                     return True
                 if phase != 'recovery-restore-roles':
@@ -5888,6 +5896,10 @@ def test_shared_recovery_restores_current_roles_with_delayed_forward_barrier(sha
                     def qualify(request, selected, writing):
                         assert request == runtime and selected == phase
                         qualification.append(writing)
+                        if writing and mode['late_fault']:
+                            mode['writing_calls'] += 1
+                            if mode['writing_calls'] == 4:
+                                mode[mode['late_fault']] = True
 
                     def gateway_denied():
                         if mode['gateway_writer']:
@@ -5917,13 +5929,15 @@ def test_shared_recovery_restores_current_roles_with_delayed_forward_barrier(sha
                     cause = cause.__context__
                 raise ValueError('Role recovery failure at ' + ', '.join(frames)) from None
 
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError) as forward_failure:
             run_operation()
-        assert mode['pending_forward'] is not None
+        assert mode['pending_forward'] is not None, str(forward_failure.value)
         frozen = {path: path.read_bytes() for path in state.glob('forward-*/**/*.json')}
         kwargs['action'], mode['recovering'] = 'recover', True
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError) as inbound_failure:
             run_operation()  # Do not grant a restored fixed Role to a foreign subject.
+        assert api.role_api is not None, str(inbound_failure.value)
+        assert '_bindings' in str(inbound_failure.value)
         assert not attempts
         del current_bindings[_key(inbound)]
         mode['extra'] = True
@@ -5946,7 +5960,23 @@ def test_shared_recovery_restores_current_roles_with_delayed_forward_barrier(sha
                 api.role_api.verify_permissions()
         finally:
             receipt.write_bytes(saved)
-        mode['busy'] = False
+        target = copy.deepcopy(api.role_api.targets[first])
+        api.role_api.targets[first]['rules'] = []
+        try:
+            with pytest.raises(ValueError):
+                api.role_api.verify_permissions()
+        finally:
+            api.role_api.targets[first] = target
+        mode['busy'], mode['late_fault'] = False, 'busy'
+        assert run_operation()['phase'] == 'recovery-restore-roles'
+        assert mode['busy'] and not attempts
+        assert {row['status'] for row in _read(child / 'roles.json')['roles'].values()} == {'prepared'}
+        mode['busy'], mode['late_fault'], mode['writing_calls'] = False, 'gateway_writer', 0
+        with pytest.raises(ValueError):
+            run_operation()
+        assert mode['gateway_writer'] and not attempts
+        assert {row['status'] for row in _read(child / 'roles.json')['roles'].values()} == {'prepared'}
+        mode['late_fault'], mode['gateway_writer'] = None, False
         result = run_operation()
         assert mode['pending_restore'] is not None
         if not committed:
