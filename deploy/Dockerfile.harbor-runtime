@@ -2,7 +2,7 @@ FROM python:3.12-slim
 ENV PIP_RETRIES=10 PIP_DEFAULT_TIMEOUT=60 \
     LITELLM_LOCAL_MODEL_COST_MAP=True
 # Keep the existing Harbor compatibility version and current-user tool probes.
-ARG HARBOR_COMPAT_SHA=d5ac1be17f575852eaf4fffc4072fd18481c209b
+ARG HARBOR_COMPAT_SHA=09f5b964f8e5075f7e52fd08c9994dfc80ad5d24
 ARG HARBOR_VERSION=0.24.0
 WORKDIR /app
 COPY deploy/harbor-runtime-requirements.txt /tmp/harbor-runtime-requirements.txt
