@@ -18,12 +18,26 @@ _Grant = tuple[str, str, str, str | None]
 
 def subject_review_namespaces(request: PoolMigrationRequest, bindings: Sequence[dict[str, Any]], *,
                               subject: tuple[str, str]) -> tuple[str, ...]:
+    """Derive the legacy migration scope without changing its retained contract."""
+    try:
+        namespaces = {request.registration.binding.namespace, *(target.namespace for target in request.guards),
+            *(ns.name for row in request.registration.spec.participants for ns in (row.execution_namespace, row.build_namespace))}
+        return service_account_review_namespaces(tuple(namespaces), bindings, subject=subject)
+    except Exception:
+        raise ValueError('pool_subject_review_scope_unqualified') from None
+
+
+def service_account_review_namespaces(base_namespaces: Sequence[str], bindings: Sequence[dict[str, Any]], *,
+                                      subject: tuple[str, str]) -> tuple[str, ...]:
     """Include foreign RoleBindings to this account or any of its actual groups."""
     try:
-        manager = request.registration.binding.namespace
         account_namespace, account = subject
-        namespaces = {manager, *(target.namespace for target in request.guards),
-            *(ns.name for row in request.registration.spec.participants for ns in (row.execution_namespace, row.build_namespace))}
+        namespaces = {account_namespace, *base_namespaces}
+        if (not isinstance(account, str) or not 0 < len(account) <= 253
+                or re.fullmatch(r'[a-z0-9](?:[-a-z0-9]*[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]*[a-z0-9])?)*', account) is None
+                or any(not isinstance(name, str)
+                    or re.fullmatch(r'[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?', name) is None for name in namespaces)):
+            raise ValueError
         identities = {'User': {f'system:serviceaccount:{account_namespace}:{account}'},
             'Group': {'system:serviceaccounts', 'system:serviceaccounts:' + account_namespace, 'system:authenticated'}}
         for binding in bindings:

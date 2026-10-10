@@ -16,6 +16,12 @@ from scripts.ops.nebius_development_runtime_retained import (
     load_completed_runtime,
 )
 from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
+from scripts.ops.nebius_management_prerequisites import inventory_resources
+from scripts.ops.nebius_management_transport import ManagementKubernetesTransport
+from scripts.ops.nebius_pool_gateway_authority import (
+    review_gateway_rules,
+    service_account_review_namespaces,
+)
 
 from loom.nebius_platform_render import digest
 from loom_service.pool_management.installation_render import render_gateway
@@ -81,3 +87,56 @@ def prepare_development_activation(request: DevelopmentRuntimeInstallRequest) ->
         return DevelopmentActivationPlan(runtime, authority, original, target, namespace, build_target, policy, checksum)
     except Exception:
         raise ValueError('development activation intent unqualified') from None
+
+
+def review_development_gateway_permissions(request: DevelopmentRuntimeInstallRequest, *,
+        transport: ManagementKubernetesTransport, granted: bool) -> tuple[str, ...]:
+    """Inspect the fixed dev gateway, including grants outside dev namespaces.
+
+    This makes only inventory GETs and nonpersisted permission reviews. It never
+    grants authority or fences staging. The protected activation parent must bind
+    this observation to live cluster/resource identity and its recorded grant
+    phase, and separately qualify competing Kubernetes/provider writers. Passing
+    this check alone is not sole-physical-pool ownership or permission to activate.
+    """
+    try:
+        if type(granted) is not bool:
+            raise ValueError
+        plan = prepare_development_activation(request)
+        database = plan.runtime.request.database
+        registration = database.manager.retained.request.registration
+        if transport.api_server != database.foundation.inputs.config['kubernetes_api_server']:
+            raise ValueError
+
+        def permissions() -> dict[str, dict[str, Any]]:
+            rows: dict[str, dict[str, Any]] = {}
+            uids: set[str] = set()
+            for resource, kind in (('roles', 'Role'), ('clusterroles', 'ClusterRole'),
+                    ('rolebindings', 'RoleBinding'), ('clusterrolebindings', 'ClusterRoleBinding')):
+                for row in inventory_resources(transport._request, 'rbac.authorization.k8s.io/v1', resource, kind):
+                    key, uid = _key(row), _uid(row)
+                    metadata = row['metadata']
+                    if (key in rows or uid in uids
+                            or not isinstance(metadata.get('resourceVersion'), str) or not metadata['resourceVersion']
+                            or (kind in {'Role', 'RoleBinding'}) != bool(metadata.get('namespace'))):
+                        raise ValueError
+                    _snapshot(row)
+                    rows[key], uids = row, uids | {uid}
+            return rows
+
+        original = permissions()
+        manager = registration.binding.namespace
+        base = (manager, database.foundation.inputs.config['namespace'],
+            *(ns.name for participant in registration.spec.participants
+                for ns in (participant.execution_namespace, participant.build_namespace)))
+        bindings = tuple(row for row in original.values() if row['kind'] in {'RoleBinding', 'ClusterRoleBinding'})
+        namespaces = service_account_review_namespaces(base, bindings,
+            subject=(manager, 'loom-pool-gateway'))
+        authority = list(plan.authority.values()) if granted else []
+        for namespace in namespaces:
+            review_gateway_rules(transport.client, manager_namespace=manager, namespace=namespace, authority=authority)
+        if permissions() != original or prepare_development_activation(request) != plan:
+            raise ValueError
+        return namespaces
+    except Exception:
+        raise ValueError('development gateway permissions unqualified') from None
