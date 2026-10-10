@@ -1731,8 +1731,9 @@ def test_shared_guard_binding_uses_live_dev_database_and_real_bound_guard_reader
 
 
 @pytest.mark.timeout(600)
+@pytest.mark.parametrize('forward_processes', [False, True], ids=['initial', 'forward'])
 def test_shared_process_preflight_reads_current_databases_and_retired_authority(
-        shared_runtime, staging_history, staging_observation, completed_pool, handoff, monkeypatch):
+        shared_runtime, staging_history, staging_observation, completed_pool, handoff, monkeypatch, forward_processes):
     """Reject active old authority, failed real challenges and changed bindings.
 
     Only Kubernetes transport and remote process output are doubled. Omitting a
@@ -1759,6 +1760,7 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
     from scripts.ops.nebius_pool_migration_guard import (
         _BOUND_DATABASE_COMMAND,
         _BOUND_TELEMETRY_COMMAND,
+        pool_runtime_role_sql,
     )
     from scripts.ops.nebius_pool_runtime_settings import (
         BOUND_POOL_SETTINGS_COMMAND,
@@ -1788,7 +1790,7 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
     manager_namespace = request.database.manager.retained.request.retained.binding.namespace
 
     def add(row):
-        plural = {'Secret': 'secrets', 'Namespace': 'namespaces', 'Deployment': 'deployments',
+        plural = {'Secret': 'secrets', 'Namespace': 'namespaces', 'Deployment': 'deployments', 'CronJob': 'cronjobs',
             'StatefulSet': 'statefulsets', 'Service': 'services', 'ReplicaSet': 'replicasets'}[row['kind']]
         prefix = '/api/v1' if row['apiVersion'] == 'v1' else '/apis/' + row['apiVersion']
         namespace = row['metadata'].get('namespace')
@@ -1797,7 +1799,7 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
         return path
 
     for row in attachment.resources:
-        if row['kind'] in {'Namespace', 'Deployment', 'StatefulSet', 'Service'}:
+        if row['kind'] in {'Namespace', 'Deployment', 'StatefulSet', 'Service', 'CronJob'}:
             add(row)
     # Recover the old manager DB and credential from its genuine installation.
     journal = json.loads((old.original.upgrade.original_state / 'database/stage.json').read_bytes())
@@ -1881,9 +1883,9 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
             else:
                 kind, name = args[1:3]
                 namespace = args[args.index('-n') + 1] if '-n' in args else None
-                plural = {'namespace': 'namespaces', 'deployment': 'deployments', 'replicaset': 'replicasets',
+                plural = {'namespace': 'namespaces', 'deployment': 'deployments', 'replicaset': 'replicasets', 'cronjob': 'cronjobs',
                     'secret': 'secrets', 'service': 'services', 'statefulset': 'statefulsets'}[kind]
-                prefix = '/apis/apps/v1' if kind in {'deployment', 'replicaset', 'statefulset'} else '/api/v1'
+                prefix = '/apis/apps/v1' if kind in {'deployment', 'replicaset', 'statefulset'} else '/apis/batch/v1' if kind == 'cronjob' else '/api/v1'
                 value = read(prefix + ('/namespaces/' + namespace if namespace else '') + '/' + plural + '/' + name)
         else:
             assert args[:2] == ['exec', '-n'] and args[4] == '-c' and args[6] == '--'
@@ -1905,9 +1907,14 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
                     checked.add('new-closed')
                 else:
                     assert namespace in {'loom-dev', staging.namespace}
-                    assert sql == rollout_guard_observation_sql(owner=str(spec.operation_id), candidate=request.database.foundation.inputs.candidate['candidate_sha'])
-                    value = {'status': 'held' if mode['damage'] == 'guard-held' else 'open'}
-                    checked.add(('guard', namespace))
+                    if sql == rollout_guard_observation_sql(owner=str(spec.operation_id), candidate=request.database.foundation.inputs.candidate['candidate_sha']):
+                        value = {'status': 'held' if mode['damage'] == 'guard-held' or namespace in mode.get('held', set()) else 'open'}
+                        checked.add(('guard', namespace))
+                    else:
+                        assert forward_processes and sql == pool_runtime_role_sql(owner=str(spec.operation_id),
+                            candidate=request.database.foundation.inputs.candidate['candidate_sha'], action='inspect')
+                        value = {'status': 'qualified'}
+                        checked.add(('runtime-role', namespace))
             elif args[9] == _BOUND_TELEMETRY_COMMAND:
                 assert args[10] == attachment.participant.execution_namespace.name
                 assert args[-2:] == ['platform-test', node_uid]
@@ -1935,12 +1942,14 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
                     check = 'database'
                 else:
                     assert component == role
-                    if namespace in {staging.namespace, attachment.participant.execution_namespace.name}:
+                    staging_process = namespace in {staging.namespace, attachment.participant.execution_namespace.name}
+                    if staging_process and not mode.get('shared_settings'):
                         assert code == BOUND_LEGACY_SETTINGS_COMMAND
                         settings = expected_legacy_runtime_settings(component, workload)
                     else:
                         assert code == BOUND_POOL_SETTINGS_COMMAND
-                        machine, = (row for row in spec.machines if row.participant_id == dev.participant_id and row.workload_scope == 'environment')
+                        participant_id = staging.participant_id if staging_process else dev.participant_id
+                        machine, = (row for row in spec.machines if row.participant_id == participant_id and row.workload_scope == 'environment')
                         settings = expected_pool_runtime_settings(component, workload,
                             token_sha256=machine.token_sha256 if component in {'controller', 'actuator'} else None,
                             catalog_sha256=hashlib.sha256(spec.profiles.model_dump_json().encode()).hexdigest() if component == 'manager' else None)
@@ -1988,6 +1997,11 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
         assert checked == {'old-revoked', 'new-closed', 'telemetry', ('guard', 'loom-dev'), ('guard', staging.namespace),
             *((check, namespace, name) for namespace, name in roles for check in ('settings', 'database'))}
         assert 'private-test-only' not in repr(result)
+        if forward_processes:
+            _exercise_forward_processes(bindings=result.bindings, development=probes, documents=documents,
+                mode=mode, checked=checked, commands=commands, add=add,
+                args=dict(runtime=request, observation=staging_observation, legacy=staging_history, repo_root=ROOT))
+            return
         baseline = copy.deepcopy(documents)
         for damage in ('old-active', 'new-not-closed', 'guard-held', 'settings:' + staging.namespace,
                 'database:loom-dev', 'late-old-secret', 'late-staging-actuator'):
@@ -1999,6 +2013,226 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
     assert calls and all(row.method == 'GET' for row in calls)
     assert all(row[0] in {'get', 'exec'} for row in commands)
     assert all(path.read_bytes() == raw for path, raw in history.items())
+
+
+def _exercise_forward_processes(*, bindings, development, documents, mode, checked, commands, add, args):
+    """Real parent, process transports and readiness validators; no live effects."""
+    import importlib.util
+    import json
+
+    from scripts.ops import nebius_certificates as private_state
+    from scripts.ops import nebius_shared_pool_database as database
+    from scripts.ops import nebius_shared_pool_guards as guards
+    from scripts.ops import nebius_shared_pool_operation as parent
+    from scripts.ops import nebius_shared_pool_workloads as workloads
+    from scripts.ops.nebius_management_stage import _comparison_snapshot
+    from tests.ops.test_nebius_development_pool_retained import populate_runtime_pods
+
+    name = 'scripts.ops.nebius_shared_pool_forward_processes'
+    assert importlib.util.find_spec(name) is not None, 'phase-bound shared process observation is missing'
+    module = __import__(name, fromlist=['observe_shared_pool_forward_processes'])
+    manager = args['runtime'].database.manager.retained.request.retained
+    state = Path(manager.operation['state_dir']).parent / 'shared-pool-handoff'
+
+    class ProcessPhaseAPI(SharedPhaseAPI):
+        def prepare(self, phase, bound, child):
+            if phase == 'forward-guards':
+                guards.prepare_shared_pool_guards(bindings=bound, state_dir=child)
+            elif phase in {'forward-stop', 'forward-wire', 'forward-start'}:
+                workloads.prepare_shared_staging_workloads(bindings=bound, phase=phase, state_dir=child)
+            elif phase == 'forward-database':
+                database.prepare_shared_staging_database(bindings=bound, state_dir=child)
+            else:
+                super().prepare(phase, bound, child)
+
+        def validate_prepared_phase(self, phase, child):
+            if phase == 'forward-guards':
+                value = guards.validate_shared_pool_guards(bindings=bindings, state_dir=child, complete=False)
+                assert set(value['guards'].values()) == {'prepared'}
+            elif phase in {'forward-stop', 'forward-wire', 'forward-start'}:
+                workloads.validate_shared_staging_workloads(bindings=bindings, phase=phase,
+                    state_dir=child, complete=False, prepared=True)
+            elif phase == 'forward-database':
+                database.validate_shared_staging_database(bindings=bindings, state_dir=child, complete=False, prepared=True)
+            else:
+                super().validate_prepared_phase(phase, child)
+
+        def validate_phase(self, phase, child, *, complete):
+            if phase == 'forward-guards':
+                guards.validate_shared_pool_guards(bindings=bindings, state_dir=child, complete=complete)
+            elif phase in {'forward-stop', 'forward-wire', 'forward-start'}:
+                workloads.validate_shared_staging_workloads(bindings=bindings, phase=phase, state_dir=child, complete=complete)
+            elif phase == 'forward-database':
+                database.validate_shared_staging_database(bindings=bindings, state_dir=child, complete=complete)
+            else:
+                super().validate_phase(phase, child, complete=complete)
+
+        def advance(self, phase, bound, child):
+            if phase == 'forward-guards':
+                return set(json.loads((child / 'guards.json').read_bytes())['guards'].values()) == {'held'}
+            if phase in {'forward-stop', 'forward-wire', 'forward-start'}:
+                return all(row['status'] == 'applied' for row in json.loads((child / 'transition.json').read_bytes())['resources'].values())
+            if phase == 'forward-database':
+                return json.loads((child / 'database.json').read_bytes())['status'] == 'staged'
+            return super().advance(phase, bound, child)
+
+    api = ProcessPhaseAPI(parent)
+    api.block = 'forward-roles'
+    kwargs = {**args, 'bindings': bindings, 'api': api, 'action': 'install'}
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-guards'
+    originals = bindings.plan.staging.originals
+    for row in originals.values():
+        if row['kind'] == 'CronJob':
+            add(row)
+        namespace = row['metadata']['namespace']
+        documents.setdefault('/apis/batch/v1/namespaces/' + namespace + '/jobs',
+            {'apiVersion': 'batch/v1', 'kind': 'JobList', 'metadata': {'resourceVersion': '1'}, 'items': []})
+
+    def observe():
+        try:
+            return module.observe_shared_pool_forward_processes(bindings=bindings, state_dir=state, development=development,
+                kubeconfig=Path(development.prefix[development.prefix.index('--kubeconfig') + 1]),
+                executable=Path(development.prefix[0]))
+        except ValueError as exc:
+            import traceback
+
+            frames, cause = [], exc
+            while cause is not None:
+                frames.extend(f'{Path(frame.filename).name}:{frame.lineno}:{frame.name}'
+                    for frame in traceback.extract_tb(cause.__traceback__))
+                cause = cause.__context__
+            raise ValueError('forward process failure at ' + ', '.join(frames)) from None
+
+    checked.clear()
+    assert observe().pending_workloads == ()
+    assert {'new-closed', 'old-revoked', ('runtime-role', 'loom-dev')} <= checked
+    guard_path = state / 'forward-guards/guards.json'
+    guard_record = json.loads(guard_path.read_bytes())
+    first = bindings.migration.guards[0]
+    mode['held'] = {first.namespace}
+    with pytest.raises(ValueError):
+        observe()  # An unrecorded held guard is not owned by this operation.
+    guard_record['guards'][str(first.participant_id)] = 'acquire_intent'
+    private_state._atomic_json(guard_path, guard_record)
+    assert observe().guard_states[first.namespace] == 'held'
+    for target in bindings.migration.guards:
+        mode['held'].add(target.namespace)
+        guard_record['guards'][str(target.participant_id)] = 'held'
+    private_state._atomic_json(guard_path, guard_record)
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-stop'
+    assert observe().pending_workloads == ()
+
+    def path_for(row):
+        prefix = '/apis/apps/v1' if row['kind'] == 'Deployment' else '/apis/batch/v1'
+        plural = 'deployments' if row['kind'] == 'Deployment' else 'cronjobs'
+        return prefix + '/namespaces/' + row['metadata']['namespace'] + '/' + plural + '/' + row['metadata']['name']
+
+    def replace_live(row, wanted):
+        identity = {key: row['metadata'][key] for key in ('uid', 'resourceVersion')}
+        generation = row['metadata'].get('generation', 1) + 1
+        row.clear()
+        row.update(copy.deepcopy(wanted))
+        row['metadata'].update(**identity, generation=generation)
+        row['status'] = {'observedGeneration': generation}
+
+    stop_path = state / 'forward-stop/transition.json'
+    stop_record = json.loads(stop_path.read_bytes())
+    lingering = None
+    for key, wanted in bindings.plan.staging.stopped.items():
+        wanted = _comparison_snapshot(wanted)
+        stop_record['resources'][key].update(status='intent', expected=wanted)
+        private_state._atomic_json(stop_path, stop_record)
+        current = documents[path_for(wanted)]
+        replace_live(current, wanted)
+        namespace = current['metadata']['namespace']
+        if current['kind'] == 'Deployment':
+            pod_path = '/api/v1/namespaces/' + namespace + '/pods'
+            labels = current['spec']['selector']['matchLabels']
+            selected = [pod for pod in documents[pod_path]['items']
+                if all(pod['metadata'].get('labels', {}).get(k) == v for k, v in labels.items())]
+            assert selected
+            selected[0]['metadata']['deletionTimestamp'] = '2026-10-10T00:00:00Z'
+            assert key in observe().pending_workloads  # Zero replicas alone is not drain.
+            lingering = (key, pod_path, copy.deepcopy(selected[0]))
+            documents[pod_path]['items'] = [pod for pod in documents[pod_path]['items'] if pod not in selected]
+            for replica in documents['/apis/apps/v1/namespaces/' + namespace + '/replicasets']['items']:
+                if any(owner['uid'] == current['metadata']['uid'] for owner in replica['metadata'].get('ownerReferences', [])):
+                    replica['spec']['replicas'] = 0
+                    replica['status'] = {'observedGeneration': replica['metadata']['generation']}
+        stop_record['resources'][key]['status'] = 'applied'
+        private_state._atomic_json(stop_path, stop_record)
+    assert observe().pending_workloads == ()
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-roles'
+    before = len(commands)
+    assert observe().pending_workloads == ()
+    namespaces = {row['metadata']['namespace'] for row in originals.values()}
+    assert not any(row[0] == 'exec' and row[2] in namespaces and row[7] == 'python' for row in commands[before:])
+    key, pod_path, pod = lingering
+    documents[pod_path]['items'].append(pod)
+    with pytest.raises(ValueError):
+        observe()  # Once stop is complete, new lingering processes are not a resumable wait.
+    documents[pod_path]['items'].remove(pod)
+    api.block = 'forward-material'
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-database'
+    db_path = state / 'forward-database/database.json'
+    db_record = json.loads(db_path.read_bytes())
+    db_record['status'] = 'staged'
+    private_state._atomic_json(db_path, db_record)
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-material'
+    checked.clear()
+    observe()
+    assert ('runtime-role', bindings.plan.staging.attachment.guard.namespace) in checked
+    api.block = 'forward-build-policy'
+    for phase in ('forward-wire', 'forward-start'):
+        assert parent.run_shared_pool_operation(**kwargs)['phase'] == phase
+        journal = state / phase / 'transition.json'
+        record = json.loads(journal.read_bytes())
+        for key, item in record['resources'].items():
+            current = documents[path_for(originals[key])]
+            wanted = _comparison_snapshot(bindings.plan.staging_targets[key] if phase == 'forward-wire' else current)
+            if phase == 'forward-start':
+                wanted['spec']['replicas'] = originals[key]['spec']['replicas']
+            item.update(status='intent', expected=wanted)
+            private_state._atomic_json(journal, record)
+            replace_live(current, wanted)
+            if phase == 'forward-start':
+                mode['shared_settings'] = True
+                assert key in observe().pending_workloads
+                runtime = {path_for(current): current}
+                populate_runtime_pods(runtime)
+                for path, value in runtime.items():
+                    if value['kind'] in {'PodList', 'ReplicaSetList'}:
+                        # The old replicas are retained, but do not revive them.
+                        documents[path]['items'].extend(value['items'])
+                        for row in value['items']:
+                            if row['kind'] == 'ReplicaSet':
+                                add(row)
+                            else:
+                                row['spec']['nodeName'] = 'platform-test'
+            assert key not in observe().pending_workloads
+            item['status'] = 'applied'
+            private_state._atomic_json(journal, record)
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-build-policy'
+    checked.clear()
+    assert observe().pending_workloads == ()
+    for row in originals.values():
+        if row['kind'] == 'Deployment':
+            assert ('settings', row['metadata']['namespace'], row['metadata']['name']) in checked
+            assert ('database', row['metadata']['namespace'], row['metadata']['name']) in checked
+    for damage in ('old-active', 'new-not-closed', 'settings:' + bindings.plan.staging.attachment.guard.namespace,
+            'database:loom-dev', 'late-staging-actuator'):
+        baseline = copy.deepcopy(documents)
+        mode['damage'] = damage
+        with pytest.raises(ValueError):
+            observe()
+        documents.clear()
+        documents.update(baseline)
+    mode['damage'] = None
+    guard_path.unlink()
+    before = len(commands)
+    with pytest.raises(ValueError):
+        observe()
+    assert len(commands) == before
 
 
 @pytest.mark.timeout(420)
