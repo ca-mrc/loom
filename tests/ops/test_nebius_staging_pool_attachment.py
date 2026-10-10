@@ -2,16 +2,17 @@
 from __future__ import annotations
 
 import copy
+import json
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
-
-from loom.nebius_pool_contract import PoolParticipantV1
 from tests.support.execution_image_admission import signed_image_admission_bundle
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 from tests.unit.test_nebius_pool_contract import participant
 from tests.unit.test_nebius_pool_profiles import document
+
+from loom.nebius_pool_contract import PoolParticipantV1
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -89,8 +90,86 @@ def test_current_staging_attachment_derives_real_catalog_without_republishing_or
     result.profiles.profiles()
 
 
+def test_staging_build_profile_drives_real_global_native_builder(staging_attachment_inputs):
+    from tests.unit.test_nebius_pool_task_image_render import build_inputs, render
+
+    options, config = staging_attachment_inputs
+    result = prepare(options)
+    binding = result.participant
+    _, body, _ = build_inputs()
+    body.update(pool_id=binding.pool_id, admission_epoch=binding.admission_epoch,
+        participant_revision=binding.binding_revision, target_id=config['target_id'])
+    body['key']['participant_id'] = binding.participant_id
+    body['origin']['data_environment_id'] = binding.environment_id
+    body['build']['source']['uri'] = 's3://' + config['buckets']['artifacts'] + '/tasks/revision/'
+    profile, = result.profiles.profiles().task_images.values()
+    built = render(binding, body, profile)
+    pod = built.job['spec']['template']['spec']
+    assert pod['nodeSelector'] == {'nebius.com/node-group-id': config['execution_node_group_id'],
+        'loom.nebius/node-role': 'integration-execution', 'loom.nebius/platform': 'integration',
+        'loom.nebius/node-os': 'linux', 'loom.nebius/node-arch': 'amd64'}
+    assert built.namespace_uid == binding.build_namespace.uid
+    assert json.loads(built.configmap['data']['claim.json'])['source_bucket'] == config['buckets']['artifacts']
+
+
+def test_staging_attachment_ignores_ambient_actuator_settings(staging_attachment_inputs, monkeypatch):
+    options, _ = staging_attachment_inputs
+    monkeypatch.setenv('LOOM_EXECUTION_ACTUATOR_RUNTIME_CLASS_NAME', 'foreign')
+    monkeypatch.setenv('LOOM_EXECUTION_ACTUATOR_SERVICE_ACCOUNT_NAME', 'foreign')
+    result = prepare(options)
+    for row in result.profiles.execution:
+        assert row.runtime.runtime_class_name is None
+        assert row.runtime.service_account_name == 'loom-execution-attempt'
+
+
+def test_current_source_attachment_preserves_completed_legacy_markers_and_uids(staging_attachment_inputs):
+    options, _ = staging_attachment_inputs
+    operation = str(uuid4())
+    marker = 'loom.nebius/pool-retirement-operation'
+    for row in options['observation']['resources']:
+        if row['kind'] in {'Deployment', 'CronJob'}:
+            row['metadata'].setdefault('annotations', {})[marker] = operation
+    result = prepare(options)
+    originals = {row['metadata']['uid']: row for row in options['observation']['resources']}
+    for row in (*result.actuators, result.guard.controller):
+        assert row == originals[row['metadata']['uid']]
+        assert row['metadata']['annotations'][marker] == operation
+    # Preparation retains this history; only the later protected forward
+    # composition can qualify it as a predecessor, never a rollback replay.
+
+
+def test_real_staging_catalog_fits_complete_initial_pool_installation(staging_attachment_inputs):
+    from tests.integration.test_nebius_pool_installation import installation
+
+    from loom_service.pool_management.installation import PoolInstallation
+
+    options, config = staging_attachment_inputs
+    value, _ = installation(('development',))
+    payload = options['participant'].model_dump(mode='json')
+    payload.update(pool_id=value['pool_id'], installation_id=value['installation_id'], admission_epoch=value['admission_epoch'])
+    options['participant'] = PoolParticipantV1.model_validate(payload)
+    result = prepare(options)
+    value.update(cluster_id=config['cluster_id'], node_group_id=config['execution_node_group_id'])
+    selector = {'nebius.com/node-group-id': value['node_group_id'],
+        'loom.nebius/node-os': 'linux', 'loom.nebius/node-arch': 'amd64'}
+    value['node_selector'] = selector
+    value['profiles']['execution'][0]['runtime']['node_selector'] = selector
+    value['profiles']['task_images'][0]['target']['node_selector'] = selector
+    value['participants'].append(result.participant.model_dump(mode='json'))
+    profile_data = result.profiles.model_dump(mode='json')
+    for kind in ('execution', 'task_images'):
+        value['profiles'][kind].extend(profile_data[kind])
+    machine = copy.deepcopy(next(row for row in value['machines'] if row['role'] == 'participant'))
+    machine.update(machine_id=str(uuid4()), participant_id=str(result.participant.participant_id), token_sha256='f' * 64)
+    value['machines'].append(machine)
+    spec = PoolInstallation.model_validate(value)
+    assert {row.environment_class for row in spec.participants} == {'development', 'staging'}
+    assert len(spec.profiles.task_images) == 2
+
+
 @pytest.mark.parametrize('damage', ['candidate', 'image', 'namespace_uid', 'cluster', 'group',
-    'undeclared_legacy', 'development', 'extra_target', 'missing_actuator', 'duplicate_uid', 'container_hook'])
+    'undeclared_legacy', 'development', 'extra_target', 'missing_actuator', 'duplicate_uid', 'container_hook',
+    'pod_hook', 'pod_selector', 'collector_config'])
 def test_staging_attachment_rejects_stale_or_unbound_current_runtime(staging_attachment_inputs, damage):
     options, config = copy.deepcopy(staging_attachment_inputs)
     rows = options['observation']['resources']
@@ -115,11 +194,19 @@ def test_staging_attachment_rejects_stale_or_unbound_current_runtime(staging_att
         options['participant'] = PoolParticipantV1.model_validate(payload)
     elif damage == 'duplicate_uid':
         rows[1]['metadata']['uid'] = rows[0]['metadata']['uid']
+    elif damage == 'collector_config':
+        collector, = [row for row in rows if row['kind'] == 'ConfigMap' and
+            'LOOM_EXECUTION_CAPACITY_COLLECTOR_NODE_LABEL_SELECTOR' in row.get('data', {})]
+        collector['data']['LOOM_EXECUTION_CAPACITY_COLLECTOR_EXTRA'] = 'unpublished'
     else:
         actuator, = [row for row in rows if row['kind'] == 'Deployment' and row['metadata']['name'] == 'loom-execution-actuator']
         if damage == 'missing_actuator':
             rows.remove(actuator)
-        else:
+        elif damage == 'container_hook':
             actuator['spec']['template']['spec']['containers'][0]['lifecycle'] = {'postStart': {'exec': {'command': ['foreign']}}}
+        elif damage == 'pod_hook':
+            actuator['spec']['template']['spec']['readinessGates'] = [{'conditionType': 'foreign'}]
+        else:
+            actuator['spec']['template']['spec']['nodeSelector']['foreign'] = 'true'
     with pytest.raises(ValueError, match='staging pool attachment unqualified'):
         prepare(options)
