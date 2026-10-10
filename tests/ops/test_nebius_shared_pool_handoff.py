@@ -380,7 +380,9 @@ def test_shared_parent_anchors_all_phases_and_never_replays_completed_effects(sh
     writes = list(api.events)
     preflights = api.preflights
     assert module.run_shared_pool_operation(**kwargs, action='install')['admission_open'] is True
-    assert module.run_shared_pool_operation(**kwargs, action='preflight')['status'] == 'shared_pool_preflight_qualified'
+    qualified = module.run_shared_pool_operation(**kwargs, action='preflight')
+    assert qualified['status'] == 'shared_pool_preflight_qualified'
+    assert qualified['admission_open'] is True and qualified['writer_migration_complete'] is True
     assert api.events == writes and api.preflights == preflights
     with pytest.raises(ValueError, match='shared pool operation unconfirmed'):
         module.run_shared_pool_operation(**kwargs, action='recover')
@@ -423,6 +425,19 @@ def test_shared_parent_recovery_freezes_forward_history_and_is_terminal(shared_o
     assert json.loads((state / 'operation.json').read_bytes())['forward'] == forward
     with pytest.raises(ValueError, match='shared pool operation unconfirmed'):
         module.run_shared_pool_operation(**kwargs, action='install')
+    # Cancelling must freeze the pending child's bytes too, not only the
+    # completed-child hashes. This altered receipt is individually well formed.
+    pending = state / 'forward-wire/receipt.json'
+    raw = pending.read_bytes()
+    writes = list(api.events)
+    try:
+        pending.write_text(json.dumps({'phase': 'forward-wire', 'status': 'applied'}))
+        with pytest.raises(ValueError, match='shared pool operation unconfirmed'):
+            module.run_shared_pool_operation(**kwargs, action='recover')
+        assert api.events == writes
+    finally:
+        pending.write_bytes(raw)
+        pending.chmod(0o600)
     result = module.run_shared_pool_operation(**kwargs, action='recover')
     assert result['status'] == 'staging_restored_dev_closed' and result['admission_open'] is False
     assert result['writer_migration_complete'] is False
