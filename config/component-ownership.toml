@@ -936,6 +936,7 @@ exclude_paths = [
   "tests/integration/test_nebius_build_deadline.py",
   "tests/integration/test_application_schema_reference.py",
   "tests/integration/test_execution_actuator_k3s.py",
+  "tests/integration/test_execution_maintenance_k3s.py",
   "tests/integration/test_node_share_memory_k3s.py",
   "tests/integration/test_nebius_platform_k3s.py", "tests/integration/test_task_identity_policy_k3s.py",
   "tests/integration/test_behavior_pipeline_inputs.py",
@@ -1057,7 +1058,7 @@ include_paths = [
 id = "python-cluster-smoke"
 language = "python"
 lane = "cluster-smoke"
-include_paths = ["tests/cluster/**/*.py", "tests/integration/test_node_share_memory_k3s.py", "tests/integration/test_execution_actuator_k3s.py", "tests/integration/test_nebius_platform_k3s.py", "tests/integration/test_task_identity_policy_k3s.py", "tests/unit/test_nebius_runtime_render.py"]
+include_paths = ["tests/cluster/**/*.py", "tests/integration/test_node_share_memory_k3s.py", "tests/integration/test_execution_actuator_k3s.py", "tests/integration/test_execution_maintenance_k3s.py", "tests/integration/test_nebius_platform_k3s.py", "tests/integration/test_task_identity_policy_k3s.py", "tests/unit/test_nebius_runtime_render.py"]
 
 [[test_suites]]
 id = "python-system-smoke"
