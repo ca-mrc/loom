@@ -1174,6 +1174,25 @@ subsequent reopening and does not incorrectly require reopened staging work to
 stay idle. This child cannot release either participant guard or reopen the
 cancelled global ledger.
 
+The shared reopening child releases only the source-qualified staging guard,
+using the fixed recovery-owner transaction rather than the forward activation
+release. The new manager's cancelled epoch remains fenced, its machine tokens
+revoked, and the dev participant closed. Completed restart receipts bind this
+child, but current restored-runtime readiness, effective rights, successor
+process drain, writer/provider qualification and SQL readbacks still precede
+dispatch. Busy final checks leave the receipt prepared. One durable intent
+permits one release; lost replies and interruptions after intent are resolved
+only by observation. An already-open staging guard without that intent is
+rejected. The transaction rechecks exact recovery ownership and local drain
+under the admission lock.
+
+After staging opens, its newly admitted work does not have to drain again.
+Cancelled global/dev ledgers and their stopped processes still must remain idle.
+A separate read-only terminal phase requires fresh runtime and authority evidence,
+even when a previous verification observation was saved. These children remain
+internal to the shared parent: they provide no standalone release command or
+permission to skip full protected-parent composition and installed acceptance.
+
 The shared Role child reduces only the two source-qualified staging worker/build
 Roles, preserving their UIDs and existing bindings. Each rules-and-annotations
 PATCH tests the current UID, resourceVersion and rules. Mutation intent precedes
