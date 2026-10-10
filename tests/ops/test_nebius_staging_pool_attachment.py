@@ -167,9 +167,47 @@ def test_real_staging_catalog_fits_complete_initial_pool_installation(staging_at
     assert len(spec.profiles.task_images) == 2
 
 
+def test_attached_staging_wires_real_controller_service_and_guest_actuators(staging_attachment_inputs):
+    from scripts.ops.nebius_management_material import ManagementBinding
+    from scripts.ops.nebius_pool_migration import PoolMigrationRequest
+    from scripts.ops.nebius_pool_registration import PoolRegistrationRequest
+    from scripts.ops.nebius_pool_runtime import wire_participant
+    from tests.integration.test_nebius_pool_installation import installation
+
+    from loom_service.pool_management.installation import PoolInstallation
+
+    options, config = staging_attachment_inputs
+    value, _ = installation(('staging',))
+    payload = options['participant'].model_dump(mode='json')
+    payload.update(pool_id=value['pool_id'], installation_id=value['installation_id'],
+        admission_epoch=value['admission_epoch'], participant_id=value['participants'][0]['participant_id'])
+    options['participant'] = PoolParticipantV1.model_validate(payload)
+    result = prepare(options)
+    value.update(participants=[result.participant.model_dump(mode='json')], profiles=result.profiles.model_dump(mode='json'),
+        cluster_id=config['cluster_id'], node_group_id=config['execution_node_group_id'],
+        node_selector={'nebius.com/node-group-id': config['execution_node_group_id']})
+    spec = PoolInstallation.model_validate(value)
+    binding = ManagementBinding(str(spec.installation_id), 'loom-nebius-management-dev', str(uuid4()), str(uuid4()))
+    registration = PoolRegistrationRequest(spec=spec, binding=binding, candidate=options['candidate'])
+    migration = PoolMigrationRequest(registration, (result.guard,))
+    service, = [row for row in result.resources if row['kind'] == 'Deployment' and row['metadata']['name'] == 'loom-service']
+    ordinary, *guests = result.actuators
+    wired = wire_participant(request=migration, participant_id=result.participant.participant_id,
+        management_origin='https://management.example.test', actuator=ordinary, guest_actuators=tuple(guests),
+        service=service, runtime_profile=result.runtime_profile)
+    assert len(wired) == 3 + len(guests)
+    assert all(row['spec']['replicas'] == 0 for row in wired.values())
+    cp_env = {row['name']: row.get('value') for row in wired['control_plane']['spec']['template']['spec']['containers'][0]['env']}
+    settings = json.loads(cp_env['LOOM_CP_SERVICE_EXECUTION_GLOBAL_POOL_JSON'])
+    assert settings['environment'] == 'development'
+    assert settings['participant']['environment_class'] == 'staging'
+    assert settings['participant']['legacy_catalog_environment'] == 'development'
+
+
 @pytest.mark.parametrize('damage', ['candidate', 'image', 'namespace_uid', 'cluster', 'group',
     'undeclared_legacy', 'development', 'extra_target', 'missing_actuator', 'duplicate_uid', 'container_hook',
-    'pod_hook', 'pod_selector', 'collector_config'])
+    'pod_hook', 'pod_selector', 'collector_config', 'mount_path', 'optional_secret', 'extra_resources',
+    'external_ips', 'owner_reference', 'collector_prefix'])
 def test_staging_attachment_rejects_stale_or_unbound_current_runtime(staging_attachment_inputs, damage):
     options, config = copy.deepcopy(staging_attachment_inputs)
     rows = options['observation']['resources']
@@ -194,10 +232,20 @@ def test_staging_attachment_rejects_stale_or_unbound_current_runtime(staging_att
         options['participant'] = PoolParticipantV1.model_validate(payload)
     elif damage == 'duplicate_uid':
         rows[1]['metadata']['uid'] = rows[0]['metadata']['uid']
+    elif damage == 'collector_prefix':
+        collector, = [row for row in rows if row['kind'] == 'CronJob' and row['metadata']['name'] == 'loom-execution-capacity-collector']
+        collector['spec']['jobTemplate']['spec']['template']['spec']['containers'][0]['envFrom'][0]['prefix'] = 'FOREIGN_'
     elif damage == 'collector_config':
         collector, = [row for row in rows if row['kind'] == 'ConfigMap' and
             'LOOM_EXECUTION_CAPACITY_COLLECTOR_NODE_LABEL_SELECTOR' in row.get('data', {})]
         collector['data']['LOOM_EXECUTION_CAPACITY_COLLECTOR_EXTRA'] = 'unpublished'
+    elif damage in {'external_ips', 'owner_reference'}:
+        public, = [row for row in rows if row['kind'] == 'Service' and row['spec'].get('type') == 'LoadBalancer']
+        if damage == 'external_ips':
+            public['spec']['externalIPs'] = ['192.0.2.123']
+        else:
+            public['metadata']['ownerReferences'] = [{'apiVersion': 'v1', 'kind': 'Secret',
+                'name': 'foreign', 'uid': str(uuid4())}]
     else:
         actuator, = [row for row in rows if row['kind'] == 'Deployment' and row['metadata']['name'] == 'loom-execution-actuator']
         if damage == 'missing_actuator':
@@ -206,7 +254,48 @@ def test_staging_attachment_rejects_stale_or_unbound_current_runtime(staging_att
             actuator['spec']['template']['spec']['containers'][0]['lifecycle'] = {'postStart': {'exec': {'command': ['foreign']}}}
         elif damage == 'pod_hook':
             actuator['spec']['template']['spec']['readinessGates'] = [{'conditionType': 'foreign'}]
+        elif damage == 'mount_path':
+            actuator['spec']['template']['spec']['containers'][0]['volumeMounts'][0]['subPath'] = 'foreign'
+        elif damage == 'optional_secret':
+            volume = next(row for row in actuator['spec']['template']['spec']['volumes'] if 'secret' in row)
+            volume['secret']['optional'] = True
+        elif damage == 'extra_resources':
+            actuator['spec']['template']['spec']['containers'][0]['resources']['limits']['nvidia.com/gpu'] = '1'
         else:
             actuator['spec']['template']['spec']['nodeSelector']['foreign'] = 'true'
     with pytest.raises(ValueError, match='staging pool attachment unqualified'):
         prepare(options)
+
+
+def test_staging_attachment_accepts_known_api_defaults_and_equivalent_quantities(staging_attachment_inputs):
+    options, _ = staging_attachment_inputs
+    for row in options['observation']['resources']:
+        if row['kind'] in {'Deployment', 'StatefulSet', 'CronJob'}:
+            spec = row['spec'] if row['kind'] != 'CronJob' else row['spec']['jobTemplate']['spec']
+            pod = spec['template']['spec']
+            for key, value in {'dnsPolicy': 'ClusterFirst', 'schedulerName': 'default-scheduler',
+                'restartPolicy': 'Always', 'terminationGracePeriodSeconds': 30,
+                'serviceAccount': pod.get('serviceAccountName', 'default')}.items():
+                pod.setdefault(key, value)
+            for container in pod.get('containers', []) + pod.get('initContainers', []):
+                container.setdefault('imagePullPolicy', 'IfNotPresent')
+                container.setdefault('terminationMessagePath', '/dev/termination-log')
+                container.setdefault('terminationMessagePolicy', 'File')
+                for mount in container.get('volumeMounts', []):
+                    mount.setdefault('readOnly', False)
+                for port in container.get('ports', []):
+                    port.setdefault('protocol', 'TCP')
+                limits = container.get('resources', {}).get('limits', {})
+                if limits.get('cpu') == '1000m':
+                    limits['cpu'] = '1'
+            for volume in pod.get('volumes', []):
+                for field in ('secret', 'configMap'):
+                    if field in volume:
+                        volume[field].setdefault('defaultMode', 420)
+                        volume[field].setdefault('optional', False)
+        if row['kind'] == 'Service' and row['spec'].get('type') == 'LoadBalancer':
+            row['spec'].update(clusterIP='10.96.0.10', clusterIPs=['10.96.0.10'], ipFamilies=['IPv4'],
+                ipFamilyPolicy='SingleStack', sessionAffinity='None', externalTrafficPolicy='Cluster',
+                internalTrafficPolicy='Cluster', allocateLoadBalancerNodePorts=True)
+            row['spec']['ports'][0].update(nodePort=31080, protocol='TCP')
+    assert prepare(options).participant == options['participant']
