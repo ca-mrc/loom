@@ -1115,6 +1115,23 @@ read-only verification remains available during subsequent pending recovery;
 completed revoke writes cannot replay. The protected parent still needs its
 fresh whole-pool writer census before restoring current staging authority.
 
+Current-staging template restoration consumes the completed stop and revocation
+receipts, not the historical manager's rollback templates. It restores only the
+captured staging roots, with zero replicas or suspended schedules and the
+recovery marker retained. New dev, manager and gateway roots stay stopped and
+unchanged. Fresh namespace descendant collections and the existing closed-workload
+qualifier prove process drain alongside the protected parent's current SQL and
+authority checks. The transport seals semantically validated predecessor inputs
+to their exact completed receipt hashes. Every boundary rereads the parent and
+private-input bytes and rejects changed receipts or targets; it does not recursively
+rederive all completed predecessors for each individual read. Live drain and
+authority observations are never cached. Busy observations after a preview leave dispatch unconsumed.
+Each changed template uses a UID/resourceVersion/metadata/spec-tested PATCH with
+late intent recording; lost replies are observation-only. An unchanged stopped
+template needs no write. Completed restoration can still be observed while Roles
+are restored, but cannot replay writes or observe across the subsequent restart.
+This phase grants no Role and does not start workloads or reopen intake.
+
 The shared Role child reduces only the two source-qualified staging worker/build
 Roles, preserving their UIDs and existing bindings. Each rules-and-annotations
 PATCH tests the current UID, resourceVersion and rules. Mutation intent precedes
