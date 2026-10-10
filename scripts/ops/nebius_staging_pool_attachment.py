@@ -14,8 +14,8 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from scripts.ops.nebius_ingress_stage import _key, _retains_intent, _uid
-from scripts.ops.nebius_management_stage import _qualified_defaulted
+from scripts.ops.nebius_ingress_stage import _key, _retains_intent, _snapshot, _uid
+from scripts.ops.nebius_management_stage import _canonical_quantities, _qualified_defaulted
 from scripts.ops.nebius_pool_migration import PoolGuardDatabase, PoolGuardTarget
 
 from loom.execution_contract import ExecutionClassV1, ExecutionTopologyV1
@@ -43,36 +43,103 @@ class StagingPoolAttachment:
     resources: tuple[dict[str, Any], ...]
 
 
+def _pod_defaults(path: tuple[str, ...], wanted: dict[str, Any]) -> dict[str, Any]:
+    if not path:
+        return {'dnsPolicy': 'ClusterFirst', 'restartPolicy': 'Always', 'schedulerName': 'default-scheduler',
+            'terminationGracePeriodSeconds': 30, 'enableServiceLinks': True,
+            'serviceAccount': wanted.get('serviceAccountName', 'default')}
+    if path[0] in {'containers', 'initContainers'}:
+        if len(path) == 2:
+            return {'imagePullPolicy': 'IfNotPresent', 'terminationMessagePath': '/dev/termination-log',
+                'terminationMessagePolicy': 'File', 'resources': {}}
+        if path[2:] == ('ports', '*'):
+            return {'protocol': 'TCP'}
+        if path[2:] == ('volumeMounts', '*'):
+            return {'readOnly': False, 'mountPropagation': 'None'}
+        if path[2:] == ('resources',):
+            return {'limits': {}, 'requests': {}}
+        if path[-1] in {'livenessProbe', 'readinessProbe', 'startupProbe'}:
+            return {'failureThreshold': 3, 'successThreshold': 1, 'timeoutSeconds': 1,
+                'periodSeconds': 10, 'initialDelaySeconds': 0}
+        if len(path) == 4 and path[2] in {'livenessProbe', 'readinessProbe', 'startupProbe'} and path[3] == 'httpGet':
+            return {'scheme': 'HTTP'}
+        if path[-1] in {'secretKeyRef', 'configMapKeyRef'}:
+            return {'optional': False}
+        if path[-1] == 'fieldRef':
+            return {'apiVersion': 'v1'}
+    if len(path) == 3 and path[:2] == ('volumes', '*'):
+        if path[2] in {'secret', 'configMap'}:
+            return {'defaultMode': 420, 'optional': False}
+        if path[2] == 'projected':
+            return {'defaultMode': 420}
+    return {}
+
+
+def _exact_pod(actual: Any, wanted: Any, path: tuple[str, ...] = ()) -> bool:
+    """Closed Pod trees, with narrowly enumerated API-default leaves only."""
+    if isinstance(wanted, dict):
+        if not isinstance(actual, dict):
+            return False
+        defaults = _pod_defaults(path, wanted)
+        if any(key not in defaults or type(actual[key]) is not type(defaults[key]) or actual[key] != defaults[key]
+                for key in actual.keys() - wanted.keys()):
+            return False
+        return all(_exact_pod(actual[key], value, (*path, key)) if key in actual else value == [] or (
+            path[-2:] == ('env', '*') and key == 'value' and value == '' and 'valueFrom' not in actual)
+            for key, value in wanted.items())
+    if isinstance(wanted, list):
+        return isinstance(actual, list) and len(actual) == len(wanted) and all(
+            _exact_pod(left, right, (*path, '*')) for left, right in zip(actual, wanted, strict=True))
+    return type(actual) is type(wanted) and actual == wanted
+
+
+def _public_service(desired: dict[str, Any], observed: dict[str, Any]) -> None:
+    _snapshot(observed)  # Preserve owner/lifecycle rejection on this branch too.
+    if not _retains_intent(observed, desired):
+        raise ValueError
+    actual, wanted = copy.deepcopy(observed['spec']), desired['spec']
+    defaults = {'sessionAffinity': 'None', 'externalTrafficPolicy': 'Cluster',
+        'internalTrafficPolicy': 'Cluster', 'allocateLoadBalancerNodePorts': True, 'ipFamilyPolicy': 'SingleStack'}
+    for key in actual.keys() - wanted.keys():
+        value = actual[key]
+        allocated = ((key == 'clusterIP' and isinstance(value, str) and bool(value) and value != 'None')
+            or (key == 'clusterIPs' and value == [observed['spec'].get('clusterIP')])
+            or (key == 'ipFamilies' and value in (['IPv4'], ['IPv6'])))
+        if not allocated and (key not in defaults or type(value) is not type(defaults[key]) or value != defaults[key]):
+            raise ValueError
+        del actual[key]
+    if len(actual['ports']) != len(wanted['ports']):
+        raise ValueError
+    for port, expected in zip(actual['ports'], wanted['ports'], strict=True):
+        if 'nodePort' not in expected and 'nodePort' in port:
+            value = port.pop('nodePort')
+            if type(value) is not int or not 1 <= value <= 65535:
+                raise ValueError
+        if 'protocol' not in expected and port.get('protocol') == 'TCP':
+            del port['protocol']
+    if actual != wanted:
+        raise ValueError
+
+
 def _qualified_workload(desired: dict[str, Any], observed: dict[str, Any]) -> None:
     if desired['kind'] == 'ConfigMap' and observed.get('data') != desired.get('data'):
         raise ValueError
     if desired['kind'] == 'Service' and desired['spec'].get('type', 'ClusterIP') != 'ClusterIP':
         # The existing web LoadBalancer is retained, not a private management
         # Service. Qualify its original exposure instead of changing its type.
-        if not _retains_intent(observed, desired) or observed['spec'].get('selector') != desired['spec'].get('selector'):
-            raise ValueError
+        _public_service(desired, observed)
     else:
         _qualified_defaulted(desired, observed)
     if desired['kind'] not in {'Deployment', 'StatefulSet', 'CronJob'}:
         return
-    actual, wanted = observed['spec'], desired['spec']
+    actual, wanted = _canonical_quantities(observed)['spec'], _canonical_quantities(desired)['spec']
     if actual.get('selector') != wanted.get('selector'):
         raise ValueError
     if desired['kind'] == 'CronJob':
         actual, wanted = actual['jobTemplate']['spec'], wanted['jobTemplate']['spec']
     actual, wanted = actual['template']['spec'], wanted['template']['spec']
-    # Kubernetes defaults are not permission for admission-injected scheduling,
-    # credentials, volume or lifecycle changes. Container fields are checked by
-    # _qualified_defaulted; retain only known Pod defaults here.
-    defaults = {'dnsPolicy': 'ClusterFirst', 'restartPolicy': 'Always',
-        'schedulerName': 'default-scheduler', 'terminationGracePeriodSeconds': 30,
-        'serviceAccount': wanted.get('serviceAccountName', 'default')}
-    for key in actual.keys() - wanted.keys():
-        if key not in defaults or actual[key] != defaults[key]:
-            raise ValueError
-    for key in ('nodeSelector', 'affinity'):
-        if actual.get(key) != wanted.get(key):
-            raise ValueError
+    if not _exact_pod(actual, wanted):
+        raise ValueError
 
 
 def _runtime(actuator: dict[str, Any], *, node_group_id: str) -> tuple[ExecutionTargetRuntime, NativeTaskImageSettings | None]:
