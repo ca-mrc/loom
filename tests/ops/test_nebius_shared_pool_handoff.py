@@ -478,6 +478,13 @@ def test_shared_guard_child_retains_busy_and_unknown_acquisitions_without_regist
     guards, model = shared_guard_transport
 
     class ConnectedGuardAPI(SharedPhaseAPI):
+        guard_qualification_hook = None
+
+        def qualify(self, bound, record, *, recovering):
+            super().qualify(bound, record, recovering=recovering)
+            if self.guard_qualification_hook is not None:
+                self.guard_qualification_hook()
+
         def prepare(self, phase, bound, state):
             if phase == 'forward-guards':
                 module.prepare_shared_pool_guards(bindings=bound, state_dir=state)
@@ -511,6 +518,26 @@ def test_shared_guard_child_retains_busy_and_unknown_acquisitions_without_regist
     assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-guards'
     assert model.held == {first} and model.acquires == [first, second]
     assert api.events == []
+    # Disappearing evidence during a pre-dispatch qualification must not be
+    # recreated by a later save. This is a separate controlled fault scenario.
+    manager = args['runtime'].database.manager.retained.request.retained
+    child = Path(manager.operation['state_dir']).parent / 'shared-pool-handoff/forward-guards/guards.json'
+    checkpoint = child.read_bytes()
+    second_id = str(bindings.migration.guards[1].participant_id)
+    def lose_guard_receipt():
+        if child.exists() and _read(child)['guards'][second_id] == 'acquire_intent':
+            api.guard_qualification_hook = None
+            child.unlink()  # Only this test's temporary child journal.
+    api.guard_qualification_hook = lose_guard_receipt
+    model.busy = None
+    with pytest.raises(ValueError, match='shared pool operation unconfirmed'):
+        parent.run_shared_pool_operation(**kwargs)
+    assert model.acquires == [first, second] and model.held == {first}
+    assert not child.exists()
+    # Restore the controlled fixture for the independent unknown-reply scenario;
+    # production never rewinds an acquisition intent this way.
+    child.write_bytes(checkpoint)
+    child.chmod(0o600)
     model.busy, model.uncertain = None, second
     for _ in range(2):
         with pytest.raises(ValueError, match='shared pool operation unconfirmed'):
@@ -691,7 +718,7 @@ def test_shared_parent_connects_current_staging_workload_transitions_without_rep
     runtime = args['runtime']
     original = copy.deepcopy(bindings.plan.staging.originals)
     rows, documents, writes = copy.deepcopy(original), {}, []
-    mode = {'lose_reply': True, 'lose_read': False}
+    mode = {'lose_reply': True, 'lose_read': False, 'delete_before_write': True, 'deleted_receipt': None}
     phases = {'forward-stop', 'forward-wire', 'forward-start'}
 
     def refresh():
@@ -776,9 +803,16 @@ def test_shared_parent_connects_current_staging_workload_transitions_without_rep
             def advance(self, phase, bound, state):
                 if phase not in phases:
                     return super().advance(phase, bound, state)
+                def qualify_runtime(request, child_phase, writing):
+                    assert request == runtime and child_phase == phase
+                    if writing and mode['delete_before_write']:
+                        mode['delete_before_write'] = False
+                        path = state / 'transition.json'
+                        mode['deleted_receipt'] = path.read_bytes()
+                        path.unlink()  # Fault injection in this test's own temporary child history.
                 api = stack.enter_context(module.HTTPSSharedStagingWorkloads(bindings=bound, phase=phase,
                     api_server=runtime.database.foundation.inputs.config['kubernetes_api_server'],
-                    ssl_context=ssl.create_default_context(), qualify_runtime=lambda *_: None, observe_ready=lambda *_: True))
+                    ssl_context=ssl.create_default_context(), qualify_runtime=qualify_runtime, observe_ready=lambda *_: True))
                 connection_type = type(api.client)
                 api.client.close()
                 api.client = connection_type(base_url=api.api_server, transport=httpx.MockTransport(handle))
@@ -789,6 +823,13 @@ def test_shared_parent_connects_current_staging_workload_transitions_without_rep
         kwargs = {**args, 'bindings': bindings, 'api': api, 'action': 'install'}
         manager = runtime.database.manager.retained.request.retained
         state = Path(manager.operation['state_dir']).parent / 'shared-pool-handoff'
+        with pytest.raises(ValueError, match='shared pool operation unconfirmed'):
+            parent.run_shared_pool_operation(**kwargs)
+        assert writes == [], 'lost child evidence must prevent a mutating PATCH'
+        missing = state / 'forward-stop/transition.json'
+        assert not missing.exists() and mode['deleted_receipt'] is not None
+        missing.write_bytes(mode['deleted_receipt'])
+        missing.chmod(0o600)
         with pytest.raises(ValueError, match='shared pool operation unconfirmed') as interrupted:
             parent.run_shared_pool_operation(**kwargs)
         if len(writes) != 1:
