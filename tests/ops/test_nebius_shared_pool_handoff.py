@@ -267,6 +267,177 @@ def shared_runtime(completed_pool, publisher_cloud):
     return request, api
 
 
+@pytest.fixture
+def shared_operation(shared_runtime, staging_history, staging_observation, completed_pool, handoff):
+    """A real source/history plan and GET-qualified database-bound migration."""
+    import ssl
+
+    import httpx
+    from scripts.ops.nebius_development_runtime_observation import HTTPSDevelopmentRuntimeObserver
+    from scripts.ops.nebius_shared_pool_handoff_live import observe_shared_pool_guard_bindings
+    from tests.ops.test_nebius_development_pool_retained import runtime_http_inventory
+
+    request, parent = shared_runtime
+    _, documents, handler = runtime_http_inventory(request, parent, completed_pool[3].server, handoff[2])
+    for row in documents.values():
+        if row['kind'] == 'Secret':
+            row['metadata'].setdefault('resourceVersion', '501')
+    args = dict(runtime=request, observation=staging_observation, legacy=staging_history, repo_root=ROOT)
+    with HTTPSDevelopmentRuntimeObserver(request=request,
+            api_server=request.database.foundation.inputs.config['kubernetes_api_server'],
+            ssl_context=ssl.create_default_context()) as observer:
+        for connection in (observer, observer.manager, observer.foundation):
+            connection.client.close()
+            connection.client = type(completed_pool[3].api.client)(base_url=connection.api_server, transport=httpx.MockTransport(handler))
+        bound = observe_shared_pool_guard_bindings(**args, development=observer)
+    return args, bound
+
+
+class SharedPhaseAPI:
+    """Only the phase-adapter boundary is doubled in parent-journal tests.
+
+    This models a child engine that writes intent before remote dispatch and
+    reads an uncertain result on resumption. It does not prove live adapters.
+    """
+    def __init__(self, module):
+        self.supported_phases = frozenset((*module.FORWARD_PHASES, *module.RECOVERY_PHASES))
+        self.events = []
+        self.qualifications = []
+        self.preflights = 0
+        self.block = None
+        self.uncertain = None
+
+    def preflight(self, bindings):
+        self.preflights += 1
+
+    def qualify(self, bindings, record, *, recovering):
+        self.qualifications.append((record['outcome'], recovering))
+
+    def validate_phase(self, phase, state, *, complete):
+        import json
+
+        record = json.loads((state / 'receipt.json').read_bytes())
+        assert record['phase'] == phase
+        assert record['status'] in {'pending', 'applied'}
+        if complete:
+            assert record['status'] == 'applied'
+
+    def advance(self, phase, bindings, state):
+        import json
+
+        from scripts.ops import nebius_certificates as private_state
+
+        path = state / 'receipt.json'
+        if path.exists() and json.loads(path.read_bytes())['status'] == 'applied':
+            return True  # Readback settles the prior dispatch; no second write.
+        private_state._private_directory(state)
+        private_state._atomic_json(path, {'phase': phase, 'status': 'pending'})
+        if phase == self.block:
+            return False
+        self.events.append(phase)
+        private_state._atomic_json(path, {'phase': phase, 'status': 'applied'})
+        if phase == self.uncertain:
+            raise TimeoutError('simulated response loss after child commit')
+        return True
+
+
+@pytest.mark.timeout(420)
+def test_shared_parent_anchors_all_phases_and_never_replays_completed_effects(shared_operation):
+    import importlib.util
+    import json
+
+    name = 'scripts.ops.nebius_shared_pool_operation'
+    assert importlib.util.find_spec(name) is not None, 'shared handoff phase controller is missing'
+    module = __import__(name, fromlist=['run_shared_pool_operation'])
+    args, bindings = shared_operation
+    manager = args['runtime'].database.manager.retained.request.retained
+    state = Path(manager.operation['state_dir']).parent / 'shared-pool-handoff'
+    marker = Path(manager.operation['anchor_dir']) / 'shared-pool-handoff.json'
+    api = SharedPhaseAPI(module)
+    kwargs = {**args, 'bindings': bindings, 'api': api}
+    before = {path: path.read_bytes() for path in bindings.plan.history}
+    assert module.run_shared_pool_operation(**kwargs, action='preflight')['status'] == 'shared_pool_preflight_qualified'
+    assert api.events == [] and not state.exists() and not marker.exists()
+    phases = api.supported_phases
+    api.supported_phases -= {'recovery-restore-workloads'}
+    with pytest.raises(ValueError, match='shared pool operation unconfirmed'):
+        module.run_shared_pool_operation(**kwargs, action='install')
+    assert api.events == [] and not state.exists() and not marker.exists()
+    api.supported_phases = phases
+    api.uncertain = 'forward-wire'
+    with pytest.raises(ValueError, match='shared pool operation unconfirmed'):
+        module.run_shared_pool_operation(**kwargs, action='install')
+    journal = json.loads((state / 'operation.json').read_bytes())
+    assert journal['forward']['forward-wire']['status'] == 'started'
+    assert journal['forward']['forward-start']['status'] == 'prepared'
+    assert marker.exists()
+    assert module.run_shared_pool_operation(**kwargs, action='install')['status'] == 'shared_pool_handoff_complete'
+    assert api.events == [
+        'forward-guards', 'forward-drain', 'forward-stop', 'forward-roles', 'forward-database',
+        'forward-material', 'forward-wire', 'forward-start', 'forward-build-policy',
+        'forward-gateway', 'forward-activate', 'forward-verify',
+    ]
+    writes = list(api.events)
+    preflights = api.preflights
+    assert module.run_shared_pool_operation(**kwargs, action='install')['admission_open'] is True
+    assert module.run_shared_pool_operation(**kwargs, action='preflight')['status'] == 'shared_pool_preflight_qualified'
+    assert api.events == writes and api.preflights == preflights
+    with pytest.raises(ValueError, match='shared pool operation unconfirmed'):
+        module.run_shared_pool_operation(**kwargs, action='recover')
+    child = state / 'forward-wire/receipt.json'
+    raw = child.read_bytes()
+    try:
+        child.write_bytes(b'{}')
+        with pytest.raises(ValueError, match='shared pool operation unconfirmed'):
+            module.run_shared_pool_operation(**kwargs, action='install')
+        assert api.events == writes
+    finally:
+        child.write_bytes(raw)
+        child.chmod(0o600)
+    assert all(path.read_bytes() == raw for path, raw in before.items())
+
+
+@pytest.mark.timeout(420)
+def test_shared_parent_recovery_freezes_forward_history_and_is_terminal(shared_operation):
+    import importlib.util
+    import json
+
+    name = 'scripts.ops.nebius_shared_pool_operation'
+    assert importlib.util.find_spec(name) is not None, 'shared handoff recovery controller is missing'
+    module = __import__(name, fromlist=['run_shared_pool_operation'])
+    args, bindings = shared_operation
+    manager = args['runtime'].database.manager.retained.request.retained
+    state = Path(manager.operation['state_dir']).parent / 'shared-pool-handoff'
+    anchor = Path(manager.operation['anchor_dir'])
+    api = SharedPhaseAPI(module)
+    api.block = 'forward-wire'
+    kwargs = {**args, 'bindings': bindings, 'api': api}
+    before = {path: path.read_bytes() for path in bindings.plan.history}
+    result = module.run_shared_pool_operation(**kwargs, action='install')
+    assert result['status'] == 'pending' and result['phase'] == 'forward-wire'
+    forward = json.loads((state / 'operation.json').read_bytes())['forward']
+    api.uncertain = 'recovery-restore-workloads'
+    with pytest.raises(ValueError, match='shared pool operation unconfirmed'):
+        module.run_shared_pool_operation(**kwargs, action='recover')
+    assert (anchor / 'shared-pool-recovery.json').is_file()
+    assert json.loads((state / 'operation.json').read_bytes())['forward'] == forward
+    with pytest.raises(ValueError, match='shared pool operation unconfirmed'):
+        module.run_shared_pool_operation(**kwargs, action='install')
+    result = module.run_shared_pool_operation(**kwargs, action='recover')
+    assert result['status'] == 'staging_restored_dev_closed' and result['admission_open'] is False
+    assert result['writer_migration_complete'] is False
+    assert [phase for phase in api.events if phase.startswith('recovery-')] == [
+        'recovery-fence', 'recovery-drain', 'recovery-stop', 'recovery-revoke',
+        'recovery-restore-workloads', 'recovery-restore-roles', 'recovery-restart',
+        'recovery-reopen', 'recovery-verify',
+    ]
+    writes = list(api.events)
+    assert module.run_shared_pool_operation(**kwargs, action='recover')['status'] == 'staging_restored_dev_closed'
+    assert api.events == writes
+    assert json.loads((state / 'operation.json').read_bytes())['forward'] == forward
+    assert all(path.read_bytes() == raw for path, raw in before.items())
+
+
 @pytest.mark.timeout(420)
 def test_shared_handoff_binds_real_completed_dev_and_current_staging(shared_runtime, staging_history, staging_observation):
     import base64
