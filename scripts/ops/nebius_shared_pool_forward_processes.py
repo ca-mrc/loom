@@ -1,4 +1,4 @@
-"""Fresh database and process observations during the pre-gateway handoff.
+"""Fresh database and process observations before shared pool opening.
 
 Only known in-flight stop/start readiness can be pending. A completed transition
 is not permission to skip present drain, settings or backend correspondence.
@@ -8,27 +8,33 @@ separate mandatory observations owned by the connected parent.
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 from scripts.ops.nebius_development_runtime_probes import HTTPSDevelopmentRuntimeProbes
 from scripts.ops.nebius_development_runtime_readiness import qualify_started_deployment
 from scripts.ops.nebius_ingress_stage import _snapshot, _uid
+from scripts.ops.nebius_management_material import _documents as management_material
 from scripts.ops.nebius_management_switch import _matches
+from scripts.ops.nebius_pool_migration import PoolGuardDatabase
 from scripts.ops.nebius_pool_migration_guard import KubectlPoolGuardAPI
 from scripts.ops.nebius_pool_origin_history import (
     KubectlPoolHistoryAPI,
+    PoolManagementHistoryTarget,
     derive_management_history_target,
 )
 from scripts.ops.nebius_pool_retirement import qualify_closed_workload_drain
 from scripts.ops.nebius_shared_pool_database import validate_shared_staging_database
+from scripts.ops.nebius_shared_pool_gateway import shared_forward_gateway_view
 from scripts.ops.nebius_shared_pool_guards import validate_shared_pool_guards
 from scripts.ops.nebius_shared_pool_handoff_live import SharedPoolGuardBindings
 from scripts.ops.nebius_shared_pool_operation import _files
 from scripts.ops.nebius_shared_pool_workloads import _frame, shared_forward_staging_options
 
 from loom.nebius_platform_render import digest
+from loom_service.environment_management.candidates import _json
 
 
 @dataclass(frozen=True, repr=False)
@@ -45,6 +51,7 @@ class SharedPoolForwardProcessObservation:
 class _ProcessScope:
     frame: dict[str, Any]
     workloads: dict[str, tuple[dict[str, Any], ...]]
+    gateway: tuple[dict[str, Any], ...]
     guards: dict[str, tuple[str, ...]]
     staging_acl: bool
     receipts: dict[str, dict[str, str]]
@@ -56,7 +63,7 @@ def _scope(bindings: SharedPoolGuardBindings, state: Path) -> _ProcessScope:
     recovery = Path(manager.operation['anchor_dir']) / 'shared-pool-recovery.json'
     if (frame['outcome'] != 'pending' or recovery.exists() or recovery.is_symlink()
             or any(frame['forward'][phase]['status'] != 'prepared'
-                for phase in ('forward-gateway', 'forward-activate', 'forward-verify'))):
+                for phase in ('forward-activate', 'forward-verify'))):
         raise ValueError
     guard_options: dict[str, tuple[str, ...]] = {target.namespace: ('open',) for target in bindings.migration.guards}
     status = frame['forward']['forward-guards']['status']
@@ -76,12 +83,54 @@ def _scope(bindings: SharedPoolGuardBindings, state: Path) -> _ProcessScope:
             complete=status == 'complete', prepared=status == 'prepared')
         staging_acl = record['status'] == 'staged'
     workloads = shared_forward_staging_options(bindings=bindings, state_dir=state)
+    gateway = shared_forward_gateway_view(bindings=bindings, state_dir=state)
+    gateway_options, = gateway[2].values()
     receipts = {phase: _files(state / phase, allow_empty=True)
         for phase in ('forward-guards', 'forward-stop', 'forward-database', 'forward-wire', 'forward-start', 'forward-build-policy')
         if (state / phase).exists() or (state / phase).is_symlink()}
-    if _frame(bindings, state) != frame:
+    receipts['forward-gateway'] = gateway[1]
+    if (gateway[0] != frame or _frame(bindings, state) != frame
+            or shared_forward_gateway_view(bindings=bindings, state_dir=state) != gateway):
         raise ValueError
-    return _ProcessScope(frame, workloads, guard_options, staging_acl, receipts)
+    return _ProcessScope(frame, workloads, gateway_options, guard_options, staging_acl, receipts)
+
+
+def _gateway_history_target(bindings: SharedPoolGuardBindings, credential: dict[str, Any]) -> PoolManagementHistoryTarget:
+    """The new manager's completed database/runtime, never legacy upgrade history.
+
+    The surrounding frame brackets every private input. The current Secret's
+    version is observed, not invented from a historical snapshot that omitted it.
+    """
+    completed = bindings.plan.development.runtime
+    manager = completed.request.database.manager.retained.request.retained
+    registration = bindings.migration.registration.binding
+    binding, state = manager.binding, Path(manager.operation['state_dir'])
+    material = _json(manager.files[state / 'bootstrap/material/material.json'])
+    if ((binding.namespace, binding.namespace_uid) != (registration.namespace, registration.namespace_uid)
+            or material['binding'] != asdict(binding) or material['status'] != 'delivered'):
+        raise ValueError
+    expected = management_material(material['material'], binding, material['operation_id'])['loom-platform-db']
+    uid = material['resources']['loom-platform-db']['uid']
+    version = credential['metadata'].get('resourceVersion')
+    if (not _matches(credential, expected, uid) or not isinstance(version, str) or not 0 < len(version) <= 128):
+        raise ValueError
+    journal = _json(manager.files[state / 'database/stage.json'])
+    keys = {kind + ':' + binding.namespace + ':loom-postgres' for kind in ('StatefulSet', 'Service')}
+    if (journal['schema'] != 'loom.nebius-management-stage.v1' or journal['binding'] != asdict(binding)
+            or journal['phase'] != '20-database.yaml' or set(journal['resources']) != keys):
+        raise ValueError
+    resources = {}
+    for key, row in journal['resources'].items():
+        document = copy.deepcopy(row['observed'])
+        if row['status'] != 'created' or key != document['kind'] + ':' + binding.namespace + ':loom-postgres':
+            raise ValueError
+        document['metadata']['uid'] = row['uid']
+        _uid(document)
+        resources[document['kind']] = document
+    return PoolManagementHistoryTarget(namespace=binding.namespace, namespace_uid=UUID(binding.namespace_uid),
+        controller=copy.deepcopy(completed.resources['Deployment:' + binding.namespace + ':loom-service']),
+        database=PoolGuardDatabase(statefulset=resources['StatefulSet'], service=resources['Service'],
+            credential_uid=UUID(uid), credential_resource_version=version))
 
 
 def observe_shared_pool_forward_processes(*, bindings: SharedPoolGuardBindings, state_dir: Path,
@@ -122,6 +171,12 @@ def observe_shared_pool_forward_processes(*, bindings: SharedPoolGuardBindings, 
             predecessor=legacy.context.predecessor, credential=old_credential)
         history = KubectlPoolHistoryAPI(request=legacy.context.request.fencing.retirement.migration,
             target=history_target, kubeconfig=kubeconfig, executable=executable)
+        manager_namespace = migration.registration.binding.namespace
+        manager_credential = guards._get('secret', 'loom-platform-db', manager_namespace)
+        gateway_target = _gateway_history_target(bindings, manager_credential)
+        gateway_history = KubectlPoolHistoryAPI(request=migration, target=gateway_target,
+            kubeconfig=kubeconfig, executable=executable)
+        manager_database = development._process_identity(gateway_history._database(gateway_target, url_variable='LOOM_SVC_DB_URL'))
 
         def ledgers() -> None:
             if history.machine_retirement('observe') != 'revoked':
@@ -219,6 +274,26 @@ def observe_shared_pool_forward_processes(*, bindings: SharedPoolGuardBindings, 
                     or final['metadata'].get('generation') != current['metadata'].get('generation')):
                 raise ValueError
             observed[key] = copy.deepcopy(current)
+        gateway_original = plan.development.gateway_original
+        gateway_key = 'Deployment:' + manager_namespace + ':loom-pool-gateway'
+
+        def read_gateway() -> dict[str, Any]:
+            value = guards._get('deployment', 'loom-pool-gateway', manager_namespace)
+            if not any(_matches(value, expected, _uid(gateway_original)) for expected in before_scope.gateway):
+                raise ValueError
+            return value
+
+        gateway = read_gateway()
+        gateway_ready = workload_ready(gateway_original, gateway)
+        gateway_process = None
+        if not gateway_ready:
+            if (gateway['spec']['replicas'] != 1 or before_scope.frame['forward']['forward-gateway']['status'] != 'started'):
+                raise ValueError
+            pending.append(gateway_key)
+        elif gateway['spec']['replicas'] == 1:
+            gateway_process = development._process_identity(gateway_history._runtime(
+                gateway_target, original=gateway_original, expected=gateway))
+            gateway_history.qualify_gateway_runtime(original=gateway_original, expected=gateway)
         ledgers()
         if (guard_states() != states or urls() != before_urls
                 or guards._get('secret', 'loom-platform-db', old_namespace) != old_credential
@@ -238,12 +313,25 @@ def observe_shared_pool_forward_processes(*, bindings: SharedPoolGuardBindings, 
             if key in process_identities:
                 if development._process_identity(guards._runtime(target, original=original, expected=final)) != process_identities[key]:
                     raise ValueError
+        final_gateway = read_gateway()
+        if (not _matches(final_gateway, gateway, _uid(gateway_original))
+                or final_gateway['metadata'].get('generation') != gateway['metadata'].get('generation')
+                or (gateway_ready and not workload_ready(gateway_original, final_gateway))
+                or (gateway_process is not None and development._process_identity(gateway_history._runtime(
+                    gateway_target, original=gateway_original, expected=final_gateway)) != gateway_process)):
+            raise ValueError
+        # Bracket the final consumer and gateway reads, not just their first
+        # challenges: those reads can overlap a credential rotation or DB restart.
+        if (guards._get('secret', 'loom-platform-db', manager_namespace) != manager_credential
+                or development._process_identity(gateway_history._database(gateway_target, url_variable='LOOM_SVC_DB_URL')) != manager_database):
+            raise ValueError
         if _scope(bindings, state_dir) != before_scope:
             raise ValueError
         telemetry = guards.telemetry_report()
         pending_keys = tuple(sorted(pending))
         checksum = digest({'handoff': bindings.input_digest, 'frame': before_scope.frame,
             'receipts': before_scope.receipts, 'guards': states, 'workloads': observed,
+            'gateway': gateway, 'gateway_process': gateway_process,
             'retired_authority': 'revoked', 'pending_workloads': pending_keys, 'telemetry': telemetry})
         return SharedPoolForwardProcessObservation(bindings, states, 'revoked', pending_keys, telemetry, checksum)
     except Exception:

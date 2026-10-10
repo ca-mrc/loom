@@ -964,7 +964,7 @@ workload while its PATCH is uncertain, then only its applied successor. This
 observer performs no mutations and rejects recovery or started activation phases;
 those require their own successor authority checks.
 
-The pre-gateway process observer likewise follows the actual guard, workload and
+The pre-opening process observer likewise follows the actual guard, workload and
 database receipts. It keeps the old manager revoked and the new manager CLOSED,
 inspects installed runtime database grants, and rechecks pinned consumer
 credentials and real database backends. Staging observations use the existing
@@ -977,8 +977,15 @@ Pending identities are evidence for the child readiness engine, never permission
 to advance the parent. The observer rechecks dev and staging process identities,
 staging templates and completed drain/readiness after all other probes; a late
 restart or a newly appearing descendant invalidates the earlier challenge.
-Writer census, fresh queue drain, provider qualification,
-gateway opening and recovery remain separate required connections.
+Gateway startup uses the same receipt-selected workload and descendant checks.
+Its settings, database correspondence, projected namespace access and fresh
+aggregate capacity are challenged in the actual gateway process. The database
+target comes from the new manager's completed installation, never the retired
+manager's upgrade history. Gateway/container and manager/database process
+identities, the manager credential and receipt bytes are checked again after the
+consumer readbacks. A completed startup cannot excuse lost gateway readiness as
+an in-flight wait. Writer census, fresh queue drain, provider qualification,
+pool opening and recovery remain separate required connections.
 
 The shared build-activation child changes only the recorded development build
 namespace's enforcement label and activation annotation. Before the UID and
