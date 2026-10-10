@@ -479,6 +479,23 @@ def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writ
     replica = writer_descendant(controller, 'ReplicaSet')
     inventory['replicasets'].append(replica)
     inventory['pods'].append(writer_descendant(replica, 'Pod'))
+    # Do not hide the installation's real, ownerless one-shot Jobs. They keep
+    # their recorded UID/template; only API status and child Pods are supplied.
+    jobs = {_key(row): copy.deepcopy(row) for row in (*staging_history.context.original.retained.values(),
+        *staging_history.context.predecessor.retained.values(), *documents.values()) if row['kind'] == 'Job'}
+    management_jobs = [row for row in jobs.values() if row['metadata']['namespace'] == 'loom-nebius-management-dev']
+    assert any(row['metadata']['name'].startswith('loom-management-migrate-') for row in management_jobs)
+    assert any(row['metadata']['name'].startswith('loom-management-backup-') for row in management_jobs)
+    for job in jobs.values():
+        job['metadata']['resourceVersion'] = '401'
+        job['status'] = {'conditions': [{'type': 'Complete', 'status': 'True'}], 'active': 0, 'succeeded': 1}
+        pod = writer_descendant(job, 'Pod')
+        pod['metadata']['labels'] = copy.deepcopy(job['spec']['template']['metadata']['labels'])
+        pod['status'] = {'phase': 'Succeeded', **{states: [{'name': row['name'],
+            'state': {'terminated': {'exitCode': 0}}} for row in pod['spec'].get(containers, [])]
+            for containers, states in (('containers', 'containerStatuses'), ('initContainers', 'initContainerStatuses'))}}
+        inventory['jobs'].append(job)
+        inventory['pods'].append(pod)
     calls, mode = [], {'revision': '500'}
 
     def respond(message):
@@ -520,11 +537,40 @@ def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writ
         original_capture = copy.deepcopy(staging_observation['resources'])
         for damage in ('clone', 'cronjob', 'root_uid', 'old_template', 'revived_gateway', 'missing_root', 'revision',
                 'foreign_writer', 'foreign_cron_writer', 'group_writer', 'foreign_subject', 'revived_gateway_role',
-                'cross_namespace', 'missing_role', 'captured_writer'):
+                'cross_namespace', 'missing_role', 'captured_writer', 'unrecorded_job', 'job_uid', 'job_template',
+                'job_nonterminal', 'job_active', 'job_pod_running', 'job_pod_sidecar', 'job_pod_unowned'):
             inventory.clear()
             inventory.update(copy.deepcopy(original))
             staging_observation['resources'] = copy.deepcopy(original_capture)
-            if damage == 'captured_writer':
+            if damage.startswith('job_') or damage == 'unrecorded_job':
+                job = next(row for row in inventory['jobs'] if row['metadata']['namespace'] == 'loom-nebius-management-dev')
+                pod, = (row for row in inventory['pods']
+                    if row['metadata'].get('ownerReferences', [{}])[0].get('uid') == job['metadata']['uid'])
+                if damage == 'unrecorded_job':
+                    job['metadata']['name'] += '-unrecorded'
+                    pod['metadata']['ownerReferences'][0]['name'] = job['metadata']['name']
+                elif damage == 'job_uid':
+                    uid = str(uuid4())
+                    job['metadata']['uid'] = uid
+                    job['spec']['selector']['matchLabels']['batch.kubernetes.io/controller-uid'] = uid
+                    for labels in (job['spec']['template']['metadata']['labels'], pod['metadata']['labels']):
+                        for label in ('controller-uid', 'batch.kubernetes.io/controller-uid'):
+                            labels[label] = uid
+                    pod['metadata']['ownerReferences'][0]['uid'] = uid
+                elif damage == 'job_template':
+                    job['spec']['template']['spec']['containers'][0]['command'] = ['sleep', 'infinity']
+                elif damage == 'job_nonterminal':
+                    job['status']['conditions'] = []
+                elif damage == 'job_active':
+                    job['status']['active'] = 1
+                elif damage == 'job_pod_running':
+                    pod['status']['phase'] = 'Running'
+                elif damage == 'job_pod_sidecar':
+                    pod['spec']['initContainers'] = [{'name': 'live-sidecar', 'restartPolicy': 'Always', 'image': 'test'}]
+                    pod['status']['initContainerStatuses'] = [{'name': 'live-sidecar', 'state': {'running': {}}}]
+                else:
+                    pod['metadata']['ownerReferences'] = []
+            elif damage == 'captured_writer':
                 namespace = staging_history.context.inputs.installation.participants[0].execution_namespace.name
                 clone = copy.deepcopy(controller)
                 clone['metadata'].update(name='captured-foreign-writer', namespace=namespace, uid=str(uuid4()))
