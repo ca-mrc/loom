@@ -1168,6 +1168,75 @@ def test_concrete_runtime_parent_qualifies_before_writes_and_resumes_pending_sql
     assert all('staging' not in row['metadata'].get('namespace', '') for row in writes)
 
 
+@pytest.fixture(params=[
+    ('nebius_development_runtime_observation', 'HTTPSDevelopmentRuntimeObserver'),
+    ('nebius_development_runtime_live', 'HTTPSDevelopmentRuntimeResources'),
+    ('nebius_development_runtime_live', 'HTTPSDevelopmentRuntimeWorkloads'),
+])
+def runtime_private_reader(request, tmp_path):
+    from types import SimpleNamespace
+
+    module, name = request.param
+    cls = getattr(importlib.import_module('scripts.ops.' + module), name)
+    reader = object.__new__(cls)
+    files = {}
+    for name, raw in (('manager', b'manager'), ('foundation', b'foundation'), ('operator', b'')):
+        path = tmp_path / name
+        path.write_bytes(raw)
+        path.chmod(0o600)
+        files[name] = {path: raw}
+    reader.request = SimpleNamespace(database=SimpleNamespace(
+        manager=SimpleNamespace(retained=SimpleNamespace(files=files['manager'])),
+        foundation=SimpleNamespace(files=files['foundation'])))
+    reader.private_files = files['operator']
+    return reader, files
+
+
+def test_runtime_private_input_reads_are_bounded_by_retained_material(runtime_private_reader, monkeypatch):
+    from scripts.ops import nebius_certificates
+
+    reader, files = runtime_private_reader
+    calls = []
+    read = nebius_certificates._private_read
+    def measured(path, *, limit):
+        calls.append((path, limit))
+        return read(path, limit=limit)
+    monkeypatch.setattr(nebius_certificates, '_private_read', measured)
+    reader._private_inputs()
+    # The reader already adds one byte to detect growth. Repeated guards must
+    # not allocate the 4 MiB maximum for each tiny retained journal or key.
+    assert calls == [(path, len(raw)) for group in files.values() for path, raw in group.items()]
+
+
+@pytest.mark.parametrize('change', ['same-length', 'growth', 'truncated', 'mode', 'symlink', 'hardlink', 'oversize'])
+def test_runtime_private_input_rechecks_reject_drift(runtime_private_reader, tmp_path, change):
+    from scripts.ops.nebius_certificates import CertificateError
+
+    reader, files = runtime_private_reader
+    reader._private_inputs()
+    path, raw = next(iter(files['manager'].items()))
+    if change == 'same-length':
+        path.write_bytes(b'x' * len(raw))
+    elif change == 'growth':
+        path.write_bytes(raw + b'x')
+    elif change == 'truncated':
+        path.write_bytes(raw[:-1])
+    elif change == 'mode':
+        path.chmod(0o644)
+    elif change == 'symlink':
+        target = tmp_path / 'retained'
+        path.rename(target)
+        path.symlink_to(target)
+    elif change == 'hardlink':
+        (tmp_path / 'linked').hardlink_to(path)
+    else:
+        raw = b'x' * (4 * 1024**2 + 1)
+        path.write_bytes(raw)
+        files['manager'][path] = raw
+    with pytest.raises((ValueError, OSError, CertificateError)):
+        reader._private_inputs()
+
+
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
 @pytest.mark.parametrize('retained', [False], indirect=True)
 def test_runtime_observer_checks_retained_data_and_successors_without_replaying_originals(completed_pool, publisher_cloud, handoff, monkeypatch):
