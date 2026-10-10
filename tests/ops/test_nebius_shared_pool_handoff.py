@@ -681,7 +681,7 @@ def test_shared_parent_connects_current_staging_workload_transitions_without_rep
     import httpx
     from scripts.ops import nebius_shared_pool_operation as parent
     from scripts.ops.nebius_development_runtime_live import runtime_resource_path
-    from scripts.ops.nebius_ingress_stage import _snapshot
+    from scripts.ops.nebius_management_switch import _stable
     from tests.ops.test_nebius_development_pool_retained import populate_runtime_pods
 
     name = 'scripts.ops.nebius_shared_pool_workloads'
@@ -779,8 +779,9 @@ def test_shared_parent_connects_current_staging_workload_transitions_without_rep
                 api = stack.enter_context(module.HTTPSSharedStagingWorkloads(bindings=bound, phase=phase,
                     api_server=runtime.database.foundation.inputs.config['kubernetes_api_server'],
                     ssl_context=ssl.create_default_context(), qualify_runtime=lambda *_: None, observe_ready=lambda *_: True))
+                connection_type = type(api.client)
                 api.client.close()
-                api.client = httpx.Client(base_url=api.api_server, transport=httpx.MockTransport(handle))
+                api.client = connection_type(base_url=api.api_server, transport=httpx.MockTransport(handle))
                 return module.advance_shared_staging_workloads(bindings=bound, phase=phase, api=api, state_dir=state)
 
         api = ConnectedWorkloadsAPI(parent)
@@ -788,13 +789,28 @@ def test_shared_parent_connects_current_staging_workload_transitions_without_rep
         kwargs = {**args, 'bindings': bindings, 'api': api, 'action': 'install'}
         manager = runtime.database.manager.retained.request.retained
         state = Path(manager.operation['state_dir']).parent / 'shared-pool-handoff'
-        with pytest.raises(ValueError, match='shared pool operation unconfirmed'):
+        with pytest.raises(ValueError, match='shared pool operation unconfirmed') as interrupted:
             parent.run_shared_pool_operation(**kwargs)
-        assert len(writes) == 1
+        if len(writes) != 1:
+            import traceback
+
+            frames, cause = [], interrupted.value
+            while cause is not None:
+                frames.extend(f'{Path(frame.filename).name}:{frame.lineno}:{frame.name}'
+                    for frame in traceback.extract_tb(cause.__traceback__))
+                cause = cause.__context__
+            pytest.fail('workload phase failed before intended transport fault: ' + ', '.join(frames), pytrace=False)
         record = json.loads((state / 'operation.json').read_bytes())
         assert record['forward']['forward-stop']['status'] == 'started'
         choices = module.shared_forward_staging_options(bindings=bindings, state_dir=state)
         assert len(choices[writes[0]]) == 2  # Both original and committed target, never a guessed outcome.
+        assert tuple(_stable(row) for row in choices[writes[0]]) == (
+            _stable(original[writes[0]]), _stable(bindings.plan.staging.stopped[writes[0]]))
+        with pytest.raises(ValueError):
+            module.HTTPSSharedStagingWorkloads(bindings=bindings, phase='forward-wire',
+                api_server=runtime.database.foundation.inputs.config['kubernetes_api_server'],
+                ssl_context=ssl.create_default_context(), qualify_runtime=lambda *_: None, observe_ready=lambda *_: True)
+        assert len(writes) == 1  # A later child cannot jump the incomplete stop phase.
         result = parent.run_shared_pool_operation(**kwargs)
         assert result['status'] == 'pending' and result['phase'] == 'forward-build-policy'
         deployments = {key for key, row in original.items() if row['kind'] == 'Deployment'}
@@ -806,10 +822,10 @@ def test_shared_parent_connects_current_staging_workload_transitions_without_rep
         for key in deployments:
             wanted = copy.deepcopy(bindings.plan.staging_targets[key])
             wanted['spec']['replicas'] = 1
-            assert _snapshot(rows[key]) == _snapshot(wanted)
+            assert _stable(rows[key]) == _stable(wanted)
             assert rows[key]['metadata']['uid'] == original[key]['metadata']['uid']
         choices = module.shared_forward_staging_options(bindings=bindings, state_dir=state)
-        assert all(len(options) == 1 and _snapshot(options[0]) == _snapshot(rows[key]) for key, options in choices.items())
+        assert all(len(options) == 1 and _stable(options[0]) == _stable(rows[key]) for key, options in choices.items())
         before = list(writes)
         assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-build-policy'
         assert writes == before
