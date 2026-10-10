@@ -362,7 +362,8 @@ def gateway_permission_review(completed_runtime):
                     items = [{'apiVersion': 'rbac.authorization.k8s.io/v1', 'kind': kind,
                         'metadata': {'name': 'outside-dev', 'namespace': 'loom-nebius-platform-execution',
                             'uid': binding_uid, 'resourceVersion': '1'},
-                        'roleRef': {'apiGroup': 'rbac.authorization.k8s.io', 'kind': 'Role', 'name': 'foreign'},
+                        'roleRef': {'apiGroup': 'rbac.authorization.k8s.io',
+                            'kind': 'ClusterRole' if state['damage'] == 'ClusterRole-drift' else 'Role', 'name': 'foreign'},
                         'subjects': [copy.deepcopy(state['subject'])]}]
                     if state['damage'] == 'binding-drift' and state['binding_reads'] > 1:
                         items[0]['metadata']['resourceVersion'] = '2'
@@ -378,8 +379,6 @@ def gateway_permission_review(completed_runtime):
         assert message.headers.get_list('Impersonate-Group') == [
             'system:serviceaccounts', 'system:serviceaccounts:' + manager, 'system:authenticated']
         namespace = json.loads(message.content)['spec']['namespace']
-        if namespace > 'loom-nebius-platform-execution':
-            state['rules_changed'] = True
         rules = []
         if state['granted']:
             rules.append({'apiGroups': [''], 'resources': ['namespaces'], 'verbs': ['get'], 'resourceNames': pool_names})
@@ -391,6 +390,10 @@ def gateway_permission_review(completed_runtime):
                 ])
         if state['damage'] == 'staging-write' and namespace == 'loom-nebius-platform-execution':
             rules.append({'apiGroups': ['batch'], 'resources': ['jobs'], 'verbs': ['delete'], 'resourceNames': ['staging-task']})
+        # The response below describes the old permissions; rules change after
+        # this observation, without changing any binding identity or bytes.
+        if namespace == 'loom-nebius-platform-execution':
+            state['rules_changed'] = True
         return httpx.Response(201, json={'apiVersion': 'authorization.k8s.io/v1', 'kind': 'SelfSubjectRulesReview',
             'spec': {}, 'status': {'incomplete': state['damage'] == 'incomplete', 'resourceRules': rules,
                 'nonResourceRules': [], 'evaluationError': ''}})
@@ -453,6 +456,8 @@ def test_activation_gateway_review_fails_closed_on_uncertainty_or_changed_inputs
 def test_activation_gateway_review_rejects_rules_drift_with_unchanged_bindings(gateway_permission_review, kind):
     module, request, _, transport, state = gateway_permission_review
     state.update(damage=kind + '-drift', rules_changed=False)
-    with pytest.raises(ValueError, match='development gateway permissions unqualified'):
-        module.review_development_gateway_permissions(request, transport=transport, granted=False)
-    assert state['rules_changed'], 'the rules must change after their namespace permission review'
+    try:
+        with pytest.raises(ValueError, match='development gateway permissions unqualified'):
+            module.review_development_gateway_permissions(request, transport=transport, granted=False)
+    finally:
+        assert state['rules_changed'], 'the rules must change after their namespace permission review'
