@@ -472,7 +472,7 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
     )
     from tests.ops.test_nebius_management_refresh_predecessor import history_credential
 
-    from loom.nebius_platform_render import digest
+    from loom_service.pool_management.capacity import digest
 
     assert hasattr(module, 'observe_shared_pool_processes'), 'connected SQL/process preflight is missing'
     request, parent = shared_runtime
@@ -613,6 +613,10 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
                 assert args[-2:] == ['platform-test', node_uid]
                 value = {'status': 'blocked', 'stage': 'counters'}
                 checked.add('telemetry')
+                if mode['damage'] == 'late-staging-actuator':
+                    secret, = (row for row in documents.values() if row['kind'] == 'Secret'
+                        and row['metadata']['uid'] == str(staging.database.actuator_credential_uid))
+                    secret['metadata']['resourceVersion'] = 'late-rotation'
             else:
                 assert args[7:9] == ['python', '-c']
                 code, component, nonce, response = args[9:]
@@ -665,16 +669,28 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
                 legacy=staging_history, repo_root=ROOT, development=probes,
                 kubeconfig=Path(probes.prefix[probes.prefix.index('--kubeconfig') + 1]), executable=Path(probes.prefix[0]))
 
-        result = observe()
+        try:
+            result = observe()
+        except ValueError as error:
+            import traceback
+
+            frames = []
+            cause = error
+            while cause is not None:
+                frames.extend(f'{Path(frame.filename).name}:{frame.lineno}:{frame.name}'
+                    for frame in traceback.extract_tb(cause.__traceback__))
+                cause = cause.__context__
+            pytest.fail('process preflight failed at ' + ', '.join(frames), pytrace=False)
         assert result.bindings.plan == plan
         assert result.guard_states == {'loom-dev': 'open', staging.namespace: 'open'}
         assert result.retired_authority == 'revoked'
+        assert result.telemetry == {'status': 'unavailable', 'checks': 1, 'unavailable': 1, 'reasons': ['counters']}
         assert checked == {'old-revoked', 'new-closed', 'telemetry', ('guard', 'loom-dev'), ('guard', staging.namespace),
             *((check, namespace, name) for namespace, name in roles for check in ('settings', 'database'))}
         assert 'private-test-only' not in repr(result)
         baseline = copy.deepcopy(documents)
         for damage in ('old-active', 'new-not-closed', 'guard-held', 'settings:' + staging.namespace,
-                'database:loom-dev', 'late-old-secret'):
+                'database:loom-dev', 'late-old-secret', 'late-staging-actuator'):
             mode['damage'] = damage
             with pytest.raises(ValueError, match='shared pool process preflight unqualified'):
                 observe()
