@@ -1552,7 +1552,7 @@ Fix the diagnosed cause, confirm the original workflow is terminal, and use the
 protected recovery operation for the existing single-primary integration platform:
 
 ```sh
-gh workflow run nebius-rollout.yml --repo qianyi-sun/loom --ref dev \
+gh workflow run nebius-rollout.yml --repo ca-mrc/loom --ref dev \
   -f operation=recover -f recovery_run_id=FAILED_ROLLOUT_RUN_ID
 ```
 
