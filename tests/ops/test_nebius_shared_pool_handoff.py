@@ -2477,6 +2477,13 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
                         value = {'schema': 'loom.pool-activation-state.v1', 'operation_id': str(spec.operation_id),
                             'installation_sha256': digest(spec.model_dump(mode='json')), 'state': mode.get('pool_state', 'closed')}
                         checked.add('pool-state')
+                        if mode['damage'] == 'late-manager-database-at-final-state':
+                            mode['final_state_reads'] = mode.get('final_state_reads', 0) + 1
+                            if mode['final_state_reads'] == 3:
+                                pod, = (row for row in documents['/api/v1/namespaces/' + manager_namespace + '/pods']['items']
+                                    if row['metadata']['name'] == 'loom-postgres-0')
+                                pod['status']['containerStatuses'][0]['restartCount'] += 1
+                                mode['late_injected'] = True
                         return SimpleNamespace(returncode=0, stdout=json.dumps(value).encode(), stderr=b'')
                     if sql == pool_active_authority_sql(spec):
                         value = {'schema': 'loom.pool-active-authority.v1', 'operation_id': str(spec.operation_id),
@@ -2938,8 +2945,11 @@ def _exercise_forward_processes(*, bindings, development, documents, mode, check
         if row['kind'] == 'Deployment':
             assert ('settings', row['metadata']['namespace'], row['metadata']['name']) in checked
             assert ('database', row['metadata']['namespace'], row['metadata']['name']) in checked
-    for damage in ('old-active', 'new-not-closed', 'settings:' + bindings.plan.staging.attachment.guard.namespace,
-            'database:loom-dev', 'late-staging-actuator', 'late-staging-restart', 'late-dev-restart', 'late-staging-template'):
+    # The activation variant reuses the real transition setup, not the already
+    # covered process fault matrices; its own faults exercise opening/release.
+    for damage in (() if activation_transport else (
+            'old-active', 'new-not-closed', 'settings:' + bindings.plan.staging.attachment.guard.namespace,
+            'database:loom-dev', 'late-staging-actuator', 'late-staging-restart', 'late-dev-restart', 'late-staging-template')):
         baseline = copy.deepcopy(documents)
         mode['damage'] = damage
         mode['manager_reads'] = 0
@@ -3029,11 +3039,11 @@ def _exercise_forward_processes(*, bindings, development, documents, mode, check
     assert {(check, manager.binding.namespace, 'loom-pool-gateway')
         for check in ('settings', 'database', 'kubernetes', 'capacity')} <= checked
     mode['gateway_receipt'] = start_path
-    for damage in ('gateway-settings', 'gateway-database', 'gateway-kubernetes', 'gateway-capacity',
+    for damage in (() if activation_transport else ('gateway-settings', 'gateway-database', 'gateway-kubernetes', 'gateway-capacity',
             'late-gateway-secret', 'late-gateway-restart', 'late-gateway-database-restart', 'late-gateway-receipt',
-            'late-manager-secret-after-gateway', 'late-manager-database-after-gateway'):
+            'late-manager-secret-after-gateway', 'late-manager-database-after-gateway', 'late-manager-database-at-final-state')):
         baseline, receipt = copy.deepcopy(documents), start_path.read_bytes()
-        mode.update(damage=damage, capacity_seen=False, late_injected=False)
+        mode.update(damage=damage, capacity_seen=False, late_injected=False, final_state_reads=0)
         try:
             observe()
         except ValueError:
