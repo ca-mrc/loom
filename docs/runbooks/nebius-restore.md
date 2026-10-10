@@ -87,3 +87,16 @@ only the Job and ConfigMap named in that evidence. A successful check proves the
 selected database records can be restored and current canonical references can
 be read; it does not simulate loss/restoration of the entire object store or
 replace a complete cross-environment disaster recovery exercise.
+
+The disposable integration qualification in
+`tests/integration/test_nebius_restore.py` also exercises application recovery:
+it stops the source database, restores its ACL-bearing dump into a separate
+database, and recreates restricted application roles through the supported
+`bootstrap_database` procedure with fresh test credentials. The actual Service
+startup rejects an incompatible encryption key. With the original test key,
+password login, team isolation and authenticated artifact downloads work; a
+missing object fails its own download while another team's saved result remains
+readable. This uses the Service's `api_only` mode and ASGI HTTP transport with
+real PostgreSQL and MinIO. It does not exercise hosted ingress, the browser,
+worker startup or replacement of the running deployment, and does not extend
+the selected-record operator above into a full application restore command.
