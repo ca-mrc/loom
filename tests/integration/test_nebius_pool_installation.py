@@ -133,6 +133,27 @@ async def test_legacy_staging_catalog_is_bound_in_closed_registration_and_exact_
             await register_installation(session, PoolInstallation.model_validate(config))
 
 
+async def test_registered_legacy_staging_origin_keeps_priority_for_tasks_and_builds(sessions):
+    from loom.nebius_pool_contract import PoolParticipantV1
+    from loom.nebius_pool_priority import PoolWorkOriginV1
+    from loom_service.pool_management.origin import PoolOriginError, qualify_pool_origin
+    from tests.integration.test_nebius_pool_auth import credential
+    from tests.unit.test_nebius_pool_contract import participant
+    from tests.unit.test_nebius_pool_priority import origin
+
+    binding = PoolParticipantV1.model_validate(participant(
+        environment_class="staging", legacy_catalog_environment="development"))
+    raw, *_ = await credential(sessions, participant_config=binding)
+    async with sessions.begin() as session:
+        principal = await resolve_pool_machine(session, "Bearer " + raw)
+        for workload in ("trial", "verifier", "task_image_build"):
+            assert await qualify_pool_origin(session, principal, PoolWorkOriginV1.model_validate(origin()),
+                target_id="nebius-default", workload_kind=workload) == 1
+        with pytest.raises(PoolOriginError):
+            await qualify_pool_origin(session, principal, PoolWorkOriginV1.model_validate(origin("application")),
+                target_id="nebius-default", workload_kind="trial")
+
+
 @pytest.mark.parametrize("damage", ["missing-builder", "duplicate-builder", "missing-environment", "duplicate-environment",
     "foreign-builder", "observer-builder", "gateway-builder", "wrong-class", "missing-profile", "orphan-profile",
     "orphan-builder", "foreign-namespace", "foreign-node-group", "mixed-target"])
