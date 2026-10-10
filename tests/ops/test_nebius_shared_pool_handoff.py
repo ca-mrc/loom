@@ -3391,7 +3391,8 @@ def test_shared_activation_binds_own_parent_and_never_replays_unknown_writes(sha
 
 
 @pytest.mark.timeout(420)
-@pytest.mark.parametrize('forward_census', [False, True], ids=['initial', 'forward'])
+@pytest.mark.parametrize('forward_census', [False, True,
+    pytest.param('recovery', marks=pytest.mark.timeout(900))], ids=['initial', 'forward', 'recovery'])
 def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writers(
         shared_runtime, staging_history, staging_observation, completed_pool, handoff, shared_operation, forward_census):
     """A historical template or a stopped clone must not hide a live writer."""
@@ -3484,7 +3485,8 @@ def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writ
         transport.client = type(completed_pool[3].api.client)(base_url=transport.api_server,
             transport=httpx.MockTransport(respond))
         if forward_census:
-            _exercise_forward_writer_census(shared_operation, transport, inventory, kinds, calls, mode)
+            _exercise_forward_writer_census(shared_operation, transport, inventory, kinds, calls, mode,
+                recovery=forward_census == 'recovery')
             return
         from scripts.ops.nebius_shared_pool_handoff_live import observe_shared_pool_writers
 
@@ -3625,7 +3627,7 @@ def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writ
         assert calls and all(row.method == 'GET' for row in calls)
 
 
-def _exercise_forward_writer_census(shared_operation, transport, inventory, kinds, calls, mode):
+def _exercise_forward_writer_census(shared_operation, transport, inventory, kinds, calls, mode, *, recovery=False):
     """Observe real parent/child receipts; remote transitions are fixture state.
 
     Accepting an unrecorded successor, an old template after completion, or a
@@ -3639,6 +3641,7 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
     from scripts.ops import nebius_certificates as private_state
     from scripts.ops import nebius_shared_pool_activation as activation_child
     from scripts.ops import nebius_shared_pool_gateway as gateway_child
+    from scripts.ops import nebius_shared_pool_guards as guard_child
     from scripts.ops import nebius_shared_pool_material as material
     from scripts.ops import nebius_shared_pool_operation as parent
     from scripts.ops import nebius_shared_pool_roles as roles
@@ -3651,13 +3654,17 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
     name = 'scripts.ops.nebius_shared_pool_forward_census'
     assert importlib.util.find_spec(name) is not None, 'phase-bound shared writer census is missing'
     module = __import__(name, fromlist=['observe_shared_pool_forward_writers'])
+    if recovery:
+        assert importlib.util.find_spec('scripts.ops.nebius_shared_pool_recovery_census') is not None, 'recovery-bound writer census is missing'
     args, bindings = shared_operation
     manager = args['runtime'].database.manager.retained.request.retained
     state = Path(manager.operation['state_dir']).parent / 'shared-pool-handoff'
 
     class CensusPhaseAPI(SharedPhaseAPI):
         def prepare(self, phase, bound, child):
-            if phase == 'forward-activate':
+            if phase == 'forward-guards':
+                guard_child.prepare_shared_pool_guards(bindings=bound, state_dir=child)
+            elif phase == 'forward-activate':
                 activation_child.prepare_shared_pool_activation(bindings=bound, state_dir=child)
             elif phase in {'forward-stop', 'forward-wire', 'forward-start'}:
                 workloads.prepare_shared_staging_workloads(bindings=bound, phase=phase, state_dir=child)
@@ -3671,7 +3678,9 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
                 super().prepare(phase, bound, child)
 
         def validate_prepared_phase(self, phase, child):
-            if phase == 'forward-activate':
+            if phase == 'forward-guards':
+                guard_child.validate_shared_pool_guards(bindings=bindings, state_dir=child, complete=False)
+            elif phase == 'forward-activate':
                 activation_child.validate_shared_pool_activation(bindings=bindings, state_dir=child, complete=False, prepared=True)
             elif phase in {'forward-stop', 'forward-wire', 'forward-start'}:
                 workloads.validate_shared_staging_workloads(bindings=bindings, phase=phase,
@@ -3686,7 +3695,9 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
                 super().validate_prepared_phase(phase, child)
 
         def validate_phase(self, phase, child, *, complete):
-            if phase == 'forward-activate':
+            if phase == 'forward-guards':
+                guard_child.validate_shared_pool_guards(bindings=bindings, state_dir=child, complete=complete)
+            elif phase == 'forward-activate':
                 activation_child.validate_shared_pool_activation(bindings=bindings, state_dir=child, complete=complete)
             elif phase in {'forward-stop', 'forward-wire', 'forward-start'}:
                 workloads.validate_shared_staging_workloads(bindings=bindings, phase=phase, state_dir=child, complete=complete)
@@ -3700,6 +3711,12 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
                 super().validate_phase(phase, child, complete=complete)
 
         def advance(self, phase, bound, child):
+            if phase == 'forward-guards':
+                path = child / 'guards.json'
+                record = json.loads(path.read_bytes())
+                record['guards'].update(dict.fromkeys(record['guards'], 'held'))
+                private_state._atomic_json(path, record)
+                return True
             if phase in {'forward-stop', 'forward-wire', 'forward-start'}:
                 return all(row['status'] == 'applied' for row in json.loads((child / 'transition.json').read_bytes())['resources'].values())
             if phase == 'forward-roles':
@@ -3971,12 +3988,220 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
             observe()
         activation_path.write_bytes(activation_bytes)
         activation_path.chmod(0o600)
+    if recovery:
+        _exercise_recovery_writer_census(kwargs, state, transport, inventory, kinds, calls, mode, replace_live, CensusPhaseAPI)
+        return
     api.block = 'recovery-fence'
     assert parent.run_shared_pool_operation(**{**kwargs, 'action': 'recover'})['phase'] == 'recovery-fence'
     before = len(calls)
     with pytest.raises(ValueError):
         observe()
     assert len(calls) == before
+
+
+def _exercise_recovery_writer_census(kwargs, state, transport, inventory, kinds, calls, mode, replace_live, forward_api):
+    """Real phase journals and cluster census; remote recovery effects are fixture state."""
+    from scripts.ops import nebius_certificates as private_state
+    from scripts.ops import nebius_shared_pool_operation as parent
+    from scripts.ops import nebius_shared_pool_recovery_census as census
+    from scripts.ops import nebius_shared_pool_recovery_drain as drain
+    from scripts.ops import nebius_shared_pool_recovery_fence as fence
+    from scripts.ops import nebius_shared_pool_recovery_gateway as gateway
+    from scripts.ops import nebius_shared_pool_recovery_machines as machines
+    from scripts.ops import nebius_shared_pool_recovery_reopening as reopening
+    from scripts.ops import nebius_shared_pool_recovery_restart as restart
+    from scripts.ops import nebius_shared_pool_recovery_roles as roles
+    from scripts.ops import nebius_shared_pool_recovery_templates as templates
+    from scripts.ops import nebius_shared_pool_recovery_workloads as stop
+    from scripts.ops.nebius_development_runtime_install import _read
+    from scripts.ops.nebius_ingress_stage import _snapshot, _uid
+    from scripts.ops.nebius_management_switch import _stable
+
+    bindings = kwargs['bindings']
+    children = {
+        'recovery-fence': (fence.prepare_shared_recovery_fence, fence.validate_shared_recovery_fence, 'fence.json'),
+        'recovery-drain': (drain.prepare_shared_recovery_drain, drain.validate_shared_recovery_drain, 'drain.json'),
+        'recovery-stop': (stop.prepare_shared_recovery_workloads, stop.validate_shared_recovery_workloads, 'stop.json'),
+        'recovery-restore-workloads': (templates.prepare_shared_recovery_templates, templates.validate_shared_recovery_templates, 'templates.json'),
+        'recovery-restore-roles': (roles.prepare_shared_recovery_roles, roles.validate_shared_recovery_roles, 'roles.json'),
+        'recovery-restart': (restart.prepare_shared_recovery_restart, restart.validate_shared_recovery_restart, 'restart.json'),
+        'recovery-reopen': (reopening.prepare_shared_recovery_reopening, reopening.validate_shared_recovery_reopening, 'reopen.json'),
+    }
+
+    class API(forward_api):
+        def prepare(self, phase, bound, directory):
+            if phase in children:
+                children[phase][0](bindings=bound, state_dir=directory)
+            elif phase == 'recovery-revoke':
+                machines.prepare_shared_recovery_machines(bindings=bound, state_dir=directory)
+                gateway.prepare_shared_recovery_gateway(bindings=bound, state_dir=directory)
+            else:
+                super().prepare(phase, bound, directory)
+
+        def validate_prepared_phase(self, phase, directory):
+            if phase in children:
+                children[phase][1](bindings=bindings, state_dir=directory, complete=False, prepared=True)
+            elif phase == 'recovery-revoke':
+                machines.validate_shared_recovery_machines(bindings=bindings, state_dir=directory, complete=False, prepared=True)
+                gateway.validate_shared_recovery_gateway(bindings=bindings, state_dir=directory, complete=False, prepared=True)
+            else:
+                super().validate_prepared_phase(phase, directory)
+
+        def validate_phase(self, phase, directory, *, complete):
+            if phase in children:
+                children[phase][1](bindings=bindings, state_dir=directory, complete=complete)
+            elif phase == 'recovery-revoke':
+                machines.validate_shared_recovery_machines(bindings=bindings, state_dir=directory, complete=complete)
+                gateway.validate_shared_recovery_gateway(bindings=bindings, state_dir=directory, complete=complete)
+            else:
+                super().validate_phase(phase, directory, complete=complete)
+
+        def advance(self, phase, bound, directory):
+            if phase == self.block:
+                return False
+            if phase == 'recovery-fence':
+                path = directory / 'fence.json'
+                record = _read(path)
+                record['pool'] = 'fenced'
+                record['guards'].update(dict.fromkeys(record['guards'], 'fenced'))
+                private_state._atomic_json(path, record)
+                return True
+            if phase == 'recovery-drain':
+                path = directory / 'drain.json'
+                private_state._atomic_json(path, {**_read(path), 'status': 'observed'})
+                return True
+            if phase == 'recovery-revoke':
+                path = directory / 'machines.json'
+                private_state._atomic_json(path, {**_read(path), 'status': 'revoked'})
+                return all(row['status'] == 'restricted' for row in _read(directory / 'gateway.json')['roles'].values())
+            if phase in children:
+                record = _read(directory / children[phase][2])
+                return all(row['status'] in {'stopped', 'restored', 'started'}
+                    for row in record.get('resources', record.get('roles', {})).values())
+            return super().advance(phase, bound, directory)
+
+    def observe():
+        return census.observe_shared_pool_recovery_writers(bindings=bindings, state_dir=state, transport=transport)
+
+    def live(key):
+        return next(row for rows in inventory.values() for row in rows if _key(row) == key)
+
+    api = API(parent)
+    api.block = 'recovery-fence'
+    kwargs.update(api=api, action='recover')
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'recovery-fence'
+    frozen = {path: path.read_bytes() for path in state.glob('forward-*/**/*.json')}
+    initial = observe()
+    assert initial.resource_version == '500'
+    gateway_key = _key(bindings.plan.development.gateway_original)
+    assert initial.workloads[gateway_key]['spec']['replicas'] == 1
+    api.block = 'recovery-reopen'
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'recovery-stop'
+    journal = state / 'recovery-stop/stop.json'
+    record = _read(journal)
+    for index, key in enumerate(stop._sources(bindings, state)):
+        actual = live(key)
+        before = _snapshot(actual)
+        before['metadata']['uid'] = _uid(actual)
+        expected = stop._stopped(bindings, before)
+        if index == 0:
+            saved = copy.deepcopy(actual)
+            replace_live(actual, expected)
+            with pytest.raises(ValueError):
+                observe()  # A planned recovery stop is forbidden before this child's intent.
+            replace_live(actual, saved)
+        record['resources'][key].update(status='intent', before=before,
+            before_resource_version=actual['metadata']['resourceVersion'], expected=expected)
+        private_state._atomic_json(journal, record)
+        assert observe().workloads[key] == actual
+        replace_live(actual, expected)
+        assert observe().workloads[key] == actual
+        record['resources'][key]['status'] = 'stopped'
+        private_state._atomic_json(journal, record)
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'recovery-revoke'
+    assert observe().workloads[gateway_key]['spec']['replicas'] == 0
+    journal = state / 'recovery-revoke/gateway.json'
+    record = _read(journal)
+    for index, key in enumerate(key for key in gateway._sources(bindings, state) if key in record['roles']):
+        actual = live(key)
+        expected = gateway._readonly(bindings, actual)
+        saved = copy.deepcopy(actual)
+        if index == 0:
+            replace_live(actual, expected)
+            with pytest.raises(ValueError):
+                observe()
+            replace_live(actual, saved)
+        record['roles'][key].update(status='patch_intent', uid=_uid(actual),
+            before_resource_version=actual['metadata']['resourceVersion'])
+        private_state._atomic_json(journal, record)
+        assert observe().authority[key] == actual
+        replace_live(actual, expected)
+        assert observe().authority[key] == actual
+        record['roles'][key]['status'] = 'restricted'
+        private_state._atomic_json(journal, record)
+        if index == 0:
+            replace_live(actual, saved)
+            with pytest.raises(ValueError):
+                observe()  # Completed retirement cannot admit the old gateway writer.
+            replace_live(actual, expected)
+    for phase, component, terminal in (
+            ('recovery-restore-workloads', templates, 'restored'),
+            ('recovery-restore-roles', roles, 'restored'),
+            ('recovery-restart', restart, 'started')):
+        assert parent.run_shared_pool_operation(**kwargs)['phase'] == phase
+        observe()
+        journal = state / phase / children[phase][2]
+        record = _read(journal)
+        targets = component._inputs(bindings, state)[1]
+        for key in sorted(targets) if component is roles else targets:
+            actual = live(key)
+            expected = targets[key]
+            row = record['roles' if component is roles else 'resources'][key]
+            changed = _stable(actual) != _stable(expected)
+            if changed:
+                saved = copy.deepcopy(actual)
+                replace_live(actual, expected)
+                with pytest.raises(ValueError):
+                    observe()
+                replace_live(actual, saved)
+                row.update(status='intent', before_resource_version=actual['metadata']['resourceVersion'])
+                private_state._atomic_json(journal, record)
+                observe()  # Uncertain intent permits only this before/after pair.
+                replace_live(actual, expected)
+                observed = observe()
+                assert (observed.workloads if component is not roles else observed.authority)[key] == actual
+            row.update(status=terminal, before_resource_version=actual['metadata']['resourceVersion'] if changed or component is roles else None)
+            private_state._atomic_json(journal, record)
+        observe()
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'recovery-reopen'
+    final = observe()
+    for key, captured in bindings.plan.staging.originals.items():
+        assert final.workloads[key]['spec'] == captured['spec']
+    assert final.workloads[gateway_key]['spec']['replicas'] == 0
+    assert all(path.read_bytes() == raw for path, raw in frozen.items())
+    receipt = state / 'recovery-reopen/reopen.json'
+    raw = receipt.read_bytes()
+    mode['during_read'] = lambda: receipt.write_bytes(raw + b'\n')
+    with pytest.raises(ValueError):
+        observe()
+    receipt.write_bytes(raw)
+    # The whole-cluster algorithm must still run after recovery; fixed-root
+    # equality alone would miss this external named Job writer.
+    foreign = {'apiVersion': 'rbac.authorization.k8s.io/v1', 'kind': 'ClusterRole',
+        'metadata': {'name': 'unexpected-recovery-writer', 'uid': str(uuid4()), 'resourceVersion': '401'},
+        'rules': [{'apiGroups': ['batch'], 'resources': ['jobs'], 'verbs': ['create'], 'resourceNames': ['one-job']}]}
+    foreign_binding = {'apiVersion': foreign['apiVersion'], 'kind': 'ClusterRoleBinding',
+        'metadata': {'name': 'unexpected-recovery-writer', 'uid': str(uuid4()), 'resourceVersion': '401'},
+        'roleRef': {'apiGroup': 'rbac.authorization.k8s.io', 'kind': 'ClusterRole', 'name': foreign['metadata']['name']},
+        'subjects': [{'kind': 'ServiceAccount', 'name': 'stranger', 'namespace': 'outside-pool'}]}
+    inventory['clusterroles'].append(foreign)
+    inventory['clusterrolebindings'].append(foreign_binding)
+    with pytest.raises(ValueError):
+        observe()
+    inventory['clusterroles'].remove(foreign)
+    inventory['clusterrolebindings'].remove(foreign_binding)
+    observe()
+    assert calls and all(call.method == 'GET' for call in calls)
 
 
 @pytest.mark.timeout(240)
