@@ -2986,14 +2986,22 @@ def test_shared_activation_binds_own_parent_and_never_replays_unknown_writes(sha
     effects = []
 
     class Remote:
+        migration = bindings.migration
         mode = 'closed'
         guards = dict.fromkeys(roster, 'held')
         failure = ('open', None, 'before')
         qualified = False
+        damage = None
+        ready = True
 
         def verify_retained(self):
             if not self.qualified:
                 raise ValueError('simulated current authority loss')
+
+        def qualify_shared_state(self):
+            self.verify_retained()
+            if not self.ready:
+                raise ValueError('simulated unhealthy shared runtime')
 
         def read_workload(self, key):
             pytest.fail('shared activation must not reconstruct old startup workloads')
@@ -3003,6 +3011,11 @@ def test_shared_activation_binds_own_parent_and_never_replays_unknown_writes(sha
             assert self.mode == 'closed' and set(self.guards.values()) == {'held'}
 
         def pool_state(self):
+            if self.damage == 'receipt-bytes':
+                path = child / 'activation.json'
+                path.write_bytes(path.read_bytes() + b'\n')
+            elif self.damage == 'receipt-loss':
+                (child / 'activation.json').unlink()
             return self.mode
 
         def guard_state(self, participant):
@@ -3046,9 +3059,14 @@ def test_shared_activation_binds_own_parent_and_never_replays_unknown_writes(sha
     remote = Remote()
 
     class API(SharedPhaseAPI):
+        interrupt_preparation = True
+
         def prepare(self, phase, bound, directory):
             if phase == 'forward-activate':
                 module.prepare_shared_pool_activation(bindings=bound, state_dir=directory)
+                if self.interrupt_preparation:
+                    self.interrupt_preparation = False
+                    raise TimeoutError('simulated loss after local preparation')
             else:
                 super().prepare(phase, bound, directory)
 
@@ -3072,19 +3090,37 @@ def test_shared_activation_binds_own_parent_and_never_replays_unknown_writes(sha
     api = API(parent)
     api.block = 'forward-verify'
     kwargs = dict(**args, bindings=bindings, api=api, action='install')
-    with pytest.raises(ValueError):
+    with pytest.raises(FileNotFoundError):
         module.prepare_shared_pool_activation(bindings=bindings, state_dir=child)
+    assert not child.exists()
     with pytest.raises(ValueError):
         parent.run_shared_pool_operation(**kwargs)
     assert effects == []
     assert json.loads((child / 'activation.json').read_bytes())['opening'] == 'prepared'
+    assert json.loads((state / 'operation.json').read_bytes())['forward']['forward-activate']['status'] == 'prepared'
+    with pytest.raises(ValueError):
+        parent.run_shared_pool_operation(**kwargs)
+    assert effects == []  # Preparation resumed, but live qualification failed.
     remote.qualified = True
     assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-activate'
     assert effects == [('open', None)]
     remote.failure = None
     assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-activate'
     assert effects == [('open', None)]  # An unknown opening is never replayed.
+    remote.migration = bindings.plan.staging.legacy.context.request.fencing.retirement.migration
+    with pytest.raises(ValueError):
+        parent.run_shared_pool_operation(**kwargs)
+    assert effects == [('open', None)]  # Never observe or write through another installation's transport.
+    remote.migration = bindings.migration
     retained = (child / 'activation.json').read_bytes()
+    for damage in ('receipt-bytes', 'receipt-loss'):
+        remote.damage = damage
+        with pytest.raises(ValueError):
+            parent.run_shared_pool_operation(**kwargs)
+        assert effects == [('open', None)]
+        (child / 'activation.json').write_bytes(retained)
+        (child / 'activation.json').chmod(0o600)
+    remote.damage = None
     for loss in ('missing', 'roster', 'released-before-opening', 'recovery'):
         record = json.loads(retained)
         if loss == 'missing':
@@ -3108,6 +3144,11 @@ def test_shared_activation_binds_own_parent_and_never_replays_unknown_writes(sha
         parent.run_shared_pool_operation(**kwargs)
     assert effects == [('open', None)]  # Global alone is insufficient authority.
     remote.qualified = True
+    remote.ready = False
+    with pytest.raises(ValueError):
+        parent.run_shared_pool_operation(**kwargs)
+    assert effects == [('open', None)]  # Valid history alone cannot release unhealthy runtimes.
+    remote.ready = True
     remote.failure = ('release', roster[0], 'before')
     assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-activate'
     remote.failure = None
