@@ -14,12 +14,13 @@
  *   - `complete`:   server emitted `event: complete` (trial reached
  *                   terminal state); we closed the connection
  *   - `reconnect`:  server emitted `event: reconnect` (connection
- *                   budget exhausted); next mount will resume
+ *                   budget exhausted); retrying from the last
+ *                   accepted seq without discarding events
  *   - `error`:      EventSource errored; the browser will auto-
  *                   reconnect, but caller should consider polling
  *                   fallback for persistent failures
  *
- * Caller pairs with the legacy `/events?after_seq=N` poll path as a
+ * Caller pairs with the legacy `/trajectory?cursor=N` path as a
  * fallback for environments where `EventSource` is unavailable or
  * blocked (some corp proxies strip `text/event-stream`).
  */
@@ -61,27 +62,40 @@ export interface UseTrialEventStreamResult {
   status: TrialEventStreamStatus;
 }
 
-function _defaultBaseUrl(): string {
-  return getApiBase();
-}
+const ROLLOVER_RETRY_MS = 1_000;
 
 export function useTrialEventStream(
   trialId: string,
   opts: UseTrialEventStreamOptions = {},
 ): UseTrialEventStreamResult {
   const { enabled = true, baseUrl, eventSourceCtor } = opts;
-  const [events, setEvents] = useState<TrajEvent[]>([]);
-  const [status, setStatus] = useState<TrialEventStreamStatus>("connecting");
-  // Track the highest seq we've observed so the dedupe survives a
-  // browser-native auto-reconnect that replays already-seen events
-  // (the server ignores Last-Event-ID for now; clients can't rely
-  // on perfect resume semantics until the server consumes it).
-  const lastSeqRef = useRef<number>(-1);
+  const base = baseUrl ?? getApiBase();
+  const [stream, setStream] = useState(() => ({
+    trialId,
+    base,
+    events: [] as TrajEvent[],
+    status: "connecting" as TrialEventStreamStatus,
+  }));
+  // Cursor ownership follows the trial and endpoint, not an individual source.
+  // Same-scope disable/reenable and both kinds of reconnect retain it.
+  const cursorRef = useRef({ trialId, base, lastSeq: -1 });
 
   useEffect(() => {
+    if (cursorRef.current.trialId !== trialId || cursorRef.current.base !== base) {
+      cursorRef.current = { trialId, base, lastSeq: -1 };
+    }
+    setStream((previous) => {
+      if (previous.trialId !== trialId || previous.base !== base) {
+        return { trialId, base, events: [], status: "connecting" };
+      }
+      return enabled && trialId ? { ...previous, status: "connecting" } : previous;
+    });
     if (!enabled || !trialId) {
       return;
     }
+    const setStatus = (status: TrialEventStreamStatus): void => {
+      setStream((previous) => ({ ...previous, status }));
+    };
     const ctor = eventSourceCtor ?? (globalThis as { EventSource?: typeof EventSource }).EventSource;
     if (typeof ctor !== "function") {
       // Environment without EventSource — caller must fall back to
@@ -90,54 +104,76 @@ export function useTrialEventStream(
       setStatus("error");
       return;
     }
-    const base = baseUrl ?? _defaultBaseUrl();
-    const url = `${base}/api/v1/trials/${trialId}/stream?after_seq=${lastSeqRef.current}`;
-    const es: EventSource = new ctor(url, { withCredentials: true });
+    let disposed = false;
+    let current: EventSource | null = null;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
 
-    es.onopen = (): void => setStatus("open");
+    const connect = (): void => {
+      if (disposed) return;
+      const url = `${base}/api/v1/trials/${trialId}/stream?after_seq=${cursorRef.current.lastSeq}`;
+      const source = new ctor(url, { withCredentials: true });
+      current = source;
+      // Closing alone does not invalidate callbacks already captured by a
+      // transport. A retired source must not mutate state or schedule retries.
+      const ownsSubscription = (): boolean => !disposed && current === source;
+      const retire = (): void => {
+        current = null;
+        source.close();
+      };
 
-    es.onmessage = (e: MessageEvent): void => {
-      let ev: TrajEvent;
-      try {
-        ev = JSON.parse(e.data) as TrajEvent;
-      } catch {
-        // Malformed payload — skip but don't tear down the connection.
-        return;
-      }
-      const seq = (ev as { seq?: unknown }).seq;
-      if (typeof seq !== "number") {
-        // Server-side contract violation; skip.
-        return;
-      }
-      if (seq <= lastSeqRef.current) {
-        // Dedupe — auto-reconnect can replay events we've seen.
-        return;
-      }
-      lastSeqRef.current = seq;
-      setEvents((prev) => [...prev, ev]);
+      source.onopen = (): void => {
+        if (ownsSubscription()) setStatus("open");
+      };
+      source.onmessage = (e: MessageEvent): void => {
+        if (!ownsSubscription()) return;
+        let ev: TrajEvent;
+        try {
+          ev = JSON.parse(e.data) as TrajEvent;
+        } catch {
+          // Malformed payload — skip but don't tear down the connection.
+          return;
+        }
+        const seq = (ev as { seq?: unknown }).seq;
+        if (typeof seq !== "number" || seq <= cursorRef.current.lastSeq) return;
+        cursorRef.current.lastSeq = seq;
+        setStream((previous) => ({ ...previous, events: [...previous.events, ev] }));
+      };
+
+      source.addEventListener("complete", () => {
+        if (!ownsSubscription()) return;
+        retire();
+        setStatus("complete");
+      });
+
+      source.addEventListener("reconnect", () => {
+        if (!ownsSubscription()) return;
+        retire();
+        setStatus("reconnect");
+        // Use only accepted data to resume; a control frame's advertised
+        // last_seq must never cause locally unseen events to be skipped.
+        retryTimer = setTimeout(() => {
+          retryTimer = undefined;
+          connect();
+        }, ROLLOVER_RETRY_MS);
+      });
+
+      source.onerror = (): void => {
+        // Leave ordinary transport retries to this native EventSource. The
+        // caller may use error status to enable its existing polling fallback.
+        if (ownsSubscription()) setStatus("error");
+      };
     };
-
-    es.addEventListener("complete", () => {
-      setStatus("complete");
-      es.close();
-    });
-
-    es.addEventListener("reconnect", () => {
-      setStatus("reconnect");
-      es.close();
-    });
-
-    es.onerror = (): void => {
-      // EventSource auto-reconnects internally; we surface `error`
-      // so the caller can decide whether to swap to polling on
-      // persistent failure (e.g. proxy stripping text/event-stream).
-      setStatus("error");
-    };
-
+    connect();
     return (): void => {
-      es.close();
+      disposed = true;
+      clearTimeout(retryTimer);
+      current?.close();
+      current = null;
     };
-  }, [trialId, enabled, baseUrl, eventSourceCtor]);
+  }, [trialId, enabled, base, eventSourceCtor]);
 
-  return { events, status };
+  // Hide the previous scope even on the render before effect cleanup/reset.
+  return stream.trialId === trialId && stream.base === base
+    ? { events: stream.events, status: stream.status }
+    : { events: [], status: "connecting" };
 }
