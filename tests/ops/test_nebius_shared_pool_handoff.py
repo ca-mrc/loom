@@ -323,6 +323,24 @@ def test_shared_handoff_binds_real_completed_dev_and_current_staging(shared_runt
     assert 'staging-test-token' not in repr(result)
     assert api.store.resources == writes
     assert all(path.read_bytes() == raw for path, raw in before.items())
+    tokens = request.database.manager.retained.intent.tokens
+    machine, = (row for row in result.migration.registration.spec.machines if row.participant_id == participant.participant_id)
+    token = tokens[machine.machine_id]
+    tokens[machine.machine_id] = 'wrong-machine-token'
+    try:
+        with pytest.raises(ValueError, match='shared pool handoff intent unqualified') as error:
+            prepare_shared_pool_handoff(runtime=request, observation=staging_observation,
+                legacy=staging_history, repo_root=ROOT)
+        assert 'wrong-machine-token' not in str(error.value)
+    finally:
+        tokens[machine.machine_id] = token
+    changed = copy.deepcopy(staging_observation)
+    role = next(row for row in changed['resources'] if _key(row) in roles)
+    role['metadata'].setdefault('annotations', {})['loom.nebius/shared-pool-handoff-operation'] = str(result.migration.registration.spec.operation_id)
+    with pytest.raises(ValueError, match='shared pool handoff intent unqualified'):
+        prepare_shared_pool_handoff(runtime=request, observation=changed, legacy=staging_history, repo_root=ROOT)
+    assert api.store.resources == writes
+    assert all(path.read_bytes() == raw for path, raw in before.items())
 
 
 @pytest.mark.timeout(420)

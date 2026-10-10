@@ -853,7 +853,12 @@ effective-policy, opening/fencing and installed acceptance remain unconnected.
 
 Forward handoff preparation combines this completed dev runtime with the current
 source-qualified staging predecessor and its completed legacy history. The
-GET-only dev binding observation reuses the retained-runtime observer and pins
+projection also derives only staging's new machine Secrets, exact current Roles
+and their read-only replacements, and the fixed namespace-reader grants. Existing
+RoleBindings retain their qualified subjects and metadata; unrelated dev/manager
+material is not delivered again. The original staging Role documents remain part
+of the recovery input. Derivation neither creates Secrets nor changes authority.
+The GET-only dev binding observation reuses the retained-runtime observer and pins
 the actual database, Service and both credential identities. Secret resource
 versions are captured before the observation and compared afterward; changed
 values, UIDs, versions or private history reject the binding. The resulting

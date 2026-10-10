@@ -22,6 +22,7 @@ from scripts.ops.nebius_development_activation import (
 from scripts.ops.nebius_development_pool_registration import retained_development_participant
 from scripts.ops.nebius_development_runtime_install import DevelopmentRuntimeInstallRequest
 from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
+from scripts.ops.nebius_pool_material import machine_documents
 from scripts.ops.nebius_pool_migration import (
     PoolGuardTarget,
     PoolMigrationRequest,
@@ -29,7 +30,7 @@ from scripts.ops.nebius_pool_migration import (
 )
 from scripts.ops.nebius_pool_predecessor import CompletedPoolCutover, load_completed_pool
 from scripts.ops.nebius_pool_registration import PoolRegistrationRequest, registration_documents
-from scripts.ops.nebius_pool_runtime import wire_participant
+from scripts.ops.nebius_pool_runtime import participant_readonly_roles, wire_participant
 from scripts.ops.nebius_staging_pool_attachment import (
     StagingPoolAttachment,
     prepare_staging_pool_attachment,
@@ -58,6 +59,10 @@ class SharedPoolHandoffPlan:
     staging: StagingForwardPlan
     migration: PoolMigrationRequest
     staging_targets: dict[str, dict[str, Any]]
+    staging_material: dict[str, dict[str, Any]]
+    staging_role_originals: dict[str, dict[str, Any]]
+    staging_role_targets: dict[str, dict[str, Any]]
+    staging_reader_authority: dict[str, dict[str, Any]]
     history: dict[Path, str]
     input_digest: str
 
@@ -210,6 +215,43 @@ def prepare_shared_pool_handoff(*, runtime: DevelopmentRuntimeInstallRequest,
             targets[_key(row)] = target
         if targets.keys() != staging.originals.keys():
             raise ValueError
+        # Deliver only the staging participant's new immutable machine Secret.
+        # Dev/manager material was already delivered by completed installation;
+        # never replay that stage or adopt the old pool's revoked credentials.
+        namespaces = {attachment.guard.namespace, attachment.participant.execution_namespace.name}
+        material = {key: row for key, row in machine_documents(migration, database.manager.retained.intent.tokens).items()
+            if row['metadata']['namespace'] in namespaces}
+        if len(material) != 2 or {row['metadata']['namespace'] for row in material.values()} != namespaces:
+            raise ValueError
+        originals, role_targets, readers = {}, {}, {}
+        retained = {_key(row): row for row in attachment.resources}
+        staged_namespaces = {attachment.participant.execution_namespace.name, attachment.participant.build_namespace.name}
+        reader_name = 'loom-pool-reader-' + attachment.participant.participant_id.hex
+        for row in participant_readonly_roles(request=migration):
+            key, kind = _key(row), row['kind']
+            if kind in {'ClusterRole', 'ClusterRoleBinding'}:
+                if row['metadata']['name'] == reader_name:
+                    readers[key] = copy.deepcopy(row)
+                continue
+            if row['metadata']['namespace'] not in staged_namespaces:
+                continue
+            original = retained[key]
+            _uid(original)
+            if MARKER in original['metadata'].get('annotations', {}):
+                raise ValueError
+            if kind == 'RoleBinding':
+                # Preserve the qualified existing binding and its metadata.
+                if any(original[field] != row[field] for field in ('subjects', 'roleRef')):
+                    raise ValueError
+            elif kind == 'Role':
+                desired = _snapshot(original)
+                desired['rules'] = copy.deepcopy(row['rules'])
+                desired['metadata'].setdefault('annotations', {})[MARKER] = str(registration.spec.operation_id)
+                originals[key], role_targets[key] = copy.deepcopy(original), desired
+            else:
+                raise ValueError
+        if len(originals) != 2 or len(readers) != 2:
+            raise ValueError
         history = dict(legacy.history)
         for path, raw in completed.files.items():
             checksum = hashlib.sha256(raw).hexdigest()
@@ -221,7 +263,10 @@ def prepare_shared_pool_handoff(*, runtime: DevelopmentRuntimeInstallRequest,
             raise ValueError
         checksum = digest({'development': development.input_digest, 'staging': staging.input_digest,
             'migration': migration_contract(migration), 'staging_targets': targets,
+            'staging_material': material, 'staging_role_originals': originals, 'staging_role_targets': role_targets,
+            'staging_reader_authority': readers,
             'history': {str(path): value for path, value in history.items()}})
-        return SharedPoolHandoffPlan(development, staging, migration, targets, history, checksum)
+        return SharedPoolHandoffPlan(development, staging, migration, targets, material, originals, role_targets,
+            readers, history, checksum)
     except Exception:
         raise ValueError('shared pool handoff intent unqualified') from None
