@@ -8,13 +8,28 @@ registration, retirement and rollback stages are never replayed here.
 from __future__ import annotations
 
 import copy
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
+from scripts.ops import nebius_certificates as private_state
+from scripts.ops.nebius_development_activation import (
+    DevelopmentActivationPlan,
+    prepare_development_activation,
+)
+from scripts.ops.nebius_development_pool_registration import retained_development_participant
+from scripts.ops.nebius_development_runtime_install import DevelopmentRuntimeInstallRequest
 from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
+from scripts.ops.nebius_pool_migration import (
+    PoolGuardTarget,
+    PoolMigrationRequest,
+    migration_contract,
+)
 from scripts.ops.nebius_pool_predecessor import CompletedPoolCutover, load_completed_pool
 from scripts.ops.nebius_pool_registration import PoolRegistrationRequest, registration_documents
+from scripts.ops.nebius_pool_runtime import wire_participant
 from scripts.ops.nebius_staging_pool_attachment import (
     StagingPoolAttachment,
     prepare_staging_pool_attachment,
@@ -37,6 +52,16 @@ class StagingForwardPlan:
     input_digest: str
 
 
+@dataclass(frozen=True, repr=False)
+class SharedPoolHandoffPlan:
+    development: DevelopmentActivationPlan
+    staging: StagingForwardPlan
+    migration: PoolMigrationRequest
+    staging_targets: dict[str, dict[str, Any]]
+    history: dict[Path, str]
+    input_digest: str
+
+
 def prepare_staging_forward(*, registration: PoolRegistrationRequest, observation: dict[str, Any],
         legacy: CompletedPoolCutover, repo_root: Path) -> StagingForwardPlan:
     """Bind a new initial catalog to current staging and its completed ancestry.
@@ -53,6 +78,7 @@ def prepare_staging_forward(*, registration: PoolRegistrationRequest, observatio
                 or legacy.completion.outcome != 'legacy'
                 or spec.operation_id == legacy.context.inputs.installation.operation_id
                 or spec.pool_id == legacy.context.inputs.installation.pool_id
+                or registration.binding.kube_system_uid != legacy.context.request.fencing.retirement.migration.registration.binding.kube_system_uid
                 or registration.binding.namespace != 'loom-nebius-management-dev'):
             raise ValueError
         participant, = (row for row in spec.participants if row.environment_class == 'staging')
@@ -139,3 +165,63 @@ def prepare_staging_forward(*, registration: PoolRegistrationRequest, observatio
         return StagingForwardPlan(attachment, legacy, originals, stopped, checksum)
     except Exception:
         raise ValueError('shared pool staging predecessor unqualified') from None
+
+
+def prepare_shared_pool_handoff(*, runtime: DevelopmentRuntimeInstallRequest,
+        observation: dict[str, Any], legacy: CompletedPoolCutover, repo_root: Path) -> SharedPoolHandoffPlan:
+    """Compose completed CLOSED dev and current staging without replaying either.
+
+    The complete migration contract is used only for fixed staging projection.
+    Fresh dev is already installed, not a standalone writer to retire or register
+    again. No guard, grant, workload transition or SQL opening is performed here.
+    The protected parent still owns live sole-writer and provider qualification.
+    """
+    try:
+        development = prepare_development_activation(runtime)
+        completed = development.runtime
+        database = completed.request.database
+        pool = database.manager.retained.request
+        registration = pool.registration
+        participant = retained_development_participant(pool)
+        # One verified baseline already runs staging. The handoff does not
+        # silently deploy a newer manager/controller candidate into staging.
+        if (database.manager.publication.bundle.candidate != registration.candidate
+                or len(registration.spec.participants) != 2):
+            raise ValueError
+        staging = prepare_staging_forward(registration=registration, observation=observation,
+            legacy=legacy, repo_root=repo_root)
+        controller = completed.resources['Deployment:loom-dev:loom-control-plane']
+        dev_guard = PoolGuardTarget(participant_id=participant.participant_id, namespace='loom-dev',
+            namespace_uid=UUID(database.foundation.binding.namespace_uid), controller=copy.deepcopy(controller))
+        migration = PoolMigrationRequest(registration=registration, guards=(dev_guard, staging.attachment.guard))
+        migration_contract(migration)
+        attachment = staging.attachment
+        service = staging.originals[f'Deployment:{attachment.guard.namespace}:loom-service']
+        wired = wire_participant(request=migration, participant_id=attachment.participant.participant_id,
+            management_origin='https://' + database.manager.deployment.public_host,
+            actuator=attachment.actuators[0], guest_actuators=attachment.actuators[1:],
+            service=service, runtime_profile=attachment.runtime_profile)
+        # The old collector remains suspended. The completed dev collector is
+        # the sole aggregate observer; do not start a second per-env observer.
+        targets = copy.deepcopy(staging.stopped)
+        for row in wired.values():
+            target = _snapshot(row)
+            target['metadata'].setdefault('annotations', {})[MARKER] = str(registration.spec.operation_id)
+            targets[_key(row)] = target
+        if targets.keys() != staging.originals.keys():
+            raise ValueError
+        history = dict(legacy.history)
+        for path, raw in completed.files.items():
+            checksum = hashlib.sha256(raw).hexdigest()
+            if path in history and history[path] != checksum:
+                raise ValueError
+            history[path] = checksum
+        if any(hashlib.sha256(private_state._private_read(path, limit=4 * 1024**2)).hexdigest() != checksum
+                for path, checksum in history.items()):
+            raise ValueError
+        checksum = digest({'development': development.input_digest, 'staging': staging.input_digest,
+            'migration': migration_contract(migration), 'staging_targets': targets,
+            'history': {str(path): value for path, value in history.items()}})
+        return SharedPoolHandoffPlan(development, staging, migration, targets, history, checksum)
+    except Exception:
+        raise ValueError('shared pool handoff intent unqualified') from None
