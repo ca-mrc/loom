@@ -915,6 +915,10 @@ child retains its own mutation intent and uncertain-result readback; completed
 children are validated and byte-pinned, never dispatched again. Initial preflight
 requires the untouched predecessor. Resumption instead uses phase-aware checks,
 including fresh drain and authority checks before dependent mutations.
+Its concrete guard child uses the existing database-bound command adapter and
+records acquisition intent before dispatch. Busy participants retain earlier
+guards; an uncertain acquisition is observed without issuing it again. This
+child does not replay registration or release either participant's guard.
 
 Recovery is a separately anchored, terminal direction. Its marker freezes both
 the forward journal and all existing child receipts, including an unfinished
