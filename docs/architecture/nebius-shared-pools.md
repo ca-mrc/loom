@@ -951,6 +951,17 @@ These transitions still require the connected parent's fresh process, database,
 drain and whole-pool authority checks; historical receipts alone are not runtime
 readiness or recovery authority.
 
+The pre-gateway forward writer observer reuses the complete revision-bound census
+but derives its permitted workloads and Roles from these child receipts. A
+planned successor is not accepted before dispatch intent; an uncertain PATCH
+admits only its recorded before/after states, and a completed transition admits
+only the successor. Staging's new reader grants must be absent before their
+create intent, then match that exact operation-marked object, and finally retain
+their recorded created UID. Child receipt bytes and the parent phase are checked
+again after observation, including started children not yet covered by completed
+byte pins. This observer performs no mutations and rejects recovery or started
+gateway/activation phases; those require their own successor authority checks.
+
 The shared Role child reduces only the two source-qualified staging worker/build
 Roles, preserving their UIDs and existing bindings. Each rules-and-annotations
 PATCH tests the current UID, resourceVersion and rules. Mutation intent precedes

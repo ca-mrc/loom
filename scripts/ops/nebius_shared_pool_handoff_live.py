@@ -220,13 +220,60 @@ def observe_shared_pool_writers(*, runtime: DevelopmentRuntimeInstallRequest,
     try:
         plan = prepare_shared_pool_handoff(runtime=runtime, observation=observation,
             legacy=legacy, repo_root=repo_root)
+        roots = _resource_roots(plan, frozenset({'Deployment', 'StatefulSet', 'CronJob'}))
+        authority = _authority_roots(plan)
+        result = _observe_shared_writer_options(plan=plan, transport=transport,
+            workload_options={key: (row,) for key, row in roots.items()},
+            authority_options={key: (row,) for key, row in authority.items()})
+        if prepare_shared_pool_handoff(runtime=runtime, observation=observation, legacy=legacy, repo_root=repo_root) != plan:
+            raise ValueError
+        return result
+    except Exception:
+        raise ValueError('shared pool writer census unqualified') from None
+
+
+WriterOptions = dict[str, tuple[dict[str, Any] | None, ...]]
+
+
+def _select_writer_options(options: WriterOptions, inventory: dict[str, list[dict[str, Any]]]
+        ) -> dict[str, dict[str, Any]]:
+    """Select only a recorded alternative, including create-intent absence.
+
+    A new create intent has no UID yet, but does have the stage engine's exact
+    operation-marked desired object. Once its receipt records a UID, replacement
+    cannot be accepted. This observation never adopts or completes the create.
+    """
+    actual = {_key(row): row for rows in inventory.values() for row in rows}
+    if len(actual) != sum(map(len, inventory.values())):
+        raise ValueError
+    selected = {}
+    for key, choices in options.items():
+        row = actual.get(key)
+        if row is None:
+            if None not in choices:
+                raise ValueError
+            continue
+        uid = _uid(row)
+        matches = [wanted for wanted in choices if wanted is not None and _key(wanted) == key
+            and _matches(row, wanted, wanted['metadata'].get('uid', uid))]
+        if not matches:
+            raise ValueError
+        selected[key] = copy.deepcopy(matches[0])
+        selected[key]['metadata']['uid'] = uid
+    return selected
+
+
+def _observe_shared_writer_options(*, plan: SharedPoolHandoffPlan, transport: ManagementKubernetesTransport,
+        workload_options: WriterOptions, authority_options: WriterOptions) -> SharedPoolWriterObservation:
+    """Common census mechanics; callers derive and recheck phase authority."""
+    try:
+        runtime = plan.development.runtime.request
         if transport.api_server.rstrip('/') != runtime.database.foundation.inputs.config['kubernetes_api_server'].rstrip('/'):
             raise ValueError
-        roots = _resource_roots(plan, frozenset({'Deployment', 'StatefulSet', 'CronJob'}))
+        legacy = plan.staging.legacy
         legacy_jobs = (*legacy.context.original.retained.values(), *legacy.context.predecessor.retained.values())
         retained_jobs = {_key(row): copy.deepcopy(row) for row in legacy_jobs if row['kind'] == 'Job'}
         retained_jobs.update(_resource_roots(plan, frozenset({'Job'})))
-        authority = _authority_roots(plan)
         binding = plan.migration.registration.binding
 
         def cluster() -> None:
@@ -254,6 +301,8 @@ def observe_shared_pool_writers(*, runtime: DevelopmentRuntimeInstallRequest,
                 ('rolebindings', 'RoleBinding'), ('clusterrolebindings', 'ClusterRoleBinding'))}
         inventory = {resource: inventory_resources(read, api, resource, kind, include_terminal_pods=True)
             for api, resource, kind in POOL_WRITER_WORKLOAD_COLLECTIONS}
+        roots = _select_writer_options(workload_options, inventory)
+        authority = _select_writer_options(authority_options, permissions)
         subjects = set()
         for row in (*roots.values(), *retained_jobs.values()):
             pod = (row['spec']['jobTemplate']['spec']['template']['spec'] if row['kind'] == 'CronJob'
@@ -277,8 +326,7 @@ def observe_shared_pool_writers(*, runtime: DevelopmentRuntimeInstallRequest,
         current = {_key(row): row for rows in inventory.values() for row in rows if _key(row) in roots}
         current_authority = {_key(row): row for rows in permissions.values() for row in rows if _key(row) in authority}
         cluster()
-        if (revision is None or prepare_shared_pool_handoff(runtime=runtime, observation=observation,
-                legacy=legacy, repo_root=repo_root) != plan):
+        if revision is None:
             raise ValueError
         checksum = digest({'handoff': plan.input_digest, 'resource_version': revision,
             'workloads': inventory, 'permissions': permissions})
