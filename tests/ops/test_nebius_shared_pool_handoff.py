@@ -873,6 +873,198 @@ def test_shared_parent_connects_current_staging_workload_transitions_without_rep
 
 
 @pytest.mark.timeout(420)
+def test_shared_parent_restricts_current_roles_once_and_checks_foreign_effective_grants(shared_operation):
+    """Catch repeated unknown PATCHes and false fencing from only two Role reads."""
+    import importlib.util
+    import json
+    import ssl
+    from contextlib import ExitStack
+
+    import httpx
+    from scripts.ops import nebius_shared_pool_operation as parent
+    from scripts.ops.nebius_management_switch import _stable
+
+    name = 'scripts.ops.nebius_shared_pool_roles'
+    assert importlib.util.find_spec(name) is not None, 'connected shared Role fencing is missing'
+    module = __import__(name, fromlist=['HTTPSSharedStagingRoles'])
+    args, bindings = shared_operation
+    originals = bindings.plan.staging_role_originals
+    roles = copy.deepcopy(originals)
+    writes, attempts, reviews, qualifications = [], [], [], []
+    mode = {'delete_receipt': True, 'saved_receipt': None, 'reject': True, 'lose_reply': True,
+        'lose_read': False, 'extra_grant': True, 'incomplete': False, 'change_binding': False}
+    manager = args['runtime'].database.manager.retained.request.retained
+    state = Path(manager.operation['state_dir']).parent / 'shared-pool-handoff'
+    receipt = state / 'forward-roles/roles.json'
+    identity = bindings.migration.registration.binding
+    namespaces = {'kube-system': identity.kube_system_uid, identity.namespace: identity.namespace_uid,
+        **{guard.namespace: str(guard.namespace_uid) for guard in bindings.migration.guards},
+        **{ns.name: str(ns.uid) for participant in bindings.migration.registration.spec.participants
+            for ns in (participant.execution_namespace, participant.build_namespace)}}
+    rolebindings = [copy.deepcopy(row) for row in bindings.plan.staging.attachment.resources
+        if row['kind'] == 'RoleBinding']
+    foreign = {'apiVersion': 'rbac.authorization.k8s.io/v1', 'kind': 'RoleBinding',
+        'metadata': {'name': 'foreign-reader', 'namespace': 'outside-pool', 'uid': str(uuid4()), 'resourceVersion': '1'},
+        'subjects': [{'kind': 'Group', 'apiGroup': 'rbac.authorization.k8s.io', 'name': 'system:authenticated'}],
+        'roleRef': {'apiGroup': 'rbac.authorization.k8s.io', 'kind': 'Role', 'name': 'foreign-reader'}}
+    rolebindings.append(foreign)
+    original_bindings = copy.deepcopy(rolebindings)
+
+    def handle(message):
+        path = message.url.path
+        if path.startswith('/api/v1/namespaces/'):
+            assert message.method == 'GET'
+            namespace = path.rsplit('/', 1)[-1]
+            assert namespace in namespaces
+            return httpx.Response(200, json={'apiVersion': 'v1', 'kind': 'Namespace',
+                'metadata': {'name': namespace, 'uid': namespaces[namespace], 'resourceVersion': '1',
+                    'labels': {'loom.nebius/installation-id': identity.installation_id,
+                        'pod-security.kubernetes.io/enforce': 'restricted'}}})
+        if path in ('/apis/rbac.authorization.k8s.io/v1/rolebindings',
+                '/apis/rbac.authorization.k8s.io/v1/clusterrolebindings'):
+            assert message.method == 'GET' and 'Impersonate-User' not in message.headers
+            kind = 'RoleBinding' if path.endswith('/rolebindings') else 'ClusterRoleBinding'
+            return httpx.Response(200, json={'apiVersion': 'rbac.authorization.k8s.io/v1',
+                'kind': kind + 'List', 'metadata': {'resourceVersion': '71'},
+                'items': copy.deepcopy(rolebindings) if kind == 'RoleBinding' else []})
+        if path == '/apis/authorization.k8s.io/v1/selfsubjectrulesreviews':
+            assert message.method == 'POST'
+            account = message.headers['Impersonate-User']
+            account_namespace = account.split(':')[2]
+            assert set(message.headers.get_list('Impersonate-Group', split_commas=True)) == {
+                'system:serviceaccounts', 'system:serviceaccounts:' + account_namespace, 'system:authenticated'}
+            namespace = json.loads(message.content)['spec']['namespace']
+            reviews.append((account, namespace))
+            rules = [{'apiGroups': ['batch'], 'resources': ['jobs'], 'verbs': ['get', 'list', 'watch']}]
+            if namespace == 'outside-pool' and mode['extra_grant']:
+                rules.append({'apiGroups': ['batch'], 'resources': ['jobs'], 'verbs': ['create'], 'resourceNames': ['one-job']})
+            if mode['change_binding']:
+                mode['change_binding'] = False
+                foreign['metadata']['resourceVersion'] = '2'
+            return httpx.Response(201, json={'apiVersion': 'authorization.k8s.io/v1',
+                'kind': 'SelfSubjectRulesReview', 'spec': {}, 'status': {'incomplete': mode['incomplete'],
+                    'resourceRules': rules, 'nonResourceRules': []}})
+        assert 'Impersonate-User' not in message.headers
+        parts = path.split('/')
+        assert parts[:5] == ['', 'apis', 'rbac.authorization.k8s.io', 'v1', 'namespaces']
+        key = 'Role:' + parts[5] + ':' + parts[7]
+        assert parts[6] == 'roles' and key in originals
+        if message.method == 'GET':
+            if mode['lose_read']:
+                mode['lose_read'] = False
+                raise httpx.ReadError('simulated lost first Role readback')
+            return httpx.Response(200, json=roles[key])
+        assert message.method == 'PATCH' and not message.url.query
+        changes = json.loads(message.content)
+        current = copy.deepcopy(roles[key])
+        assert changes[:3] == [
+            {'op': 'test', 'path': '/metadata/uid', 'value': originals[key]['metadata']['uid']},
+            {'op': 'test', 'path': '/metadata/resourceVersion', 'value': current['metadata']['resourceVersion']},
+            {'op': 'test', 'path': '/rules', 'value': current['rules']},
+        ]
+        assert [(row['op'], row['path']) for row in changes[3:]] == [
+            ('add', '/metadata/annotations'), ('replace', '/rules')]
+        assert json.loads(receipt.read_bytes())['roles'][key] == 'intent'
+        attempts.append(key)
+        if mode['reject']:
+            mode['reject'] = False
+            return httpx.Response(409, json={'apiVersion': 'v1', 'kind': 'Status',
+                'status': 'Failure', 'code': 409, 'reason': 'Conflict'})
+        current['metadata']['annotations'] = changes[3]['value']
+        current['rules'] = changes[4]['value']
+        current['metadata']['resourceVersion'] = str(int(current['metadata']['resourceVersion']) + 1)
+        roles[key] = current
+        writes.append(key)
+        if mode['lose_reply']:
+            mode['lose_reply'], mode['lose_read'] = False, True
+            raise httpx.ReadError('simulated lost committed Role PATCH reply')
+        return httpx.Response(200, json=current)
+
+    with ExitStack() as stack:
+        class ConnectedRolesAPI(SharedPhaseAPI):
+            def prepare(self, phase, bound, directory):
+                if phase == 'forward-roles':
+                    module.prepare_shared_staging_roles(bindings=bound, state_dir=directory)
+                else:
+                    super().prepare(phase, bound, directory)
+
+            def validate_prepared_phase(self, phase, directory):
+                if phase == 'forward-roles':
+                    module.validate_shared_staging_roles(bindings=bindings, state_dir=directory, complete=False, prepared=True)
+                else:
+                    super().validate_prepared_phase(phase, directory)
+
+            def validate_phase(self, phase, directory, *, complete):
+                if phase == 'forward-roles':
+                    module.validate_shared_staging_roles(bindings=bindings, state_dir=directory, complete=complete)
+                else:
+                    super().validate_phase(phase, directory, complete=complete)
+
+            def advance(self, phase, bound, directory):
+                if phase != 'forward-roles':
+                    return super().advance(phase, bound, directory)
+
+                def qualify(current, writing):
+                    assert current == bindings
+                    qualifications.append(writing)
+                    if writing and mode['delete_receipt']:
+                        mode['delete_receipt'] = False
+                        mode['saved_receipt'] = receipt.read_bytes()
+                        receipt.unlink()  # Fault injection only in this test's private history.
+
+                api = stack.enter_context(module.HTTPSSharedStagingRoles(bindings=bound,
+                    api_server=args['runtime'].database.foundation.inputs.config['kubernetes_api_server'],
+                    ssl_context=ssl.create_default_context(), qualify_runtime=qualify))
+                connection_type = type(api.client)
+                api.client.close()
+                api.client = connection_type(base_url=api.api_server, transport=httpx.MockTransport(handle))
+                return module.advance_shared_staging_roles(bindings=bound, api=api, state_dir=directory)
+
+        api = ConnectedRolesAPI(parent)
+        api.block = 'forward-database'
+        kwargs = {**args, 'bindings': bindings, 'api': api, 'action': 'install'}
+        with pytest.raises(ValueError, match='shared pool operation unconfirmed'):
+            parent.run_shared_pool_operation(**kwargs)
+        assert not attempts and not receipt.exists() and mode['saved_receipt'] is not None
+        # Restore this controlled pre-dispatch fixture to test other faults.
+        # Production never recreates lost started history.
+        receipt.write_bytes(mode['saved_receipt'])
+        receipt.chmod(0o600)
+        assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-roles'
+        assert len(attempts) == 1 and writes == []  # Definite rejection permits a later retry.
+        with pytest.raises(ValueError, match='shared pool operation unconfirmed'):
+            parent.run_shared_pool_operation(**kwargs)
+        assert len(writes) == 1
+        options = module.shared_forward_role_options(bindings=bindings, state_dir=state)
+        assert len(options[writes[0]]) == 2  # Unknown commit retains both exact possibilities.
+        with pytest.raises(ValueError, match='shared pool operation unconfirmed'):
+            parent.run_shared_pool_operation(**kwargs)
+        assert set(writes) == set(originals) and len(writes) == 2
+        assert len(attempts) == 3  # No second dispatch of the unknown committed PATCH.
+        assert any(namespace == 'outside-pool' for _, namespace in reviews)
+        assert rolebindings == original_bindings
+        mode['extra_grant'], mode['incomplete'] = False, True
+        with pytest.raises(ValueError, match='shared pool operation unconfirmed'):
+            parent.run_shared_pool_operation(**kwargs)
+        mode['incomplete'], mode['change_binding'] = False, True
+        with pytest.raises(ValueError, match='shared pool operation unconfirmed'):
+            parent.run_shared_pool_operation(**kwargs)
+        assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-database'
+        assert len(attempts) == 3 and any(qualifications)
+        expected_subjects = set()
+        for row in bindings.plan.staging.originals.values():
+            pod = (row['spec']['jobTemplate']['spec']['template']['spec'] if row['kind'] == 'CronJob'
+                else row['spec']['template']['spec'])
+            expected_subjects.add('system:serviceaccount:' + row['metadata']['namespace'] + ':' + pod.get('serviceAccountName', 'default'))
+        assert {subject for subject, namespace in reviews if namespace == 'outside-pool'} == expected_subjects
+        assert all(_stable(roles[key]) == _stable(bindings.plan.staging_role_targets[key]) for key in originals)
+        assert all(roles[key]['metadata']['uid'] == originals[key]['metadata']['uid'] for key in originals)
+        assert all(len(choices) == 1 for choices in module.shared_forward_role_options(bindings=bindings, state_dir=state).values())
+        assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-database'
+        assert len(attempts) == 3
+
+
+@pytest.mark.timeout(420)
 def test_shared_handoff_binds_real_completed_dev_and_current_staging(shared_runtime, staging_history, staging_observation):
     import base64
 
