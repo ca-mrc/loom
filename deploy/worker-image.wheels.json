@@ -1,8 +1,8 @@
 {
   "schema_version": "1",
   "python_version": "3.12",
-  "harbor_compat_sha": "527d50deb63a5d279e8c20593c18a2cbc7f61f9e",
-  "harbor_runtime_version": "0.18.0",
+  "harbor_compat_sha": "d5ac1be17f575852eaf4fffc4072fd18481c209b",
+  "harbor_runtime_version": "0.24.0",
   "packages": {
     "openai": {
       "version": "2.54.0",
@@ -10,9 +10,9 @@
       "sha256": "89089789197ccdb87f173a03145ed1598d00795220c93e96cf712b1cbf5e5f2b"
     },
     "litellm": {
-      "version": "1.98.0",
-      "wheel": "litellm-1.98.0-py3-none-any.whl",
-      "sha256": "3a95260f087a4cf763da85bbeeb2efa82caec243ad2394c9e6362ff747963738"
+      "version": "1.104.2",
+      "wheel": "litellm-1.104.2-cp310-abi3-manylinux_2_28_x86_64.whl",
+      "sha256": "416c3538ea78b08d637ec45564a919232aa2093e73adb9dd7752f7cff2ec585e"
     }
   },
   "regenerate": "scripts/ops/update_worker_image_lock.sh"

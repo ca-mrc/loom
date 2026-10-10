@@ -73,7 +73,7 @@ class RealHarborCompletionTests(unittest.IsolatedAsyncioTestCase):
                 instances.append(self)
 
         async def ledger(self, trial_id):
-            agents = [agent for agent in instances if agent._user_provided_session_id == str(trial_id)]
+            agents = [agent for agent in instances if agent.options.session_id == str(trial_id)]
             if not agents:
                 return []
             agent, = agents

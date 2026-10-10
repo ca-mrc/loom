@@ -23,6 +23,7 @@ from harbor.models.metric.usage_info import UsageInfo
 
 from loom.agent.terminus2 import runtime as bridge
 from loom.agent.terminus2.mapper import Terminus2TrajectoryMapper
+from loom.agent.terminus2.model_switch import construct_teacher_llm, redact_agent_llm_kwargs
 from loom.agent.terminus2.provenance import HARBOR_COMPAT_SHA
 from loom.driver.fake import FakeDriver
 from loom.errors import AgentError
@@ -142,8 +143,8 @@ def agent_class(llm, session):
             self._session = session
             llm.effective_options = {
                 "max_turns": self._max_episodes,
-                "enable_summarize": self._enable_summarize,
-                "record_terminal_session": self._record_terminal_session,
+                "enable_summarize": self.options.enable_summarize,
+                "record_terminal_session": self.options.record_terminal_session,
             }
 
     return Agent
@@ -168,6 +169,36 @@ class HarborConformanceTests(unittest.IsolatedAsyncioTestCase):
             importlib.metadata.distribution("harbor").read_text("direct_url.json")
         )
         self.assertEqual(direct_url["vcs_info"]["commit_id"], HARBOR_COMPAT_SHA)
+
+    def test_real_teacher_constructor_preserves_auth_and_redacts_dump_options(self):
+        logs = Path(self.directory.name) / "real-llm"
+        logs.mkdir()
+        agent = Terminus2(
+            logs_dir=logs,
+            model_name="openai/gpt-4o",
+            api_base="http://gateway/openai/v1",
+            session_id="fixture-session",
+            enable_summarize=False,
+            temperature=0.25,
+            llm_kwargs={"api_key": "loom_step_fixture_credential", "top_p": 0.8},
+        )
+        student = agent._llm
+        teacher = construct_teacher_llm(agent, teacher_model_name="openai/gpt-4o-mini")
+        self.assertEqual(teacher._api_base, student._api_base)
+        self.assertEqual(teacher._session_id, agent._session_id)
+        self.assertEqual(teacher._llm_kwargs, student._llm_kwargs)
+        self.assertEqual(teacher._llm_kwargs["api_key"], "loom_step_fixture_credential")
+        # Harbor binds temperature as a named LiteLLM constructor parameter;
+        # call() reads this field when preparing completion kwargs.
+        self.assertEqual(teacher._temperature, 0.25)
+        self.assertEqual(teacher._temperature, student._temperature)
+        self.assertEqual(teacher._llm_kwargs["top_p"], 0.8)
+        redact_agent_llm_kwargs(agent)
+        self.assertNotIn("api_key", agent.options.llm_kwargs)
+        self.assertEqual(student._llm_kwargs["api_key"], "loom_step_fixture_credential")
+        recovered = construct_teacher_llm(agent, teacher_model_name="openai/gpt-4o-mini")
+        self.assertEqual(recovered._llm_kwargs, teacher._llm_kwargs)
+        self.assertEqual(recovered._temperature, teacher._temperature)
 
     async def pair(
         self, responses, *, max_turns=50, timeout=False, instruction_suffix="", request_params=None

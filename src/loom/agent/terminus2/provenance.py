@@ -6,12 +6,12 @@ import os
 from importlib.metadata import PackageNotFoundError, version
 
 HARBOR_COMPAT_SHA = os.environ.get(
-    "LOOM_HARBOR_SOURCE_REVISION", "527d50deb63a5d279e8c20593c18a2cbc7f61f9e",
+    "LOOM_HARBOR_SOURCE_REVISION", "09f5b964f8e5075f7e52fd08c9994dfc80ad5d24",
 )
 try:
     HARBOR_RUNTIME_VERSION = version("harbor")
 except PackageNotFoundError:
-    HARBOR_RUNTIME_VERSION = "0.18.0"
+    HARBOR_RUNTIME_VERSION = "0.24.0"
 LOOM_BRIDGE_REVISION = os.environ.get("LOOM_BRIDGE_REVISION", "1.0")
 
 
