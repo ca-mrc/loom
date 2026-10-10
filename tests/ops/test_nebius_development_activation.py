@@ -233,6 +233,7 @@ def test_completed_runtime_rejects_history_changing_during_load(completed_runtim
         module.load_completed_runtime(request)
 
 
+@pytest.mark.parametrize('connected', [None, True], indirect=True, ids=['dev-only', 'common-catalog'])
 def test_activation_preparation_limits_writes_to_retained_gateway_and_build_namespace(completed_runtime, monkeypatch):
     _, request, _, _, _ = completed_runtime
     name = 'scripts.ops.nebius_development_activation'
@@ -246,7 +247,9 @@ def test_activation_preparation_limits_writes_to_retained_gateway_and_build_name
     monkeypatch.setattr(private_state, '_atomic_json', no_write)
     plan = module.prepare_development_activation(request)
     spec = request.database.manager.retained.request.registration.spec
-    participant, = spec.participants
+    participant, = [row for row in spec.participants if row.environment_class == 'development']
+    namespaces = {namespace.name for row in spec.participants
+        for namespace in (row.execution_namespace, row.build_namespace)}
     assert plan.runtime.request == request
     assert plan.gateway_original['spec']['replicas'] == 0
     assert plan.gateway_target['spec']['replicas'] == 1
@@ -254,12 +257,12 @@ def test_activation_preparation_limits_writes_to_retained_gateway_and_build_name
     pod = plan.gateway_target['spec']['template']['spec']
     assert pod['serviceAccountName'] == 'loom-pool-gateway'
     assert pod['containers'][0]['image'] == request.database.manager.publication.bundle.candidate['images']['service']['image_ref']
-    assert {row['metadata']['namespace'] for row in plan.authority.values() if row['kind'] in {'Role', 'RoleBinding'}} == {
-        participant.execution_namespace.name, participant.build_namespace.name}
+    assert {row['metadata']['namespace'] for row in plan.authority.values()
+        if row['kind'] in {'Role', 'RoleBinding'}} == namespaces
     for row in plan.authority.values():
         if row['kind'] == 'ClusterRole':
             assert row['rules'] == [{'apiGroups': [''], 'resources': ['namespaces'], 'verbs': ['get'],
-                'resourceNames': sorted([participant.execution_namespace.name, participant.build_namespace.name])}]
+                'resourceNames': sorted(namespaces)}]
         for subject in row.get('subjects', []):
             assert subject == {'kind': 'ServiceAccount', 'name': 'loom-pool-gateway', 'namespace': 'loom-nebius-management-dev'}
     before, after = plan.build_namespace_original, plan.build_namespace_target
