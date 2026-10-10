@@ -28,6 +28,7 @@ from scripts.ops.nebius_ingress_stage import _key, _uid
 from scripts.ops.nebius_management_stage import _stage_fixed_documents, _validate_record
 from scripts.ops.nebius_management_supplied import _defaulted
 from scripts.ops.nebius_management_transport import ManagementKubernetesTransport
+from scripts.ops.nebius_shared_pool_activation import shared_forward_activation_view
 from scripts.ops.nebius_shared_pool_handoff_live import SharedPoolGuardBindings, WriterOptions
 from scripts.ops.nebius_shared_pool_operation import FORWARD_PHASES, _files
 from scripts.ops.nebius_shared_pool_workloads import _frame
@@ -160,13 +161,9 @@ def shared_forward_gateway_view(*, bindings: SharedPoolGuardBindings, state_dir:
     Created grants require their recorded UID. Include all child receipt bytes
     so readers can reject changes even before the parent pins completed history.
     """
-    frame = _frame(bindings, state_dir)
+    opening = shared_forward_activation_view(bindings=bindings, state_dir=state_dir)
+    frame = opening.frame
     plan = bindings.plan.development
-    manager = plan.runtime.request.database.manager.retained.request.retained
-    recovery = Path(manager.operation['anchor_dir']) / 'shared-pool-recovery.json'
-    if (frame['outcome'] != 'pending' or recovery.exists() or recovery.is_symlink()
-            or any(frame['forward'][phase]['status'] != 'prepared' for phase in ('forward-activate', 'forward-verify'))):
-        raise ValueError
     original = copy.deepcopy(plan.gateway_original)
     workloads: dict[str, tuple[dict[str, Any], ...]] = {_key(original): (original,)}
     authority: WriterOptions = {key: (None,) for key in plan.authority}
@@ -194,7 +191,7 @@ def shared_forward_gateway_view(*, bindings: SharedPoolGuardBindings, state_dir:
                     workloads[_key(original)] = (original, after) if item['status'] == 'intent' else (after,)
         if _files(child, allow_empty=phase == 'prepared') != files:
             raise ValueError
-    if _frame(bindings, state_dir) != frame:
+    if shared_forward_activation_view(bindings=bindings, state_dir=state_dir) != opening:
         raise ValueError
     return frame, files, workloads, authority
 

@@ -6,6 +6,7 @@ caller manifest, and has no standalone command or recovery dispatch authority.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -85,6 +86,48 @@ def validate_shared_pool_activation(*, bindings: SharedPoolGuardBindings, state_
             raise ValueError
         unfinished |= row['release'] != 'released'
     return record
+
+
+@dataclass(frozen=True, repr=False)
+class SharedForwardActivationView:
+    frame: dict[str, Any]
+    files: dict[str, str]
+    pool_states: tuple[str, ...]
+    guard_states: dict[str, tuple[str, ...]] | None
+
+
+def shared_forward_activation_view(*, bindings: SharedPoolGuardBindings, state_dir: Path) -> SharedForwardActivationView:
+    """Exact observation alternatives from forward opening, never recovery.
+
+    Before this child, the guard-acquisition receipts select open/held states.
+    Once opening is prepared here, all acquisition phases must be complete and
+    only this child's ordered release intent can authorize an open guard.
+    """
+    frame = _frame(bindings, state_dir)
+    manager = bindings.plan.development.runtime.request.database.manager.retained.request.retained
+    recovery = Path(manager.operation['anchor_dir']) / 'shared-pool-recovery.json'
+    if (frame['outcome'] not in {'pending', 'shared_pool_handoff_complete'} or recovery.exists() or recovery.is_symlink()
+            or (frame['outcome'] == 'shared_pool_handoff_complete'
+                and any(row['status'] != 'complete' for row in frame['forward'].values()))):
+        raise ValueError
+    phase = frame['forward'][_PHASE]['status']
+    child = state_dir / _PHASE
+    files: dict[str, str] = {}
+    record = None
+    if phase != 'prepared' or child.exists() or child.is_symlink():
+        files = _files(child, allow_empty=phase == 'prepared')
+        if files or phase != 'prepared':
+            if any(frame['forward'][prior]['status'] != 'complete' for prior in FORWARD_PHASES[:FORWARD_PHASES.index(_PHASE)]):
+                raise ValueError
+            record = validate_shared_pool_activation(bindings=bindings, state_dir=child,
+                complete=phase == 'complete', prepared=phase == 'prepared')
+        if _files(child, allow_empty=phase == 'prepared') != files:
+            raise ValueError
+    if _frame(bindings, state_dir) != frame:
+        raise ValueError
+    return SharedForwardActivationView(frame, files, ('closed',) if record is None else _pool_choices(record),
+        None if record is None else {target.namespace: _guard_choices(record['guards'][str(target.participant_id)])
+            for target in bindings.migration.guards})
 
 
 def prepare_shared_pool_activation(*, bindings: SharedPoolGuardBindings, state_dir: Path) -> None:

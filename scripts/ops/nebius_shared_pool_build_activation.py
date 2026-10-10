@@ -22,6 +22,7 @@ from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
 from scripts.ops.nebius_management_switch import _matches
 from scripts.ops.nebius_management_transport import ManagementKubernetesTransport
 from scripts.ops.nebius_pool_retirement_live import _patch_result
+from scripts.ops.nebius_shared_pool_activation import shared_forward_activation_view
 from scripts.ops.nebius_shared_pool_handoff_live import SharedPoolGuardBindings
 from scripts.ops.nebius_shared_pool_operation import FORWARD_PHASES, _files
 from scripts.ops.nebius_shared_pool_workloads import _frame
@@ -109,16 +110,11 @@ def shared_forward_build_namespace_view(*, bindings: SharedPoolGuardBindings, st
 
     Includes parent history and receipt bytes so a caller can bracket a remote
     observation. This projects only the namespace; the combined runtime view
-    separately qualifies gateway successors. Opening/recovery remain excluded.
+    separately qualifies gateway successors. Recovery remains excluded.
     """
-    frame = _frame(bindings, state_dir)
+    opening = shared_forward_activation_view(bindings=bindings, state_dir=state_dir)
+    frame = opening.frame
     plan = bindings.plan.development
-    manager = plan.runtime.request.database.manager.retained.request.retained
-    recovery = Path(manager.operation['anchor_dir']) / 'shared-pool-recovery.json'
-    if (frame['outcome'] != 'pending' or recovery.exists() or recovery.is_symlink()
-            or any(frame['forward'][phase]['status'] != 'prepared'
-                for phase in ('forward-activate', 'forward-verify'))):
-        raise ValueError
     status, files = 'prepared', {}
     child = state_dir / _PHASE
     phase = frame['forward'][_PHASE]['status']
@@ -133,7 +129,7 @@ def shared_forward_build_namespace_view(*, bindings: SharedPoolGuardBindings, st
     before, after = copy.deepcopy(plan.build_namespace_original), copy.deepcopy(plan.build_namespace_target)
     after['metadata']['uid'] = _uid(before)
     choices = (before,) if status == 'prepared' else (before, after) if status == 'intent' else (after,)
-    if _frame(bindings, state_dir) != frame:
+    if shared_forward_activation_view(bindings=bindings, state_dir=state_dir) != opening:
         raise ValueError
     return frame, files, {_key(before): choices}
 

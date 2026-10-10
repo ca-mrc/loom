@@ -1005,8 +1005,11 @@ resources retain their original identities. The ordinary CLOSED-runtime observer
 remains strict without this binding. The shared probe adapter carries the same
 binding through nested process checks; permitting a successor only in the outer
 inventory is not enough. Live gateway grants are checked separately by the writer
-census; the development inventory gains no staging read scope. Pool opening and
-recovery stages still require their own successors.
+census; the development inventory gains no staging read scope. During opening,
+both inventory and census also pin the activation child's receipt bytes. Its
+recorded intent selects CLOSED/GLOBAL and held/open alternatives; before that
+child exists, the acquisition receipts still own guard state. Recovery remains a
+separate direction and cannot reuse these forward-only views.
 
 The shared gateway child creates only its catalog-derived grants and starts the
 already-installed, stopped gateway through the existing create-only and workload

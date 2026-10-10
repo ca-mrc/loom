@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from scripts.ops.nebius_development_runtime_probes import HTTPSDevelopmentRuntimeProbes
+from scripts.ops.nebius_shared_pool_activation import shared_forward_activation_view
 from scripts.ops.nebius_shared_pool_handoff_live import SharedPoolGuardBindings
 
 
@@ -25,12 +26,15 @@ def shared_forward_runtime_view(*, bindings: SharedPoolGuardBindings, state_dir:
     from scripts.ops.nebius_shared_pool_build_activation import shared_forward_build_namespace_view
     from scripts.ops.nebius_shared_pool_gateway import shared_forward_gateway_view
 
+    opening = shared_forward_activation_view(bindings=bindings, state_dir=state_dir)
     build = shared_forward_build_namespace_view(bindings=bindings, state_dir=state_dir)
     gateway = shared_forward_gateway_view(bindings=bindings, state_dir=state_dir)
-    if (build[0] != gateway[0] or build[2].keys() & gateway[2].keys()
-            or shared_forward_build_namespace_view(bindings=bindings, state_dir=state_dir) != build):
+    if (build[0] != gateway[0] or build[0] != opening.frame or build[2].keys() & gateway[2].keys()
+            or shared_forward_build_namespace_view(bindings=bindings, state_dir=state_dir) != build
+            or shared_forward_activation_view(bindings=bindings, state_dir=state_dir) != opening):
         raise ValueError('shared runtime successor history changed')
-    return build[0], {'forward-build-policy': build[1], 'forward-gateway': gateway[1]}, {**build[2], **gateway[2]}
+    return build[0], {'forward-build-policy': build[1], 'forward-gateway': gateway[1],
+        'forward-activate': opening.files}, {**build[2], **gateway[2]}
 
 
 class HTTPSSharedPoolRuntimeProbes(HTTPSDevelopmentRuntimeProbes):

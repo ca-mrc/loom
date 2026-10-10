@@ -1,9 +1,9 @@
-"""Read-only, receipt-bound writer census before shared pool opening.
+"""Read-only, receipt-bound writer census through shared pool opening.
 
 The initial census cannot survive intentional workload or Role transitions.
 This observer derives only the actual child journals' before/after choices and
 rechecks them after the complete snapshot. It neither attests process drain nor
-authorizes recovery or active pool successors.
+authorizes recovery successors or performs admission transactions.
 """
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from scripts.ops.nebius_management_transport import ManagementKubernetesTransport
+from scripts.ops.nebius_shared_pool_activation import shared_forward_activation_view
 from scripts.ops.nebius_shared_pool_gateway import shared_forward_gateway_view
 from scripts.ops.nebius_shared_pool_handoff_live import (
     SharedPoolGuardBindings,
@@ -32,13 +33,8 @@ from loom.nebius_platform_render import digest
 
 def _forward_options(bindings: SharedPoolGuardBindings, state: Path
         ) -> tuple[dict[str, Any], WriterOptions, WriterOptions, dict[str, dict[str, str]]]:
-    frame = _frame(bindings, state)
-    manager = bindings.plan.development.runtime.request.database.manager.retained.request.retained
-    recovery = Path(manager.operation['anchor_dir']) / 'shared-pool-recovery.json'
-    if (frame['outcome'] != 'pending' or recovery.exists() or recovery.is_symlink()
-            or any(frame['forward'][phase]['status'] != 'prepared'
-                for phase in ('forward-activate', 'forward-verify'))):
-        raise ValueError
+    opening = shared_forward_activation_view(bindings=bindings, state_dir=state)
+    frame = opening.frame
     roots: WriterOptions = {key: (row,) for key, row in
         _resource_roots(bindings.plan, frozenset({'Deployment', 'StatefulSet', 'CronJob'})).items()}
     roots.update(shared_forward_staging_options(bindings=bindings, state_dir=state))
@@ -76,8 +72,10 @@ def _forward_options(bindings: SharedPoolGuardBindings, state: Path
         for phase in ('forward-stop', 'forward-roles', 'forward-material', 'forward-wire', 'forward-start')
         if (state / phase).exists() or (state / phase).is_symlink()}
     receipts['forward-gateway'] = gateway[1]
+    receipts['forward-activate'] = opening.files
     if (_frame(bindings, state) != frame
-            or shared_forward_gateway_view(bindings=bindings, state_dir=state) != gateway):
+            or shared_forward_gateway_view(bindings=bindings, state_dir=state) != gateway
+            or shared_forward_activation_view(bindings=bindings, state_dir=state) != opening):
         raise ValueError
     return frame, roots, authority, receipts
 
