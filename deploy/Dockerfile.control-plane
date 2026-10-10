@@ -11,10 +11,16 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src ./src
 COPY packages/loom-bundle-checksum ./packages/loom-bundle-checksum
+COPY packages/loom-launcher ./packages/loom-launcher
 COPY database/migrations ./database/migrations
 COPY database/capacity_guard_migrations ./database/capacity_guard_migrations
-RUN chmod -R a+rX ./src ./database/migrations ./database/capacity_guard_migrations ./packages/loom-bundle-checksum && \
+# Trial submission validates agent names against the catalog, whose
+# installed-harness entries (codex, openhands-sdk, ...) come from
+# loom-launcher's adapter registry. Without it they are silently unknown.
+RUN chmod -R a+rX ./src ./database/migrations ./database/capacity_guard_migrations ./packages/loom-bundle-checksum ./packages/loom-launcher && \
     pip install --no-cache-dir -e ./packages/loom-bundle-checksum && \
-    pip install --no-cache-dir -e .
+    pip install --no-cache-dir -e . && \
+    pip install --no-cache-dir -e ./packages/loom-launcher && \
+    python -c 'from loom.hosted_harness import NATIVE_EXECUTION_AGENT_NAMES as n; from loom_service.agent_catalog import known_names as k; missing = n - k(); assert not missing, missing'
 EXPOSE 8080
 CMD ["python", "-m", "loom_control_plane"]
