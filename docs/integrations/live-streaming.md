@@ -119,6 +119,12 @@ stream; a per-request drain task filters notifications by the
 `<trial_id>:` prefix and sets an `asyncio.Event` the outer loop
 awaits with a fixed poll-interval fallback.
 
+The subscription also owns cleanup during setup: if LISTEN registration or
+the notification self-test raises, any acquired connection is closed before
+the route falls back to polling. Cancellation during setup closes the connection
+and propagates cancellation. Normal context exit cancels the notification drain
+task and closes its connection.
+
 The MinIO trajectory JSONL is still written for every trial by the
 worker (`TrajectoryWriter`); the `trial_events` table receives the
 same events via the worker's `CpEventSink` batched dual-write. In
