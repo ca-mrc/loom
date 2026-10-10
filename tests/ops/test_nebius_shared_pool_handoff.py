@@ -374,7 +374,11 @@ def shared_guard_transport(shared_operation, tmp_path, monkeypatch):
 
     from pydantic import PostgresDsn
     from scripts.ops.deploy_nebius_platform import rollout_guard_observation_sql
-    from scripts.ops.nebius_pool_migration_guard import _BOUND_GUARD_COMMAND, KubectlPoolGuardAPI
+    from scripts.ops.nebius_pool_migration_guard import (
+        _BOUND_GUARD_COMMAND,
+        KubectlPoolGuardAPI,
+        pool_runtime_role_sql,
+    )
     from tests.ops.test_nebius_development_pool_retained import (
         populate_database_backends,
         populate_runtime_pods,
@@ -417,7 +421,8 @@ def shared_guard_transport(shared_operation, tmp_path, monkeypatch):
     kubeconfig.write_text('private-test-config')
     kubeconfig.chmod(0o600)
     api = KubectlPoolGuardAPI(request=request, kubeconfig=kubeconfig, executable=Path('/usr/bin/kubectl'))
-    model = SimpleNamespace(held=set(), busy=None, uncertain=None, acquires=[], documents=documents)
+    model = SimpleNamespace(held=set(), busy=None, uncertain=None, acquires=[], documents=documents,
+        runtime_roles=set(), runtime_stages=[], runtime_reads=[], runtime_uncertain=False, runtime_lost_read=False)
 
     def run(argv, **kwargs):
         assert argv[:len(api.prefix)] == api.prefix
@@ -442,9 +447,26 @@ def shared_guard_transport(shared_operation, tmp_path, monkeypatch):
             namespace = args[2]
             if args[7] == 'psql':
                 assert args[3:6] == ['pod/loom-postgres-0', '-c', 'loom-postgres']
-                assert args[-1] == rollout_guard_observation_sql(owner=str(request.registration.spec.operation_id),
-                    candidate=request.registration.candidate['candidate_sha'])
-                value = {'status': 'held' if namespace in model.held else 'open'}
+                if args[-1] == rollout_guard_observation_sql(owner=str(request.registration.spec.operation_id),
+                        candidate=request.registration.candidate['candidate_sha']):
+                    value = {'status': 'held' if namespace in model.held else 'open'}
+                else:
+                    action, = (action for action in ('stage', 'observe') if args[-1] == pool_runtime_role_sql(
+                        owner=str(request.registration.spec.operation_id), candidate=request.registration.candidate['candidate_sha'], action=action))
+                    assert namespace in model.held  # Real SQL independently enforces the held idle guard.
+                    if action == 'stage':
+                        model.runtime_stages.append(namespace)
+                        model.runtime_roles.add(namespace)
+                        if model.runtime_uncertain:
+                            model.runtime_uncertain, model.runtime_lost_read = False, True
+                            raise TimeoutError('simulated lost committed runtime-role transaction')
+                    else:
+                        model.runtime_reads.append(namespace)
+                        if model.runtime_lost_read:
+                            model.runtime_lost_read = False
+                            raise TimeoutError('simulated lost first runtime-role readback')
+                        assert namespace in model.runtime_roles
+                    value = {'status': 'staged' if action == 'stage' else 'qualified'}
             else:
                 assert args[3:6] == ['pod/loom-control-plane-a12b34-test', '-c', 'loom-control-plane']
                 assert args[7:11] == ['python', '-c', _BOUND_GUARD_COMMAND, 'acquire']
@@ -870,6 +892,91 @@ def test_shared_parent_connects_current_staging_workload_transitions_without_rep
         before = list(writes)
         assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-build-policy'
         assert writes == before
+
+
+@pytest.mark.timeout(420)
+def test_shared_database_child_stages_only_staging_and_reads_unknown_commits(shared_operation, shared_guard_transport):
+    """Real bound DB adapter and parent; no replay of dev's completed SQL stage."""
+    import importlib.util
+    import json
+
+    from scripts.ops import nebius_shared_pool_operation as parent
+
+    name = 'scripts.ops.nebius_shared_pool_database'
+    assert importlib.util.find_spec(name) is not None, 'shared staging database child is missing'
+    module = __import__(name, fromlist=['advance_shared_staging_database'])
+    args, bindings = shared_operation
+    database, model = shared_guard_transport
+    model.held.update(target.namespace for target in bindings.migration.guards)
+    staging = bindings.plan.staging.attachment.guard
+    dev, = (target for target in bindings.migration.guards if target.participant_id != staging.participant_id)
+    manager = args['runtime'].database.manager.retained.request.retained
+    state = Path(manager.operation['state_dir']).parent / 'shared-pool-handoff'
+    receipt = state / 'forward-database/database.json'
+    failure = {'delete': True, 'saved': None}
+    # The DB-bound path must still work with the captured controller stopped.
+    controller = model.documents['/apis/apps/v1/namespaces/' + staging.namespace + '/deployments/loom-control-plane']
+    controller['spec']['replicas'] = 0
+
+    class ConnectedDatabaseAPI(SharedPhaseAPI):
+        def prepare(self, phase, bound, directory):
+            if phase == 'forward-database':
+                module.prepare_shared_staging_database(bindings=bound, state_dir=directory)
+            else:
+                super().prepare(phase, bound, directory)
+
+        def validate_prepared_phase(self, phase, directory):
+            if phase == 'forward-database':
+                module.validate_shared_staging_database(bindings=bindings, state_dir=directory, complete=False, prepared=True)
+            else:
+                super().validate_prepared_phase(phase, directory)
+
+        def validate_phase(self, phase, directory, *, complete):
+            if phase == 'forward-database':
+                module.validate_shared_staging_database(bindings=bindings, state_dir=directory, complete=complete)
+            else:
+                super().validate_phase(phase, directory, complete=complete)
+
+        def advance(self, phase, bound, directory):
+            if phase != 'forward-database':
+                return super().advance(phase, bound, directory)
+
+            def qualify():
+                if failure['delete'] and json.loads(receipt.read_bytes())['status'] == 'intent':
+                    failure['delete'] = False
+                    failure['saved'] = receipt.read_bytes()
+                    receipt.unlink()  # This test's private fault injection, never production repair.
+
+            return module.advance_shared_staging_database(bindings=bound, api=database, state_dir=directory, qualify=qualify)
+
+    api = ConnectedDatabaseAPI(parent)
+    api.block = 'forward-material'
+    kwargs = {**args, 'bindings': bindings, 'api': api, 'action': 'install'}
+    with pytest.raises(ValueError, match='shared pool operation unconfirmed'):
+        parent.run_shared_pool_operation(**kwargs)
+    assert not receipt.exists() and model.runtime_stages == [] and failure['saved'] is not None
+    receipt.write_bytes(failure['saved'])
+    receipt.chmod(0o600)
+    with pytest.raises(ValueError, match='shared pool operation unconfirmed'):
+        parent.run_shared_pool_operation(**kwargs)
+    assert model.runtime_stages == []  # Missing outcome of saved intent never permits another stage.
+    # Controlled fixture rewind to exercise an independent unknown-commit fault.
+    # Production cannot reset an uncertain intent or recreate missing evidence.
+    prepared = json.loads(failure['saved'])
+    prepared['status'] = 'prepared'
+    receipt.write_text(json.dumps(prepared))
+    model.runtime_uncertain = True
+    with pytest.raises(ValueError, match='shared pool operation unconfirmed'):
+        parent.run_shared_pool_operation(**kwargs)
+    assert model.runtime_stages == [staging.namespace]
+    assert json.loads(receipt.read_bytes())['status'] == 'intent'
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-material'
+    assert model.runtime_stages == [staging.namespace] and set(model.runtime_reads) == {staging.namespace}
+    assert json.loads(receipt.read_bytes())['status'] == 'staged'
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-material'
+    assert model.runtime_stages == [staging.namespace]
+    assert dev.namespace not in model.runtime_roles
+    assert model.acquires == []  # No registration, guard replay/release, or controller exec.
 
 
 @pytest.mark.timeout(420)
