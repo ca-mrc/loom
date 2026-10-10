@@ -11,6 +11,7 @@ from uuid import uuid4
 
 import httpx
 import pytest
+from httpx import Client
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_management_stage import _canonical_quantities
 from tests.ops.test_nebius_development_pool_retained import (
@@ -334,18 +335,27 @@ def gateway_permission_review(completed_runtime):
     manager = 'loom-nebius-management-dev'
     pool_names = sorted([participant.execution_namespace.name, participant.build_namespace.name])
     state = {'subject': {'kind': 'ServiceAccount', 'namespace': manager, 'name': 'loom-pool-gateway'},
-        'granted': False, 'damage': None, 'calls': [], 'binding_reads': 0}
+        'granted': False, 'damage': None, 'calls': [], 'binding_reads': 0, 'rules_changed': False}
     binding_uid = str(uuid4())
+    role_uids = {kind: str(uuid4()) for kind in ('Role', 'ClusterRole')}
 
     def respond(message):
         state['calls'].append(message)
         path = message.url.path
         if message.method == 'GET':
             assert 'Impersonate-User' not in message.headers
-            assert path in {'/apis/rbac.authorization.k8s.io/v1/rolebindings',
-                '/apis/rbac.authorization.k8s.io/v1/clusterrolebindings'}
-            kind = 'RoleBinding' if path.endswith('/rolebindings') else 'ClusterRoleBinding'
+            collection = path.rsplit('/', 1)[-1]
+            assert path == '/apis/rbac.authorization.k8s.io/v1/' + collection
+            kind = {'rolebindings': 'RoleBinding', 'clusterrolebindings': 'ClusterRoleBinding',
+                'roles': 'Role', 'clusterroles': 'ClusterRole'}[collection]
             items, continuation = [], ''
+            if kind in role_uids:
+                changed = state['rules_changed'] and state['damage'] == kind + '-drift'
+                items = [{'apiVersion': 'rbac.authorization.k8s.io/v1', 'kind': kind,
+                    'metadata': {'name': 'foreign', 'uid': role_uids[kind], 'resourceVersion': '2' if changed else '1',
+                        **({'namespace': 'loom-nebius-platform-execution'} if kind == 'Role' else {})},
+                    'rules': [{'apiGroups': ['batch'], 'resources': ['jobs'],
+                        'verbs': ['get', 'delete'] if changed else ['get']}]}]
             if kind == 'RoleBinding':
                 # Put the foreign grant on page two so incomplete discovery fails.
                 if message.url.params.get('continue') == 'next':
@@ -368,6 +378,8 @@ def gateway_permission_review(completed_runtime):
         assert message.headers.get_list('Impersonate-Group') == [
             'system:serviceaccounts', 'system:serviceaccounts:' + manager, 'system:authenticated']
         namespace = json.loads(message.content)['spec']['namespace']
+        if namespace > 'loom-nebius-platform-execution':
+            state['rules_changed'] = True
         rules = []
         if state['granted']:
             rules.append({'apiGroups': [''], 'resources': ['namespaces'], 'verbs': ['get'], 'resourceNames': pool_names})
@@ -386,7 +398,9 @@ def gateway_permission_review(completed_runtime):
     transport = ManagementKubernetesTransport(api_server=request.database.foundation.inputs.config['kubernetes_api_server'],
         ssl_context=ssl.create_default_context())
     transport.client.close()
-    transport.client = httpx.Client(base_url=transport.api_server, transport=httpx.MockTransport(respond))
+    # The predecessor fixture replaces httpx.Client with its registration
+    # transport. Use the captured real class for this distinct permission API.
+    transport.client = Client(base_url=transport.api_server, transport=httpx.MockTransport(respond))
     try:
         yield activation, request, plan, transport, state
     finally:
@@ -419,9 +433,10 @@ def test_activation_gateway_review_fails_closed_on_uncertainty_or_changed_inputs
     review = getattr(module, 'review_development_gateway_permissions', None)
     assert callable(review), 'fresh activation effective gateway permission review is missing'
     for damage in ('binding-drift', 'incomplete'):
-        state.update(damage=damage, binding_reads=0)
+        state.update(damage=damage, binding_reads=0, calls=[])
         with pytest.raises(ValueError, match='development gateway permissions unqualified'):
             review(request, transport=transport, granted=False)
+        assert any(call.method == 'POST' for call in state['calls']), 'failure must reach the permission review'
     state.update(damage=None, calls=[])
     endpoint = transport.api_server
     transport.api_server = 'https://different-cluster.example'
@@ -432,3 +447,12 @@ def test_activation_gateway_review_fails_closed_on_uncertainty_or_changed_inputs
     with pytest.raises(ValueError, match='development gateway permissions unqualified'):
         review(request, transport=transport, granted='false')
     assert not state['calls']
+
+
+@pytest.mark.parametrize('kind', ['Role', 'ClusterRole'])
+def test_activation_gateway_review_rejects_rules_drift_with_unchanged_bindings(gateway_permission_review, kind):
+    module, request, _, transport, state = gateway_permission_review
+    state.update(damage=kind + '-drift', rules_changed=False)
+    with pytest.raises(ValueError, match='development gateway permissions unqualified'):
+        module.review_development_gateway_permissions(request, transport=transport, granted=False)
+    assert state['rules_changed'], 'the rules must change after their namespace permission review'
