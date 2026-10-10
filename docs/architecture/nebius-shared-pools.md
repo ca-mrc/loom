@@ -1054,6 +1054,18 @@ uses the existing fixed fencing transactions without requiring a healthy gateway
 or idle journals. Fencing does not prove work has drained and does not authorize
 restoration or reopening; those remain separate required recovery phases.
 
+The recovery-drain child reads the new manager's capacity journal and every
+participant's activity, outbox and cleanup counts through the retained database
+transports. It requires the completed recovery fence and checks actual fenced
+admission on both sides of the reads. A busy ledger keeps recovery pending without
+stopping cleanup, and does not skip checking other participants. Its local receipt
+records only that an observation finished; later stop/revoke/restore boundaries
+must rerun the same read-only observer, never reuse a saved zero. Changed authority
+or receipt bytes reject the observation without changing any database. Final guard
+readbacks follow the last retained-authority check so a change during that check
+cannot pass unnoticed. Completed recovery keeps its historical drain receipt
+valid, but cannot resume this observer or dispatch the completed child again.
+
 The shared Role child reduces only the two source-qualified staging worker/build
 Roles, preserving their UIDs and existing bindings. Each rules-and-annotations
 PATCH tests the current UID, resourceVersion and rules. Mutation intent precedes
