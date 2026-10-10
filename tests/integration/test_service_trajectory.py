@@ -12,6 +12,7 @@ from decimal import Decimal
 from uuid import UUID, uuid4
 
 import httpx
+import pytest
 from fastapi import FastAPI
 from sqlalchemy import create_engine, insert, select, update
 from sqlalchemy.orm import sessionmaker
@@ -824,14 +825,68 @@ async def test_stream_serves_postgres_events_for_terminal_trial(
     assert parsed[0].get("marker") == "stream-from-postgres"
 
 
+@pytest.mark.parametrize("source", ["postgres", "minio"])
+@pytest.mark.parametrize(("count", "after_seq"), [
+    (0, 499), (200, 499), (400, 499), (401, 499), (1000, 499),
+    (1000, 699), (1000, 1499),
+])
+async def test_terminal_stream_drains_every_page_before_complete(
+    traj_setup: tuple[FastAPI, str, UUID, UUID],
+    postgres_url: str,
+    source: str,
+    count: int,
+    after_seq: int,
+) -> None:
+    """Completed archives must not lose the third page or a resumed tail."""
+    app, raw, team_id, trial_id = traj_setup
+    events = [
+        {"seq": seq, "kind": "env_exec", "marker": source}
+        for seq in range(500, 500 + count)
+    ]
+    if source == "postgres":
+        _seed_trial_events_postgres(postgres_url, trial_id, [
+            {"seq": event["seq"], "kind": "env_exec", "source": "worker",
+             "schema_version": 1, "payload": event}
+            for event in events
+        ])
+    else:
+        app.state.minio_client.put_object(
+            Bucket=app.state.settings.trajectories_bucket,
+            Key=f"{team_id}/{trial_id}/events.jsonl",
+            Body="".join(json.dumps(event) + "\n" for event in events).encode(),
+        )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as client:
+        response = await client.get(
+            f"/api/v1/trials/{trial_id}/stream?after_seq={after_seq}",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+    assert response.status_code == 200, response.text
+    messages = _parse_sse(response.text)
+    delivered = [json.loads(message["data"]) for message in messages
+                 if "data" in message and message.get("event") != "complete"]
+    expected_seqs = list(range(after_seq + 1, 500 + count))
+    assert [event["seq"] for event in delivered] == expected_seqs
+    assert all(event["marker"] == source for event in delivered)
+    completions = [json.loads(message["data"]) for message in messages
+                   if message.get("event") == "complete"]
+    assert completions == [{
+        "final_state": "succeeded", "last_seq": expected_seqs[-1] if expected_seqs else after_seq,
+    }]
+    assert messages[-1]["event"] == "complete"
+
+
 # ──────────────────────────────────────────────────────────────────────
 # #5 Slice 3e: SSE inner loop wakes on NOTIFY (LISTEN consumer)
 # ──────────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.parametrize("tail_count", [1, 601])
 async def test_stream_wakes_on_listen_notify_mid_run(
     traj_setup: tuple[FastAPI, str, UUID, UUID],
     postgres_url: str,
+    tail_count: int,
 ) -> None:
     """End-to-end LISTEN/NOTIFY. Open the SSE stream against a
     running trial that already has its initial-replay row in
@@ -844,7 +899,7 @@ async def test_stream_wakes_on_listen_notify_mid_run(
 
     from sqlalchemy import update as sa_update
 
-    from loom.db.schema import Trial
+    from loom.db.schema import Trial, TrialEvent
 
     app, raw, team_id, completed_trial_id = traj_setup
 
@@ -888,20 +943,22 @@ async def test_stream_wakes_on_listen_notify_mid_run(
         """+0.3s after stream open: insert a NOTIFY-target event,
         then flip the trial to `succeeded` so the stream closes."""
         await asyncio_local.sleep(0.3)
-        _seed_trial_events_postgres(postgres_url, trial_id, [
-            {
-                "seq": 301, "kind": "step_end", "source": "worker",
-                "schema_version": 1,
-                "payload": {
-                    "seq": 301, "kind": "step_end",
-                    "marker": "fired-by-notify",
-                },
-            },
-        ])
-        await asyncio_local.sleep(0.2)
         sync = create_engine(postgres_url)
         slx = sessionmaker(sync)
         with slx() as s:
+            # Commit the final event batch and terminal state together, as native
+            # materialization does. LISTEN wakes only after all rows are durable.
+            s.execute(insert(TrialEvent), [
+                {
+                    "trial_id": trial_id,
+                    "seq": seq, "kind": "step_end", "source": "worker",
+                    "schema_version": 1,
+                    "payload": {
+                        "seq": seq, "kind": "step_end",
+                        "marker": "fired-by-notify",
+                    },
+                } for seq in range(301, 301 + tail_count)
+            ])
             s.execute(
                 sa_update(Trial)
                 .where(Trial.id == trial_id)
@@ -932,10 +989,10 @@ async def test_stream_wakes_on_listen_notify_mid_run(
     seqs = [e["seq"] for e in parsed]
     # Both events landed: seq=300 from the opening Postgres read
     # AND seq=301 from the LISTEN consumer waking the loop.
-    assert seqs == [300, 301]
+    assert seqs == list(range(300, 301 + tail_count))
     assert parsed[1].get("marker") == "fired-by-notify"
     # Final state event present.
     complete = next(m for m in messages if m.get("event") == "complete")
     payload = json.loads(complete["data"])
     assert payload["final_state"] == "succeeded"
-    assert payload["last_seq"] == 301
+    assert payload["last_seq"] == 300 + tail_count
