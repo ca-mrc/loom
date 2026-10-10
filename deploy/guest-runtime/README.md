@@ -27,6 +27,15 @@ without executing package installation hooks. An unavailable pinned archive
 fails the build. Updating dependencies requires updating the lock and running
 the full payload verification and guest capability tests.
 
+For HTTP 502, 503 or 504, the downloader makes at most three attempts, waiting
+one and then two seconds between attempts. Each attempt retains the 120-second
+network timeout. Diagnostics identify the locked archive by SHA256, HTTP status
+and attempt count, without logging URLs or response bodies. Other HTTP errors,
+transport failures, local filesystem failures and size/hash mismatches fail
+without retries. Failed downloads remove their partial files; only complete,
+verified archives enter the cache. These are build-time archive retries, not
+task execution retries.
+
 `archive.ubuntu.com` removes a package file from `pool/` once Ubuntu publishes
 a newer version, so a pinned URL there can start returning 404. The `libssl3t64`
 and `libpng16-16t64` entries use the [Ubuntu snapshot service](https://snapshot.ubuntu.com/) at
