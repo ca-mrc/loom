@@ -1,4 +1,4 @@
-"""Fresh database and process observations before shared pool opening.
+"""Fresh database and process observations through shared pool opening.
 
 Only known in-flight stop/start readiness can be pending. A completed transition
 is not permission to skip present drain, settings or backend correspondence.
@@ -26,6 +26,7 @@ from scripts.ops.nebius_pool_origin_history import (
     derive_management_history_target,
 )
 from scripts.ops.nebius_pool_retirement import qualify_closed_workload_drain
+from scripts.ops.nebius_shared_pool_activation import shared_forward_activation_view
 from scripts.ops.nebius_shared_pool_database import validate_shared_staging_database
 from scripts.ops.nebius_shared_pool_gateway import shared_forward_gateway_view
 from scripts.ops.nebius_shared_pool_guards import validate_shared_pool_guards
@@ -40,6 +41,7 @@ from loom_service.environment_management.candidates import _json
 @dataclass(frozen=True, repr=False)
 class SharedPoolForwardProcessObservation:
     bindings: SharedPoolGuardBindings
+    pool_state: str
     guard_states: dict[str, str]
     retired_authority: str
     pending_workloads: tuple[str, ...]
@@ -50,6 +52,8 @@ class SharedPoolForwardProcessObservation:
 @dataclass(frozen=True, repr=False)
 class _ProcessScope:
     frame: dict[str, Any]
+    pool_states: tuple[str, ...]
+    activation: bool
     workloads: dict[str, tuple[dict[str, Any], ...]]
     gateway: tuple[dict[str, Any], ...]
     guards: dict[str, tuple[str, ...]]
@@ -58,13 +62,8 @@ class _ProcessScope:
 
 
 def _scope(bindings: SharedPoolGuardBindings, state: Path) -> _ProcessScope:
-    frame = _frame(bindings, state)
-    manager = bindings.plan.development.runtime.request.database.manager.retained.request.retained
-    recovery = Path(manager.operation['anchor_dir']) / 'shared-pool-recovery.json'
-    if (frame['outcome'] != 'pending' or recovery.exists() or recovery.is_symlink()
-            or any(frame['forward'][phase]['status'] != 'prepared'
-                for phase in ('forward-activate', 'forward-verify'))):
-        raise ValueError
+    opening = shared_forward_activation_view(bindings=bindings, state_dir=state)
+    frame = opening.frame
     guard_options: dict[str, tuple[str, ...]] = {target.namespace: ('open',) for target in bindings.migration.guards}
     status = frame['forward']['forward-guards']['status']
     path = state / 'forward-guards/guards.json'
@@ -75,6 +74,8 @@ def _scope(bindings: SharedPoolGuardBindings, state: Path) -> _ProcessScope:
         for target in bindings.migration.guards:
             item = record['guards'][str(target.participant_id)]
             guard_options[target.namespace] = {'prepared': ('open',), 'acquire_intent': ('open', 'held'), 'held': ('held',)}[item]
+    if opening.guard_states is not None:
+        guard_options = opening.guard_states
     staging_acl = False
     status = frame['forward']['forward-database']['status']
     path = state / 'forward-database/database.json'
@@ -89,10 +90,13 @@ def _scope(bindings: SharedPoolGuardBindings, state: Path) -> _ProcessScope:
         for phase in ('forward-guards', 'forward-stop', 'forward-database', 'forward-wire', 'forward-start', 'forward-build-policy')
         if (state / phase).exists() or (state / phase).is_symlink()}
     receipts['forward-gateway'] = gateway[1]
+    receipts['forward-activate'] = opening.files
     if (gateway[0] != frame or _frame(bindings, state) != frame
-            or shared_forward_gateway_view(bindings=bindings, state_dir=state) != gateway):
+            or shared_forward_gateway_view(bindings=bindings, state_dir=state) != gateway
+            or shared_forward_activation_view(bindings=bindings, state_dir=state) != opening):
         raise ValueError
-    return _ProcessScope(frame, workloads, gateway_options, guard_options, staging_acl, receipts)
+    return _ProcessScope(frame, opening.pool_states, opening.guard_states is not None,
+        workloads, gateway_options, guard_options, staging_acl, receipts)
 
 
 def _gateway_history_target(bindings: SharedPoolGuardBindings, credential: dict[str, Any]) -> PoolManagementHistoryTarget:
@@ -157,7 +161,8 @@ def observe_shared_pool_forward_processes(*, bindings: SharedPoolGuardBindings, 
         guards = KubectlPoolGuardAPI(request=migration, kubeconfig=kubeconfig, executable=executable)
 
         def guard_states() -> dict[str, str]:
-            result = {target.namespace: guards.guard(target, 'observe')['status'] for target in migration.guards}
+            result = {target.namespace: (guards.activation_guard(target, 'observe') if before_scope.activation
+                else guards.guard(target, 'observe')['status']) for target in migration.guards}
             if any(value not in before_scope.guards[namespace] for namespace, value in result.items()):
                 raise ValueError
             return result
@@ -178,16 +183,23 @@ def observe_shared_pool_forward_processes(*, bindings: SharedPoolGuardBindings, 
             kubeconfig=kubeconfig, executable=executable)
         manager_database = development._process_identity(gateway_history._database(gateway_target, url_variable='LOOM_SVC_DB_URL'))
 
-        def ledgers() -> None:
+        def ledgers() -> str:
             if history.machine_retirement('observe') != 'revoked':
                 raise ValueError
-            development.qualify_closed_pool()
+            mode = gateway_history.activation_pool('observe')
+            if mode not in before_scope.pool_states:
+                raise ValueError
+            if mode == 'global':
+                gateway_history.qualify_active_pool()
+            else:
+                development.qualify_closed_pool()
             for target in migration.guards:
                 if target.namespace == 'loom-dev' or before_scope.staging_acl:
                     if guards.runtime_role(target, 'inspect') != {'status': 'qualified'}:
                         raise ValueError
+            return mode
 
-        ledgers()
+        pool_state = ledgers()
         participant = plan.staging.attachment.participant
         dev_participant, = (row for row in migration.registration.spec.participants if row.participant_id != participant.participant_id)
         dev_processes = {}
@@ -293,11 +305,9 @@ def observe_shared_pool_forward_processes(*, bindings: SharedPoolGuardBindings, 
         elif gateway['spec']['replicas'] == 1:
             gateway_process = development._process_identity(gateway_history._runtime(
                 gateway_target, original=gateway_original, expected=gateway))
-            gateway_history.qualify_gateway_runtime(original=gateway_original, expected=gateway)
-        ledgers()
-        if (guard_states() != states or urls() != before_urls
-                or guards._get('secret', 'loom-platform-db', old_namespace) != old_credential
-                or any(development._process_identity(guards._database(target)) != databases[target.namespace] for target in migration.guards)):
+            gateway_history.qualify_gateway_runtime(original=gateway_original, expected=gateway, active=pool_state == 'global')
+        if (ledgers() != pool_state or guard_states() != states or urls() != before_urls
+                or guards._get('secret', 'loom-platform-db', old_namespace) != old_credential):
             raise ValueError
         dev_scope()
         for key, identity in dev_processes.items():
@@ -320,8 +330,12 @@ def observe_shared_pool_forward_processes(*, bindings: SharedPoolGuardBindings, 
                 or (gateway_process is not None and development._process_identity(gateway_history._runtime(
                     gateway_target, original=gateway_original, expected=final_gateway)) != gateway_process)):
             raise ValueError
-        # Bracket the final consumer and gateway reads, not just their first
-        # challenges: those reads can overlap a credential rotation or DB restart.
+        if gateway_history.activation_pool('observe') != pool_state or guard_states() != states:
+            raise ValueError
+        # Bracket final consumer, gateway and pool/guard reads, not just their
+        # first challenges: even the last state read can overlap a DB restart.
+        if any(development._process_identity(guards._database(target)) != databases[target.namespace] for target in migration.guards):
+            raise ValueError
         if (guards._get('secret', 'loom-platform-db', manager_namespace) != manager_credential
                 or development._process_identity(gateway_history._database(gateway_target, url_variable='LOOM_SVC_DB_URL')) != manager_database):
             raise ValueError
@@ -330,9 +344,9 @@ def observe_shared_pool_forward_processes(*, bindings: SharedPoolGuardBindings, 
         telemetry = guards.telemetry_report()
         pending_keys = tuple(sorted(pending))
         checksum = digest({'handoff': bindings.input_digest, 'frame': before_scope.frame,
-            'receipts': before_scope.receipts, 'guards': states, 'workloads': observed,
+            'receipts': before_scope.receipts, 'pool_state': pool_state, 'guards': states, 'workloads': observed,
             'gateway': gateway, 'gateway_process': gateway_process,
             'retired_authority': 'revoked', 'pending_workloads': pending_keys, 'telemetry': telemetry})
-        return SharedPoolForwardProcessObservation(bindings, states, 'revoked', pending_keys, telemetry, checksum)
+        return SharedPoolForwardProcessObservation(bindings, pool_state, states, 'revoked', pending_keys, telemetry, checksum)
     except Exception:
         raise ValueError('shared pool forward process observation unqualified') from None
