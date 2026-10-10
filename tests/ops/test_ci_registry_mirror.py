@@ -222,3 +222,55 @@ def test_daemon_activation_failure_is_not_ignored(
     monkeypatch.setattr(registry_setup.subprocess, "run", run)
     with pytest.raises(subprocess.CalledProcessError if failure == "restart" else ValueError):
         registry_setup.configure_daemon(config)
+
+
+def test_persisted_remote_docker_context_is_rejected_before_sudo(tmp_path: Path) -> None:
+    (tmp_path / "config.json").write_text('{"currentContext": "remote"}')
+    docker = tmp_path / "docker"
+    docker.write_text(
+        "#!/usr/bin/env python3\nimport json, os, pathlib, sys\n"
+        'assert sys.argv[1:] == ["context", "inspect", "--format", '
+        '"{{json .Endpoints.docker.Host}}"]\n'
+        'config = json.loads((pathlib.Path(os.environ["DOCKER_CONFIG"]) / "config.json").read_text())\n'
+        'assert config["currentContext"] == "remote"\n'
+        'print(json.dumps("tcp://remote.example:2376"))\n'
+    )
+    docker.chmod(0o755)
+    marker = tmp_path / "sudo-called"
+    sudo = tmp_path / "sudo"
+    sudo.write_text(f'#!/bin/sh\ntouch "{marker}"\nexit 99\n')
+    sudo.chmod(0o755)
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT)],
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "DOCKER_CONFIG": str(tmp_path),
+            "GITHUB_ACTIONS": "true",
+            "RUNNER_ENVIRONMENT": "github-hosted",
+            "RUNNER_OS": "Linux",
+        },
+    )
+    assert result.returncode != 0
+    assert not marker.exists(), "remote context must be rejected before host mutation"
+    assert "local Docker daemon" in result.stderr
+
+
+def test_default_local_docker_endpoint_is_accepted(
+    registry_setup: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert command == [
+            "docker",
+            "context",
+            "inspect",
+            "--format",
+            "{{json .Endpoints.docker.Host}}",
+        ]
+        assert kwargs["check"] is True
+        return subprocess.CompletedProcess(command, 0, '"unix:///var/run/docker.sock"\n')
+
+    monkeypatch.setattr(registry_setup.subprocess, "run", run)
+    registry_setup.require_local_context()
