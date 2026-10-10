@@ -6048,7 +6048,8 @@ def test_shared_recovery_restarts_only_current_staging_with_real_pod_readiness(s
     captured = copy.deepcopy(bindings.plan.staging.originals)
     documents, rows = {}, {}
     mode = {'busy': False, 'busy_preview': True, 'late_busy': False, 'writing_calls': 0,
-        'pending': None, 'unready': True, 'successor_pod': False, 'gateway_writer': False, 'roles_missing': False}
+        'pending': None, 'unready': True, 'successor_pod': False, 'gateway_writer': False, 'roles_missing': False,
+        'late_pod': None, 'bad_pod': None, 'challenge_reads': 0, 'unrelated_pod': False, 'late_unrelated': False}
     attempts, effects, challenges = [], [], []
 
     def refresh():
@@ -6103,9 +6104,16 @@ def test_shared_recovery_restarts_only_current_staging_with_real_pod_readiness(s
         assert path in documents
         if message.method == 'GET':
             value = copy.deepcopy(documents[path])
-            if value['kind'] == 'PodList' and mode['unready']:
+            if value['kind'] == 'PodList':
                 for pod in value['items']:
-                    pod['status']['conditions'][0]['status'] = 'False'
+                    if mode['unready'] or (mode['bad_pod'] is not None and all(
+                            pod['metadata'].get('labels', {}).get(label) == wanted
+                            for label, wanted in rows[mode['bad_pod']]['spec']['selector']['matchLabels'].items())):
+                        pod['status']['conditions'][0]['status'] = 'False'
+                if mode['unrelated_pod'] and path == '/api/v1/namespaces/' + captured[target_key]['metadata']['namespace'] + '/pods':
+                    value['items'].append({'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {'name': 'unrelated',
+                        'namespace': captured[target_key]['metadata']['namespace'], 'uid': '00000000-0000-4000-8000-000000000778',
+                        'labels': {'app': 'unrelated'}}, 'spec': {}, 'status': {'phase': 'Running'}})
             if value['kind'] == 'PodList' and mode['successor_pod']:
                 root = next(row for key, row in rows.items() if key not in captured and row['kind'] == 'Deployment')
                 if path == '/api/v1/namespaces/' + root['metadata']['namespace'] + '/pods':
@@ -6235,6 +6243,13 @@ def test_shared_recovery_restarts_only_current_staging_with_real_pod_readiness(s
                         assert request == runtime and selected == phase
                         assert _key(before) in captured and actual['spec'] == desired['spec']
                         challenges.append(_key(actual))
+                        if _key(actual) == mode['late_pod']:
+                            mode['challenge_reads'] += 1
+                            if mode['challenge_reads'] == 2:
+                                if mode['late_unrelated']:
+                                    mode['unrelated_pod'] = True
+                                else:
+                                    mode['bad_pod'] = _key(actual)
                         return True
 
                     self.restart_api = stack.enter_context(module.HTTPSSharedRecoveryRestart(bindings=bound,
@@ -6326,6 +6341,14 @@ def test_shared_recovery_restarts_only_current_staging_with_real_pod_readiness(s
         assert all(rows[key] == value for key, value in untouched.items())
         assert all(path.read_bytes() == raw for path, raw in frozen.items())
         assert api.restart_api.ready()
+        mode['late_pod'] = next(key for key in reversed(api.restart_api.originals)
+            if key in captured and captured[key]['kind'] == 'Deployment')
+        assert api.restart_api.ready() is False
+        assert mode['bad_pod'] is not None
+        mode['bad_pod'], mode['challenge_reads'], mode['late_unrelated'] = None, 0, True
+        assert api.restart_api.ready()  # Unrelated Pod activity is not a fixed-root readiness failure.
+        assert mode['unrelated_pod']
+        mode['late_pod'] = None
         mode['unready'] = True
         assert api.restart_api.ready() is False
         mode['unready'], mode['busy'] = False, True
