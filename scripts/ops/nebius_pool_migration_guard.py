@@ -619,12 +619,16 @@ class KubectlPoolGuardAPI:
         if original_replicas == 0:
             # Only the newly created closed gateway has no running predecessor.
             # Its journal-selected start may change replicas, never its template.
+            # The parent also journals Deployment metadata such as an activation
+            # annotation. Match that metadata against the actual workload below,
+            # not against the pre-start snapshot; it cannot change the Pod spec.
             started = copy.deepcopy(original)
             started['spec']['replicas'] = 1
             if (expected is None or isinstance(target, PoolGuardTarget)
                     or namespace != self.request.registration.binding.namespace or name != 'loom-pool-gateway'
                     or retained.get('serviceAccountName') != 'loom-pool-gateway'
-                    or retained['containers'][0]['name'] != 'gateway' or not _matches(workload, started, _uid(original))):
+                    or retained['containers'][0]['name'] != 'gateway'
+                    or _stable(workload)['spec'] != _stable(started)['spec']):
                 raise ValueError
         if (original.get("apiVersion") != "apps/v1" or original.get("kind") != "Deployment"
                 or set(selector) != {"matchLabels"} or len(selector["matchLabels"]) != 1
