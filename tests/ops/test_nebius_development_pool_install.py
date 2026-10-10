@@ -145,6 +145,38 @@ def test_common_catalog_preparation_preserves_staging_without_delivering_its_aut
     assert not any(token in repr(intent) for token in tokens.values())
 
 
+def test_common_catalog_profile_ids_are_scoped_by_workload_kind(pool_inputs):
+    from scripts.ops.nebius_development_pool_registration import development_profile_catalog
+
+    reference, combined, tokens = common_catalog_inputs(pool_inputs, True)
+    dev, = [row for row in combined['participants'] if row['environment_class'] == 'development']
+    staging, = [row for row in combined['participants'] if row['environment_class'] == 'staging']
+    dev_application, = [row for row in dev['targets'] if 'application_image_build' in row['workload_kinds']]
+    staging_build, = [row for row in staging['targets'] if 'task_image_build' in row['workload_kinds']]
+    profile, = [row for row in combined['profiles']['task_images'] if row['profile_id'] == staging_build['profile_id']]
+    separate_build = {**staging_build, 'target_id': 'staging-task-builder', 'workload_kinds': ['task_image_build']}
+    staging_build['workload_kinds'] = [kind for kind in staging_build['workload_kinds'] if kind != 'task_image_build']
+    staging['targets'].append(separate_build)
+    staging_build = separate_build
+    profile['target']['target_id'] = staging_build['target_id']
+    profile['profile_id'] = staging_build['profile_id'] = dev_application['profile_id']
+    # Assert this really is a valid catalog: the regression must not succeed by
+    # testing rejection of a missing execution profile or a duplicate target.
+    from loom_service.pool_management.installation import PoolInstallation
+    validation = copy.deepcopy(combined)
+    validation_dev, = [row for row in validation['participants'] if row['environment_class'] == 'development']
+    for field in ('execution_namespace', 'build_namespace'):
+        validation_dev[field]['uid'] = str(uuid4())
+    PoolInstallation.model_validate(validation)
+    intent = module().prepare_intent(reference=reference, catalog=combined, tokens=tokens)
+    request = module().bind_namespaces(intent,
+        {dev[field]['name']: str(uuid4()) for field in ('execution_namespace', 'build_namespace')})
+    selected = development_profile_catalog(request)
+    assert len(selected.execution) == len(selected.task_images) == len(selected.application_images) == 1
+    assert {row.target.namespace for row in selected.task_images} == {dev['build_namespace']['name']}
+    assert len(request.registration.spec.profiles.task_images) == 2
+
+
 @pytest.mark.parametrize('damage', ['missing', 'architecture', 'os', 'reserved'])
 def test_intent_rejects_native_build_selectors_that_cannot_render(pool_inputs, damage):
     _, catalog, _ = pool_inputs
