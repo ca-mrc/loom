@@ -2273,7 +2273,7 @@ def test_shared_guard_binding_uses_live_dev_database_and_real_bound_guard_reader
 
 
 @pytest.mark.timeout(600)
-@pytest.mark.parametrize('forward_processes', [False, True], ids=['initial', 'forward'])
+@pytest.mark.parametrize('forward_processes', [False, True, 'activation'], ids=['initial', 'forward', 'activation'])
 def test_shared_process_preflight_reads_current_databases_and_retired_authority(
         shared_runtime, staging_history, staging_observation, completed_pool, handoff, monkeypatch, forward_processes):
     """Reject active old authority, failed real challenges and changed bindings.
@@ -2312,6 +2312,7 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
         expected_pool_runtime_settings,
     )
     from scripts.ops.nebius_pool_startup_capacity import (
+        BOUND_POOL_ACTIVATION_COMMAND,
         BOUND_POOL_ACTIVE_CAPACITY_COMMAND,
         BOUND_POOL_CAPACITY_COMMAND,
         expected_startup_capacity,
@@ -2514,6 +2515,15 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
                             'participant_id': str(participant.participant_id), 'status': 'foreign' if mode['damage'] == 'guard-foreign'
                             else 'held' if namespace in mode.get('held', set()) else 'open'}
                         checked.add(('active-guard', namespace))
+                    elif sql == pool_guard_activation_sql(spec.operation_id, participant.participant_id,
+                            request.database.foundation.inputs.candidate['candidate_sha'], action='release'):
+                        assert forward_processes == 'activation' and mode['pool_state'] == 'global'
+                        mode['effects'].append(('release', str(participant.participant_id)))
+                        if mode.get('release_failure') == str(participant.participant_id):
+                            raise TimeoutError('simulated unknown guard transaction')
+                        mode['held'].remove(namespace)
+                        value = {'schema': 'loom.pool-local-guard.v1', 'operation_id': str(spec.operation_id),
+                            'participant_id': str(participant.participant_id), 'status': 'open'}
                     else:
                         assert forward_processes and sql == pool_runtime_role_sql(owner=str(spec.operation_id),
                             candidate=request.database.foundation.inputs.candidate['candidate_sha'], action='inspect')
@@ -2528,6 +2538,15 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
                     secret, = (row for row in documents.values() if row['kind'] == 'Secret'
                         and row['metadata']['uid'] == str(staging.database.actuator_credential_uid))
                     secret['metadata']['resourceVersion'] = 'late-rotation'
+            elif args[9] == BOUND_POOL_ACTIVATION_COMMAND:
+                assert forward_processes == 'activation' and args[7:9] == ['python', '-c']
+                assert namespace == manager_namespace and args[5] == 'gateway' and len(args) == 12
+                payload = json.dumps(expected_startup_capacity(spec), sort_keys=True, separators=(',', ':')).encode()
+                assert hmac.new(bytes.fromhex(args[-2]), payload, 'sha256').hexdigest() == args[-1]
+                assert mode.get('pool_state', 'closed') == 'closed' and len(mode['held']) == len(spec.participants)
+                mode['effects'].append(('open', None))
+                mode['pool_state'] = 'global'
+                raise TimeoutError('simulated committed opening reply loss')
             elif args[9] in {BOUND_GATEWAY_KUBERNETES_COMMAND, BOUND_POOL_CAPACITY_COMMAND, BOUND_POOL_ACTIVE_CAPACITY_COMMAND}:
                 assert args[7:9] == ['python', '-c'] and namespace == manager_namespace and args[5] == 'gateway'
                 name = 'loom-pool-gateway'
@@ -2649,6 +2668,7 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
                     connection.client = type(completed_pool[3].api.client)(base_url=connection.api_server, transport=httpx.MockTransport(handle))
                 _exercise_forward_processes(bindings=result.bindings, development=shared_probes, documents=documents,
                     mode=mode, checked=checked, commands=commands, add=add,
+                    activation_transport=forward_processes == 'activation',
                     args=dict(runtime=request, observation=staging_observation, legacy=staging_history, repo_root=ROOT))
             return
         baseline = copy.deepcopy(documents)
@@ -2664,7 +2684,8 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
     assert all(path.read_bytes() == raw for path, raw in history.items())
 
 
-def _exercise_forward_processes(*, bindings, development, documents, mode, checked, commands, add, args):
+def _exercise_forward_processes(*, bindings, development, documents, mode, checked, commands, add, args,
+        activation_transport=False):
     """Real parent, process transports and readiness validators; no live effects."""
     import importlib.util
     import json
@@ -3038,6 +3059,10 @@ def _exercise_forward_processes(*, bindings, development, documents, mode, check
     documents[gateway_path]['status']['readyReplicas'] = 1
     api.prepare_failure = None
     assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-activate'
+    if activation_transport:
+        _exercise_shared_activation_transport(bindings=bindings, development=development, state=state,
+            mode=mode, checked=checked, parent=parent, kwargs=kwargs, api=api)
+        return
     assert observe().pool_state == 'closed'
     mode['pool_state'] = 'global'
     with pytest.raises(ValueError):
@@ -3076,6 +3101,68 @@ def _exercise_forward_processes(*, bindings, development, documents, mode, check
     with pytest.raises(ValueError):
         observe()
     assert len(commands) == before
+
+
+def _exercise_shared_activation_transport(*, bindings, development, state, mode, checked, parent, kwargs, api):
+    """Actual process/SQL/guard transports under the shared opening controller.
+
+    The preceding helper provides real child receipts and remote-I/O doubles.
+    The parent's separate writer/provider qualification is a boundary double
+    here; it must be connected in the full protected parent, not claimed by this
+    test. An unhealthy actual runtime must fail even when that boundary passes.
+    """
+    import importlib.util
+
+    from scripts.ops.nebius_shared_pool_activation import advance_shared_pool_activation
+
+    name = 'scripts.ops.nebius_shared_pool_activation_live'
+    assert importlib.util.find_spec(name) is not None, 'concrete shared opening transport is missing'
+    module = __import__(name, fromlist=['SharedPoolActivationTransport'])
+    qualification = []
+    mode['effects'] = []
+
+    def qualify():
+        qualification.append('writers-provider')
+        if mode.get('qualification_failure'):
+            raise ValueError('simulated lost parent writer/provider qualification')
+
+    transport = module.SharedPoolActivationTransport(bindings=bindings, development=development, qualify=qualify)
+    child = state / 'forward-activate'
+    roster = tuple(str(row.participant_id) for row in bindings.migration.guards)
+    for call in (transport.open_pool, lambda: transport.release_guard(roster[0]),
+            transport.fence_pool, lambda: transport.fence_guard(roster[0])):
+        with pytest.raises(ValueError):
+            call()
+    assert mode['effects'] == []
+    mode['qualification_failure'] = True
+    with pytest.raises(ValueError):
+        advance_shared_pool_activation(bindings=bindings, api=transport, state_dir=child)
+    assert qualification and mode['effects'] == []
+    mode['qualification_failure'] = False
+    mode['damage'] = 'gateway-capacity'
+    with pytest.raises(ValueError):
+        advance_shared_pool_activation(bindings=bindings, api=transport, state_dir=child)
+    assert mode['effects'] == []
+    mode['damage'] = None
+    mode['release_failure'] = roster[0]
+    assert not advance_shared_pool_activation(bindings=bindings, api=transport, state_dir=child)
+    assert mode['pool_state'] == 'global'
+    assert mode['effects'] == [('open', None), ('release', roster[0])]
+    # Unknown release remains observation-only even after the transport returns.
+    assert not advance_shared_pool_activation(bindings=bindings, api=transport, state_dir=child)
+    assert mode['effects'] == [('open', None), ('release', roster[0])]
+    mode['held'].remove(bindings.migration.guards[0].namespace)  # Delayed commit becomes observable.
+    mode['release_failure'] = None
+    checked.clear()
+    assert advance_shared_pool_activation(bindings=bindings, api=transport, state_dir=child)
+    assert mode['effects'] == [('open', None), *(('release', key) for key in roster)]
+    assert not mode['held'] and 'new-active' in checked and 'new-closed' not in checked
+    assert any(isinstance(row, tuple) and row[0] == 'active-capacity' for row in checked)
+    api.block = 'forward-verify'
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-verify'
+    with pytest.raises(ValueError):
+        transport.open_pool()  # Completed child is no longer dispatch authority.
+    assert mode['effects'] == [('open', None), *(('release', key) for key in roster)]
 
 
 @pytest.mark.timeout(180)
