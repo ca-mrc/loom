@@ -269,6 +269,8 @@ def shared_runtime(completed_pool, publisher_cloud):
 
 @pytest.mark.timeout(420)
 def test_shared_handoff_binds_real_completed_dev_and_current_staging(shared_runtime, staging_history, staging_observation):
+    import base64
+
     from scripts.ops.nebius_development_runtime_retained import load_completed_runtime
     from scripts.ops.nebius_shared_pool_handoff import prepare_shared_pool_handoff
 
@@ -292,6 +294,33 @@ def test_shared_handoff_binds_real_completed_dev_and_current_staging(shared_runt
     bound = PoolRuntimeSettings.model_validate_json(settings['LOOM_CP_SERVICE_EXECUTION_GLOBAL_POOL_JSON'])
     assert bound.participant.environment_class == 'staging' and bound.environment == 'development'
     assert bound.management_origin == 'https://' + request.database.manager.deployment.public_host
+    participant = result.staging.attachment.participant
+    execution, build = participant.execution_namespace.name, participant.build_namespace.name
+    assert hasattr(result, 'staging_material'), 'handoff must derive staged credentials and role targets'
+    assert len(result.staging_material) == 2
+    assert {row['metadata']['namespace'] for row in result.staging_material.values()} == {staging_observation['namespace'], execution}
+    assert all(row['kind'] == 'Secret' and row['immutable'] is True
+        and base64.b64decode(row['data']['token']) == b'staging-test-token' for row in result.staging_material.values())
+    roles = {f'Role:{execution}:loom-execution-actuator', f'Role:{build}:loom-task-image-builder'}
+    assert set(result.staging_role_originals) == set(result.staging_role_targets) == roles
+    for key in roles:
+        original = result.staging_role_originals[key]
+        assert original == next(row for row in staging_observation['resources'] if _key(row) == key)
+        target = result.staging_role_targets[key]
+        assert target['rules'] == [
+            {'apiGroups': ['batch'], 'resources': ['jobs'], 'verbs': ['get']},
+            {'apiGroups': [''], 'resources': ['pods'], 'verbs': ['get', 'list']},
+            {'apiGroups': [''], 'resources': ['pods/log'], 'verbs': ['get']},
+        ]
+        assert target['metadata']['annotations']['loom.nebius/shared-pool-handoff-operation'] == str(result.migration.registration.spec.operation_id)
+        assert target['metadata'].get('labels') == original['metadata'].get('labels')
+    assert {row['kind'] for row in result.staging_reader_authority.values()} == {'ClusterRole', 'ClusterRoleBinding'}
+    reader, = (row for row in result.staging_reader_authority.values() if row['kind'] == 'ClusterRole')
+    assert reader['rules'] == [{'apiGroups': [''], 'resources': ['namespaces'], 'verbs': ['get'],
+        'resourceNames': [execution, build]}]
+    binding, = (row for row in result.staging_reader_authority.values() if row['kind'] == 'ClusterRoleBinding')
+    assert binding['subjects'] == [{'kind': 'ServiceAccount', 'name': 'loom-execution-actuator', 'namespace': execution}]
+    assert 'staging-test-token' not in repr(result)
     assert api.store.resources == writes
     assert all(path.read_bytes() == raw for path, raw in before.items())
 
