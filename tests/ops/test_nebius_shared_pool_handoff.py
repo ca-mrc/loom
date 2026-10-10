@@ -1719,6 +1719,212 @@ def test_shared_build_activation_requires_effective_policy_and_never_repeats_unk
     assert len(patches) == 2
 
 
+@pytest.mark.timeout(600)
+def test_shared_gateway_stages_exact_grants_then_starts_once_under_closed_parent(shared_operation, completed_pool):
+    """A grant or PATCH reply loss must not start a second writer or replay effects."""
+    import importlib
+    import json
+    import ssl
+    from contextlib import ExitStack
+
+    import httpx
+    from scripts.ops import nebius_shared_pool_operation as parent
+    from scripts.ops.nebius_development_runtime_live import runtime_resource_path
+    from scripts.ops.nebius_management_switch import _stable
+    from tests.ops.test_nebius_development_pool_retained import populate_runtime_pods
+
+    name = 'scripts.ops.nebius_shared_pool_gateway'
+    assert importlib.util.find_spec(name) is not None, 'shared gateway child is missing'
+    module = importlib.import_module(name)
+    args, bindings = shared_operation
+    runtime, plan = args['runtime'], bindings.plan.development
+    manager = runtime.database.manager.retained.request.retained
+    state = Path(manager.operation['state_dir']).parent / 'shared-pool-handoff'
+    child = state / 'forward-gateway'
+    fixed = plan.authority
+    resources = {}
+    gateway = copy.deepcopy(plan.gateway_original)
+    gateway['metadata'].update(resourceVersion='901', generation=1)
+    gateway_path = runtime_resource_path(gateway) + '/' + gateway['metadata']['name']
+    resource_paths = {runtime_resource_path(row) + '/' + row['metadata']['name']: key for key, row in fixed.items()}
+    creates, patches, reviews, challenges = [], [], [], []
+    documents = {}
+    mode = {'lose_create': True, 'lose_patch': True, 'lose_read': False,
+        'ready': False, 'extra_permission': False, 'runtime_ready': False, 'prepare_loss': True}
+
+    def refresh():
+        namespace = gateway['metadata']['namespace']
+        gateway['status'] = {'observedGeneration': gateway['metadata']['generation'],
+            **{field: int(mode['ready'] and gateway['spec']['replicas'] == 1)
+                for field in ('replicas', 'readyReplicas', 'updatedReplicas', 'availableReplicas')}}
+        documents.clear()
+        documents[gateway_path] = copy.deepcopy(gateway)
+        for version, plural, kind in (('apps/v1', 'replicasets', 'ReplicaSet'), ('v1', 'pods', 'Pod')):
+            path = ('/api/v1' if version == 'v1' else '/apis/' + version) + '/namespaces/' + namespace + '/' + plural
+            documents[path] = {'apiVersion': version, 'kind': kind + 'List',
+                'metadata': {'resourceVersion': '902'}, 'items': []}
+        if mode['ready']:
+            populate_runtime_pods(documents)
+
+    refresh()
+
+    def handle(request):
+        path = request.url.path
+        if request.method == 'GET':
+            if mode['lose_read']:
+                mode['lose_read'] = False
+                raise httpx.ReadError('simulated committed effect readback loss')
+            if path in resource_paths:
+                key = resource_paths[path]
+                return httpx.Response(200, json=copy.deepcopy(resources[key])) if key in resources else httpx.Response(404)
+            if path in documents:
+                return httpx.Response(200, json=copy.deepcopy(documents[path]))
+            collection = path.rsplit('/', 1)[-1]
+            assert path == '/apis/rbac.authorization.k8s.io/v1/' + collection
+            kind = {'roles': 'Role', 'rolebindings': 'RoleBinding', 'clusterroles': 'ClusterRole',
+                'clusterrolebindings': 'ClusterRoleBinding'}[collection]
+            return httpx.Response(200, json={'apiVersion': 'rbac.authorization.k8s.io/v1', 'kind': kind + 'List',
+                'metadata': {'resourceVersion': '903'},
+                'items': [copy.deepcopy(row) for row in resources.values() if row['kind'] == kind]})
+        if path == '/apis/authorization.k8s.io/v1/selfsubjectrulesreviews':
+            assert request.method == 'POST' and not request.url.query
+            assert request.headers['Impersonate-User'] == 'system:serviceaccount:loom-nebius-management-dev:loom-pool-gateway'
+            namespace = json.loads(request.content)['spec']['namespace']
+            reviews.append(namespace)
+            rules = [copy.deepcopy(rule) for row in resources.values()
+                if row['kind'] == 'ClusterRole' or (row['kind'] == 'Role' and row['metadata']['namespace'] == namespace)
+                for rule in row['rules']]
+            if mode['extra_permission']:
+                rules.append({'apiGroups': [''], 'resources': ['secrets'], 'verbs': ['get']})
+            return httpx.Response(201, json={'apiVersion': 'authorization.k8s.io/v1', 'kind': 'SelfSubjectRulesReview',
+                'status': {'incomplete': False, 'resourceRules': rules, 'nonResourceRules': [], 'evaluationError': ''}})
+        if request.method == 'POST':
+            row = json.loads(request.content)
+            key = _key(row)
+            assert key in fixed and path == runtime_resource_path(fixed[key])
+            row['metadata'].update(uid=str(uuid4()), resourceVersion='904')
+            if request.url.params.get('dryRun') == 'All':
+                return httpx.Response(201, json=row)
+            assert not request.url.query and key not in resources
+            assert json.loads((child / 'gateway.json').read_bytes())['dispatch'] is True
+            assert json.loads((child / 'authority/stage.json').read_bytes())['resources'][key]['status'] == 'create_intent'
+            assert gateway['spec']['replicas'] == 0
+            creates.append(key)
+            resources[key] = row
+            if mode['lose_create']:
+                mode['lose_create'], mode['lose_read'] = False, True
+                raise httpx.ReadError('simulated committed grant response loss')
+            return httpx.Response(201, json=row)
+        assert request.method == 'PATCH' and path == gateway_path
+        assert set(resources) == set(fixed) and reviews, 'gateway cannot start before effective fixed grants'
+        changed = copy.deepcopy(gateway)
+        changes = json.loads(request.content)
+        assert changes[:3] == [
+            {'op': 'test', 'path': '/metadata/uid', 'value': gateway['metadata']['uid']},
+            {'op': 'test', 'path': '/metadata/resourceVersion', 'value': gateway['metadata']['resourceVersion']},
+            {'op': 'test', 'path': '/spec', 'value': gateway['spec']},
+        ]
+        for change in changes:
+            target, field = ((changed['metadata'], change['path'].rsplit('/', 1)[-1])
+                if change['path'].startswith('/metadata/') else (changed, 'spec'))
+            if change['op'] == 'test':
+                assert target[field] == change['value']
+            elif change['op'] == 'remove':
+                target.pop(field)
+            else:
+                target[field] = change['value']
+        if request.url.params.get('dryRun') == 'All':
+            return httpx.Response(200, json=changed)
+        assert not request.url.query
+        assert json.loads((child / 'start/transition.json').read_bytes())['resources'][_key(gateway)]['status'] == 'intent'
+        patches.append(_key(gateway))
+        changed['metadata'].update(resourceVersion='905', generation=2)
+        gateway.clear()
+        gateway.update(changed)
+        refresh()
+        if mode['lose_patch']:
+            mode['lose_patch'], mode['lose_read'] = False, True
+            raise httpx.ReadError('simulated committed gateway response loss')
+        return httpx.Response(200, json=copy.deepcopy(gateway))
+
+    with ExitStack() as stack:
+        class API(SharedPhaseAPI):
+            def prepare(self, phase, bound, directory):
+                if phase != 'forward-gateway':
+                    return super().prepare(phase, bound, directory)
+                module.prepare_shared_gateway(bindings=bound, state_dir=directory)
+                if mode['prepare_loss']:
+                    mode['prepare_loss'] = False
+                    raise TimeoutError('simulated interruption after effect-free child preparation')
+
+            def validate_prepared_phase(self, phase, directory):
+                if phase == 'forward-gateway':
+                    module.validate_shared_gateway(bindings=bindings, state_dir=directory, complete=False, prepared=True)
+                else:
+                    super().validate_prepared_phase(phase, directory)
+
+            def validate_phase(self, phase, directory, *, complete):
+                if phase == 'forward-gateway':
+                    module.validate_shared_gateway(bindings=bindings, state_dir=directory, complete=complete)
+                else:
+                    super().validate_phase(phase, directory, complete=complete)
+
+            def advance(self, phase, bound, directory):
+                if phase != 'forward-gateway':
+                    return super().advance(phase, bound, directory)
+                def ready(request, selected, original, expected, actual):
+                    assert request == runtime and selected == 'forward-gateway'
+                    assert _key(original) == _key(actual) == _key(plan.gateway_original)
+                    challenges.append(actual['metadata']['uid'])
+                    return mode['runtime_ready']
+                transport = stack.enter_context(module.HTTPSSharedGateway(bindings=bound,
+                    api_server=runtime.database.foundation.inputs.config['kubernetes_api_server'],
+                    ssl_context=ssl.create_default_context(), qualify_runtime=lambda *_: None, observe_ready=ready))
+                transport.client.close()
+                transport.client = type(completed_pool[3].api.client)(base_url=transport.api_server, transport=httpx.MockTransport(handle))
+                return module.advance_shared_gateway(bindings=bound, api=transport, state_dir=directory)
+
+        api = API(parent)
+        api.block = 'forward-activate'
+        kwargs = dict(**args, bindings=bindings, api=api, action='install')
+        with pytest.raises(ValueError):
+            parent.run_shared_pool_operation(**kwargs)
+        assert creates == patches == []
+        with pytest.raises(ValueError):
+            parent.run_shared_pool_operation(**kwargs)
+        assert creates == [next(iter(fixed))] and patches == []
+        for path in (child / 'gateway.json', child / 'authority/stage.json', child / 'authority/dispatch.json', child / 'start/transition.json'):
+            saved = path.read_bytes()
+            path.unlink()
+            with pytest.raises(ValueError):
+                parent.run_shared_pool_operation(**kwargs)
+            assert len(creates) == 1 and patches == []
+            path.write_bytes(saved)
+            path.chmod(0o600)
+        mode['extra_permission'] = True
+        with pytest.raises(ValueError):
+            parent.run_shared_pool_operation(**kwargs)
+        assert creates == list(fixed) and patches == []
+        mode['extra_permission'] = False
+        with pytest.raises(ValueError):
+            parent.run_shared_pool_operation(**kwargs)
+        assert patches == [_key(gateway)]
+        assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-gateway'
+        assert challenges == []  # No process challenge before actual rollout readiness.
+        mode['ready'] = True
+        refresh()
+        assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-gateway'
+        assert challenges and patches == [_key(gateway)]
+        mode['runtime_ready'] = True
+        assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-activate'
+        assert patches == [_key(gateway)] and creates == list(fixed)
+        assert gateway['spec']['replicas'] == 1 and _stable(gateway) == _stable(plan.gateway_target)
+        assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-activate'
+        assert patches == [_key(gateway)] and creates == list(fixed)
+        assert {namespace for participant in bindings.migration.registration.spec.participants
+            for namespace in (participant.execution_namespace.name, participant.build_namespace.name)} <= set(reviews)
+
+
 @pytest.mark.timeout(420)
 def test_shared_handoff_binds_real_completed_dev_and_current_staging(shared_runtime, staging_history, staging_observation):
     import base64
