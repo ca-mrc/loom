@@ -29,6 +29,90 @@ from tests.unit.test_task_bundle_registration import _bundle
 pytestmark = [pytest.mark.docker, pytest.mark.timeout(120)]
 
 
+@pytest.mark.parametrize("source_registration_mode", ["legacy", "versioned-v1"])
+async def test_local_publisher_excludes_stale_transport_sidecar_from_authored_inputs(
+    isolated_migration_postgres_url, tmp_path, minio_tls, source_registration_mode,
+):
+    import hashlib
+    import json
+
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from loom.db.schema import Task
+    from loom.models.task_checksum import task_checksum
+    from loom.trajectory.storage import BUNDLE_FILE_METADATA_NAME
+    from loom_cli.local_benchmark_publish import publish_local_benchmark
+    from loom_cli.local_benchmark_validate import validate_local_benchmark
+    from tests.integration.test_local_benchmark_publish import _write_layout
+
+    root = tmp_path / "local-benchmark"
+    _write_layout(root)
+    task_dir = root / "tasks" / "alpha"
+    (task_dir / ".authored").write_bytes(b"authored dotfile\n")
+    nested = task_dir / "inputs" / BUNDLE_FILE_METADATA_NAME
+    nested.parent.mkdir()
+    nested.write_bytes(b"authored nested file\n")
+    nested.chmod(0o755)
+    authored_checksum = task_checksum(task_dir)
+    authored = {
+        path.relative_to(task_dir).as_posix(): path.read_bytes()
+        for path in task_dir.rglob("*") if path.is_file()
+    }
+    stale_metadata = b'{"files":{},"schema_version":1}'
+    (task_dir / BUNDLE_FILE_METADATA_NAME).write_bytes(stale_metadata)
+    assert validate_local_benchmark(root).task_count == 1
+    bucket = "publisher-sidecar-" + uuid4().hex
+    admin = minio_tls[3]
+    admin.create_bucket(Bucket=bucket)
+    admin.put_bucket_versioning(Bucket=bucket, VersioningConfiguration={"Status": "Enabled"})
+    store = _store(minio_tls)
+
+    stats = await publish_local_benchmark(
+        root, db_url=isolated_migration_postgres_url, object_store=store, bucket=bucket,
+        source_registration_mode=source_registration_mode,
+    )
+    assert stats.inserted == 1
+    engine = create_async_engine(isolated_migration_postgres_url)
+    try:
+        async with async_sessionmaker(engine)() as session:
+            task = await session.get(Task, "team-evals/alpha")
+            binding = task.source_provenance["service_execution_input"]
+            prefix = task.source.removeprefix(f"s3://{bucket}/")
+            manifest_bytes = await store.get_object(
+                bucket=bucket, key=binding["manifest_uri"].removeprefix(f"s3://{bucket}/"),
+            )
+            manifest = json.loads(manifest_bytes)
+            restored = tmp_path / "restored"
+            count = await store.download_prefix(bucket=bucket, prefix=prefix, out_dir=restored)
+            assert {
+                "catalog_checksum": task.checksum,
+                "manifest_checksum": manifest["task_revision_sha256"],
+                "manifest_paths": [item["relative_path"] for item in manifest["files"]],
+                "binding_file_count": binding["file_count"],
+                "binding_total_bytes": binding["total_bytes"],
+            } == {
+                "catalog_checksum": authored_checksum,
+                "manifest_checksum": "sha256:" + authored_checksum,
+                "manifest_paths": sorted(authored),
+                "binding_file_count": len(authored),
+                "binding_total_bytes": sum(map(len, authored.values())),
+            }
+            assert binding["manifest_sha256"] == "sha256:" + hashlib.sha256(manifest_bytes).hexdigest()
+            assert task_checksum(restored) == authored_checksum
+            assert count == len(authored)
+            for item in manifest["files"]:
+                body = authored[item["relative_path"]]
+                assert item["sha256"] == "sha256:" + hashlib.sha256(body).hexdigest()
+                assert (restored / item["relative_path"]).read_bytes() == body
+            assert (restored / "inputs" / BUNDLE_FILE_METADATA_NAME).stat().st_mode & 0o111
+            assert not (restored / BUNDLE_FILE_METADATA_NAME).exists()
+    finally:
+        await engine.dispose()
+    assert (task_dir / BUNDLE_FILE_METADATA_NAME).read_bytes() == stale_metadata
+    for name, body in authored.items():
+        assert (task_dir / name).read_bytes() == body
+
+
 def _prepare(tmp_path, minio_tls, *, versioning=True):
     bucket = "journal-source-" + uuid4().hex
     admin = minio_tls[3]

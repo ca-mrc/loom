@@ -185,6 +185,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Configure credential-free Docker Hub mirror
+        run: python3 scripts/configure_ci_registry_mirror.py
+
       - name: Install uv
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:

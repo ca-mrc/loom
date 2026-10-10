@@ -19,16 +19,19 @@ with legacy `Trial.config["agent"]` fallback for older rows.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
+import asyncio
+from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
 from typing import Annotated, Any
 from uuid import UUID
 
+from anyio import CancelScope
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.types import Receive, Scope, Send
 
 from loom.db.schema import (
     Artifact,
@@ -89,7 +92,7 @@ from loom_service.service_execution_status import service_execution_lifecycle_st
 from loom_service.stale_running_debug import trial_stale_running_debug_context
 from loom_service.submission_compat import validate_submission_agent_task_compatibility
 from loom_service.task_image_preparation import task_image_preparation_for_trial
-from loom_service.trial_bundles import canonical_bundle_for_trial
+from loom_service.trial_bundles import CanonicalTrialBundle, canonical_bundle_for_trial
 from loom_service.trial_execution_provenance import (
     trial_execution_provenance,
     validated_runtime_plan,
@@ -1072,14 +1075,63 @@ async def get_trial(
     return base
 
 
-def _trial_bundle_body(archive: ArchiveBuildResult) -> Iterator[bytes]:
+async def _drain_bundle_worker(worker: asyncio.Task[Any]) -> None:
+    # Starlette disconnects use level cancellation; raw task.cancel() can recur
+    # independently. Shield both while the thread still owns the spool.
+    with CancelScope(shield=True):
+        while not worker.done():
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+    if not worker.cancelled():
+        worker.exception()  # Retrieve a failure without masking cancellation.
+
+
+async def _trial_bundle_body(archive: ArchiveBuildResult) -> AsyncIterator[bytes]:
     try:
-        while chunk := archive.body.read(1024 * 1024):
+        while True:
+            worker = asyncio.create_task(asyncio.to_thread(archive.body.read, 1024 * 1024))
+            try:
+                chunk = await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                await _drain_bundle_worker(worker)
+                raise
+            if not chunk:
+                break
             yield chunk
     finally:
-        close = getattr(archive.body, "close", None)
-        if callable(close):
-            close()
+        archive.body.close()
+
+
+async def _build_trial_bundle(client: Any, bundle: CanonicalTrialBundle) -> ArchiveBuildResult:
+    worker = asyncio.create_task(asyncio.to_thread(
+        build_canonical_trial_bundle_archive, client=client, bundle=bundle,
+    ))
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        # Thread cancellation cannot interrupt storage reads or compression.
+        # Retain ownership until the worker stops, including repeated cancellation.
+        await _drain_bundle_worker(worker)
+        if not worker.cancelled() and worker.exception() is None:
+            worker.result().body.close()
+        raise
+
+
+class _TrialBundleResponse(StreamingResponse):
+    def __init__(self, archive: ArchiveBuildResult, *, headers: dict[str, str]) -> None:
+        self.archive = archive
+        super().__init__(_trial_bundle_body(archive), media_type="application/gzip", headers=headers)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            # Header-send failure can precede the iterator's first read/finally.
+            self.archive.body.close()
 
 
 @router.get("/trials/{trial_id}/bundle/download")
@@ -1100,10 +1152,7 @@ async def download_trial_bundle(
         bundle = await canonical_bundle_for_trial(s, trial=trial)
         if bundle is None:
             raise HTTPException(status_code=409, detail="canonical Trial bundle is not ready")
-        archive = build_canonical_trial_bundle_archive(
-            client=request.app.state.minio_client,
-            bundle=bundle,
-        )
+        archive = await _build_trial_bundle(request.app.state.minio_client, bundle)
     except DeliveryExportError as exc:
         detail = (
             exc.detail
@@ -1115,9 +1164,8 @@ async def download_trial_bundle(
         )
         raise HTTPException(status_code=exc.status_code, detail=detail) from exc
     filename = f"{trial.id}-complete-trial-bundle.tar.gz"
-    return StreamingResponse(
-        _trial_bundle_body(archive),
-        media_type="application/gzip",
+    return _TrialBundleResponse(
+        archive,
         headers={
             "Content-Disposition": f'attachment; filename="{filename}"',
             "Content-Length": str(archive.size_bytes),

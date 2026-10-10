@@ -10,6 +10,7 @@ Begin with the [operator runbook](operator-runbook.md). Use the architecture
 - [Infrastructure](nebius-infrastructure.md): Terraform, identities, networking and resource convergence.
 - [Platform operations](nebius-platform.md): service rendering, capacity and deployment diagnostics.
 - [Candidate publication](nebius-candidate.md): immutable images and candidate records.
+- [Image retention](nebius-image-retention.md): reference-aware cleanup of published platform and task images.
 - [Deployment](nebius-deployment.md): target binding, backup, migrations and readiness.
 - [Staging credentials](nebius-staging-credentials.md): scoped identities and PostgreSQL trust.
 - [Staging release validation](staging-launch.md): candidate-bound promotion evidence.
@@ -31,6 +32,7 @@ Begin with the [operator runbook](operator-runbook.md). Use the architecture
 - [Harbor runtime versions](harbor-runtime-versions.md): select and register a published runtime.
 - [Harbor90 x86 sources](nebius-harbor90-migration.md): preserve benchmark identity while publishing x86 inputs.
 - [TerminalGen corpus publication](terminalgen-corpus-publication.md): publication and read contracts.
+- [Reviewed task declaration corrections](quality-task-declarations.md): prepare immutable Poetry/Jupyter revisions from the exact reviewed sources.
 
 ## Personal and local development
 

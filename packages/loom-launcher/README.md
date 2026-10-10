@@ -1,6 +1,6 @@
 # loom-launcher
 
-Pluggable agent harnesses + sandbox capture utilities for [Loom](https://github.com/qianyi-sun/loom) — a team platform for running LLMs on customizable tasks.
+Pluggable agent harnesses + sandbox capture utilities for [Loom](https://github.com/ca-mrc/loom) — a team platform for running LLMs on customizable tasks.
 
 Two consumers:
 - **Workers** install this package to read adapter metadata (env vars, argv, capture pattern) and construct a `SubprocessAgent`.

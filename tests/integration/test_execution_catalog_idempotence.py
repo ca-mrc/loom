@@ -88,3 +88,56 @@ async def test_catalog_reapply_accepts_legacy_set_order_and_rejects_definition_c
                 delete(ServiceExecutionClass).where(ServiceExecutionClass.id == class_id)
             )
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_admin_catalog_readback_reports_disabled_identity_without_mutating(
+    postgres_url: str, request: pytest.FixtureRequest
+) -> None:
+    config, candidate, profile = request.getfixturevalue('platform_inputs')
+    files = build_platform(config, candidate, profile, {}, repo_root=Path(__file__).parents[2])
+    catalog = json.loads(files['10-config-network.yaml'][0]['data']['catalog.json'])
+    class_id, target_id = 'catalog-read-' + uuid4().hex, 'catalog-read-target-' + uuid4().hex
+    catalog['execution_class']['class_id'] = class_id
+    catalog['topology']['execution_class_id'] = class_id
+    target = catalog['topology']['targets'][0]
+    target.update(target_id=target_id, execution_class_id=class_id)
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    app = FastAPI()
+    app.state.session_factory = sessions
+    token = 'loom_admin_' + 'e' * 64
+    app.state.admin_secret_verifier = AdminSecretVerifier.from_token(token)
+    app.include_router(service_executions.router)
+    route = '/admin/service-execution/catalog/' + target_id
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://catalog.test') as client:
+            response = await client.get(route)
+            assert response.status_code == 401
+            client.headers['Authorization'] = 'Bearer ' + token
+            assert (await client.get(route)).status_code == 404
+            created = await client.post('/admin/service-execution/catalog', json=catalog)
+            assert created.status_code == 200, created.text
+            async with sessions() as session:
+                stored_class = await session.get(ServiceExecutionClass, class_id)
+                stored_target = await session.get(ServiceExecutionTarget, target_id)
+                assert stored_class is not None and stored_target is not None
+                original_updated = stored_target.updated_at
+                expected = {'execution_class': stored_class.spec_json,
+                    'execution_class_sha256': stored_class.spec_sha256, 'class_enabled': True,
+                    'class_retired_at': None, 'target': stored_target.spec_json,
+                    'target_sha256': stored_target.spec_sha256,
+                    'desired_state': 'disabled', 'observed_state': 'unknown',
+                    'health_status': 'unknown', 'health_observed_at': None, 'health_error_code': None}
+            for _ in range(2):
+                response = await client.get(route)
+                assert response.status_code == 200, response.text
+                assert response.json() == expected
+            async with sessions() as session:
+                stored_target = await session.get(ServiceExecutionTarget, target_id)
+                assert stored_target is not None and stored_target.updated_at == original_updated
+    finally:
+        async with sessions() as session, session.begin():
+            await session.execute(delete(ServiceExecutionTarget).where(ServiceExecutionTarget.id == target_id))
+            await session.execute(delete(ServiceExecutionClass).where(ServiceExecutionClass.id == class_id))
+        await engine.dispose()

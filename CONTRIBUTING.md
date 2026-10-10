@@ -15,11 +15,14 @@
 > Labels may add validation but cannot remove path-inferred validation. The
 > developer or maintainer enables GitHub's native squash auto-merge for every
 > non-draft PR, independent of author or reviewer identity. GitHub waits for
-> every required gate on that current head SHA before merging.
+> every required gate on that current head SHA before adding it to the `dev`
+> merge queue. The queue validates a merge group against the latest `dev` and
+> earlier queued changes before performing the squash merge.
 > Static documentation is a location-and-format allowlist; unknown runtime
 > paths fail safe to the full validation set. Manual runs report `*-manual`
 > contexts and cannot satisfy protected PR contexts. These four strict,
-> GitHub-Actions-app-bound current-head checks are the only merge authority for
+> GitHub-Actions-app-bound checks on PR heads and queued merge groups are the
+> only merge authority for
 > `dev`: it requires no human approval, no CODEOWNER approval, and no
 > conversation resolution. CI or release-authority changes select full CI but
 > add no human merge gate.
@@ -177,11 +180,14 @@ secrets.
   owner selects every heavy lane until its ownership is declared.
 - For a completed non-draft `dev` PR, a trusted collaborator enables GitHub's
   native squash auto-merge. No workflow or custom controller enables or performs
-  the merge. All four required gates must be visible and successful on the current head SHA,
-  and strict base evaluation requires the branch to be up to date with `dev`.
-  If another PR advances `dev`, update the branch and validate the new head;
-  auto-merge does not update a behind branch or reuse its old checks. The
-  four strict, app-bound checks are the
+  the merge. All four required gates must be visible and successful on the
+  current head SHA of the PR before queue admission. GitHub's native merge queue then
+  requires those same four app-bound gates on its generated merge-group SHA,
+  which includes the latest `dev` and any earlier queued changes. If another PR
+  advances `dev`, GitHub rebuilds and validates the affected merge group;
+  authors do not need to rebase solely because the base advanced. Update the
+  branch when its code conflicts or needs an amendment, then validate its new
+  head. Keep the four strict, app-bound checks as the
   only merge authority: `dev` requires no human approval, no CODEOWNER
   approval, and no conversation resolution. Do not hand-merge an eligible
   `dev` PR just because CI is green.
@@ -298,13 +304,14 @@ have one place to audit them.
 - **Publish and deploy workflows use protected GitHub Environments.**
   Secrets for benchmark-bundle publish or infrastructure deploy live in
   protected Environments so they are not available to pull request code.
-- **The active `dev protected admission` ruleset** requires the strict,
-  GitHub-Actions-app-bound current-head contexts `repository-checks`,
+- **The active `dev protected admission` ruleset** requires the native merge
+  queue and the strict, GitHub-Actions-app-bound contexts `repository-checks`,
   `images-gate`, `cluster-smoke-gate`, and `staging-smoke-gate`, blocks direct
   pushes, deletion, and force-pushes, and enforces squash-only linear-history
   merges. It has no bypass actors and requires zero human approvals, zero
   CODEOWNER approvals, and zero conversation resolution; these four CI checks
-  are its merge authority.
+  are required on both PR heads and the queue's merge groups. The initial queue
+  builds one merge group at a time and merges one PR per group.
 - **The active `main protected promotion` ruleset** requires a pull request,
   and only the GitHub-Actions-app-bound `main-promotion-gate` context. That
   direct job binds the current `dev` head, same-repository PR, successful
@@ -314,8 +321,9 @@ have one place to audit them.
   candidate freshness is enforced by the composite gate itself.
 - **Auto-merge is native and author-neutral.** `allow_auto_merge=true` lets a
   developer or maintainer enable GitHub's squash auto-merge on every eligible
-  non-draft PR. The four required checks remain merge authority for `dev`;
-  enabling auto-merge grants no bypass. `main` uses the separate protected
+  non-draft PR. For `dev`, this requests queue admission once its PR checks pass;
+  the queue performs the squash merge after its merge-group checks pass.
+  Enabling auto-merge grants no bypass. `main` uses the separate protected
   promotion ruleset described above.
   Verify remote rulesets through the GitHub API or repository settings rather
   than treating this checked-in description as live evidence.

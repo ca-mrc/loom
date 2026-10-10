@@ -1810,6 +1810,18 @@ def _build_platform(
         pod = deployment["spec"]["template"]["spec"]
         _mount_secret(pod, "db-ca", "loom-platform-db", "/var/run/loom-db", ca_only=True)
         _mount_secret(pod, "admin", "loom-admin-secret", "/var/run/loom/admin")
+        if component == "control_plane" and execution_enabled:
+            pod.setdefault("volumes", []).append({
+                "name": "recovery-platform-config",
+                "configMap": {"name": "loom-platform-config", "items": [
+                    {"key": "profile.json", "path": "profile.json"},
+                    {"key": "environment.json", "path": "environment.json"},
+                ]},
+            })
+            pod["containers"][0].setdefault("volumeMounts", []).append({
+                "name": "recovery-platform-config", "mountPath": "/var/run/loom-platform",
+                "readOnly": True,
+            })
         if component == "gateway":
             pod["terminationGracePeriodSeconds"] = 300
             if "task_egress" in config:

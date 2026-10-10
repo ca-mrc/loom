@@ -736,6 +736,12 @@ LOOM_NEBIUS_WEB_IMAGE=loom-web-tls:test uv run --extra dev pytest -q -s \
   tests/integration/test_nebius_public_tls.py
 ```
 
+The smoke reads its generated public certificate inside the TLS container as
+the image's normal user. Caddy's private storage directories stay restricted;
+the host test runner does not need root or relaxed certificate permissions.
+An exact published image digest can also be supplied through
+`LOOM_NEBIUS_WEB_IMAGE` to qualify that candidate's TLS behavior locally.
+
 Live acceptance separately checks the published candidate, PVC binding, both
 web-container readiness states, Caddy's successful issuance log and stored
 certificate expiry, and trusted public HTTPS. A still-valid bootstrap certificate
@@ -1313,7 +1319,7 @@ account for that head before consuming remaining capacity; unsupported,
 cancelled, expired or superseded work does not fence admission. Waiting does not
 increment build attempts or create/cost counters. Deploy the matching controller
 and all capacity writers before claiming live fairness. See the
-[native fairness contract](../architecture/nebius-primary-platform.md#native-task-image-capacity-fairness).
+[native fairness contract](../architecture/nebius-shared-pools.md#native-task-image-capacity-fairness).
 
 Kubernetes may omit default-false host namespace and volume-mount flags and
 canonicalize volume sizes (for example, `7168Mi` to `7Gi`). The native controller
@@ -1552,7 +1558,7 @@ Fix the diagnosed cause, confirm the original workflow is terminal, and use the
 protected recovery operation for the existing single-primary integration platform:
 
 ```sh
-gh workflow run nebius-rollout.yml --repo qianyi-sun/loom --ref dev \
+gh workflow run nebius-rollout.yml --repo ca-mrc/loom --ref dev \
   -f operation=recover -f recovery_run_id=FAILED_ROLLOUT_RUN_ID
 ```
 

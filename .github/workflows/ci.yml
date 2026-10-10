@@ -385,6 +385,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Configure credential-free Docker Hub mirror
+        run: python3 scripts/configure_ci_registry_mirror.py
+
       - name: Select nonempty tests-root manifest
         id: manifest
         shell: bash
@@ -601,6 +604,9 @@ jobs:
        needs.workflow-plan.outputs.gate_mode == 'preflight')
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Configure credential-free Docker Hub mirror
+        run: python3 scripts/configure_ci_registry_mirror.py
 
       - name: Execute manifest-owned runtime payload conformance
         run: python3 scripts/runtime_payload_conformance.py --test-scope "${CI_TEST_SCOPE:-all}"
@@ -924,6 +930,9 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
+      - name: Configure credential-free Docker Hub mirror
+        run: python3 scripts/configure_ci_registry_mirror.py
+
       - name: Select nonempty integration manifest
         id: manifest
         shell: bash
@@ -1034,6 +1043,9 @@ jobs:
       TEST_CHANGED_PATHS: ${{ needs.workflow-plan.outputs.test_changes }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Configure credential-free Docker Hub mirror
+        run: python3 scripts/configure_ci_registry_mirror.py
 
       - name: Select nonempty integration-docker manifest
         id: manifest

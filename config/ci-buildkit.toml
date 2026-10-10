@@ -1,0 +1,4 @@
+# Docker-container builders do not inherit the Docker daemon's registry mirrors.
+# Keep source references/digests intact; ordinary upstream fallback stays enabled.
+[registry."docker.io"]
+mirrors = ["mirror.gcr.io"]

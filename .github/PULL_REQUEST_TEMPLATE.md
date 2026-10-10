@@ -20,8 +20,10 @@
       GitHub's native squash auto-merge for every non-draft PR, regardless of
       author or reviewer. GitHub keeps the candidate queued until
       `repository-checks`, `images-gate`, `cluster-smoke-gate`, and
-      `staging-smoke-gate` succeed on the current head SHA. These four strict,
-      app-bound checks are the only merge authority: `dev` requires no human
+      `staging-smoke-gate` succeed on the current head SHA. The native `dev`
+      merge queue then requires those same contexts on its generated merge-group
+      SHA against the latest base before performing the squash merge. These four
+      strict, app-bound checks are the only merge authority: `dev` requires no human
       approval, no CODEOWNER approval, and no conversation resolution.
 - [ ] This PR targets `main` only for a production release promotion from `dev`;
       a developer or maintainer enables GitHub's native squash auto-merge after

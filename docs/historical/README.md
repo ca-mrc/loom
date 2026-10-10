@@ -4,7 +4,8 @@ These pages preserve only context needed to interpret retirement and retained
 data. They are not supported deployment procedures or future implementation plans.
 
 - [Shared-cluster retirement](shared-cluster-retirement-2026-09.md): architecture decision, removed capabilities and retained compatibility.
-- [Reference audit](shared-cluster-reference-audit.json): classified remaining legacy terminology in tracked files.
+- [Legacy schema retirement](legacy-schema-retirement-2026-09.md): migration 0171's disposition, retained data and upgrade/rollback constraints.
+- [Reference audit](shared-cluster-reference-audit.json): the retirement-time snapshot of classified legacy terminology; paths and counts are historical, not a current repository inventory.
 - [Staging data lineage](staging-data-lifecycle.md): identities and constraints used by historical backups and database rows.
 
 ## Recovering older material

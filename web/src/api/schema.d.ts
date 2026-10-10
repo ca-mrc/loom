@@ -2705,10 +2705,10 @@ export interface paths {
          * Stream Events
          * @description SSE live event stream for `trial_id`, starting at `after_seq + 1`.
          *
-         *     The connection emits all available events on first read, then
+         *     The connection drains all available event pages, then
          *     polls MinIO every `_DEFAULT_SSE_POLL_INTERVAL_SEC` for new events,
-         *     and terminates when the trial reaches a terminal state OR the
-         *     client disconnects OR the connection has been open for longer
+         *     and completes only after a terminal trial has no remaining events. It also
+         *     stops if the client disconnects or the connection has been open for longer
          *     than `_DEFAULT_SSE_MAX_CONNECTION_SEC` (clients reconnect with
          *     the last seen seq as `after_seq`).
          *

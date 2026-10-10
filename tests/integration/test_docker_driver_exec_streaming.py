@@ -272,6 +272,14 @@ async def test_docker_streaming_wait_after_kill_retains_exit_status() -> None:
         handle = await driver.exec_streaming(
             ["sleep", "30"], env_vars={}, cwd=PurePosixPath("/workspace"),
         )
+        # Docker can return the upgraded stream before the command starts.
+        # Synchronize this fixture before its best-effort kill, so the test
+        # exercises wait-after-kill rather than racing process creation.
+        async def wait_until_started() -> None:
+            while (await driver.exec("pgrep -fx 'sleep 30'")).return_code != 0:
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(wait_until_started(), timeout=5)
         await handle.kill()
         assert await asyncio.wait_for(handle.wait(), timeout=5) == 137
         assert await asyncio.wait_for(handle.wait(), timeout=5) == 137

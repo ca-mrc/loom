@@ -5,6 +5,8 @@ smuggle path-traversal into the S3 prefix (Plan 14 audit follow-ups)."""
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import stat
 from pathlib import Path
 
@@ -14,11 +16,55 @@ from loom.trajectory.storage import (
     BUNDLE_FILE_METADATA_NAME,
     FakeObjectStore,
     bundle_file_metadata_sha256,
+    discard_staged_bundle_file_metadata,
     restore_bundle_file_metadata_sidecar,
     write_bundle_file_metadata_sidecar,
 )
 from loom_benchmark_tool.import_cmd import _validate_instance_id
 from loom_benchmark_tool.upload import upload_task_dir
+
+
+def test_discard_staged_metadata_preserves_authored_files_and_original_tree(tmp_path: Path) -> None:
+    original = tmp_path / "original"
+    original.mkdir()
+    (original / BUNDLE_FILE_METADATA_NAME).write_bytes(b"stale metadata")
+    (original / ".authored").write_bytes(b"dotfile")
+    nested = original / "inputs" / BUNDLE_FILE_METADATA_NAME
+    nested.parent.mkdir()
+    nested.write_bytes(b"nested authored file")
+    nested.chmod(0o755)
+    staged = tmp_path / "staged"
+    shutil.copytree(original, staged)
+
+    discard_staged_bundle_file_metadata(staged)
+    discard_staged_bundle_file_metadata(staged)  # Bundles without a sidecar also work.
+
+    assert (original / BUNDLE_FILE_METADATA_NAME).read_bytes() == b"stale metadata"
+    assert not (staged / BUNDLE_FILE_METADATA_NAME).exists()
+    assert (staged / ".authored").read_bytes() == b"dotfile"
+    assert (staged / "inputs" / BUNDLE_FILE_METADATA_NAME).read_bytes() == b"nested authored file"
+    assert (staged / "inputs" / BUNDLE_FILE_METADATA_NAME).stat().st_mode & 0o111
+
+
+@pytest.mark.parametrize("entry", ["symlink", "dangling-symlink", "directory", "fifo"])
+def test_discard_staged_metadata_rejects_unsafe_reserved_entry(tmp_path: Path, entry: str) -> None:
+    target = tmp_path / "authored"
+    target.write_bytes(b"keep original")
+    sidecar = tmp_path / BUNDLE_FILE_METADATA_NAME
+    if entry == "symlink":
+        sidecar.symlink_to(target)
+    elif entry == "dangling-symlink":
+        sidecar.symlink_to(tmp_path / "absent")
+    elif entry == "directory":
+        sidecar.mkdir()
+    else:
+        os.mkfifo(sidecar)
+
+    with pytest.raises(ValueError, match="not a regular file"):
+        discard_staged_bundle_file_metadata(tmp_path)
+
+    assert os.path.lexists(sidecar)
+    assert target.read_bytes() == b"keep original"
 
 
 async def test_upload_task_dir_rejects_empty_prefix(tmp_path: Path) -> None:

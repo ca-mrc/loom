@@ -49,8 +49,11 @@ No target, or `--environment local`, selects this local workflow explicitly.
 request to the logged-in management server; it never falls back to Compose and
 cannot be combined with local-only flags. The
 [managed request layer](../architecture/nebius-primary-platform.md#managed-provisioning-requests)
-currently journals requests but does not yet provision personal stacks. Its
-`loom dev create/list/status/wait` commands are not installed-readiness evidence.
+retains the isolated-environment lifecycle. A management service configured with
+the provider runtime can provision execution-disabled child stacks; accepting a
+request alone does not establish installed readiness. For personal frontend/API
+development against shared data, use the separate
+[personal application workflow](personal-development.md) and `loom dev app`.
 
 ## Non-default local ports
 

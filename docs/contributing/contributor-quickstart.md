@@ -5,10 +5,10 @@ docs live in [`user-guide.md`](../user-guide.md) +
 [`operator-runbook.md`](../runbooks/operator-runbook.md).
 
 The canonical public development repository is
-[`qianyi-sun/loom`](https://github.com/qianyi-sun/loom):
+[`ca-mrc/loom`](https://github.com/ca-mrc/loom):
 
 ```bash
-git clone https://github.com/qianyi-sun/loom.git
+git clone https://github.com/ca-mrc/loom.git
 cd loom
 ```
 

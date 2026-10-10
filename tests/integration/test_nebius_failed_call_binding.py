@@ -205,9 +205,6 @@ async def test_failed_writer_rejects_misbound_native_context(boundary: str) -> N
 async def test_signed_deadline_audits_only_dispatched_calls(
     facade_setup, monkeypatch: pytest.MonkeyPatch, dispatched: bool,  # noqa: F811
 ) -> None:
-    import asyncio
-    import time
-
     from loom_llm_gateway.attempt_deadline import GatewayAttemptDeadline
 
     app, token, _team_id, trial_id, connection_id, _captures = facade_setup
@@ -215,11 +212,12 @@ async def test_signed_deadline_audits_only_dispatched_calls(
     lease_id = uuid4()
     original_auth = facade_openai.verify_facade_auth
     attempts = []
+    clock = [0.0 if dispatched else 2.0]
 
     async def authenticated_lease(*args, **kwargs):
         ctx = await original_auth(*args, **kwargs)
         kwargs["request"].state.loom_gateway_attempt_deadline = GatewayAttemptDeadline(
-            time.monotonic() + (0.1 if dispatched else -1),
+            1.0, clock=lambda: clock[0],
         )
         return replace(ctx, step_id="agent", service_execution_lease_id=lease_id,
                        service_execution_generation=4)
@@ -228,8 +226,9 @@ async def test_signed_deadline_audits_only_dispatched_calls(
 
     async def upstream(request: httpx.Request) -> httpx.Response:
         attempts.append(request.url.path)
-        await asyncio.sleep(1)
-        return httpx.Response(200, json={})
+        # Expire during provider I/O, independently of database admission latency.
+        clock[0] = 2.0
+        raise TimeoutError("synthetic provider timeout")
 
     await app.state.egress_client_pool.aclose()
     await app.state.upstream_client.aclose()

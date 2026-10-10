@@ -433,7 +433,8 @@ class _ListenSubscription:
     the drain task is cancelled and the connection is closed. The
     connection is opened lazily inside `__aenter__` so a connection
     failure can be caught + the route can degrade to pure-poll mode
-    without blowing up the request.
+    without blowing up the request. Failed or cancelled entry closes
+    partially acquired resources before propagating the original error.
     """
 
     def __init__(self, dsn: str, trial_id: UUID) -> None:
@@ -445,25 +446,31 @@ class _ListenSubscription:
         self.wake = asyncio.Event()
 
     async def __aenter__(self) -> _ListenSubscription:
-        # Autocommit is required for LISTEN — the connection is a
-        # streaming consumer, not transaction-scoped.
-        self._conn = await psycopg.AsyncConnection.connect(
-            self._dsn, autocommit=True,
-        )
-        await self._conn.execute(f"LISTEN {_LISTEN_CHANNEL}")
-        push_ok = await notify_round_trip(self._conn, timeout_sec=1.0)
-        if push_ok:
-            _PUSH_MODE_GAUGE.labels(watcher="trajectory").set(1)
-        else:
-            logger.error(
-                "trajectory_listen_selftest_failed — NOTIFY round-trip timed out; "
-                "SSE stream will fall back to poll-only mode. "
-                "Check that the LISTEN connection is not routed through "
-                "pgbouncer transaction mode.",
+        try:
+            # Autocommit is required for LISTEN — the connection is a
+            # streaming consumer, not transaction-scoped.
+            self._conn = await psycopg.AsyncConnection.connect(
+                self._dsn, autocommit=True,
             )
-            _PUSH_MODE_GAUGE.labels(watcher="trajectory").set(0)
-        self._push_mode = push_ok
-        self._drain_task = asyncio.create_task(self._drain())
+            await self._conn.execute(f"LISTEN {_LISTEN_CHANNEL}")
+            push_ok = await notify_round_trip(self._conn, timeout_sec=1.0)
+            if push_ok:
+                _PUSH_MODE_GAUGE.labels(watcher="trajectory").set(1)
+            else:
+                logger.error(
+                    "trajectory_listen_selftest_failed — NOTIFY round-trip timed out; "
+                    "SSE stream will fall back to poll-only mode. "
+                    "Check that the LISTEN connection is not routed through "
+                    "pgbouncer transaction mode.",
+                )
+                _PUSH_MODE_GAUGE.labels(watcher="trajectory").set(0)
+            self._push_mode = push_ok
+            self._drain_task = asyncio.create_task(self._drain())
+        except BaseException:
+            # Context managers do not call __aexit__ when __aenter__ fails.
+            # Include cancellation, which must clean up rather than fall back.
+            await self.__aexit__()
+            raise
         return self
 
     async def __aexit__(self, *_exc: object) -> None:
@@ -504,10 +511,10 @@ async def stream_events(
 ) -> StreamingResponse:
     """SSE live event stream for `trial_id`, starting at `after_seq + 1`.
 
-    The connection emits all available events on first read, then
+    The connection drains all available event pages, then
     polls MinIO every `_DEFAULT_SSE_POLL_INTERVAL_SEC` for new events,
-    and terminates when the trial reaches a terminal state OR the
-    client disconnects OR the connection has been open for longer
+    and completes only after a terminal trial has no remaining events. It also
+    stops if the client disconnects or the connection has been open for longer
     than `_DEFAULT_SSE_MAX_CONNECTION_SEC` (clients reconnect with
     the last seen seq as `after_seq`).
 
@@ -576,6 +583,7 @@ async def stream_events(
         current_seq = after_seq
         loop = asyncio.get_running_loop()
         started_at = loop.time()
+        completed_state: str | None = None
         # Emit a comment line up front so any proxy that buffers SSE
         # gets a flush before the first real event lands.
         yield b": stream open\n\n"
@@ -584,43 +592,56 @@ async def stream_events(
             while True:
                 if await request.is_disconnected():
                     return
-                events, current_state = await _read_loop_chunk(current_seq)
-                for ev in events:
-                    yield _sse_format(
-                        event_kind=None,
-                        data=ev,
-                        event_id=str(ev["seq"]),
-                    )
-                    current_seq = int(ev["seq"])
-
-                # Terminal-state detection — once terminal AND we've
-                # emitted everything currently available, close cleanly.
-                if current_state in _TERMINAL_TRIAL_STATES:
-                    # One more read to flush any events that landed
-                    # between the previous read and the state check.
-                    tail, _ = await _read_loop_chunk(current_seq)
-                    for ev in tail:
-                        yield _sse_format(
-                            event_kind=None,
-                            data=ev,
-                            event_id=str(ev["seq"]),
-                        )
-                        current_seq = int(ev["seq"])
-                    yield _sse_format(
-                        event_kind="complete",
-                        data={"final_state": current_state, "last_seq": current_seq},
-                    )
-                    return
-
-                # Connection-budget exhaustion: client reconnects with
-                # `after_seq=current_seq` to resume — standard SSE
-                # Last-Event-ID semantics.
                 if loop.time() - started_at >= max_connection_sec:
                     yield _sse_format(
                         event_kind="reconnect",
                         data={"reason": "max_connection_sec", "last_seq": current_seq},
                     )
                     return
+                if completed_state is not None:
+                    yield _sse_format(
+                        event_kind="complete",
+                        data={"final_state": completed_state, "last_seq": current_seq},
+                    )
+                    return
+                events, current_state = await _read_loop_chunk(current_seq)
+                for ev in events:
+                    # Sending a large backlog can itself exhaust the connection
+                    # budget or outlive the client; do not wait for an empty page.
+                    if await request.is_disconnected():
+                        return
+                    if loop.time() - started_at >= max_connection_sec:
+                        yield _sse_format(
+                            event_kind="reconnect",
+                            data={"reason": "max_connection_sec", "last_seq": current_seq},
+                        )
+                        return
+                    seq = ev["seq"]
+                    if type(seq) is not int or seq <= current_seq:
+                        raise ValueError("trajectory stream event sequence did not advance")
+                    yield _sse_format(
+                        event_kind=None,
+                        data=ev,
+                        event_id=str(seq),
+                    )
+                    current_seq = seq
+
+                if events:
+                    # More pages may already be available, including after a
+                    # terminal transition. Drain without a polling delay, while
+                    # letting timers, cancellations and other requests run.
+                    await asyncio.sleep(0)
+                    continue
+
+                if current_state in _TERMINAL_TRIAL_STATES:
+                    # Only an empty read with terminal state proves the durable
+                    # tail is drained. Recheck disconnect/deadline before sending
+                    # completion in case the final read crossed either boundary.
+                    completed_state = current_state
+                    continue
+
+                if loop.time() - started_at >= max_connection_sec:
+                    continue
 
                 # Wait for either: a NOTIFY matching our trial fires
                 # (push), or `poll_interval` elapses (fallback for

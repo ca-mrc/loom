@@ -34,6 +34,7 @@ from loom.service_execution_materialization import (
 from loom.terminal_bench_normalize import (
     normalize_terminal_bench_task_toml,
 )
+from loom.trajectory.storage import discard_staged_bundle_file_metadata
 from loom_cli.benchmarks_sync import walk_task_tomls
 from loom_cli.local_compatibility_report import (
     TaskCompatibilityReport,
@@ -266,6 +267,7 @@ def _validate_nebius_terminus_profile(
                 raw_cfg = tomllib.load(f)
             raw_cfg = normalize_terminal_bench_task_toml(raw_cfg, task_id=task_id)
             raw_cfg, adapt_stats = adapt_bundle_for_nebius_terminus(staged, raw_cfg)
+            discard_staged_bundle_file_metadata(staged)
             checksum = task_checksum(staged)
             _, sei_provenance = prepare_service_execution_input_manifest(
                 staged,

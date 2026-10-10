@@ -46,8 +46,9 @@ frontend's EventSource-unavailable fallback.
 SSE live stream. Emits an initial replay for events matching
 `after_seq`, then streams new events as they land in the
 `trial_events` table via a Postgres LISTEN connection on the
-`trial_events_inserted` channel. The connection closes when the
-trial reaches a terminal state OR the client disconnects OR the
+`trial_events_inserted` channel. The connection completes after the trial is
+terminal and all available event pages have been drained. It also closes if the
+client disconnects or the
 connection has been open for 600 s (client reconnects with the last
 seen seq).
 
@@ -59,13 +60,20 @@ so proxies do not buffer chunks.
 | Event kind      | Emitted when                    | Data body                                        |
 |-----------------|---------------------------------|--------------------------------------------------|
 | _(default)_     | A new trajectory event arrives  | Full typed event body (same shape as `/events`). |
-| `complete`      | Trial reaches terminal state    | `{ "final_state": "succeeded", "last_seq": N }`  |
+| `complete`      | Terminal Trial's event backlog is drained | `{ "final_state": "succeeded", "last_seq": N }`  |
 | `reconnect`     | 600 s connection budget hit     | `{ "reason": "max_connection_sec", "last_seq": N }` |
 
-Every message carries an `id: <seq>` line so browser EventSource
+Every trajectory event carries an `id: <seq>` line so browser EventSource
 auto-reconnect includes `Last-Event-ID` on the next attempt. The
 server does not currently consume that header; clients should also
 dedupe by seq on their side (the SPA hook does).
+
+Replay uses bounded pages and yields between pages. Connection deadlines and
+disconnects remain effective while draining a backlog; a `reconnect` event
+reports the last delivered sequence, so clients can resume with `after_seq=N`.
+An invalid or nonadvancing source sequence ends the stream without claiming
+completion. After LISTEN setup succeeds, disconnect, cancellation, read failure
+and normal completion close the subscription.
 
 Example (bash):
 
@@ -92,10 +100,22 @@ const { events, status } = useTrialEventStream(trialId);
 
 The hook dedupes by event seq (browser auto-reconnect can replay
 already-seen events) and closes the connection on unmount or on the
-`complete` event. `TrialDetail` uses this hook by default and falls
-back to `useAdaptivePolling` against `/trajectory?cursor=N` when
-`status === 'error'` — appropriate for environments where corporate
-proxies strip `text/event-stream`.
+`complete` event. When the server requests `reconnect`, the hook closes
+that source and opens a replacement after one second, using the highest
+locally accepted seq as `after_seq`. Existing events remain visible;
+the control frame's `last_seq` cannot advance the cursor past received data.
+Only one source or pending rollover retry is owned at a time. Ordinary
+transport errors retain the browser's native EventSource retry behavior.
+
+Changing the trial ID or API base clears events, cursor and status.
+Disabling the same scope closes its source and cancels any pending retry;
+reenabling resumes from its retained cursor. Cleanup and completion invalidate
+callbacks from retired sources. `TrialDetail` also keys its trajectory viewer
+by trial ID, so navigation already remounts that viewer.
+
+`TrialDetail` uses this hook by default and offers the paginated
+`/trajectory?cursor=N` fallback when `status === 'error'` — appropriate
+for environments where corporate proxies strip `text/event-stream`.
 
 ## Under the hood
 
@@ -106,6 +126,12 @@ every `trial_events` INSERT. The service opens one dedicated
 stream; a per-request drain task filters notifications by the
 `<trial_id>:` prefix and sets an `asyncio.Event` the outer loop
 awaits with a fixed poll-interval fallback.
+
+The subscription also owns cleanup during setup: if LISTEN registration or
+the notification self-test raises, any acquired connection is closed before
+the route falls back to polling. Cancellation during setup closes the connection
+and propagates cancellation. Normal context exit cancels the notification drain
+task and closes its connection.
 
 The MinIO trajectory JSONL is still written for every trial by the
 worker (`TrajectoryWriter`); the `trial_events` table receives the
