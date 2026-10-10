@@ -1043,6 +1043,17 @@ point. The full protected parent must still connect both forward and recovery
 operations before installed opening is available. Recovery has separate terminal
 authority and never rewrites completed forward evidence.
 
+The shared recovery-fence child derives its initial CLOSED/GLOBAL and local-guard
+alternatives from those frozen forward receipts. Its separately anchored intents
+authorize fencing the new capacity epoch first, then each participant's intake in
+roster order. Unknown fence replies are observation-only, including delayed
+commits. The fixed adapter binds the new manager's database, each retained
+participant backend and the private connection, brackets observations with exact
+receipt bytes, and invokes the protected parent's retained-authority check. It
+uses the existing fixed fencing transactions without requiring a healthy gateway
+or idle journals. Fencing does not prove work has drained and does not authorize
+restoration or reopening; those remain separate required recovery phases.
+
 The shared Role child reduces only the two source-qualified staging worker/build
 Roles, preserving their UIDs and existing bindings. Each rules-and-annotations
 PATCH tests the current UID, resourceVersion and rules. Mutation intent precedes
