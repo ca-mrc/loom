@@ -2926,12 +2926,13 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
 
     import httpx
     from scripts.ops import nebius_certificates as private_state
+    from scripts.ops import nebius_shared_pool_gateway as gateway_child
     from scripts.ops import nebius_shared_pool_material as material
     from scripts.ops import nebius_shared_pool_operation as parent
     from scripts.ops import nebius_shared_pool_roles as roles
     from scripts.ops import nebius_shared_pool_workloads as workloads
     from scripts.ops.nebius_development_runtime_live import runtime_resource_path
-    from scripts.ops.nebius_management_stage import _comparison_snapshot
+    from scripts.ops.nebius_management_stage import _comparison_snapshot, _stage_fixed_documents
 
     name = 'scripts.ops.nebius_shared_pool_forward_census'
     assert importlib.util.find_spec(name) is not None, 'phase-bound shared writer census is missing'
@@ -2948,6 +2949,8 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
                 roles.prepare_shared_staging_roles(bindings=bound, state_dir=child)
             elif phase == 'forward-material':
                 material.prepare_shared_staging_material(bindings=bound, state_dir=child)
+            elif phase == 'forward-gateway':
+                gateway_child.prepare_shared_gateway(bindings=bound, state_dir=child)
             else:
                 super().prepare(phase, bound, child)
 
@@ -2959,6 +2962,8 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
                 roles.validate_shared_staging_roles(bindings=bindings, state_dir=child, complete=False, prepared=True)
             elif phase == 'forward-material':
                 material.validate_shared_staging_material(bindings=bindings, state_dir=child, complete=False, prepared=True)
+            elif phase == 'forward-gateway':
+                gateway_child.validate_shared_gateway(bindings=bindings, state_dir=child, complete=False, prepared=True)
             else:
                 super().validate_prepared_phase(phase, child)
 
@@ -2969,6 +2974,8 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
                 roles.validate_shared_staging_roles(bindings=bindings, state_dir=child, complete=complete)
             elif phase == 'forward-material':
                 material.validate_shared_staging_material(bindings=bindings, state_dir=child, complete=complete)
+            elif phase == 'forward-gateway':
+                gateway_child.validate_shared_gateway(bindings=bindings, state_dir=child, complete=complete)
             else:
                 super().validate_phase(phase, child, complete=complete)
 
@@ -2981,6 +2988,8 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
                 child_state = material.validate_shared_staging_material(bindings=bindings, state_dir=child, complete=False)
                 return child_state['stage'] is not None and all(row['status'] == 'created'
                     for row in child_state['stage']['resources'].values())
+            if phase == 'forward-gateway':
+                return False
             return super().advance(phase, bound, child)
 
     api = CensusPhaseAPI(parent)
@@ -3103,7 +3112,7 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
         if message.url.params.get('dryRun') != 'All':
             assert not message.url.query and key not in stored
             stored[key] = row
-            if key in bindings.plan.staging_reader_authority:
+            if key in bindings.plan.staging_reader_authority or key in bindings.plan.development.authority:
                 inventory[kinds[row['kind']]].append(row)
                 observe()  # The child still has create_intent, including an unobserved UID.
         return httpx.Response(201, json=row)
@@ -3155,10 +3164,76 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
     observe()
     api.block = 'forward-gateway'
     assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-gateway'
+    observe()  # Started gateway child still permits only its stopped predecessor.
+    gateway = bindings.plan.development.gateway_original
+    gateway_key = _key(gateway)
+    live_gateway = next(row for row in inventory['deployments'] if _key(row) == gateway_key)
+    stopped_gateway = copy.deepcopy(live_gateway)
+    started_gateway = _comparison_snapshot(bindings.plan.development.gateway_target)
+    replace_live(live_gateway, started_gateway)
     before = len(calls)
     with pytest.raises(ValueError):
-        observe()  # Gateway activation needs its own exact authority projection.
-    assert len(calls) == before
+        observe()  # Planned startup alone is not retained dispatch intent.
+    assert len(calls) > before
+    replace_live(live_gateway, stopped_gateway)
+    fixed = bindings.plan.development.authority
+    untracked = copy.deepcopy(next(iter(fixed.values())))
+    untracked['metadata'].update(uid=str(uuid4()), resourceVersion='401')
+    inventory[kinds[untracked['kind']]].append(untracked)
+    with pytest.raises(ValueError):
+        observe()  # Even a source-qualified grant is forbidden before its intent.
+    inventory[kinds[untracked['kind']]].remove(untracked)
+    stored = {}
+    paths = {runtime_resource_path(row) + '/' + row['metadata']['name']: key for key, row in fixed.items()}
+    with gateway_child.HTTPSSharedGateway(bindings=bindings,
+            api_server=args['runtime'].database.foundation.inputs.config['kubernetes_api_server'],
+            ssl_context=ssl.create_default_context(), qualify_runtime=lambda *_: None,
+            observe_ready=lambda *_: False) as delivery:
+        delivery.client.close()
+        delivery.client = type(transport.client)(base_url=delivery.api_server, transport=httpx.MockTransport(material_request))
+        _stage_fixed_documents(documents=fixed, revision=digest(fixed), phase='forward-gateway-authority',
+            binding=delivery.binding, api=delivery, state_dir=state / 'forward-gateway/authority')
+    assert set(fixed) <= observe().authority.keys()
+    for row in stored.values():
+        original_uid = row['metadata']['uid']
+        row['metadata']['uid'] = str(uuid4())
+        with pytest.raises(ValueError):
+            observe()  # Created grants must keep their recorded UID.
+        row['metadata']['uid'] = original_uid
+    path = state / 'forward-gateway/start/transition.json'
+    record = json.loads(path.read_bytes())
+    record['resources'][gateway_key].update(status='intent', expected=started_gateway)
+    private_state._atomic_json(path, record)
+    assert observe().workloads[gateway_key] == stopped_gateway
+    replace_live(live_gateway, started_gateway)
+    assert observe().workloads[gateway_key] == live_gateway
+    live_gateway['spec']['template']['spec']['containers'][0]['image'] = 'foreign.invalid/image:latest'
+    with pytest.raises(ValueError):
+        observe()
+    replace_live(live_gateway, started_gateway)
+    for receipt in ('gateway.json', 'authority/stage.json', 'authority/dispatch.json', 'start/transition.json'):
+        selected = state / 'forward-gateway' / receipt
+        raw = selected.read_bytes()
+        selected.unlink()
+        before = len(calls)
+        with pytest.raises(ValueError):
+            observe()
+        assert len(calls) == before
+        selected.write_bytes(raw)
+        selected.chmod(0o600)
+    raw = path.read_bytes()
+    mode['during_read'] = path.unlink
+    with pytest.raises(ValueError):
+        observe()
+    path.write_bytes(raw)
+    path.chmod(0o600)
+    record['resources'][gateway_key]['status'] = 'applied'
+    private_state._atomic_json(path, record)
+    observe()
+    replace_live(live_gateway, stopped_gateway)
+    with pytest.raises(ValueError):
+        observe()  # Completed startup no longer admits the stopped predecessor.
+    replace_live(live_gateway, started_gateway)
     api.block = 'recovery-fence'
     assert parent.run_shared_pool_operation(**{**kwargs, 'action': 'recover'})['phase'] == 'recovery-fence'
     before = len(calls)
