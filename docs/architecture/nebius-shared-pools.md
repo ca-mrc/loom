@@ -952,6 +952,16 @@ reviews. Additional named write grants, incomplete resolution or concurrent bind
 changes reject completion. This child grants no gateway rights and does not replace
 the parent's fresh whole-pool writer census and process-drain checks.
 
+The database child selects only the captured staging participant and invokes the
+existing database-bound runtime-role transaction. Dev's completed SQL setup is
+not replayed. The transaction independently requires the exact held idle guard,
+schema and restricted actuator identity; it grants no management-ledger access.
+The child retains intent before staging and qualifies any uncertain commit by
+read-only observation, never by repeating the transaction. It works through the
+qualified database Pod and Service backend after staging's controller stops,
+without requiring a controller exec or a direct database connection. Receipt
+loss during requalification blocks dispatch or completion.
+
 Recovery is a separately anchored, terminal direction. Its marker freezes both
 the forward journal and all existing child receipts, including prepared or
 unfinished children. It cannot erase completed success or resume forward work
