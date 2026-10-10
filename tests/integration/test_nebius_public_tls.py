@@ -163,6 +163,17 @@ HTTPServer(('0.0.0.0',8090),Handler).serve_forever()
                 assert cert.not_valid_after_utc > datetime.now(UTC), "served an expired certificate"
                 return cert.serial_number
 
+    def managed_certificate():
+        # Caddy creates private storage directories as the production UID. Read
+        # only the test's public certificate as that same UID inside the container,
+        # so an unprivileged host runner need not traverse or relax those directories.
+        pem = docker(
+            "exec", prefix + "-tls", "sh", "-c",
+            'for cert in /data/certificates/*/loom.example/*.crt; do '
+            'if [ -f "$cert" ]; then cat "$cert"; exit; fi; done',
+        )
+        return x509.load_pem_x509_certificate(pem.encode()) if pem else None
+
     try:
         docker("network", "create", prefix)
         run(
@@ -254,8 +265,7 @@ HTTPServer(('0.0.0.0',8090),Handler).serve_forever()
         assert response.readline() == b"data: first\n" and time.monotonic() - started < 1.5
         response.read()
         conn.close()
-        managed_path = _wait(lambda: next(data.glob("certificates/*/loom.example/*.crt"), None))
-        first = x509.load_pem_x509_certificate(managed_path.read_bytes()).serial_number
+        first = _wait(managed_certificate).serial_number
         # This mirrors the supported second render/deploy with bootstrap=false.
         # Remove the bootstrap promptly, avoiding CertMagic's inclusive final
         # NotAfter second, which some TLS clients already regard as expired.
@@ -269,7 +279,8 @@ HTTPServer(('0.0.0.0',8090),Handler).serve_forever()
         docker("unpause", prefix + "-pebble")
 
         def renewed():
-            cert = x509.load_pem_x509_certificate(managed_path.read_bytes())
+            cert = managed_certificate()
+            assert cert is not None
             assert peer_serial() != bootstrap
             return cert.serial_number if cert.serial_number != first else None
 
@@ -285,4 +296,14 @@ HTTPServer(('0.0.0.0',8090),Handler).serve_forever()
     finally:
         for name in reversed(names):
             subprocess.run(["docker", "rm", "-f", name], capture_output=True, check=False)
-        subprocess.run(["docker", "network", "rm", prefix], capture_output=True, check=False)
+        try:
+            # Private directories also prevent the host runner from cleaning its
+            # temporary directory. Remove only this fixture's data as its owner,
+            # after stopping every writer; keep the storage permissions intact.
+            docker(
+                "run", "--rm", "--name", prefix + "-cleanup", "--network", "none",
+                "-v", f"{data}:/data", "--entrypoint", "sh", image,
+                "-c", "rm -rf /data/*",
+            )
+        finally:
+            subprocess.run(["docker", "network", "rm", prefix], capture_output=True, check=False)
