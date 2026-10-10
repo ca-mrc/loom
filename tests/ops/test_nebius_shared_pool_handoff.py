@@ -2317,6 +2317,10 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
         'uid': old.original.upgrade.setup.binding.namespace_uid}})
     add({'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': 'kube-system',
         'uid': plan.migration.registration.binding.kube_system_uid}})
+    namespace_response = fallback(httpx.Request('GET', request.database.foundation.inputs.config['kubernetes_api_server']
+        + '/api/v1/namespaces/' + manager_namespace))
+    assert namespace_response.status_code == 200
+    add(namespace_response.json())  # Share the full existing namespace fixture across HTTPS and kubectl.
     # Current staging secrets correspond to its captured UID/resourceVersions.
     for row in plan.staging.originals.values():
         if row['kind'] != 'Deployment':
@@ -2335,9 +2339,10 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
                 'data': {}})
         documents[path]['data'][reference['key']] = base64.b64encode(
             f'postgresql+psycopg://loom:private-test-only@loom-postgres.{staging.namespace}.svc:5432/loom'.encode()).decode()
+    # Retained snapshots intentionally omit volatile versions, but live API
+    # objects expose them. Both HTTPS and kubectl consume this same inventory.
     for row in documents.values():
-        if row['kind'] == 'Secret':
-            row['metadata'].setdefault('resourceVersion', '301')
+        row['metadata'].setdefault('resourceVersion', '301')
     populate_runtime_pods(documents)
     populate_database_backends(documents)
     for row in documents.values():
@@ -2396,6 +2401,15 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
                     'secret': 'secrets', 'service': 'services', 'statefulset': 'statefulsets'}[kind]
                 prefix = '/apis/apps/v1' if kind in {'deployment', 'replicaset', 'statefulset'} else '/apis/batch/v1' if kind == 'cronjob' else '/api/v1'
                 value = read(prefix + ('/namespaces/' + namespace if namespace else '') + '/' + plural + '/' + name)
+                if (kind == 'deployment' and namespace == staging.namespace and mode.get('capacity_seen')
+                        and mode['damage'] in {'late-manager-secret-after-gateway', 'late-manager-database-after-gateway'}):
+                    if mode['damage'] == 'late-manager-secret-after-gateway':
+                        documents['/api/v1/namespaces/' + manager_namespace + '/secrets/loom-platform-db']['metadata']['resourceVersion'] = 'late-final-rotation'
+                    elif not mode.get('late_injected'):
+                        pod, = (row for row in documents['/api/v1/namespaces/' + manager_namespace + '/pods']['items']
+                            if row['metadata']['name'] == 'loom-postgres-0')
+                        pod['status']['containerStatuses'][0]['restartCount'] += 1
+                    mode['late_injected'] = True
         else:
             assert args[:2] == ['exec', '-n'] and args[4] == '-c' and args[6] == '--'
             namespace = args[2]
@@ -2469,6 +2483,7 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
                 checked.add((check, namespace, name))
                 value = {'status': 'wrong' if mode['damage'] == 'gateway-' + check else 'qualified'}
                 if check == 'capacity':
+                    mode['capacity_seen'] = True
                     pods = documents['/api/v1/namespaces/' + namespace + '/pods']['items']
                     if mode['damage'] == 'late-gateway-secret':
                         documents['/api/v1/namespaces/' + namespace + '/secrets/loom-platform-db']['metadata']['resourceVersion'] = 'late-rotation'
@@ -2661,7 +2676,7 @@ def _exercise_forward_processes(*, bindings, development, documents, mode, check
             if phase == 'forward-build-policy':
                 return json.loads((child / 'build-policy.json').read_bytes())['status'] == 'activated'
             if phase == 'forward-gateway':
-                return False
+                return all(row['status'] == 'applied' for row in json.loads((child / 'start/transition.json').read_bytes())['resources'].values())
             return super().advance(phase, bound, child)
 
     api = ProcessPhaseAPI(parent)
@@ -2854,6 +2869,15 @@ def _exercise_forward_processes(*, bindings, development, documents, mode, check
         observe()  # A planned but unrecorded start is not process authority.
     gateway.clear()
     gateway.update(original_gateway)
+    lingering_gateway = {gateway_path: copy.deepcopy(gateway)}
+    lingering_gateway[gateway_path]['spec']['replicas'] = 1
+    populate_runtime_pods(lingering_gateway)
+    pod_path = '/api/v1/namespaces/' + manager.binding.namespace + '/pods'
+    lingering_pod, = lingering_gateway[pod_path]['items']
+    documents[pod_path]['items'].append(lingering_pod)
+    with pytest.raises(ValueError):
+        observe()  # Zero replicas cannot excuse a live gateway descendant.
+    documents[pod_path]['items'].remove(lingering_pod)
     fixed, stored = plan.authority, {}
     paths = {runtime_resource_path(row) + '/' + row['metadata']['name']: key for key, row in fixed.items()}
 
@@ -2904,16 +2928,33 @@ def _exercise_forward_processes(*, bindings, development, documents, mode, check
         for check in ('settings', 'database', 'kubernetes', 'capacity')} <= checked
     mode['gateway_receipt'] = start_path
     for damage in ('gateway-settings', 'gateway-database', 'gateway-kubernetes', 'gateway-capacity',
-            'late-gateway-secret', 'late-gateway-restart', 'late-gateway-database-restart', 'late-gateway-receipt'):
+            'late-gateway-secret', 'late-gateway-restart', 'late-gateway-database-restart', 'late-gateway-receipt',
+            'late-manager-secret-after-gateway', 'late-manager-database-after-gateway'):
         baseline, receipt = copy.deepcopy(documents), start_path.read_bytes()
-        mode['damage'] = damage
-        with pytest.raises(ValueError):
+        mode.update(damage=damage, capacity_seen=False, late_injected=False)
+        try:
             observe()
+        except ValueError:
+            pass
+        else:
+            pytest.fail(f'forward process observation accepted {damage}')
+        if damage.startswith('late-manager-'):
+            assert mode['late_injected'], damage
         documents.clear()
         documents.update(baseline)
         start_path.write_bytes(receipt)
         start_path.chmod(0o600)
     mode['damage'] = None
+    start_record['resources'][gateway_key]['status'] = 'applied'
+    private_state._atomic_json(start_path, start_record)
+    api.prepare_failure = ('forward-activate', 'before')
+    with pytest.raises(ValueError):
+        parent.run_shared_pool_operation(**kwargs)
+    assert observe().pending_workloads == ()
+    documents[gateway_path]['status']['readyReplicas'] = 0
+    with pytest.raises(ValueError):
+        observe()  # A completed startup cannot claim an in-flight readiness wait.
+    documents[gateway_path]['status']['readyReplicas'] = 1
     guard_path.unlink()
     before = len(commands)
     with pytest.raises(ValueError):
