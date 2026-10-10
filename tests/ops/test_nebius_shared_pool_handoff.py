@@ -4140,7 +4140,16 @@ def test_shared_recovery_fence_preserves_forward_history_and_observes_unknown_wr
         parent.run_shared_pool_operation(**kwargs)
     assert effects == []
     remote.mode = previous
-    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'recovery-fence'
+    try:
+        result = parent.run_shared_pool_operation(**kwargs)
+    except Exception as error:
+        import traceback
+        cause = error
+        while cause is not None:
+            print(type(cause).__name__, [(row.name, row.lineno) for row in traceback.extract_tb(cause.__traceback__)])
+            cause = cause.__context__
+        raise
+    assert result['phase'] == 'recovery-fence'
     assert effects == [('pool', None)]
     assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'recovery-fence'
     assert effects == [('pool', None)]  # An unknown fence is never retried.
@@ -4188,12 +4197,16 @@ def _shared_recovery_database_io(*, remote, bindings, guard_api, database_model,
         pool_activation_state_sql,
     )
     from scripts.ops.nebius_pool_guard_activation import pool_guard_activation_sql
+    from scripts.ops.nebius_pool_recovery_database import (
+        participant_recovery_drain_sql,
+        pool_recovery_drain_sql,
+    )
     from tests.ops.test_nebius_development_pool_retained import (
         populate_database_backends,
         runtime_http_inventory,
     )
 
-    from loom.nebius_platform_render import digest
+    from loom_service.pool_management.capacity import digest
 
     runtime, parent = shared_runtime
     _, inventory, _ = runtime_http_inventory(runtime, parent, completed_pool[3].server, handoff[2])
@@ -4220,6 +4233,12 @@ def _shared_recovery_database_io(*, remote, bindings, guard_api, database_model,
         assert args[-2] == '-c'
         current_namespace, query = args[2], args[-1]
         if current_namespace == namespace:
+            if query == pool_recovery_drain_sql(spec):
+                remote.reads.append('pool')
+                assert remote.mode == 'fenced'
+                value = {'schema': 'loom.pool-recovery-drain.v1', 'operation_id': str(spec.operation_id),
+                    'installation_sha256': digest(spec.model_dump(mode='json')), 'read_only': True, 'counts': remote.pool_counts}
+                return SimpleNamespace(returncode=0, stdout=json.dumps(value).encode(), stderr=b'')
             if query == fence_pool_activation_sql(spec):
                 remote.fence_pool()
             else:
@@ -4229,6 +4248,14 @@ def _shared_recovery_database_io(*, remote, bindings, guard_api, database_model,
         else:
             target, = (row for row in bindings.migration.guards if row.namespace == current_namespace)
             participant = str(target.participant_id)
+            if query == participant_recovery_drain_sql(spec.operation_id, target.participant_id,
+                    bindings.migration.registration.candidate['candidate_sha']):
+                remote.reads.append(participant)
+                assert remote.local[participant] == 'fenced'
+                value = {'schema': 'loom.pool-participant-drain.v1', 'operation_id': str(spec.operation_id),
+                    'participant_id': participant, 'candidate_sha': bindings.migration.registration.candidate['candidate_sha'],
+                    'read_only': True, 'counts': remote.local_counts[participant]}
+                return SimpleNamespace(returncode=0, stdout=json.dumps(value).encode(), stderr=b'')
             if query == pool_guard_activation_sql(spec.operation_id, target.participant_id,
                     bindings.migration.registration.candidate['candidate_sha'], action='fence'):
                 remote.fence_guard(participant)
@@ -4240,6 +4267,143 @@ def _shared_recovery_database_io(*, remote, bindings, guard_api, database_model,
         return SimpleNamespace(returncode=0, stdout=json.dumps(value).encode(), stderr=b'')
 
     monkeypatch.setattr(subprocess, 'run', run)
+
+
+@pytest.mark.timeout(240)
+def test_shared_recovery_drain_reads_all_databases_fresh_before_restoration(
+        shared_operation, shared_guard_transport, shared_runtime, completed_pool, handoff, monkeypatch):
+    """A prior zero cannot authorize stopping writers while cleanup is active."""
+    import importlib.util
+
+    from scripts.ops import nebius_shared_pool_guards as guards
+    from scripts.ops import nebius_shared_pool_operation as parent
+    from scripts.ops import nebius_shared_pool_recovery_fence as fence
+    from scripts.ops.nebius_shared_pool_recovery_fence_live import SharedPoolRecoveryFenceTransport
+
+    name = 'scripts.ops.nebius_shared_pool_recovery_drain'
+    assert importlib.util.find_spec(name) is not None, 'connected shared recovery drain is missing'
+    drain = __import__(name, fromlist=['advance_shared_recovery_drain'])
+    args, bindings = shared_operation
+    manager = args['runtime'].database.manager.retained.request.retained
+    state = Path(manager.operation['state_dir']).parent / 'shared-pool-handoff'
+    child = state / 'recovery-drain'
+    roster = tuple(str(target.participant_id) for target in bindings.migration.guards)
+
+    class Remote:
+        mode = 'closed'
+        damage = None
+
+        def __init__(self):
+            self.local = dict.fromkeys(roster, 'open')
+            self.reads, self.effects = [], []
+            self.pool_counts = {'unstarted_requests': 1, 'active_requests': 0, 'unconfirmed_creates': 0, 'unqualified_releases': 0}
+            self.local_counts = {key: {'trials': 0, 'executions': 0, 'builds': 0, 'build_cleanup': 0,
+                'execution_outboxes': 0, 'build_outboxes': 0} for key in roster}
+
+        def verify_retained(self):
+            if self.damage == 'authority':
+                raise ValueError('simulated retained authority change')
+
+        def pool_state(self):
+            if self.damage == 'receipt' and self.reads:
+                path = child / 'drain.json'
+                path.write_bytes(path.read_bytes() + b'\n')
+            return self.mode
+
+        def guard_state(self, participant):
+            return self.local[participant]
+
+        def fence_pool(self):
+            self.effects.append('pool')
+            self.mode = 'fenced'
+
+        def fence_guard(self, participant):
+            self.effects.append(participant)
+            self.local[participant] = 'fenced'
+
+    remote = Remote()
+    guard_api, database_model = shared_guard_transport
+    _shared_recovery_database_io(remote=remote, bindings=bindings, guard_api=guard_api, database_model=database_model,
+        shared_runtime=shared_runtime, completed_pool=completed_pool, handoff=handoff, monkeypatch=monkeypatch)
+
+    class API(SharedPhaseAPI):
+        fence_api = None
+
+        def prepare(self, phase, bound, directory):
+            if phase == 'forward-guards':
+                guards.prepare_shared_pool_guards(bindings=bound, state_dir=directory)
+            elif phase == 'recovery-fence':
+                fence.prepare_shared_recovery_fence(bindings=bound, state_dir=directory)
+            elif phase == 'recovery-drain':
+                drain.prepare_shared_recovery_drain(bindings=bound, state_dir=directory)
+            else:
+                super().prepare(phase, bound, directory)
+
+        def validate_prepared_phase(self, phase, directory):
+            if phase in {'forward-guards', 'recovery-fence', 'recovery-drain'}:
+                self.validate_phase(phase, directory, complete=False)
+            else:
+                super().validate_prepared_phase(phase, directory)
+
+        def validate_phase(self, phase, directory, *, complete):
+            if phase == 'forward-guards':
+                guards.validate_shared_pool_guards(bindings=bindings, state_dir=directory, complete=complete)
+            elif phase == 'recovery-fence':
+                fence.validate_shared_recovery_fence(bindings=bindings, state_dir=directory, complete=complete)
+            elif phase == 'recovery-drain':
+                drain.validate_shared_recovery_drain(bindings=bindings, state_dir=directory, complete=complete)
+            else:
+                super().validate_phase(phase, directory, complete=complete)
+
+        def advance(self, phase, bound, directory):
+            if phase == 'forward-guards':
+                return False
+            if phase == 'recovery-fence':
+                if self.fence_api is None:
+                    self.fence_api = SharedPoolRecoveryFenceTransport(bindings=bound, kubeconfig=guard_api.kubeconfig,
+                        executable=Path(guard_api.prefix[0]), qualify=remote.verify_retained)
+                return fence.advance_shared_recovery_fence(bindings=bound, api=self.fence_api, state_dir=directory)
+            if phase == 'recovery-drain':
+                return drain.advance_shared_recovery_drain(bindings=bound, guards=self.fence_api.guards,
+                    history=self.fence_api.history, state_dir=directory, qualify=remote.verify_retained)
+            return super().advance(phase, bound, directory)
+
+    api = API(parent)
+    kwargs = {**args, 'bindings': bindings, 'api': api, 'action': 'install'}
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-guards'
+    kwargs['action'] = 'recover'
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'recovery-drain'
+    assert remote.effects == ['pool', *roster] and remote.reads == ['pool', *roster]
+    receipt = child / 'drain.json'
+    saved = receipt.read_bytes()
+    for target, key in ((remote.pool_counts, 'unconfirmed_creates'),
+            (remote.local_counts[roster[0]], 'execution_outboxes'), (remote.local_counts[roster[1]], 'build_cleanup')):
+        remote.pool_counts['unstarted_requests'] = 0
+        target[key] = 1
+        remote.reads.clear()
+        assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'recovery-drain'
+        assert remote.reads == ['pool', *roster] and receipt.read_bytes() == saved
+        target[key] = 0
+    for damage in ('authority', 'receipt'):
+        remote.reads.clear()
+        remote.damage = damage
+        with pytest.raises(ValueError):
+            parent.run_shared_pool_operation(**kwargs)
+        assert remote.effects == ['pool', *roster]
+        if damage == 'authority':
+            assert remote.reads == []
+        receipt.write_bytes(saved)
+        receipt.chmod(0o600)
+    remote.damage = None
+    remote.reads.clear()
+    api.block = 'recovery-stop'
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'recovery-stop'
+    drain.validate_shared_recovery_drain(bindings=bindings, state_dir=child, complete=True)
+    remote.pool_counts['unconfirmed_creates'] = 1
+    remote.reads.clear()
+    assert drain.observe_shared_recovery_drain(bindings=bindings, guards=api.fence_api.guards,
+        history=api.fence_api.history, state_dir=state, qualify=remote.verify_retained) is False
+    assert remote.reads == ['pool', *roster] and remote.effects == ['pool', *roster]
 
 
 @pytest.mark.timeout(420)
