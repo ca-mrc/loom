@@ -283,10 +283,19 @@ async def test_actual_controller_retirement_preserves_templates_waits_for_pods_a
         methods = []
         with HTTPSPoolRetirementAPI(request=request, guards=Guards(request), api_server=configuration.host, ssl_context=tls) as api:
             api.client.event_hooks["request"].append(lambda message: methods.append(message.method))
-            result = await asyncio.to_thread(retire, request, api, tmp_path)
-            assert result["status"] == "pending_drain" and result["writer_migration_complete"] is False
-            held = await asyncio.to_thread(core.read_namespaced_pod, held_pod.metadata.name, held_namespace)
-            assert held.metadata.deletion_timestamp is not None
+            # Retirement can stop at an earlier controller, and Kubernetes
+            # deletes its Pods asynchronously. Resume until the retained Pod
+            # enters deletion; its finalizer must still prevent completion.
+            deadline = time.monotonic() + 45
+            while True:
+                result = await asyncio.to_thread(retire, request, api, tmp_path)
+                assert result["status"] == "pending_drain" and result["writer_migration_complete"] is False
+                held = await asyncio.to_thread(core.read_namespaced_pod, held_pod.metadata.name, held_namespace)
+                assert held.metadata.uid == held_pod.metadata.uid
+                if held.metadata.deletion_timestamp is not None:
+                    break
+                assert time.monotonic() < deadline, "retained controller Pod did not enter deletion"
+                await asyncio.sleep(0.5)
             await asyncio.to_thread(core.patch_namespaced_pod, held_pod.metadata.name, held_namespace,
                 {"metadata": {"finalizers": None}})
             deadline = time.monotonic() + 60
