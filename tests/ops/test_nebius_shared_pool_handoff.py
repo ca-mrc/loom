@@ -1905,6 +1905,20 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
                         'installation_sha256': digest(spec.model_dump(mode='json')), 'read_only': True,
                         'qualified': mode['damage'] != 'new-not-closed'}
                     checked.add('new-closed')
+                    if mode['damage'] in {'late-staging-restart', 'late-dev-restart', 'late-staging-template', 'late-stopped-pod'}:
+                        mode['manager_reads'] = mode.get('manager_reads', 0) + 1
+                        if mode['manager_reads'] == 2:
+                            if mode['damage'] == 'late-stopped-pod':
+                                path, pod = mode['late_pod']
+                                documents[path]['items'].append(copy.deepcopy(pod))
+                            elif mode['damage'] in {'late-staging-restart', 'late-dev-restart'}:
+                                namespace = 'loom-dev' if mode['damage'] == 'late-dev-restart' else staging.namespace
+                                pod, = (row for row in documents['/api/v1/namespaces/' + namespace + '/pods']['items']
+                                    if row['metadata'].get('labels', {}).get('app') == 'loom-control-plane')
+                                pod['status']['containerStatuses'][0]['restartCount'] += 1
+                            else:
+                                workload = documents['/apis/apps/v1/namespaces/' + staging.namespace + '/deployments/loom-control-plane']
+                                workload['spec']['template']['spec']['containers'][0]['image'] = 'foreign.invalid/image:latest'
                 else:
                     assert namespace in {'loom-dev', staging.namespace}
                     if sql == rollout_guard_observation_sql(owner=str(spec.operation_id), candidate=request.database.foundation.inputs.candidate['candidate_sha']):
@@ -2172,6 +2186,11 @@ def _exercise_forward_processes(*, bindings, development, documents, mode, check
     with pytest.raises(ValueError):
         observe()  # Once stop is complete, new lingering processes are not a resumable wait.
     documents[pod_path]['items'].remove(pod)
+    mode.update(damage='late-stopped-pod', manager_reads=0, late_pod=(pod_path, pod))
+    with pytest.raises(ValueError):
+        observe()  # A Pod appearing after its drain check invalidates the whole observation.
+    documents[pod_path]['items'] = [row for row in documents[pod_path]['items'] if row['metadata']['uid'] != pod['metadata']['uid']]
+    mode['damage'] = None
     api.block = 'forward-material'
     assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-database'
     db_path = state / 'forward-database/database.json'
@@ -2185,6 +2204,12 @@ def _exercise_forward_processes(*, bindings, development, documents, mode, check
     api.block = 'forward-build-policy'
     for phase in ('forward-wire', 'forward-start'):
         assert parent.run_shared_pool_operation(**kwargs)['phase'] == phase
+        if phase == 'forward-start':
+            _, pod_path, pod = lingering
+            documents[pod_path]['items'].append(pod)
+            with pytest.raises(ValueError):
+                observe()  # A still-stopped resource cannot become pending again during another resource's startup.
+            documents[pod_path]['items'].remove(pod)
         journal = state / phase / 'transition.json'
         record = json.loads(journal.read_bytes())
         for key, item in record['resources'].items():
@@ -2202,7 +2227,10 @@ def _exercise_forward_processes(*, bindings, development, documents, mode, check
                 populate_runtime_pods(runtime)
                 for path, value in runtime.items():
                     if value['kind'] in {'PodList', 'ReplicaSetList'}:
-                        # The old replicas are retained, but do not revive them.
+                        # This fixture reuses a deterministic hash: collect an
+                        # old zero replica before creating its same-name successor.
+                        names = {row['metadata']['name'] for row in value['items']}
+                        documents[path]['items'] = [row for row in documents[path]['items'] if row['metadata']['name'] not in names]
                         documents[path]['items'].extend(value['items'])
                         for row in value['items']:
                             if row['kind'] == 'ReplicaSet':
@@ -2220,9 +2248,10 @@ def _exercise_forward_processes(*, bindings, development, documents, mode, check
             assert ('settings', row['metadata']['namespace'], row['metadata']['name']) in checked
             assert ('database', row['metadata']['namespace'], row['metadata']['name']) in checked
     for damage in ('old-active', 'new-not-closed', 'settings:' + bindings.plan.staging.attachment.guard.namespace,
-            'database:loom-dev', 'late-staging-actuator'):
+            'database:loom-dev', 'late-staging-actuator', 'late-staging-restart', 'late-dev-restart', 'late-staging-template'):
         baseline = copy.deepcopy(documents)
         mode['damage'] = damage
+        mode['manager_reads'] = 0
         with pytest.raises(ValueError):
             observe()
         documents.clear()

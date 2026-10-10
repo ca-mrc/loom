@@ -962,6 +962,22 @@ again after observation, including started children not yet covered by completed
 byte pins. This observer performs no mutations and rejects recovery or started
 gateway/activation phases; those require their own successor authority checks.
 
+The pre-gateway process observer likewise follows the actual guard, workload and
+database receipts. It keeps the old manager revoked and the new manager CLOSED,
+inspects installed runtime database grants, and rechecks pinned consumer
+credentials and real database backends. Staging observations use the existing
+participant-bound reader; the development-only reader gains no staging scope.
+Complete descendant lists establish current stopped-workload drain or started
+readiness before typed settings/database challenges. Only an in-flight stop or
+an actually starting Deployment can report pending readiness; a previously
+stopped resource cannot use another resource's startup to excuse lingering Pods.
+Pending identities are evidence for the child readiness engine, never permission
+to advance the parent. The observer rechecks dev and staging process identities,
+staging templates and completed drain/readiness after all other probes; a late
+restart or a newly appearing descendant invalidates the earlier challenge.
+Writer census, fresh queue drain, provider qualification,
+gateway opening and recovery remain separate required connections.
+
 The shared Role child reduces only the two source-qualified staging worker/build
 Roles, preserving their UIDs and existing bindings. Each rules-and-annotations
 PATCH tests the current UID, resourceVersion and rules. Mutation intent precedes
