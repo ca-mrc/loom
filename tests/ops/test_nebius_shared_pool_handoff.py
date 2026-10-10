@@ -434,6 +434,7 @@ def test_shared_guard_binding_uses_live_dev_database_and_real_bound_guard_reader
 def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writers(
         shared_runtime, staging_history, staging_observation, completed_pool, handoff):
     """A historical template or a stopped clone must not hide a live writer."""
+    import json
     import ssl
 
     import httpx
@@ -446,10 +447,31 @@ def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writ
     kinds = {'Deployment': 'deployments', 'StatefulSet': 'statefulsets', 'CronJob': 'cronjobs',
         'DaemonSet': 'daemonsets', 'ReplicaSet': 'replicasets', 'ReplicationController': 'replicationcontrollers',
         'Job': 'jobs', 'Pod': 'pods'}
+    rbac_kinds = {'Role': 'roles', 'ClusterRole': 'clusterroles', 'RoleBinding': 'rolebindings',
+        'ClusterRoleBinding': 'clusterrolebindings'}
+    kinds.update(rbac_kinds)
     roots = {_key(row): copy.deepcopy(row) for row in (*staging_history.context.request.platform_consumers,
         *staging_history.completion.workloads.values(), *documents.values(), *staging_observation['resources'])
         if row['kind'] in {'Deployment', 'StatefulSet', 'CronJob'}}
     inventory = {plural: [] for plural in kinds.values()}
+    authority = {_key(row): copy.deepcopy(row) for row in (*staging_history.context.original.retained.values(),
+        *staging_history.context.predecessor.retained.values(), *documents.values(),
+        *staging_observation['resources'], *staging_history.context.request.platform_authority.resources)
+        if row['kind'] in rbac_kinds}
+    gateway_stage = json.loads((Path(staging_history.context.operation['state_dir']) / 'authority/stage.json').read_bytes())
+    retired_gateway_roles = set()
+    for key, item in gateway_stage['resources'].items():
+        row = copy.deepcopy(item['observed'])
+        row['metadata']['uid'] = item['uid']
+        if row['kind'] == 'Role':
+            retired_gateway_roles.add(key)
+            for rule in row['rules']:
+                rule['verbs'] = [verb for verb in rule['verbs'] if verb not in {'create', 'delete'}]
+        authority[key] = row
+    assert retired_gateway_roles
+    for row in authority.values():
+        row['metadata']['resourceVersion'] = '401'
+        inventory[kinds[row['kind']]].append(row)
     for row in roots.values():
         row['metadata']['resourceVersion'] = '401'
         inventory[kinds[row['kind']]].append(row)
@@ -468,10 +490,11 @@ def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writ
         plural = message.url.path.rsplit('/', 1)[-1]
         kind, = (kind for kind, name in kinds.items() if name == plural)
         version = message.url.params.get('resourceVersion')
-        if plural != 'deployments':
+        if plural != 'roles':
             assert version == '500' and message.url.params['resourceVersionMatch'] == 'Exact'
         return httpx.Response(200, json={'apiVersion': 'v1' if plural in {'pods', 'replicationcontrollers'}
-            else 'batch/v1' if plural in {'jobs', 'cronjobs'} else 'apps/v1', 'kind': kind + 'List',
+            else 'batch/v1' if plural in {'jobs', 'cronjobs'} else 'rbac.authorization.k8s.io/v1'
+            if kind in rbac_kinds else 'apps/v1', 'kind': kind + 'List',
             'metadata': {'resourceVersion': mode['revision'] if plural == 'pods' else '500', 'continue': ''},
             'items': inventory[plural]})
 
@@ -480,10 +503,10 @@ def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writ
         transport.client.close()
         transport.client = type(completed_pool[3].api.client)(base_url=transport.api_server,
             transport=httpx.MockTransport(respond))
-        from scripts.ops.nebius_shared_pool_handoff_live import observe_shared_pool_workloads
+        from scripts.ops.nebius_shared_pool_handoff_live import observe_shared_pool_writers
 
         def observe():
-            return observe_shared_pool_workloads(runtime=request, observation=staging_observation,
+            return observe_shared_pool_writers(runtime=request, observation=staging_observation,
                 legacy=staging_history, repo_root=ROOT, transport=transport)
 
         result = observe()
@@ -494,10 +517,40 @@ def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writ
             if row['metadata']['name'] == 'loom-pool-gateway')
         assert result.workloads[_key(gateway)]['spec']['replicas'] == 0
         original = copy.deepcopy(inventory)
-        for damage in ('clone', 'cronjob', 'root_uid', 'old_template', 'revived_gateway', 'missing_root', 'revision'):
+        for damage in ('clone', 'cronjob', 'root_uid', 'old_template', 'revived_gateway', 'missing_root', 'revision',
+                'foreign_writer', 'foreign_cron_writer', 'group_writer', 'foreign_subject', 'revived_gateway_role',
+                'cross_namespace', 'missing_role'):
             inventory.clear()
             inventory.update(copy.deepcopy(original))
-            if damage == 'clone':
+            if damage in {'foreign_writer', 'foreign_cron_writer', 'group_writer', 'cross_namespace'}:
+                role = {'apiVersion': 'rbac.authorization.k8s.io/v1', 'kind': 'ClusterRole',
+                    'metadata': {'name': 'unexpected-writer', 'uid': str(uuid4()), 'resourceVersion': '401'},
+                    'rules': [{'apiGroups': ['batch'], 'resources': ['cronjobs' if damage == 'foreign_cron_writer' else 'jobs'],
+                        'verbs': ['create']}]}
+                binding = {'apiVersion': role['apiVersion'], 'kind': 'ClusterRoleBinding',
+                    'metadata': {'name': 'unexpected-writer', 'uid': str(uuid4()), 'resourceVersion': '401'},
+                    'roleRef': {'apiGroup': 'rbac.authorization.k8s.io', 'kind': 'ClusterRole', 'name': 'unexpected-writer'},
+                    'subjects': [{'kind': 'ServiceAccount', 'name': 'foreign-account', 'namespace': 'outside-pool'}]}
+                if damage == 'group_writer':
+                    binding['subjects'] = [{'apiGroup': 'rbac.authorization.k8s.io', 'kind': 'Group', 'name': 'system:authenticated'}]
+                elif damage == 'cross_namespace':
+                    binding['kind'] = 'RoleBinding'
+                    binding['metadata']['namespace'] = 'outside-pool'
+                    actuator, = (row for row in roots.values() if row['metadata']['name'] == 'loom-execution-actuator'
+                        and row['metadata']['namespace'] == staging_history.context.inputs.installation.participants[0].execution_namespace.name)
+                    binding['subjects'] = [{'kind': 'ServiceAccount', 'name': 'loom-execution-actuator',
+                        'namespace': actuator['metadata']['namespace']}]
+                inventory['clusterroles'].append(role)
+                inventory[kinds[binding['kind']]].append(binding)
+            elif damage == 'foreign_subject':
+                binding = inventory['rolebindings'][0]
+                binding['subjects'].append({'kind': 'ServiceAccount', 'name': 'foreign-account', 'namespace': 'outside-pool'})
+            elif damage == 'revived_gateway_role':
+                role = next(row for row in inventory['roles'] if _key(row) in retired_gateway_roles)
+                role['rules'][0]['verbs'].append('create')
+            elif damage == 'missing_role':
+                inventory['roles'].pop()
+            elif damage == 'clone':
                 clone = copy.deepcopy(inventory['pods'][0])
                 clone['metadata'].update(name='unexpected-writer', uid=str(uuid4()), ownerReferences=[])
                 inventory['pods'].append(clone)
@@ -522,7 +575,7 @@ def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writ
                     assert row['spec'] != controller['spec']
                 else:
                     row['spec']['replicas'] = 1
-            with pytest.raises(ValueError, match='shared pool workload census unqualified'):
+            with pytest.raises(ValueError, match='shared pool writer census unqualified'):
                 observe()
             mode['revision'] = '500'
         assert calls and all(row.method == 'GET' for row in calls)
