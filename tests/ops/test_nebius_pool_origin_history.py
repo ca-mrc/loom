@@ -287,6 +287,11 @@ def test_gateway_runtime_accepts_journal_metadata_but_not_template_or_live_metad
         action='probe', journal_metadata=True)
 
 
+@pytest.mark.parametrize('damage', [None, 'capacity', 'late_capacity_secret', 'late_capacity_backend'])
+def test_gateway_active_probe_uses_read_only_global_capacity_qualification(management_history, projected_gateway, monkeypatch, damage):
+    _gateway_runtime_case(management_history, projected_gateway, monkeypatch, damage, action='active-probe')
+
+
 def _gateway_runtime_case(management_history, projected_gateway, monkeypatch, damage, *, action, journal_metadata=False):
     """The new gateway has no running predecessor; only its scalar start is valid."""
     import hashlib
@@ -298,6 +303,7 @@ def _gateway_runtime_case(management_history, projected_gateway, monkeypatch, da
     from scripts.ops.nebius_pool_migration import PoolMigrationError
     from scripts.ops.nebius_pool_startup_capacity import (
         BOUND_POOL_ACTIVATION_COMMAND,
+        BOUND_POOL_ACTIVE_CAPACITY_COMMAND,
         BOUND_POOL_CAPACITY_COMMAND,
     )
 
@@ -393,11 +399,13 @@ def _gateway_runtime_case(management_history, projected_gateway, monkeypatch, da
         if args[0] == 'exec':
             assert args[:9] == ['exec', '-n', namespace, 'pod/' + pod['metadata']['name'], '-c', 'gateway', '--', 'python', '-c']
             assert 'private-' not in repr(args)
-            if args[9] in {BOUND_POOL_CAPACITY_COMMAND, BOUND_POOL_ACTIVATION_COMMAND}:
+            if args[9] in {BOUND_POOL_CAPACITY_COMMAND, BOUND_POOL_ACTIVE_CAPACITY_COMMAND, BOUND_POOL_ACTIVATION_COMMAND}:
                 # This fixture doubles the remote database only; owning
                 # integration tests execute the exact command against PostgreSQL.
                 assert len(args) == 12 and all(len(value) == 64 for value in args[10:])
                 opening = args[9] == BOUND_POOL_ACTIVATION_COMMAND
+                if not opening:
+                    assert args[9] == (BOUND_POOL_ACTIVE_CAPACITY_COMMAND if action == 'active-probe' else BOUND_POOL_CAPACITY_COMMAND)
                 # Bind the exact registration and a fresh challenge; a report
                 # from another installation cannot satisfy this exec contract.
                 import hmac
@@ -456,14 +464,15 @@ def _gateway_runtime_case(management_history, projected_gateway, monkeypatch, da
         return api._run(args)
 
     monkeypatch.setattr(selected, '_run', run)
-    invoke = selected.qualify_gateway_runtime if action == 'probe' else selected.open_pool
+    invoke = selected.open_pool if action == 'open' else selected.qualify_gateway_runtime
+    options = {'active': True} if action == 'active-probe' else {}
     if damage:
         with pytest.raises(PoolMigrationError) as error:
-            invoke(original=original, expected=expected)
-        assert error.value.stage == ('gateway_runtime' if action == 'probe' else 'activation_open') and 'private-' not in str(error.value)
+            invoke(original=original, expected=expected, **options)
+        assert error.value.stage == ('activation_open' if action == 'open' else 'gateway_runtime') and 'private-' not in str(error.value)
     else:
-        assert invoke(original=original, expected=expected) is None
-        assert len(processes) == (4 if action == 'probe' else 5) and all(row.returncode == 0 for row in processes)
+        assert invoke(original=original, expected=expected, **options) is None
+        assert len(processes) == (5 if action == 'open' else 4) and all(row.returncode == 0 for row in processes)
         assert {path for _, path, _ in wire['requests']} == {'/api/v1/namespaces/' + name for name in wire['namespaces']}
     assert sum(row[0] == 'exec' and row[9] == BOUND_POOL_ACTIVATION_COMMAND for row in calls) == (
         1 if action == 'open' and (damage is None or damage.startswith('open_')) else 0)
