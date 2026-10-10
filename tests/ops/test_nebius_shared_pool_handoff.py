@@ -472,12 +472,14 @@ def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writ
             assert version == '500' and message.url.params['resourceVersionMatch'] == 'Exact'
         return httpx.Response(200, json={'apiVersion': 'v1' if plural in {'pods', 'replicationcontrollers'}
             else 'batch/v1' if plural in {'jobs', 'cronjobs'} else 'apps/v1', 'kind': kind + 'List',
-            'metadata': {'resourceVersion': mode['revision'], 'continue': ''}, 'items': inventory[plural]})
+            'metadata': {'resourceVersion': mode['revision'] if plural == 'pods' else '500', 'continue': ''},
+            'items': inventory[plural]})
 
     with ManagementKubernetesTransport(api_server=request.database.foundation.inputs.config['kubernetes_api_server'],
             ssl_context=ssl.create_default_context()) as transport:
         transport.client.close()
-        transport.client = httpx.Client(base_url=transport.api_server, transport=httpx.MockTransport(respond))
+        transport.client = type(completed_pool[3].api.client)(base_url=transport.api_server,
+            transport=httpx.MockTransport(respond))
         from scripts.ops.nebius_shared_pool_handoff_live import observe_shared_pool_workloads
 
         def observe():

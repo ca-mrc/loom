@@ -863,6 +863,14 @@ separate captured database binding, which still needs live requalification.
 These observations neither acquire a guard nor prove writer fencing, provider
 authority, process readiness or an operational shared pool.
 
+The initial workload census reads every built-in workload collection at one
+API-server revision, including terminal Pods. Its retained roots include current
+staging, completed dev, and the retired old manager/gateway. It rejects changed
+root identities/templates, detached processes using their ServiceAccounts, and
+undeclared schedules in worker namespaces, even suspended schedules. This is
+workload accounting, not proof of RBAC/provider exclusivity or process drain;
+it cannot be replayed unchanged after an intentional handoff transition.
+
 Authenticated Kubernetes/worker identity and capacity observations remain
 mandatory. Detailed kubelet samples retain the existing optional-telemetry
 contract; unavailable samples are not zero usage or evidence of certificate trust.

@@ -355,9 +355,32 @@ def qualify_retained_writer_workloads(request: PoolRoleFenceRequest,
         subjects, _ = role_fence_review_scope(request)
         writer_namespaces = {namespace.name for participant in request.retirement.migration.registration.spec.participants
             for namespace in (participant.execution_namespace, participant.build_namespace)}
+        if any(originals.get(key) != row for key, row in retired.items()):
+            raise ValueError
+        qualify_pool_writer_workloads(inventory, originals=originals, expected=expected,
+            subjects=frozenset(subjects), writer_namespaces=frozenset(writer_namespaces),
+            controller_uids=frozenset(_uid(guard.controller) for guard in request.retirement.migration.guards),
+            producer_uids=frozenset(_uid(row) for row in retired.values()), platform_subjects=platform_subjects)
+    except Exception:
+        raise ValueError("pool_retained_writer_workload_inventory_unqualified") from None
+
+
+def qualify_pool_writer_workloads(inventory: dict[str, list[dict[str, Any]]], *,
+                                  originals: dict[str, dict[str, Any]], expected: dict[str, dict[str, Any]],
+                                  subjects: frozenset[tuple[str, str]], writer_namespaces: frozenset[str],
+                                  controller_uids: frozenset[str], producer_uids: frozenset[str],
+                                  platform_subjects: frozenset[tuple[str, str]] = frozenset()) -> None:
+    """Census mechanics shared by retained retirement and forward handoff.
+
+    The protected caller derives roots, identities and allowed current templates
+    from qualified history. This function grants no authority and has no public
+    document-input entrypoint. It does not prove process drain or RBAC fencing.
+    """
+    try:
+        root_uids = {_uid(row) for row in originals.values()}
         if (set(inventory) != {resource for _api, resource, _kind in POOL_WRITER_WORKLOAD_COLLECTIONS}
-                or set(expected) != set(originals)
-                or any(originals.get(key) != row for key, row in retired.items())):
+                or not originals or set(expected) != set(originals)
+                or not controller_uids <= producer_uids <= root_uids):
             raise ValueError
         documents: dict[str, dict[str, Any]] = {}
         identities: dict[str, tuple[str, str]] = {}
@@ -401,9 +424,9 @@ def qualify_retained_writer_workloads(request: PoolRoleFenceRequest,
                 raise ValueError
             roots.add(uid)
 
-        controllers = {_uid(guard.controller) for guard in request.retirement.migration.guards}
-        other_subjects = {identities[_uid(row)] for row in retired.values() if _uid(row) not in controllers}
-        history_subjects = {identities[uid] for uid in controllers if identities[uid][0] not in writer_namespaces} - other_subjects
+        other_subjects = {identities[uid] for uid in producer_uids - controller_uids}
+        history_subjects = {identities[uid] for uid in controller_uids
+            if identities[uid][0] not in writer_namespaces} - other_subjects
         for row in inventory["jobs"]:
             uid = _uid(row)
             if identities[uid] in history_subjects and _terminal_platform_job(row, inventory["pods"], identities):

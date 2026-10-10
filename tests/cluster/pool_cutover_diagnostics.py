@@ -10,7 +10,10 @@ from uuid import UUID
 
 from scripts.ops.nebius_pool_cutover import stage_pool_cutover
 from scripts.ops.nebius_pool_cutover_live import HTTPSPoolCutoverAPI
-from scripts.ops.nebius_pool_role_fencing import qualify_retained_writer_workloads
+from scripts.ops.nebius_pool_role_fencing import (
+    qualify_pool_writer_workloads,
+    qualify_retained_writer_workloads,
+)
 
 _KINDS = frozenset({"Deployment", "ReplicaSet", "StatefulSet", "DaemonSet",
     "ReplicationController", "CronJob", "Job", "Pod"})
@@ -19,6 +22,7 @@ _LOCATIONS = {
     HTTPSPoolCutoverAPI.preflight.__code__: ("nebius_pool_cutover_live.py", "preflight"),
     HTTPSPoolCutoverAPI.qualify_writer_bindings.__code__: ("nebius_pool_cutover_live.py", "qualify_writer_bindings"),
     qualify_retained_writer_workloads.__code__: ("nebius_pool_role_fencing.py", "qualify_retained_writer_workloads"),
+    qualify_pool_writer_workloads.__code__: ("nebius_pool_role_fencing.py", "qualify_pool_writer_workloads"),
 }
 
 
@@ -142,7 +146,7 @@ def cutover_failure_report(error: BaseException, invocation: int) -> dict[str, A
                     report["journal"] = journal_phases(values["record"])
                 elif code is HTTPSPoolCutoverAPI.qualify_writer_bindings.__code__:
                     report["snapshot_resource_version"] = _revision(values.get("revision"))
-                elif code is qualify_retained_writer_workloads.__code__:
+                elif code is qualify_pool_writer_workloads.__code__:
                     report["workload"], report["ancestry"] = _workload_failure(values)
             frame = frame.tb_next
         current = current.__context__
