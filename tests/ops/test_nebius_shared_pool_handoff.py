@@ -422,7 +422,8 @@ def shared_guard_transport(shared_operation, tmp_path, monkeypatch):
     kubeconfig.chmod(0o600)
     api = KubectlPoolGuardAPI(request=request, kubeconfig=kubeconfig, executable=Path('/usr/bin/kubectl'))
     model = SimpleNamespace(held=set(), busy=None, uncertain=None, acquires=[], documents=documents,
-        runtime_roles=set(), runtime_stages=[], runtime_reads=[], runtime_uncertain=False, runtime_lost_read=False)
+        runtime_roles=set(), runtime_stages=[], runtime_reads=[], runtime_uncertain=False, runtime_lost_read=False,
+        readiness_pages={}, readiness_calls=[], readiness_failure=None)
 
     def run(argv, **kwargs):
         assert argv[:len(api.prefix)] == api.prefix
@@ -450,6 +451,12 @@ def shared_guard_transport(shared_operation, tmp_path, monkeypatch):
                 if args[-1] == rollout_guard_observation_sql(owner=str(request.registration.spec.operation_id),
                         candidate=request.registration.candidate['candidate_sha']):
                     value = {'status': 'held' if namespace in model.held else 'open'}
+                elif (namespace, args[-1]) in model.readiness_pages:
+                    assert namespace in model.held
+                    model.readiness_calls.append(namespace)
+                    if model.readiness_failure == namespace:
+                        raise RuntimeError('simulated real SQL rejection of charged work')
+                    value = copy.deepcopy(model.readiness_pages[namespace, args[-1]])
                 else:
                     action, = (action for action in ('stage', 'observe') if args[-1] == pool_runtime_role_sql(
                         owner=str(request.registration.spec.operation_id), candidate=request.registration.candidate['candidate_sha'], action=action))
@@ -892,6 +899,156 @@ def test_shared_parent_connects_current_staging_workload_transitions_without_rep
         before = list(writes)
         assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-build-policy'
         assert writes == before
+
+
+@pytest.mark.timeout(420)
+def test_shared_drain_checks_both_databases_and_retains_qualified_paged_backlog(
+        shared_operation, shared_guard_transport, shared_runtime, completed_pool, handoff, monkeypatch):
+    """Use real guards/history validators; saved drain is never current authority."""
+    import importlib.util
+    import json
+    import shutil
+    import ssl
+    import subprocess
+    from types import SimpleNamespace
+
+    import httpx
+    from scripts.ops import nebius_shared_pool_operation as parent
+    from scripts.ops.nebius_development_runtime_probes import HTTPSDevelopmentRuntimeProbes
+    from scripts.ops.nebius_pool_migration_guard import pool_cutover_readiness_sql
+    from scripts.ops.nebius_pool_origin_history import pool_management_history_sql
+    from scripts.ops.nebius_pool_startup_database import pool_startup_closed_sql
+    from tests.ops.test_nebius_development_pool_retained import (
+        populate_database_backends,
+        runtime_http_inventory,
+    )
+
+    from loom.nebius_pool_priority import PoolWorkOriginV1
+    from loom_service.pool_management.capacity import digest
+
+    name = 'scripts.ops.nebius_shared_pool_drain'
+    assert importlib.util.find_spec(name) is not None, 'shared real drain observation is missing'
+    module = __import__(name, fromlist=['observe_closed_shared_pool_drain'])
+    args, bindings = shared_operation
+    runtime = args['runtime']
+    guards, model = shared_guard_transport
+    spec = bindings.migration.registration.spec
+    model.held.update(target.namespace for target in bindings.migration.guards)
+    manager = runtime.database.manager.retained.request.retained
+    state = Path(manager.operation['state_dir']).parent / 'shared-pool-handoff'
+    history_reports, read_history = {}, []
+    backlog = {}
+    for target in bindings.migration.guards:
+        participant, = (row for row in spec.participants if row.participant_id == target.participant_id)
+        count = 129 if participant.environment_class == 'development' else 1
+        origins = tuple(PoolWorkOriginV1(data_environment_id=participant.environment_id,
+            submission_id=UUID(int=index + 1), kind='environment', application=None) for index in range(count))
+        rows = [{'key': 'batch:' + str(origin.submission_id), 'origin': origin.model_dump(mode='json'),
+            'source_matches': True} for origin in origins]
+        backlog[str(participant.participant_id)] = count
+        logical_pool, = (row['value'] for row in target.controller['spec']['template']['spec']['containers'][0]['env']
+            if row['name'] == 'LOOM_CP_SERVICE_EXECUTION_SCHEDULER_POOL_ID')
+        for offset in range(0, count, 128):
+            after = rows[offset - 1]['key'] if offset else None
+            query = pool_cutover_readiness_sql(owner=str(spec.operation_id),
+                candidate=bindings.migration.registration.candidate['candidate_sha'], logical_pool_id=logical_pool, after=after)
+            model.readiness_pages[target.namespace, query] = {'status': 'observed', 'schema_revision': '0175', 'rows': rows[offset:offset + 128]}
+            page = origins[offset:offset + 128]
+            history_reports[pool_management_history_sql(page)] = {'schema': 'loom.pool-management-history.v1',
+                'schema_revision': '0175', 'read_only': True, 'rows': [
+                    {'ordinal': index, 'origin': origin.model_dump(mode='json'), 'application': None, 'operation': None}
+                    for index, origin in enumerate(page, start=1)]}
+    _, documents, handler = runtime_http_inventory(runtime, shared_runtime[1], completed_pool[3].server, handoff[2])
+    populate_database_backends(documents)
+    monkeypatch.setattr(shutil, 'which', lambda _: '/usr/bin/kubectl')
+    guard_run = subprocess.run
+    mode = {'history_invalid': True, 'reopen_guard': False}
+    closed_reads = []
+    with HTTPSDevelopmentRuntimeProbes(request=runtime,
+            api_server=runtime.database.foundation.inputs.config['kubernetes_api_server'],
+            ssl_context=ssl.create_default_context(), token='private-test-kubernetes-token') as probes:
+        for connection in (probes, probes.manager, probes.foundation):
+            connection.client.close()
+            connection.client = type(completed_pool[3].api.client)(base_url=connection.api_server,
+                transport=httpx.MockTransport(handler))
+
+        def run(argv, **kwargs):
+            if argv[:len(guards.prefix)] == guards.prefix:
+                return guard_run(argv, **kwargs)
+            assert argv[:len(probes.prefix)] == probes.prefix
+            command = argv[len(probes.prefix):]
+            assert command[:17] == ['exec', '-n', manager.binding.namespace, 'pod/loom-postgres-0', '-c', 'loom-postgres',
+                '--', 'psql', '-X', '-qAt', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', 'loom', '-c']
+            query = command[-1]
+            if query == pool_startup_closed_sql(spec):
+                closed_reads.append(query)
+                value = {'schema': 'loom.pool-startup-closed.v1', 'operation_id': str(spec.operation_id),
+                    'installation_sha256': digest(spec.model_dump(mode='json')), 'read_only': True, 'qualified': True}
+            else:
+                assert query in history_reports, 'only fixed read-only origin history belongs on the manager DB'
+                read_history.append(query)
+                value = copy.deepcopy(history_reports[query])
+                if mode['history_invalid']:
+                    value['rows'][0]['origin']['data_environment_id'] = str(uuid4())
+                if mode['reopen_guard']:
+                    mode['reopen_guard'] = False
+                    model.held.remove(bindings.migration.guards[0].namespace)
+            payload = json.dumps(value, indent=32).encode()
+            if len(value.get('rows', [])) == 128:
+                assert 65536 < len(payload) < 4 * 1024**2  # Legal JSON history exceeds the small process-probe cap.
+            return SimpleNamespace(returncode=0, stdout=payload, stderr=b'')
+
+        monkeypatch.setattr(subprocess, 'run', run)
+
+        class ConnectedDrainAPI(SharedPhaseAPI):
+            def prepare(self, phase, bound, child):
+                if phase == 'forward-drain':
+                    module.prepare_shared_pool_drain(bindings=bound, state_dir=child)
+                else:
+                    super().prepare(phase, bound, child)
+
+            def validate_prepared_phase(self, phase, child):
+                if phase == 'forward-drain':
+                    module.validate_shared_pool_drain(bindings=bindings, state_dir=child, complete=False, prepared=True)
+                else:
+                    super().validate_prepared_phase(phase, child)
+
+            def validate_phase(self, phase, child, *, complete):
+                if phase == 'forward-drain':
+                    module.validate_shared_pool_drain(bindings=bindings, state_dir=child, complete=complete)
+                else:
+                    super().validate_phase(phase, child, complete=complete)
+
+            def advance(self, phase, bound, child):
+                if phase != 'forward-drain':
+                    return super().advance(phase, bound, child)
+                return module.advance_shared_pool_drain(bindings=bound, guards=guards, development=probes,
+                    state_dir=child, qualify=lambda: None)
+
+        api = ConnectedDrainAPI(parent)
+        api.block = 'forward-stop'
+        kwargs = {**args, 'bindings': bindings, 'api': api, 'action': 'install'}
+        with pytest.raises(ValueError, match='shared pool operation unconfirmed'):
+            parent.run_shared_pool_operation(**kwargs)
+        assert read_history and closed_reads
+        mode['history_invalid'] = False
+        mode['reopen_guard'] = True
+        with pytest.raises(ValueError, match='shared pool operation unconfirmed'):
+            parent.run_shared_pool_operation(**kwargs)
+        model.held.update(target.namespace for target in bindings.migration.guards)
+        assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-stop'
+        record = json.loads((state / 'forward-drain/drain.json').read_bytes())
+        assert record['pending_origins'] == backlog
+        assert set(model.readiness_calls) == {target.namespace for target in bindings.migration.guards}
+        assert set(read_history) == set(history_reports)  # Includes the 129th queued source, not only page one.
+        before = (state / 'forward-drain/drain.json').read_bytes()
+        for target in bindings.migration.guards:
+            model.readiness_failure = target.namespace
+            with pytest.raises(ValueError):
+                module.observe_closed_shared_pool_drain(bindings=bindings, guards=guards, development=probes,
+                    state_dir=state, qualify=lambda: None)
+        assert (state / 'forward-drain/drain.json').read_bytes() == before
+        assert model.runtime_stages == model.acquires == []
 
 
 @pytest.mark.timeout(420)
