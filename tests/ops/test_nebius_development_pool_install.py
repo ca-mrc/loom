@@ -23,7 +23,7 @@ from tests.ops.test_nebius_development_pool_registration import (
 )
 from tests.ops.test_nebius_development_pool_registration import capacity_checks as capacity_checks
 from tests.ops.test_nebius_development_pool_registration import cloud as cloud
-from tests.ops.test_nebius_development_pool_registration import configured
+from tests.ops.test_nebius_development_pool_registration import configured, with_staging
 from tests.ops.test_nebius_development_pool_registration import installation as installation
 from tests.ops.test_nebius_development_pool_registration import inventory as inventory
 from tests.ops.test_nebius_development_pool_registration import (
@@ -38,7 +38,6 @@ from tests.ops.test_nebius_development_pool_registration import provider_checks 
 from tests.ops.test_nebius_development_pool_registration import retained as retained
 from tests.ops.test_nebius_development_pool_registration import route as route
 from tests.ops.test_nebius_development_pool_registration import tls_material as tls_material
-from tests.ops.test_nebius_development_pool_registration import with_staging
 from tests.unit.test_nebius_application_image_renderer import build_inputs as build_inputs
 
 
@@ -96,8 +95,7 @@ def prepare(pool_inputs):
     return module().prepare_intent(reference=reference, catalog=catalog, tokens=tokens)
 
 
-@pytest.mark.parametrize('staging_first', [False, True])
-def test_common_catalog_preparation_preserves_staging_without_delivering_its_authority(pool_inputs, staging_first):
+def common_catalog_inputs(pool_inputs, staging_first):
     from loom_service.pool_management.installation import PoolInstallation
 
     reference, catalog, tokens = pool_inputs
@@ -113,8 +111,21 @@ def test_common_catalog_preparation_preserves_staging_without_delivering_its_aut
     for profile in combined['profiles']['task_images']:
         if profile['profile_id'] in staging_profile_ids:
             profile['settings']['source_bucket'] = 'retained-staging-artifacts'
+            profile['settings']['registry_repository'] = 'cr.eu-north1.nebius.cloud/staging/task-images'
+    for profile in combined['profiles']['execution']:
+        if profile['profile_id'] in staging_profile_ids:
+            profile['candidate_sha'] = 'd' * 40
     if staging_first:
         combined['participants'].reverse()
+    return reference, combined, tokens
+
+
+@pytest.mark.parametrize('staging_first', [False, True])
+def test_common_catalog_preparation_preserves_staging_without_delivering_its_authority(pool_inputs, staging_first):
+    reference, combined, tokens = common_catalog_inputs(pool_inputs, staging_first)
+    dev, = [row for row in combined['participants'] if row['environment_class'] == 'development']
+    staging, = [row for row in combined['participants'] if row['environment_class'] == 'staging']
+    staging_machine, = [row for row in combined['machines'] if row['participant_id'] == staging['participant_id']]
     intent = module().prepare_intent(reference=reference, catalog=combined, tokens=tokens)
     assert intent.catalog == combined
     namespaces = module().namespace_documents(intent)
@@ -348,16 +359,13 @@ class PoolServer(RegistrationServer):
             self.calls.append(message)
             value = self.delivered.get(path)
             return httpx.Response(404) if value is None else httpx.Response(200, json=value)
-        response = super().handle(message)
-        if path.endswith('/log') and response.status_code == 200:
-            value = response.json()
-            value['machines'] = 4
-            return httpx.Response(200, json=value)
-        return response
+        return super().handle(message)
 
 
 @pytest.fixture
-def connected(pool_inputs, retained, monkeypatch):
+def connected(pool_inputs, retained, monkeypatch, request):
+    if getattr(request, 'param', None) is not None:
+        pool_inputs = common_catalog_inputs(pool_inputs, request.param)
     intent = prepare(pool_inputs)
     name = 'scripts.ops.nebius_development_pool_live'
     if importlib.util.find_spec(name) is None:
@@ -450,6 +458,32 @@ def test_connected_install_waits_for_commit_then_delivers_only_disabled_runtime(
     deployment, = [row for row in connected.server.delivered.values() if row['kind'] == 'Deployment']
     assert deployment['spec']['replicas'] == 0
     assert {row['kind'] for row in connected.server.delivered.values()} == {'Secret', 'ConfigMap', 'ServiceAccount', 'Deployment'}
+
+
+@pytest.mark.parametrize('connected', [False, True], indirect=True, ids=['dev-first', 'staging-first'])
+def test_common_catalog_connected_install_never_writes_staging_or_delivers_its_token(connected):
+    assert install(connected)['status'] == 'pending_registration'
+    connected.server.complete = True
+    result = install(connected)
+    assert result['status'] == 'development_pool_installed_closed'
+    assert result['admission_open'] is False and result['writer_migration_complete'] is False
+    spec = connected.server.request.registration.spec
+    dev, = [row for row in spec.participants if row.environment_class == 'development']
+    staging, = [row for row in spec.participants if row.environment_class == 'staging']
+    assert set(connected.server.namespaces) == {dev.execution_namespace.name, dev.build_namespace.name}
+    posted = [json.loads(call.content) for call in connected.server.calls if call.method == 'POST']
+    assert {doc['metadata'].get('namespace') for doc in posted} <= {
+        None, 'loom-dev', 'loom-nebius-management-dev', dev.execution_namespace.name, dev.build_namespace.name}
+    staging_machine, = [row for row in spec.machines if row.participant_id == staging.participant_id]
+    assert not any(doc['metadata'].get('labels', {}).get('loom.nebius/pool-machine') == str(staging_machine.machine_id)
+        for doc in posted)
+    registration, = [doc for doc in connected.server.store.resources.values()
+        if doc['kind'] == 'ConfigMap' and doc['metadata']['name'].startswith('loom-pool-registration-')]
+    assert len(json.loads(registration['data']['installation.json'])['participants']) == 2
+    creates = list(connected.server.created)
+    assert install(connected) == result
+    assert connected.server.created == creates
+    assert len(connected.server.store.creates) == 2
 
 
 @pytest.mark.parametrize('outcome', ['before', 'after'])

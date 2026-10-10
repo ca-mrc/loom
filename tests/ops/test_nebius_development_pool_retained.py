@@ -480,7 +480,7 @@ def test_runtime_parent_freezes_complete_fixed_inventory_before_writes(completed
 @pytest.mark.parametrize('retained', [False], indirect=True)
 @pytest.mark.parametrize('connected', [False, True], indirect=True, ids=['dev-first', 'staging-first'])
 def test_common_catalog_runtime_preparation_and_resume_leave_staging_untouched(completed_pool, publisher_cloud):
-    runtime, request, api, state, _ = parent_install_fixture(completed_pool, publisher_cloud)
+    runtime, request, api, _, _ = parent_install_fixture(completed_pool, publisher_cloud)
     spec = request.database.manager.retained.request.registration.spec
     dev, = [row for row in spec.participants if row.environment_class == 'development']
     staging, = [row for row in spec.participants if row.environment_class == 'staging']
@@ -490,7 +490,8 @@ def test_common_catalog_runtime_preparation_and_resume_leave_staging_untouched(c
         None, 'loom-dev', 'loom-nebius-management-dev', dev.execution_namespace.name, dev.build_namespace.name}
     for doc in documents:
         if doc['kind'] in {'RoleBinding', 'ClusterRoleBinding'}:
-            assert {row.get('namespace') for row in doc['subjects']} <= {dev.execution_namespace.name}
+            assert {row.get('namespace') for row in doc['subjects']} <= {
+                dev.execution_namespace.name, 'loom-nebius-management-dev'}
     policy, = [doc for doc in documents if doc['kind'] == 'ValidatingAdmissionPolicy']
     assert staging.build_namespace.name not in json.dumps(policy)
     assert 'retained-staging-artifacts' not in json.dumps(policy)
@@ -976,6 +977,7 @@ def runtime_cloud_transport(request, publisher_cloud, monkeypatch, tmp_path):
 
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
 @pytest.mark.parametrize('retained', [False], indirect=True)
+@pytest.mark.parametrize('connected', [None, True], indirect=True, ids=['dev-only', 'common-catalog'])
 async def test_runtime_cloud_uses_observer_credentials_and_rejects_authority_or_pool_drift(
         completed_pool, publisher_cloud, monkeypatch, tmp_path):
     from scripts.ops import nebius_development_runtime_external as module
@@ -1270,6 +1272,7 @@ def test_runtime_private_input_rechecks_reject_drift(runtime_private_reader, tmp
 
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
 @pytest.mark.parametrize('retained', [False], indirect=True)
+@pytest.mark.parametrize('connected', [None, True], indirect=True, ids=['dev-only', 'common-catalog'])
 def test_runtime_observer_checks_retained_data_and_successors_without_replaying_originals(completed_pool, publisher_cloud, handoff, monkeypatch):
     runtime, request, parent, state, _ = parent_install_fixture(completed_pool, publisher_cloud)
     parent.database_complete = True
@@ -1504,6 +1507,7 @@ def populate_database_backends(documents):
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
 @pytest.mark.parametrize('retained', [False], indirect=True)
 @pytest.mark.parametrize('probe_kind', ['settings', 'database'])
+@pytest.mark.parametrize('connected', [None, True], indirect=True, ids=['dev-only', 'common-catalog'])
 def test_runtime_process_settings_challenge_uses_actual_owned_pod_and_rejects_drift(
         completed_pool, publisher_cloud, handoff, monkeypatch, probe_kind):
     import hmac
@@ -1534,7 +1538,7 @@ def test_runtime_process_settings_challenge_uses_actual_owned_pod_and_rejects_dr
             return httpx.Response(200, json=listing)
         return original_handle(message)
     spec = request.database.manager.retained.request.registration.spec
-    participant, = spec.participants
+    participant, = [row for row in spec.participants if row.environment_class == 'development']
     machine, = (row for row in spec.machines if row.participant_id == participant.participant_id and row.workload_scope == 'environment')
     roles = {(request.database.manager.retained.request.retained.binding.namespace, 'loom-service'): 'manager',
         ('loom-dev', 'loom-service'): 'service', ('loom-dev', 'loom-control-plane'): 'controller',
