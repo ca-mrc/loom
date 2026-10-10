@@ -1154,6 +1154,13 @@ rights remain observable through subsequent pending recovery, but restoration
 writes cannot replay. This child does not restart workloads or reopen either
 staging or the cancelled dev/global ledger.
 
+A fresh protected process can reconstruct completed gateway and Role permission
+readers without recreating the earlier machine-retirement or stopped-template
+write adapters. Omitting those dependencies is accepted only with the respective
+phase complete and its receipts validated. Current identity, inventory and
+effective-rights checks remain mandatory; mutation methods still require their
+original active phase and concrete write dependencies.
+
 Current-staging restart consumes the completed template and Role restoration
 receipts. Its targets are the captured current specs with the recovery marker
 retained, dispatched in reverse stop order: service, controller, actuators, then

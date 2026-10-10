@@ -148,7 +148,7 @@ def prepare_shared_recovery_gateway(*, bindings: SharedPoolGuardBindings, state_
 class HTTPSSharedRecoveryGateway(ManagementKubernetesTransport):
     """Fixed read/create/CAS operations; unknown dispatches have no retry path."""
 
-    def __init__(self, *, bindings: SharedPoolGuardBindings, machines: SharedRecoveryMachineTransport,
+    def __init__(self, *, bindings: SharedPoolGuardBindings, machines: SharedRecoveryMachineTransport | None,
             api_server: str, ssl_context: ssl.SSLContext, token: str | None = None,
             private_files: dict[Path, bytes] | None = None):
         self.bindings = copy.deepcopy(bindings)
@@ -168,7 +168,8 @@ class HTTPSSharedRecoveryGateway(ManagementKubernetesTransport):
         frame = _frame(self.bindings, self.state.parent)
         status = frame['recovery'][_PHASE]['status']
         if (frame['outcome'] != 'pending' or status not in {'started', 'complete'}
-                or self.machines.bindings != self.bindings or self.machines.state != self.state
+                or (self.machines is None and status != 'complete')
+                or (self.machines is not None and (self.machines.bindings != self.bindings or self.machines.state != self.state))
                 or any(private_state._private_read(path) != raw for path, raw in self.private_files.items())
                 or self.sources != _sources(self.bindings, self.state.parent)):
             raise ValueError('shared recovery gateway scope differs')
@@ -193,6 +194,8 @@ class HTTPSSharedRecoveryGateway(ManagementKubernetesTransport):
     def qualify(self) -> bool:
         before = self._scope()
         _active(self.bindings, self.state, 'started')
+        if self.machines is None:
+            raise ValueError('shared recovery gateway mutation requires the active machine transport')
         self._namespaces()
         drained = self.machines.drained()
         if self.machines.machine_authority() != 'revoked' or self._scope() != before:

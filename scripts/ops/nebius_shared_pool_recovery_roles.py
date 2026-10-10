@@ -182,7 +182,7 @@ def _qualify_rules(review: dict[str, Any], *, catalog: Documents, subject: tuple
 
 class HTTPSSharedRecoveryRoles(ManagementKubernetesTransport):
     def __init__(self, *, bindings: SharedPoolGuardBindings, api_server: str, ssl_context: ssl.SSLContext,
-            templates: HTTPSSharedRecoveryTemplates, gateway: HTTPSSharedRecoveryGateway,
+            templates: HTTPSSharedRecoveryTemplates | None, gateway: HTTPSSharedRecoveryGateway,
             qualify_runtime: Callable[[DevelopmentRuntimeInstallRequest, str, bool], None],
             token: str | None = None, private_files: dict[Path, bytes] | None = None):
         self.bindings = copy.deepcopy(bindings)
@@ -214,7 +214,9 @@ class HTTPSSharedRecoveryRoles(ManagementKubernetesTransport):
         if (frame['outcome'] != 'pending' or status not in {'started', 'complete'}
                 or self._dependencies(frame) != self.dependencies
                 or _identity(self.bindings, self.state, self.sources, self.targets, self.readers) != self.identity
-                or self.templates.bindings != self.bindings or self.templates.state != self.state.parent / 'recovery-restore-workloads'
+                or (self.templates is None and status != 'complete')
+                or (self.templates is not None and (self.templates.bindings != self.bindings
+                    or self.templates.state != self.state.parent / 'recovery-restore-workloads'))
                 or self.gateway.bindings != self.bindings or self.gateway.state != self.state.parent / 'recovery-revoke'):
             raise ValueError('shared Role recovery scope differs')
         database = self.request.database
@@ -338,6 +340,8 @@ class HTTPSSharedRecoveryRoles(ManagementKubernetesTransport):
     def _ready(self, *, writing: bool = False) -> bool:
         before = self._scope()
         _active(self.bindings, self.state, 'started')
+        if self.templates is None:
+            raise ValueError('shared Role recovery mutation requires the active template transport')
         self.qualify_runtime(copy.deepcopy(self.request), _PHASE, writing)
         self.gateway.verify_permissions()
         drained = self.templates.drained()
