@@ -306,12 +306,33 @@ class SharedPhaseAPI:
         self.preflights = 0
         self.block = None
         self.uncertain = None
+        self.prepare_failure = None
 
     def preflight(self, bindings):
         self.preflights += 1
 
     def qualify(self, bindings, record, *, recovering):
         self.qualifications.append((record['outcome'], recovering))
+
+    def prepare(self, phase, bindings, state):
+        from scripts.ops import nebius_certificates as private_state
+
+        if self.prepare_failure == (phase, 'before'):
+            raise TimeoutError('simulated interruption before local child preparation')
+        private_state._private_directory(state)
+        if self.prepare_failure == (phase, 'directory'):
+            raise TimeoutError('simulated interruption after private directory creation')
+        path = state / 'receipt.json'
+        if not path.exists():
+            private_state._atomic_json(path, {'phase': phase, 'status': 'pending'})
+        self.validate_prepared_phase(phase, state)
+        if self.prepare_failure == (phase, 'after'):
+            raise TimeoutError('simulated interruption after local child preparation')
+
+    def validate_prepared_phase(self, phase, state):
+        import json
+
+        assert json.loads((state / 'receipt.json').read_bytes()) == {'phase': phase, 'status': 'pending'}
 
     def validate_phase(self, phase, state, *, complete):
         import json
@@ -457,6 +478,19 @@ def test_shared_guard_child_retains_busy_and_unknown_acquisitions_without_regist
     guards, model = shared_guard_transport
 
     class ConnectedGuardAPI(SharedPhaseAPI):
+        def prepare(self, phase, bound, state):
+            if phase == 'forward-guards':
+                module.prepare_shared_pool_guards(bindings=bound, state_dir=state)
+            else:
+                super().prepare(phase, bound, state)
+
+        def validate_prepared_phase(self, phase, state):
+            if phase == 'forward-guards':
+                record = module.validate_shared_pool_guards(bindings=bindings, state_dir=state, complete=False)
+                assert set(record['guards'].values()) == {'prepared'}
+            else:
+                super().validate_prepared_phase(phase, state)
+
         def validate_phase(self, phase, state, *, complete):
             if phase == 'forward-guards':
                 module.validate_shared_pool_guards(bindings=bindings, state_dir=state, complete=complete)
@@ -490,6 +524,39 @@ def test_shared_guard_child_retains_busy_and_unknown_acquisitions_without_regist
     before = list(model.acquires)
     assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-drain'
     assert model.acquires == before
+
+
+@pytest.mark.timeout(420)
+@pytest.mark.parametrize('direction', ['forward', 'recovery'])
+def test_shared_parent_resumes_before_and_after_each_local_child_preparation(shared_operation, direction):
+    import json
+
+    from scripts.ops import nebius_shared_pool_operation as module
+
+    args, bindings = shared_operation
+    manager = args['runtime'].database.manager.retained.request.retained
+    state = Path(manager.operation['state_dir']).parent / 'shared-pool-handoff'
+    api = SharedPhaseAPI(module)
+    kwargs = {**args, 'bindings': bindings, 'api': api, 'action': 'install'}
+    phases, final = module.FORWARD_PHASES, 'shared_pool_handoff_complete'
+    if direction == 'recovery':
+        api.block = 'forward-wire'
+        assert module.run_shared_pool_operation(**kwargs)['phase'] == 'forward-wire'
+        kwargs['action'] = 'recover'
+        phases, final = module.RECOVERY_PHASES, 'staging_restored_dev_closed'
+    prefix = list(api.events)
+    for index, phase in enumerate(phases):
+        for boundary in ('before', 'directory', 'after'):
+            api.prepare_failure = (phase, boundary)
+            with pytest.raises(ValueError, match='shared pool operation unconfirmed'):
+                module.run_shared_pool_operation(**kwargs)
+            record = json.loads((state / 'operation.json').read_bytes())
+            assert record[direction][phase]['status'] == 'prepared'
+            assert (state / phase / 'receipt.json').exists() is (boundary == 'after')
+            assert api.events == prefix + list(phases[:index])
+    api.prepare_failure = None
+    assert module.run_shared_pool_operation(**kwargs)['status'] == final
+    assert api.events == prefix + list(phases)
 
 
 @pytest.mark.timeout(420)
