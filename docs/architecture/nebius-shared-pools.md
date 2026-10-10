@@ -1096,6 +1096,25 @@ retained-runtime qualification. A successful machine receipt does not complete
 recovery's revoke phase: gateway RBAC retirement and effective permission checks
 must still finish before any current-staging template or Role restoration.
 
+The gateway-retirement half uses the frozen forward grant receipts, including
+partial creates. Existing gateway Roles are reduced in place with UID/version
+tests and a recovery marker; reader ClusterRoles and all bindings are preserved.
+For an uncertain, absent forward Role, one journaled same-name read-only create
+blocks a delayed writer create. If the original wins that race, recovery pins
+its UID and reduces it instead. Neither unknown create nor unknown PATCH is
+redispatched. Never-attempted grants stay absent. Fresh machine revocation and
+workload/database drain precede mutations, and busy dry-run checks do not consume
+the real dispatch intent.
+
+Effective permission review derives expected reader grants from the fixed
+bindings actually present, not every planned Role. It includes namespaces reached
+through foreign account/group bindings and rejects extra rights, including named
+writes. Exact inventory and receipt readbacks bracket the reviews. A delayed
+fixed binding can then grant only the already-pinned reader rights. This
+read-only verification remains available during subsequent pending recovery;
+completed revoke writes cannot replay. The protected parent still needs its
+fresh whole-pool writer census before restoring current staging authority.
+
 The shared Role child reduces only the two source-qualified staging worker/build
 Roles, preserving their UIDs and existing bindings. Each rules-and-annotations
 PATCH tests the current UID, resourceVersion and rules. Mutation intent precedes
