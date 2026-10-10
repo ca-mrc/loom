@@ -4303,6 +4303,8 @@ def test_shared_recovery_drain_reads_all_databases_fresh_before_restoration(
         def verify_retained(self):
             if self.damage == 'authority':
                 raise ValueError('simulated retained authority change')
+            if self.damage == 'late-guard' and self.reads:
+                self.local[roster[0]] = 'open'
 
         def pool_state(self):
             if self.damage == 'receipt' and self.reads:
@@ -4371,6 +4373,7 @@ def test_shared_recovery_drain_reads_all_databases_fresh_before_restoration(
     api = API(parent)
     kwargs = {**args, 'bindings': bindings, 'api': api, 'action': 'install'}
     assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-guards'
+    api.block = 'recovery-stop'
     kwargs['action'] = 'recover'
     assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'recovery-drain'
     assert remote.effects == ['pool', *roster] and remote.reads == ['pool', *roster]
@@ -4384,7 +4387,7 @@ def test_shared_recovery_drain_reads_all_databases_fresh_before_restoration(
         assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'recovery-drain'
         assert remote.reads == ['pool', *roster] and receipt.read_bytes() == saved
         target[key] = 0
-    for damage in ('authority', 'receipt'):
+    for damage in ('authority', 'receipt', 'late-guard'):
         remote.reads.clear()
         remote.damage = damage
         with pytest.raises(ValueError):
@@ -4394,6 +4397,7 @@ def test_shared_recovery_drain_reads_all_databases_fresh_before_restoration(
             assert remote.reads == []
         receipt.write_bytes(saved)
         receipt.chmod(0o600)
+        remote.local[roster[0]] = 'fenced'
     remote.damage = None
     remote.reads.clear()
     api.block = 'recovery-stop'
@@ -4404,6 +4408,18 @@ def test_shared_recovery_drain_reads_all_databases_fresh_before_restoration(
     assert drain.observe_shared_recovery_drain(bindings=bindings, guards=api.fence_api.guards,
         history=api.fence_api.history, state_dir=state, qualify=remote.verify_retained) is False
     assert remote.reads == ['pool', *roster] and remote.effects == ['pool', *roster]
+    remote.pool_counts['unconfirmed_creates'] = 0
+    api.block = None
+    assert parent.run_shared_pool_operation(**kwargs)['status'] == 'staging_restored_dev_closed'
+    drain.validate_shared_recovery_drain(bindings=bindings, state_dir=child, complete=True)
+    with pytest.raises(ValueError):
+        drain.advance_shared_recovery_drain(bindings=bindings, guards=api.fence_api.guards,
+            history=api.fence_api.history, state_dir=child, qualify=remote.verify_retained)
+    reads = list(remote.reads)
+    with pytest.raises(ValueError):
+        drain.observe_shared_recovery_drain(bindings=bindings, guards=api.fence_api.guards,
+            history=api.fence_api.history, state_dir=state, qualify=remote.verify_retained)
+    assert remote.reads == reads
 
 
 @pytest.mark.timeout(420)
