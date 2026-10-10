@@ -73,7 +73,9 @@ class HTTPSDevelopmentRuntimeObserver(ManagementKubernetesTransport):
     def _private_inputs(self) -> None:
         database = self.request.database
         files = (*database.manager.retained.files.items(), *database.foundation.files.items(), *self.private_files.items())
-        if any(private_state._private_read(path, limit=4 * 1024**2) != raw for path, raw in files):
+        # Exact retained bytes also bound the read allocation. The reader's
+        # extra byte detects growth; every call still reopens and checks files.
+        if any(private_state._private_read(path, limit=min(len(raw), 4 * 1024**2)) != raw for path, raw in files):
             raise ValueError('development runtime observation inputs changed')
 
     def _get(self, document: dict[str, Any]) -> dict[str, Any]:

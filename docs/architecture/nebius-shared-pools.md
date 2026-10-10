@@ -624,6 +624,10 @@ as observation options; those options never authorize retry or activation.
 Each observation validates runtime history once before and once after its live
 reads, comparing the parent record, workload options and raw child-journal
 checksums. These views are not cached across child or pre-write boundaries.
+Every private-input check still reopens and compares all retained files, with
+the same ownership, permissions and link checks. Reads use the known retained
+byte length, capped at 4 MiB, plus one byte for growth detection; small inputs
+do not allocate the maximum buffer on every resource observation.
 The protected independent closed-runtime entrypoint connects this parent with
 phase-aware HTTPS qualification, provider/material access and publication binding.
 Its component tests do not establish installed readiness: dev-only activation
