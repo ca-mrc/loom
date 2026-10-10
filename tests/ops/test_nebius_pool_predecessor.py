@@ -226,6 +226,10 @@ def test_forward_staging_predecessor_uses_current_source_without_replaying_legac
         assert _snapshot(api.rows[key]) == _snapshot(original)
         assert api.rows[key]['metadata']['uid'] == original['metadata']['uid']
     assert {path: path.read_bytes() for path in legacy.history} == before
+    with pytest.raises(ValueError, match='shared pool staging predecessor unqualified'):
+        prepare_staging_forward(registration=replace(registration,
+            binding=replace(registration.binding, kube_system_uid=str(uuid4()))),
+            observation=observation, legacy=legacy, repo_root=Path(__file__).resolve().parents[2])
     altered = copy.deepcopy(observation)
     current = next(row for row in altered['resources'] if _key(row) == _key(controller))
     current['metadata']['uid'] = str(uuid4())
