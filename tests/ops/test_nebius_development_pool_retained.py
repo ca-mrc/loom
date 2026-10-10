@@ -958,15 +958,18 @@ def runtime_cloud_transport(request, publisher_cloud, monkeypatch, tmp_path):
         assert sdk.identity == scope.account_id and selection.parent_id == scope.tenant_id
         reads.append(('quotas', sdk.identity))
         amounts = {'nodes': 20, 'vcpu': 80, 'memory': 160 * 1024**3, 'storage': 2000 * 1024**3}
-        return SimpleNamespace(items=[_quota(identity[3], identity[4], amounts[name], 0, 1)
+        return SimpleNamespace(items=[_quota(identity[3], identity[4], amounts[name],
+            amounts[name] if mode['damage'] == 'exhausted' else 0, 1)
             for name, identity in spec.quota_identities.items()], next_page_token='')
     async def group(sdk, selection, **kwargs):
         assert sdk.identity == scope.account_id and selection.id == spec.node_group_id
         reads.append(('nodegroup', sdk.identity))
         return SimpleNamespace(metadata=SimpleNamespace(id=spec.node_group_id, resource_version=1,
             parent_id='foreign-cluster' if mode['damage'] == 'cluster' else config['cluster_id']),
-            spec=_node_group_spec(), status=SimpleNamespace(state=_enum('RUNNING'), node_count=0,
-                target_node_count=0, ready_node_count=0, reconciling=False, events=[]))
+            spec=_node_group_spec(), status=SimpleNamespace(
+                state=_enum('DELETING' if mode['damage'] == 'deleting' else 'RUNNING'), node_count=0,
+                target_node_count=1 if mode['damage'] == 'scaling' else 0, ready_node_count=0,
+                reconciling=mode['damage'] == 'scaling', events=[]))
     monkeypatch.setattr(quotas, 'QuotaAllowanceServiceClient',
         lambda sdk: SimpleNamespace(list=lambda *args, **kwargs: allowance(sdk, *args, **kwargs)))
     monkeypatch.setattr(mk8s, 'NodeGroupServiceClient',

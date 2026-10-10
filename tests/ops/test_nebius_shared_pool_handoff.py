@@ -534,11 +534,19 @@ def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writ
             if row['metadata']['name'] == 'loom-pool-gateway')
         assert result.workloads[_key(gateway)]['spec']['replicas'] == 0
         original = copy.deepcopy(inventory)
+        # Completed Jobs and Pods may have been garbage-collected normally.
+        # No absent historical object becomes a required deployment target.
+        job_uids = {row['metadata']['uid'] for row in inventory['jobs']}
+        inventory['jobs'] = []
+        inventory['pods'] = [row for row in inventory['pods']
+            if not any(owner['uid'] in job_uids for owner in row['metadata'].get('ownerReferences', []))]
+        assert observe().workloads == result.workloads
         original_capture = copy.deepcopy(staging_observation['resources'])
         for damage in ('clone', 'cronjob', 'root_uid', 'old_template', 'revived_gateway', 'missing_root', 'revision',
                 'foreign_writer', 'foreign_cron_writer', 'group_writer', 'foreign_subject', 'revived_gateway_role',
                 'cross_namespace', 'missing_role', 'captured_writer', 'unrecorded_job', 'job_uid', 'job_template',
-                'job_nonterminal', 'job_active', 'job_pod_running', 'job_pod_sidecar', 'job_pod_unowned'):
+                'job_nonterminal', 'job_active', 'job_pod_running', 'job_pod_sidecar', 'job_pod_unowned',
+                'job_absent_with_pod'):
             inventory.clear()
             inventory.update(copy.deepcopy(original))
             staging_observation['resources'] = copy.deepcopy(original_capture)
@@ -568,6 +576,8 @@ def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writ
                 elif damage == 'job_pod_sidecar':
                     pod['spec']['initContainers'] = [{'name': 'live-sidecar', 'restartPolicy': 'Always', 'image': 'test'}]
                     pod['status']['initContainerStatuses'] = [{'name': 'live-sidecar', 'state': {'running': {}}}]
+                elif damage == 'job_absent_with_pod':
+                    inventory['jobs'].remove(job)
                 else:
                     pod['metadata']['ownerReferences'] = []
             elif damage == 'captured_writer':
@@ -646,4 +656,68 @@ def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writ
                 observe()
             mode['revision'] = '500'
         staging_observation['resources'] = original_capture
+        assert calls and all(row.method == 'GET' for row in calls)
+
+
+@pytest.mark.timeout(420)
+async def test_shared_provider_uses_installed_observer_and_retains_scale_zero(
+        shared_runtime, staging_history, staging_observation, completed_pool, handoff,
+        publisher_cloud, monkeypatch, tmp_path):
+    """The common-pool preflight must use actual observer IAM/pool readbacks."""
+    import ssl
+
+    import httpx
+    from scripts.ops.nebius_development_runtime_observation import HTTPSDevelopmentRuntimeObserver
+    from scripts.ops.nebius_shared_pool_handoff_live import observe_shared_pool_provider
+    from tests.ops.test_nebius_development_pool_retained import (
+        runtime_cloud_transport,
+        runtime_http_inventory,
+    )
+
+    request, parent = shared_runtime
+    calls, documents, handler = runtime_http_inventory(request, parent, completed_pool[3].server, handoff[2])
+    operator, sessions, reads, closed, mode = runtime_cloud_transport(request, publisher_cloud, monkeypatch, tmp_path)
+    spec = request.database.manager.retained.request.registration.spec
+    with HTTPSDevelopmentRuntimeObserver(request=request,
+            api_server=request.database.foundation.inputs.config['kubernetes_api_server'],
+            ssl_context=ssl.create_default_context()) as observer:
+        for connection in (observer, observer.manager, observer.foundation):
+            connection.client.close()
+            connection.client = type(completed_pool[3].api.client)(base_url=connection.api_server,
+                transport=httpx.MockTransport(handler))
+
+        async def observe():
+            return await observe_shared_pool_provider(runtime=request, observation=staging_observation,
+                legacy=staging_history, repo_root=ROOT, development=observer, operator_credentials=operator)
+
+        result = await observe()
+        assert result.provider.node_group.id == spec.node_group_id
+        assert result.provider.node_count == result.provider.ready_node_count == result.provider.target_node_count == 0
+        assert result.provider.provider_capacity_state == 'available' and result.provider.autoscaler_state == 'ready'
+        assert reads == [('quotas', request.collector_scope.account_id), ('nodegroup', request.collector_scope.account_id)]
+        assert sessions == closed and not sessions[-1].path.exists()
+        assert 'provider' not in repr(result) and all(row.method == 'GET' for row in calls)
+        for state in ('exhausted', 'scaling'):
+            mode['damage'] = state
+            current = await observe()
+            if state == 'exhausted':
+                assert current.provider.used_nodes == current.provider.quota_nodes
+            else:
+                assert current.provider.autoscaler_state == 'scaling'
+
+        for damage in ('deleting', 'cluster', 'credential'):
+            mode['damage'] = damage
+            if damage == 'credential':
+                secret = next(row for row in documents.values() if row['kind'] == 'Secret'
+                    and row.get('data', {}).get('credentials.json')
+                    and row['metadata']['namespace'] == spec.participants[0].execution_namespace.name)
+                previous_uid = secret['metadata']['uid']
+                secret['metadata']['uid'] = str(uuid4())
+                before = len(reads)
+            with pytest.raises(ValueError, match='shared pool provider unqualified'):
+                await observe()
+            if damage == 'credential':
+                assert len(reads) == before  # Fail before exchanging a mismatched installed identity.
+                secret['metadata']['uid'] = previous_uid
+            assert sessions == closed
         assert calls and all(row.method == 'GET' for row in calls)
