@@ -16,6 +16,7 @@ from scripts.ops.nebius_development_management_foundation import (
     RetainedDevelopmentState,
     load_retained_foundation,
 )
+from scripts.ops.nebius_development_pool_registration import retained_development_participant
 from scripts.ops.nebius_development_pool_retained import RetainedDevelopmentPoolReference
 from scripts.ops.nebius_development_runtime_render import (
     DevelopmentManagerRuntime,
@@ -94,7 +95,7 @@ def prepare_database_runtime(reference: RetainedDevelopmentPoolReference, *,
                 or foundation.bootstrap['material']['loom-platform-auth']['secret-store-master-key']
                     != shared_material['secret_store_master_keys']):
             raise ValueError
-        participant, = manager.retained.request.registration.spec.participants
+        participant = retained_development_participant(manager.retained.request)
         name = 'loom-dev-runtime-' + operation_id.hex
         labels = {'loom.nebius/development-runtime-operation': str(operation_id)}
 

@@ -746,8 +746,11 @@ can be created; the transaction uses the manager's existing database.
 One anchored parent operation per manager retains the actual closed-registration
 receipt. Changed inputs, lost journals, replaced resources and uncertain creates
 cannot start another registration. TLS-only renewal does not change this database
-identity. This fresh composition accepts the one shared-development participant;
-it does not attach staging/production, create a physical worker pool, deliver
+identity. This fresh composition selects the shared-development participant by
+its retained application data-environment ID, not its position in the catalog.
+The initial closed catalog can retain other UID-bound participants in the same
+pool; their publication and live attachment require separate protected
+qualification. Registration does not activate staging/production, create a physical worker pool, deliver
 machine-token Secrets or grant Job-write roles. It is an internal protected stage,
 not a deployed CLI or a replacement for runtime delivery, sole-writer qualification
 and admission activation. Its completion explicitly reports admission closed and
@@ -755,7 +758,10 @@ writer migration incomplete.
 
 The protected independent-dev **pool installer** composes that internal stage
 without legacy cutover history. Its private intent contains a complete task and
-application-build catalog, but no operator-supplied execution namespace UIDs.
+application-build catalog, but no operator-supplied development execution/build
+namespace UIDs. Other participants retain their existing namespace bindings;
+the installer neither creates nor adopts their namespaces. The registration
+adapter reads every participant namespace UID before writing the closed catalog.
 Before writes it checks the original publication/runtime digest, shared source and
 schema bindings, trial/task-image target capabilities, dedicated builder support
 and all machine-token hashes. Initial namespace/registration writes require
@@ -766,7 +772,10 @@ UIDs into the frozen registration. Both namespaces remain restricted at this sta
 
 Only after the exact closed SQL commit receipt does it deliver immutable,
 scope-specific machine Secrets, the profile catalog, a gateway ServiceAccount and
-a zero-replica gateway Deployment. It grants no RBAC and does not modify the
+a zero-replica gateway Deployment. Only the selected dev participant's tokens
+are delivered, together with the common observer and gateway tokens; other
+participant credentials stay private for their separately qualified handoff.
+It grants no RBAC and does not modify the
 running manager, shared service/control plane, collector, physical pool or staging.
 One original-installation anchor and phase journal prevent changed inputs, lost
 state or uncertain creates from starting another installation. Earlier material
@@ -805,6 +814,14 @@ pool read uses the actual collector credential. It neither publishes capacity no
 creates cloud grants. Each durable phase checks current publication/cloud
 authority; repeated resource observations reuse the frozen plan while rechecking
 private bytes and live identities.
+
+The manager retains the complete common profile catalog. Dev runtime preparation
+selects only profiles referenced by its retained data participant when deriving
+build credentials, registry scope and admission policy. Other participants retain
+their own published runtime and storage bindings. This allows one closed catalog
+without making staging a dev runtime resource or extending dev credentials to
+staging storage. It does not establish a completed staging handoff or sole-writer
+authority over the physical pool.
 
 SQL/catalog completion requires an exact owned successful Job/Pod and bounded
 receipt. Running manager, service, control-plane and actuator processes prove

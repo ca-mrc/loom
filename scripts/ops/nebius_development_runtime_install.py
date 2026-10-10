@@ -35,6 +35,10 @@ from scripts.ops.nebius_development_collector_runtime import (
     prepare_collector_runtime,
 )
 from scripts.ops.nebius_development_network_runtime import prepare_network_runtime
+from scripts.ops.nebius_development_pool_registration import (
+    development_profile_catalog,
+    retained_development_participant,
+)
 from scripts.ops.nebius_development_runtime_setup import (
     DevelopmentDatabaseRuntime,
     database_runtime_documents,
@@ -93,15 +97,16 @@ def prepare_runtime_install(request: DevelopmentRuntimeInstallRequest) -> Develo
         database = request.database
         config = database.foundation.inputs.config
         spec = database.manager.retained.request.registration.spec
-        participant, = spec.participants
+        participant = retained_development_participant(database.manager.retained.request)
+        profiles = development_profile_catalog(database.manager.retained.request)
         namespaces = {'loom-dev', database.manager.retained.request.retained.binding.namespace,
             participant.execution_namespace.name, participant.build_namespace.name}
         if len(namespaces) != 4:
             raise ValueError
         collector_key = collector_public_key(scope=request.collector_scope, config=config,
             credential=request.collector_credential)
-        repositories = {profile.settings.registry_repository for profile in spec.profiles.task_images}
-        repositories.update(profile.settings.registry_repository for profile in spec.profiles.application_images)
+        repositories = {profile.settings.registry_repository for profile in profiles.task_images}
+        repositories.update(profile.settings.registry_repository for profile in profiles.application_images)
         registry_key = registry_public_key(scope=request.registry_scope, config=config,
             credential=request.registry_credential, repositories=tuple(sorted(repositories)))
         if (collector_key == registry_key or any(getattr(request.collector_scope, field) == getattr(request.registry_scope, field)

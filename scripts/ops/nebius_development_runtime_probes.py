@@ -26,6 +26,7 @@ from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_database_readiness import qualify_database_backend, qualify_database_pod
 from scripts.ops.nebius_development_bootstrap import _secret_documents
 from scripts.ops.nebius_development_install import DevelopmentInstallRequest, _storage_observation
+from scripts.ops.nebius_development_pool_registration import retained_development_participant
 from scripts.ops.nebius_development_runtime_install import DevelopmentRuntimeInstallRequest
 from scripts.ops.nebius_development_runtime_observation import HTTPSDevelopmentRuntimeObserver
 from scripts.ops.nebius_development_runtime_readiness import qualify_started_deployment
@@ -170,7 +171,7 @@ class HTTPSDevelopmentRuntimeProbes(HTTPSDevelopmentRuntimeObserver):
         elif namespace == 'loom-dev' and name in {'loom-service', 'loom-control-plane'}:
             component = 'service' if name == 'loom-service' else 'controller'
         else:
-            participant, = self.request.database.manager.retained.request.registration.spec.participants
+            participant = retained_development_participant(self.request.database.manager.retained.request)
             if (namespace != participant.execution_namespace.name
                     or name != 'loom-execution-actuator'):
                 raise ValueError
@@ -200,7 +201,7 @@ class HTTPSDevelopmentRuntimeProbes(HTTPSDevelopmentRuntimeObserver):
         try:
             component, workload, before = self._running(key, state_dir)
             spec = self.request.database.manager.retained.request.registration.spec
-            participant, = spec.participants
+            participant = retained_development_participant(self.request.database.manager.retained.request)
             machine, = (row for row in spec.machines
                 if row.participant_id == participant.participant_id and row.workload_scope == 'environment')
             wanted = expected_pool_runtime_settings(component, workload,

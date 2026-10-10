@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml  # type: ignore[import-untyped]
+from scripts.ops.nebius_development_pool_registration import retained_development_participant
 from scripts.ops.nebius_development_runtime_setup import DevelopmentDatabaseRuntime
 from scripts.ops.nebius_development_shared_runtime import prepare_shared_runtime
 from scripts.ops.nebius_pool_runtime import _environment
@@ -34,7 +35,7 @@ def prepare_actuator_runtime(request: DevelopmentDatabaseRuntime) -> Development
         prepare_shared_runtime(request)
         manager = request.manager
         spec = manager.retained.request.registration.spec
-        participant, = spec.participants
+        participant = retained_development_participant(manager.retained.request)
         machine, = (row for row in spec.machines
             if row.participant_id == participant.participant_id and row.workload_scope == 'environment')
         target_id = request.foundation.inputs.config['target_id']

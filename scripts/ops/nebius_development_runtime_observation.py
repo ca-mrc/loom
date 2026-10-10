@@ -14,6 +14,7 @@ from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_development_bootstrap import _secret_documents
 from scripts.ops.nebius_development_install import DevelopmentInstallRequest, _storage_observation
 from scripts.ops.nebius_development_management_foundation import HTTPSRetainedDevelopmentFoundation
+from scripts.ops.nebius_development_pool_registration import retained_development_participant
 from scripts.ops.nebius_development_pool_registration_live import (
     HTTPSRetainedDevelopmentManagementAPI,
 )
@@ -81,7 +82,7 @@ class HTTPSDevelopmentRuntimeObserver(ManagementKubernetesTransport):
     def _get(self, document: dict[str, Any]) -> dict[str, Any]:
         version, plural, cluster = _READ_PATHS[document['kind']]
         namespace = document['metadata'].get('namespace')
-        participant, = self.request.database.manager.retained.request.registration.spec.participants
+        participant = retained_development_participant(self.request.database.manager.retained.request)
         allowed = {'loom-dev', self.manager.binding.namespace, participant.execution_namespace.name, participant.build_namespace.name}
         if document['apiVersion'] != version or (namespace is not None if cluster else namespace not in allowed):
             raise ValueError

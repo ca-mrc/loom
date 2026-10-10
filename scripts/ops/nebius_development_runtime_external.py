@@ -12,6 +12,7 @@ from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_development_build_cloud import qualify_registry_cloud
 from scripts.ops.nebius_development_collector_cloud import qualify_collector_cloud
 from scripts.ops.nebius_development_collector_runtime import prepare_collector_runtime
+from scripts.ops.nebius_development_pool_registration import development_profile_catalog
 from scripts.ops.nebius_development_runtime_install import DevelopmentRuntimeInstallRequest
 from scripts.ops.nebius_pool_runtime import _RetainedPoolCollectorSettings
 
@@ -53,9 +54,9 @@ async def qualify_runtime_cloud(*, request: DevelopmentRuntimeInstallRequest,
     try:
         original = private_state._private_read(operator_credentials, limit=1024**2)
         config = request.database.foundation.inputs.config
-        spec = request.database.manager.retained.request.registration.spec
-        repositories = tuple(sorted({row.settings.registry_repository for row in spec.profiles.task_images}
-            | {row.settings.registry_repository for row in spec.profiles.application_images}))
+        profiles = development_profile_catalog(request.database.manager.retained.request)
+        repositories = tuple(sorted({row.settings.registry_repository for row in profiles.task_images}
+            | {row.settings.registry_repository for row in profiles.application_images}))
         async with asyncio.timeout(180):
             sdk = SDK(credentials_file_name=str(operator_credentials), user_agent_prefix='loom-dev-runtime/1.0')
             try:

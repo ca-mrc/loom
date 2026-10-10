@@ -525,7 +525,7 @@ cutover's inputs or manually patching its live workload.
 Do not hand-mount credentials or treat the renderer as installation authority.
 
 The internal independent-dev pool-registration stage can qualify a completed dev
-manager and register its shared-development participant in that manager's database
+manager and register the initial participant catalog in that manager's database
 with admission **closed**. It reuses retained installation history and the existing
 fixed registration Job, not legacy migration receipts. It is not exposed as a
 standalone operator command. A closed receipt does not authorize task/build
@@ -554,11 +554,18 @@ pin the selection. Inputs live at
 with owner-only permissions. The `loom.nebius-development-pool-inputs.v1` input
 contains `retained` original-management history, `operator_connection`, `catalog`
 and private `tokens` keyed by machine UUID. The catalog follows
-`loom.pool-installation.v1` but omits `uid` in both participant namespace bindings:
-only actual namespace-create receipts may supply those values. It must include
+`loom.pool-installation.v1` but omits `uid` in both **development** participant
+namespace bindings: only actual namespace-create receipts may supply those values.
+Dev is selected by its retained application data-environment ID, not list order.
+Other participants in the same initial catalog must retain their bound namespace
+UIDs; this preparation creates no namespaces or machine-token Secrets for them.
+Do not treat catalog inclusion as a qualified staging attachment: publication,
+live identities, writer fencing and recovery still need the protected handoff.
+The catalog is immutable after initial registration; do not install a dev-only
+catalog expecting a later replay to add staging. Dev profiles must include
 trial/task-image target capabilities and dedicated application-image-build profiles;
 published runtime binary/image identities and the original shared storage/schema
-must match. Task-image profiles read ordinary TaskSet bundles from
+must match the retained dev installation. Dev task-image profiles read ordinary TaskSet bundles from
 `buckets.artifacts`; application-image profiles read personal application archives
 from `buckets.source`. These are distinct intake paths even though both use the
 shared build pool. Do not point task-image profiles at the application-source

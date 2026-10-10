@@ -10,6 +10,7 @@ import copy
 from dataclasses import dataclass
 from typing import Any
 
+from scripts.ops.nebius_development_pool_registration import retained_development_participant
 from scripts.ops.nebius_development_runtime_install import DevelopmentRuntimeInstallRequest
 from scripts.ops.nebius_development_runtime_retained import (
     CompletedDevelopmentRuntime,
@@ -48,7 +49,7 @@ def prepare_development_activation(request: DevelopmentRuntimeInstallRequest) ->
         database = runtime.request.database
         registration = database.manager.retained.request.registration
         spec, binding = registration.spec, registration.binding
-        participant, = spec.participants
+        participant = retained_development_participant(database.manager.retained.request)
         if binding.namespace != 'loom-nebius-management-dev' or database.foundation.inputs.config['namespace'] != 'loom-dev':
             raise ValueError
         rendered = render_gateway(spec, namespace=binding.namespace,
