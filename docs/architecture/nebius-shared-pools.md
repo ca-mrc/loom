@@ -1085,6 +1085,17 @@ completed stop writes. Observation ends when restoration starts or recovery is
 terminal. The child does not restore templates, grant rights or
 reopen intake; those remain dependent terminal recovery steps.
 
+Within shared recovery's revoke phase, the machine-retirement child binds the
+new manager's actual database transport and uses the existing exact-scope token
+revocation transaction. It requires the completed stop journal and fresh current
+workload/database drain. Intent is recorded only after the transport's final
+pre-dispatch checks; busy checks leave it prepared, while any uncertain persisted
+intent is observation-only. Unexplained preexisting revocation is not adopted.
+Machine readback also rechecks the terminal pool and participant fences after
+retained-runtime qualification. A successful machine receipt does not complete
+recovery's revoke phase: gateway RBAC retirement and effective permission checks
+must still finish before any current-staging template or Role restoration.
+
 The shared Role child reduces only the two source-qualified staging worker/build
 Roles, preserving their UIDs and existing bindings. Each rules-and-annotations
 PATCH tests the current UID, resourceVersion and rules. Mutation intent precedes
