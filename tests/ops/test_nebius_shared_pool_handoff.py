@@ -517,12 +517,33 @@ def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writ
             if row['metadata']['name'] == 'loom-pool-gateway')
         assert result.workloads[_key(gateway)]['spec']['replicas'] == 0
         original = copy.deepcopy(inventory)
+        original_capture = copy.deepcopy(staging_observation['resources'])
         for damage in ('clone', 'cronjob', 'root_uid', 'old_template', 'revived_gateway', 'missing_root', 'revision',
                 'foreign_writer', 'foreign_cron_writer', 'group_writer', 'foreign_subject', 'revived_gateway_role',
-                'cross_namespace', 'missing_role'):
+                'cross_namespace', 'missing_role', 'captured_writer'):
             inventory.clear()
             inventory.update(copy.deepcopy(original))
-            if damage in {'foreign_writer', 'foreign_cron_writer', 'group_writer', 'cross_namespace'}:
+            staging_observation['resources'] = copy.deepcopy(original_capture)
+            if damage == 'captured_writer':
+                namespace = staging_history.context.inputs.installation.participants[0].execution_namespace.name
+                clone = copy.deepcopy(controller)
+                clone['metadata'].update(name='captured-foreign-writer', namespace=namespace, uid=str(uuid4()))
+                clone['spec']['template']['spec']['serviceAccountName'] = 'captured-foreign-writer'
+                role = {'apiVersion': 'rbac.authorization.k8s.io/v1', 'kind': 'Role',
+                    'metadata': {'name': 'captured-foreign-writer', 'namespace': namespace,
+                        'uid': str(uuid4()), 'resourceVersion': '401'},
+                    'rules': [{'apiGroups': ['batch'], 'resources': ['jobs'], 'verbs': ['create']}]}
+                binding = {'apiVersion': role['apiVersion'], 'kind': 'RoleBinding',
+                    'metadata': {'name': 'captured-foreign-writer', 'namespace': namespace,
+                        'uid': str(uuid4()), 'resourceVersion': '401'},
+                    'roleRef': {'apiGroup': 'rbac.authorization.k8s.io', 'kind': 'Role', 'name': 'captured-foreign-writer'},
+                    'subjects': [{'kind': 'ServiceAccount', 'name': 'captured-foreign-writer', 'namespace': namespace}]}
+                # A capture is observation, not authority: adding the same
+                # unrendered writer to both inputs must not legitimize it.
+                for row in (clone, role, binding):
+                    staging_observation['resources'].append(copy.deepcopy(row))
+                    inventory[kinds[row['kind']]].append(row)
+            elif damage in {'foreign_writer', 'foreign_cron_writer', 'group_writer', 'cross_namespace'}:
                 role = {'apiVersion': 'rbac.authorization.k8s.io/v1', 'kind': 'ClusterRole',
                     'metadata': {'name': 'unexpected-writer', 'uid': str(uuid4()), 'resourceVersion': '401'},
                     'rules': [{'apiGroups': ['batch'], 'resources': ['cronjobs' if damage == 'foreign_cron_writer' else 'jobs'],
@@ -578,4 +599,5 @@ def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writ
             with pytest.raises(ValueError, match='shared pool writer census unqualified'):
                 observe()
             mode['revision'] = '500'
+        staging_observation['resources'] = original_capture
         assert calls and all(row.method == 'GET' for row in calls)
