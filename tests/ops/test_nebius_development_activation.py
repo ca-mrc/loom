@@ -5,8 +5,11 @@ import copy
 import hashlib
 import importlib
 import json
+import ssl
 from pathlib import Path
+from uuid import uuid4
 
+import httpx
 import pytest
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_management_stage import _canonical_quantities
@@ -318,3 +321,114 @@ def test_activation_accepts_only_harmless_kubernetes_policy_defaults(completed_r
     plan = prepare_development_activation(request)
     assert len(plan.build_policy) == 2
     assert plan.build_namespace_target['metadata']['labels']['pod-security.kubernetes.io/enforce'] == 'privileged'
+
+
+@pytest.fixture
+def gateway_permission_review(completed_runtime):
+    from scripts.ops import nebius_development_activation as activation
+    from scripts.ops.nebius_management_transport import ManagementKubernetesTransport
+
+    _, request, _, _, _ = completed_runtime
+    plan = activation.prepare_development_activation(request)
+    participant, = request.database.manager.retained.request.registration.spec.participants
+    manager = 'loom-nebius-management-dev'
+    pool_names = sorted([participant.execution_namespace.name, participant.build_namespace.name])
+    state = {'subject': {'kind': 'ServiceAccount', 'namespace': manager, 'name': 'loom-pool-gateway'},
+        'granted': False, 'damage': None, 'calls': [], 'binding_reads': 0}
+    binding_uid = str(uuid4())
+
+    def respond(message):
+        state['calls'].append(message)
+        path = message.url.path
+        if message.method == 'GET':
+            assert 'Impersonate-User' not in message.headers
+            assert path in {'/apis/rbac.authorization.k8s.io/v1/rolebindings',
+                '/apis/rbac.authorization.k8s.io/v1/clusterrolebindings'}
+            kind = 'RoleBinding' if path.endswith('/rolebindings') else 'ClusterRoleBinding'
+            items, continuation = [], ''
+            if kind == 'RoleBinding':
+                # Put the foreign grant on page two so incomplete discovery fails.
+                if message.url.params.get('continue') == 'next':
+                    items = [{'apiVersion': 'rbac.authorization.k8s.io/v1', 'kind': kind,
+                        'metadata': {'name': 'outside-dev', 'namespace': 'loom-nebius-platform-execution',
+                            'uid': binding_uid, 'resourceVersion': '1'},
+                        'roleRef': {'apiGroup': 'rbac.authorization.k8s.io', 'kind': 'Role', 'name': 'foreign'},
+                        'subjects': [copy.deepcopy(state['subject'])]}]
+                    if state['damage'] == 'binding-drift' and state['binding_reads'] > 1:
+                        items[0]['metadata']['resourceVersion'] = '2'
+                else:
+                    state['binding_reads'] += 1
+                    continuation = 'next'
+            return httpx.Response(200, json={'apiVersion': 'rbac.authorization.k8s.io/v1',
+                'kind': kind + 'List', 'metadata': {'resourceVersion': '50', 'continue': continuation}, 'items': items})
+        # No persistent POST, PATCH, DELETE, token issue, or staging guard call.
+        assert message.method == 'POST'
+        assert path == '/apis/authorization.k8s.io/v1/selfsubjectrulesreviews'
+        assert message.headers['Impersonate-User'] == f'system:serviceaccount:{manager}:loom-pool-gateway'
+        assert message.headers.get_list('Impersonate-Group') == [
+            'system:serviceaccounts', 'system:serviceaccounts:' + manager, 'system:authenticated']
+        namespace = json.loads(message.content)['spec']['namespace']
+        rules = []
+        if state['granted']:
+            rules.append({'apiGroups': [''], 'resources': ['namespaces'], 'verbs': ['get'], 'resourceNames': pool_names})
+            if namespace in pool_names:
+                rules.extend([
+                    {'apiGroups': ['batch'], 'resources': ['jobs'], 'verbs': ['get', 'create', 'delete']},
+                    {'apiGroups': [''], 'resources': ['configmaps'], 'verbs': ['get', 'create', 'delete']},
+                    {'apiGroups': [''], 'resources': ['pods'], 'verbs': ['get', 'list', 'delete']},
+                ])
+        if state['damage'] == 'staging-write' and namespace == 'loom-nebius-platform-execution':
+            rules.append({'apiGroups': ['batch'], 'resources': ['jobs'], 'verbs': ['delete'], 'resourceNames': ['staging-task']})
+        return httpx.Response(201, json={'apiVersion': 'authorization.k8s.io/v1', 'kind': 'SelfSubjectRulesReview',
+            'spec': {}, 'status': {'incomplete': state['damage'] == 'incomplete', 'resourceRules': rules,
+                'nonResourceRules': [], 'evaluationError': ''}})
+
+    transport = ManagementKubernetesTransport(api_server=request.database.foundation.inputs.config['kubernetes_api_server'],
+        ssl_context=ssl.create_default_context())
+    transport.client.close()
+    transport.client = httpx.Client(base_url=transport.api_server, transport=httpx.MockTransport(respond))
+    try:
+        yield activation, request, plan, transport, state
+    finally:
+        transport.client.close()
+
+
+def test_activation_gateway_review_detects_foreign_direct_and_inherited_write_grants(gateway_permission_review):
+    module, request, _, transport, state = gateway_permission_review
+    review = getattr(module, 'review_development_gateway_permissions', None)
+    assert callable(review), 'fresh activation must inspect effective gateway rights without a migration request'
+    subjects = [state['subject'],
+        {'kind': 'User', 'apiGroup': 'rbac.authorization.k8s.io',
+            'name': 'system:serviceaccount:loom-nebius-management-dev:loom-pool-gateway'},
+        *({'kind': 'Group', 'apiGroup': 'rbac.authorization.k8s.io', 'name': name} for name in (
+            'system:serviceaccounts:loom-nebius-management-dev', 'system:serviceaccounts', 'system:authenticated'))]
+    for granted in (False, True):
+        state['granted'] = granted
+        for subject in subjects:
+            state['subject'], state['damage'] = subject, None
+            observed = review(request, transport=transport, granted=granted)
+            assert 'loom-nebius-platform-execution' in observed
+            assert {'loom-dev', 'loom-nebius-management-dev'} <= set(observed)
+            state['damage'] = 'staging-write'
+            with pytest.raises(ValueError, match='development gateway permissions unqualified'):
+                review(request, transport=transport, granted=granted)
+
+
+def test_activation_gateway_review_fails_closed_on_uncertainty_or_changed_inputs(gateway_permission_review):
+    module, request, _, transport, state = gateway_permission_review
+    review = getattr(module, 'review_development_gateway_permissions', None)
+    assert callable(review), 'fresh activation effective gateway permission review is missing'
+    for damage in ('binding-drift', 'incomplete'):
+        state.update(damage=damage, binding_reads=0)
+        with pytest.raises(ValueError, match='development gateway permissions unqualified'):
+            review(request, transport=transport, granted=False)
+    state.update(damage=None, calls=[])
+    endpoint = transport.api_server
+    transport.api_server = 'https://different-cluster.example'
+    with pytest.raises(ValueError, match='development gateway permissions unqualified'):
+        review(request, transport=transport, granted=False)
+    assert not state['calls']
+    transport.api_server = endpoint
+    with pytest.raises(ValueError, match='development gateway permissions unqualified'):
+        review(request, transport=transport, granted='false')
+    assert not state['calls']
