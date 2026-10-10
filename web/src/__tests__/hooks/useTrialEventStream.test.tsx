@@ -6,6 +6,7 @@
  * up a real SSE server.
  */
 import { act, renderHook } from "@testing-library/react";
+import { StrictMode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { useTrialEventStream } from "../../hooks/useTrialEventStream";
@@ -255,6 +256,160 @@ describe("useTrialEventStream", () => {
       expect(instances).toHaveLength(2);
     },
   );
+
+  describe("subscription ownership", () => {
+    const options = {
+      baseUrl: "http://svc",
+      eventSourceCtor: FakeEventSource as unknown as typeof EventSource,
+    };
+
+    it("keeps a single retry across repeated rollovers and ignores retired sources", () => {
+      vi.useFakeTimers();
+      const { result } = renderHook(() => useTrialEventStream("trial-1", options));
+      const original = instances[0];
+      act(() => {
+        original.emitOpen();
+        original.emitMessage({ seq: 0, kind: "trial_start" });
+        original.emitTyped("reconnect", { last_seq: 0 });
+        original.emitTyped("reconnect", { last_seq: 0 });
+        original.emitMessage({ seq: 99, kind: "step_end" });
+        original.emitError();
+        original.emitTyped("complete", { last_seq: 99 });
+      });
+      expect(result.current.status).toBe("reconnect");
+      act(() => vi.advanceTimersByTime(30_000));
+      expect(instances).toHaveLength(2);
+      expect(instances[1].url).toContain("after_seq=0");
+
+      act(() => {
+        instances[1].emitOpen();
+        instances[1].emitMessage({ seq: 1, kind: "step_start" });
+        instances[1].emitTyped("reconnect", { last_seq: 1 });
+      });
+      act(() => vi.advanceTimersByTime(30_000));
+      expect(instances).toHaveLength(3);
+      expect(instances[2].url).toContain("after_seq=1");
+      act(() => {
+        instances[2].emitOpen();
+        instances[2].emitMessage({ seq: 2, kind: "step_end" });
+      });
+      expect(result.current.events.map((event) => event.seq)).toEqual([0, 1, 2]);
+      expect(instances.filter((source) => !source.closed)).toEqual([instances[2]]);
+    });
+
+    it("keeps completion final even if the retired source calls back", () => {
+      vi.useFakeTimers();
+      const { result } = renderHook(() => useTrialEventStream("trial-1", options));
+      act(() => {
+        instances[0].emitMessage({ seq: 0, kind: "trial_end" });
+        instances[0].emitTyped("complete", { last_seq: 0 });
+        instances[0].emitMessage({ seq: 1, kind: "step_end" });
+        instances[0].emitOpen();
+        instances[0].emitError();
+        instances[0].emitTyped("reconnect", { last_seq: 1 });
+        vi.advanceTimersByTime(30_000);
+      });
+      expect(result.current.status).toBe("complete");
+      expect(result.current.events.map((event) => event.seq)).toEqual([0]);
+      expect(instances).toHaveLength(1);
+      expect(instances[0].closed).toBe(true);
+    });
+
+    it.each(["unmount", "disable", "trial", "base"])(
+      "cancels a pending rollover on %s",
+      (change) => {
+        vi.useFakeTimers();
+        const initialProps = { trialId: "trial-1", baseUrl: "http://svc", enabled: true };
+        const { rerender, unmount } = renderHook(
+          ({ trialId, ...scope }) => useTrialEventStream(trialId, { ...options, ...scope }),
+          { initialProps },
+        );
+        act(() => instances[0].emitTyped("reconnect", { last_seq: -1 }));
+        if (change === "unmount") unmount();
+        else if (change === "disable") rerender({ ...initialProps, enabled: false });
+        else if (change === "trial") rerender({ ...initialProps, trialId: "trial-2" });
+        else rerender({ ...initialProps, baseUrl: "http://other-svc" });
+
+        act(() => vi.advanceTimersByTime(30_000));
+        expect(instances).toHaveLength(change === "unmount" || change === "disable" ? 1 : 2);
+        expect(instances[0].closed).toBe(true);
+      },
+    );
+
+    it("preserves accepted events when disabled and resumes the same scope", () => {
+      const { result, rerender } = renderHook(
+        (enabled) => useTrialEventStream("trial-1", { ...options, enabled }),
+        { initialProps: true },
+      );
+      act(() => {
+        instances[0].emitOpen();
+        instances[0].emitMessage({ seq: 0, kind: "trial_start" });
+      });
+      rerender(false);
+      expect(instances[0].closed).toBe(true);
+      expect(result.current.events.map((event) => event.seq)).toEqual([0]);
+      act(() => instances[0].emitMessage({ seq: 99, kind: "step_end" }));
+      rerender(true);
+      expect(result.current.status).toBe("connecting");
+      expect(instances[1].url).toContain("after_seq=0");
+      act(() => instances[1].emitMessage({ seq: 1, kind: "step_start" }));
+      expect(result.current.events.map((event) => event.seq)).toEqual([0, 1]);
+    });
+
+    it("does not render old events while a disabled new scope waits for its effect", () => {
+      const renders: Array<{ trialId: string; seqs: Array<number | undefined>; status: string }> = [];
+      const { rerender } = renderHook(
+        ({ trialId, enabled }) => {
+          const stream = useTrialEventStream(trialId, { ...options, enabled });
+          renders.push({ trialId, seqs: stream.events.map((event) => event.seq), status: stream.status });
+          return stream;
+        },
+        { initialProps: { trialId: "trial-1", enabled: true } },
+      );
+      act(() => {
+        instances[0].emitOpen();
+        instances[0].emitMessage({ seq: 8, kind: "step_end" });
+      });
+      rerender({ trialId: "trial-2", enabled: false });
+      const newScopeRenders = renders.filter((render) => render.trialId === "trial-2");
+      expect(newScopeRenders.length).toBeGreaterThan(0);
+      for (const render of newScopeRenders) {
+        expect(render).toEqual({ trialId: "trial-2", seqs: [], status: "connecting" });
+      }
+      expect(instances).toHaveLength(1);
+    });
+
+    it("owns one live source through StrictMode effect cleanup and setup", () => {
+      const { result, unmount } = renderHook(() => useTrialEventStream("trial-1", options), {
+        wrapper: StrictMode,
+      });
+      expect(instances.filter((source) => !source.closed)).toHaveLength(1);
+      act(() => instances.at(-1)!.emitMessage({ seq: 0, kind: "trial_start" }));
+      expect(result.current.events.map((event) => event.seq)).toEqual([0]);
+      unmount();
+      expect(instances.every((source) => source.closed)).toBe(true);
+    });
+
+    it("leaves ordinary transport retry with the same native source", () => {
+      vi.useFakeTimers();
+      const { result } = renderHook(() => useTrialEventStream("trial-1", options));
+      act(() => {
+        instances[0].emitMessage({ seq: 0, kind: "trial_start" });
+        instances[0].emitError();
+        vi.advanceTimersByTime(30_000);
+      });
+      expect(result.current.status).toBe("error");
+      expect(instances).toHaveLength(1);
+      expect(instances[0].closed).toBe(false);
+      act(() => {
+        instances[0].emitOpen();
+        instances[0].emitMessage({ seq: 0, kind: "trial_start" });
+        instances[0].emitMessage({ seq: 1, kind: "step_start" });
+      });
+      expect(result.current.status).toBe("open");
+      expect(result.current.events.map((event) => event.seq)).toEqual([0, 1]);
+    });
+  });
 
   it("status flips to 'error' on EventSource error", () => {
     const { result } = renderHook(() =>

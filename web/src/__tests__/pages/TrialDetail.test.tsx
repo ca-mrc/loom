@@ -10,7 +10,7 @@
  * we surface a "Retry" button rather than the regular "Load more"
  * (which mis-implies more pages exist).
  */
-import { screen, waitFor } from "@testing-library/react";
+import { act, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -187,6 +187,52 @@ describe("TrialDetail trajectory section", () => {
     window.localStorage.clear();
     window.localStorage.setItem("loom_token", "test-token");
     vi.restoreAllMocks();
+  });
+
+  it("displays new trajectory events after the server rolls over the real hook's stream", async () => {
+    const sources: TrialEventSource[] = [];
+    class TrialEventSource extends EventTarget {
+      onopen: (() => void) | null = null;
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      onerror: (() => void) | null = null;
+      closed = false;
+      constructor(readonly url: string) {
+        super();
+        sources.push(this);
+      }
+      close(): void { this.closed = true; }
+      message(payload: unknown): void {
+        this.onmessage?.(new MessageEvent("message", { data: JSON.stringify(payload) }));
+      }
+    }
+    vi.stubGlobal("EventSource", TrialEventSource);
+    const fetchMock = fetchSpy({ ok: true, body: { events: [], next_cursor: null } });
+    renderWithProviders(<Routes><Route path="/trials/:trialId" element={<TrialDetail />} /></Routes>, {
+      route: `/trials/${TRIAL_ID}`,
+    });
+    await waitFor(() => expect(sources).toHaveLength(1));
+    act(() => {
+      sources[0].onopen?.();
+      sources[0].message({ seq: 0, kind: "trial_start", trial_id: TRIAL_ID });
+      sources[0].dispatchEvent(new MessageEvent("reconnect", {
+        data: JSON.stringify({ reason: "max_connection_sec", last_seq: 0 }),
+      }));
+    });
+    expect(screen.getByText("Trial started")).toBeInTheDocument();
+    expect(screen.getByText("1 events · reconnecting…")).toBeInTheDocument();
+
+    await waitFor(() => expect(sources).toHaveLength(2), { timeout: 3_000 });
+    expect(sources[0].closed).toBe(true);
+    expect(sources[1].url).toContain(`/trials/${TRIAL_ID}/stream?after_seq=0`);
+    act(() => {
+      sources[1].onopen?.();
+      sources[1].message({ seq: 0, kind: "trial_start", trial_id: TRIAL_ID });
+      sources[1].message({ seq: 1, kind: "step_start", step_id: "after-rollover", trial_id: TRIAL_ID });
+    });
+    expect(screen.getAllByText("Trial started")).toHaveLength(1);
+    expect(screen.getByText("Step after-rollover started")).toBeInTheDocument();
+    expect(screen.getByText("2 events · live")).toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/trajectory"))).toBe(false);
   });
 
   it("shows the exact Harbor version returned for a Trial", async () => {
