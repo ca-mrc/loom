@@ -5559,7 +5559,7 @@ def test_shared_recovery_restores_current_templates_closed_without_replaying_unk
                     self.template_api = stack.enter_context(templates.HTTPSSharedRecoveryTemplates(bindings=bound,
                         api_server=runtime.database.foundation.inputs.config['kubernetes_api_server'],
                         ssl_context=ssl.create_default_context(), qualify_runtime=qualify,
-                        recovery_drained=lambda: not mode['busy'], observe_ready=lambda *_: True))
+                        recovery_drained=lambda: not mode['busy']))
                     connection_type = type(self.template_api.client)
                     self.template_api.client.close()
                     self.template_api.client = connection_type(base_url=self.template_api.api_server, transport=httpx.MockTransport(handle))
@@ -5589,6 +5589,23 @@ def test_shared_recovery_restores_current_templates_closed_without_replaying_unk
         assert mode['calls'] == 0
         assert {row['status'] for row in _read(child / 'templates.json')['resources'].values()} == {'prepared'}
         untouched = {key: copy.deepcopy(row) for key, row in rows.items() if key not in captured}
+        receipt = state / 'recovery-stop/stop.json'
+        receipt_bytes = receipt.read_bytes()
+        receipt.write_bytes(receipt_bytes + b'\n')
+        try:
+            with pytest.raises(ValueError):
+                api.template_api.drained()
+        finally:
+            receipt.write_bytes(receipt_bytes)
+        target_key = next(key for key in api.template_api.targets if captured[key]['kind'] == 'Deployment')
+        target_before = copy.deepcopy(api.template_api.targets[target_key])
+        api.template_api.targets[target_key]['spec']['replicas'] = 1
+        try:
+            with pytest.raises(ValueError):
+                api.template_api.drained()
+        finally:
+            api.template_api.targets[target_key] = target_before
+        assert mode['calls'] == 0
         mode['busy'], mode['retained_pod'] = False, True
         assert run_operation()['phase'] == 'recovery-restore-workloads'
         assert mode['calls'] == 0
