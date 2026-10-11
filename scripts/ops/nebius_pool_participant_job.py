@@ -46,6 +46,27 @@ class PoolParticipantJobRequest:
     observation_id: UUID | None = None
 
 
+def validate_participant_refresh_report(request: PoolParticipantJobRequest, report: Any) -> None:
+    """Validate a committed action's fixed identity, not current live readiness."""
+    refresh, action = request.release.refresh, request.action
+    allowed = {'observe': {'ready', 'fenced', 'staged', 'complete'}, 'fence': {'fenced', 'pending_work'},
+        'stage': {'staged', 'pending_work'}, 'open': {'complete', 'pending_work'}, 'capacity': {'complete'}}
+    if not isinstance(report, dict) or report.get('status') not in allowed[action]:
+        raise ValueError
+    expected: dict[str, Any] = {'schema_version': 'loom.pool-participant-refresh-receipt.v1',
+        'operation_id': str(refresh.after.operation_id), 'participant_id': str(refresh.participant_id),
+        'pool_id': str(refresh.after.pool_id), 'status': report['status'],
+        'before_sha256': digest(refresh.before.model_dump(mode='json')),
+        'after_sha256': digest(refresh.after.model_dump(mode='json'))}
+    if action == 'capacity':
+        proof = ParticipantCapacityReceipt.model_validate_json(json.dumps(report['capacity']))
+        if proof.valid_until > proof.selected_observed_at + timedelta(seconds=refresh.after.admission.observation_max_age_seconds):
+            raise ValueError
+        expected['capacity'] = report['capacity']
+    if report != expected:
+        raise ValueError
+
+
 def _parts(request: PoolParticipantJobRequest, state_dir: Path) -> tuple[tuple[dict[str, Any], str, Path], ...]:
     config, job = refresh_documents(request.release, manager=request.manager, action=request.action,
         observation_id=request.observation_id)
@@ -104,23 +125,7 @@ class HTTPSPoolParticipantJobAPI(HTTPSPoolRegistrationAPI):
         return result
 
     def _validate_execution_report(self, report: Any) -> None:
-        refresh, action = self.refresh_request.release.refresh, self.refresh_request.action
-        allowed = {'observe': {'ready', 'fenced', 'staged', 'complete'}, 'fence': {'fenced', 'pending_work'},
-            'stage': {'staged', 'pending_work'}, 'open': {'complete', 'pending_work'}, 'capacity': {'complete'}}
-        if not isinstance(report, dict) or report.get('status') not in allowed[action]:
-            raise ValueError
-        expected: dict[str, Any] = {'schema_version': 'loom.pool-participant-refresh-receipt.v1',
-            'operation_id': str(refresh.after.operation_id), 'participant_id': str(refresh.participant_id),
-            'pool_id': str(refresh.after.pool_id), 'status': report['status'],
-            'before_sha256': digest(refresh.before.model_dump(mode='json')),
-            'after_sha256': digest(refresh.after.model_dump(mode='json'))}
-        if action == 'capacity':
-            proof = ParticipantCapacityReceipt.model_validate_json(json.dumps(report['capacity']))
-            if proof.valid_until > proof.selected_observed_at + timedelta(seconds=refresh.after.admission.observation_max_age_seconds):
-                raise ValueError
-            expected['capacity'] = report['capacity']
-        if report != expected:
-            raise ValueError
+        validate_participant_refresh_report(self.refresh_request, report)
 
     def refresh_report(self, state_dir: Path) -> dict[str, Any] | None:
         """A historical committed action; neither fresh capacity nor guard authority."""

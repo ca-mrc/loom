@@ -1557,6 +1557,24 @@ Parent phase authority and full protected rollout integration remain required
 connections. The read-only unchanged-policy path does not cover upgrades that
 change admission policy; the candidate file loop alone does not cover every effect.
 
+The read-only participant resource observer derives live alternatives from these
+fixed journals. Before dispatch, only the original object or planned absence is
+allowed; an uncertain PATCH allows its recorded original and target, while a
+completed write requires the pinned successor UID. Creation intent uses the same
+server-defaulting checks as the writer, including Kubernetes-assigned Job labels.
+Failed-Job recovery preserves all previous attempts and selects only the current
+generation or explicitly recorded cleanup absence. An exact candidate factory
+may identify its currently preparing child before that child's journal exists;
+this is not permission to recreate missing recovery evidence.
+
+Both presence and absence are read back, and source/cluster identity plus bounded
+private receipt bytes bracket the observation. Foreign receipts, symlinked
+directories and changed records are refused without writing local or cluster
+state. Successful resource observation alone does not prove full writer census,
+effective permissions, process/database readiness, publication/provider scope,
+guard ownership or completed release history; those remain required checks of
+the protected caller.
+
 The transaction, pool-effect adapter and parent interface do not establish
 publication, history, full runtime readiness or recovery authority on their own.
 The protected entry and phase-aware live qualifier must still connect the normal
