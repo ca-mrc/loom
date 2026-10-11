@@ -40,6 +40,7 @@ def connection(operation_inputs):
     external.key = _key
     state = SimpleNamespace(retained=retained, external=external, requests=[], allow=True, before_dispatch=[],
         pods=[], continuation=False, job_reads=0, replace_during_observation=False,
+        deletes=[], delete_failure=None, retain_deleted_pods=False, deleting=False,
         keys=[_key(retained.release.files[phase][0]) for phase in ('30-migrate.yaml', '50-configure.yaml')]
             + ['pre-upgrade-backup', 'ConfigMap:' + ns + ':loom-feature-config'])
 
@@ -72,6 +73,31 @@ def connection(operation_inputs):
                         actual = copy.deepcopy(actual)
                         actual['metadata']['uid'] = str(uuid4())
                 return httpx.Response(404) if actual is None else httpx.Response(200, json=actual)
+            if message.method == 'DELETE':
+                options = json.loads(message.content)
+                kind = 'Job'
+                name = message.url.path.removeprefix(prefix + '/')
+                actual_key = kind + ':' + ns + ':' + name
+                actual = external.resources[actual_key]
+                assert options == {'apiVersion': 'v1', 'kind': 'DeleteOptions', 'propagationPolicy': 'Foreground',
+                    'preconditions': {'uid': actual['metadata']['uid'],
+                        'resourceVersion': actual['metadata']['resourceVersion']}}
+                journals = [json.loads(path.read_text()) for path in (retained.state_dir / 'candidate-creations').rglob('retries.json')]
+                assert any(row['attempts'][-1]['status'] == 'delete_intent'
+                    and row['attempts'][-1]['job_uid'] == actual['metadata']['uid'] for row in journals)
+                state.deletes.append(options)
+                if state.delete_failure == 'before':
+                    raise httpx.ReadError('request unavailable')
+                if state.deleting:
+                    actual['metadata']['deletionTimestamp'] = '2026-10-11T00:00:00Z'
+                    actual['metadata']['finalizers'] = ['foregroundDeletion']
+                else:
+                    del external.resources[actual_key]
+                    if not state.retain_deleted_pods:
+                        state.pods = []
+                if state.delete_failure == 'after':
+                    raise httpx.ReadError('response unavailable')
+                return httpx.Response(202, json={'apiVersion': 'v1', 'kind': 'Status', 'status': 'Success'})
             assert message.method == 'POST' and message.url.path == prefix
             doc = json.loads(message.content)
             if message.url.params:
@@ -105,6 +131,120 @@ def terminal_pod(job, *, succeeded):
                 for row in template['spec']['containers']],
             'initContainerStatuses': [{'name': row['name'], 'state': {'terminated': {'exitCode': 0}}}
                 for row in template['spec'].get('initContainers', [])]}}
+
+
+def fail_recorded_job(state, api, key):
+    stage(state, api, key)
+    job = state.external.resources[_key(api.document)]
+    job['status'] = {'conditions': [{'type': 'Failed', 'status': 'True'}], 'active': 0, 'failed': 1}
+    state.pods = [terminal_pod(job, succeeded=False)]
+    return copy.deepcopy(job)
+
+
+@pytest.mark.parametrize('selected', [0, 2])
+def test_failed_job_retry_preserves_attempt_history_and_uses_exact_delete_preconditions(connection, selected):
+    state, connect = connection
+    key = state.keys[selected]
+    with connect(key) as first:
+        original = fail_recorded_job(state, first, key)
+        journal, = (state.retained.state_dir / 'candidate-creations').rglob('stage.json')
+        original_bytes = journal.read_bytes()
+        assert first.retry_failed_job() is True
+        with pytest.raises(ValueError, match='changed|preserve'):
+            first.create_resource(json.loads(original_bytes)['resources'][_key(original)]['desired'])
+    with connect(key) as second:
+        assert second.retry_pending() is False
+        result = stage(state, second, key)
+        replacement_uid, = result['resource_uids'].values()
+        assert replacement_uid != original['metadata']['uid']
+        assert second.document['metadata']['name'] == original['metadata']['name']
+        assert second.document['spec'] == first.document['spec']
+        assert second.job_outcome() is None
+        assert stage(state, second, key) == result
+    assert journal.read_bytes() == original_bytes
+    assert len(list((state.retained.state_dir / 'candidate-creations').rglob('stage.json'))) == 2
+    assert len(state.deletes) == 1 and len(state.external.creates) == 2
+
+
+@pytest.mark.parametrize('failure', ['before', 'after'])
+def test_failed_job_retry_resolves_lost_delete_response_without_unconditional_delete(connection, failure):
+    state, connect = connection
+    key = state.keys[0]
+    with connect(key) as api:
+        original = fail_recorded_job(state, api, key)
+        state.delete_failure = failure
+        assert api.retry_failed_job() is (failure == 'after')
+        if failure == 'before':
+            assert api.retry_pending() is True
+            assert api.reconcile_retry() is False
+            assert len(state.deletes) == 1, 'observing cleanup cannot redispatch deletion'
+            state.delete_failure = None
+            # A new explicit recovery can reissue only the original UID/version
+            # conditional operation. The HTTP client itself never retries.
+            assert api.retry_failed_job() is True
+            assert state.deletes[0] == state.deletes[1]
+    with connect(key) as api:
+        stage(state, api, key)
+    assert len(state.external.creates) == 2
+    assert state.external.resources[_key(original)]['metadata']['uid'] != original['metadata']['uid']
+
+
+@pytest.mark.parametrize('residue', ['deleting-job', 'owned-pod', 'unlabelled-owned-pod', 'partial-list'])
+def test_retry_waits_for_old_job_and_all_descendants_to_disappear(connection, residue):
+    state, connect = connection
+    key = state.keys[0]
+    with connect(key) as api:
+        original = fail_recorded_job(state, api, key)
+        state.deleting = residue == 'deleting-job'
+        state.retain_deleted_pods = True
+        state.continuation = residue == 'partial-list'
+        if residue == 'partial-list':
+            with pytest.raises(ValueError, match='preserve'):
+                api.retry_failed_job()
+            assert state.deletes == []
+            return
+        assert api.retry_failed_job() is False
+        if residue == 'unlabelled-owned-pod':
+            state.pods[0]['metadata']['labels'] = {}
+        assert api.reconcile_retry() is False
+        with pytest.raises(ValueError, match='preserve'):
+            stage(state, api, key)
+        assert len(state.external.creates) == 1
+        state.external.resources.pop(_key(original), None)
+        state.pods = []
+        assert api.reconcile_retry() is True
+    with connect(key) as api:
+        stage(state, api, key)
+    assert len(state.deletes) == 1 and len(state.external.creates) == 2
+
+
+@pytest.mark.parametrize('state_name', ['complete', 'active', 'replaced', 'version-changed', 'guard'])
+def test_failed_job_retry_rejects_missing_authority_or_changed_attempt(connection, state_name):
+    state, connect = connection
+    key = state.keys[0]
+    with connect(key) as api:
+        original = fail_recorded_job(state, api, key)
+        if state_name in {'version-changed', 'replaced'}:
+            state.delete_failure = 'before'
+            assert api.retry_failed_job() is False
+            state.delete_failure = None
+        job = state.external.resources[_key(original)]
+        if state_name == 'complete':
+            job['status'] = {'conditions': [{'type': 'Complete', 'status': 'True'}], 'succeeded': 1}
+            state.pods = [terminal_pod(job, succeeded=True)]
+        elif state_name == 'active':
+            state.pods[0]['status']['phase'] = 'Running'
+            state.pods[0]['status']['containerStatuses'][0]['state'] = {'running': {}}
+        elif state_name == 'replaced':
+            job['metadata']['uid'] = str(uuid4())
+        elif state_name == 'version-changed':
+            job['metadata']['resourceVersion'] = '999'
+        else:
+            state.allow = False
+        count = len(state.deletes)
+        with pytest.raises(ValueError, match='preserve'):
+            api.retry_failed_job()
+        assert len(state.deletes) == count and len(state.external.creates) == 1
 
 
 @pytest.mark.parametrize('selected', [0, 2])
