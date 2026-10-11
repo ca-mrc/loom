@@ -63,6 +63,8 @@ def connection(operation_inputs):
                 'Deployment': '/apis/apps/v1/namespaces/' + retained.inputs.config['namespace'] + '/deployments/',
                 'StatefulSet': '/apis/apps/v1/namespaces/' + retained.inputs.config['namespace'] + '/statefulsets/',
                 'PersistentVolumeClaim': '/api/v1/namespaces/' + retained.inputs.config['namespace'] + '/persistentvolumeclaims/',
+                'ValidatingAdmissionPolicy': '/apis/admissionregistration.k8s.io/v1/validatingadmissionpolicies/',
+                'ValidatingAdmissionPolicyBinding': '/apis/admissionregistration.k8s.io/v1/validatingadmissionpolicybindings/',
             }
             row = state.rows[key]
             assert message.url.path == expected_paths[row['kind']] + row['metadata']['name']
@@ -131,6 +133,24 @@ def test_candidate_file_writer_preserves_order_and_reads_back_repeated_dispatch(
     ns = state.retained.inputs.config['namespace']
     assert state.writes == ['Service:' + ns + ':loom-postgres', 'StatefulSet:' + ns + ':loom-postgres']
     assert state.rows[state.writes[0]]['spec']['clusterIP'] == '10.0.0.7'
+
+
+@pytest.mark.parametrize('changed', [False, True])
+def test_candidate_file_writer_qualifies_unchanged_identity_policy_without_bootstrap(connection, changed):
+    state, connect = connection
+    policies = state.retained.release.files.get('00-task-identity-policy.yaml', [])
+    if not policies:
+        pytest.skip('participant has no private-root admission policy')
+    writer = file_writer(state, connect)
+    if changed:
+        state.rows[_key(policies[0])]['spec']['failurePolicy'] = 'Ignore'
+        with pytest.raises(ValueError, match='preserve'):
+            writer.qualify_identity_policy()
+    else:
+        writer.qualify_identity_policy()
+        assert len([row for row in state.requests if row.method == 'PATCH']) == 2
+    assert state.writes == []
+    assert all(row.method == 'GET' or dict(row.url.params) == {'dryRun': 'All'} for row in state.requests)
 
 
 def test_candidate_file_writer_preserves_existing_storage_without_patch_or_allocation(connection):
