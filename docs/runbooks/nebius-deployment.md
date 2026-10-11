@@ -2671,9 +2671,44 @@ internal host entry now composes the phase-aware pool adapter and completed-rele
 predecessor promotion. Its new-release preparation resolves the exact publication,
 qualifies a complete source/receipt-bound live inventory, retains it once, and
 runs protected preflight without acquiring a guard. Retrying preparation reloads
-the original anchor; recovery never prepares again. Fixed protected transport,
-installation and normal workflow routing remain required before operational use.
-Local retained inputs are not installed readiness.
+the original anchor; recovery never prepares again. Runner transport and normal
+workflow routing remain required before operational use. Local retained inputs
+are not installed readiness.
+
+The operator-only `scripts.ops.install_nebius_pool_participant_entrypoint`
+installer adds separate participant-release authority; do not invoke it with an
+existing rollout key or widen the exact-bundle shared-handoff grant. From reviewed
+integrated source, preview with:
+
+```bash
+uv run --no-sync python -m scripts.ops.install_nebius_pool_participant_entrypoint \
+  --bundle PRIVATE_TOOLING_BUNDLE --bundle-sha256 REVIEWED_BUNDLE_SHA256 \
+  --public-key DEDICATED_PUBLIC_KEY \
+  --configuration PRIVATE_HOST_CONFIGURATION \
+  --configuration-sha256 REVIEWED_CONFIGURATION_SHA256
+```
+
+Use absolute private input paths. The hash-pinned host configuration uses schema
+`loom.nebius-participant-host.v1` and selects the original `shared_operation` and
+`shared_operation_sha256`, `operator_connection`, `executable`, `state_root` and
+`anchor_dir`. Keep it under the operator's `.loom` directory. State and anchor
+roots are respectively `.loom/nebius-participant-releases/INSTALLATION_UUID` and
+`.loom/nebius-participant-anchors/INSTALLATION_UUID`; the installer creates empty
+private roots, not completed history. Current operator CA and credential files
+must be distinct private files, not aliases of historical inputs.
+
+After reviewing the exact bundle and configuration, `--apply` prepares and
+qualifies tooling, then atomically appends a distinct restricted Ed25519 key while
+preserving other grants. Its only commands are
+`loom-nebius-participant-prepare-v1`, `loom-nebius-participant-execute-v1`, and
+`loom-nebius-participant-recover-v1`. Stdin carries command data, never replacement
+code, host paths or credentials. Tooling lives under
+`.loom/nebius-participant-delivery/INSTALLATION_UUID`. Partial or tampered releases
+and the eight-release retention bound stop installation for reconciliation;
+the installer does not delete old releases or reconstruct private history.
+Installation itself does not acquire a guard, deploy resources, or prove live
+readiness. Keep the guard unacquired during installation and workflow preparation.
+
 The shared rollout records the pre-upgrade backup Job name before creation and
 rechecks guard ownership before that write. A failed or unconfirmed backup keeps
 the shared release's pause for recovery, even before registry refresh starts.

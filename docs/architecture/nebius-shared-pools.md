@@ -1849,9 +1849,10 @@ and a recognized outcome; private exceptions, diagnostics and paths are omitted.
 A bare success status without the matching deployment binding is rejected.
 Its process entry suppresses private process output and checks the configuration
 again before acknowledging the outcome. This dispatcher does not itself install
-an SSH grant. A separate restricted launcher, runner-owned persisted deployment
-intent and normal workflow routing are still required; the exact-bundle shared
-handoff grant cannot authorize this new command surface.
+an SSH grant. The separate operator-only participant installer binds a dedicated
+key to exact tooling and private host configuration. Runner-owned persisted
+deployment intent and normal workflow routing are still required; the exact-bundle
+shared handoff grant cannot authorize this new command surface.
 
 Participant tooling has a separate archive allowlist containing the complete
 host dispatcher and release dependencies. The archive includes pinned wheels,
@@ -1863,6 +1864,17 @@ back to workspace Loom modules. Its fixed process command selects the installed
 interpreter and entry, while the public-report validator rejects extra fields,
 foreign release references and candidate/guard mismatches. Packaging and report
 validation alone do not install a grant or connect the normal rollout workflow.
+The installer qualifies the isolated tooling and private host selection before
+appending the separate forced-command key. It preserves existing keys, refuses
+key reuse with different authority, and rechecks installation inputs before the
+atomic key update. First installation creates empty private state/anchor roots,
+not deployment history. Dependencies are prepared outside the shared key-file
+lock. At most eight tooling releases are retained; partial or changed releases
+require operator reconciliation, never automatic rebuilding or deletion.
+The installed launcher accepts only the three fixed prepare/execute/recover
+commands with bounded data on stdin, verifies retained source hashes before and
+after dispatch, and uses the existing private-process watchdog. Installing it
+performs no cluster operation and does not establish live handoff acceptance.
 
 The deployer has an internal finalization hook inside its existing error/evidence
 boundary, after verified guard release and before reporting success. Protected
