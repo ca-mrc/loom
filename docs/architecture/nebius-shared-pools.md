@@ -1523,9 +1523,25 @@ observer binds the retained Job UID/template to a complete Pod collection and
 terminal owned processes, then rechecks the Job and journal. Success requires a
 successful owned Pod with successful container exits; a failed outcome requires
 all owned processes to be inert. Running unrelated services are not confused with
-Job descendants. This observation grants no retry or deployment authority.
-Explicit failed-Job retry lineage, backup/Job dispatch through the retained
-engines, parent phase authority and full rollout integration remain required
+Job descendants. A native failed Job that timed out before any Pod was created
+can be qualified from the complete empty descendant inventory; success still
+requires a successful owned Pod. This observation grants no retry or deployment authority.
+
+The file writer also connects the original pre-upgrade backup and candidate
+migration/configuration Jobs to the deployer. Each returns only after the owned
+terminal-process proof above. Explicit recovery of an already failed Job records
+its stage hash, UID, resourceVersion and Pod identities before a foreground DELETE
+with both UID and resourceVersion preconditions. Cleanup observation never repeats
+that write. A new explicit recovery invocation may reissue the identical
+conditional DELETE only while the same failed Job version and inert processes
+remain qualified. Recreation waits for the old Job and all descendants to
+disappear from a complete inventory. Each attempt keeps its original stage journal;
+the same Job name receives a separately retained generation and operation marker.
+Unknown creates remain readback-only, including in a retry generation. Missing
+predecessor, successor or retry evidence cannot authorize a fresh create. A newly
+failed execution is not retried within the invocation that first ran it.
+
+Parent phase authority and full protected rollout integration remain required
 connections. The read-only unchanged-policy path does not cover upgrades that
 change admission policy; the candidate file loop alone does not cover every effect.
 

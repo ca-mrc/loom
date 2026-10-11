@@ -908,7 +908,8 @@ def verify_deployed_images(kube: Kubectl, files: dict[str, list[dict[str, Any]]]
 def _rollout_candidate_files(*, kube: Kubectl, manifest: dict[str, Any], config: dict[str, Any],
         files: dict[str, list[dict[str, Any]]], snapshot_root: Path, retry_failed_jobs: bool,
         phase: Callable[[str], None], before_write: Callable[[], None],
-        write_candidate_file: Callable[[str], None] | None = None) -> None:
+        write_candidate_file: Callable[[str], None] | None = None,
+        run_candidate_job: Callable[[str, bool], None] | None = None) -> None:
     """Common workload sequence after the caller's qualified, guarded preflight.
 
     This is not an entry point or a guard bypass. The parent owns source/namespace
@@ -928,6 +929,14 @@ def _rollout_candidate_files(*, kube: Kubectl, manifest: dict[str, Any], config:
             kube.run("apply", "-f", str(snapshot_root / filename))
 
     def run_job(filename: str) -> None:
+        if run_candidate_job is not None:
+            before_write()
+            phase(filename.removesuffix('.yaml'))
+            try:
+                run_candidate_job(filename, retry_failed_jobs)
+            except Exception:
+                raise DeploymentError('candidate Job execution unconfirmed; preserve recovery evidence') from None
+            return
         name = files[filename][0]["metadata"]["name"]
         existing = kube.get("job", name, ns)
         if job_complete(existing):
@@ -1156,6 +1165,7 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None,
 
         if state["backup_required"]:
             backup_name = (
+                candidate_writer.job_name('pre-upgrade-backup') if candidate_writer is not None else
                 "loom-predeploy-" + manifest["candidate_sha"][:12] + "-" + uuid.uuid4().hex[:8]
             )
             evidence["backup_job"] = backup_name
@@ -1165,8 +1175,15 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None,
                 # and must still own that pause immediately before dispatch.
                 before_write()
             phase("pre-upgrade-backup")
-            kube.run("create", "job", backup_name, "--from=cronjob/loom-platform-backup", "-n", ns)
-            wait_for_job(kube, backup_name, ns, 1860)
+            if candidate_writer is None:
+                kube.run("create", "job", backup_name, "--from=cronjob/loom-platform-backup", "-n", ns)
+                wait_for_job(kube, backup_name, ns, 1860)
+            else:
+                try:
+                    evidence['backup_result'] = candidate_writer.run_job('pre-upgrade-backup',
+                        retry_failed_jobs=args.retry_failed_jobs)
+                except Exception:
+                    raise DeploymentError('backup Job execution unconfirmed; preserve recovery evidence') from None
         if retire_target is not None:
             # A lost response can follow a committed state change. From this
             # point every failure must retain the durable operator-owned pause.
@@ -1196,10 +1213,16 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None,
             phase("install-and-verify-task-identity-policy")
             install_task_identity_policy(kube, config, snapshot_root,
                 qualify_installed=candidate_writer.qualify_identity_policy if candidate_writer is not None else None)
+
+        def retained_job(filename: str, retry: bool) -> None:
+            assert candidate_writer is not None
+            candidate_writer.run_job(filename, retry_failed_jobs=retry)
+
         _rollout_candidate_files(kube=kube, manifest=manifest, config=config, files=files,
             snapshot_root=snapshot_root, retry_failed_jobs=args.retry_failed_jobs,
             phase=phase, before_write=before_write,
-            write_candidate_file=candidate_writer.apply_file if candidate_writer is not None else None)
+            write_candidate_file=candidate_writer.apply_file if candidate_writer is not None else None,
+            run_candidate_job=retained_job if candidate_writer is not None else None)
         if pool is not None:
             assert participant_release is not None and guard_acquired
             check_release()

@@ -1,8 +1,8 @@
 """Retained candidate file writes and CAS for the normal-release parent.
 
-Resource file delivery is connected; this is not a whole rollout/readiness proof.
-The parent still owns phase-aware inventory/guard qualification, backup/Job
-lineage, policy-changing bootstrap, readiness, and completed-history promotion.
+Resource and Job delivery are connected; this is not a whole rollout proof.
+The parent still owns phase-aware inventory/guard qualification, policy-changing
+bootstrap, application readiness, and completed-history promotion.
 No caller supplies a replacement document or an unrestricted resource path.
 """
 from __future__ import annotations
@@ -12,10 +12,11 @@ import hashlib
 import json
 import re
 import ssl
+import time
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_development_runtime_live import (
@@ -27,7 +28,7 @@ from scripts.ops.nebius_development_runtime_transition import (
     _advance_fixed_resources,
 )
 from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
-from scripts.ops.nebius_management_stage import ManagementStageAPI, _qualified_defaulted
+from scripts.ops.nebius_management_stage import _qualified_defaulted
 from scripts.ops.nebius_management_switch import _matches, _stable
 from scripts.ops.nebius_management_transport import ManagementKubernetesTransport
 from scripts.ops.nebius_pool_participant_operation import (
@@ -38,6 +39,9 @@ from scripts.ops.nebius_pool_participant_operation import (
 from loom.nebius_platform_render import digest
 from loom_service.environment_management.kubernetes_provider import _contains
 
+if TYPE_CHECKING:
+    from scripts.ops.nebius_pool_participant_creation import ParticipantCreationAPI
+
 _KINDS = frozenset({'Namespace', 'ConfigMap', 'ServiceAccount', 'Role', 'RoleBinding', 'NetworkPolicy',
     'StatefulSet', 'Service', 'Deployment', 'CronJob', 'ValidatingAdmissionPolicy', 'ValidatingAdmissionPolicyBinding'})
 _MARKER = 'loom.nebius/participant-candidate-operation'
@@ -45,12 +49,14 @@ _SERVICE_ALLOCATION = ('clusterIP', 'clusterIPs', 'ipFamilies', 'ipFamilyPolicy'
 _PRESERVED_KINDS = frozenset({'PersistentVolumeClaim', 'ResourceQuota'})
 _CANDIDATE_FILES = frozenset({'00-namespaces.yaml', '10-config-network.yaml', '20-database.yaml',
     '40-services.yaml', '60-execution.yaml', '70-public.yaml', '80-backup.yaml'})
+_JOB_FILES = frozenset({'30-migrate.yaml', '50-configure.yaml'})
 
 
 class RetainedCandidateFileWriter:
-    """Connect fixed resource engines to the ordinary deployment's file phases.
+    """Connect fixed resource and Job engines to ordinary deployment phases.
 
-    This does not own backup/Job execution or policy-changing bootstrap.
+    This includes pre-upgrade backup and explicit failed-Job recovery, but not
+    policy-changing bootstrap or overall application readiness.
     The protected parent supplies source-bound API factories whose qualification
     callbacks own the current guard and full phase-aware inventory. An independent
     dispatch anchor prevents missing child evidence from reopening a write.
@@ -58,7 +64,7 @@ class RetainedCandidateFileWriter:
 
     def __init__(self, *, retained: RetainedParticipantRollout,
             open_resource: Callable[[str], AbstractContextManager[DevelopmentRuntimeWorkloadAPI]],
-            open_creation: Callable[[str], AbstractContextManager[ManagementStageAPI]]):
+            open_creation: Callable[[str], AbstractContextManager[ParticipantCreationAPI]]):
         self.retained = copy.deepcopy(retained)
         self.open_resource, self.open_creation = open_resource, open_creation
 
@@ -112,7 +118,7 @@ class RetainedCandidateFileWriter:
     def _children(self) -> dict[str, tuple[str, Path]]:
         originals = {_key(row) for row in self.retained.inputs.current}
         result = {}
-        for filename in _CANDIDATE_FILES:
+        for filename in _CANDIDATE_FILES | _JOB_FILES:
             for document in self.retained.release.files[filename]:
                 key = _key(document)
                 if key in result:
@@ -122,7 +128,27 @@ class RetainedCandidateFileWriter:
                 action = 'preserve' if update and document['kind'] in _PRESERVED_KINDS else 'update' if update else 'create'
                 result[key] = (action,
                     self.retained.state_dir / root / hashlib.sha256(key.encode()).hexdigest() / journal)
+        backup = 'pre-upgrade-backup'
+        result[backup] = ('create', self.retained.state_dir / 'candidate-creations'
+            / hashlib.sha256(backup.encode()).hexdigest() / 'stage.json')
         return result
+
+    def _job_key(self, selector: str) -> str:
+        if selector == 'pre-upgrade-backup':
+            return selector
+        if selector not in _JOB_FILES:
+            raise ValueError
+        document, = self.retained.release.files[selector]
+        if document['kind'] != 'Job':
+            raise ValueError
+        return _key(document)
+
+    def job_name(self, selector: str) -> str:
+        from scripts.ops.nebius_pool_participant_creation import _creation
+
+        self.validate()
+        document, _ = _creation(self.retained, self._job_key(selector))
+        return str(document['metadata']['name'])
 
     def _record(self, path: Path, children: dict[str, tuple[str, Path]]) -> dict[str, Any]:
         identity = {'schema': 'loom.nebius-participant-file-writes.v1',
@@ -156,6 +182,77 @@ class RetainedCandidateFileWriter:
         for key in record['started']:
             private_state._private_read(children[key][1], limit=4 * 1024**2)
         return record
+
+    @staticmethod
+    def _begin_child(*, key: str, record: dict[str, Any], path: Path, child: Path) -> None:
+        if key not in record['started']:
+            if child.exists() or child.is_symlink():
+                raise ValueError
+            record['started'].append(key)
+            private_state._atomic_json(path, record)
+
+    def run_job(self, selector: str, *, retry_failed_jobs: bool) -> dict[str, Any]:
+        """Execute/recover one retained Job; at most one explicitly requested retry.
+
+        A failed condition first reached during this invocation does not authorize
+        retry. Cleanup polling only reads; all actual effects requalify the parent
+        through the source-bound API. No result is accepted while owned Pods live.
+        """
+        from scripts.ops.nebius_pool_participant_creation import (
+            _creation,
+            stage_participant_creation,
+        )
+
+        try:
+            self.validate()
+            if type(retry_failed_jobs) is not bool:
+                raise ValueError
+            key = self._job_key(selector)
+            document, _ = _creation(self.retained, key)
+            children = self._children()
+            root = self.retained.state_dir / 'candidate-file-writes'
+            with private_state._locked_state(root):
+                path = root / 'dispatch.json'
+                record = self._record(path, children)
+                deadline = time.monotonic() + (1860 if key == 'pre-upgrade-backup' else 660)
+                eligible: bool | None = None
+                retried = False
+                while True:
+                    self.validate()
+                    with self.open_creation(key) as api:
+                        if api.retained != self.retained or api.key != key:
+                            raise ValueError
+                        self._begin_child(key=key, record=record, path=path, child=children[key][1])
+                        if api.retry_pending():
+                            if retry_failed_jobs and not retried:
+                                retried = True
+                                ready = api.retry_failed_job()
+                            else:
+                                ready = api.reconcile_retry()
+                            if ready:
+                                continue  # The old handle cannot operate the newly selected generation.
+                        else:
+                            if eligible is None:
+                                before = api.get_resource(document)
+                                eligible = before is not None and any(row.get('type') == 'Failed' and row.get('status') == 'True'
+                                    for row in before.get('status', {}).get('conditions', []))
+                            stage_participant_creation(retained=self.retained, key=key, api=api)
+                            outcome = api.job_outcome()
+                            if outcome is not None:
+                                if outcome['status'] == 'complete':
+                                    self.validate()
+                                    return outcome
+                                if outcome['status'] != 'failed' or not eligible or not retry_failed_jobs or retried:
+                                    raise ValueError
+                                retried = True
+                                if api.retry_failed_job():
+                                    continue
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise ValueError
+                    time.sleep(min(5, remaining))
+        except Exception:
+            raise ValueError('participant Job execution unqualified; preserve evidence') from None
 
     def apply_file(self, filename: str) -> None:
         from scripts.ops.nebius_pool_participant_creation import (
@@ -193,12 +290,7 @@ class RetainedCandidateFileWriter:
                     self.validate()
                     if children[key][0] == 'preserve':
                         continue
-                    if key not in record['started']:
-                        child = children[key][1]
-                        if child.exists() or child.is_symlink():
-                            raise ValueError
-                        record['started'].append(key)
-                        private_state._atomic_json(path, record)
+                    self._begin_child(key=key, record=record, path=path, child=children[key][1])
                     if children[key][0] == 'update':
                         with self.open_resource(key) as update_api:
                             if not update_participant_resource(retained=self.retained, key=key, api=update_api):
