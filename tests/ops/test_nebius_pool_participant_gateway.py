@@ -52,10 +52,10 @@ def report(status='complete'):
 
 def test_participant_bundle_imports_real_dispatch_without_workspace_modules(tmp_path):
     from scripts.ops.nebius_ingress_rollout import build_wheels
-    from scripts.ops.nebius_shared_pool_delivery_gateway import SOURCES as old_sources
+    from scripts.ops.nebius_shared_pool_delivery_gateway import SOURCES as SHARED_SOURCES
 
     gateway = module()
-    assert not any('nebius_pool_participant' in path for path in old_sources), 'do not widen the handoff grant'
+    assert not any('nebius_pool_participant' in path for path in SHARED_SOURCES), 'do not widen the handoff grant'
     build = tmp_path / 'wheel-build'
     build.mkdir()
     executable = shutil.which('uv')

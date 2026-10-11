@@ -1853,6 +1853,17 @@ an SSH grant. A separate restricted launcher, runner-owned persisted deployment
 intent and normal workflow routing are still required; the exact-bundle shared
 handoff grant cannot authorize this new command surface.
 
+Participant tooling has a separate archive allowlist containing the complete
+host dispatcher and release dependencies. The archive includes pinned wheels,
+hash-locked dependency input, rendering assets and a tooling source record; it
+does not contain private host configuration or retained deployment history.
+The existing handoff archive's sources and commands are unchanged. Isolated
+import coverage loads the actual archive's scripts and wheels without falling
+back to workspace Loom modules. Its fixed process command selects the installed
+interpreter and entry, while the public-report validator rejects extra fields,
+foreign release references and candidate/guard mismatches. Packaging and report
+validation alone do not install a grant or connect the normal rollout workflow.
+
 The deployer has an internal finalization hook inside its existing error/evidence
 boundary, after verified guard release and before reporting success. Protected
 composition uses that hook for latest-head promotion. It also runs after successful
