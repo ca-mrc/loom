@@ -109,8 +109,9 @@ def test_shared_recovery_selects_original_publication_not_another_success_for_sa
     assert 'actions/runs/42/attempts/2' in calls
 
 
+@pytest.mark.parametrize('file_writes', [False, True])
 @pytest.mark.parametrize('recover', [False, True])
-def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation_inputs, tmp_path, monkeypatch, recover):
+def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation_inputs, tmp_path, monkeypatch, recover, file_writes):
     """Only Kubernetes/GitHub/HTTPS and the pending concrete pool I/O are doubled."""
     inputs = operation_inputs
     retained = operation.retain_participant_rollout(**inputs)
@@ -205,9 +206,49 @@ def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation
     monkeypatch.setenv('GITHUB_RUN_ID', '991')
     monkeypatch.setenv('GITHUB_RUN_ATTEMPT', '1')
     pool = PoolIO()
+    writer_args = {}
+    written = []
+    if file_writes:
+        from contextlib import nullcontext
+
+        from scripts.ops.nebius_management_switch import _matches
+        from scripts.ops.nebius_pool_participant_resource import RetainedCandidateFileWriter
+
+        class ResourceIO:
+            def qualify(self):
+                assert kube.guard_identity is not None and state['pool'] in {'staged', 'open'}
+
+            def read_workload(self, key):
+                kind, _, name = key.split(':')
+                return copy.deepcopy(kube.objects[kind.lower(), name])
+
+            def preview_workload(self, key, before, desired):
+                return copy.deepcopy(desired)
+
+            def patch_workload(self, key, before, desired):
+                actual = self.read_workload(key)
+                assert actual['metadata']['uid'] == before['metadata']['uid']
+                assert actual['metadata']['resourceVersion'] == before['metadata']['resourceVersion']
+                value = {**copy.deepcopy(desired), 'metadata': {**copy.deepcopy(desired['metadata']),
+                    'uid': before['metadata']['uid'], 'resourceVersion': '100', 'generation': 1}}
+                if value['kind'] in {'Deployment', 'StatefulSet'}:
+                    replicas = value['spec'].get('replicas', 1)
+                    value['status'] = {'observedGeneration': 1, 'replicas': replicas,
+                        'updatedReplicas': replicas, 'availableReplicas': replicas, 'readyReplicas': replicas}
+                kube.objects[value['kind'].lower(), value['metadata']['name']] = value
+                written.append(key)
+                return True
+
+            def workload_ready(self, key, expected):
+                observed = self.read_workload(key)
+                return _matches(observed, expected, observed['metadata']['uid'])
+
+        writer_args['candidate_writer'] = RetainedCandidateFileWriter(retained=retained,
+            open_resource=lambda _: nullcontext(ResourceIO()),
+            open_creation=lambda _: pytest.fail('unexpected new fixture object'))
     if recover:
         with pytest.raises(deploy.DeploymentError, match='HTTPS'):
-            idle.rollout(args, participant_rollout=retained, pool=pool)
+            idle.rollout(args, participant_rollout=retained, pool=pool, **writer_args)
         failed, = args.evidence_dir.glob('deployment-*.json')
         assert json.loads(failed.read_text())['shared_pool_release'] == retained.reference.model_dump(mode='json')
         assert kube.guard_identity == (retained.guard_owner, inputs['candidate']['candidate_sha'])
@@ -217,11 +258,20 @@ def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation
         assert json.loads(kube.objects['configmap', 'loom-platform-config']['data']['profile.json'])['candidate_sha'] == 'd' * 40
         retained = operation.load_participant_rollout(reference=retained.reference,
             state_root=inputs['state_root'], anchor_dir=inputs['anchor_dir'])
-    result = idle.rollout(args, participant_rollout=retained, pool=pool)
+    result = idle.rollout(args, participant_rollout=retained, pool=pool, **writer_args)
     assert result['status'] == 'complete' and kube.guard_identity is None
     assert result['shared_pool_release'] == retained.reference.model_dump(mode='json')
     assert mutations == ['stage', 'open']
-    assert {'30-migrate.yaml', '50-configure.yaml', '40-services.yaml', '60-execution.yaml', '70-public.yaml'} <= set(phases)
+    if file_writes:
+        assert not set(phases) & {'00-namespaces.yaml', '10-config-network.yaml', '20-database.yaml',
+            '40-services.yaml', '60-execution.yaml', '70-public.yaml', '80-backup.yaml'}
+        assert len(written) == len(set(written)), 'recovery must read back prior writes'
+        assert {'Deployment:' + config['namespace'] + ':loom-service',
+            'Deployment:' + config['execution_namespace'] + ':loom-execution-actuator',
+            'Service:' + config['namespace'] + ':loom-web'} <= set(written)
+    else:
+        assert {'40-services.yaml', '60-execution.yaml', '70-public.yaml'} <= set(phases)
+    assert {'30-migrate.yaml', '50-configure.yaml'} <= set(phases)
     assert all(row['shared_pool_release'] == retained.reference.model_dump(mode='json') for row in intents)
     assert len(intents) == (2 if recover else 1)
 
