@@ -2248,6 +2248,10 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
 
     from loom.nebius_platform_render import digest
 
+    # Later lifecycle cases need genuine forward receipts, not another copy of
+    # the forward fault matrix. Keep every assertion in the forward case; only
+    # its extra census probes are omitted while arranging recovery/release.
+    check_forward = not recovery and not participant
     name = 'scripts.ops.nebius_shared_pool_forward_census'
     assert importlib.util.find_spec(name) is not None, 'phase-bound shared writer census is missing'
     module = __import__(name, fromlist=['observe_shared_pool_forward_writers'])
@@ -2361,32 +2365,33 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
         actual.update(copy.deepcopy(wanted))
         actual['metadata'].update(identity)
 
-    replace_live(actual, expected)
-    with pytest.raises(ValueError):
-        observe()  # No intent exists yet: matching a planned target is insufficient.
-    replace_live(actual, original)
-    stopped['resources'][key].update(status='intent', expected=expected)
-    private_state._atomic_json(journal, stopped)
-    assert observe().workloads[key] == original
-    replace_live(actual, expected)
-    assert observe().workloads[key] == actual  # A lost PATCH reply permits either recorded side.
-    actual['spec']['template']['spec']['containers'][0]['image'] = 'foreign.invalid/image:latest'
-    with pytest.raises(ValueError):
-        observe()
-    replace_live(actual, expected)
-    raw = journal.read_bytes()
-    journal.unlink()
-    before = len(calls)
-    with pytest.raises(ValueError):
-        observe()
-    assert len(calls) == before
-    journal.write_bytes(raw)
-    journal.chmod(0o600)
-    mode['during_read'] = journal.unlink
-    with pytest.raises(ValueError):
-        observe()  # Started children are not covered by completed-child byte pins.
-    journal.write_bytes(raw)
-    journal.chmod(0o600)
+    if check_forward:
+        replace_live(actual, expected)
+        with pytest.raises(ValueError):
+            observe()  # No intent exists yet: matching a planned target is insufficient.
+        replace_live(actual, original)
+        stopped['resources'][key].update(status='intent', expected=expected)
+        private_state._atomic_json(journal, stopped)
+        assert observe().workloads[key] == original
+        replace_live(actual, expected)
+        assert observe().workloads[key] == actual  # A lost PATCH reply permits either recorded side.
+        actual['spec']['template']['spec']['containers'][0]['image'] = 'foreign.invalid/image:latest'
+        with pytest.raises(ValueError):
+            observe()
+        replace_live(actual, expected)
+        raw = journal.read_bytes()
+        journal.unlink()
+        before = len(calls)
+        with pytest.raises(ValueError):
+            observe()
+        assert len(calls) == before
+        journal.write_bytes(raw)
+        journal.chmod(0o600)
+        mode['during_read'] = journal.unlink
+        with pytest.raises(ValueError):
+            observe()  # Started children are not covered by completed-child byte pins.
+        journal.write_bytes(raw)
+        journal.chmod(0o600)
 
     for key, target in bindings.plan.staging.stopped.items():
         wanted = _comparison_snapshot(target)
@@ -2402,14 +2407,15 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
     target_role = bindings.plan.staging_role_targets[key]
     role_path = state / 'forward-roles/roles.json'
     role_record = json.loads(role_path.read_bytes())
-    replace_live(role, target_role)
-    with pytest.raises(ValueError):
-        observe()
-    role_record['roles'][key] = 'intent'
-    private_state._atomic_json(role_path, role_record)
-    assert observe().authority[key] == role
-    replace_live(role, original_role)
-    assert observe().authority[key] == original_role
+    if check_forward:
+        replace_live(role, target_role)
+        with pytest.raises(ValueError):
+            observe()
+        role_record['roles'][key] = 'intent'
+        private_state._atomic_json(role_path, role_record)
+        assert observe().authority[key] == role
+        replace_live(role, original_role)
+        assert observe().authority[key] == original_role
     for key, target in bindings.plan.staging_role_targets.items():
         role_record['roles'][key] = 'restricted'
         row = next(row for row in inventory['roles'] if _key(row) == key)
@@ -2417,17 +2423,18 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
     private_state._atomic_json(role_path, role_record)
     assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-database'
     observe()
-    successor = copy.deepcopy(role)
-    replace_live(role, original_role)
-    with pytest.raises(ValueError):
-        observe()  # Completion must not retain the old write grant as an alternative.
-    replace_live(role, successor)
-    reader = copy.deepcopy(next(iter(bindings.plan.staging_reader_authority.values())))
-    reader['metadata'].update(uid=str(uuid4()), resourceVersion='401')
-    inventory[kinds[reader['kind']]].append(reader)
-    with pytest.raises(ValueError):
-        observe()  # Even planned new authority is foreign until its retained create intent.
-    inventory[kinds[reader['kind']]].remove(reader)
+    if check_forward:
+        successor = copy.deepcopy(role)
+        replace_live(role, original_role)
+        with pytest.raises(ValueError):
+            observe()  # Completion must not retain the old write grant as an alternative.
+        replace_live(role, successor)
+        reader = copy.deepcopy(next(iter(bindings.plan.staging_reader_authority.values())))
+        reader['metadata'].update(uid=str(uuid4()), resourceVersion='401')
+        inventory[kinds[reader['kind']]].append(reader)
+        with pytest.raises(ValueError):
+            observe()  # Even planned new authority is foreign until its retained create intent.
+        inventory[kinds[reader['kind']]].remove(reader)
 
     api.block = 'forward-build-policy'
     assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-material'
@@ -2450,12 +2457,14 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
             stored[key] = row
             if key in bindings.plan.staging_reader_authority or key in bindings.plan.development.authority:
                 inventory[kinds[row['kind']]].append(row)
-                observe()  # The child still has create_intent, including an unobserved UID.
+                if check_forward:
+                    observe()  # The child still has create_intent, including an unobserved UID.
         return httpx.Response(201, json=row)
 
     with material.HTTPSSharedStagingMaterial(bindings=bindings,
             api_server=args['runtime'].database.foundation.inputs.config['kubernetes_api_server'],
-            ssl_context=ssl.create_default_context(), qualify_runtime=lambda *_: observe()) as delivery:
+            ssl_context=ssl.create_default_context(),
+            qualify_runtime=lambda *_: observe() if check_forward else None) as delivery:
         delivery.client.close()
         delivery.client = type(transport.client)(base_url=delivery.api_server, transport=httpx.MockTransport(material_request))
         try:
@@ -2471,13 +2480,14 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
             pytest.fail('census material integration failed at ' + ', '.join(frames), pytrace=False)
     result = observe()
     assert set(bindings.plan.staging_reader_authority) <= result.authority.keys()
-    for key in bindings.plan.staging_reader_authority:
-        row = stored[key]
-        original_uid = row['metadata']['uid']
-        row['metadata']['uid'] = str(uuid4())
-        with pytest.raises(ValueError):
-            observe()  # A completed create no longer permits a same-name replacement.
-        row['metadata']['uid'] = original_uid
+    if check_forward:
+        for key in bindings.plan.staging_reader_authority:
+            row = stored[key]
+            original_uid = row['metadata']['uid']
+            row['metadata']['uid'] = str(uuid4())
+            with pytest.raises(ValueError):
+                observe()  # A completed create no longer permits a same-name replacement.
+            row['metadata']['uid'] = original_uid
 
     for phase in ('forward-wire', 'forward-start'):
         assert parent.run_shared_pool_operation(**kwargs)['phase'] == phase
@@ -2506,19 +2516,20 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
     live_gateway = next(row for row in inventory['deployments'] if _key(row) == gateway_key)
     stopped_gateway = copy.deepcopy(live_gateway)
     started_gateway = _comparison_snapshot(bindings.plan.development.gateway_target)
-    replace_live(live_gateway, started_gateway)
-    before = len(calls)
-    with pytest.raises(ValueError):
-        observe()  # Planned startup alone is not retained dispatch intent.
-    assert len(calls) > before
-    replace_live(live_gateway, stopped_gateway)
     fixed = bindings.plan.development.authority
-    untracked = copy.deepcopy(next(iter(fixed.values())))
-    untracked['metadata'].update(uid=str(uuid4()), resourceVersion='401')
-    inventory[kinds[untracked['kind']]].append(untracked)
-    with pytest.raises(ValueError):
-        observe()  # Even a source-qualified grant is forbidden before its intent.
-    inventory[kinds[untracked['kind']]].remove(untracked)
+    if check_forward:
+        replace_live(live_gateway, started_gateway)
+        before = len(calls)
+        with pytest.raises(ValueError):
+            observe()  # Planned startup alone is not retained dispatch intent.
+        assert len(calls) > before
+        replace_live(live_gateway, stopped_gateway)
+        untracked = copy.deepcopy(next(iter(fixed.values())))
+        untracked['metadata'].update(uid=str(uuid4()), resourceVersion='401')
+        inventory[kinds[untracked['kind']]].append(untracked)
+        with pytest.raises(ValueError):
+            observe()  # Even a source-qualified grant is forbidden before its intent.
+        inventory[kinds[untracked['kind']]].remove(untracked)
     stored = {}
     paths = {runtime_resource_path(row) + '/' + row['metadata']['name']: key for key, row in fixed.items()}
     with gateway_child.HTTPSSharedGateway(bindings=bindings,
@@ -2530,12 +2541,13 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
         _stage_fixed_documents(documents=fixed, revision=digest(fixed), phase='forward-gateway-authority',
             binding=delivery.binding, api=delivery, state_dir=state / 'forward-gateway/authority')
     assert set(fixed) <= observe().authority.keys()
-    for row in stored.values():
-        original_uid = row['metadata']['uid']
-        row['metadata']['uid'] = str(uuid4())
-        with pytest.raises(ValueError):
-            observe()  # Created grants must keep their recorded UID.
-        row['metadata']['uid'] = original_uid
+    if check_forward:
+        for row in stored.values():
+            original_uid = row['metadata']['uid']
+            row['metadata']['uid'] = str(uuid4())
+            with pytest.raises(ValueError):
+                observe()  # Created grants must keep their recorded UID.
+            row['metadata']['uid'] = original_uid
     path = state / 'forward-gateway/start/transition.json'
     record = json.loads(path.read_bytes())
     record['resources'][gateway_key].update(status='intent', expected=started_gateway)
@@ -2543,48 +2555,51 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
     assert observe().workloads[gateway_key] == stopped_gateway
     replace_live(live_gateway, started_gateway)
     assert observe().workloads[gateway_key] == live_gateway
-    live_gateway['spec']['template']['spec']['containers'][0]['image'] = 'foreign.invalid/image:latest'
-    with pytest.raises(ValueError):
-        observe()
-    replace_live(live_gateway, started_gateway)
-    for receipt in ('gateway.json', 'authority/stage.json', 'authority/dispatch.json', 'start/transition.json'):
-        selected = state / 'forward-gateway' / receipt
-        raw = selected.read_bytes()
-        selected.unlink()
-        before = len(calls)
+    if check_forward:
+        live_gateway['spec']['template']['spec']['containers'][0]['image'] = 'foreign.invalid/image:latest'
         with pytest.raises(ValueError):
             observe()
-        assert len(calls) == before
-        selected.write_bytes(raw)
-        selected.chmod(0o600)
-    raw = path.read_bytes()
-    mode['during_read'] = path.unlink
-    with pytest.raises(ValueError):
-        observe()
-    path.write_bytes(raw)
-    path.chmod(0o600)
+        replace_live(live_gateway, started_gateway)
+        for receipt in ('gateway.json', 'authority/stage.json', 'authority/dispatch.json', 'start/transition.json'):
+            selected = state / 'forward-gateway' / receipt
+            raw = selected.read_bytes()
+            selected.unlink()
+            before = len(calls)
+            with pytest.raises(ValueError):
+                observe()
+            assert len(calls) == before
+            selected.write_bytes(raw)
+            selected.chmod(0o600)
+        raw = path.read_bytes()
+        mode['during_read'] = path.unlink
+        with pytest.raises(ValueError):
+            observe()
+        path.write_bytes(raw)
+        path.chmod(0o600)
     record['resources'][gateway_key]['status'] = 'applied'
     private_state._atomic_json(path, record)
     observe()
-    replace_live(live_gateway, stopped_gateway)
-    with pytest.raises(ValueError):
-        observe()  # Completed startup no longer admits the stopped predecessor.
-    replace_live(live_gateway, started_gateway)
+    if check_forward:
+        replace_live(live_gateway, stopped_gateway)
+        with pytest.raises(ValueError):
+            observe()  # Completed startup no longer admits the stopped predecessor.
+        replace_live(live_gateway, started_gateway)
     assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-activate'
     assert observe().workloads[gateway_key] == live_gateway
     activation_path = state / 'forward-activate/activation.json'
     activation_bytes = activation_path.read_bytes()
-    for mutation in ('bytes', 'missing'):
-        def change(mutation=mutation):
-            if mutation == 'bytes':
-                activation_path.write_bytes(activation_bytes + b'\n')
-            else:
-                activation_path.unlink()
-        mode['during_read'] = change
-        with pytest.raises(ValueError):
-            observe()
-        activation_path.write_bytes(activation_bytes)
-        activation_path.chmod(0o600)
+    if check_forward:
+        for mutation in ('bytes', 'missing'):
+            def change(mutation=mutation):
+                if mutation == 'bytes':
+                    activation_path.write_bytes(activation_bytes + b'\n')
+                else:
+                    activation_path.unlink()
+            mode['during_read'] = change
+            with pytest.raises(ValueError):
+                observe()
+            activation_path.write_bytes(activation_bytes)
+            activation_path.chmod(0o600)
     if participant:
         record = json.loads(activation_bytes)
         record['opening'] = 'opened'
