@@ -134,6 +134,29 @@ async def test_exact_candidate_ancestry_uses_scoped_github_reader(publication, s
             assert await catalog.candidate_follows(candidate_id=IDENTITY, current_sha=current) is want
 
 
+@pytest.mark.parametrize('status', [401, 403, 404, 429, 500])
+async def test_unavailable_commit_comparison_never_authorizes_a_release(publication, status):
+    from loom.execution_image_admission import ImageAdmissionKeyring
+    from loom_service.environment_management.candidates import (
+        GitHubCandidateCatalog,
+        ProtectedPublication,
+    )
+
+    reference, _, _, keyring, candidate = publication
+
+    def respond(request):
+        assert request.url.path == f'/repositories/1281629473/compare/{HEAD}...{SHA}'
+        assert request.headers['Authorization'] == 'Bearer test-github-secret'
+        return httpx.Response(status)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        catalog = GitHubCandidateCatalog(http, token='test-github-secret',
+            publications=[ProtectedPublication.model_validate(reference)],
+            keyring=ImageAdmissionKeyring.from_json(keyring), registry_prefix=candidate['registry_prefix'])
+        with pytest.raises(httpx.HTTPStatusError):
+            await catalog.candidate_follows(candidate_id=IDENTITY, current_sha=HEAD)
+
+
 @pytest.mark.parametrize("candidate_repository", ["qianyi-sun/loom", "ca-mrc/loom"])
 async def test_transferred_repository_resolves_old_and_new_publications(publication, candidate_repository):
     reference, responses, _, keyring, candidate = copy.deepcopy(publication)
