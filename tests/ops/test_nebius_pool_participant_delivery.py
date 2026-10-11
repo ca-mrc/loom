@@ -109,7 +109,8 @@ def test_shared_recovery_selects_original_publication_not_another_success_for_sa
 
 
 @pytest.mark.parametrize('recover,file_writes', [(False, False), (False, True), (True, False), (True, True),
-    ('pre-upgrade-backup', True), ('30-migrate.yaml', True), ('50-configure.yaml', True), ('guard-release', True)])
+    ('pre-upgrade-backup', True), ('30-migrate.yaml', True), ('50-configure.yaml', True), ('guard-release', True),
+    ('release-before-commit', True), ('completion-prepare', True), ('completion-ack', True)])
 def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation_inputs, connection, tmp_path, monkeypatch, recover, file_writes):
     """Real pool effects and deployment lifecycle; external I/O/qualification doubled."""
     inputs = operation_inputs
@@ -124,9 +125,32 @@ def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation
         expected_cluster_id=config['cluster_id'], publication_dir=publication,
         candidate=inputs['candidate']['candidate_sha'], evidence_dir=tmp_path / 'evidence', github=True)
     intents, phases = [], []
+    completion_faults = {'guard-release', 'release-before-commit', 'completion-prepare', 'completion-ack'}
     failed_job = ('loom-predeploy-' + retained.reference.operation_id.hex if recover == 'pre-upgrade-backup' else
-        plan.files[recover][0]['metadata']['name'] if isinstance(recover, str) and recover != 'guard-release' else None)
+        plan.files[recover][0]['metadata']['name'] if isinstance(recover, str) and recover not in completion_faults else None)
     state = {'fail_https': recover is True, 'fail_job': failed_job, 'lose_release': recover == 'guard-release'}
+    if recover in {'completion-prepare', 'completion-ack'}:
+        from scripts.ops import nebius_certificates as private_state
+
+        original_write, original_atomic = private_state._write_private, private_state._atomic_json
+        fault = [True]
+
+        def write(path, payload, *args, **kwargs):
+            if path.name.endswith('-completion.json') and recover == 'completion-prepare' and fault[0]:
+                fault[0] = False
+                raise OSError('simulated interrupted effect-free preparation')
+            return original_write(path, payload, *args, **kwargs)
+
+        def atomic(path, payload, *args, **kwargs):
+            result = original_atomic(path, payload, *args, **kwargs)
+            if path.name == 'release.json' and payload.get('status') == 'released' and recover == 'completion-ack' and fault[0]:
+                fault[0] = False
+                raise OSError('simulated committed completion acknowledgement loss')
+            return result
+
+        monkeypatch.setattr(private_state, '_write_private', write)
+        monkeypatch.setattr(private_state, '_atomic_json', atomic)
+    release_attempts = []
 
     class Kube(FakeKubectl):
         def get(self, kind, name, namespace):
@@ -150,6 +174,10 @@ def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation
                     if pod['spec']['containers'][0]['securityContext']['capabilities'].get('add'):
                         raise deploy.TaskIdentityPolicyDeniedError(config['execution_namespace'] + '-private-root-v1')
                     return ''
+            if 'loom.nebius_rollout_guard' in command and 'release' in command:
+                release_attempts.append(command)
+                if recover == 'release-before-commit' and len(release_attempts) == 1:
+                    raise deploy.DeploymentError('guard release failed before commit')
             result = super().run(*command, **kwargs)
             if 'loom.nebius_rollout_guard' in command and 'release' in command and state['lose_release']:
                 state['lose_release'] = False
@@ -178,7 +206,9 @@ def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation
             raise deploy.DeploymentError('simulated post-workload HTTPS failure')
 
     def qualify_pool(phase):
-        if phase != 'preflight':
+        if phase == 'released':
+            assert kube.guard_identity is None
+        elif phase != 'preflight':
             assert kube.guard_identity == (retained.guard_owner, inputs['candidate']['candidate_sha'])
 
     pool_state.qualify = qualify_pool
@@ -299,12 +329,14 @@ def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation
         writer_args['candidate_writer'] = RetainedCandidateFileWriter(retained=retained,
             open_resource=lambda _: nullcontext(ResourceIO()), open_creation=open_job)
     if recover:
-        error = 'HTTPS' if recover is True else 'guard release response lost' if recover == 'guard-release' else 'execution unconfirmed'
-        with pytest.raises(deploy.DeploymentError, match=error):
+        error = ('HTTPS' if recover is True else {'guard-release': 'guard release response lost',
+            'release-before-commit': 'guard release failed', 'completion-prepare': 'release intent',
+            'completion-ack': 'release completion'}.get(recover, 'execution unconfirmed'))
+        with pytest.raises(ValueError, match=error):
             idle.rollout(args, participant_rollout=retained, pool=pool, **writer_args)
         failed, = args.evidence_dir.glob('deployment-*.json')
         assert json.loads(failed.read_text())['shared_pool_release'] == retained.reference.model_dump(mode='json')
-        assert kube.guard_identity == (None if recover == 'guard-release' else
+        assert kube.guard_identity == (None if recover in {'guard-release', 'completion-ack'} else
             (retained.guard_owner, inputs['candidate']['candidate_sha']))
         args.recovery_evidence = failed
         # Recovery uses the original snapshot even though the platform's live
@@ -313,10 +345,33 @@ def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation
         assert json.loads(kube.objects['configmap', 'loom-platform-config']['data']['profile.json'])['candidate_sha'] == expected_candidate
         retained = operation.load_participant_rollout(reference=retained.reference,
             state_root=inputs['state_root'], anchor_dir=inputs['anchor_dir'])
+        if recover == 'guard-release':
+            from scripts.ops import nebius_certificates as private_state
+            from scripts.ops.nebius_pool_participant_completion import RetainedParticipantCompletion
+
+            completion = RetainedParticipantCompletion(writer_args['candidate_writer'], pool)
+            original_completion = completion.path.read_bytes()
+            original_anchor = completion.anchor.read_bytes()
+            for path, original in ((completion.path, original_completion), (completion.anchor, original_anchor)):
+                path.unlink()
+                with pytest.raises(ValueError, match='preserve'):
+                    completion.reconcile(kube)
+                private_state._write_private(path, original)
+            damaged = json.loads(original_completion)
+            next(iter(damaged['jobs'].values()))['pod_uids'] = [str(uuid4())]
+            private_state._atomic_json(completion.path, damaged)
+            with pytest.raises(ValueError, match='preserve'):
+                completion.reconcile(kube)
+            private_state._atomic_json(completion.path, json.loads(original_completion))
+            pool_state.ready = False
+            with pytest.raises(ValueError, match='preserve'):
+                completion.reconcile(kube)
+            pool_state.ready = True
     result = idle.rollout(args, participant_rollout=retained, pool=pool, **writer_args)
     assert result['status'] == 'complete' and kube.guard_identity is None
     assert result['shared_pool_release'] == retained.reference.model_dump(mode='json')
-    assert pool_state.effects == ['config', 'fence', 'stage', 'config', 'manager', 'open', 'capacity']
+    assert pool_state.effects == ['config', 'fence', 'stage', 'config', 'manager', 'open', 'capacity'] + (
+        ['capacity'] if recover in {'release-before-commit', 'completion-prepare'} else [])
     if file_writes:
         assert not set(phases) & {'00-namespaces.yaml', '10-config-network.yaml', '20-database.yaml',
             '40-services.yaml', '60-execution.yaml', '70-public.yaml', '80-backup.yaml',
@@ -338,12 +393,51 @@ def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation
         assert {'30-migrate.yaml', '50-configure.yaml'} <= set(phases)
     assert all(row['shared_pool_release'] == retained.reference.model_dump(mode='json') for row in intents)
     assert len(intents) == (2 if recover else 1)
-    if recover == 'guard-release':
+    if recover in completion_faults:
         # Completion reconciliation must not reacquire intake or repeat any
         # build/deploy/pool effect after the original release committed.
         actions = [command for command in kube.commands if 'loom.nebius_rollout_guard' in command
             and ('acquire' in command or 'release' in command)]
         assert len(actions) == 2
+
+
+def test_completion_preserves_the_existing_database_clock_skew_allowance(
+        operation_inputs, connection, tmp_path, monkeypatch):
+    from datetime import datetime, timedelta
+
+    from tests.ops import test_nebius_pool_participant_adapter as transport
+
+    class DatabaseClock:
+        @staticmethod
+        def now(tz):
+            return datetime.now(tz) + timedelta(seconds=5)
+
+    monkeypatch.setattr(transport, 'datetime', DatabaseClock)
+    test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(
+        operation_inputs, connection, tmp_path, monkeypatch, recover=False, file_writes=True)
+
+
+def test_expired_monotonic_capacity_cannot_create_a_release_intent(operation_inputs, connection, tmp_path, monkeypatch):
+    import time
+
+    from scripts.ops.nebius_pool_participant_adapter import RetainedParticipantPoolAdapter
+
+    elapsed = [0]
+    original = RetainedParticipantPoolAdapter.read_capacity
+
+    def read_capacity(self, *args, **kwargs):
+        result = original(self, *args, **kwargs)
+        elapsed[0] += 61  # Transport fixture's capacity receipt has a 60-second lease.
+        return result
+
+    monkeypatch.setattr(RetainedParticipantPoolAdapter, 'read_capacity', read_capacity)
+    monkeypatch.setattr(deploy, 'time', SimpleNamespace(monotonic=lambda: time.monotonic() + elapsed[0], sleep=time.sleep))
+    with pytest.raises(deploy.DeploymentError, match='capacity proof unavailable or expired'):
+        test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(
+            operation_inputs, connection, tmp_path, monkeypatch, recover=False, file_writes=True)
+    retained = connection[0].retained
+    assert not (retained.state_dir / 'completion/release.json').exists()
+    assert not (retained.anchor_dir / (str(retained.reference.operation_id) + '-completion.json')).exists()
 
 
 @pytest.mark.parametrize('damage', ['missing-adapter', 'missing-operation', 'mutated-operation',

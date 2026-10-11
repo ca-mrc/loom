@@ -52,9 +52,9 @@ def connection(operation_inputs, monkeypatch):
     kube = state.kube
 
     def qualify(observed_kube, operation, phase):
-        assert observed_kube is state.kube and operation == retained and phase in {'preflight', 'guarded', 'ready'}
+        assert observed_kube is state.kube and operation == retained and phase in {'preflight', 'guarded', 'ready', 'released'}
         state.gates.append(phase)
-        if not state.allow or (phase == 'ready' and not state.ready):
+        if not state.allow or (phase in {'ready', 'released'} and not state.ready):
             raise ValueError('qualification unavailable')
         if state.qualify is not None:
             state.qualify(phase)
