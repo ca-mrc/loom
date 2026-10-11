@@ -1386,6 +1386,57 @@ def test_shared_parent_anchors_all_phases_and_never_replays_completed_effects(sh
 
 
 @pytest.mark.timeout(420)
+def test_normal_release_predecessor_requires_completed_shared_history_without_live_effects(shared_operation):
+    import hashlib
+
+    from scripts.ops import nebius_shared_pool_operation as module
+
+    args, bindings = shared_operation
+    manager = args['runtime'].database.manager.retained.request.retained
+    state = Path(manager.operation['state_dir']).parent / 'shared-pool-handoff'
+    anchor = Path(manager.operation['anchor_dir'])
+    marker = anchor / 'shared-pool-handoff.json'
+    api = SharedPhaseAPI(module)
+    kwargs = {**args, 'bindings': bindings, 'api': api}
+    with pytest.raises(ValueError, match='completed shared pool history unavailable'):
+        module.load_completed_shared_pool_operation(**kwargs)
+    assert not state.exists() and not marker.exists() and not api.events
+
+    api.block = 'forward-wire'
+    assert module.run_shared_pool_operation(**kwargs, action='install')['status'] == 'pending'
+    with pytest.raises(ValueError, match='completed shared pool history unavailable'):
+        module.load_completed_shared_pool_operation(**kwargs)
+    api.block = None
+    assert module.run_shared_pool_operation(**kwargs, action='install')['status'] == 'shared_pool_handoff_complete'
+    effects = (list(api.events), list(api.qualifications), api.preflights)
+    proof = module.load_completed_shared_pool_operation(**kwargs)
+    assert proof.migration == bindings.migration and proof.state_dir == state
+    assert bindings.plan.history.items() <= proof.history.items()
+    assert proof.history[marker] == hashlib.sha256(marker.read_bytes()).hexdigest()
+    assert proof.history[state / 'operation.json'] == hashlib.sha256((state / 'operation.json').read_bytes()).hexdigest()
+    for phase in module.FORWARD_PHASES:
+        receipt = state / phase / 'receipt.json'
+        assert proof.history[receipt] == hashlib.sha256(receipt.read_bytes()).hexdigest()
+    assert module.load_completed_shared_pool_operation(**kwargs) == proof
+    assert effects == (api.events, api.qualifications, api.preflights)
+
+    for path in (marker, state / 'operation.json', state / 'forward-wire' / 'receipt.json'):
+        original = path.read_bytes()
+        try:
+            path.write_bytes(b'{}')
+            with pytest.raises(ValueError, match='completed shared pool history unavailable'):
+                module.load_completed_shared_pool_operation(**kwargs)
+        finally:
+            path.write_bytes(original)
+    recovery = anchor / 'shared-pool-recovery.json'
+    recovery.write_bytes(b'{}')
+    recovery.chmod(0o600)
+    with pytest.raises(ValueError, match='completed shared pool history unavailable'):
+        module.load_completed_shared_pool_operation(**kwargs)
+    assert effects == (api.events, api.qualifications, api.preflights)
+
+
+@pytest.mark.timeout(420)
 def test_shared_parent_recovery_freezes_forward_history_and_is_terminal(shared_operation):
     import importlib.util
     import json
