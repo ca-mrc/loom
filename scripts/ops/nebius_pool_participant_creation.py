@@ -1,13 +1,15 @@
 """Create-only candidate and original-backup resources for the release parent.
 
 The existing stage engine retains intent/defaults/UID and only reads an unknown
-create outcome. This child does not prove execution, authorize failed-Job retry,
-or replace the parent's independent dispatch history and phase/guard census.
+create outcome. Creation receipts are not execution proof; the separate read-only
+Job observer qualifies owned terminal processes. Neither authorizes failed-Job
+retry or replaces the parent's independent dispatch history and phase/guard census.
 """
 from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import ssl
 from collections.abc import Callable
 from dataclasses import asdict
@@ -17,15 +19,75 @@ from uuid import UUID
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
 from scripts.ops.nebius_management_material import ManagementBinding
-from scripts.ops.nebius_management_stage import _MARKER, ManagementStageAPI, _stage_fixed_documents
+from scripts.ops.nebius_management_stage import (
+    _MARKER,
+    ManagementStageAPI,
+    _qualified_defaulted,
+    _stage_fixed_documents,
+    _validate_record,
+)
 from scripts.ops.nebius_management_transport import ManagementKubernetesTransport
 from scripts.ops.nebius_pool_participant_operation import (
     RetainedParticipantRollout,
     load_participant_rollout,
 )
 from scripts.ops.nebius_pool_participant_resource import _KINDS, _resource_path
+from scripts.ops.nebius_pool_role_fencing import _terminal_platform_job
+from scripts.ops.nebius_shared_pool_recovery_collector import _owned, _pod_spec
 
 from loom.nebius_platform_render import digest
+
+
+def _job_outcome(job: dict[str, Any], collection: dict[str, Any]) -> dict[str, Any] | None:
+    """Complete inventory plus retained Job ancestry; no new execution authority."""
+    metadata = collection['metadata']
+    if (collection.get('apiVersion') != 'v1' or collection.get('kind') != 'PodList'
+            or metadata.get('continue') or not isinstance(metadata.get('resourceVersion'), str)
+            or not 0 < len(metadata['resourceVersion']) <= 128
+            or not isinstance(collection.get('items'), list) or len(collection['items']) > 1000):
+        raise ValueError
+    uid, namespace = _uid(job), job['metadata']['namespace']
+    template = job['spec']['template']
+    pods = collection['items']
+    identities = {uid: (namespace, template['spec'].get('serviceAccountName', 'default'))}
+    owned = []
+    selector = job['spec']['selector']['matchLabels']
+    for pod in pods:
+        pod_uid = _uid(pod)
+        if (pod.get('apiVersion') != 'v1' or pod.get('kind') != 'Pod'
+                or pod['metadata']['namespace'] != namespace or pod_uid in identities):
+            raise ValueError
+        identities[pod_uid] = (namespace, pod['spec'].get('serviceAccountName', 'default'))
+        belongs = _owned(pod, job)
+        selected = all(pod['metadata'].get('labels', {}).get(key) == value for key, value in selector.items())
+        if selected != belongs:
+            raise ValueError
+        if belongs:
+            if not _pod_spec(pod['spec'], template['spec'], scheduled=True):
+                raise ValueError
+            owned.append(pod)
+    status = job.get('status', {})
+    conditions = status.get('conditions', [])
+    if (len({row['type'] for row in conditions}) != len(conditions)
+            or any(type(status.get(field, 0)) is not int or status.get(field, 0) < 0
+                for field in ('active', 'terminating', 'succeeded', 'failed'))):
+        raise ValueError
+    terminal = [row['type'] for row in conditions if row['type'] in {'Complete', 'Failed'} and row.get('status') == 'True']
+    if len(terminal) > 1:
+        raise ValueError
+    if not terminal or not owned or not _terminal_platform_job(job, pods, identities):
+        return None
+    if terminal == ['Complete']:
+        successes = [pod for pod in owned if pod['status']['phase'] == 'Succeeded']
+        if len(successes) != 1 or status.get('succeeded') != 1:
+            raise ValueError
+        for field in ('containerStatuses', 'initContainerStatuses', 'ephemeralContainerStatuses'):
+            if any(row['state']['terminated']['exitCode'] != 0 for row in successes[0]['status'].get(field, [])):
+                raise ValueError
+    elif status.get('succeeded', 0) != 0 or any(pod['status']['phase'] != 'Failed' for pod in owned):
+        raise ValueError
+    return {'status': 'complete' if terminal == ['Complete'] else 'failed', 'job_uid': uid,
+        'job_name': job['metadata']['name'], 'pod_uids': sorted(_uid(pod) for pod in owned)}
 
 
 def _creation(retained: RetainedParticipantRollout, key: str) -> tuple[dict[str, Any], str]:
@@ -141,6 +203,49 @@ class HTTPSParticipantCreationAPI(ManagementKubernetesTransport):
         path = self._approved(document, writing=True).rsplit('/', 1)[0]
         self.verify_identity(self.binding)
         self._request('POST', path, document=document)
+
+    def job_outcome(self) -> dict[str, Any] | None:
+        """Observe this recorded Job and its terminal processes, without writes.
+
+        Failed is positive terminal proof, not permission to retry. None is an
+        unfinished/unproven outcome; only the parent can decide its next phase.
+        """
+        try:
+            self.verify_identity(self.binding)
+            document, identity = _creation(self.retained, self.key)
+            if document['kind'] != 'Job':
+                raise ValueError
+            path = self.retained.state_dir / 'candidate-creations' / hashlib.sha256(self.key.encode()).hexdigest() / 'stage.json'
+            raw = private_state._private_read(path, limit=4 * 1024**2)
+            record = json.loads(raw)
+            _validate_record(record, {'schema': 'loom.nebius-management-stage.v1', 'binding': asdict(self.binding),
+                'revision': digest({'creation': identity, 'binding': asdict(self.binding)}), 'phase': 'participant-creation'},
+                {_key(document): document})
+            item = record['resources'][_key(document)]
+            if item['status'] != 'created':
+                raise ValueError
+
+            def observed_job() -> dict[str, Any]:
+                job = self.get_resource(item['desired'])
+                if (job is None or _uid(job) != item['uid'] or _snapshot(job) != item['observed']
+                        or _qualified_defaulted(item['desired'], job) != item['expected']):
+                    raise ValueError
+                return job
+
+            job = observed_job()
+            collection = self._request('GET', '/api/v1/namespaces/' + document['metadata']['namespace'] + '/pods?limit=1000')
+            if collection is None:
+                raise ValueError
+            outcome = _job_outcome(job, collection)
+            final = observed_job()
+            if final.get('status', {}) != job.get('status', {}):
+                raise ValueError
+            self.verify_identity(self.binding)
+            if private_state._private_read(path, limit=4 * 1024**2) != raw:
+                raise ValueError
+            return outcome
+        except Exception:
+            raise ValueError('participant Job outcome unqualified; preserve evidence') from None
 
     def get_database_claim(self) -> dict[str, Any] | None:
         raise ValueError('participant creation does not inspect or allocate storage')

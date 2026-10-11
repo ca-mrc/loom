@@ -1499,8 +1499,13 @@ UID; recovery never derives a replacement backup from an already updated CronJob
 The existing fixed-create journal preserves dry-run defaults, dispatch intent and
 the observed resource UID. Unknown creates are only read back, existing names
 are not adopted, and missing/replaced created resources are not recreated. These
-receipts prove creation, not successful Job execution. Terminal Job/Pod proof,
-explicit failed-Job retry lineage, parent phase authority and full rollout
+receipts prove creation, not successful Job execution. The separate read-only
+observer binds the retained Job UID/template to a complete Pod collection and
+terminal owned processes, then rechecks the Job and journal. Success requires a
+successful owned Pod with successful container exits; a failed outcome requires
+all owned processes to be inert. Running unrelated services are not confused with
+Job descendants. This observation grants no retry or deployment authority.
+Explicit failed-Job retry lineage, parent phase authority and full rollout
 integration remain required connections. The normal rollout's admission-policy
 bootstrap writes must also be accounted for; the candidate file loop alone does
 not cover every effect.

@@ -160,6 +160,26 @@ def test_job_success_rejects_unqualified_execution_evidence(connection, damage):
         assert all(row.method == 'GET' for row in state.requests)
 
 
+def test_backup_success_accounts_for_backoff_pods_but_not_unrelated_running_services(connection):
+    state, connect = connection
+    with connect('pre-upgrade-backup') as api:
+        stage(state, api, 'pre-upgrade-backup')
+        job, = state.external.resources.values()
+        job['status'] = {'conditions': [{'type': 'Complete', 'status': 'True'}],
+            'active': 0, 'succeeded': 1, 'failed': 1}
+        failed, succeeded = terminal_pod(job, succeeded=False), terminal_pod(job, succeeded=True)
+        failed['metadata']['name'] += '-failed'
+        unrelated = copy.deepcopy(failed)
+        unrelated['metadata'].update(name='ordinary-service', uid=str(uuid4()), labels={'app': 'loom-service'},
+            ownerReferences=[])
+        unrelated['status'] = {'phase': 'Running'}
+        state.pods = [failed, unrelated, succeeded]
+        result = api.job_outcome()
+        assert result['status'] == 'complete'
+        assert result['pod_uids'] == sorted([failed['metadata']['uid'], succeeded['metadata']['uid']])
+        assert len(state.external.creates) == 1
+
+
 def stage(state, api, key):
     return module().stage_participant_creation(retained=state.retained, key=key, api=api)
 
