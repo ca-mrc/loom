@@ -45,6 +45,11 @@ from scripts.ops.nebius_pool_participant_resource import (
     _qualified_candidate,
     _resource_path,
 )
+from scripts.ops.nebius_pool_startup_database import (
+    ParticipantRegistryState,
+    pool_participant_authority_sql,
+    qualify_participant_authority_report,
+)
 from scripts.ops.nebius_shared_pool_operation import _files
 
 from loom.nebius_platform_render import digest
@@ -217,6 +222,7 @@ class _ResourceView:
                 or any(not isinstance(path, str) for path in intents) or len(set(intents)) != len(intents)):
             raise ValueError
         allowed: set[str] = set()
+        dispatched: set[str] = set()
         for name, step in steps.items():
             if (set(step) != {'status', 'result'} or step['status'] not in {'started', 'complete'}
                     or (step['status'] == 'started' and step['result'] is not None)
@@ -250,6 +256,10 @@ class _ResourceView:
                 item = self._stage(path, document=document,
                     revision=digest({'documents': {_key(document): document}, 'binding': asdict(binding)}),
                     phase=phase, dispatched=relative in intents, required=relative in intents)
+                if document['kind'] == 'Job' and relative in intents:
+                    if item is None or item['status'] not in {'create_intent', 'created'}:
+                        raise ValueError
+                    dispatched.add(name)
                 if item is not None and name not in steps and document['kind'] != 'ConfigMap':
                     raise ValueError
                 if name in steps and steps[name]['status'] == 'complete':
@@ -257,6 +267,26 @@ class _ResourceView:
                         raise ValueError
                     if document['kind'] == 'Job' and steps[name]['result'].get('job_uid') != item['uid']:
                         raise ValueError
+        self.registry_states: frozenset[ParticipantRegistryState] = frozenset({'ready'})
+        transitions: tuple[tuple[str, ParticipantRegistryState, ParticipantRegistryState], ...] = (
+            ('fence', 'ready', 'fenced'), ('stage', 'fenced', 'staged'), ('open', 'staged', 'complete'))
+        for name, before, after in transitions:
+            if name not in steps:
+                continue
+            if self.registry_states != frozenset({before}):
+                raise ValueError
+            step = steps[name]
+            if step['status'] == 'complete':
+                self.registry_states = frozenset({before if step['result']['refresh']['status'] == 'pending_work' else after})
+            elif name in dispatched:
+                # Only dispatch of this action's Job permits an uncertain SQL
+                # transition; staging its shared input ConfigMap does not.
+                self.registry_states = frozenset({before, after})
+        for prerequisite, consumers, expected in (
+                ('stage', {'catalog', 'manager', 'open'}, 'staged'),
+                ('open', {name for name in steps if name.startswith('capacity:')}, 'complete')):
+            if consumers & steps.keys() and steps[prerequisite]['result']['refresh']['status'] != expected:
+                raise ValueError
         request_catalog = ParticipantCatalogRequest(retained.release, retained.inputs.manager, retained.inputs.catalog)
         catalog, manager, identity = _projection(request_catalog)
         path = root / 'catalog/catalog/stage.json'
@@ -419,6 +449,76 @@ class HTTPSParticipantResourceObserver(ManagementKubernetesTransport):
             return result[0]
         except Exception:
             raise ValueError('participant guard observation unqualified; preserve evidence') from None
+
+    def observe_registry(self, *, bindings: SharedPoolGuardBindings, kubeconfig: Path,
+            executable: Path, preparing: str | None = None) -> ParticipantRegistryState:
+        """Read exact management authority allowed by this release's dispatch.
+
+        This composes with resource/writer observation; it does not repeat that
+        census or turn saved Job receipts into current database authority. Only
+        fixed READ ONLY SQL is executed, never a refresh Job or locking action.
+        """
+        from scripts.ops.nebius_development_runtime_probes import HTTPSDevelopmentRuntimeProbes
+        from scripts.ops.nebius_pool_origin_history import KubectlPoolHistoryAPI
+        from scripts.ops.nebius_pool_participant_operation import _paths
+        from scripts.ops.nebius_shared_pool_forward_processes import _gateway_history_target
+
+        try:
+            self._source()
+            bound, retained = copy.deepcopy(bindings), self.retained
+            view = _ResourceView(retained, preparing)
+            manager = bound.plan.development.runtime.request.database.manager.retained.request.retained
+            if (bound.migration.registration.binding != retained.inputs.previous.registration.binding
+                    or not {path: hashlib.sha256(raw).hexdigest() for path, raw in manager.files.items()}.items()
+                        <= retained.inputs.history.items()):
+                raise ValueError
+            secret_path = '/api/v1/namespaces/' + manager.binding.namespace + '/secrets/loom-platform-db'
+            credential = self._request('GET', secret_path)
+            if credential is None:
+                raise ValueError
+            original = _gateway_history_target(bound, credential)
+            if (_key(original.controller) != _key(retained.inputs.manager)
+                    or _uid(original.controller) != _uid(retained.inputs.manager)):
+                raise ValueError
+            target = replace(original, controller=retained.inputs.manager)
+            history = KubectlPoolHistoryAPI(request=retained.inputs.previous, target=target,
+                kubeconfig=kubeconfig, executable=executable)
+            prefix = tuple(history.prefix)
+            _, marker = _paths(retained.reference, retained.state_dir.parent, retained.anchor_dir)
+            anchor = private_state._private_read(marker)
+            query = pool_participant_authority_sql(retained.release.refresh)
+
+            def unchanged() -> None:
+                if (bindings != bound or self.retained != retained or tuple(history.prefix) != prefix
+                        or hashlib.sha256(private_state._private_read(kubeconfig, limit=512 * 1024)).hexdigest() != history.kubeconfig_sha256
+                        or hashlib.sha256(private_state._private_read(retained.state_dir / 'inputs.json', limit=16 * 1024**2)).hexdigest()
+                            != retained.reference.inputs_sha256
+                        or private_state._private_read(marker) != anchor
+                        or _ResourceView(retained, preparing).files != view.files
+                        or any(private_state._private_read(path, limit=4 * 1024**2) != raw for path, raw in manager.files.items())):
+                    raise ValueError
+
+            def read() -> tuple[ParticipantRegistryState, tuple[Any, ...]]:
+                unchanged()
+                before = history._database(target, url_variable='LOOM_SVC_DB_URL')
+                process = HTTPSDevelopmentRuntimeProbes._process_identity(before)
+                report = history._run(['exec', '-n', target.namespace, 'pod/' + before['metadata']['name'], '-c', 'loom-postgres', '--',
+                    'psql', '-X', '-qAt', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', 'loom', '-c', query])
+                result = qualify_participant_authority_report(retained.release.refresh, report, states=view.registry_states)
+                if HTTPSDevelopmentRuntimeProbes._process_identity(history._database(target, url_variable='LOOM_SVC_DB_URL')) != process:
+                    raise ValueError
+                unchanged()
+                return result, process
+
+            result = read()
+            credential = self._request('GET', secret_path)
+            if credential is None or _gateway_history_target(bound, credential) != original or read() != result:
+                raise ValueError
+            unchanged()
+            self._source()
+            return result[0]
+        except Exception:
+            raise ValueError('participant registry observation unqualified; preserve evidence') from None
 
     def observe_writers(self, *, bindings: SharedPoolGuardBindings, shared_state: Path,
             preparing: str | None = None) -> SharedPoolWriterObservation:

@@ -1603,6 +1603,22 @@ The released-state check requires open intake, but does not establish completed
 release history. None of these observations acquires/releases a guard, qualifies
 application processes or replaces the other protected release checks.
 
+The participant registry observation reads the retained manager's database through
+its pinned credential, namespace, StatefulSet, Service and actual backend process.
+A fixed repeatable-read, read-only SQL snapshot checks the exact pool, participant,
+machine and token authority against the original or candidate registration. It
+acquires no mutation advisory lock or row lock and executes no refresh Job.
+Other participants must remain active with their unchanged bindings.
+
+The current release's actual Job dispatch journals determine which registry state
+is admissible: original active, original fenced, candidate fenced, or candidate
+active. An unfinished dispatched Job permits only its two adjacent states; an
+input ConfigMap or prepared Job does not authorize a transition. A completed
+`pending_work` report preserves the prior state and cannot justify later catalog,
+manager, opening or capacity steps. Repeated SQL/backend/credential and private
+history reads reject drift. These reads compose with the full resource/writer and
+runtime checks; they neither establish completed release history nor grant writes.
+
 The transaction, pool-effect adapter and parent interface do not establish
 publication, history, full runtime readiness or recovery authority on their own.
 The protected entry and phase-aware live qualifier must still connect the normal
