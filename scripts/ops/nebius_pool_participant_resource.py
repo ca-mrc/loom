@@ -42,6 +42,23 @@ _MARKER = 'loom.nebius/participant-candidate-operation'
 _SERVICE_ALLOCATION = ('clusterIP', 'clusterIPs', 'ipFamilies', 'ipFamilyPolicy', 'healthCheckNodePort')
 
 
+def _resource_path(document: dict[str, Any]) -> str:
+    metadata = document['metadata']
+    if any(not isinstance(value, str) or re.fullmatch(r'[a-z0-9][a-z0-9.-]{0,251}[a-z0-9]|[a-z0-9]', value) is None
+            for value in (metadata['name'], *([metadata['namespace']] if 'namespace' in metadata else []))):
+        raise ValueError
+    extra = {'Namespace': ('v1', 'namespaces'), 'Service': ('v1', 'services'),
+        'StatefulSet': ('apps/v1', 'statefulsets')}
+    if document['kind'] not in extra:
+        return runtime_resource_path(document) + '/' + str(metadata['name'])
+    version, plural = extra[document['kind']]
+    cluster = document['kind'] == 'Namespace'
+    if document['apiVersion'] != version or cluster == ('namespace' in metadata):
+        raise ValueError
+    return ('/api/v1' if version == 'v1' else '/apis/' + version) + (
+        '' if cluster else '/namespaces/' + str(metadata['namespace'])) + '/' + plural + '/' + str(metadata['name'])
+
+
 def _inputs(retained: RetainedParticipantRollout, key: str) -> tuple[dict[str, Any], dict[str, Any], str]:
     original, = (row for row in retained.inputs.current if _key(row) == key)
     candidate, = (row for rows in retained.release.files.values() for row in rows if _key(row) == key)
@@ -161,21 +178,7 @@ class HTTPSParticipantResourceAPI(HTTPSDevelopmentRuntimeWorkloads):
         self._private_inputs()
 
     def _path(self, key: str) -> str:
-        document = self.originals[key]
-        metadata = document['metadata']
-        if any(not isinstance(value, str) or re.fullmatch(r'[a-z0-9][a-z0-9.-]{0,251}[a-z0-9]|[a-z0-9]', value) is None
-                for value in (metadata['name'], *([metadata['namespace']] if 'namespace' in metadata else []))):
-            raise ValueError
-        extra = {'Namespace': ('v1', 'namespaces'), 'Service': ('v1', 'services'),
-            'StatefulSet': ('apps/v1', 'statefulsets')}
-        if document['kind'] not in extra:
-            return runtime_resource_path(document) + '/' + str(metadata['name'])
-        version, plural = extra[document['kind']]
-        cluster = document['kind'] == 'Namespace'
-        if document['apiVersion'] != version or cluster == ('namespace' in metadata):
-            raise ValueError
-        return ('/api/v1' if version == 'v1' else '/apis/' + version) + (
-            '' if cluster else '/namespaces/' + str(metadata['namespace'])) + '/' + plural + '/' + str(metadata['name'])
+        return _resource_path(self.originals[key])
 
     def _patch(self, key: str, before: dict[str, Any], desired: dict[str, Any], *, preview: bool) -> dict[str, Any] | None:
         try:

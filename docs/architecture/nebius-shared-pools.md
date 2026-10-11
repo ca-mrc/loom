@@ -1490,8 +1490,20 @@ finalizers and existing Service allocations are preserved, including the public
 LoadBalancer; management's private-Service-only defaulting rule is not reused for
 that public endpoint. A release marker distinguishes the target from an unchanged
 original. This child proves only the recorded resource update, not descendants or
-runtime readiness. Creates, candidate/backup Job lineage, parent phase authority
-and full rollout integration remain separate required connections.
+runtime readiness.
+
+The paired create-only child selects a new resource from the same retained
+candidate, or derives the pre-upgrade backup Job from the original captured
+CronJob. The backup has an operation-stable name and records its source CronJob
+UID; recovery never derives a replacement backup from an already updated CronJob.
+The existing fixed-create journal preserves dry-run defaults, dispatch intent and
+the observed resource UID. Unknown creates are only read back, existing names
+are not adopted, and missing/replaced created resources are not recreated. These
+receipts prove creation, not successful Job execution. Terminal Job/Pod proof,
+explicit failed-Job retry lineage, parent phase authority and full rollout
+integration remain required connections. The normal rollout's admission-policy
+bootstrap writes must also be accounted for; the candidate file loop alone does
+not cover every effect.
 
 The transaction and parent interface do not establish publication, history,
 Kubernetes readiness or recovery authority on their own. The concrete protected
