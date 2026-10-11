@@ -345,7 +345,9 @@ def test_shared_candidate_uses_full_normal_rollout_without_restoring_local_write
     events = []
 
     def smoke(origin, environment):
-        assert origin == 'https://' + config['public_host'] and environment == 'staging'
+        # This attachment fixture retains the historical development catalog
+        # label; normal release must not silently reclassify the environment.
+        assert origin == 'https://' + config['public_host'] and environment == 'development'
         events.append('https')
         if failure == 'https':
             raise deploy.DeploymentError('HTTPS not ready')

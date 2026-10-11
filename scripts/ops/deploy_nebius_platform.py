@@ -14,6 +14,7 @@ import tempfile
 import time
 import urllib.request
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -768,6 +769,66 @@ def verify_deployed_images(kube: Kubectl, files: dict[str, list[dict[str, Any]]]
                 raise DeploymentError("candidate workload readback failed: " + metadata["name"])
 
 
+def _rollout_candidate_files(*, kube: Kubectl, manifest: dict[str, Any], config: dict[str, Any],
+        files: dict[str, list[dict[str, Any]]], snapshot_root: Path, retry_failed_jobs: bool,
+        phase: Callable[[str], None], before_write: Callable[[], None]) -> None:
+    """Common workload sequence after the caller's qualified, guarded preflight.
+
+    This is not an entry point or a guard bypass. The parent owns source/namespace
+    qualification, backup, pool registration and recovery, and must retain write
+    intent before each effect. Neither success nor failure releases its guard.
+    The exact supplied files may be standalone or shared-wired; never re-render
+    them here, since that could restore a retired collector or local writers.
+    """
+    ns = config["namespace"]
+
+    def apply_file(filename: str) -> None:
+        before_write()
+        phase(filename.removesuffix(".yaml"))
+        kube.run("apply", "-f", str(snapshot_root / filename))
+
+    def run_job(filename: str) -> None:
+        name = files[filename][0]["metadata"]["name"]
+        existing = kube.get("job", name, ns)
+        if job_complete(existing):
+            phase(filename.removesuffix(".yaml") + "-already-complete")
+            return
+        if job_failed(existing):
+            if not retry_failed_jobs:
+                raise DeploymentError(
+                    "candidate job previously failed; fix the cause and explicitly retry failed jobs"
+                )
+            before_write()
+            phase("retry-failed-job-" + name)
+            kube.run("delete", "job", name, "-n", ns, "--cascade=foreground", "--wait=true")
+        if not existing or job_failed(existing):
+            apply_file(filename)
+        wait_for_job(kube, name, ns, 660)
+
+    for filename in ("00-namespaces.yaml", "10-config-network.yaml", "20-database.yaml"):
+        apply_file(filename)
+    phase("database-ready")
+    kube.run("rollout", "status", "statefulset/loom-postgres", "-n", ns, "--timeout=600s", timeout=640)
+    apply_file("80-backup.yaml")
+    run_job("30-migrate.yaml")
+    apply_file("40-services.yaml")
+    for name in ("loom-service", "loom-control-plane", "loom-llm-gateway", "loom-web"):
+        kube.run("rollout", "status", f"deployment/{name}", "-n", ns, "--timeout=300s", timeout=340)
+    run_job("50-configure.yaml")
+    apply_file("60-execution.yaml")
+    for actuator in [row["metadata"]["name"] for row in files["60-execution.yaml"] if row["kind"] == "Deployment"]:
+        kube.run("rollout", "status", "deployment/" + actuator, "-n", config["execution_namespace"],
+            "--timeout=300s", timeout=340)
+    apply_file("70-public.yaml")
+    phase("public-load-balancer-ready")
+    kube.run("wait", "--for=jsonpath={.status.loadBalancer.ingress}", "service/loom-web", "-n", ns,
+        "--timeout=300s", timeout=340)
+    phase("public-https-smoke")
+    public_smoke(manifest["public_origin"], config["environment"])
+    phase("candidate-readback")
+    verify_deployed_images(kube, files)
+
+
 def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str, Any]:
     snapshot = tempfile.TemporaryDirectory(prefix="loom-nebius-deploy-")
     snapshot_root = Path(snapshot.name)
@@ -885,31 +946,9 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
                 phase("validate-fresh-target")
                 execution_target_action(kube, ns, "validate", retire_target, config["target_id"])
 
-        def apply_file(filename: str) -> None:
+        def before_write() -> None:
             nonlocal mutation_started
             mutation_started = True
-            phase(filename.removesuffix(".yaml"))
-            kube.run("apply", "-f", str(snapshot_root / filename))
-
-        def wait_job(name: str, seconds: int = 660) -> None:
-            wait_for_job(kube, name, ns, seconds)
-
-        def run_job(filename: str) -> None:
-            name = files[filename][0]["metadata"]["name"]
-            existing = kube.get("job", name, ns)
-            if job_complete(existing):
-                phase(filename.removesuffix(".yaml") + "-already-complete")
-                return
-            if job_failed(existing):
-                if not args.retry_failed_jobs:
-                    raise DeploymentError(
-                        "candidate job previously failed; fix the cause and explicitly retry failed jobs"
-                    )
-                phase("retry-failed-job-" + name)
-                kube.run("delete", "job", name, "-n", ns, "--cascade=foreground", "--wait=true")
-            if not existing or job_failed(existing):
-                apply_file(filename)
-            wait_job(name)
 
         if state["backup_required"]:
             phase("pre-upgrade-backup")
@@ -918,7 +957,7 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
             )
             evidence["backup_job"] = backup_name
             kube.run("create", "job", backup_name, "--from=cronjob/loom-platform-backup", "-n", ns)
-            wait_job(backup_name, 1860)
+            wait_for_job(kube, backup_name, ns, 1860)
         if retire_target is not None:
             # A lost response can follow a committed state change. From this
             # point every failure must retain the durable operator-owned pause.
@@ -930,55 +969,9 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
             mutation_started = True
             phase("install-and-verify-task-identity-policy")
             install_task_identity_policy(kube, config, snapshot_root)
-        for filename in ("00-namespaces.yaml", "10-config-network.yaml", "20-database.yaml"):
-            apply_file(filename)
-        phase("database-ready")
-        kube.run(
-            "rollout",
-            "status",
-            "statefulset/loom-postgres",
-            "-n",
-            ns,
-            "--timeout=600s",
-            timeout=640,
-        )
-        apply_file("80-backup.yaml")
-        run_job("30-migrate.yaml")
-        apply_file("40-services.yaml")
-        for name in ("loom-service", "loom-control-plane", "loom-llm-gateway", "loom-web"):
-            kube.run(
-                "rollout", "status", f"deployment/{name}", "-n", ns, "--timeout=300s", timeout=340
-            )
-        run_job("50-configure.yaml")
-        apply_file("60-execution.yaml")
-        for actuator in [
-            row["metadata"]["name"] for row in files["60-execution.yaml"]
-            if row["kind"] == "Deployment"
-        ]:
-            kube.run(
-                "rollout",
-                "status",
-                "deployment/" + actuator,
-                "-n",
-                config["execution_namespace"],
-                "--timeout=300s",
-                timeout=340,
-            )
-        apply_file("70-public.yaml")
-        phase("public-load-balancer-ready")
-        kube.run(
-            "wait",
-            "--for=jsonpath={.status.loadBalancer.ingress}",
-            "service/loom-web",
-            "-n",
-            ns,
-            "--timeout=300s",
-            timeout=340,
-        )
-        phase("public-https-smoke")
-        public_smoke(manifest["public_origin"], config["environment"])
-        phase("candidate-readback")
-        verify_deployed_images(kube, files)
+        _rollout_candidate_files(kube=kube, manifest=manifest, config=config, files=files,
+            snapshot_root=snapshot_root, retry_failed_jobs=args.retry_failed_jobs,
+            phase=phase, before_write=before_write)
         if retire_target is not None:
             phase("target-replacement-readback")
             execution_target_action(kube, ns, "verify", retire_target, config["target_id"])
