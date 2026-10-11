@@ -4319,7 +4319,9 @@ def test_shared_recovery_runtime_inventory_reaches_nested_probes_without_staging
     private_state._atomic_json(journal, record)
     target = copy.deepcopy(record['resources'][stopped_key]['expected'])
     target['metadata']['uid'] = _uid(completed.resources[stopped_key])
-    documents[runtime_resource_path(target)] = target
+    target_path = runtime_resource_path(target) + '/' + target['metadata']['name']
+    assert target_path in documents
+    documents[target_path] = target
 
     def connect(observer, read=handler):
         for connection in (observer, observer.manager, observer.foundation):
@@ -4343,10 +4345,10 @@ def test_shared_recovery_runtime_inventory_reaches_nested_probes_without_staging
         with pytest.raises(ValueError):
             observer.inspect(state_dir=completed.state_dir, _shared_handoff=bindings)
         journal.write_bytes(raw)
-        documents[runtime_resource_path(target)]['metadata']['uid'] = str(uuid4())
+        documents[target_path]['metadata']['uid'] = str(uuid4())
         with pytest.raises(ValueError):
             observer.inspect(state_dir=completed.state_dir, _shared_handoff=bindings)
-        documents[runtime_resource_path(target)]['metadata']['uid'] = _uid(completed.resources[stopped_key])
+        documents[target_path]['metadata']['uid'] = _uid(completed.resources[stopped_key])
 
     populate_runtime_pods(documents)
     with runtime_observation.HTTPSSharedPoolRuntimeProbes(bindings=bindings,
