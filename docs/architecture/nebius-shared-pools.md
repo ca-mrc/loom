@@ -1340,6 +1340,19 @@ restart child. This read-only callback does not acquire guards or replace the
 parent's phase/receipt validation, whole-pool census, current provider checks or
 installed acceptance. Those protected-parent connections remain required.
 
+The recovery process observer binds that callback to the same validated recovery
+receipts used by the writer census. Before a root's stop begins, crashed
+applications do not block fencing or cancellation. Only that root's unresolved
+stop or restart intent permits pending readiness; it cannot borrow another
+root's wait. Completed stops require actual descendant drain, and restored
+staging requires current Pod readiness and the runtime challenges above before
+reopening. Cancelled development and gateway roots remain stopped. Complete
+namespace collections and selected process snapshots, root identity/generation,
+the final database process identity, and all private receipt bytes bracket each
+observation. Terminal recovery uses the same current reads without constructing
+active mutation adapters. SQL authority/drain, whole-cluster writer and provider
+qualification remain independent mandatory observations for the protected parent.
+
 Authenticated Kubernetes/worker identity and capacity observations remain
 mandatory. Detailed kubelet samples retain the existing optional-telemetry
 contract; unavailable samples are not zero usage or evidence of certificate trust.
