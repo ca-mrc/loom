@@ -1464,10 +1464,31 @@ candidate's roll-forward recovery. A busy result may release it only when the
 adapter positively proves the fence changed nothing and no later phase began.
 No CLI mode disables the standalone boundary.
 
+The normal-release input record freezes the selected publication and isolated
+render, original participant inventory, manager/catalog and predecessor history.
+It is bounded private local state with a separate input-digest anchor. Recovery
+loads that original record without re-rendering or recapturing the cluster; lost
+or altered anchored input is not reconstructed. An identical, effect-free local
+preparation can resume before its anchor, but existing child dispatch evidence
+prevents recreating a missing anchor. Secret bodies are not part of this capture.
+
+The ordinary idle-rollout wrapper accepts this retained operation only paired
+with its protected pool adapter. It checks the retained binding before preparing
+output and again before invoking the full deployer, using the frozen shared files
+and operation-derived guard owner. Both GitHub deployment intent and deployment
+evidence carry the same non-secret recovery reference. Shared recovery selects
+the exact publication run attempt and artifact ID/digest, not another successful
+publication of the same commit or the latest attempt. A missing shared operation
+cannot fall back to standalone rendering. These internal connections do not
+provide a public document-input deployment command.
+
 The transaction and parent interface do not establish publication, history,
 Kubernetes readiness or recovery authority on their own. The concrete protected
 adapter and normal workflow must still connect those checks, catalog mounting/
 manager restart and fixed child journals before this is an operational route.
+They also must promote semantically completed release history only after verified
+guard release, so later releases use the latest predecessor rather than the
+original handoff. Retained inputs and a deployer result alone are not that proof.
 Fence, catalog staging and reopening each invalidate prior capacity captures;
 the parent must wait for a fresh capture after reopening before releasing the
 local idle guard. Other participants retain their grants/activation plans, and

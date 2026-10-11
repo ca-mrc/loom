@@ -70,7 +70,7 @@ class ParticipantRolloutReference(BaseModel):
 
 
 class ParticipantRolloutInputs(BaseModel):
-    """Private original snapshot; no credentials or executable caller payload."""
+    """Private original snapshot, not a credential or executable intake API."""
 
     model_config = ConfigDict(extra='forbid', frozen=True, hide_input_in_errors=True)
     schema_version: Literal['loom.nebius-participant-rollout-inputs.v1'] = 'loom.nebius-participant-rollout-inputs.v1'
@@ -95,6 +95,7 @@ class ParticipantRolloutInputs(BaseModel):
 class RetainedParticipantRollout:
     reference: ParticipantRolloutReference
     state_dir: Path
+    anchor_dir: Path
     inputs: ParticipantRolloutInputs
 
     @property
@@ -135,9 +136,13 @@ def _qualify(inputs: ParticipantRolloutInputs) -> None:
     _, original_config, _ = validate_render(inputs.rendered_files)
     if config != inputs.config or original_config != config:
         raise ValueError
-    # These snapshots cannot contain live Secret data; existing snapshot rules
-    # also reject malformed/missing immutable Kubernetes identities.
-    for row in (*inputs.current, inputs.manager, inputs.catalog):
+    # The release needs credential identities/references, not Secret bodies.
+    # Keep deleting/foreign-owned objects out using the existing snapshot rules.
+    for row in (*inputs.current, inputs.manager, inputs.catalog,
+            *(row for group in inputs.rendered_files.values() for row in group),
+            *(row for group in release.files.values() for row in group)):
+        if row['kind'] == 'Secret':
+            raise ValueError
         _snapshot(row)
     prepare_manager_catalog_refresh(release=release, manager=inputs.manager, catalog=inputs.catalog)
     _history(inputs)
@@ -179,7 +184,7 @@ def load_participant_rollout(*, reference: ParticipantRolloutReference,
         if (private_state._private_read(marker) != before
                 or private_state._private_read(state / 'inputs.json', limit=_MAX_INPUT_BYTES) != raw):
             raise ValueError
-        return RetainedParticipantRollout(reference, state, inputs)
+        return RetainedParticipantRollout(reference, state, anchor_dir, inputs)
     except Exception:
         raise ValueError('participant rollout history unavailable; preserve evidence') from None
 
@@ -207,6 +212,9 @@ def retain_participant_rollout(*, predecessor: ParticipantPredecessor,
             source=source.model_copy(deep=True), publication=publication.model_copy(deep=True),
             management_origin=management_origin, rendered_files=copy.deepcopy(rendered_files),
             manager=copy.deepcopy(manager), catalog=copy.deepcopy(catalog), release=release)
+        # Reparse nested model instances too: model_copy can bypass validation.
+        # No private journal should be created for structurally invalid input.
+        inputs = ParticipantRolloutInputs.model_validate(inputs.model_dump(mode='json'))
         _qualify(inputs)
         payload = inputs.model_dump(mode='json')
         # Match the shared private atomic writer's serialization exactly, so

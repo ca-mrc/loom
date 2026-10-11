@@ -31,6 +31,7 @@ from loom.nebius_platform_render import canonical, validate_environment  # noqa:
 from loom.nebius_task_identity_policy import identity_policy_documents  # noqa: E402
 
 if TYPE_CHECKING:
+    from scripts.ops.nebius_pool_participant_operation import ParticipantRolloutReference
     from scripts.ops.nebius_pool_participant_release import PreparedParticipantRelease
 
     from loom_service.pool_management.participant_refresh import ParticipantCapacityReceipt
@@ -956,7 +957,8 @@ def _rollout_candidate_files(*, kube: Kubectl, manifest: dict[str, Any], config:
 
 def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None,
         participant_release: PreparedParticipantRelease | None = None,
-        pool: ParticipantRolloutAPI | None = None) -> dict[str, Any]:
+        pool: ParticipantRolloutAPI | None = None,
+        participant_reference: ParticipantRolloutReference | None = None) -> dict[str, Any]:
     if (participant_release is None) != (pool is None):
         raise DeploymentError('shared release and protected adapter must be supplied together')
     participant_release = copy.deepcopy(participant_release)
@@ -970,6 +972,17 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None,
         "status": "running",
         "phases": [],
     }
+    if participant_reference is not None:
+        from scripts.ops.nebius_pool_participant_operation import ParticipantRolloutReference
+
+        try:
+            reference = ParticipantRolloutReference.model_validate(participant_reference.model_dump())
+            if (participant_release is None or reference.operation_id != participant_release.refresh.after.operation_id
+                    or reference.publication.source_sha != participant_release.migration.registration.candidate['candidate_sha']):
+                raise ValueError
+            evidence['shared_pool_release'] = reference.model_dump(mode='json')
+        except Exception:
+            raise DeploymentError('shared release reference differs from deployment') from None
 
     resume_owner = getattr(args, "resume_guard_owner", None)
     if resume_owner is not None and re.fullmatch(r"rollout-[0-9a-f]{32}", resume_owner) is None:
