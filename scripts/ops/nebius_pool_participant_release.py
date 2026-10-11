@@ -264,9 +264,9 @@ def refresh_documents(release: PreparedParticipantRelease, *, manager: dict[str,
     An observation identity cannot create another attempt of a mutation Job.
     """
     try:
-        if action not in {'observe', 'fence', 'stage', 'open'}:
+        if action not in {'observe', 'capacity', 'fence', 'stage', 'open'}:
             raise ValueError
-        if action == 'observe':
+        if action in {'observe', 'capacity'}:
             if not isinstance(observation_id, UUID) or not observation_id.int:
                 raise ValueError
         elif observation_id is not None:
@@ -277,7 +277,7 @@ def refresh_documents(release: PreparedParticipantRelease, *, manager: dict[str,
         name = 'loom-pool-refresh-' + refresh.after.operation_id.hex
         config['metadata']['name'] = name
         config['data'] = {'refresh.json': refresh.model_dump_json()}
-        job['metadata']['name'] = ('loom-pool-observe-' + observation_id.hex if observation_id else name + '-' + action)
+        job['metadata']['name'] = ('loom-pool-' + action + '-' + observation_id.hex if observation_id else name + '-' + action)
         labels = {'loom.nebius/management-installation': str(refresh.after.installation_id),
             'loom.nebius/pool-operation': str(refresh.after.operation_id)}
         config['metadata']['labels'] = labels.copy()

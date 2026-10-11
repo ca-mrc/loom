@@ -99,8 +99,11 @@ def test_refresh_rejects_widened_scope_even_when_both_installations_are_valid(da
         module().PoolParticipantRefresh.model_validate(value)
 
 
-async def setup(sessions):
+async def setup(sessions, *, observation_max_age_seconds=None):
     value, tokens = selection()
+    if observation_max_age_seconds is not None:
+        for version in ('before', 'after'):
+            value[version]['admission']['observation_max_age_seconds'] = observation_max_age_seconds
     request = module().PoolParticipantRefresh.model_validate(value)
     async with sessions.begin() as session:
         await register_installation(session, request.before)
@@ -267,16 +270,16 @@ def test_release_can_keep_identical_runtime_binary_and_image_when_the_source_cha
     module().PoolParticipantRefresh.model_validate(value)
 
 
-@pytest.mark.parametrize('condition', ['fresh', 'before-open', 'expired', 'connected-stale', 'unrelated-stale', 'full', 'zero'])
-async def test_capacity_read_requires_fresh_post_open_component_without_demanding_headroom(sessions, condition):
+@pytest.mark.parametrize('condition', ['fresh', 'missing', 'before-open', 'expired', 'connected-fresh', 'connected-stale',
+    'unrelated-stale', 'full', 'zero'])
+async def test_capacity_read_requires_fresh_post_open_component_without_demanding_headroom(sessions, tmp_path, monkeypatch, condition):
     from loom.db.nebius_pool_schema import NebiusPoolObservation
     from loom_execution_capacity_collector.contracts import CapacityPlacement
-    from loom_service.pool_management.capacity import digest
     from tests.execution_placement_fixtures import placement_fixture
     from tests.integration.test_nebius_pool_registry import publish_placement
     from tests.integration.test_nebius_pool_registry import setup as setup_neighbor
 
-    request, tokens = await setup(sessions)
+    request, tokens = await setup(sessions, observation_max_age_seconds=900)
     machine, = (row for row in request.before.machines if row.role == 'observer')
     payload = placement_fixture(target_id='group-1', parent_id='parent', quota_nodes=1,
         node_cpu=32000, node_memory=65536, node_storage=262144,
@@ -304,25 +307,20 @@ async def test_capacity_read_requires_fresh_post_open_component_without_demandin
                 await module().refresh_participant(session, request, action='capacity')
     async with sessions.begin() as session:
         await module().refresh_participant(session, request, action='open')
-    if condition != 'before-open':
+    if condition not in {'before-open', 'missing'}:
         await publish_current()
-    stale_pool = None
-    if condition == 'expired':
-        stale_pool = request.after.pool_id
-    elif condition in {'connected-stale', 'unrelated-stale'}:
+    if condition in {'connected-fresh', 'connected-stale', 'unrelated-stale'}:
         neighbors, *_ = await setup_neighbor(sessions, group_id='group-2', memory_quota=False,
-            parent_id='parent' if condition == 'connected-stale' else 'foreign-parent')
-        stale_pool = neighbors[0].pool_id
-    if stale_pool is not None:
-        async with sessions.begin() as session:
-            observation = await session.scalar(select(NebiusPoolObservation).where(NebiusPoolObservation.pool_id == stale_pool))
-            expired = datetime.now(UTC) - timedelta(minutes=30)
-            data = {**observation.observation_json, 'observed_at': expired.isoformat()}
-            await session.execute(update(NebiusPoolObservation).where(NebiusPoolObservation.observation_id == observation.observation_id)
-                .values(observed_at=expired, observation_json=data, observation_sha256=digest(data)))
+            parent_id='foreign-parent' if condition == 'unrelated-stale' else 'parent')
+    if condition in {'expired', 'connected-stale', 'unrelated-stale'}:
+        # Evidence is immutable. Advance only the database clock boundary under
+        # test; the selected pool allows 900 seconds, neighbors allow 60.
+        async def future_clock(_session):
+            return datetime.now(UTC) + timedelta(seconds=1000 if condition == 'expired' else 300)
+        monkeypatch.setattr(module(), '_clock', future_clock)
     before = await snapshot(sessions)
     async with sessions.begin() as session:
-        if condition in {'before-open', 'expired', 'connected-stale'}:
+        if condition in {'before-open', 'missing', 'expired', 'connected-stale'}:
             with pytest.raises(ValueError, match='pool_observation_unavailable'):
                 await module().refresh_participant(session, request, action='capacity')
         else:
@@ -332,11 +330,37 @@ async def test_capacity_read_requires_fresh_post_open_component_without_demandin
             proof = result['capacity']
             assert proof['selected_observation_id'] == str(observed.observation_id)
             assert datetime.fromisoformat(proof['selected_observed_at']) == observed.observed_at
-            assert proof['connected_pools'] == 1
+            assert proof['connected_pools'] == (2 if condition == 'connected-fresh' else 1)
             checked, until = (datetime.fromisoformat(proof[key]) for key in ('checked_at', 'valid_until'))
             assert observed.observed_at <= checked < until
-            assert until == observed.observed_at + timedelta(seconds=request.after.admission.observation_max_age_seconds)
+            if condition == 'connected-fresh':
+                neighbor_observation = await session.scalar(select(NebiusPoolObservation).where(
+                    NebiusPoolObservation.pool_id == neighbors[0].pool_id))
+                assert until == neighbor_observation.observed_at + timedelta(seconds=60)
+            else:
+                assert until == observed.observed_at + timedelta(seconds=900)
             assert len(proof['observations_sha256']) == 64
+    if condition in {'fresh', 'missing'}:
+        import json
+        import os
+        import subprocess
+        import sys
+
+        path = tmp_path / 'refresh.json'
+        path.write_text(request.model_dump_json())
+        child = subprocess.run([sys.executable, '-m', 'loom_service.pool_management.participant_refresh', 'capacity'],
+            env={**os.environ, 'LOOM_POOL_PARTICIPANT_REFRESH_FILE': str(path),
+                'LOOM_POOL_PARTICIPANT_REFRESH_DB_URL': sessions.kw['bind'].url.render_as_string(hide_password=False)},
+            text=True, capture_output=True, timeout=25, check=False)
+        assert child.stderr == ''
+        if condition == 'fresh':
+            assert child.returncode == 0
+            receipt = json.loads(child.stdout)
+            assert receipt['status'] == 'complete' and receipt['operation_id'] == str(request.after.operation_id)
+            assert receipt['capacity']['selected_observation_id'] == str(observed.observation_id)
+        else:
+            assert child.returncode == 1
+            assert json.loads(child.stdout) == {'status': 'pool_participant_refresh_unavailable'}
     assert await snapshot(sessions) == before
 
 

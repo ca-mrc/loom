@@ -1422,6 +1422,16 @@ both recorded resources before returning evidence. Unknown creates are read back
 never retried or adopted into fresh history. A successfully created Job is not a
 successful database action, and an old observation receipt is not current state.
 
+Its separately identified `capacity` read requires the completed participant
+refresh and uses the existing connected-pool capacity reader under the management
+mutation lock. It verifies post-open registration fingerprints and observation
+age across shared quota peers, without changing application rows. The bounded
+receipt includes the selected observation identity, check time, earliest expiry
+and a fingerprint of the connected observations. Full occupancy and scale-to-zero
+are not failures of this read; it does not reserve work or demand spare headroom.
+The Job adapter verifies historical receipt integrity. The protected parent must
+still require a new read and enforce its expiry before releasing the idle guard.
+
 The existing deploy parent has an internal shared-release path paired with a
 protected pool I/O adapter. It binds the exact projected files and release/guard
 identity, retains the ordinary backup/schema/configuration/workload sequence,

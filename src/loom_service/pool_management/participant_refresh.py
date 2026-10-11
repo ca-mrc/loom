@@ -11,11 +11,12 @@ import json
 import os
 import stat
 import sys
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, Literal, cast
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -28,14 +29,35 @@ from loom.db.nebius_pool_schema import (
 )
 from loom.db.schema import Token
 from loom.db.schema_startup import assert_schema_at_head
-from loom_service.pool_management.capacity import CHARGED_PHASES, digest
+from loom_service.pool_management.capacity import CHARGED_PHASES, digest, read_connected_capacity
 from loom_service.pool_management.control import _clock
 from loom_service.pool_management.installation import PoolInstallation
 from loom_service.pool_management.locks import acquire_pool_mutation_lock
 from loom_service.pool_management.profiles import _object
 
-RefreshAction = Literal["observe", "fence", "stage", "open"]
-_ACTIONS = {"observe", "fence", "stage", "open"}
+RefreshAction = Literal["observe", "capacity", "fence", "stage", "open"]
+_ACTIONS = {"observe", "capacity", "fence", "stage", "open"}
+
+
+class ParticipantCapacityReceipt(BaseModel):
+    """Bounded historical readiness proof; the parent must check expiry on use."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    checked_at: AwareDatetime
+    valid_until: AwareDatetime
+    selected_observation_id: UUID
+    selected_observed_at: AwareDatetime
+    connected_pools: int = Field(ge=1, le=1000)
+    observations_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def bounded_window(self) -> ParticipantCapacityReceipt:
+        if (not self.selected_observation_id.int or self.valid_until <= self.checked_at
+                or self.selected_observed_at > self.checked_at + timedelta(seconds=60)
+                or self.valid_until > self.selected_observed_at + timedelta(seconds=900)):
+            raise ValueError("participant_capacity_receipt_unqualified")
+        return self
 
 
 class PoolParticipantRefresh(BaseModel):
@@ -216,7 +238,7 @@ async def refresh_participant(session: AsyncSession, request: PoolParticipantRef
     selected, = (row for row in participants if row.participant_id == request.participant_id)
     status = ("ready" if selected.phase == "active" else "fenced") if current is request.before else (
         "complete" if selected.phase == "active" else "staged")
-    if action != "observe":
+    if action not in {"observe", "capacity"}:
         allowed = {"fence": {"ready", "fenced"}, "stage": {"fenced", "staged"}, "open": {"staged", "complete"}}
         if status not in allowed[action]:
             raise ValueError("participant_refresh_out_of_order")
@@ -239,10 +261,25 @@ async def refresh_participant(session: AsyncSession, request: PoolParticipantRef
                 await session.execute(update(NebiusPoolParticipant).where(NebiusPoolParticipant.participant_id == request.participant_id)
                     .values(phase="fenced" if action == "fence" else "active"))
                 status = "fenced" if action == "fence" else "complete"
-    return {"schema_version": "loom.pool-participant-refresh-receipt.v1", "operation_id": str(request.after.operation_id),
+    result: dict[str, Any] = {"schema_version": "loom.pool-participant-refresh-receipt.v1", "operation_id": str(request.after.operation_id),
         "participant_id": str(request.participant_id), "pool_id": str(pool.pool_id), "status": status,
         "before_sha256": digest(request.before.model_dump(mode="json")),
         "after_sha256": digest(request.after.model_dump(mode="json"))}
+    if action == "capacity":
+        if status != "complete":
+            raise ValueError("participant_refresh_capacity_requires_complete")
+        now = await _clock(session)
+        capacities = await read_connected_capacity(session, pool.pool_id, now)
+        selected_capacity = capacities[pool.pool_id]
+        proof = ParticipantCapacityReceipt(checked_at=now,
+            valid_until=min(row.observed_at + timedelta(seconds=row.policy.observation_max_age_seconds)
+                for row in capacities.values()),
+            selected_observation_id=selected_capacity.observation_id, selected_observed_at=selected_capacity.observed_at,
+            connected_pools=len(capacities), observations_sha256=digest([
+                {'pool_id': str(key), 'observation_id': str(row.observation_id), 'observed_at': row.observed_at.isoformat()}
+                for key, row in sorted(capacities.items())]))
+        result['capacity'] = proof.model_dump(mode='json')
+    return result
 
 
 async def run_refresh(path: Path, *, db_url: str, action: RefreshAction) -> dict[str, Any]:
