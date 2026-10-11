@@ -1351,6 +1351,31 @@ def test_manifest_lane_shards_are_disjoint_and_complete(lane: str) -> None:
     assert set().union(*shards) == set(paths)
 
 
+def test_root_shards_distribute_shared_handoff_phases_and_observation() -> None:
+    """Run 38159584210 exceeded 40m with the new lifecycle suites collocated."""
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+    policy = manifest.test_shard_policy("tests-root")
+    assert policy is not None
+    paths = component_ownership.test_paths_for_lane(
+        manifest, tracked_paths=component_ownership._tracked_paths(REPO_ROOT), lane="tests-root",
+    )
+    placement = {
+        path: index
+        for index in range(policy.shard_count)
+        for path in component_ownership.shard_paths(
+            paths, shard_index=index, shard_count=policy.shard_count,
+            strategy=policy.strategy, salt=policy.salt, pins=policy.pins,
+        )
+    }
+    phases = [placement[f"tests/ops/test_nebius_shared_pool_handoff{suffix}.py"] for suffix in (
+        "", "_parent", "_forward", "_processes", "_census", "_recovery_fences",
+        "_recovery_authority", "_recovery_release",
+    )]
+    assert len(set(phases)) >= 6
+    assert max(phases.count(index) for index in set(phases)) <= 2
+    assert placement["tests/ops/test_nebius_pool_participant_observation.py"] not in phases
+
+
 def test_stable_hash_sharding_is_order_independent_and_has_zero_insertion_churn() -> None:
     paths = tuple(f"tests/unit/test_{index:03d}.py" for index in range(20))
 
