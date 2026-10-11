@@ -432,7 +432,8 @@ def test_completed_release_is_the_next_receipt_selected_predecessor(
         for path in root.rglob('*') if path.is_file()}
     successor = loader(reference=retained.reference, state_root=retained.state_dir.parent,
         anchor_dir=retained.anchor_dir)
-    assert {path: path.read_bytes() for path in before} == before
+    assert {path: path.read_bytes() for root in (retained.state_dir, retained.anchor_dir)
+        for path in root.rglob('*') if path.is_file()} == before
     selected = retained.release.refresh.participant_id
     guard, = (row for row in successor.migration.guards if row.participant_id == selected)
     old_guard, = (row for row in retained.inputs.previous.guards if row.participant_id == selected)
@@ -459,6 +460,23 @@ def test_completed_release_is_the_next_receipt_selected_predecessor(
     inputs.update(predecessor=successor, operation_id=uuid4(), manager=successor.manager,
         catalog=successor.catalog, current=tuple(successor.resources[_key(row)] for row in retained.inputs.current
             if row['kind'] != 'Job'))
+    from tests.support.execution_image_admission import signed_image_admission_bundle
+
+    from loom.nebius_platform_render import build_platform
+    from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1
+
+    inputs['candidate'].update(candidate_sha='e' * 40, run_id=813)
+    for image in inputs['candidate']['images'].values():
+        image['image_ref'] = image['image_ref'].split('@')[0] + '@sha256:' + 'f' * 64
+    refs = tuple(inputs['candidate']['images'][name]['image_ref'] for name in ('service', 'execution_runtime'))
+    profile = inputs['runtime_profile'].model_dump(mode='json')
+    profile.update(candidate_sha='e' * 40, task_image_ref=refs[0], runtime_image_ref=refs[1],
+        image_admission=signed_image_admission_bundle(refs).model_dump(mode='json'))
+    inputs['runtime_profile'] = ServiceExecutionRuntimeProfileV1.model_validate(profile)
+    inputs['source'] = inputs['source'].model_copy(update={'source_sha': 'e' * 40})
+    inputs['publication'] = inputs['publication'].model_copy(update={'source_sha': 'e' * 40, 'run_id': 813})
+    inputs['rendered_files'] = build_platform(inputs['config'], inputs['candidate'], profile,
+        successor.migration.registration.spec.profiles.image_admission_keyring, repo_root=inputs['repo_root'])
     following = operation.retain_participant_rollout(**inputs)
     assert following.inputs.previous == successor.migration
     assert following.release.refresh.before == retained.release.refresh.after
@@ -555,6 +573,22 @@ def test_latest_participant_head_advances_only_from_exact_completed_predecessor(
     assert initialize(**options) == successor, 'initialization must never rewind a completed head'
     with pytest.raises(ValueError, match='participant head'):
         completion.promote_participant_head(**options, expected=successor, reference=retained.reference)
+    assert pointer.read_bytes() == promoted_bytes
+    # Even a fully completed competing release from the same old predecessor
+    # cannot overwrite the already advanced head. Exercise the real receipt
+    # loader for both releases, not a mocked completion object.
+    from tests.ops import test_nebius_pool_participant_adapter as transport
+
+    competing_inputs = copy.deepcopy(operation_inputs)
+    competing_inputs['operation_id'] = uuid4()
+    competing_path = tmp_path / 'competing'
+    competing_path.mkdir()
+    with monkeypatch.context() as patch:
+        competing = transport.connection.__wrapped__(competing_inputs, patch)
+        test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(
+            competing_inputs, competing, competing_path, patch, recover=False, file_writes=True)
+    with pytest.raises(ValueError, match='participant head'):
+        completion.promote_participant_head(**options, expected=initial, reference=competing[0].retained.reference)
     assert pointer.read_bytes() == promoted_bytes
     pointer.unlink()
     with pytest.raises(ValueError, match='participant head'):
