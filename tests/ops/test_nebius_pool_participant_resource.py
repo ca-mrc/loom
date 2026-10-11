@@ -17,7 +17,9 @@ from tests.ops.test_nebius_pool_participant_operation import management_inputs a
 from tests.ops.test_nebius_pool_participant_operation import operation_inputs as operation_inputs
 from tests.ops.test_nebius_pool_participant_operation import platform_inputs as platform_inputs
 from tests.ops.test_nebius_pool_participant_operation import release_inputs as release_inputs
-from tests.ops.test_nebius_pool_participant_operation import staging_attachment_inputs as staging_attachment_inputs
+from tests.ops.test_nebius_pool_participant_operation import (
+    staging_attachment_inputs as staging_attachment_inputs,
+)
 
 
 def module():

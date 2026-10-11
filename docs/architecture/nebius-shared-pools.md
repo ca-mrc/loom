@@ -1482,6 +1482,17 @@ publication of the same commit or the latest attempt. A missing shared operation
 cannot fall back to standalone rendering. These internal connections do not
 provide a public document-input deployment command.
 
+The internal existing-resource update child selects an object from the anchored
+candidate and original inventory, not caller-supplied replacement documents. It
+reuses the fixed transition journal with server dry-run, atomic UID/resourceVersion
+preconditions, and readback-only handling of an uncertain write. Namespace
+finalizers and existing Service allocations are preserved, including the public
+LoadBalancer; management's private-Service-only defaulting rule is not reused for
+that public endpoint. A release marker distinguishes the target from an unchanged
+original. This child proves only the recorded resource update, not descendants or
+runtime readiness. Creates, candidate/backup Job lineage, parent phase authority
+and full rollout integration remain separate required connections.
+
 The transaction and parent interface do not establish publication, history,
 Kubernetes readiness or recovery authority on their own. The concrete protected
 adapter and normal workflow must still connect those checks, catalog mounting/
