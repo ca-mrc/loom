@@ -208,16 +208,60 @@ def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation
     pool = PoolIO()
     writer_args = {}
     written = []
+    job_creates = []
     if file_writes:
         from contextlib import nullcontext
+        import ssl
+
+        import httpx
 
         from scripts.ops.nebius_management_switch import _matches
+        from scripts.ops.nebius_pool_participant_creation import HTTPSParticipantCreationAPI
         from scripts.ops.nebius_pool_participant_resource import RetainedCandidateFileWriter
+        from tests.ops.test_nebius_management_stage import PhaseAPI
+        from tests.ops.test_nebius_pool_participant_creation import terminal_pod
 
         # The older kubectl fake indexes only kind/name. The real API separates
         # identically named execution/build ServiceAccounts by namespace.
         inventory = {row['kind'] + ':' + row['metadata'].get('namespace', '-') + ':' + row['metadata']['name']:
             copy.deepcopy(row) for row in inputs['current']}
+        jobs = PhaseAPI(plan.migration.registration.binding)
+        jobs.key = lambda row: row['kind'] + ':' + row['metadata'].get('namespace', '-') + ':' + row['metadata']['name']
+        jobs.resources = inventory
+        pods = []
+
+        def open_job(key):
+            api = HTTPSParticipantCreationAPI(retained=retained, key=key,
+                api_server=config['kubernetes_api_server'], ssl_context=ssl.create_default_context(),
+                qualify_creation=lambda *_: pool.under_guard(kube, plan))
+
+            def respond(request):
+                if request.method == 'GET':
+                    if request.url.path == '/api/v1/namespaces/' + config['namespace'] + '/pods':
+                        assert dict(request.url.params) == {'limit': '1000'}
+                        return httpx.Response(200, json={'apiVersion': 'v1', 'kind': 'PodList',
+                            'metadata': {'resourceVersion': '70'}, 'items': pods})
+                    assert request.url.path.startswith('/apis/batch/v1/namespaces/' + config['namespace'] + '/jobs/')
+                    row = inventory.get('Job:' + config['namespace'] + ':' + request.url.path.rsplit('/', 1)[-1])
+                    return httpx.Response(404) if row is None else httpx.Response(200, json=row)
+                assert request.method == 'POST'
+                assert request.url.path == '/apis/batch/v1/namespaces/' + config['namespace'] + '/jobs'
+                document = json.loads(request.content)
+                if request.url.params:
+                    assert dict(request.url.params) == {'dryRun': 'All'}
+                    return httpx.Response(201, json=jobs.default_resource(document))
+                jobs.create_resource(document)
+                row = jobs.get_resource(document)
+                row['status'] = {'conditions': [{'type': 'Complete', 'status': 'True'}], 'succeeded': 1, 'active': 0}
+                inventory[jobs.key(row)] = row
+                kube.objects['job', row['metadata']['name']] = row
+                pods.append(terminal_pod(row, succeeded=True))
+                job_creates.append(row['metadata']['name'])
+                return httpx.Response(201, json=row)
+
+            api.client.close()
+            api.client = httpx.Client(base_url=config['kubernetes_api_server'], transport=httpx.MockTransport(respond))
+            return api
 
         class ResourceIO:
             def qualify(self):
@@ -249,8 +293,7 @@ def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation
                 return _matches(observed, expected, observed['metadata']['uid'])
 
         writer_args['candidate_writer'] = RetainedCandidateFileWriter(retained=retained,
-            open_resource=lambda _: nullcontext(ResourceIO()),
-            open_creation=lambda _: pytest.fail('unexpected new fixture object'))
+            open_resource=lambda _: nullcontext(ResourceIO()), open_creation=open_job)
     if recover:
         with pytest.raises(deploy.DeploymentError, match='HTTPS'):
             idle.rollout(args, participant_rollout=retained, pool=pool, **writer_args)
@@ -270,7 +313,10 @@ def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation
     if file_writes:
         assert not set(phases) & {'00-namespaces.yaml', '10-config-network.yaml', '20-database.yaml',
             '40-services.yaml', '60-execution.yaml', '70-public.yaml', '80-backup.yaml',
-            'identity-policy-bootstrap.yaml', '00-task-identity-policy.yaml'}
+            'identity-policy-bootstrap.yaml', '00-task-identity-policy.yaml', '30-migrate.yaml', '50-configure.yaml'}
+        assert not any(command[0] in {'create', 'delete'} for command in kube.commands)
+        assert job_creates == ['loom-predeploy-' + retained.reference.operation_id.hex,
+            plan.files['30-migrate.yaml'][0]['metadata']['name'], plan.files['50-configure.yaml'][0]['metadata']['name']]
         assert len(written) == len(set(written)), 'recovery must read back prior writes'
         assert not any(key.startswith(('PersistentVolumeClaim:', 'ResourceQuota:')) for key in written)
         assert {'Deployment:' + config['namespace'] + ':loom-service',
@@ -278,7 +324,7 @@ def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation
             'Service:' + config['namespace'] + ':loom-web'} <= set(written)
     else:
         assert {'40-services.yaml', '60-execution.yaml', '70-public.yaml'} <= set(phases)
-    assert {'30-migrate.yaml', '50-configure.yaml'} <= set(phases)
+        assert {'30-migrate.yaml', '50-configure.yaml'} <= set(phases)
     assert all(row['shared_pool_release'] == retained.reference.model_dump(mode='json') for row in intents)
     assert len(intents) == (2 if recover else 1)
 

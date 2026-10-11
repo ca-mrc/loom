@@ -41,6 +41,7 @@ def connection(operation_inputs):
     state = SimpleNamespace(retained=retained, external=external, requests=[], allow=True, before_dispatch=[],
         pods=[], continuation=False, job_reads=0, replace_during_observation=False,
         deletes=[], delete_failure=None, retain_deleted_pods=False, deleting=False,
+        auto_outcome=None,
         keys=[_key(retained.release.files[phase][0]) for phase in ('30-migrate.yaml', '50-configure.yaml')]
             + ['pre-upgrade-backup', 'ConfigMap:' + ns + ':loom-feature-config'])
 
@@ -107,7 +108,19 @@ def connection(operation_inputs):
             pending, = (item for journal in journals for item in journal['resources'].values()
                 if item['desired'] == doc)
             state.before_dispatch.append(copy.deepcopy(pending))
-            external.create_resource(doc)
+            try:
+                external.create_resource(doc)
+            finally:
+                if state.auto_outcome is not None and doc['kind'] == 'Job' and _key(doc) in external.resources:
+                    actual = external.resources[_key(doc)]
+                    success = state.auto_outcome != 'failed'
+                    actual['status'] = {'conditions': [{'type': 'Complete' if success else 'Failed', 'status': 'True'}],
+                        'succeeded': int(success), 'failed': int(not success), 'active': 0}
+                    pod = terminal_pod(actual, succeeded=success)
+                    if state.auto_outcome == 'draining':
+                        pod['status']['phase'] = 'Running'
+                        pod['status']['containerStatuses'][0]['state'] = {'running': {}}
+                    state.pods.append(pod)
             return httpx.Response(201, json=external.get_resource(doc))
 
         api.client.close()
@@ -141,6 +154,52 @@ def fail_recorded_job(state, api, key):
     return copy.deepcopy(job)
 
 
+def job_writer(state, connect):
+    from scripts.ops.nebius_pool_participant_resource import RetainedCandidateFileWriter
+
+    return RetainedCandidateFileWriter(retained=state.retained, open_creation=connect,
+        open_resource=lambda _: pytest.fail('unexpected candidate resource update'))
+
+
+@pytest.mark.parametrize('selector', ['pre-upgrade-backup', '30-migrate.yaml', '50-configure.yaml'])
+def test_connected_job_writer_executes_once_and_recovers_original_completion(connection, selector):
+    state, connect = connection
+    state.auto_outcome = 'complete'
+    writer = job_writer(state, connect)
+    result = writer.run_job(selector, retry_failed_jobs=False)
+    assert result['status'] == 'complete'
+    assert result['job_name'] == writer.job_name(selector)
+    assert job_writer(state, connect).run_job(selector, retry_failed_jobs=False) == result
+    assert len(state.external.creates) == 1 and state.deletes == []
+
+
+def test_connected_job_writer_retries_only_an_existing_failed_attempt(connection):
+    state, connect = connection
+    writer = job_writer(state, connect)
+    state.auto_outcome = 'failed'
+    with pytest.raises(ValueError, match='preserve'):
+        writer.run_job('30-migrate.yaml', retry_failed_jobs=True)
+    assert len(state.external.creates) == 1 and state.deletes == [], 'a newly failed execution needs a new explicit retry'
+    state.auto_outcome = 'complete'
+    result = writer.run_job('30-migrate.yaml', retry_failed_jobs=True)
+    assert result['status'] == 'complete'
+    assert writer.run_job('30-migrate.yaml', retry_failed_jobs=False) == result
+    assert len(state.external.creates) == 2 and len(state.deletes) == 1
+
+
+def test_connected_job_writer_does_not_accept_complete_condition_with_live_processes(connection, monkeypatch):
+    from scripts.ops import nebius_pool_participant_resource as resource
+
+    state, connect = connection
+    state.auto_outcome = 'draining'
+    clock = [0]
+    monkeypatch.setattr(resource, 'time', SimpleNamespace(monotonic=lambda: clock[0],
+        sleep=lambda _: clock.__setitem__(0, 2000)), raising=False)
+    with pytest.raises(ValueError, match='preserve'):
+        job_writer(state, connect).run_job('pre-upgrade-backup', retry_failed_jobs=False)
+    assert len(state.external.creates) == 1 and state.deletes == []
+
+
 @pytest.mark.parametrize('selected', [0, 2])
 def test_failed_job_retry_preserves_attempt_history_and_uses_exact_delete_preconditions(connection, selected):
     state, connect = connection
@@ -150,7 +209,7 @@ def test_failed_job_retry_preserves_attempt_history_and_uses_exact_delete_precon
         journal, = (state.retained.state_dir / 'candidate-creations').rglob('stage.json')
         original_bytes = journal.read_bytes()
         assert first.retry_failed_job() is True
-        with pytest.raises(ValueError, match='changed|preserve'):
+        with pytest.raises(ValueError, match=r'changed|preserve'):
             first.create_resource(json.loads(original_bytes)['resources'][_key(original)]['desired'])
     with connect(key) as second:
         assert second.retry_pending() is False
