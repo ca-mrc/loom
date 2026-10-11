@@ -4989,7 +4989,8 @@ def test_shared_activation_binds_own_parent_and_never_replays_unknown_writes(sha
 
 
 @pytest.mark.timeout(420)
-@pytest.mark.parametrize('forward_census', [False, True, 'recovery'], ids=['initial', 'forward', 'recovery'])
+@pytest.mark.parametrize('forward_census', [False, True, 'recovery', 'participant'],
+    ids=['initial', 'forward', 'recovery', 'participant'])
 def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writers(
         shared_runtime, staging_history, staging_observation, completed_pool, handoff, shared_operation, forward_census):
     """A historical template or a stopped clone must not hide a live writer."""
@@ -5083,7 +5084,7 @@ def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writ
             transport=httpx.MockTransport(respond))
         if forward_census:
             _exercise_forward_writer_census(shared_operation, transport, inventory, kinds, calls, mode,
-                recovery=forward_census == 'recovery')
+                recovery=forward_census == 'recovery', participant=forward_census == 'participant')
             return
         from scripts.ops.nebius_shared_pool_handoff_live import observe_shared_pool_writers
 
@@ -5224,7 +5225,8 @@ def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writ
         assert calls and all(row.method == 'GET' for row in calls)
 
 
-def _exercise_forward_writer_census(shared_operation, transport, inventory, kinds, calls, mode, *, recovery=False):
+def _exercise_forward_writer_census(shared_operation, transport, inventory, kinds, calls, mode, *,
+        recovery=False, participant=False):
     """Observe real parent/child receipts; remote transitions are fixture state.
 
     Accepting an unrecorded successor, an old template after completion, or a
@@ -5325,7 +5327,7 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
             if phase == 'forward-gateway':
                 return all(row['status'] == 'applied' for row in json.loads((child / 'start/transition.json').read_bytes())['resources'].values())
             if phase == 'forward-activate':
-                return False
+                return getattr(self, 'activation_complete', False)
             return super().advance(phase, bound, child)
 
     api = CensusPhaseAPI(parent)
@@ -5585,6 +5587,16 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
             observe()
         activation_path.write_bytes(activation_bytes)
         activation_path.chmod(0o600)
+    if participant:
+        record = json.loads(activation_bytes)
+        record['opening'] = 'opened'
+        for row in record['guards'].values():
+            row['release'] = 'released'
+        private_state._atomic_json(activation_path, record)
+        api.activation_complete = True
+        assert parent.run_shared_pool_operation(**kwargs)['status'] == 'shared_pool_handoff_complete'
+        _exercise_participant_writer_census(args, bindings, state, api, transport, inventory, kinds, mode)
+        return
     if recovery:
         _exercise_recovery_writer_census(kwargs, state, transport, inventory, kinds, calls, mode, replace_live, CensusPhaseAPI)
         return
@@ -5594,6 +5606,156 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
     with pytest.raises(ValueError):
         observe()
     assert len(calls) == before
+
+
+def _exercise_participant_writer_census(args, bindings, state, parent_api, transport, inventory, kinds, mode):
+    """Normal release must retain the entire shared pool, not just its resources."""
+    import json
+    import ssl
+
+    import httpx
+    from scripts.ops.nebius_development_preflight import PreparedDevelopmentSource
+    from scripts.ops.nebius_pool_participant_observation import HTTPSParticipantResourceObserver
+    from scripts.ops.nebius_pool_participant_operation import retain_participant_rollout
+    from scripts.ops.nebius_pool_participant_resource import (
+        HTTPSParticipantResourceAPI,
+        RetainedCandidateFileWriter,
+        _resource_path,
+    )
+    from scripts.ops.nebius_shared_pool_operation import load_completed_shared_pool_operation
+
+    from loom.nebius_platform_render import build_platform
+    from loom_service.environment_management.candidates import ProtectedPublication
+
+    predecessor = load_completed_shared_pool_operation(**args, bindings=bindings, api=parent_api)
+    attached = bindings.plan.staging.attachment
+    spec = predecessor.migration.registration.spec
+    old_files = build_platform(attached.config, predecessor.migration.registration.candidate,
+        attached.runtime_profile.model_dump(mode='json'), spec.profiles.image_admission_keyring, repo_root=ROOT)
+    current = {_key(row): copy.deepcopy(row) for rows in old_files.values() for row in rows}
+    for row in current.values():
+        row['metadata'].update(uid=str(uuid4()), resourceVersion='401')
+    current.update({_key(row): copy.deepcopy(row) for row in attached.resources})
+    for rows in inventory.values():
+        for row in rows:
+            if _key(row) in current:
+                current[_key(row)] = copy.deepcopy(row)
+    manager = next(row for row in inventory['deployments']
+        if row['metadata']['namespace'] == predecessor.migration.registration.binding.namespace
+        and row['metadata']['name'] == 'loom-service')
+    catalog = {'apiVersion': 'v1', 'kind': 'ConfigMap', 'metadata': {
+        'name': 'loom-pool-profiles-' + spec.operation_id.hex,
+        'namespace': manager['metadata']['namespace'], 'uid': str(uuid4()), 'resourceVersion': '401'},
+        'immutable': True, 'data': {'profiles.json': spec.profiles.model_dump_json()}}
+    candidate = copy.deepcopy(predecessor.migration.registration.candidate)
+    candidate.update(schema_version='loom.nebius-candidate.v1', candidate_sha='d' * 40,
+        run_id=812, source_archive_sha256='sha256:' + 'a' * 64)
+    profile = attached.runtime_profile.model_copy(update={'candidate_sha': candidate['candidate_sha']})
+    publication = ProtectedPublication(candidate_id=uuid4(), source_sha=candidate['candidate_sha'], run_id=812,
+        run_attempt=1, artifact_id=923, artifact_sha256='sha256:' + 'b' * 64, pull_request=2425)
+    retained = retain_participant_rollout(predecessor=predecessor, current=tuple(current.values()),
+        config=attached.config, candidate=candidate, runtime_profile=profile, operation_id=uuid4(),
+        management_origin='https://' + args['runtime'].database.manager.deployment.public_host, repo_root=ROOT,
+        rendered_files=build_platform(attached.config, candidate, profile.model_dump(mode='json'),
+            spec.profiles.image_admission_keyring, repo_root=ROOT),
+        source=PreparedDevelopmentSource(source_sha=candidate['candidate_sha'],
+            source_archive_sha256=candidate['source_archive_sha256']), publication=publication,
+        manager=manager, catalog=catalog, state_root=state.parent / 'participant-releases',
+        anchor_dir=state.parent / 'participant-anchors')
+    resources = {**current, _key(manager): manager, _key(catalog): catalog}
+    writes = []
+
+    def respond(message):
+        plural = message.url.path.rsplit('/', 1)[-1]
+        if plural in kinds.values() or message.url.path == '/api/v1/namespaces/kube-system':
+            return transport.client.send(message)
+        row = next((row for row in resources.values() if _resource_path(row) == message.url.path), None)
+        if message.method == 'GET':
+            return httpx.Response(200, json=row) if row is not None else httpx.Response(404)
+        assert message.method == 'PATCH' and row is not None
+        target = copy.deepcopy(row)
+        for patch in json.loads(message.content):
+            parts = [part.replace('~1', '/').replace('~0', '~') for part in patch['path'].strip('/').split('/')]
+            owner = target
+            for part in parts[:-1]:
+                owner = owner[part]
+            if patch['op'] == 'test':
+                assert owner[parts[-1]] == patch['value']
+            elif patch['op'] == 'remove':
+                del owner[parts[-1]]
+            else:
+                assert patch['op'] in {'add', 'replace'}
+                owner[parts[-1]] = patch['value']
+        if not message.url.params:
+            writes.append(_key(row))
+            target['metadata']['resourceVersion'] = str(int(row['metadata']['resourceVersion']) + 1)
+            resources[_key(row)] = target
+            if row['kind'] in kinds:
+                inventory[kinds[row['kind']]] = [target if _key(item) == _key(row) else item
+                    for item in inventory[kinds[row['kind']]]]
+        else:
+            assert dict(message.url.params) == {'dryRun': 'All'}
+        return httpx.Response(200, json=target)
+
+    def connect(api):
+        api.client.close()
+        api.client = httpx.Client(base_url=transport.api_server, transport=httpx.MockTransport(respond))
+        return api
+
+    with connect(HTTPSParticipantResourceObserver(retained=retained, api_server=transport.api_server,
+            ssl_context=ssl.create_default_context())) as observer:
+        assert hasattr(observer, 'observe_writers'), 'normal rollout does not qualify the complete shared writer set'
+
+        def observe(preparing=None):
+            return observer.observe_writers(bindings=bindings, shared_state=state, preparing=preparing)
+
+        result = observe()
+        assert not writes
+        assert result.workloads[_key(manager)] == manager
+        assert any(row['metadata']['namespace'] == 'loom-dev' for row in result.workloads.values())
+
+        def resource(key):
+            return connect(HTTPSParticipantResourceAPI(retained=retained, key=key,
+                api_server=transport.api_server, ssl_context=ssl.create_default_context(),
+                qualify_resource=lambda _retained, selected: observe(selected)))
+
+        writer = RetainedCandidateFileWriter(retained=retained, open_resource=resource,
+            open_creation=lambda _: pytest.fail('unexpected creation'))
+        writer.apply_file('20-database.yaml')
+        key = 'StatefulSet:' + attached.config['namespace'] + ':loom-postgres'
+        assert observe().workloads[key] == resources[key]
+        assert len(writes) == 2
+        snapshot = copy.deepcopy(inventory)
+        for damage in ('cloned-controller', 'revived-collector', 'other-owner', 'extra-grant', 'old-template'):
+            inventory.clear()
+            inventory.update(copy.deepcopy(snapshot))
+            if damage == 'cloned-controller':
+                clone = copy.deepcopy(next(row for row in inventory['deployments']
+                    if row['metadata']['namespace'] == attached.config['namespace'] and row['metadata']['name'] == 'loom-control-plane'))
+                clone['metadata'].update(name='foreign-controller', uid=str(uuid4()))
+                clone['spec']['replicas'] = 0
+                inventory['deployments'].append(clone)
+            elif damage == 'revived-collector':
+                next(row for row in inventory['cronjobs'] if row['metadata']['namespace'] == attached.config['execution_namespace'])['spec']['suspend'] = False
+            elif damage == 'other-owner':
+                next(row for row in inventory['deployments'] if row['metadata']['namespace'] == 'loom-dev')['spec']['replicas'] = 0
+            elif damage == 'extra-grant':
+                next(row for row in inventory['roles'] if row['metadata']['namespace'] == attached.config['execution_namespace'])['rules'].append(
+                    {'apiGroups': ['batch'], 'resources': ['jobs'], 'verbs': ['create']})
+            else:
+                inventory['statefulsets'] = [current[key] if _key(row) == key else row for row in inventory['statefulsets']]
+            with pytest.raises(ValueError, match='preserve'):
+                observe()
+            assert len(writes) == 2
+        inventory.clear()
+        inventory.update(snapshot)
+        record = retained.state_dir / 'candidate-file-writes/dispatch.json'
+        raw = record.read_bytes()
+        mode['during_read'] = lambda: record.write_bytes(raw + b'\n')
+        with pytest.raises(ValueError, match='preserve'):
+            observe()
+        record.write_bytes(raw)
+        assert observe().workloads[key] == resources[key]
 
 
 def _exercise_recovery_writer_census(kwargs, state, transport, inventory, kinds, calls, mode, replace_live, forward_api):
