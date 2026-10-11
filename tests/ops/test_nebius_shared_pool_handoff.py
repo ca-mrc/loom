@@ -494,6 +494,35 @@ def test_shared_history_loads_original_source_without_retired_operator_credentia
     assert all(not item.exists() for item in retired)
 
 
+def test_shared_history_refuses_synthetic_completion_without_opening_a_connection(shared_operation, monkeypatch):
+    """A completed parent/checksums cannot replace its actual child contracts."""
+    from scripts.ops import nebius_shared_pool_entry as entry
+    from scripts.ops import nebius_shared_pool_operation as parent
+
+    assert callable(getattr(entry, 'load_completed_history', None)), 'protected entry lacks semantic shared history loading'
+    args, bindings = shared_operation
+    root, _, inputs, _, _ = _shared_entry_inputs(args, bindings)
+    for field in ('ca_file', 'credentials_file'):
+        Path(inputs['operator_connection'][field]).unlink()
+    monkeypatch.setattr(entry, '_transport', lambda *_: pytest.fail('historical completion must not authenticate'))
+    monkeypatch.setattr(entry, 'HTTPSSharedPoolOperationAPI', lambda **_: pytest.fail('historical completion must not connect'))
+    options = dict(operation_path=root / 'operation.json',
+        operation_sha256=hashlib.sha256((root / 'operation.json').read_bytes()).hexdigest())
+    with pytest.raises(ValueError, match='completed shared pool history'):
+        entry.load_completed_history(**options)
+    api = SharedPhaseAPI(parent)
+    assert parent.run_shared_pool_operation(**args, bindings=bindings, api=api,
+        action='install')['status'] == 'shared_pool_handoff_complete'
+    # The deliberately synthetic fixture is useful for parent sequencing only.
+    # Its valid parent and file hashes must not pass production child validation.
+    manager = args['runtime'].database.manager.retained.request.retained
+    state = Path(manager.operation['state_dir']).parent / 'shared-pool-handoff'
+    before = {path: path.read_bytes() for path in state.rglob('*') if path.is_file()}
+    with pytest.raises(ValueError, match='completed shared pool history'):
+        entry.load_completed_history(**options)
+    assert {path: path.read_bytes() for path in state.rglob('*') if path.is_file()} == before
+
+
 @pytest.mark.timeout(420)
 def test_shared_private_entry_dispatches_real_parent_and_preserves_uncertain_intent(
         shared_operation, shared_guard_transport, monkeypatch, capsys):
@@ -1166,6 +1195,8 @@ def test_connected_shared_parent_forward_completion_requires_current_health(shar
     from scripts.ops.nebius_development_runtime_install import _read
 
     args, bindings = shared_operation
+    assert hasattr(module, 'SharedPoolPhaseEvidence'), 'completion validation still depends on live operator authority'
+    historical = module.SharedPoolPhaseEvidence(bindings=bindings)
     manager = args['runtime'].database.manager.retained.request.retained
     state = Path(manager.operation['state_dir']).parent / 'shared-pool-handoff'
     predecessor = SharedPhaseAPI(parent)
@@ -1248,6 +1279,14 @@ def test_connected_shared_parent_forward_completion_requires_current_health(shar
         mode['damage'] = None
         assert api.advance('forward-verify', bindings, child)
         assert _read(child / 'verify.json')['status'] == 'observed'
+        historical.validate_phase('forward-verify', child, complete=True)
+        final_raw = (child / 'verify.json').read_bytes()
+        private_state._atomic_json(child / 'verify.json', {**_read(child / 'verify.json'), 'status': 'prepared'})
+        with pytest.raises(ValueError):
+            historical.validate_phase('forward-verify', child, complete=True)
+        (child / 'verify.json').write_bytes(final_raw)
+        with pytest.raises(ValueError):
+            historical.validate_phase('forward-verify', state / 'foreign', complete=True)
         result = parent.run_shared_pool_operation(**args, bindings=bindings, api=api, action='install')
         assert result['status'] == 'shared_pool_handoff_complete'
         assert result['admission_open'] and result['writer_migration_complete']
