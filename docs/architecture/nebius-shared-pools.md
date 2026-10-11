@@ -1732,6 +1732,29 @@ invalidate earlier receipts. These local selection functions are not deployment,
 publication or guard authority; protected entry still must connect them to the
 normal workflow and freshly qualify the selected historical identities.
 
+`ParticipantReleaseQualifier` composes the actual normal-release observers for
+one protected operator connection. It checks the retained input and latest
+predecessor, private connection bytes, endpoint/client identity and selected
+guard; then publication/provider authority with writer/permission census, selected
+and manager processes, peers and optional actuator telemetry, gateway continuity,
+and live registry state. Guard ownership and receipt bytes are rechecked before
+return. Only a recognized selected/manager rollout transition may wait, with a
+bounded read-only retry; failed authority, identity, evidence or transport checks
+are not retried. Optional telemetry unavailability remains diagnostic. A promoted
+release can requalify final completion but cannot regain mutation authority.
+The qualifier is for the already-authenticated protected entry, not a public
+credential or document intake route.
+
+The deployer has an internal finalization hook inside its existing error/evidence
+boundary, after verified guard release and before reporting success. Protected
+composition uses that hook for latest-head promotion. It also runs after successful
+lost-release reconciliation. A failed promotion, including a committed pointer
+update whose acknowledgement was lost, therefore leaves a failed, recoverable
+deployment record with the observed guard state rather than reporting premature
+success. Recovery requalifies completion and finishes promotion without replaying
+candidate/pool mutations. The hook requires a retained candidate writer and is
+not available as a CLI flag; standalone behavior remains unchanged.
+
 The transaction, pool-effect adapter and parent interface do not establish
 publication, history, full runtime readiness or recovery authority on their own.
 The protected entry and phase-aware live qualifier must still connect the normal

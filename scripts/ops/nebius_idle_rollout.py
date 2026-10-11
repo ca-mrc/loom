@@ -12,7 +12,7 @@ import sys
 import tarfile
 import tempfile
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -372,7 +372,9 @@ def candidate_follows(current: str, candidate: str) -> bool:
 
 def rollout(args: argparse.Namespace, *, participant_rollout: RetainedParticipantRollout | None = None,
         pool: ParticipantRolloutAPI | None = None,
-        candidate_writer: RetainedCandidateFileWriter | None = None) -> dict:
+        candidate_writer: RetainedCandidateFileWriter | None = None,
+        participant_finalize: Callable[[], None] | None = None,
+        kube: Kubectl | None = None) -> dict:
     """Ordinary lifecycle, optionally bound by the protected shared delivery.
 
     No CLI flag accepts shared files or an operation as deployment authority.
@@ -383,6 +385,10 @@ def rollout(args: argparse.Namespace, *, participant_rollout: RetainedParticipan
         raise DeploymentError('shared operation and protected adapter must be supplied together')
     if candidate_writer is not None and candidate_writer.retained != participant_rollout:
         raise DeploymentError('candidate writer differs from shared operation')
+    if participant_finalize is not None and (candidate_writer is None or not callable(participant_finalize)):
+        raise DeploymentError('shared finalization requires its retained candidate writer')
+    if kube is not None and kube.kubeconfig != args.kubeconfig:
+        raise DeploymentError('protected rollout connection differs')
 
     def check_retained() -> None:
         if candidate_writer is not None:
@@ -402,7 +408,7 @@ def rollout(args: argparse.Namespace, *, participant_rollout: RetainedParticipan
         decision = check_rollout(args)
         if decision["status"] != "ready":
             return decision
-    kube = Kubectl(args.kubeconfig)
+    kube = kube or Kubectl(args.kubeconfig)
     data = kube.get("configmap", "loom-platform-config", args.namespace)["data"]
     config = json.loads(data["environment.json"])
     if config["namespace"] != args.namespace or config.get("regional_execution_targets"):
@@ -486,7 +492,8 @@ def rollout(args: argparse.Namespace, *, participant_rollout: RetainedParticipan
             result = deploy(args, kube=kube)
         else:
             result = deploy(args, kube=kube, participant_release=participant_rollout.release, pool=pool,
-                participant_reference=participant_rollout.reference, candidate_writer=candidate_writer)
+                participant_reference=participant_rollout.reference, candidate_writer=candidate_writer,
+                participant_finalize=participant_finalize)
     except Exception:
         report("failure", "Rollout failed; inspect phase evidence and dispatch pause before recovery")
         raise

@@ -986,9 +986,12 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None,
         participant_release: PreparedParticipantRelease | None = None,
         pool: ParticipantRolloutAPI | None = None,
         participant_reference: ParticipantRolloutReference | None = None,
-        candidate_writer: RetainedCandidateFileWriter | None = None) -> dict[str, Any]:
+        candidate_writer: RetainedCandidateFileWriter | None = None,
+        participant_finalize: Callable[[], None] | None = None) -> dict[str, Any]:
     if (participant_release is None) != (pool is None):
         raise DeploymentError('shared release and protected adapter must be supplied together')
+    if participant_finalize is not None and (candidate_writer is None or not callable(participant_finalize)):
+        raise DeploymentError('shared finalization requires its retained candidate writer')
     if candidate_writer is not None:
         candidate_writer.validate()
         if (participant_release is None or candidate_writer.retained.release != participant_release
@@ -1098,7 +1101,12 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None,
                 completed = completion.reconcile(kube)
                 if completed is not None:
                     evidence['pool_refresh'].update(completed)
-                    evidence.update(status='complete', guard_owner=guard_owner, completion_reconciled=True)
+                    evidence.update(guard_owner=guard_owner, completion_reconciled=True)
+                    if participant_finalize is not None:
+                        phase('shared-pool-promote-history')
+                        check_release()
+                        participant_finalize()
+                    evidence['status'] = 'complete'
                     return evidence
         evidence["preflight"] = state
         retire_target = getattr(args, "retire_target", None)
@@ -1274,6 +1282,10 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None,
             guard_acquired = False
             if completion is not None and completion.reconcile(kube) is None:
                 raise DeploymentError('shared release completion unconfirmed; preserve evidence')
+        if participant_finalize is not None:
+            phase('shared-pool-promote-history')
+            check_release()
+            participant_finalize()
         evidence["status"] = "complete"
         return evidence
     except Exception as exc:
