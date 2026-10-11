@@ -219,6 +219,56 @@ class ParticipantReleaseConnection:
             initial=self.qualifier.initial, expected=self.expected, pool=self.pool,
             writer=self.writer, kube=self.qualifier.kube, candidate_ancestry=self.qualifier.candidate_follows)
 
+    def execute(self, *, automatic: bool = False, recovery: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Run on the operator host without runner paths or GitHub credentials.
+
+        The protected caller already loaded this exact release and authenticated
+        its connection. GitHub intent/reporting remain runner-owned; this returns
+        private deployment evidence, not an unrestricted public report. Recovery
+        supplies only a bounded selector and must still pass retained history,
+        live guard and phase qualification in the ordinary lifecycle.
+        """
+        from scripts.ops.nebius_idle_rollout import recovery_record
+
+        retained = copy.deepcopy(self.qualifier.retained)
+        config = retained.inputs.config
+        record = None
+        try:
+            if type(automatic) is not bool or (automatic and recovery is not None):
+                raise ValueError
+            if recovery is not None:
+                if not isinstance(recovery, dict) or len(json.dumps(recovery, allow_nan=False).encode()) > 16384:
+                    raise ValueError
+                record = recovery_record(copy.deepcopy(recovery))
+                previous, = (row for row in retained.inputs.current
+                    if row['kind'] == 'ConfigMap' and row['metadata']['name'] == 'loom-platform-config'
+                    and row['metadata'].get('namespace') == config['namespace'])
+                if (record.get('shared_pool_release') != retained.reference.model_dump(mode='json')
+                        or record['guard_owner'] != retained.guard_owner
+                        or record['candidate_sha'] != retained.inputs.candidate['candidate_sha']
+                        or record.get('previous_candidate_sha') != json.loads(previous['data']['profile.json'])['candidate_sha']
+                        or any(record[key] != config[key] for key in ('cluster_id', 'namespace', 'execution_namespace'))):
+                    raise ValueError
+        except Exception:
+            raise ValueError('participant host recovery selection unqualified; preserve evidence') from None
+        self.writer.validate()
+        if self.writer.retained != retained:
+            raise ValueError('participant host release differs; preserve evidence')
+        evidence = retained.state_dir / 'deployment-evidence'
+        private_state._private_directory(evidence)
+        with tempfile.TemporaryDirectory(prefix='inputs-', dir=evidence) as temporary:
+            publication = Path(temporary)
+            private_state._write_private(publication / 'candidate.json', json.dumps(retained.inputs.candidate, allow_nan=False).encode())
+            private_state._write_private(publication / 'runtime-profile.json', retained.inputs.runtime_profile.model_dump_json().encode())
+            args = argparse.Namespace(kubeconfig=self.qualifier.kubeconfig, namespace=config['namespace'],
+                expected_cluster_id=config['cluster_id'], publication_dir=publication,
+                candidate=retained.inputs.candidate['candidate_sha'], evidence_dir=evidence,
+                github=False, automatic=automatic)
+            if record is not None:
+                args.recovery_evidence = publication / 'recovery.json'
+                private_state._write_private(args.recovery_evidence, json.dumps(record, allow_nan=False).encode())
+            return self.rollout(args)
+
 
 @contextmanager
 def connected_participant_release(*, retained: RetainedParticipantRollout,

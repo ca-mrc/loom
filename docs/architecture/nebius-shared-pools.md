@@ -1787,6 +1787,16 @@ to the runner or artifact host. Automatic idle checks reuse the same authenticat
 Kubernetes connection and ancestry reader. Historical standalone candidates keep
 their existing Git-based path, not a fallback for protected shared delivery.
 
+The internal connection's `execute` method reconstructs candidate/profile files
+from its retained operation in a private temporary directory on the operator
+host. It selects the authenticated host kubeconfig and retains deployment evidence
+under that operation, without accepting runner paths or calling GitHub deployment
+APIs. Recovery must name the same reference, candidate, original previous
+candidate, guard owner and platform binding; automatic recovery is rejected.
+Temporary publication files are removed on success or failure. Its return value
+is private evidence, not a public gateway response. Runner-owned deployment intent
+and allowlisted reporting still require the protected workflow connection.
+
 `authenticated_participant_release` exchanges the explicitly selected Nebius
 operator credential using the existing authenticated transport. It pins private
 CA/credential bytes around that exchange and rejects an endpoint mismatch or

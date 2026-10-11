@@ -541,7 +541,7 @@ def test_operator_host_rejects_foreign_recovery_before_private_writes(operation_
     delivery = ParticipantReleaseConnection(qualifier, None, None, writer)
     before = {path: path.read_bytes() for root in (retained.state_dir, retained.anchor_dir)
         for path in root.rglob('*') if path.is_file()}
-    with pytest.raises(ValueError, match='host|recovery'):
+    with pytest.raises(ValueError, match=r'host|recovery'):
         delivery.execute(automatic=1 if damage == 'automatic-type' else damage == 'automatic', recovery=record)
     assert {path: path.read_bytes() for root in (retained.state_dir, retained.anchor_dir)
         for path in root.rglob('*') if path.is_file()} == before
