@@ -333,6 +333,7 @@ def test_observer_rejects_missing_or_unrelated_dispatch_evidence(resource_connec
             live.observe()
 
 
+@pytest.mark.timeout(180)
 def test_pool_adapter_uses_live_observer_through_catalog_and_job_transitions(pool_connection):
     state, kube, connect = pool_connection
     with observer(state.retained, lambda: state.api.resources)[0] as live:

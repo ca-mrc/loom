@@ -161,7 +161,9 @@ pins = [
   { path = "tests/ops/test_nebius_pool_cutover.py", shard_index = 7 },
   { path = "tests/ops/test_nebius_pool_gateway_retirement_live.py", shard_index = 7 },
   { path = "tests/ops/test_nebius_pool_image_cancellation_gateway.py", shard_index = 0 },
-  { path = "tests/ops/test_nebius_pool_participant_observation.py", shard_index = 0 },
+  # Observation was unfinished at 38m41s beside the image lifecycle matrices
+  # in 38181207030. The forward shard completed in 12m49s and has room for it.
+  { path = "tests/ops/test_nebius_pool_participant_observation.py", shard_index = 10 },
   { path = "tests/ops/test_nebius_pool_participant_resource.py", shard_index = 1 },
   { path = "tests/ops/test_nebius_pool_participant_processes.py", shard_index = 1 },
   { path = "tests/ops/test_nebius_development_pool_retained.py", shard_index = 2 },
@@ -190,12 +192,14 @@ pins = [
   { path = "tests/ops/test_nebius_shared_pool_handoff_processes_recovery.py", shard_index = 17 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_processes_observation.py", shard_index = 10 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_census.py", shard_index = 18 },
-  # Completed release used 13m06s in 38176447484; the full recovery census
-  # runs beside it instead of sharing one job with all other census variants.
+  # Give recovery census its own headroom: beside completed release it used
+  # 38m26s in 38181207030. Keep it separate from the other census variants.
   { path = "tests/ops/test_nebius_shared_pool_handoff_census_recovery.py", shard_index = 19 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_fences.py", shard_index = 4 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_authority.py", shard_index = 11 },
-  { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_release.py", shard_index = 19 },
+  # The release matrix used about 17m including setup; shard 7's complete
+  # job used 17m45s, leaving more room than its previous census neighbor.
+  { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_release.py", shard_index = 7 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_stop.py", shard_index = 12 },
   # The stop matrix exceeded its original CI test budget.
   # Templates completed in 8m06s in 38172223205; this placement gives the
