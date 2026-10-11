@@ -136,6 +136,52 @@ def test_machine_retirement_transport_uses_retained_database_without_retry(manag
         assert commands[0][:7] == ['exec', '-n', state.target.namespace, 'pod/loom-postgres-0', '-c', 'loom-postgres', '--']
 
 
+@pytest.mark.parametrize('status', ['active', 'revoked'])
+@pytest.mark.parametrize('damage', [None, 'backend', 'authority', 'late_authority', 'report', 'read_only', 'lost_reply'])
+def test_fenced_machine_observation_is_bound_readonly_and_never_retried(management_history, monkeypatch, status, damage):
+    from scripts.ops import nebius_pool_machine_database as module
+    from scripts.ops.nebius_pool_migration import PoolMigrationError
+
+    from loom_service.pool_management.capacity import digest
+
+    api, state = management_history
+    assert hasattr(api, 'fenced_machine_state'), 'fenced authority read transport is missing'
+    spec = api.request.registration.spec
+    state.report = {'schema': 'loom.pool-fenced-machine-state.v1', 'operation_id': str(spec.operation_id),
+        'installation_sha256': digest(spec.model_dump(mode='json')), 'read_only': True, 'state': status}
+    if damage == 'backend':
+        state.after_drift = True
+    elif damage == 'authority':
+        api.kubeconfig.write_bytes(b'private-changed-authority')
+    elif damage == 'report':
+        state.report['operation_id'] = str(uuid4())
+    elif damage == 'read_only':
+        state.report['read_only'] = 1
+    original = api._run
+
+    def run(args):
+        value = original(args)
+        if args[0] == 'exec':
+            assert args[-1] == module.pool_fenced_machine_state_sql(spec)
+            if damage == 'late_authority':
+                api.kubeconfig.write_bytes(b'private-changed-authority')
+            elif damage == 'lost_reply':
+                raise OSError('private-marker')
+        return value
+
+    monkeypatch.setattr(api, '_run', run)
+    if damage is None:
+        assert api.fenced_machine_state() == status
+    else:
+        with pytest.raises(PoolMigrationError) as error:
+            api.fenced_machine_state()
+        assert 'private-' not in str(error.value)
+    commands = [row for row in state.calls if row[0] == 'exec']
+    assert len(commands) == (0 if damage == 'authority' else 1)
+    if commands:
+        assert commands[0][:7] == ['exec', '-n', state.target.namespace, 'pod/loom-postgres-0', '-c', 'loom-postgres', '--']
+
+
 @pytest.mark.parametrize('scope', ['pool', 'guard'])
 @pytest.mark.parametrize('damage', [None, 'pending', 'backend', 'authority', 'late_authority', 'report'])
 def test_recovery_drain_reads_exact_retained_database_and_rejects_drift(management_history, database_guard, monkeypatch, scope, damage):

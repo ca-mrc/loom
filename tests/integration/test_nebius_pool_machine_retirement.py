@@ -190,6 +190,65 @@ async def test_retirement_does_not_disable_cleanup_for_a_reserved_request(sessio
     assert await principal('gateway') is not None
 
 
+async def test_fenced_authority_can_be_observed_while_real_requests_still_need_cleanup(sessions, tmp_path):
+    from scripts.ops import nebius_pool_machine_database as module
+    from scripts.ops.nebius_pool_activation_database import fence_pool_activation_sql
+    from scripts.ops.nebius_pool_recovery_database import (
+        pool_recovery_drain_sql,
+        qualify_pool_recovery_drain,
+    )
+
+    from tests.integration.test_nebius_pool_recovery_drain import request_setup
+
+    assert hasattr(module, 'pool_fenced_machine_state_sql'), 'read-only fenced authority without a drain precondition is missing'
+    spec, url, principal, _ = await request_setup(sessions, tmp_path)
+    read_sql(url, fence_pool_activation_sql(spec))
+    before = read_sql(url, pool_recovery_drain_sql(spec))
+    assert not qualify_pool_recovery_drain(spec, before)
+    report = read_sql(url, module.pool_fenced_machine_state_sql(spec))
+    assert module.qualify_fenced_machine_state_report(spec, report) == 'active'
+    assert report['read_only'] is True
+    assert read_sql(url, pool_recovery_drain_sql(spec)) == before
+    # Observing authority must not retire credentials, cancel work, or relax the
+    # existing retirement barrier. The real cleanup principal remains usable.
+    for action in ('observe', 'revoke'):
+        with pytest.raises(psycopg.Error):
+            read_sql(url, module.pool_machine_retirement_sql(spec, action=action))
+    assert await principal('gateway') is not None
+
+
+@pytest.mark.parametrize('damage', [None, 'no_fence', 'partial', 'token_scope', 'extra_credential'])
+async def test_fenced_authority_observation_requires_exact_machine_state(sessions, damage):
+    from scripts.ops import nebius_pool_machine_database as module
+    from scripts.ops.nebius_pool_activation_database import fence_pool_activation_sql
+
+    assert hasattr(module, 'pool_fenced_machine_state_sql'), 'read-only fenced authority without a drain precondition is missing'
+    spec, _, url = await registered(sessions)
+    if damage != 'no_fence':
+        read_sql(url, fence_pool_activation_sql(spec))
+    machine = spec.machines[0]
+    async with sessions.begin() as session:
+        if damage == 'partial':
+            await session.execute(update(Token).where(Token.token_hash == bytes.fromhex(machine.token_sha256)).values(revoked_at=datetime.now(UTC)))
+        elif damage == 'token_scope':
+            await session.execute(update(Token).where(Token.token_hash == bytes.fromhex(machine.token_sha256)).values(scopes=['admin']))
+        elif damage == 'extra_credential':
+            await session.execute(insert(Token).values(token_hash=b'z' * 32, type='pool_machine', scopes=[], issued_at=datetime.now(UTC)))
+            await session.execute(insert(NebiusPoolMachineCredential).values(token_hash=b'z' * 32,
+                machine_id=machine.machine_id, credential_epoch=machine.credential_epoch))
+
+    def observe():
+        return module.qualify_fenced_machine_state_report(spec, read_sql(url, module.pool_fenced_machine_state_sql(spec)))
+
+    if damage is not None:
+        with pytest.raises(ValueError):
+            observe()
+    else:
+        assert observe() == 'active'
+        read_sql(url, module.pool_machine_retirement_sql(spec, action='revoke'))
+        assert observe() == 'revoked'
+
+
 async def test_expired_original_credentials_can_be_retired_without_renewal(sessions, monkeypatch):
     from scripts.ops.nebius_pool_activation_database import fence_pool_activation_sql
     from scripts.ops.nebius_pool_machine_database import (
