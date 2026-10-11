@@ -34,6 +34,7 @@ from loom.repository_identity import (  # noqa: E402
 if TYPE_CHECKING:
     from scripts.ops.deploy_nebius_platform import ParticipantRolloutAPI
     from scripts.ops.nebius_pool_participant_operation import RetainedParticipantRollout
+    from scripts.ops.nebius_pool_participant_resource import RetainedCandidateFileWriter
 
     from loom_service.environment_management.candidates import ProtectedPublication
 
@@ -370,7 +371,8 @@ def candidate_follows(current: str, candidate: str) -> bool:
 
 
 def rollout(args: argparse.Namespace, *, participant_rollout: RetainedParticipantRollout | None = None,
-        pool: ParticipantRolloutAPI | None = None) -> dict:
+        pool: ParticipantRolloutAPI | None = None,
+        candidate_writer: RetainedCandidateFileWriter | None = None) -> dict:
     """Ordinary lifecycle, optionally bound by the protected shared delivery.
 
     No CLI flag accepts shared files or an operation as deployment authority.
@@ -379,8 +381,14 @@ def rollout(args: argparse.Namespace, *, participant_rollout: RetainedParticipan
     """
     if (participant_rollout is None) != (pool is None):
         raise DeploymentError('shared operation and protected adapter must be supplied together')
+    if candidate_writer is not None and candidate_writer.retained != participant_rollout:
+        raise DeploymentError('candidate writer differs from shared operation')
 
     def check_retained() -> None:
+        if candidate_writer is not None:
+            candidate_writer.validate()
+            if candidate_writer.retained != participant_rollout:
+                raise DeploymentError('candidate writer changed during rollout')
         if participant_rollout is not None:
             from scripts.ops.nebius_pool_participant_operation import load_participant_rollout
 
@@ -478,7 +486,7 @@ def rollout(args: argparse.Namespace, *, participant_rollout: RetainedParticipan
             result = deploy(args, kube=kube)
         else:
             result = deploy(args, kube=kube, participant_release=participant_rollout.release, pool=pool,
-                participant_reference=participant_rollout.reference)
+                participant_reference=participant_rollout.reference, candidate_writer=candidate_writer)
     except Exception:
         report("failure", "Rollout failed; inspect phase evidence and dispatch pause before recovery")
         raise

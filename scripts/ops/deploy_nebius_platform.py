@@ -33,6 +33,7 @@ from loom.nebius_task_identity_policy import identity_policy_documents  # noqa: 
 if TYPE_CHECKING:
     from scripts.ops.nebius_pool_participant_operation import ParticipantRolloutReference
     from scripts.ops.nebius_pool_participant_release import PreparedParticipantRelease
+    from scripts.ops.nebius_pool_participant_resource import RetainedCandidateFileWriter
 
     from loom_service.pool_management.participant_refresh import ParticipantCapacityReceipt
 
@@ -384,25 +385,31 @@ class Kubectl:
 
 def install_task_identity_policy(
     kube: Kubectl, config: dict[str, Any], snapshot_root: Path,
+    *, qualify_installed: Callable[[], None] | None = None,
 ) -> None:
     """Prove policy enforcement before the caller may relax namespace PSS.
 
-    The deployment guard has already drained active work. Every failure leaves
-    restricted PSS enforced. Neither probe creates a workload or pulls an image.
+    The deployment guard has already drained active work. Bootstrap failures
+    leave restricted PSS enforced. The retained code-only route first proves an
+    unchanged installed policy and performs no bootstrap writes. Neither probe
+    creates a workload or pulls an image.
     """
     namespace = config["execution_namespace"]
     name = namespace + "-private-root-v1"
-    bootstrap = snapshot_root / "identity-policy-bootstrap.yaml"
-    bootstrap.write_text(yaml.safe_dump_all([
-        {"apiVersion": "v1", "kind": "Namespace", "metadata": {
-            "name": namespace, "labels": {"pod-security.kubernetes.io/enforce": "restricted"},
-        }},
-        {"apiVersion": "v1", "kind": "ServiceAccount", "metadata": {
-            "name": "loom-execution-policy-probe", "namespace": namespace,
-        }, "automountServiceAccountToken": False},
-    ]))
-    kube.run("apply", "-f", str(bootstrap))
-    kube.run("apply", "-f", str(snapshot_root / "00-task-identity-policy.yaml"))
+    if qualify_installed is None:
+        bootstrap = snapshot_root / "identity-policy-bootstrap.yaml"
+        bootstrap.write_text(yaml.safe_dump_all([
+            {"apiVersion": "v1", "kind": "Namespace", "metadata": {
+                "name": namespace, "labels": {"pod-security.kubernetes.io/enforce": "restricted"},
+            }},
+            {"apiVersion": "v1", "kind": "ServiceAccount", "metadata": {
+                "name": "loom-execution-policy-probe", "namespace": namespace,
+            }, "automountServiceAccountToken": False},
+        ]))
+        kube.run("apply", "-f", str(bootstrap))
+        kube.run("apply", "-f", str(snapshot_root / "00-task-identity-policy.yaml"))
+    else:
+        qualify_installed()
     deadline = time.monotonic() + 30
     while True:
         policy = kube.get("validatingadmissionpolicy", name, namespace)
@@ -421,7 +428,8 @@ def install_task_identity_policy(
     pod: dict[str, Any] = {"apiVersion": "v1", "kind": "Pod", "metadata": {
         "name": "loom-execution-policy-probe", "namespace": namespace,
     }, "spec": {
-        "automountServiceAccountToken": False, "serviceAccountName": "loom-execution-policy-probe",
+        "automountServiceAccountToken": False,
+        "serviceAccountName": "loom-execution-policy-probe" if qualify_installed is None else "loom-execution-attempt",
         "restartPolicy": "Never", "securityContext": {
             "runAsNonRoot": True, "runAsUser": 65532, "runAsGroup": 65532,
             "seccompProfile": {"type": "RuntimeDefault"},
@@ -459,6 +467,8 @@ def install_task_identity_policy(
         except TaskIdentityPolicyDeniedError as exc:
             if exc.policy_name != name:
                 raise DeploymentError("another policy rejected the identity probe") from exc
+            if qualify_installed is not None:
+                qualify_installed()
             return
         if time.monotonic() >= deadline:
             raise DeploymentError("task identity admission policy did not reject the negative probe")
@@ -897,7 +907,8 @@ def verify_deployed_images(kube: Kubectl, files: dict[str, list[dict[str, Any]]]
 
 def _rollout_candidate_files(*, kube: Kubectl, manifest: dict[str, Any], config: dict[str, Any],
         files: dict[str, list[dict[str, Any]]], snapshot_root: Path, retry_failed_jobs: bool,
-        phase: Callable[[str], None], before_write: Callable[[], None]) -> None:
+        phase: Callable[[str], None], before_write: Callable[[], None],
+        write_candidate_file: Callable[[str], None] | None = None) -> None:
     """Common workload sequence after the caller's qualified, guarded preflight.
 
     This is not an entry point or a guard bypass. The parent owns source/namespace
@@ -911,7 +922,10 @@ def _rollout_candidate_files(*, kube: Kubectl, manifest: dict[str, Any], config:
     def apply_file(filename: str) -> None:
         before_write()
         phase(filename.removesuffix(".yaml"))
-        kube.run("apply", "-f", str(snapshot_root / filename))
+        if write_candidate_file is not None and filename not in {'30-migrate.yaml', '50-configure.yaml'}:
+            write_candidate_file(filename)
+        else:
+            kube.run("apply", "-f", str(snapshot_root / filename))
 
     def run_job(filename: str) -> None:
         name = files[filename][0]["metadata"]["name"]
@@ -958,9 +972,15 @@ def _rollout_candidate_files(*, kube: Kubectl, manifest: dict[str, Any], config:
 def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None,
         participant_release: PreparedParticipantRelease | None = None,
         pool: ParticipantRolloutAPI | None = None,
-        participant_reference: ParticipantRolloutReference | None = None) -> dict[str, Any]:
+        participant_reference: ParticipantRolloutReference | None = None,
+        candidate_writer: RetainedCandidateFileWriter | None = None) -> dict[str, Any]:
     if (participant_release is None) != (pool is None):
         raise DeploymentError('shared release and protected adapter must be supplied together')
+    if candidate_writer is not None:
+        candidate_writer.validate()
+        if (participant_release is None or candidate_writer.retained.release != participant_release
+                or candidate_writer.retained.reference != participant_reference):
+            raise DeploymentError('candidate writer differs from retained shared release')
     participant_release = copy.deepcopy(participant_release)
     snapshot = tempfile.TemporaryDirectory(prefix="loom-nebius-deploy-")
     snapshot_root = Path(snapshot.name)
@@ -1034,6 +1054,11 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None,
         def check_release() -> None:
             if participant_release is not None and _participant_release_binding(participant_release, manifest, config, files) != release_binding:
                 raise DeploymentError('shared release changed during rollout')
+            if candidate_writer is not None:
+                candidate_writer.validate()
+                if (candidate_writer.retained.release != participant_release
+                        or candidate_writer.retained.reference != participant_reference):
+                    raise DeploymentError('candidate writer changed during rollout')
 
         if pool is None:
             state = preflight(kube, manifest, config, files, args.expected_cluster_id, pool_completions=pool_completions)
@@ -1169,10 +1194,12 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None,
         if config.get("task_identity_policy") is not None:
             before_write()
             phase("install-and-verify-task-identity-policy")
-            install_task_identity_policy(kube, config, snapshot_root)
+            install_task_identity_policy(kube, config, snapshot_root,
+                qualify_installed=candidate_writer.qualify_identity_policy if candidate_writer is not None else None)
         _rollout_candidate_files(kube=kube, manifest=manifest, config=config, files=files,
             snapshot_root=snapshot_root, retry_failed_jobs=args.retry_failed_jobs,
-            phase=phase, before_write=before_write)
+            phase=phase, before_write=before_write,
+            write_candidate_file=candidate_writer.apply_file if candidate_writer is not None else None)
         if pool is not None:
             assert participant_release is not None and guard_acquired
             check_release()

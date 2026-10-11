@@ -1,8 +1,8 @@
-"""Retained candidate-resource CAS for the protected normal-release parent.
+"""Retained candidate file writes and CAS for the normal-release parent.
 
-This is one update child, not a rollout or readiness proof. The parent owns
-phase-aware inventory/guard qualification, independent child-start evidence,
-ordering, creates/Job lineage, readiness, and completed-history promotion.
+Resource file delivery is connected; this is not a whole rollout/readiness proof.
+The parent still owns phase-aware inventory/guard qualification, backup/Job
+lineage, policy-changing bootstrap, readiness, and completed-history promotion.
 No caller supplies a replacement document or an unrestricted resource path.
 """
 from __future__ import annotations
@@ -13,6 +13,8 @@ import json
 import re
 import ssl
 from collections.abc import Callable
+from contextlib import AbstractContextManager
+from pathlib import Path
 from typing import Any
 
 from scripts.ops import nebius_certificates as private_state
@@ -25,7 +27,7 @@ from scripts.ops.nebius_development_runtime_transition import (
     _advance_fixed_resources,
 )
 from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
-from scripts.ops.nebius_management_stage import _qualified_defaulted
+from scripts.ops.nebius_management_stage import ManagementStageAPI, _qualified_defaulted
 from scripts.ops.nebius_management_switch import _matches, _stable
 from scripts.ops.nebius_management_transport import ManagementKubernetesTransport
 from scripts.ops.nebius_pool_participant_operation import (
@@ -40,6 +42,173 @@ _KINDS = frozenset({'Namespace', 'ConfigMap', 'ServiceAccount', 'Role', 'RoleBin
     'StatefulSet', 'Service', 'Deployment', 'CronJob', 'ValidatingAdmissionPolicy', 'ValidatingAdmissionPolicyBinding'})
 _MARKER = 'loom.nebius/participant-candidate-operation'
 _SERVICE_ALLOCATION = ('clusterIP', 'clusterIPs', 'ipFamilies', 'ipFamilyPolicy', 'healthCheckNodePort')
+_PRESERVED_KINDS = frozenset({'PersistentVolumeClaim', 'ResourceQuota'})
+_CANDIDATE_FILES = frozenset({'00-namespaces.yaml', '10-config-network.yaml', '20-database.yaml',
+    '40-services.yaml', '60-execution.yaml', '70-public.yaml', '80-backup.yaml'})
+
+
+class RetainedCandidateFileWriter:
+    """Connect fixed resource engines to the ordinary deployment's file phases.
+
+    This does not own backup/Job execution or policy-changing bootstrap.
+    The protected parent supplies source-bound API factories whose qualification
+    callbacks own the current guard and full phase-aware inventory. An independent
+    dispatch anchor prevents missing child evidence from reopening a write.
+    """
+
+    def __init__(self, *, retained: RetainedParticipantRollout,
+            open_resource: Callable[[str], AbstractContextManager[DevelopmentRuntimeWorkloadAPI]],
+            open_creation: Callable[[str], AbstractContextManager[ManagementStageAPI]]):
+        self.retained = copy.deepcopy(retained)
+        self.open_resource, self.open_creation = open_resource, open_creation
+
+    def validate(self) -> None:
+        if load_participant_rollout(reference=self.retained.reference,
+                state_root=self.retained.state_dir.parent, anchor_dir=self.retained.anchor_dir) != self.retained:
+            raise ValueError('candidate file source changed; preserve evidence')
+
+    def qualify_identity_policy(self) -> None:
+        """Prove the installed policy is unchanged, using read/dry-run only.
+
+        A policy-changing candidate still requires a separately journalled
+        bootstrap; this code-only route cannot silently adopt it. Namespace PSS
+        stays at its installed value and no probe ServiceAccount is created.
+        """
+        try:
+            self.validate()
+            policies = self.retained.release.files['00-task-identity-policy.yaml']
+            if {row['kind'] for row in policies} != {'ValidatingAdmissionPolicy', 'ValidatingAdmissionPolicyBinding'} or len(policies) != 2:
+                raise ValueError
+            for document in policies:
+                key = _key(document)
+                original, desired, _ = _inputs(self.retained, key)
+                with self.open_resource(key) as api:
+                    api.qualify()
+                    observed = api.read_workload(key)
+                    if not _matches(observed, original, _uid(original)):
+                        raise ValueError
+                    preview = api.preview_workload(key, observed, desired)
+                    if preview is None:
+                        raise ValueError
+                    _qualified_candidate(desired, preview)
+                    value = copy.deepcopy(preview)
+                    annotations = value['metadata']['annotations']
+                    if annotations[_MARKER] != str(self.retained.reference.operation_id):
+                        raise ValueError
+                    previous = original['metadata'].get('annotations', {})
+                    if _MARKER in previous:
+                        annotations[_MARKER] = previous[_MARKER]
+                    else:
+                        del annotations[_MARKER]
+                    if not annotations and 'annotations' not in original['metadata']:
+                        value['metadata'].pop('annotations')
+                    if _stable(value) != _stable(original) or not _matches(api.read_workload(key), original, _uid(original)):
+                        raise ValueError
+                    api.qualify()
+            self.validate()
+        except Exception:
+            raise ValueError('installed candidate identity policy differs; preserve evidence') from None
+
+    def _children(self) -> dict[str, tuple[str, Path]]:
+        originals = {_key(row) for row in self.retained.inputs.current}
+        result = {}
+        for filename in _CANDIDATE_FILES:
+            for document in self.retained.release.files[filename]:
+                key = _key(document)
+                if key in result:
+                    raise ValueError
+                update = key in originals
+                root, journal = ('candidate-resources', 'transition.json') if update else ('candidate-creations', 'stage.json')
+                action = 'preserve' if update and document['kind'] in _PRESERVED_KINDS else 'update' if update else 'create'
+                result[key] = (action,
+                    self.retained.state_dir / root / hashlib.sha256(key.encode()).hexdigest() / journal)
+        return result
+
+    def _record(self, path: Path, children: dict[str, tuple[str, Path]]) -> dict[str, Any]:
+        identity = {'schema': 'loom.nebius-participant-file-writes.v1',
+            'reference': self.retained.reference.model_dump(mode='json')}
+        anchor = self.retained.anchor_dir / (str(self.retained.reference.operation_id) + '-candidate-file-writes.json')
+        anchored = anchor.exists() or anchor.is_symlink()
+        if path.exists() or path.is_symlink():
+            record: dict[str, Any] = json.loads(private_state._private_read(path, limit=4 * 1024**2))
+            if (set(record) != {*identity, 'started'} or any(record[key] != value for key, value in identity.items())
+                    or not isinstance(record['started'], list)
+                    or any(not isinstance(key, str) or key not in children or children[key][0] == 'preserve'
+                        for key in record['started'])
+                    or len(set(record['started'])) != len(record['started'])
+                    or (record['started'] and not anchored)):
+                raise ValueError
+        else:
+            if anchored or any(child.exists() or child.is_symlink() for _, child in children.values()):
+                raise ValueError
+            record = {**identity, 'started': []}
+            private_state._atomic_json(path, record)
+        if anchored:
+            if json.loads(private_state._private_read(anchor)) != identity:
+                raise ValueError
+        else:
+            # No effect precedes both records. An interrupted, empty local
+            # preparation can finish; dispatched or missing evidence cannot.
+            if any(child.exists() or child.is_symlink() for _, child in children.values()):
+                raise ValueError
+            private_state._write_private(anchor, json.dumps(identity, sort_keys=True).encode())
+            private_state._sync_directory(anchor.parent)
+        for key in record['started']:
+            private_state._private_read(children[key][1], limit=4 * 1024**2)
+        return record
+
+    def apply_file(self, filename: str) -> None:
+        from scripts.ops.nebius_pool_participant_creation import (
+            _creation,
+            stage_participant_creation,
+        )
+
+        try:
+            self.validate()
+            if filename not in _CANDIDATE_FILES:
+                raise ValueError
+            children = self._children()
+            keys = [_key(row) for row in self.retained.release.files[filename]]
+            # Validate every selected resource before dispatching the first one.
+            for key in keys:
+                if children[key][0] in {'update', 'preserve'}:
+                    _inputs(self.retained, key)
+                else:
+                    _creation(self.retained, key)
+            root = self.retained.state_dir / 'candidate-file-writes'
+            with private_state._locked_state(root):
+                path = root / 'dispatch.json'
+                record = self._record(path, children)
+                # Read-only infrastructure must qualify before any application
+                # write in this file, including when it occurs late in render order.
+                for key in keys:
+                    if children[key][0] == 'preserve':
+                        original, _, _ = _inputs(self.retained, key)
+                        with self.open_resource(key) as read_api:
+                            read_api.qualify()
+                            if not _matches(read_api.read_workload(key), original, _uid(original)):
+                                raise ValueError
+                            read_api.qualify()
+                for key in keys:
+                    self.validate()
+                    if children[key][0] == 'preserve':
+                        continue
+                    if key not in record['started']:
+                        child = children[key][1]
+                        if child.exists() or child.is_symlink():
+                            raise ValueError
+                        record['started'].append(key)
+                        private_state._atomic_json(path, record)
+                    if children[key][0] == 'update':
+                        with self.open_resource(key) as update_api:
+                            if not update_participant_resource(retained=self.retained, key=key, api=update_api):
+                                raise ValueError
+                    else:
+                        with self.open_creation(key) as create_api:
+                            stage_participant_creation(retained=self.retained, key=key, api=create_api)
+                self.validate()
+        except Exception:
+            raise ValueError('candidate file write unqualified; preserve evidence') from None
 
 
 def _resource_path(document: dict[str, Any]) -> str:
@@ -48,6 +217,8 @@ def _resource_path(document: dict[str, Any]) -> str:
             for value in (metadata['name'], *([metadata['namespace']] if 'namespace' in metadata else []))):
         raise ValueError
     extra = {'Namespace': ('v1', 'namespaces'), 'Service': ('v1', 'services'),
+        'PersistentVolumeClaim': ('v1', 'persistentvolumeclaims'),
+        'ResourceQuota': ('v1', 'resourcequotas'),
         'StatefulSet': ('apps/v1', 'statefulsets')}
     if document['kind'] not in extra:
         return runtime_resource_path(document) + '/' + str(metadata['name'])
@@ -59,14 +230,42 @@ def _resource_path(document: dict[str, Any]) -> str:
         '' if cluster else '/namespaces/' + str(metadata['namespace'])) + '/' + plural + '/' + str(metadata['name'])
 
 
+def _preserved_quantities(document: dict[str, Any]) -> dict[str, Any]:
+    """Compare storage/quota amounts exactly without changing retained spelling."""
+    from kubernetes.utils.quantity import parse_quantity
+
+    result = copy.deepcopy(document)
+    if result['kind'] == 'ResourceQuota':
+        maps = [result['spec']['hard']]
+    elif result['kind'] == 'PersistentVolumeClaim':
+        resources = result['spec']['resources']
+        maps = [resources.get(field, {}) for field in ('requests', 'limits')]
+    else:
+        raise ValueError
+    for quantities in maps:
+        for key, value in quantities.items():
+            amount = parse_quantity(value)
+            if not amount.is_finite() or amount < 0:
+                raise ValueError
+            quantities[key] = str(amount.normalize())
+    return result
+
+
 def _inputs(retained: RetainedParticipantRollout, key: str) -> tuple[dict[str, Any], dict[str, Any], str]:
     original, = (row for row in retained.inputs.current if _key(row) == key)
     candidate, = (row for rows in retained.release.files.values() for row in rows if _key(row) == key)
-    if (candidate['kind'] not in _KINDS or key in retained.release.preserved
+    if (candidate['kind'] not in _KINDS | _PRESERVED_KINDS or key in retained.release.preserved
             or original['metadata'].get('annotations', {}).get(_MARKER) == str(retained.reference.operation_id)):
         raise ValueError
     _uid(original)
     desired = _snapshot(candidate)
+    if candidate['kind'] in _PRESERVED_KINDS:
+        # Code rollout cannot resize/rebind storage or change infrastructure
+        # quotas. Qualify the original request and preserve all allocations.
+        if not _contains(_preserved_quantities(original), _preserved_quantities(desired)):
+            raise ValueError
+        return copy.deepcopy(original), _snapshot(original), digest({
+            'reference': retained.reference.model_dump(mode='json'), 'key': key, 'preserved': original})
     for field in ('labels', 'annotations'):
         merged = {**original['metadata'].get(field, {}), **desired['metadata'].get(field, {})}
         if merged:
@@ -183,6 +382,8 @@ class HTTPSParticipantResourceAPI(HTTPSDevelopmentRuntimeWorkloads):
     def _patch(self, key: str, before: dict[str, Any], desired: dict[str, Any], *, preview: bool) -> dict[str, Any] | None:
         try:
             original = self.originals[key]
+            if original['kind'] in _PRESERVED_KINDS:
+                raise ValueError
             if desired != self.targets[key] or not _matches(before, original, _uid(original)):
                 raise ValueError
             version = before['metadata']['resourceVersion']

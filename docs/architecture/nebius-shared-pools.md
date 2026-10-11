@@ -1492,6 +1492,25 @@ that public endpoint. A release marker distinguishes the target from an unchange
 original. This child proves only the recorded resource update, not descendants or
 runtime readiness.
 
+The retained file writer connects those update and create engines to the actual
+idle-rollout/deployer resource phases, preserving renderer order. A private
+dispatch journal and separate start anchor prevent a missing parent or child
+journal from reopening writes. Existing storage claims and ResourceQuotas are
+qualified read-only before the file's application writes; code rollout does not
+resize/rebind storage or change infrastructure quotas. Equivalent Kubernetes
+quantity spellings compare by exact amount while the retained allocation stays
+unchanged. Source/reference mismatch is rejected before this writer can be
+supplied to the deployer.
+
+For an unchanged installed task-identity policy, the writer qualifies the exact
+original policy UID/body and verifies server-dry-run equivalence, then the deployer
+runs its positive/negative admission probes using the existing execution account.
+It does not bootstrap a temporary namespace policy or create a probe account.
+Policy changes are refused by this route and still require a separately retained
+bootstrap transition. Standalone policy installation retains its existing
+bootstrap behavior. The file-writer connection is internal; the protected entry
+must still supply concrete source/guard-qualified API factories.
+
 The paired create-only child selects a new resource from the same retained
 candidate, or derives the pre-upgrade backup Job from the original captured
 CronJob. The backup has an operation-stable name and records its source CronJob
@@ -1505,10 +1524,10 @@ terminal owned processes, then rechecks the Job and journal. Success requires a
 successful owned Pod with successful container exits; a failed outcome requires
 all owned processes to be inert. Running unrelated services are not confused with
 Job descendants. This observation grants no retry or deployment authority.
-Explicit failed-Job retry lineage, parent phase authority and full rollout
-integration remain required connections. The normal rollout's admission-policy
-bootstrap writes must also be accounted for; the candidate file loop alone does
-not cover every effect.
+Explicit failed-Job retry lineage, backup/Job dispatch through the retained
+engines, parent phase authority and full rollout integration remain required
+connections. The read-only unchanged-policy path does not cover upgrades that
+change admission policy; the candidate file loop alone does not cover every effect.
 
 The transaction and parent interface do not establish publication, history,
 Kubernetes readiness or recovery authority on their own. The concrete protected
