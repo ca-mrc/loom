@@ -109,7 +109,7 @@ def test_shared_recovery_selects_original_publication_not_another_success_for_sa
 
 
 @pytest.mark.parametrize('recover,file_writes', [(False, False), (False, True), (True, False), (True, True),
-    ('pre-upgrade-backup', True), ('30-migrate.yaml', True), ('50-configure.yaml', True)])
+    ('pre-upgrade-backup', True), ('30-migrate.yaml', True), ('50-configure.yaml', True), ('guard-release', True)])
 def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation_inputs, connection, tmp_path, monkeypatch, recover, file_writes):
     """Real pool effects and deployment lifecycle; external I/O/qualification doubled."""
     inputs = operation_inputs
@@ -125,8 +125,8 @@ def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation
         candidate=inputs['candidate']['candidate_sha'], evidence_dir=tmp_path / 'evidence', github=True)
     intents, phases = [], []
     failed_job = ('loom-predeploy-' + retained.reference.operation_id.hex if recover == 'pre-upgrade-backup' else
-        plan.files[recover][0]['metadata']['name'] if isinstance(recover, str) else None)
-    state = {'fail_https': recover is True, 'fail_job': failed_job}
+        plan.files[recover][0]['metadata']['name'] if isinstance(recover, str) and recover != 'guard-release' else None)
+    state = {'fail_https': recover is True, 'fail_job': failed_job, 'lose_release': recover == 'guard-release'}
 
     class Kube(FakeKubectl):
         def get(self, kind, name, namespace):
@@ -151,6 +151,9 @@ def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation
                         raise deploy.TaskIdentityPolicyDeniedError(config['execution_namespace'] + '-private-root-v1')
                     return ''
             result = super().run(*command, **kwargs)
+            if 'loom.nebius_rollout_guard' in command and 'release' in command and state['lose_release']:
+                state['lose_release'] = False
+                raise deploy.DeploymentError('guard release response lost after commit')
             if command[:2] == ('config', 'view'):
                 value = json.loads(result)
                 value['clusters'][0]['name'] = config['cluster_id']
@@ -296,11 +299,13 @@ def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation
         writer_args['candidate_writer'] = RetainedCandidateFileWriter(retained=retained,
             open_resource=lambda _: nullcontext(ResourceIO()), open_creation=open_job)
     if recover:
-        with pytest.raises(deploy.DeploymentError, match='HTTPS' if recover is True else 'execution unconfirmed'):
+        error = 'HTTPS' if recover is True else 'guard release response lost' if recover == 'guard-release' else 'execution unconfirmed'
+        with pytest.raises(deploy.DeploymentError, match=error):
             idle.rollout(args, participant_rollout=retained, pool=pool, **writer_args)
         failed, = args.evidence_dir.glob('deployment-*.json')
         assert json.loads(failed.read_text())['shared_pool_release'] == retained.reference.model_dump(mode='json')
-        assert kube.guard_identity == (retained.guard_owner, inputs['candidate']['candidate_sha'])
+        assert kube.guard_identity == (None if recover == 'guard-release' else
+            (retained.guard_owner, inputs['candidate']['candidate_sha']))
         args.recovery_evidence = failed
         # Recovery uses the original snapshot even though the platform's live
         # configuration now identifies the partially deployed new candidate.
@@ -333,6 +338,12 @@ def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation
         assert {'30-migrate.yaml', '50-configure.yaml'} <= set(phases)
     assert all(row['shared_pool_release'] == retained.reference.model_dump(mode='json') for row in intents)
     assert len(intents) == (2 if recover else 1)
+    if recover == 'guard-release':
+        # Completion reconciliation must not reacquire intake or repeat any
+        # build/deploy/pool effect after the original release committed.
+        actions = [command for command in kube.commands if 'loom.nebius_rollout_guard' in command
+            and ('acquire' in command or 'release' in command)]
+        assert len(actions) == 2
 
 
 @pytest.mark.parametrize('damage', ['missing-adapter', 'missing-operation', 'mutated-operation',
