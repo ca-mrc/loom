@@ -120,6 +120,9 @@ strategy = "stable-hash"
 # Separation contracts in test_ci_test_selection.py are respected.
 # Keep stable hashing for the remaining files; new files do not move old files.
 # CI confirms the resulting balance; historical seconds are not a runtime gate.
+# Run 38159584210 exposed a new shared-handoff/observation collision. Keep
+# complete phase modules on separate lanes within these same eight shards;
+# participant observation alone took 14.6 min. No test or timeout is removed.
 salt = "tests-root-v2-8275"
 pins = [
   { path = "tests/ops/test_ci_secret_isolation.py", shard_index = 0 },
@@ -158,6 +161,15 @@ pins = [
   { path = "tests/ops/test_nebius_pool_cutover.py", shard_index = 7 },
   { path = "tests/ops/test_nebius_pool_gateway_retirement_live.py", shard_index = 7 },
   { path = "tests/ops/test_nebius_pool_image_cancellation_gateway.py", shard_index = 7 },
+  { path = "tests/ops/test_nebius_pool_participant_observation.py", shard_index = 0 },
+  { path = "tests/ops/test_nebius_shared_pool_handoff.py", shard_index = 6 },
+  { path = "tests/ops/test_nebius_shared_pool_handoff_parent.py", shard_index = 1 },
+  { path = "tests/ops/test_nebius_shared_pool_handoff_forward.py", shard_index = 4 },
+  { path = "tests/ops/test_nebius_shared_pool_handoff_processes.py", shard_index = 1 },
+  { path = "tests/ops/test_nebius_shared_pool_handoff_census.py", shard_index = 7 },
+  { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_fences.py", shard_index = 2 },
+  { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_authority.py", shard_index = 5 },
+  { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_release.py", shard_index = 4 },
 ]
 
 [[test_sharding]]
