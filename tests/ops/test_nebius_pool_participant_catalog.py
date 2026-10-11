@@ -14,7 +14,9 @@ from tests.ops.test_nebius_pool_participant_release import catalog_inputs as cat
 from tests.ops.test_nebius_pool_participant_release import management_inputs as management_inputs
 from tests.ops.test_nebius_pool_participant_release import platform_inputs as platform_inputs
 from tests.ops.test_nebius_pool_participant_release import release_inputs as release_inputs
-from tests.ops.test_nebius_pool_participant_release import staging_attachment_inputs as staging_attachment_inputs
+from tests.ops.test_nebius_pool_participant_release import (
+    staging_attachment_inputs as staging_attachment_inputs,
+)
 
 
 def module():
@@ -42,7 +44,9 @@ def live_children(manager):
             'uid': replica['metadata']['uid'], 'controller': True}]},
         'spec': copy.deepcopy(template['spec']), 'status': {'phase': 'Running',
             'conditions': [{'type': 'Ready', 'status': 'True'}], 'containerStatuses': [
-                {'name': row['name'], 'ready': True, 'state': {'running': {}}} for row in template['spec']['containers']]}}
+                {'name': row['name'], 'ready': True, 'state': {'running': {}}} for row in template['spec']['containers']],
+            'initContainerStatuses': [{'name': row['name'], 'state': {'terminated': {'exitCode': 0}}}
+                for row in template['spec'].get('initContainers', [])]}}
     return ({'apiVersion': 'apps/v1', 'kind': 'ReplicaSetList', 'metadata': {'resourceVersion': '26'}, 'items': [replica]},
         {'apiVersion': 'v1', 'kind': 'PodList', 'metadata': {'resourceVersion': '27'}, 'items': [pod]})
 
@@ -57,7 +61,7 @@ def connection(catalog_inputs, tmp_path):
     request = module().ParticipantCatalogRequest(**inputs)
     binding = request.release.migration.registration.binding
     state = SimpleNamespace(request=request, directory=tmp_path, manager=copy.deepcopy(manager), config=None,
-        writes=[], failure=None, ready=True, old_pod=False, replaced_catalog=False, collections=None)
+        writes=[], failure=None, ready=True, init_ready=True, old_pod=False, replaced_catalog=False, collections=None)
 
     def respond(message):
         path = message.url.path
@@ -92,6 +96,8 @@ def connection(catalog_inputs, tmp_path):
             if path.endswith('/pods'):
                 if not state.ready:
                     value['items'][0]['status']['containerStatuses'][0]['ready'] = False
+                if not state.init_ready:
+                    value['items'][0]['status']['initContainerStatuses'][0]['state'] = {'running': {}}
                 if state.old_pod:
                     old = copy.deepcopy(value['items'][0])
                     old['metadata'].update(uid=str(uuid4()), name='old-manager')
@@ -150,16 +156,18 @@ def advance(api, state):
     return module().refresh_participant_manager(request=state.request, api=api, state_dir=state.directory)
 
 
-@pytest.mark.parametrize('failure', [None, 'lost-after', 'unready', 'old-pod', 'conflict'])
+@pytest.mark.parametrize('failure', [None, 'lost-after', 'unready', 'init-unready', 'old-pod', 'conflict'])
 def test_catalog_update_changes_only_mount_and_replays_without_duplicate_patch(connection, failure):
     api, state = connection
     original = copy.deepcopy(state.manager)
     state.failure = failure
     state.ready, state.old_pod = failure != 'unready', failure == 'old-pod'
+    state.init_ready = failure != 'init-unready'
     with api:
         stage(api, state)
-        assert advance(api, state) is (failure not in {'unready', 'old-pod', 'conflict'})
+        assert advance(api, state) is (failure not in {'unready', 'init-unready', 'old-pod', 'conflict'})
         state.failure, state.ready, state.old_pod = None, True, False
+        state.init_ready = True
         stage(api, state)
         assert advance(api, state) is True
     assert [kind for kind, _ in state.writes] == ['catalog', 'manager'] + (['manager'] if failure == 'conflict' else [])

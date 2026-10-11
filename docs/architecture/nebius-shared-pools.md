@@ -1432,6 +1432,15 @@ are not failures of this read; it does not reserve work or demand spare headroom
 The Job adapter verifies historical receipt integrity. The protected parent must
 still require a new read and enforce its expiry before releasing the idle guard.
 
+The catalog/manager child stages only the immutable successor catalog and uses
+the existing journaled workload compare-and-swap engine for the projected manager
+update. Its image, credentials, other settings and Recreate strategy remain
+unchanged. The recorded catalog UID must still match before the manager update;
+lost responses are reconciled without repeating an uncertain patch. Readiness
+checks complete Pod/ReplicaSet observations, including init-container completion
+and absence of lingering old Pods, then rereads the manager and catalog. This
+child does not qualify publication or own the participant fence or idle guard.
+
 The existing deploy parent has an internal shared-release path paired with a
 protected pool I/O adapter. It binds the exact projected files and release/guard
 identity, retains the ordinary backup/schema/configuration/workload sequence,
