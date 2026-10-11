@@ -16,7 +16,7 @@ import time
 import urllib.request
 import uuid
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
@@ -32,6 +32,8 @@ from loom.nebius_task_identity_policy import identity_policy_documents  # noqa: 
 
 if TYPE_CHECKING:
     from scripts.ops.nebius_pool_participant_release import PreparedParticipantRelease
+
+    from loom_service.pool_management.participant_refresh import ParticipantCapacityReceipt
 
 PHASE_FILES = (
     "00-namespaces.yaml",
@@ -83,8 +85,44 @@ class ParticipantRolloutAPI(Protocol):
         ...
 
     def finish(self, kube: Kubectl, release: PreparedParticipantRelease) -> None:
-        """Qualify current shared workloads, reopen and prove fresh post-open capacity."""
+        """Qualify current shared workloads and reopen the selected participant."""
         ...
+
+    def read_capacity(self, kube: Kubectl, release: PreparedParticipantRelease, *,
+            observation_id: uuid.UUID) -> ParticipantCapacityReceipt:
+        """Return this new post-open read's capacity receipt.
+
+        Retain observation_id before creating its fixed capacity Job. Never
+        substitute a previous read, including during original-candidate recovery.
+        The deploy parent checks expiry again immediately before guard release.
+        """
+        ...
+
+
+def _participant_capacity_before_release(proof: ParticipantCapacityReceipt | None, *,
+        started_at: datetime, started_clock: float, max_age_seconds: int) -> dict[str, Any]:
+    """Enforce the bounded proof at dispatch, not merely inside pool I/O.
+
+    The monotonic interval starts before the new read, conservatively charging
+    Job/startup/readback time against its remaining database-clock lifetime.
+    Wall-clock checks also reject stale/future receipts and clock reversal.
+    """
+    from loom_service.pool_management.participant_refresh import ParticipantCapacityReceipt
+
+    try:
+        if not isinstance(proof, ParticipantCapacityReceipt):
+            raise ValueError
+        proof = ParticipantCapacityReceipt.model_validate_json(proof.model_dump_json())
+        now = datetime.now(UTC)
+        elapsed = time.monotonic() - started_clock
+        if (now < started_at or proof.checked_at < started_at - timedelta(seconds=60)
+                or proof.checked_at > now + timedelta(seconds=60) or now >= proof.valid_until
+                or proof.valid_until > proof.selected_observed_at + timedelta(seconds=max_age_seconds)
+                or not 0 <= elapsed < (proof.valid_until - proof.checked_at).total_seconds()):
+            raise ValueError
+        return proof.model_dump(mode='json')
+    except Exception:
+        raise DeploymentError('shared capacity proof unavailable or expired; preserve the original guard') from None
 
 
 def _participant_release_binding(release: PreparedParticipantRelease, manifest: dict[str, Any],
@@ -933,6 +971,7 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None,
         guard_owner = shared_owner
     guard_acquired = False
     mutation_started = False
+    capacity_proof: ParticipantCapacityReceipt | None = None
 
     def phase(name: str) -> None:
         evidence["phases"].append({"name": name, "started_at": datetime.now(UTC).isoformat()})
@@ -1106,11 +1145,22 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None,
             phase('shared-pool-reopen-and-capacity')
             pool.finish(kube, copy.deepcopy(participant_release))
             check_release()
+            observation_id = uuid.uuid4()
+            evidence['pool_refresh']['capacity_observation_id'] = str(observation_id)
+            phase('shared-pool-capacity-read')
+            capacity_started_at, capacity_started_clock = datetime.now(UTC), time.monotonic()
+            capacity_proof = pool.read_capacity(kube, copy.deepcopy(participant_release), observation_id=observation_id)
+            check_release()
         if retire_target is not None:
             phase("target-replacement-readback")
             execution_target_action(kube, ns, "verify", retire_target, config["target_id"])
             evidence["target_replacement"]["active_target_verified"] = True
         if guard_acquired:
+            if pool is not None:
+                assert participant_release is not None
+                evidence['pool_refresh']['capacity'] = _participant_capacity_before_release(capacity_proof,
+                    started_at=capacity_started_at, started_clock=capacity_started_clock,
+                    max_age_seconds=participant_release.refresh.after.admission.observation_max_age_seconds)
             rollout_guard(kube, ns, "release", guard_owner, manifest["candidate_sha"])
             guard_acquired = False
         evidence["status"] = "complete"

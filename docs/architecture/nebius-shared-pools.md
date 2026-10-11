@@ -1444,7 +1444,14 @@ child does not qualify publication or own the participant fence or idle guard.
 The existing deploy parent has an internal shared-release path paired with a
 protected pool I/O adapter. It binds the exact projected files and release/guard
 identity, retains the ordinary backup/schema/configuration/workload sequence,
-and checks current guard ownership before shared mutation phases and reopening. Unknown
+and checks current guard ownership before shared mutation phases and reopening.
+After reopening it assigns and records a new capacity-read identity, including
+on recovery. Reopening and capacity reading are separate adapter operations, so
+time spent reopening does not consume the new read's validity window. Immediately
+before dispatching guard release, the parent validates the returned receipt,
+the selected pool's maximum observation age, wall-clock expiry and elapsed
+monotonic read time. A missing, expired or implausibly future receipt cannot clear
+the guard merely because the adapter returned normally. Unknown
 pool effects or stale post-open capacity retain the guard for the original
 candidate's roll-forward recovery. A busy result may release it only when the
 adapter positively proves the fence changed nothing and no later phase began.
