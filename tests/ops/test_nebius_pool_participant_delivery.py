@@ -417,6 +417,161 @@ def test_completion_preserves_the_existing_database_clock_skew_allowance(
         operation_inputs, connection, tmp_path, monkeypatch, recover=False, file_writes=True)
 
 
+def test_completed_release_is_the_next_receipt_selected_predecessor(
+        operation_inputs, connection, tmp_path, monkeypatch):
+    from scripts.ops import nebius_pool_participant_completion as completion
+    from scripts.ops.nebius_ingress_stage import _key, _uid
+    from scripts.ops.nebius_management_switch import _stable
+
+    test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(
+        operation_inputs, connection, tmp_path, monkeypatch, recover=False, file_writes=True)
+    loader = getattr(completion, 'load_completed_participant_rollout', None)
+    assert callable(loader), 'a released operation must have a semantic predecessor loader'
+    retained = connection[0].retained
+    before = {path: path.read_bytes() for root in (retained.state_dir, retained.anchor_dir)
+        for path in root.rglob('*') if path.is_file()}
+    successor = loader(reference=retained.reference, state_root=retained.state_dir.parent,
+        anchor_dir=retained.anchor_dir)
+    assert {path: path.read_bytes() for path in before} == before
+    selected = retained.release.refresh.participant_id
+    guard, = (row for row in successor.migration.guards if row.participant_id == selected)
+    old_guard, = (row for row in retained.inputs.previous.guards if row.participant_id == selected)
+    kube = connection[0].kube
+    assert _stable(guard.controller) == _stable(kube.objects['deployment', 'loom-control-plane'])
+    assert _uid(guard.controller) == _uid(old_guard.controller)
+    assert guard.controller['metadata']['annotations']['loom.nebius/participant-candidate-operation'] == str(retained.reference.operation_id)
+    assert _stable(guard.database.statefulset) == _stable(kube.objects['statefulset', 'loom-postgres'])
+    assert _stable(guard.database.service) == _stable(kube.objects['service', 'loom-postgres'])
+    assert guard.database.credential_uid == old_guard.database.credential_uid
+    assert guard.database.credential_resource_version == old_guard.database.credential_resource_version
+    assert tuple(row for row in successor.migration.guards if row.participant_id != selected) == tuple(
+        row for row in retained.inputs.previous.guards if row.participant_id != selected)
+    assert successor.migration.registration.spec == retained.release.refresh.after
+    assert successor.manager['spec']['template']['spec']['volumes'] != retained.inputs.manager['spec']['template']['spec']['volumes']
+    assert successor.catalog['metadata']['name'] == 'loom-pool-profiles-' + retained.reference.operation_id.hex
+    assert retained.state_dir / 'completion/release.json' in successor.history
+    assert retained.state_dir / 'pool-refresh/dispatch.json' in successor.history
+    assert retained.state_dir.parent / 'latest.json' not in successor.history
+
+    # Prepare another real release using the receipt-derived starting point,
+    # including the updated manager/catalog and the unchanged peer.
+    inputs = copy.deepcopy(operation_inputs)
+    inputs.update(predecessor=successor, operation_id=uuid4(), manager=successor.manager,
+        catalog=successor.catalog, current=tuple(successor.resources[_key(row)] for row in retained.inputs.current
+            if row['kind'] != 'Job'))
+    following = operation.retain_participant_rollout(**inputs)
+    assert following.inputs.previous == successor.migration
+    assert following.release.refresh.before == retained.release.refresh.after
+    assert following.release.refresh.after.policy_revision == retained.release.refresh.after.policy_revision + 1
+    assert loader(reference=retained.reference, state_root=retained.state_dir.parent,
+        anchor_dir=retained.anchor_dir) == successor
+
+
+def test_completed_predecessor_rejects_pending_or_changed_history(
+        operation_inputs, connection, tmp_path, monkeypatch):
+    from scripts.ops import nebius_certificates as private_state
+    from scripts.ops import nebius_pool_participant_completion as completion
+
+    test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(
+        operation_inputs, connection, tmp_path, monkeypatch, recover=False, file_writes=True)
+    loader = getattr(completion, 'load_completed_participant_rollout', None)
+    assert callable(loader), 'a released flag alone is not completed predecessor evidence'
+    retained = connection[0].retained
+
+    def load():
+        return loader(reference=retained.reference, state_root=retained.state_dir.parent,
+            anchor_dir=retained.anchor_dir)
+
+    baseline = load()
+    record_path = retained.state_dir / 'completion/release.json'
+    source = record_path.read_bytes()
+    for status in ('prepared', 'release_intent'):
+        record = json.loads(source)
+        record['status'] = status
+        private_state._atomic_json(record_path, record)
+        with pytest.raises(ValueError, match='completed participant'):
+            load()
+    private_state._atomic_json(record_path, json.loads(source))
+    for path in (record_path, retained.anchor_dir / (str(retained.reference.operation_id) + '-completion.json'),
+            retained.state_dir / 'pool-refresh/dispatch.json', retained.state_dir / 'inputs.json',
+            next(iter(retained.inputs.history))):
+        original = path.read_bytes()
+        path.unlink()
+        with pytest.raises(ValueError, match='completed participant'):
+            load()
+        assert not path.exists(), 'history loading must not recreate missing evidence'
+        private_state._write_private(path, original)
+        private_state._atomic_json(path, {'altered': True})
+        with pytest.raises(ValueError, match='completed participant'):
+            load()
+        private_state._atomic_json(path, json.loads(original))
+    assert load() == baseline
+
+
+def test_latest_participant_head_advances_only_from_exact_completed_predecessor(
+        operation_inputs, connection, tmp_path, monkeypatch):
+    from scripts.ops import nebius_certificates as private_state
+    from scripts.ops import nebius_pool_participant_completion as completion
+
+    initialize = getattr(completion, 'initialize_participant_head', None)
+    assert callable(initialize), 'normal releases need a retained compare-and-swap head'
+    initial = operation_inputs['predecessor']
+    retained = connection[0].retained
+    options = dict(initial=initial, state_root=retained.state_dir.parent, anchor_dir=retained.anchor_dir)
+    assert initialize(**options) == initial
+    assert initialize(**options) == initial
+    pointer = retained.state_dir.parent / 'latest.json'
+    initial_bytes = pointer.read_bytes()
+    with pytest.raises(ValueError, match='participant head'):
+        completion.promote_participant_head(**options, expected=initial, reference=retained.reference)
+    assert pointer.read_bytes() == initial_bytes
+    test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(
+        operation_inputs, connection, tmp_path, monkeypatch, recover=False, file_writes=True)
+
+    wrong = replace(initial, state_dir=tmp_path)
+    with pytest.raises(ValueError, match='participant head'):
+        completion.promote_participant_head(**options, expected=wrong, reference=retained.reference)
+    assert pointer.read_bytes() == initial_bytes
+    # A committed pointer update whose acknowledgement is lost must be safe to
+    # retry; the completed release's frozen history must not contain that pointer.
+    atomic = private_state._atomic_json
+
+    def lose_ack(path, payload):
+        atomic(path, payload)
+        if path == pointer:
+            raise OSError('simulated head-promotion acknowledgement loss')
+
+    with monkeypatch.context() as patch:
+        patch.setattr(private_state, '_atomic_json', lose_ack)
+        with pytest.raises(ValueError, match='participant head'):
+            completion.promote_participant_head(**options, expected=initial, reference=retained.reference)
+    successor = completion.promote_participant_head(**options, expected=initial, reference=retained.reference)
+    promoted_bytes = pointer.read_bytes()
+    assert promoted_bytes != initial_bytes
+    assert completion.load_participant_head(**options) == successor
+    assert pointer not in successor.history
+    assert completion.promote_participant_head(**options, expected=initial, reference=retained.reference) == successor
+    assert pointer.read_bytes() == promoted_bytes
+    assert initialize(**options) == successor, 'initialization must never rewind a completed head'
+    with pytest.raises(ValueError, match='participant head'):
+        completion.promote_participant_head(**options, expected=successor, reference=retained.reference)
+    assert pointer.read_bytes() == promoted_bytes
+    pointer.unlink()
+    with pytest.raises(ValueError, match='participant head'):
+        initialize(**options)
+    assert not pointer.exists(), 'lost latest pointer must not reset to the initial handoff'
+    private_state._write_private(pointer, promoted_bytes)
+    value = json.loads(promoted_bytes)
+    value['selected']['operation_id'] = str(uuid4())
+    private_state._atomic_json(pointer, value)
+    with pytest.raises(ValueError, match='participant head'):
+        completion.load_participant_head(**options)
+    private_state._atomic_json(pointer, json.loads(promoted_bytes))
+    # Re-reading old immutable history remains possible after pointer movement.
+    assert completion.load_completed_participant_rollout(reference=retained.reference,
+        state_root=retained.state_dir.parent, anchor_dir=retained.anchor_dir) == successor
+
+
 def test_expired_monotonic_capacity_cannot_create_a_release_intent(operation_inputs, connection, tmp_path, monkeypatch):
     import time
 
