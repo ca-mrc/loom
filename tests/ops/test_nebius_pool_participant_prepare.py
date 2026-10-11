@@ -118,7 +118,7 @@ def test_new_release_captures_complete_live_baseline_then_retains_it(operation_i
     assert all(row['kind'] not in {'Secret', 'Job'} for row in captured.current)
 
 
-@pytest.mark.parametrize('damage', ['missing-account', 'account-token', 'network-policy', 'policy',
+@pytest.mark.parametrize('damage', ['missing-account', 'account-token', 'network-policy', 'policy', 'policy-condition', 'binding-selector',
     'controller-identity', 'controller-template', 'collector-open', 'manager-catalog',
     'resource-replaced-during-read', 'history-changed', 'receipt-changed', 'endpoint'])
 def test_new_release_rejects_incomplete_changed_or_foreign_baseline(operation_inputs, preparation, damage):
@@ -132,11 +132,17 @@ def test_new_release_rejects_incomplete_changed_or_foreign_baseline(operation_in
     elif damage == 'network-policy':
         row = next(row for row in live.resources.values() if row['kind'] == 'NetworkPolicy')
         row['spec']['podSelector'] = {'matchLabels': {'foreign': 'true'}}
-    elif damage == 'policy':
-        row = next((row for row in live.resources.values() if row['kind'] == 'ValidatingAdmissionPolicy'), None)
+    elif damage in {'policy', 'policy-condition', 'binding-selector'}:
+        kind = 'ValidatingAdmissionPolicyBinding' if damage == 'binding-selector' else 'ValidatingAdmissionPolicy'
+        row = next((row for row in live.resources.values() if row['kind'] == kind), None)
         if row is None:
             pytest.skip('the zero-guest baseline has no admission policy')
-        row['spec']['validations'] = [{'expression': 'true'}]
+        if damage == 'policy':
+            row['spec']['validations'] = [{'expression': 'true'}]
+        elif damage == 'policy-condition':
+            row['spec']['matchConditions'] = [{'name': 'skip-everything', 'expression': 'false'}]
+        else:
+            row['spec']['matchResources']['objectSelector'] = {'matchLabels': {'skip-all-tasks': 'true'}}
     elif damage.startswith('controller-'):
         row = live.resources[f'Deployment:{namespace}:loom-control-plane']
         if damage == 'controller-identity':
@@ -164,7 +170,23 @@ def test_new_release_rejects_incomplete_changed_or_foreign_baseline(operation_in
     assert not operation_inputs['state_root'].exists() and not operation_inputs['anchor_dir'].exists()
 
 
-@pytest.mark.parametrize('failure', [None, 'publication', 'ancestry', 'qualification'])
+def test_preparation_accepts_only_inert_admission_defaults(preparation):
+    options, live = preparation
+    policies = [row for row in live.resources.values() if row['kind'].startswith('ValidatingAdmissionPolicy')]
+    if not policies:
+        pytest.skip('the zero-guest baseline has no admission policy')
+    for row in policies:
+        field = 'matchConstraints' if row['kind'] == 'ValidatingAdmissionPolicy' else 'matchResources'
+        match = row['spec'][field]
+        match.setdefault('namespaceSelector', {})
+        match.setdefault('objectSelector', {})
+        match.setdefault('matchPolicy', 'Equivalent')
+    result = module().capture_participant_release(**options)
+    captured = {_key(row): row for row in result.current}
+    assert all(captured[_key(row)] == row for row in policies)
+
+
+@pytest.mark.parametrize('failure', [None, 'publication', 'ancestry', 'qualification', 'schema'])
 def test_host_prepares_exact_publication_and_replays_only_retained_inputs(
         operation_inputs, preparation, tmp_path, monkeypatch, failure):
     from scripts.ops import nebius_development_entry as authentication
@@ -200,6 +222,8 @@ def test_host_prepares_exact_publication_and_replays_only_retained_inputs(
     monkeypatch.setattr(entry, 'ManagementKubernetesTransport', transport, raising=False)
     bundle = CandidateBundle(inputs['publication'].candidate_id, inputs['candidate'],
         inputs['runtime_profile'].model_dump(mode='json'))
+    if failure == 'schema':
+        bundle.candidate['service_schema_head'] = 'head'
     publications, qualified = [], []
 
     async def follows(**selected):
@@ -242,7 +266,7 @@ def test_host_prepares_exact_publication_and_replays_only_retained_inputs(
         with pytest.raises(ValueError, match='participant preparation') as error:
             entry.prepare_retained_participant_release(**selected)
         assert 'private-' not in str(error.value)
-        if failure in {'publication', 'ancestry'}:
+        if failure in {'publication', 'ancestry', 'schema'}:
             assert not inputs['state_root'].exists() and not inputs['anchor_dir'].exists()
         return
     retained = entry.prepare_retained_participant_release(**selected)
