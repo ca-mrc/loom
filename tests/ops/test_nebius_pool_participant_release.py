@@ -19,6 +19,8 @@ from tests.ops.test_nebius_staging_pool_attachment import (
     staging_attachment_inputs as staging_attachment_inputs,
 )
 from tests.support.execution_image_admission import signed_image_admission_bundle
+from tests.unit.test_nebius_management_render import management_inputs as management_inputs
+from tests.unit.test_nebius_management_render import render as render_manager
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 from loom.nebius_platform_render import build_platform
@@ -227,3 +229,82 @@ def test_normal_release_rejects_scope_or_live_binding_drift(release_inputs, dama
         current[f'ClusterRole:{"-"}:{execution}-actuator-usage']['rules'][0]['resources'] = ['nodes/proxy']
     with pytest.raises(ValueError):
         module().prepare_staging_pool_release(**options)
+
+
+@pytest.fixture
+def catalog_inputs(release_inputs, management_inputs):
+    from scripts.ops.nebius_pool_runtime import wire_manager
+
+    from loom_service.pool_management.installation_render import render_gateway
+
+    plan = module().prepare_staging_pool_release(**release_inputs)
+    previous = release_inputs['previous']
+    inputs = copy.deepcopy(management_inputs)
+    inputs[0].update(namespace=previous.registration.binding.namespace,
+        installation_id=previous.registration.binding.installation_id)
+    manager, = [row for row in render_manager(inputs).files['40-services.yaml'] if row['kind'] == 'Deployment']
+    manager['metadata'].update(uid=str(uuid4()), resourceVersion='12')
+    manager['metadata']['labels']['loom.nebius/management-installation'] = previous.registration.binding.installation_id
+    manager = wire_manager(request=previous, original=manager)
+    manager['spec']['replicas'] = 1
+    catalog, = [row for row in render_gateway(plan.refresh.before, namespace=previous.registration.binding.namespace,
+        service_image=manager['spec']['template']['spec']['containers'][0]['image'],
+        kubernetes_endpoint=release_inputs['config']['kubernetes_api_server'])['configuration'] if row['kind'] == 'ConfigMap']
+    catalog['metadata'].update(uid=str(uuid4()), resourceVersion='13')
+    return dict(release=plan, manager=manager, catalog=catalog)
+
+
+def test_manager_refresh_changes_only_catalog_reference_and_keeps_executable_credentials(catalog_inputs):
+    from scripts.ops.nebius_ingress_stage import _snapshot
+
+    from loom_service.pool_management.profiles import PoolProfileCatalog
+
+    before = copy.deepcopy(catalog_inputs)
+    result = module().prepare_manager_catalog_refresh(**catalog_inputs)
+    assert catalog_inputs == before
+    after = catalog_inputs['release'].refresh.after
+    expected = _snapshot(catalog_inputs['manager'])
+    volume, = [row for row in expected['spec']['template']['spec']['volumes'] if row['name'] == 'pool-profiles']
+    volume['configMap']['name'] = 'loom-pool-profiles-' + after.operation_id.hex
+    assert result['manager'] == expected
+    assert result['catalog']['metadata']['name'] == volume['configMap']['name']
+    assert result['catalog']['immutable'] is True
+    assert 'uid' not in result['catalog']['metadata']
+    assert PoolProfileCatalog.model_validate_json(result['catalog']['data']['profiles.json']) == after.profiles
+    for action in ('observe', 'fence', 'stage', 'open'):
+        config, job = module().refresh_documents(catalog_inputs['release'], manager=catalog_inputs['manager'], action=action)
+        pod = job['spec']['template']['spec']
+        container, = pod['containers']
+        assert container['command'] == ['python', '-m', 'loom_service.pool_management.participant_refresh', action]
+        assert container['image'] == expected['spec']['template']['spec']['containers'][0]['image']
+        assert job['spec']['backoffLimit'] == 0 and pod['restartPolicy'] == 'Never'
+        assert pod['automountServiceAccountToken'] is False
+        assert config['immutable'] is True
+        assert json.loads(config['data']['refresh.json']) == catalog_inputs['release'].refresh.model_dump(mode='json')
+        assert job['metadata']['name'] == 'loom-pool-refresh-' + after.operation_id.hex + '-' + action
+
+
+@pytest.mark.parametrize('damage', ['namespace', 'catalog', 'volume', 'mount', 'setting', 'mode', 'replicas', 'mutable-image'])
+def test_manager_refresh_refuses_changed_catalog_or_process_binding(catalog_inputs, damage):
+    options = copy.deepcopy(catalog_inputs)
+    manager, catalog = options['manager'], options['catalog']
+    pod = manager['spec']['template']['spec']
+    container, = pod['containers']
+    if damage == 'namespace':
+        manager['metadata']['namespace'] = 'foreign'
+    elif damage == 'catalog':
+        catalog['data']['profiles.json'] = '{}'
+    elif damage == 'volume':
+        next(row for row in pod['volumes'] if row['name'] == 'pool-profiles')['configMap']['name'] = 'foreign'
+    elif damage == 'mount':
+        next(row for row in container['volumeMounts'] if row['name'] == 'pool-profiles')['mountPath'] = '/foreign'
+    elif damage == 'setting':
+        env(manager)['LOOM_SVC_POOL_PROFILES_FILE']['value'] = '/foreign/profiles.json'
+    elif damage == 'mode':
+        env(manager)['LOOM_SVC_SERVICE_MODE']['value'] = 'full'
+    elif damage == 'replicas':
+        manager['spec']['replicas'] = 0
+    else:
+        container['image'] = 'registry.example/service:latest'
+    with pytest.raises(ValueError):
+        module().prepare_manager_catalog_refresh(**options)
