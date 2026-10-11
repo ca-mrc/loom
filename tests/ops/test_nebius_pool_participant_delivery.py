@@ -420,6 +420,9 @@ def test_completion_preserves_the_existing_database_clock_skew_allowance(
 def test_shared_delivery_uses_published_schema_and_scoped_ancestry_without_git(
         operation_inputs, connection, tmp_path, monkeypatch):
     """Real deployment lifecycle; source authority is a separate HTTP-bound test."""
+    from scripts.ops import nebius_pool_participant_entry as entry
+    from scripts.ops.nebius_pool_participant_completion import initialize_participant_head
+
     original_rollout = idle.rollout
     calls, completed = [], []
 
@@ -432,7 +435,16 @@ def test_shared_delivery_uses_published_schema_and_scoped_ancestry_without_git(
         with monkeypatch.context() as patch:
             patch.setattr(idle, 'candidate_follows', lambda *_: pytest.fail('operator bundle has no Git history'))
             patch.setattr(idle, 'candidate_schema_head', lambda *_: pytest.fail('operator bundle has no migration checkout'))
-            result = original_rollout(args, **kwargs, candidate_ancestry=ancestry)
+            patch.setattr(idle, 'rollout', original_rollout)
+            retained, initial = connection[0].retained, operation_inputs['predecessor']
+            initialize_participant_head(initial=initial, state_root=retained.state_dir.parent, anchor_dir=retained.anchor_dir)
+            kube = connection[0].kube
+            kube.kubeconfig = args.kubeconfig
+            # The real source qualifier has separate HTTP-bound coverage. This
+            # exercises its delivery connection through final head promotion.
+            qualifier = SimpleNamespace(retained=retained, initial=initial, kube=kube, candidate_follows=ancestry)
+            delivery = entry.ParticipantReleaseConnection(qualifier, initial, kwargs['pool'], kwargs['candidate_writer'])
+            result = delivery.rollout(args)
             assert args.migration_schema_head == '0175'
             completed.append(result)
             return result
@@ -701,7 +713,8 @@ def test_deployment_reports_success_only_after_history_promotion(
             kube.kubeconfig = args.kubeconfig
             return entry.run_participant_release(args, retained=retained,
                 initial=options['initial'], expected=options['initial'],
-                pool=kwargs['pool'], writer=kwargs['candidate_writer'], kube=kube)
+                pool=kwargs['pool'], writer=kwargs['candidate_writer'], kube=kube,
+                candidate_ancestry=idle.candidate_follows)
 
     monkeypatch.setattr(idle, 'rollout', connected)
     if failure:
@@ -772,7 +785,8 @@ def test_protected_delivery_rejects_original_history_drift_before_cluster_io(
     monkeypatch.setattr(idle, 'rollout', lambda *_args, **_kwargs: pytest.fail('must not enter deployment'))
     with pytest.raises(ValueError, match='preserve'):
         run_participant_release(SimpleNamespace(), retained=retained, initial=initial, expected=expected,
-            pool=connection[2](), writer=writer, kube=connection[0].kube)
+            pool=connection[2](), writer=writer, kube=connection[0].kube,
+            candidate_ancestry=lambda *_: pytest.fail('must not query ancestry after history drift'))
     assert not connection[0].effects
 
 

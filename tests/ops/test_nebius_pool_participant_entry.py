@@ -18,6 +18,14 @@ from scripts.ops import nebius_pool_participant_entry as entry
 from loom.nebius_kubernetes import NebiusKubernetesConnection
 
 
+@pytest.mark.parametrize('ancestry', [None, False, 'git'])
+def test_protected_delivery_requires_authenticated_ancestry_before_opening_history(ancestry):
+    # Missing protected composition must not fall back to the host's Git state.
+    with pytest.raises(ValueError, match='ancestry'):
+        entry.run_participant_release(SimpleNamespace(), retained=None, initial=None,
+            expected=None, pool=None, writer=None, kube=None, candidate_ancestry=ancestry)
+
+
 @pytest.mark.parametrize('failure', [None, 'operation', 'authentication', 'changed-material', 'endpoint', 'nested-ssh'])
 def test_authenticated_operator_connection_pins_cluster_trust_and_cleans_up(tmp_path, monkeypatch, failure):
     assert hasattr(entry, 'authenticated_participant_release'), 'participant delivery has no explicit operator authentication'
