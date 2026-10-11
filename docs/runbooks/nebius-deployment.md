@@ -2667,9 +2667,13 @@ rollout connection retains its original candidate/render, guard owner and exact
 publication run attempt/artifact reference in deployment intent and evidence.
 Recovery must load the same private input-digest anchor; it cannot recapture a
 partly updated cluster or choose another publication of the same commit. The
-concrete phase-aware pool adapter, completed-release predecessor promotion and
-protected delivery entry remain required before operational use. Local retained
-inputs are not publication approval or installed readiness.
+internal host entry now composes the phase-aware pool adapter and completed-release
+predecessor promotion. Its new-release preparation resolves the exact publication,
+qualifies a complete source/receipt-bound live inventory, retains it once, and
+runs protected preflight without acquiring a guard. Retrying preparation reloads
+the original anchor; recovery never prepares again. Fixed protected transport,
+installation and normal workflow routing remain required before operational use.
+Local retained inputs are not installed readiness.
 The shared rollout records the pre-upgrade backup Job name before creation and
 rechecks guard ownership before that write. A failed or unconfirmed backup keeps
 the shared release's pause for recovery, even before registry refresh starts.

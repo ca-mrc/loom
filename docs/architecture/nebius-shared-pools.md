@@ -1813,8 +1813,28 @@ and checks those bytes around authenticated execution. Recovery does not reconst
 retained input or initialize head records, and never captures a replacement live baseline. All paths
 and the connection come from the protected installed caller, not runner data.
 This is an internal connection, not an installed authority or public CLI.
-New-release preparation and protected transport/workflow routing remain required
-before operational rollout is available.
+
+`prepare_retained_participant_release` connects new-release preparation on that
+host. It resolves the exact protected publication and authenticated commit
+ancestry using the installed reader, requires a concrete published service schema
+revision, and captures the selected environment's complete current render. The
+initial handoff's resource inventory is intentionally narrower than a platform
+release: receipt-selected workload/RBAC successors qualify changed objects,
+while unchanged ServiceAccounts, NetworkPolicies, PVCs and admission resources
+must match the original source render. All identities are read from the API;
+preparation never manufactures missing UIDs. A later release uses its completed
+predecessor's resources, manager and catalog. A second observation checks that
+the cluster, objects, private inputs and handoff receipts stayed unchanged.
+This capture does not replace the qualifier's whole-pool writer census.
+
+Preparation renders and retains the qualified successor, then runs the same
+protected preflight without acquiring a guard. Repeating an operation uses its
+original anchored inputs; it cannot recapture a newer baseline or rebuild lost
+evidence under the same UUID. Recovery never calls preparation. Publication
+resolution and normal observation share the installed-reader implementation,
+which checks the reader Secret identity before and after both resolution and
+ancestry reads. Protected transport and normal workflow routing remain required
+before these internal functions form an operational rollout route.
 
 The deployer has an internal finalization hook inside its existing error/evidence
 boundary, after verified guard release and before reporting success. Protected

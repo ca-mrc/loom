@@ -7,7 +7,6 @@ No resource receipt or successful read substitutes for those independent checks.
 """
 from __future__ import annotations
 
-import base64
 import copy
 import hashlib
 import json
@@ -395,36 +394,18 @@ class HTTPSParticipantResourceObserver(ManagementKubernetesTransport):
     async def _publication_catalog(self, *, completed: CompletedDevelopmentRuntime,
             http: httpx.AsyncClient) -> AsyncIterator[GitHubCandidateCatalog]:
         """Bind every catalog read to the original installed reader and bundle."""
-        from loom.execution_image_admission import ImageAdmissionKeyring
+        from scripts.ops.nebius_pool_participant_prepare import resolve_participant_publication
+
         from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1
-        from loom_service.environment_management.candidates import GitHubCandidateCatalog, _json
 
         retained = self.retained
-        manager = completed.request.database.manager.retained.request.retained
-        reader_key = 'Secret:' + manager.binding.namespace + ':loom-management-publications'
-        record = _json(manager.files[Path(manager.operation['state_dir']) / 'supplied/stage.json'])
-        item = record['resources'][reader_key]
-        reader = copy.deepcopy(item['observed'])
-        reader['metadata']['uid'] = item['uid']
-
-        def unchanged() -> None:
-            actual = self._request('GET', _resource_path(reader))
-            if actual is None or not _matches(actual, reader, _uid(reader)):
+        async with resolve_participant_publication(completed=completed, publication=retained.inputs.publication,
+                keyring=retained.release.refresh.before.profiles.image_admission_keyring,
+                transport=self, http=http) as (catalog, bundle):
+            if (bundle.candidate != retained.inputs.candidate
+                    or ServiceExecutionRuntimeProfileV1.model_validate(bundle.profile) != retained.inputs.runtime_profile):
                 raise ValueError
-
-        unchanged()
-        catalog = GitHubCandidateCatalog(http,
-            token=base64.b64decode(reader['data']['token'], validate=True).decode(),
-            publications=[retained.inputs.publication],
-            registry_prefix=completed.request.database.manager.deployment.installation.registry_prefix,
-            keyring=ImageAdmissionKeyring.from_json(json.dumps(retained.release.refresh.before.profiles.image_admission_keyring)))
-        bundle = await catalog.resolve(retained.inputs.publication.candidate_id)
-        if (bundle.candidate != retained.inputs.candidate
-                or ServiceExecutionRuntimeProfileV1.model_validate(bundle.profile) != retained.inputs.runtime_profile):
-            raise ValueError
-        unchanged()
-        yield catalog
-        unchanged()
+            yield catalog
 
     async def candidate_follows(self, *, bindings: SharedPoolGuardBindings,
             current_sha: str, http: httpx.AsyncClient) -> bool:

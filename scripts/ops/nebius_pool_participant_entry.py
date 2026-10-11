@@ -22,16 +22,20 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import httpx
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops.deploy_nebius_platform import Kubectl
+from scripts.ops.nebius_development_preflight import PreparedDevelopmentSource
+from scripts.ops.nebius_management_transport import ManagementKubernetesTransport
 from scripts.ops.nebius_pool_participant_adapter import (
     QualificationPhase,
     RetainedParticipantPoolAdapter,
 )
 from scripts.ops.nebius_pool_participant_completion import (
     CompletedParticipantRollout,
+    initialize_participant_head,
     load_participant_head,
     load_participant_predecessor,
     promote_participant_head,
@@ -46,6 +50,7 @@ from scripts.ops.nebius_pool_participant_operation import (
     ParticipantRolloutReference,
     RetainedParticipantRollout,
     load_participant_rollout,
+    retain_participant_rollout,
 )
 from scripts.ops.nebius_pool_participant_resource import (
     HTTPSParticipantResourceAPI,
@@ -53,7 +58,12 @@ from scripts.ops.nebius_pool_participant_resource import (
 )
 from scripts.ops.nebius_shared_pool_handoff_live import SharedPoolGuardBindings
 
+from loom.nebius_candidate_contract import candidate_service_schema_head
 from loom.nebius_kubernetes import NebiusKubernetesConnection
+from loom.nebius_platform_render import build_platform
+from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1
+from loom_service.environment_management.candidates import ProtectedPublication
+from loom_service.environment_management.manager import CandidateBundle
 
 
 class ParticipantReleaseQualifier:
@@ -270,6 +280,106 @@ class ParticipantReleaseConnection:
                 args.recovery_evidence = publication / 'recovery.json'
                 private_state._write_private(args.recovery_evidence, json.dumps(record, allow_nan=False).encode())
             return self.rollout(args)
+
+
+def prepare_retained_participant_release(*, publication: ProtectedPublication, operation_id: UUID,
+        shared_operation: Path, shared_operation_sha256: str, state_root: Path, anchor_dir: Path,
+        operator_connection: NebiusKubernetesConnection, executable: Path, repo_root: Path) -> RetainedParticipantRollout:
+    """Prepare a new exact publication on the host, without acquiring any guard.
+
+    Repeated preparation loads the original independent anchor. It never renders
+    or captures a replacement baseline for an operation whose reply was lost.
+    History, paths, tooling and credentials are installed-caller selections.
+    """
+    from scripts.ops.nebius_development_entry import _transport
+    from scripts.ops.nebius_pool_participant_prepare import (
+        capture_participant_release,
+        resolve_participant_publication,
+    )
+    from scripts.ops.nebius_shared_pool_entry import load_completed_history
+
+    try:
+        if (not isinstance(operation_id, UUID) or not operation_id.int
+                or any(not root.is_absolute() or root != root.resolve() for root in (state_root, anchor_dir, repo_root))):
+            raise ValueError
+        historical, initial = load_completed_history(operation_path=shared_operation,
+            operation_sha256=shared_operation_sha256)
+        publication = ProtectedPublication.model_validate(publication.model_dump())
+        files = dict(historical.files)
+        paths = (operator_connection.ca_file, operator_connection.credentials_file)
+        if len(set(paths)) != len(paths) or set(paths) & files.keys():
+            raise ValueError
+        for path in paths:
+            if not path.is_absolute() or path != path.resolve():
+                raise ValueError
+            files[path] = private_state._private_read(path, limit=16 * 1024**2)
+
+        def unchanged() -> None:
+            if any(path != path.resolve() or private_state._private_read(path, limit=16 * 1024**2) != raw
+                    for path, raw in files.items()):
+                raise ValueError
+
+        marker = anchor_dir / (str(operation_id) + '-participant-rollout.json')
+        if marker.exists() or marker.is_symlink():
+            reference = ParticipantRolloutReference.model_validate(json.loads(private_state._private_read(marker))['reference'])
+            if reference.operation_id != operation_id or reference.publication != publication:
+                raise ValueError
+            retained = load_participant_rollout(reference=reference, state_root=state_root, anchor_dir=anchor_dir)
+            expected = load_participant_predecessor(initial=initial, retained=retained)
+        else:
+            # An unanchored interrupted preparation cannot be reinterpreted as
+            # permission to capture newer state under the same operation ID.
+            operation_state = state_root / str(operation_id)
+            if operation_state.exists() or operation_state.is_symlink():
+                raise ValueError
+            has_head = any(path.exists() or path.is_symlink() for path in (
+                state_root / 'latest.json', anchor_dir / 'participant-head.json'))
+            expected = load_participant_head(initial=initial, state_root=state_root, anchor_dir=anchor_dir) if has_head else initial
+            endpoint = historical.bindings.plan.staging.attachment.config['kubernetes_api_server'].rstrip('/')
+            if operator_connection.endpoint != endpoint or os.environ.get('LOOM_DEPLOY_SSH_TARGET'):
+                raise ValueError
+            unchanged()
+            context, token = asyncio.run(_transport(operator_connection))
+            unchanged()
+            with ManagementKubernetesTransport(api_server=endpoint, ssl_context=context, token=token) as transport:
+                async def resolve() -> CandidateBundle:
+                    async with httpx.AsyncClient(timeout=30, follow_redirects=False, trust_env=False) as http:
+                        async with resolve_participant_publication(completed=historical.bindings.plan.development.runtime,
+                                publication=publication, keyring=expected.migration.registration.spec.profiles.image_admission_keyring,
+                                transport=transport, http=http) as (catalog, bundle):
+                            if not await catalog.candidate_follows(candidate_id=publication.candidate_id,
+                                    current_sha=expected.migration.registration.candidate['candidate_sha']):
+                                raise ValueError
+                            return bundle
+
+                bundle = asyncio.run(resolve())
+                unchanged()
+                snapshot = capture_participant_release(predecessor=expected, bindings=historical.bindings,
+                    shared_state=initial.state_dir, repo_root=repo_root, transport=transport)
+            unchanged()
+            profile = ServiceExecutionRuntimeProfileV1.model_validate(bundle.profile)
+            source = PreparedDevelopmentSource(source_sha=bundle.candidate['candidate_sha'],
+                source_archive_sha256=bundle.candidate['source_archive_sha256'])
+            candidate_service_schema_head(bundle.candidate)
+            rendered = build_platform(snapshot.config, bundle.candidate, bundle.profile,
+                expected.migration.registration.spec.profiles.image_admission_keyring, repo_root=repo_root)
+            if initialize_participant_head(initial=initial, state_root=state_root, anchor_dir=anchor_dir) != expected:
+                raise ValueError
+            retained = retain_participant_rollout(predecessor=expected, current=snapshot.current,
+                config=snapshot.config, candidate=bundle.candidate, runtime_profile=profile,
+                operation_id=operation_id, management_origin=snapshot.management_origin, repo_root=repo_root,
+                rendered_files=rendered, source=source, publication=publication, manager=snapshot.manager,
+                catalog=snapshot.catalog, state_root=state_root, anchor_dir=anchor_dir)
+        unchanged()
+        with authenticated_participant_release(retained=retained, initial=initial, expected=expected,
+                bindings=historical.bindings, shared_state=initial.state_dir, operator_connection=operator_connection,
+                executable=executable, operator_credentials=operator_connection.credentials_file,
+                private_files=files) as delivery:
+            delivery.qualifier(delivery.qualifier.kube, retained, 'preflight')
+            unchanged()
+        return retained
+    except Exception:
+        raise ValueError('participant preparation unqualified; preserve evidence') from None
 
 
 def execute_retained_participant_release(*, reference: ParticipantRolloutReference,
