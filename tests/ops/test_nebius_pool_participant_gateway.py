@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib
 import io
 import json
@@ -10,6 +11,7 @@ import subprocess
 import sys
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from tests.ops.test_nebius_development_management_gateway import archive
@@ -158,3 +160,80 @@ def test_fixed_process_command_cannot_select_runner_source_or_expand_action(tmp_
     for action in ('install', 'shell', 'execute --source /runner/tooling'):
         with pytest.raises(gateway.GatewayError):
             gateway.command(release, config, 'c' * 64, action, command())
+
+
+@pytest.fixture
+def prepared_tooling(tmp_path, monkeypatch):
+    gateway = module()
+    assert callable(getattr(gateway, 'prepare_release', None)), 'fixed tooling installation is missing'
+    root = tmp_path / 'private-tooling'
+    root.mkdir(mode=0o700)
+    raw = archive(members())
+    files, _ = gateway.unpack_bundle(raw)
+    manifest = hashlib.sha256(files['manifest.json']).hexdigest()
+    calls = []
+
+    def process(argv, *, timeout):
+        calls.append((argv, timeout))
+        if argv[1:3] == ['-I', '-c']:
+            return b'{"status":"tooling_qualified"}'
+        return b''
+
+    monkeypatch.setattr(gateway, 'run_private', process)
+    release = gateway.prepare_release(raw, root=root)
+    assert release == root / 'releases' / hashlib.sha256(raw).hexdigest()
+    assert len(calls) == 4 and '--require-hashes' in calls[1][0] and '--offline' in calls[2][0]
+    assert (release / 'complete').read_bytes() == b'complete'
+    assert gateway.prepare_release(raw, root=root) == release and len(calls) == 4
+    return gateway, raw, release, manifest, calls
+
+
+@pytest.mark.parametrize('damage', ['source', 'manifest', 'missing', 'partial', 'symlink'])
+def test_retained_tooling_refuses_tampering_without_reinstalling(prepared_tooling, damage):
+    gateway, raw, release, manifest, calls = prepared_tooling
+    target = release / 'scripts/ops/nebius_pool_participant_entry.py'
+    if damage == 'source':
+        target.write_bytes(b'foreign implementation')
+    elif damage == 'manifest':
+        (release / 'manifest.json').write_bytes(b'{}')
+    elif damage == 'missing':
+        target.unlink()
+    elif damage == 'partial':
+        (release / 'complete').unlink()
+    else:
+        source = release / 'original-entry'
+        target.rename(source)
+        target.symlink_to(source)
+    with pytest.raises(gateway.GatewayError):
+        gateway.verify_release(release, manifest)
+    with pytest.raises(gateway.GatewayError):
+        gateway.prepare_release(raw, root=release.parent.parent)
+    assert len(calls) == 4
+
+
+def test_forced_entry_uses_only_installed_tooling_and_watchdog(prepared_tooling, tmp_path, monkeypatch, capsys):
+    gateway, _, release, manifest, _ = prepared_tooling
+    assert callable(getattr(gateway, 'authorized_main', None)), 'fixed SSH dispatch is missing'
+    config = tmp_path / 'private-host.json'
+    calls = []
+
+    def process(argv, *, timeout):
+        calls.append(argv)
+        assert argv == gateway.command(release, config, 'c' * 64, 'execute', command()) and timeout == 1800
+        return json.dumps(report()).encode()
+
+    monkeypatch.setattr(gateway, 'run_private', process)
+    for selected, incoming in (('id', command()), ('loom-nebius-shared-pool-install-v1', command()),
+            ('loom-nebius-participant-execute-v1', b'x' * (gateway.MAX_COMMAND + 1))):
+        monkeypatch.setenv('SSH_ORIGINAL_COMMAND', selected)
+        monkeypatch.setattr(sys, 'stdin', SimpleNamespace(buffer=io.BytesIO(incoming)))
+        assert gateway.authorized_main(release, config, 'c' * 64, manifest) == 126
+    assert not calls
+    monkeypatch.setenv('SSH_ORIGINAL_COMMAND', 'loom-nebius-participant-execute-v1')
+    monkeypatch.setattr(sys, 'stdin', SimpleNamespace(buffer=io.BytesIO(command())))
+    assert gateway.authorized_main(release, config, 'c' * 64, manifest) == 0
+    assert json.loads(capsys.readouterr().out) == report() and len(calls) == 1
+    (release / 'scripts/ops/nebius_pool_participant_dispatch.py').write_bytes(b'changed')
+    monkeypatch.setattr(sys, 'stdin', SimpleNamespace(buffer=io.BytesIO(command())))
+    assert gateway.authorized_main(release, config, 'c' * 64, manifest) == 1
+    assert capsys.readouterr().out == '' and len(calls) == 1
