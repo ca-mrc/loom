@@ -796,13 +796,17 @@ def test_completed_release_is_the_next_receipt_selected_predecessor(
     bindings = SimpleNamespace(plan=SimpleNamespace(development=SimpleNamespace(runtime=SimpleNamespace(
         request=SimpleNamespace(database=SimpleNamespace(manager=SimpleNamespace(deployment=SimpleNamespace(
             public_host='manage.example.test'))))))))
+    # Once a selected release has completed, its retained render defines the
+    # baseline even if the installed tooling no longer contains those templates.
+    newer_tooling = tmp_path / 'newer-tooling-without-original-templates'
+    newer_tooling.mkdir()
     with monkeypatch.context() as patch, ManagementKubernetesTransport(
             api_server=retained.inputs.config['kubernetes_api_server'], ssl_context=ssl.create_default_context()) as transport:
         patch.setattr(census, '_forward_options', lambda *_: pytest.fail('next release cannot replay the initial baseline'))
         transport.client.close()
         transport.client = httpx.Client(base_url=transport.api_server, transport=httpx.MockTransport(read))
         captured = capture_participant_release(predecessor=successor, bindings=bindings,
-            shared_state=operation_inputs['predecessor'].state_dir, repo_root=operation_inputs['repo_root'], transport=transport)
+            shared_state=operation_inputs['predecessor'].state_dir, repo_root=newer_tooling, transport=transport)
     assert captured.manager == successor.manager and captured.catalog == successor.catalog
     assert {_key(row): row for row in captured.current} == {
         _key(row): successor.resources[_key(row)] for row in retained.inputs.current if row['kind'] != 'Job'}

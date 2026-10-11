@@ -186,7 +186,7 @@ def test_preparation_accepts_only_inert_admission_defaults(preparation):
     assert all(captured[_key(row)] == row for row in policies)
 
 
-@pytest.mark.parametrize('failure', [None, 'publication', 'ancestry', 'qualification', 'schema'])
+@pytest.mark.parametrize('failure', [None, 'publication', 'ancestry', 'source', 'renderer', 'qualification', 'schema'])
 def test_host_prepares_exact_publication_and_replays_only_retained_inputs(
         operation_inputs, preparation, tmp_path, monkeypatch, failure):
     from scripts.ops import nebius_development_entry as authentication
@@ -225,6 +225,29 @@ def test_host_prepares_exact_publication_and_replays_only_retained_inputs(
     if failure == 'schema':
         bundle.candidate['service_schema_head'] = 'head'
     publications, qualified = [], []
+    source_reads = []
+
+    async def render_source(*, candidate_id):
+        assert candidate_id == inputs['publication'].candidate_id
+        source_reads.append(candidate_id)
+        if failure == 'source':
+            raise ValueError('private-source-error')
+        root = inputs['repo_root']
+        paths = [*(root / 'deploy/k8s').rglob('*'), *(root / 'src/loom').rglob('*.py'),
+            root / 'scripts/ops/render_nebius_platform.py']
+        files = {path.relative_to(root).as_posix(): path.read_bytes() for path in paths
+            if path.is_file() and '__pycache__' not in path.parts}
+        module_path = 'src/loom/nebius_platform_render.py'
+        files[module_path] = files[module_path].replace(b'cpu="25m"', b'cpu="133m"')
+        renderer = 'scripts/ops/render_nebius_platform.py'
+        files[renderer] = files[renderer].replace(b'        remote = build_regional_execution',
+            b'        for row in files["40-services.yaml"]:\n'
+            b'            if row["kind"] == "Deployment" and row["metadata"]["name"] == "loom-web":\n'
+            b'                row["metadata"].setdefault("annotations", {})["test-selected-renderer"] = "yes"\n'
+            b'        remote = build_regional_execution')
+        if failure == 'renderer':
+            files[renderer] = b'raise RuntimeError("private-renderer-error")\n'
+        return files
 
     async def follows(**selected):
         assert selected == {'candidate_id': inputs['publication'].candidate_id,
@@ -238,7 +261,7 @@ def test_host_prepares_exact_publication_and_replays_only_retained_inputs(
         publications.append(selected['publication'])
         if failure == 'publication':
             raise ValueError('private-publication-error')
-        yield SimpleNamespace(candidate_follows=follows), copy.deepcopy(bundle)
+        yield SimpleNamespace(candidate_follows=follows, render_source=render_source), copy.deepcopy(bundle)
 
     monkeypatch.setattr(module(), 'resolve_participant_publication', publication, raising=False)
 
@@ -266,12 +289,17 @@ def test_host_prepares_exact_publication_and_replays_only_retained_inputs(
         with pytest.raises(ValueError, match='participant preparation') as error:
             entry.prepare_retained_participant_release(**selected)
         assert 'private-' not in str(error.value)
-        if failure in {'publication', 'ancestry', 'schema'}:
+        if failure in {'publication', 'ancestry', 'source', 'renderer', 'schema'}:
             assert not inputs['state_root'].exists() and not inputs['anchor_dir'].exists()
         return
     retained = entry.prepare_retained_participant_release(**selected)
     assert retained.inputs.publication == inputs['publication']
     assert retained.inputs.candidate == bundle.candidate
+    web, = (row for row in retained.release.files['40-services.yaml'] if row['kind'] == 'Deployment'
+        and row['metadata']['name'] == 'loom-web')
+    assert web['spec']['template']['spec']['containers'][0]['resources']['requests']['cpu'] == '133m'
+    assert web['metadata']['annotations']['test-selected-renderer'] == 'yes'
+    assert source_reads == [inputs['publication'].candidate_id]
     assert {_key(row): row for row in retained.inputs.current} == {
         _key(row): row for row in inputs['current'] if row['kind'] != 'Job'}
     assert publications == [inputs['publication']] and qualified == [retained.reference]
@@ -279,6 +307,7 @@ def test_host_prepares_exact_publication_and_replays_only_retained_inputs(
     monkeypatch.setattr(module(), 'capture_participant_release', lambda **_: pytest.fail('repeat preparation cannot recapture'))
     repeated = entry.prepare_retained_participant_release(**selected)
     assert repeated == retained and len(live.reads) == count
+    assert source_reads == [inputs['publication'].candidate_id]
     assert publications == [inputs['publication']] and qualified == [retained.reference, retained.reference]
     wrong = inputs['publication'].model_copy(update={'run_attempt': 3})
     with pytest.raises(ValueError, match='participant preparation'):
