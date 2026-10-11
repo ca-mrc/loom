@@ -55,6 +55,36 @@ def report():
         "expires_at": "2026-12-02T12:00:00+00:00", "sans": [HOST]}
 
 
+def test_legacy_dispatch_keeps_preexisting_exact_bundle_authority(selection, monkeypatch, capsys):
+    """New manager delivery must not require reinstalling the legacy SSH grant."""
+    from scripts.ops import nebius_certificate_gateway as legacy_gateway
+
+    config = {"schema": "loom.nebius-certificate-installation.v1", "installation_id": IDENTITY,
+        "zone": "example.test", "child_domain": "dev.example.test", "management_host": "management.example.test",
+        "credential_file": "/home/codex/private-dns.json",
+        "state_dir": "/home/codex/.loom/nebius-certificates/state", "email": None}
+    # Captured using the actual pre-change runner at 4ddff8fc8 with these fixed
+    # fixture inputs. A change to any bundled legacy code invalidates its already
+    # installed exact-digest grant, even if its CLI/default behavior is unchanged.
+    approved = "b2ec0aedde958e777bdd2165393b639d48418be5c6d48037854cef8df31cd183"
+    content = runner.build_bundle(config, uv=selection[1], requirements=selection[2])
+    issued = []
+
+    def issue(value):
+        issued.append(value)
+        return {"status": "qualified"}
+
+    monkeypatch.setattr(legacy_gateway, "qualify_bundle", issue)
+    monkeypatch.setenv("SSH_ORIGINAL_COMMAND", "loom-nebius-certificate-v1")
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=io.BytesIO(content)))
+    assert legacy_gateway.authorized_main(approved) == 0
+    assert json.loads(capsys.readouterr().out) == {"status": "qualified"}
+    assert issued == [content]
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=io.BytesIO(content + b"changed")))
+    assert legacy_gateway.authorized_main(approved) == 126
+    assert issued == [content]
+
+
 def test_manager_report_accepts_only_one_exact_host_and_redacts_private_fields():
     value = report() | {"private": "secret-marker"}
     assert gateway.safe_report(json.dumps(value).encode(), management_only=True) == report()
