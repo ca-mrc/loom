@@ -101,6 +101,36 @@ async def test_protected_publication_resolves_actual_squash_not_nonexistent_dev_
     assert bundle.profile["candidate_sha"] == SHA
 
 
+@pytest.mark.parametrize('status,current,merge_base,ahead,behind,want', [
+    ('ahead', HEAD, HEAD, 12, 0, True),
+    ('identical', SHA, SHA, 0, 0, True),
+    ('behind', HEAD, SHA, 0, 3, False),
+    ('diverged', HEAD, 'c' * 40, 2, 3, False),
+    ('ahead', HEAD, 'c' * 40, 12, 0, None),
+    ('ahead', HEAD, HEAD, True, 0, None),
+    ('identical', HEAD, SHA, 0, 0, None),
+    ('unknown', HEAD, HEAD, 0, 0, None),
+])
+async def test_exact_candidate_ancestry_uses_scoped_github_reader(publication, status, current, merge_base, ahead, behind, want):
+    from loom.execution_image_admission import ImageAdmissionKeyring
+    from loom_service.environment_management.candidates import GitHubCandidateCatalog, ProtectedPublication
+
+    reference, responses, payload, keyring, candidate = publication
+    responses[f'compare/{current}...{SHA}'] = {'status': status,
+        'base_commit': {'sha': current}, 'merge_base_commit': {'sha': merge_base},
+        'ahead_by': ahead, 'behind_by': behind}
+    async with httpx.AsyncClient(transport=github_transport(responses, payload)) as http:
+        catalog = GitHubCandidateCatalog(http, token='test-github-secret',
+            publications=[ProtectedPublication.model_validate(reference)],
+            keyring=ImageAdmissionKeyring.from_json(keyring), registry_prefix=candidate['registry_prefix'])
+        assert callable(getattr(catalog, 'candidate_follows', None)), 'protected source comparison still requires Git'
+        if want is None:
+            with pytest.raises(ValueError):
+                await catalog.candidate_follows(candidate_id=IDENTITY, current_sha=current)
+        else:
+            assert await catalog.candidate_follows(candidate_id=IDENTITY, current_sha=current) is want
+
+
 @pytest.mark.parametrize("candidate_repository", ["qianyi-sun/loom", "ca-mrc/loom"])
 async def test_transferred_repository_resolves_old_and_new_publications(publication, candidate_repository):
     reference, responses, _, keyring, candidate = copy.deepcopy(publication)
