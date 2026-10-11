@@ -1400,6 +1400,15 @@ Successive release projections produce fresh profile IDs/revisions without
 changing other participants. This source connection is tested through the SQL
 transaction, not an installed normal-rollout endpoint.
 
+The fixed internal refresh runner owns one schema-head-checked transaction and
+emits its receipt only after commit. Its Jobs use the retained manager image and
+namespace-local database Secret, with no automatic retry. Mutation Job identities
+stay fixed per release/action; each new observation requires a separately retained
+observation identity. A completed observation Job proves only that historical
+read, not current registry state. The catalog projection changes only the manager's
+catalog mount reference, preserving its executable, credentials and other settings;
+the parent still owns compatibility qualification and restart/readiness checks.
+
 This transaction does not establish rollout ownership, source publication,
 Kubernetes readiness or recovery authority. The protected normal-rollout parent
 must connect those checks, catalog mounting/manager restart, schema/configuration

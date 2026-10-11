@@ -256,10 +256,20 @@ def prepare_manager_catalog_refresh(*, release: PreparedParticipantRelease, mana
 
 
 def refresh_documents(release: PreparedParticipantRelease, *, manager: dict[str, Any],
-        action: RefreshAction) -> tuple[dict[str, Any], dict[str, Any]]:
-    """One fixed, non-retrying Job per phase, using the retained manager image."""
+        action: RefreshAction, observation_id: UUID | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Fixed mutations and separately identified reads using the retained image.
+
+    The parent must retain a fresh observation identity for each new read. A
+    completed Job proves that historical read only, never current registry state.
+    An observation identity cannot create another attempt of a mutation Job.
+    """
     try:
         if action not in {'observe', 'fence', 'stage', 'open'}:
+            raise ValueError
+        if action == 'observe':
+            if not isinstance(observation_id, UUID) or not observation_id.int:
+                raise ValueError
+        elif observation_id is not None:
             raise ValueError
         refresh, manager_container = _manager(release, manager)
         namespace = release.migration.registration.binding.namespace
@@ -267,10 +277,12 @@ def refresh_documents(release: PreparedParticipantRelease, *, manager: dict[str,
         name = 'loom-pool-refresh-' + refresh.after.operation_id.hex
         config['metadata']['name'] = name
         config['data'] = {'refresh.json': refresh.model_dump_json()}
-        job['metadata']['name'] = name + '-' + action
+        job['metadata']['name'] = ('loom-pool-observe-' + observation_id.hex if observation_id else name + '-' + action)
         labels = {'loom.nebius/management-installation': str(refresh.after.installation_id),
             'loom.nebius/pool-operation': str(refresh.after.operation_id)}
         config['metadata']['labels'] = labels.copy()
+        if observation_id is not None:
+            labels['loom.nebius/pool-observation'] = str(observation_id)
         job['metadata']['labels'] = labels.copy()
         job['spec']['template']['metadata']['labels'] = labels.copy()
         pod = job['spec']['template']['spec']
