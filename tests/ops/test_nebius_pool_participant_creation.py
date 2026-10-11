@@ -200,6 +200,22 @@ def test_connected_job_writer_does_not_accept_complete_condition_with_live_proce
     assert len(state.external.creates) == 1 and state.deletes == []
 
 
+def test_connected_job_writer_cannot_resume_another_jobs_pending_retry(connection):
+    state, connect = connection
+    state.auto_outcome = 'failed'
+    with pytest.raises(ValueError, match='preserve'):
+        job_writer(state, connect).run_job('50-configure.yaml', retry_failed_jobs=False)
+    state.delete_failure = 'before'
+    with connect(state.keys[1]) as other:
+        assert other.retry_failed_job() is False
+    state.delete_failure = None
+    deletes = len(state.deletes)
+    with pytest.raises(ValueError, match='preserve'):
+        job_writer(state, lambda _: connect(state.keys[1])).run_job('30-migrate.yaml', retry_failed_jobs=True)
+    assert len(state.deletes) == deletes, 'factory scope mismatch must not delete another recorded Job'
+    assert state.keys[1] in state.external.resources
+
+
 @pytest.mark.parametrize('selected', [0, 2])
 def test_failed_job_retry_preserves_attempt_history_and_uses_exact_delete_preconditions(connection, selected):
     state, connect = connection

@@ -210,11 +210,10 @@ def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation
     written = []
     job_creates = []
     if file_writes:
-        from contextlib import nullcontext
         import ssl
+        from contextlib import nullcontext
 
         import httpx
-
         from scripts.ops.nebius_management_switch import _matches
         from scripts.ops.nebius_pool_participant_creation import HTTPSParticipantCreationAPI
         from scripts.ops.nebius_pool_participant_resource import RetainedCandidateFileWriter
