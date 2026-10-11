@@ -298,15 +298,28 @@ def secret_requirements(
 
 
 class Kubectl:
-    def __init__(self, kubeconfig: Path, *, context: str | None = None):
+    def __init__(self, kubeconfig: Path, *, context: str | None = None,
+                 local_executable: Path | None = None):
+        if local_executable is not None and (not local_executable.is_absolute()
+                or local_executable != local_executable.resolve() or not local_executable.is_file()
+                or not os.access(local_executable, os.X_OK)
+                or not kubeconfig.is_absolute() or kubeconfig != kubeconfig.resolve() or context is not None):
+            raise DeploymentError('protected local Kubernetes connection differs')
         self.kubeconfig = kubeconfig
         self.context = context
+        self.local_executable = local_executable
 
     def run(self, *args: str, timeout: int = 90, preserve_output: bool = False) -> str:
+        # The protected operator entry supplies a private, plugin-free config.
+        # Its exact local route must never become a nested SSH or ambient proxy
+        # route. Existing runner/standalone behavior is unchanged by default.
+        if self.local_executable is not None and os.environ.get('LOOM_DEPLOY_SSH_TARGET'):
+            raise DeploymentError('protected local Kubernetes connection cannot use SSH')
         command = [
-                "kubectl",
+                str(self.local_executable) if self.local_executable is not None else "kubectl",
                 "--kubeconfig",
                 str(self.kubeconfig),
+                *(["--cache-dir", str(self.kubeconfig.parent / 'cache')] if self.local_executable is not None else []),
                 *(["--context", self.context] if self.context else []),
                 *([] if args[0] in {"wait", "rollout"} else ["--request-timeout=30s"]),
                 *args,
@@ -332,6 +345,7 @@ class Kubectl:
             text=True,
             timeout=timeout,
             check=False,
+            env={'PATH': os.defpath, 'LANG': 'C.UTF-8'} if self.local_executable is not None else None,
         )
         if result.returncode:
             denied = re.search(

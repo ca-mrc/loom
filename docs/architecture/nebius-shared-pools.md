@@ -1745,6 +1745,28 @@ release can requalify final completion but cannot regain mutation authority.
 The qualifier is for the already-authenticated protected entry, not a public
 credential or document intake route.
 
+`connected_participant_release` constructs the resource-update, creation and pool
+APIs from one explicit operator TLS/token connection. Each candidate API uses the
+same qualifier with its exact child key; no resource or Job access bypasses the
+guard checks. Child clients close with their operation, and the observer closes
+with the connection. Its rollout connection uses the existing idle/deploy path,
+retained writer and concrete pool adapter, then promotes the original semantic
+predecessor through the completion hook. A changed predecessor or lost latest-head
+record refuses before deployment starts. An already-promoted release can finish
+lost-acknowledgement recovery without substituting a new predecessor.
+
+`authenticated_participant_release` exchanges the explicitly selected Nebius
+operator credential using the existing authenticated transport. It pins private
+CA/credential bytes around that exchange and rejects an endpoint mismatch or
+nested SSH route. Its temporary, mode-0600 kubeconfig uses the retained Nebius
+cluster ID and only the selected endpoint, CA and bearer; it has no credential
+plugins. Protected local kubectl uses an exact executable, an isolated discovery
+cache and a minimal environment without ambient credentials/proxies. The temporary
+configuration and cache are removed on success or failure, without hiding an
+original deployment error. This is an internal connection, not an installed
+authority or public CLI. Initial history loading and the protected host/workflow
+entry still need to be connected before operational rollout is available.
+
 The deployer has an internal finalization hook inside its existing error/evidence
 boundary, after verified guard release and before reporting success. Protected
 composition uses that hook for latest-head promotion. It also runs after successful
