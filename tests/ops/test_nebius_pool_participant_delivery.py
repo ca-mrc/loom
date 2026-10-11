@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -66,7 +67,7 @@ def test_shared_recovery_reference_cannot_be_reinterpreted_as_standalone(damage)
         idle.recovery_record(record)
 
 
-@pytest.mark.parametrize('damage', [None, 'attempt', 'artifact-id', 'artifact-digest', 'duplicate-artifact'])
+@pytest.mark.parametrize('damage', [None, 'attempt', 'artifact-id', 'artifact-digest', 'artifact-run'])
 def test_shared_recovery_selects_original_publication_not_another_success_for_same_sha(monkeypatch, tmp_path, damage):
     calls = []
 
@@ -78,14 +79,16 @@ def test_shared_recovery_selects_original_publication_not_another_success_for_sa
             pytest.fail('must not substitute another publication for the retained release')
         if path == 'actions/runs/42':
             pytest.fail('recovery must query the retained attempt, not the latest run attempt')
+        if path == 'actions/runs/42/artifacts?per_page=100':
+            pytest.fail('a pinned artifact must not depend on its position in an artifact-list page')
+        if path == 'actions/artifacts/72':
+            return {'id': 73 if damage == 'artifact-id' else 72,
+                'name': 'nebius-candidate-' + 'a' * 40 + '-42-2', 'expired': False,
+                'digest': 'sha256:' + ('f' if damage == 'artifact-digest' else 'e') * 64,
+                'workflow_run': {'id': 43 if damage == 'artifact-run' else 42, 'head_sha': 'a' * 40}}
         result = recovery_api(path, payload)
         if path == 'actions/runs/42/attempts/2' and damage == 'attempt':
             result = {**result, 'run_attempt': 3}
-        if path == 'actions/runs/42/artifacts?per_page=100':
-            artifact, = result['artifacts']
-            artifact = {**artifact, 'id': 73 if damage == 'artifact-id' else 72,
-                'digest': 'sha256:' + ('f' if damage == 'artifact-digest' else 'e') * 64}
-            result = {'artifacts': [artifact] * (2 if damage == 'duplicate-artifact' else 1)}
         return result
 
     def command(argv, **kwargs):
@@ -221,3 +224,66 @@ def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation
     assert {'30-migrate.yaml', '50-configure.yaml', '40-services.yaml', '60-execution.yaml', '70-public.yaml'} <= set(phases)
     assert all(row['shared_pool_release'] == retained.reference.model_dump(mode='json') for row in intents)
     assert len(intents) == (2 if recover else 1)
+
+
+@pytest.mark.parametrize('damage', ['missing-adapter', 'missing-operation', 'mutated-operation',
+    'candidate', 'profile', 'lost-reference', 'standalone-recovery', 'late-history-change'])
+def test_shared_delivery_rejects_binding_changes_before_deployer_dispatch(operation_inputs, tmp_path, monkeypatch, damage):
+    from scripts.ops import nebius_certificates as private_state
+
+    inputs = operation_inputs
+    retained = operation.retain_participant_rollout(**inputs)
+    config = inputs['config']
+    candidate = copy.deepcopy(inputs['candidate'])
+    profile = inputs['runtime_profile'].model_dump(mode='json')
+    if damage == 'candidate':
+        candidate['images']['web']['image_ref'] = 'registry.example/foreign@sha256:' + 'f' * 64
+    if damage == 'profile':
+        profile['max_log_bytes_per_stream'] = 17
+    (tmp_path / 'candidate.json').write_text(json.dumps(candidate))
+    (tmp_path / 'runtime-profile.json').write_text(json.dumps(profile))
+    args = SimpleNamespace(kubeconfig=tmp_path / 'unused', namespace=config['namespace'],
+        publication_dir=tmp_path, candidate=candidate['candidate_sha'], evidence_dir=tmp_path / 'evidence', github=True)
+    data = next(row['data'] for row in inputs['current'] if row['kind'] == 'ConfigMap'
+        and row['metadata']['name'] == 'loom-platform-config')
+    monkeypatch.setattr(idle, 'Kubectl', lambda _: SimpleNamespace(get=lambda *_: {'data': copy.deepcopy(data)}))
+    monkeypatch.setattr(idle, 'candidate_follows', lambda *_: True)
+    monkeypatch.setattr(idle, 'candidate_schema_head', lambda *_: '0175')
+    monkeypatch.setattr(idle, 'deploy', lambda *args, **kwargs: pytest.fail('unqualified shared input reached deployment'))
+    monkeypatch.setattr(idle, 'render_candidate', lambda *_: pytest.fail('shared recovery fell back to standalone rendering'))
+    seen = []
+
+    def github(path, payload):
+        seen.append((path, payload))
+        if path == 'deployments':
+            return {'id': 1}
+        if damage == 'late-history-change' and payload['state'] == 'in_progress':
+            history, = inputs['predecessor'].history
+            private_state._atomic_json(history, {'changed': True})
+        return {}
+
+    monkeypatch.setattr(idle, 'github', github)
+    selected, pool = retained, object()
+    if damage == 'missing-adapter':
+        pool = None
+    elif damage == 'missing-operation':
+        selected = None
+    elif damage == 'mutated-operation':
+        selected = replace(retained, inputs=retained.inputs.model_copy(deep=True))
+        selected.inputs.release.files['70-public.yaml'] = []
+    elif damage in {'lost-reference', 'standalone-recovery'}:
+        record = {'schema_version': 'loom.nebius-deployment.v1', 'status': 'failed', 'mode': 'apply',
+            'candidate_sha': candidate['candidate_sha'], 'previous_candidate_sha': 'c' * 40,
+            'guard_owner': retained.guard_owner,
+            **{key: config[key] for key in ('cluster_id', 'namespace', 'execution_namespace')}}
+        if damage == 'standalone-recovery':
+            record['shared_pool_release'] = retained.reference.model_dump(mode='json')
+            selected, pool = None, None
+        args.recovery_evidence = tmp_path / 'failed.json'
+        args.recovery_evidence.write_text(json.dumps(record))
+    with pytest.raises(ValueError):
+        idle.rollout(args, participant_rollout=selected, pool=pool)
+    if damage == 'late-history-change':
+        assert seen[-1][1]['state'] == 'failure'
+    else:
+        assert not seen
