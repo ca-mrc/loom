@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 from fastapi import FastAPI
-from sqlalchemy import create_engine, delete, insert, text
+from sqlalchemy import create_engine, delete, insert, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -18,6 +18,7 @@ from loom.db.schema import (
     AdminAuditEvent,
     LoginChallenge,
     Team,
+    TeamInvite,
     TeamMembership,
     TeamQuota,
     User,
@@ -333,6 +334,48 @@ async def test_accept_invite_creates_user_membership_session_and_safe_audit(
     assert metadata["role"] == "member"
     assert metadata["invite_prefix"] == prefix
     assert code not in str(metadata)
+
+
+@pytest.mark.parametrize("platform_admin", [False, True])
+async def test_existing_invitee_requires_own_authenticated_session(
+    invite_app: tuple[FastAPI, UUID, UUID, UUID], platform_admin: bool,
+) -> None:
+    app, team_a, team_b, _owner_id = invite_app
+    user_id = uuid4()
+    async with app.state.session_factory() as session:
+        session.add(User(id=user_id, email="existing@example.com", username="existing",
+                         username_normalized="existing", status="active",
+                         is_platform_admin=platform_admin, created_at=datetime.now(UTC)))
+        await session.flush()
+        session.add(TeamMembership(team_id=team_b, user_id=user_id, role="member"))
+        await session.commit()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="https://loom.example.com") as owner:
+        _, csrf = await _login(owner)
+        created = await owner.post("/api/v1/invites", headers={"X-Loom-CSRF": csrf},
+                                   json={"email": "existing@example.com", "team_id": str(team_a)})
+        assert created.status_code == 201, created.text
+    code = created.json()["invite_code"]
+    invite_id = UUID(created.json()["invite"]["id"])
+    async with httpx.AsyncClient(transport=transport, base_url="https://loom.example.com") as recipient:
+        denied = await recipient.post("/api/v1/invites/accept",
+                                      json={"code": code, "email": "existing@example.com"})
+        assert denied.status_code == 403, denied.text
+        assert not denied.headers.get("set-cookie")
+        async with app.state.session_factory() as session:
+            invite = await session.get(TeamInvite, invite_id)
+            assert invite.status == "pending" and invite.accepted_uses == 0
+            assert await session.get(TeamMembership, (team_a, user_id)) is None
+            assert not (await session.execute(select(UserSession).where(
+                UserSession.user_id == user_id))).scalars().all()
+
+        # The same unconsumed invite still works once its recipient signs in.
+        await _login(recipient, "existing@example.com")
+        accepted = await recipient.post("/api/v1/invites/accept", json={"code": code})
+        assert accepted.status_code == 200, accepted.text
+        assert accepted.json()["user"]["id"] == str(user_id)
+        assert accepted.json()["current_team"]["id"] == str(team_a)
 
 
 async def test_invite_acceptance_denies_expired_and_wrong_email_without_leaks(
