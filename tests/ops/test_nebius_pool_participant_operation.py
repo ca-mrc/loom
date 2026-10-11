@@ -153,7 +153,7 @@ def test_recovery_refuses_lost_or_changed_evidence_without_repairing_it(operatio
 
 
 @pytest.mark.parametrize('damage', ['source-sha', 'source-archive', 'publication-run', 'publication-sha',
-    'history', 'catalog', 'predecessor', 'manager'])
+    'publication-shape', 'history', 'catalog', 'predecessor', 'manager', 'secret'])
 def test_unqualified_inputs_fail_before_retention(operation_inputs, damage):
     inputs = operation_inputs
     if damage == 'source-sha':
@@ -164,12 +164,17 @@ def test_unqualified_inputs_fail_before_retention(operation_inputs, damage):
         inputs['publication'] = inputs['publication'].model_copy(update={'run_id': 813})
     elif damage == 'publication-sha':
         inputs['publication'] = inputs['publication'].model_copy(update={'source_sha': 'e' * 40})
+    elif damage == 'publication-shape':
+        inputs['publication'] = inputs['publication'].model_copy(update={'run_attempt': 0})
     elif damage == 'history':
         inputs['predecessor'] = replace(inputs['predecessor'], history={})
     elif damage == 'catalog':
         inputs['catalog']['data']['profiles.json'] = '{}'
     elif damage == 'manager':
         inputs['manager']['spec']['replicas'] = 0
+    elif damage == 'secret':
+        inputs['current'] += ({'apiVersion': 'v1', 'kind': 'Secret', 'metadata': {'name': 'unneeded-credentials',
+            'namespace': inputs['config']['namespace'], 'uid': str(uuid4())}, 'data': {'password': 'c2VjcmV0'}},)
     else:
         inputs['predecessor'] = replace(inputs['predecessor'], migration=replace(inputs['predecessor'].migration,
             guards=()))

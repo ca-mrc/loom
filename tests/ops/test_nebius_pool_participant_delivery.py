@@ -66,8 +66,8 @@ def test_shared_recovery_reference_cannot_be_reinterpreted_as_standalone(damage)
         idle.recovery_record(record)
 
 
-@pytest.mark.parametrize('changed_attempt', [False, True])
-def test_shared_recovery_selects_original_publication_not_another_success_for_same_sha(monkeypatch, tmp_path, changed_attempt):
+@pytest.mark.parametrize('damage', [None, 'attempt', 'artifact-id', 'artifact-digest', 'duplicate-artifact'])
+def test_shared_recovery_selects_original_publication_not_another_success_for_same_sha(monkeypatch, tmp_path, damage):
     calls = []
 
     def github(path, payload=None):
@@ -76,9 +76,16 @@ def test_shared_recovery_selects_original_publication_not_another_success_for_sa
             return {'workflow_runs': [{'id': 999, 'head_sha': 'a' * 40}]}
         if path.startswith('actions/runs/999'):
             pytest.fail('must not substitute another publication for the retained release')
+        if path == 'actions/runs/42':
+            pytest.fail('recovery must query the retained attempt, not the latest run attempt')
         result = recovery_api(path, payload)
-        if path == 'actions/runs/42' and changed_attempt:
+        if path == 'actions/runs/42/attempts/2' and damage == 'attempt':
             result = {**result, 'run_attempt': 3}
+        if path == 'actions/runs/42/artifacts?per_page=100':
+            artifact, = result['artifacts']
+            artifact = {**artifact, 'id': 73 if damage == 'artifact-id' else 72,
+                'digest': 'sha256:' + ('f' if damage == 'artifact-digest' else 'e') * 64}
+            result = {'artifacts': [artifact] * (2 if damage == 'duplicate-artifact' else 1)}
         return result
 
     def command(argv, **kwargs):
@@ -88,7 +95,7 @@ def test_shared_recovery_selects_original_publication_not_another_success_for_sa
 
     monkeypatch.setattr(idle, 'github', github)
     monkeypatch.setattr(idle.subprocess, 'run', command)
-    if changed_attempt:
+    if damage:
         with pytest.raises(deploy.DeploymentError, match='publication'):
             idle.select_recovery('91', tmp_path / 'recovery')
     else:
@@ -96,6 +103,7 @@ def test_shared_recovery_selects_original_publication_not_another_success_for_sa
         assert result['run_id'] == '42'
         assert result['artifact'] == 'nebius-candidate-' + 'a' * 40 + '-42-2'
     assert not any(path.startswith('actions/workflows/nebius-candidate.yml/runs?') for path in calls)
+    assert 'actions/runs/42/attempts/2' in calls
 
 
 @pytest.mark.parametrize('recover', [False, True])
