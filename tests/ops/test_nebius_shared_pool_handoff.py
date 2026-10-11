@@ -5653,7 +5653,7 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
     profile = attached.runtime_profile.model_copy(update={'candidate_sha': candidate['candidate_sha']})
     publication = ProtectedPublication(candidate_id=uuid4(), source_sha=candidate['candidate_sha'], run_id=812,
         run_attempt=1, artifact_id=923, artifact_sha256='sha256:' + 'b' * 64, pull_request=2425)
-    retained = retain_participant_rollout(predecessor=predecessor, current=tuple(current.values()),
+    release_inputs = dict(predecessor=predecessor, current=tuple(current.values()),
         config=attached.config, candidate=candidate, runtime_profile=profile, operation_id=uuid4(),
         management_origin='https://' + args['runtime'].database.manager.deployment.public_host, repo_root=ROOT,
         rendered_files=build_platform(attached.config, candidate, profile.model_dump(mode='json'),
@@ -5662,11 +5662,40 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
             source_archive_sha256=candidate['source_archive_sha256']), publication=publication,
         manager=manager, catalog=catalog, state_root=state.parent / 'participant-releases',
         anchor_dir=state.parent / 'participant-anchors')
+    retained = retain_participant_rollout(**release_inputs)
     resources = {**current, _key(manager): manager, _key(catalog): catalog}
     writes = []
+    reviews = []
 
     def respond(message):
+        if message.url.path == '/apis/authorization.k8s.io/v1/selfsubjectrulesreviews':
+            assert message.method == 'POST'
+            namespace, account = message.headers['Impersonate-User'].removeprefix('system:serviceaccount:').split(':')
+            assert set(message.headers.get_list('Impersonate-Group')) == {
+                'system:serviceaccounts', 'system:serviceaccounts:' + namespace, 'system:authenticated'}
+            selected = json.loads(message.content)['spec']['namespace']
+            reviews.append((namespace, account, selected))
+            rules = []
+            catalog = {_key(row): row for plural in ('roles', 'clusterroles') for row in inventory[plural]}
+            for binding in (*inventory['rolebindings'], *inventory['clusterrolebindings']):
+                if binding['kind'] == 'RoleBinding' and binding['metadata']['namespace'] != selected:
+                    continue
+                if not any(row['kind'] == 'ServiceAccount' and (row['namespace'], row['name']) == (namespace, account)
+                        for row in binding.get('subjects', [])):
+                    continue
+                reference = binding['roleRef']
+                key = reference['kind'] + ':' + (binding['metadata']['namespace'] if reference['kind'] == 'Role' else '-') + ':' + reference['name']
+                rules.extend(copy.deepcopy(catalog[key]['rules']))
+            if mode.get('effective_write'):
+                rules.append({'apiGroups': ['batch'], 'resources': ['jobs'], 'verbs': ['create'], 'resourceNames': ['foreign-job']})
+            return httpx.Response(201, json={'apiVersion': 'authorization.k8s.io/v1', 'kind': 'SelfSubjectRulesReview',
+                'spec': {}, 'status': {'resourceRules': rules, 'nonResourceRules': [], 'incomplete': False, 'evaluationError': ''}})
         plural = message.url.path.rsplit('/', 1)[-1]
+        if plural in {'rolebindings', 'clusterrolebindings'} and 'resourceVersion' not in message.url.params:
+            assert message.method == 'GET'
+            return httpx.Response(200, json={'apiVersion': 'rbac.authorization.k8s.io/v1',
+                'kind': 'RoleBindingList' if plural == 'rolebindings' else 'ClusterRoleBindingList',
+                'metadata': {'resourceVersion': '500', 'continue': ''}, 'items': inventory[plural]})
         if plural in kinds.values() or message.url.path == '/api/v1/namespaces/kube-system':
             return transport.client.send(message)
         row = next((row for row in resources.values() if _resource_path(row) == message.url.path), None)
@@ -5699,7 +5728,7 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
 
     def connect(api):
         api.client.close()
-        api.client = httpx.Client(base_url=transport.api_server, transport=httpx.MockTransport(respond))
+        api.client = type(transport.client)(base_url=transport.api_server, transport=httpx.MockTransport(respond))
         return api
 
     with connect(HTTPSParticipantResourceObserver(retained=retained, api_server=transport.api_server,
@@ -5707,12 +5736,50 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
         assert hasattr(observer, 'observe_writers'), 'normal rollout does not qualify the complete shared writer set'
 
         def observe(preparing=None):
-            return observer.observe_writers(bindings=bindings, shared_state=state, preparing=preparing)
+            try:
+                return observer.observe_writers(bindings=bindings, shared_state=state, preparing=preparing)
+            except ValueError as error:
+                import traceback
+
+                frames, cause = [], error
+                while cause is not None:
+                    frames.extend(f'{Path(frame.filename).name}:{frame.lineno}:{frame.name}'
+                        for frame in traceback.extract_tb(cause.__traceback__))
+                    cause = cause.__context__
+                raise ValueError('participant census unqualified; preserve evidence; ' + ', '.join(frames)) from None
 
         result = observe()
         assert not writes
         assert result.workloads[_key(manager)] == manager
         assert any(row['metadata']['namespace'] == 'loom-dev' for row in result.workloads.values())
+        mode['effective_write'] = True
+        with pytest.raises(ValueError, match='preserve'):
+            observe()
+        mode.pop('effective_write')
+        assert reviews, 'RBAC objects alone do not prove effective permissions'
+
+        # A newly captured source snapshot cannot replace an already retained
+        # actuator UID, even if all individual resource reads agree with it.
+        changed = copy.deepcopy(release_inputs)
+        changed['operation_id'] = uuid4()
+        actuator = next(row for row in changed['current'] if row['kind'] == 'Deployment'
+            and row['metadata']['namespace'] == attached.config['execution_namespace']
+            and row['metadata']['name'] == 'loom-execution-actuator')
+        actuator['metadata']['uid'] = str(uuid4())
+        substituted = retain_participant_rollout(**changed)
+        actuator_key = _key(actuator)
+        saved = resources[actuator_key]
+        resources[actuator_key] = actuator
+        saved_inventory = copy.deepcopy(inventory['deployments'])
+        inventory['deployments'] = [actuator if _key(row) == actuator_key else row for row in inventory['deployments']]
+        try:
+            with connect(HTTPSParticipantResourceObserver(retained=substituted, api_server=transport.api_server,
+                    ssl_context=ssl.create_default_context())) as replaced:
+                with pytest.raises(ValueError, match='preserve'):
+                    replaced.observe_writers(bindings=bindings, shared_state=state)
+        finally:
+            resources[actuator_key] = saved
+            inventory['deployments'] = saved_inventory
 
         def resource(key):
             return connect(HTTPSParticipantResourceAPI(retained=retained, key=key,
