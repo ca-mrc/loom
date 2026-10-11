@@ -1688,6 +1688,26 @@ required. Current writer census, resource identities, private history, operator
 credential bytes and connection checks bracket the external reads. This neither
 replays installation nor publishes capacity or authorizes admission.
 
+The retained deployer records a final-release boundary after application checks
+and the fresh post-open capacity query. It validates completed candidate resource
+receipts, pool transitions and actual terminal backup/schema/configure Job
+outcomes, including their recorded Job and Pod identities. An independent private
+anchor binds the fixed effects and Job outcomes. Effect-free preparation is
+distinct from an anchored release intent; interrupted preparation can resume
+under the original held guard, but cannot justify already-open intake.
+
+After a lost release response or completion acknowledgement, recovery checks this
+private record before another deployment. Open intake requires fresh released-
+state runtime/registry qualification, HTTPS and deployed-image checks, plus the
+unchanged effect history. It can then finish the same release without reacquiring
+the guard or replaying workload, backup, schema, configuration or pool mutations.
+Held intake continues through the existing journal-aware guarded recovery and a
+new capacity query. Missing/altered completion evidence or failed current checks
+refuse reconciliation. A historical capacity receipt is not fresh write authority;
+the deployer still enforces its wall-clock and monotonic expiry immediately before
+any guard release. This final-release record is not yet latest-predecessor
+promotion or a connected protected operator entry.
+
 The transaction, pool-effect adapter and parent interface do not establish
 publication, history, full runtime readiness or recovery authority on their own.
 The protected entry and phase-aware live qualifier must still connect the normal

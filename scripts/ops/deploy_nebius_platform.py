@@ -100,6 +100,10 @@ class ParticipantRolloutAPI(Protocol):
         """
         ...
 
+    def qualify_completion(self, kube: Kubectl, release: PreparedParticipantRelease, *, released: bool) -> None:
+        """Fresh complete runtime/registry qualification with held or open intake."""
+        ...
+
 
 def _participant_capacity_before_release(proof: ParticipantCapacityReceipt | None, *,
         started_at: datetime, started_clock: float, max_age_seconds: int) -> dict[str, Any]:
@@ -991,6 +995,12 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None,
                 or candidate_writer.retained.reference != participant_reference):
             raise DeploymentError('candidate writer differs from retained shared release')
     participant_release = copy.deepcopy(participant_release)
+    completion = None
+    if candidate_writer is not None:
+        from scripts.ops.nebius_pool_participant_completion import RetainedParticipantCompletion
+
+        assert pool is not None
+        completion = RetainedParticipantCompletion(candidate_writer, pool)
     snapshot = tempfile.TemporaryDirectory(prefix="loom-nebius-deploy-")
     snapshot_root = Path(snapshot.name)
     args.evidence_dir.mkdir(parents=True, exist_ok=True)
@@ -1084,6 +1094,12 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None,
             evidence['pool_refresh'] = {'operation_id': str(participant_release.refresh.after.operation_id),
                 'participant_id': str(participant_release.refresh.participant_id),
                 'pool_id': str(participant_release.refresh.after.pool_id)}
+            if args.apply and completion is not None:
+                completed = completion.reconcile(kube)
+                if completed is not None:
+                    evidence['pool_refresh'].update(completed)
+                    evidence.update(status='complete', guard_owner=guard_owner, completion_reconciled=True)
+                    return evidence
         evidence["preflight"] = state
         retire_target = getattr(args, "retire_target", None)
         current = kube.get("configmap", "loom-platform-config", config["namespace"])
@@ -1243,11 +1259,21 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None,
         if guard_acquired:
             if pool is not None:
                 assert participant_release is not None
+                # A rejected proof must not create release authority. Check
+                # again after retaining the intent to charge preparation time.
+                _participant_capacity_before_release(capacity_proof,
+                    started_at=capacity_started_at, started_clock=capacity_started_clock,
+                    max_age_seconds=participant_release.refresh.after.admission.observation_max_age_seconds)
+                if completion is not None:
+                    assert capacity_proof is not None
+                    completion.prepare(kube, observation_id=observation_id, capacity=capacity_proof)
                 evidence['pool_refresh']['capacity'] = _participant_capacity_before_release(capacity_proof,
                     started_at=capacity_started_at, started_clock=capacity_started_clock,
                     max_age_seconds=participant_release.refresh.after.admission.observation_max_age_seconds)
             rollout_guard(kube, ns, "release", guard_owner, manifest["candidate_sha"])
             guard_acquired = False
+            if completion is not None and completion.reconcile(kube) is None:
+                raise DeploymentError('shared release completion unconfirmed; preserve evidence')
         evidence["status"] = "complete"
         return evidence
     except Exception as exc:

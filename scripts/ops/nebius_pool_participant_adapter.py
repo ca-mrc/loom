@@ -44,7 +44,7 @@ from loom_service.pool_management.participant_refresh import (
     RefreshAction,
 )
 
-QualificationPhase = Literal['preflight', 'guarded', 'ready']
+QualificationPhase = Literal['preflight', 'guarded', 'ready', 'released']
 _ORDER = ('fence', 'stage', 'catalog', 'manager', 'open')
 
 
@@ -202,6 +202,10 @@ class RetainedParticipantPoolAdapter:
             self._record(create=False)
         except Exception:
             raise ValueError('participant pool guard unqualified; preserve evidence') from None
+
+    def qualify_completion(self, kube: Kubectl, release: PreparedParticipantRelease, *, released: bool) -> None:
+        self._qualify(kube, release, 'released' if released else 'ready')
+        self._record(create=False)
 
     def _job(self, kube: Kubectl, record: dict[str, Any], action: RefreshAction,
             observation_id: UUID | None = None) -> dict[str, Any]:
