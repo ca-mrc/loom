@@ -702,6 +702,33 @@ def test_expired_monotonic_capacity_cannot_create_a_release_intent(operation_inp
     assert not (retained.anchor_dir / (str(retained.reference.operation_id) + '-completion.json')).exists()
 
 
+@pytest.mark.parametrize('damage', ['predecessor', 'history', 'missing-head'])
+def test_protected_delivery_rejects_original_history_drift_before_cluster_io(
+        operation_inputs, connection, tmp_path, monkeypatch, damage):
+    from scripts.ops.nebius_pool_participant_completion import initialize_participant_head
+    from scripts.ops.nebius_pool_participant_entry import run_participant_release
+    from scripts.ops.nebius_pool_participant_resource import RetainedCandidateFileWriter
+
+    retained = connection[0].retained
+    initial = operation_inputs['predecessor']
+    initialize_participant_head(initial=initial, state_root=retained.state_dir.parent, anchor_dir=retained.anchor_dir)
+    expected = SimpleNamespace(migration=initial.migration, state_dir=initial.state_dir, history=copy.deepcopy(initial.history))
+    if damage == 'predecessor':
+        expected.state_dir = tmp_path / 'foreign-predecessor'
+    elif damage == 'history':
+        expected.history.clear()
+    else:
+        (retained.state_dir.parent / 'latest.json').unlink()
+    writer = RetainedCandidateFileWriter(retained=retained,
+        open_resource=lambda _: pytest.fail('must not open candidate resource'),
+        open_creation=lambda _: pytest.fail('must not open candidate creation'))
+    monkeypatch.setattr(idle, 'rollout', lambda *_args, **_kwargs: pytest.fail('must not enter deployment'))
+    with pytest.raises(ValueError, match='preserve'):
+        run_participant_release(SimpleNamespace(), retained=retained, initial=initial, expected=expected,
+            pool=connection[2](), writer=writer, kube=connection[0].kube)
+    assert not connection[0].effects
+
+
 @pytest.mark.parametrize('damage', ['missing-adapter', 'missing-operation', 'mutated-operation',
     'candidate', 'profile', 'lost-reference', 'standalone-recovery', 'late-history-change'])
 def test_shared_delivery_rejects_binding_changes_before_deployer_dispatch(operation_inputs, tmp_path, monkeypatch, damage):

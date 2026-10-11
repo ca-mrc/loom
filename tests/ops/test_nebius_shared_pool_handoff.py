@@ -5634,8 +5634,8 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
     from loom.nebius_platform_render import build_platform
 
     assert importlib.util.find_spec('scripts.ops.nebius_pool_participant_entry') is not None, 'protected release qualification is not composed'
-    from scripts.ops.nebius_pool_participant_entry import ParticipantReleaseQualifier
     from scripts.ops import nebius_pool_participant_entry as participant_entry
+    from scripts.ops.nebius_pool_participant_entry import ParticipantReleaseQualifier
 
     assert hasattr(participant_entry, 'connected_participant_release'), 'protected candidate and pool delivery are not composed'
 
