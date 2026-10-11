@@ -123,7 +123,7 @@ def _prepare(*, previous: PoolMigrationRequest, current: tuple[dict[str, Any], .
     desired = {_key(row): row for group in files.values() for row in group}
     rendered_data = desired[platform_key]['data']
     if (rendered_config != config
-            or json.loads(rendered_data['profile.json']) != runtime_profile.model_dump(mode='json')
+            or ServiceExecutionRuntimeProfileV1.model_validate_json(rendered_data['profile.json']) != runtime_profile
             or json.loads(rendered_data['keyring.json']) != spec.profiles.image_admission_keyring):
         raise ValueError
     profiles, actuators = derive_staging_profiles(participant=participant, data=desired[platform_key]['data'],
