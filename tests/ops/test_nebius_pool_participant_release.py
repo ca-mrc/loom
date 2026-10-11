@@ -46,6 +46,9 @@ def release_inputs(staging_attachment_inputs):
         participant_id=spec['participants'][0]['participant_id'])
     options['participant'] = PoolParticipantV1.model_validate(payload)
     attached = prepare(options)
+    # Normal rollout reads the persisted, renderer-normalized environment, not
+    # the pre-render author input (which can omit default resource requests).
+    config = copy.deepcopy(attached.config)
     spec['participants'][0] = attached.participant.model_dump(mode='json')
     spec.update(cluster_id=config['cluster_id'], node_group_id=config['execution_node_group_id'])
     spec['node_selector'] = copy.deepcopy(attached.profiles.execution[0].runtime.node_selector)
@@ -151,6 +154,40 @@ def test_normal_release_keeps_shared_wiring_and_preserves_retired_and_other_owne
     configmap = rows[f'ConfigMap:{namespace}:loom-platform-config']
     assert json.loads(configmap['data']['profile.json'])['candidate_sha'] == 'd' * 40
     assert plan.migration.registration.spec == refresh.after
+
+
+def test_successive_normal_releases_keep_original_handoff_lineage_and_current_registration(release_inputs):
+    options = copy.deepcopy(release_inputs)
+    first = module().prepare_staging_pool_release(**options)
+    current = {_key(row): copy.deepcopy(row) for row in options['current']}
+    for rows in first.files.values():
+        for desired in rows:
+            key = _key(desired)
+            metadata = current.get(key, {}).get('metadata', {})
+            row = copy.deepcopy(desired)
+            row['metadata'].update(uid=metadata.get('uid', str(uuid4())), resourceVersion='22')
+            current[key] = row
+    options.update(previous=first.migration, current=tuple(current.values()), operation_id=uuid4())
+    options['candidate']['candidate_sha'] = 'e' * 40
+    for value in options['candidate']['images'].values():
+        value['image_ref'] = value['image_ref'].split('@')[0] + '@sha256:' + 'f' * 64
+    profile = options['runtime_profile'].model_dump(mode='json')
+    refs = (options['candidate']['images']['service']['image_ref'], options['candidate']['images']['execution_runtime']['image_ref'])
+    profile.update(candidate_sha='e' * 40, task_image_ref=refs[0], runtime_image_ref=refs[1],
+        image_admission=signed_image_admission_bundle(refs).model_dump(mode='json'))
+    options['runtime_profile'] = ServiceExecutionRuntimeProfileV1.model_validate(profile)
+    second = module().prepare_staging_pool_release(**options)
+    assert second.refresh.before == first.refresh.after
+    assert second.refresh.after.policy_revision == first.refresh.before.policy_revision + 2
+    assert second.refresh.after.participants[0].binding_revision == first.refresh.before.participants[0].binding_revision + 2
+    assert second.refresh.after.participants[1] == first.refresh.before.participants[1]
+    for rows in second.files.values():
+        for row in rows:
+            annotations = row['metadata'].get('annotations', {})
+            if 'loom.nebius/participant-refresh-operation' in annotations:
+                assert annotations['loom.nebius/participant-refresh-operation'] == str(options['operation_id'])
+                assert annotations['loom.nebius/shared-pool-handoff-operation'] == str(first.refresh.before.operation_id)
+    assert second.preserved == first.preserved
 
 
 @pytest.mark.parametrize('damage', ['source', 'operation', 'scope', 'namespace-uid', 'global-participant',
