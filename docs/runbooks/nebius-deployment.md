@@ -2661,9 +2661,9 @@ open the pool manually. Successful resource staging is not a successful database
 registration or permission to switch controllers. The ordinary management image
 refresh does not authorize this migration's credential, configuration or RBAC
 changes. The connected protected switchover remains required before deployment.
-The source-level participant-refresh transaction is not a standalone operator
-command: it must be connected to the protected normal-rollout parent and retained
-recovery evidence before use. Do not invoke it directly against the live database,
+The source-level participant-refresh transaction and candidate projection are not
+standalone operator commands: they must be connected to the protected normal-rollout parent and retained
+recovery evidence before use. Do not invoke refresh directly against the live database,
 remove global settings to pass the standalone deployer, or release a local idle
 guard using a capacity sample taken before the participant was reopened.
 Its initial closure stage keeps the existing rollout guard in each idle data

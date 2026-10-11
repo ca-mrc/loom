@@ -1387,6 +1387,19 @@ blocks transition rather than being cancelled. Exact completed replay neither
 requires idleness nor fences work accepted after the update. Caller rollback
 undoes the transaction; there is no public refresh API or implicit commit.
 
+The normal-release projection derives the successor catalog from actual candidate
+platform templates, using the same catalog derivation as initial staging
+attachment. It does not fabricate a live observation to qualify new templates.
+The current namespace identities, global participant settings, management origin
+and persisted environment/keyring must match the retained registration. New
+CP/API/ordinary and guest actuator templates retain the shared machine identity,
+use Recreate and carry forward handoff ancestry. Local worker Roles stay
+read-only. The suspended old collector and cluster authority are retained as
+unchanged resources, outside candidate apply; unexpected RBAC drift is refused.
+Successive release projections produce fresh profile IDs/revisions without
+changing other participants. This source connection is tested through the SQL
+transaction, not an installed normal-rollout endpoint.
+
 This transaction does not establish rollout ownership, source publication,
 Kubernetes readiness or recovery authority. The protected normal-rollout parent
 must connect those checks, catalog mounting/manager restart, schema/configuration

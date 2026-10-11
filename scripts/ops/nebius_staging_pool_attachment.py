@@ -171,6 +171,66 @@ def _runtime(actuator: dict[str, Any], *, node_group_id: str) -> tuple[Execution
     return runtime, NativeTaskImageSettings.model_validate_json(raw) if raw is not None else None
 
 
+def derive_staging_profiles(*, participant: PoolParticipantV1, data: dict[str, Any],
+        runtime_profile: ServiceExecutionRuntimeProfileV1, node_group_id: str,
+        deployments: dict[str, dict[str, Any]]) -> tuple[PoolProfileCatalog, tuple[dict[str, Any], ...]]:
+    """Pure renderer projection, not a live observation or deployment authority.
+
+    Initial attachment calls this only after qualifying every observed workload;
+    a normal release instead supplies fresh candidate-rendered templates.
+    """
+    execution, task_images, actuators, target_ids = [], [], [], set()
+    for field in ('catalog.json', 'guest-catalog.json', 'emulated-auth-catalog.json'):
+        if field not in data:
+            continue
+        catalog = json.loads(data[field])
+        execution_class = ExecutionClassV1.model_validate(catalog['execution_class'])
+        target, = ExecutionTopologyV1.model_validate(catalog['topology']).targets
+        if (target.environment != participant.catalog_environment
+                or target.namespace_name != participant.execution_namespace.name
+                or target.execution_class_id != execution_class.class_id):
+            raise ValueError
+        binding = participant.target(target.target_id, 'trial')
+        ordinary = field == 'catalog.json'
+        kinds = {'trial', 'verifier', 'task_image_build'} if ordinary else {'trial', 'verifier'}
+        if set(binding.workload_kinds) != kinds:
+            raise ValueError
+        name = 'loom-execution-actuator' if ordinary else target.target_id + '-actuator'
+        actuator = deployments[name]
+        runtime, builder = _runtime(actuator, node_group_id=node_group_id)
+        if runtime.target_id != target.target_id or runtime.namespace != target.namespace_name:
+            raise ValueError
+        native_labels = {'loom.nebius/node-os': 'linux',
+            'loom.nebius/node-arch': {'x86_64': 'amd64', 'arm64': 'arm64'}[execution_class.cpu_architecture]}
+        selector = runtime.node_selector or {}
+        if any(selector.get(key, value) != value for key, value in native_labels.items()):
+            raise ValueError
+        runtime = replace(runtime, node_selector={**selector, **native_labels})
+        execution.append({'profile_id': str(binding.profile_id), 'runtime': asdict(runtime),
+            'candidate_sha': runtime_profile.candidate_sha, 'execution_class_id': execution_class.class_id,
+            'runtime_image_ref': runtime_profile.runtime_image_ref,
+            'runtime_binary_sha256': runtime_profile.runtime_binary_sha256,
+            'execution_class': execution_class.model_dump(mode='json')})
+        if ordinary:
+            if builder is None or builder.namespace != participant.build_namespace.name:
+                raise ValueError
+            # The native renderer supplies the same provider-owned architecture
+            # labels retained above; global accounting freezes its final selector.
+            task_images.append({'profile_id': str(binding.profile_id), 'cpu_arch': execution_class.cpu_architecture,
+                'target': asdict(replace(runtime, namespace=builder.namespace)),
+                'settings': builder.model_dump(mode='json')})
+        elif builder is not None:
+            raise ValueError
+        actuators.append(actuator)
+        target_ids.add(target.target_id)
+    if target_ids != {row.target_id for row in participant.targets}:
+        raise ValueError
+    profiles = PoolProfileCatalog.model_validate({'schema_version': 'loom.pool-profiles.v1',
+        'image_admission_keyring': json.loads(data['keyring.json']), 'execution': execution, 'task_images': task_images})
+    profiles.profiles()
+    return profiles, tuple(actuators)
+
+
 def _prepare(*, participant: PoolParticipantV1, observation: dict[str, Any], candidate: dict[str, Any],
         cluster_id: str, node_group_id: str, repo_root: Path) -> StagingPoolAttachment:
     if (participant.environment_class != 'staging'
@@ -215,55 +275,9 @@ def _prepare(*, participant: PoolParticipantV1, observation: dict[str, Any], can
     # ConfigMap data is executable configuration. Superset matching is insufficient.
     if data != expected[f'ConfigMap:{namespace}:loom-platform-config']['data']:
         raise ValueError
-    execution, task_images, actuators, target_ids = [], [], [], set()
-    for field in ('catalog.json', 'guest-catalog.json', 'emulated-auth-catalog.json'):
-        if field not in data:
-            continue
-        catalog = json.loads(data[field])
-        execution_class = ExecutionClassV1.model_validate(catalog['execution_class'])
-        target, = ExecutionTopologyV1.model_validate(catalog['topology']).targets
-        if (target.environment != participant.catalog_environment
-                or target.namespace_name != participant.execution_namespace.name
-                or target.execution_class_id != execution_class.class_id):
-            raise ValueError
-        binding = participant.target(target.target_id, 'trial')
-        ordinary = field == 'catalog.json'
-        kinds = {'trial', 'verifier', 'task_image_build'} if ordinary else {'trial', 'verifier'}
-        if set(binding.workload_kinds) != kinds:
-            raise ValueError
-        name = 'loom-execution-actuator' if ordinary else target.target_id + '-actuator'
-        actuator = get('Deployment', name, participant.execution_namespace.name)
-        runtime, builder = _runtime(actuator, node_group_id=node_group_id)
-        if runtime.target_id != target.target_id or runtime.namespace != target.namespace_name:
-            raise ValueError
-        native_labels = {'loom.nebius/node-os': 'linux',
-            'loom.nebius/node-arch': {'x86_64': 'amd64', 'arm64': 'arm64'}[execution_class.cpu_architecture]}
-        selector = runtime.node_selector or {}
-        if any(selector.get(key, value) != value for key, value in native_labels.items()):
-            raise ValueError
-        runtime = replace(runtime, node_selector={**selector, **native_labels})
-        execution.append({'profile_id': str(binding.profile_id), 'runtime': asdict(runtime),
-            'candidate_sha': runtime_profile.candidate_sha, 'execution_class_id': execution_class.class_id,
-            'runtime_image_ref': runtime_profile.runtime_image_ref,
-            'runtime_binary_sha256': runtime_profile.runtime_binary_sha256,
-            'execution_class': execution_class.model_dump(mode='json')})
-        if ordinary:
-            if builder is None or builder.namespace != participant.build_namespace.name:
-                raise ValueError
-            # The native renderer supplies the same provider-owned architecture
-            # labels retained above; global accounting freezes its final selector.
-            task_images.append({'profile_id': str(binding.profile_id), 'cpu_arch': execution_class.cpu_architecture,
-                'target': asdict(replace(runtime, namespace=builder.namespace)),
-                'settings': builder.model_dump(mode='json')})
-        elif builder is not None:
-            raise ValueError
-        actuators.append(actuator)
-        target_ids.add(target.target_id)
-    if target_ids != {row.target_id for row in participant.targets}:
-        raise ValueError
-    profiles = PoolProfileCatalog.model_validate({'schema_version': 'loom.pool-profiles.v1',
-        'image_admission_keyring': keyring, 'execution': execution, 'task_images': task_images})
-    profiles.profiles()
+    profiles, actuators = derive_staging_profiles(participant=participant, data=data, runtime_profile=runtime_profile,
+        node_group_id=node_group_id, deployments={row['metadata']['name']: row for row in resources
+            if row['kind'] == 'Deployment' and row['metadata']['namespace'] == participant.execution_namespace.name})
 
     def credential(key: str) -> tuple[UUID, str]:
         raw = observation[key]
