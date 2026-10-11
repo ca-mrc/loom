@@ -184,7 +184,7 @@ qualification cases run once, while mode-specific grants and failure cases remai
 The job limit remains 40 minutes. Connected participant lifecycle tests have
 explicit 120-second budgets (180 seconds for two successive releases). The
 complete workflow-selector integration also has a 120-second budget. Exhaustive
-shared census uses 600 seconds and recovery reopening uses 900 seconds.
+shared census and recovery reopening each use 900 seconds.
 Delayed-stop commit outcomes use 1200 seconds each and run in separate file
 shards. These test-only limits include retained-chain setup and fault/replay
 validation; production deadlines and fresh authority checks are unchanged.

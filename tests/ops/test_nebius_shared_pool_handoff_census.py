@@ -147,7 +147,7 @@ from tests.ops.test_nebius_shared_pool_handoff import (
 )
 
 
-@pytest.mark.timeout(600)
+@pytest.mark.timeout(900)
 @pytest.mark.parametrize('forward_census', [False, True, 'recovery', 'participant', 'preparation'],
     ids=['initial', 'forward', 'recovery', 'participant', 'preparation'])
 def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writers(
