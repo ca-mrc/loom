@@ -481,6 +481,65 @@ def qualify_workload(api, state):
         credential_uid=state.credential[0], credential_resource_version=state.credential[1])
 
 
+@pytest.mark.parametrize('workload_database', ['controller'], indirect=True)
+@pytest.mark.parametrize('case', ['qualified', 'pending', 'bad_report', 'pod_restart', 'database_restart',
+    'credential', 'scope', 'template'])
+def test_collector_publication_keeps_controller_backend_and_public_scope_bound(workload_database, monkeypatch, case):
+    import hashlib
+    import hmac
+    import json
+
+    from scripts.ops import nebius_pool_startup_capacity as commands
+    from scripts.ops.nebius_pool_migration import PoolMigrationError
+
+    api, state = workload_database
+    assert hasattr(api, 'observe_collector_publication'), 'collector publication is not connected to the bound controller'
+    publication = {'receipt': {'id': str(uuid4())}, 'source': 'fixture-collector'}
+    expected = copy.deepcopy(state.original)
+    expected['metadata'].setdefault('annotations', {})['loom.nebius/shared-pool-recovery'] = 'fixture'
+    if case == 'template':
+        expected['spec']['template']['spec']['containers'][0]['image'] = 'unqualified-image'
+    state.controller.update(copy.deepcopy(expected))
+    state.replica['spec']['template'] = copy.deepcopy(expected['spec']['template'])
+    state.runtime_pod['spec'] = copy.deepcopy(expected['spec']['template']['spec'])
+    reads, executions = [], []
+    transport = api._run
+
+    def run(args):
+        reads.append(args)
+        if args[0] != 'exec':
+            return transport(args)
+        assert args[:10] == ['exec', '-n', state.target.namespace,
+            'pod/' + state.runtime_pod['metadata']['name'], '-c', 'loom-control-plane', '--',
+            'python', '-c', commands.BOUND_TARGET_COLLECTOR_COMMAND]
+        assert json.loads(args[10]) == publication
+        assert hmac.compare_digest(args[12], hmac.new(bytes.fromhex(args[11]),
+            state.runtime_environment['LOOM_CP_DB_URL'].encode(), hashlib.sha256).hexdigest())
+        assert all('private-' not in arg for arg in args)
+        executions.append(args)
+        if case == 'pod_restart':
+            state.runtime_pod['status']['containerStatuses'][0]['restartCount'] = 1
+        elif case == 'database_restart':
+            state.pod['status']['containerStatuses'][0]['restartCount'] = 1
+        elif case == 'credential':
+            state.secret['metadata']['resourceVersion'] = '99'
+        elif case == 'scope':
+            publication['source'] = 'changed-during-read'
+        return {'status': 'pending', 'reason': 'stale'} if case == 'pending' else (
+            {'status': 'qualified', 'unexpected': True} if case == 'bad_report' else {'status': 'qualified'})
+
+    monkeypatch.setattr(api, '_run', run)
+    if case in {'qualified', 'pending'}:
+        assert api.observe_collector_publication(state.target, expected=expected, publication=publication) is (case == 'qualified')
+        assert len(executions) == 1
+        assert reads[-1][0] == 'get'  # Pending reads must also requalify their backend.
+    else:
+        with pytest.raises(PoolMigrationError) as error:
+            api.observe_collector_publication(state.target, expected=expected, publication=publication)
+        assert error.value.stage == 'collector_publication'
+        assert len(executions) == (0 if case == 'template' else 1)
+
+
 def running_successor(state):
     """Keep original authority immutable while installing a replacement fixture."""
     expected = copy.deepcopy(state.original)

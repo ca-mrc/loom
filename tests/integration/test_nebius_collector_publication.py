@@ -15,8 +15,14 @@ import pytest
 from pydantic import PostgresDsn
 from sqlalchemy import delete, select, update
 
-from loom.db.schema import ExecutionCapacityObservation, ExecutionCapacityPolicy, ServiceExecutionTarget
-from loom.pipeline.keys import canonical_digest
+from loom.db.schema import (
+    ExecutionCapacityObservation,
+    ExecutionCapacityPolicy,
+    ServiceExecutionTarget,
+)
+from loom.execution_contract import NEBIUS_CPU_GUEST_EXECUTION_CLASS_V1
+from loom_control_plane.execution_capacity import create_execution_capacity_observation
+from loom_control_plane.service_execution import persist_execution_catalog
 from tests.integration.test_nebius_pool_registry import sessions as sessions
 from tests.integration.test_service_execution_leases import _seed_ready_trial
 
@@ -34,12 +40,15 @@ async def test_collector_publication_is_fresh_exact_and_read_only(sessions, tmp_
     observed = now + timedelta(seconds=120) if case == 'future' else now - timedelta(
         seconds=1000 if case == 'stale' else 30)
     async with sessions.begin() as session:
-        _, target = await _seed_ready_trial(session, now=observed)
+        _, target = await _seed_ready_trial(session, now=observed - timedelta(seconds=1))
         row = (await session.scalars(select(ExecutionCapacityObservation).where(
             ExecutionCapacityObservation.target_id == target.target_id))).one()
         payload = copy.deepcopy(row.observation_json)
+        payload.pop('schema_version')
+        payload.pop('provider')
+        payload.update(observed_at=observed, source_version='collector-regression')
         if case == 'exhausted':
-            row.provider_capacity_state = payload['provider_capacity_state'] = 'insufficient'
+            payload['provider_capacity_state'] = 'insufficient'
             for quota in payload['placement']['quota_resources'].values():
                 quota['used'] = quota['limit']
         elif case == 'zero_workers':
@@ -48,11 +57,9 @@ async def test_collector_publication_is_fresh_exact_and_read_only(sessions, tmp_
             for field in ('active_nodes', 'provisioned_vcpu_millis', 'provisioned_memory_mib',
                     'provisioned_storage_mib', 'allocatable_cpu_millis', 'allocatable_memory_mib',
                     'allocatable_storage_mib'):
-                setattr(row, field, 0)
                 payload[field] = 0
             payload['node_states'] = {key: 0 for key in payload['node_states']}
-        row.observation_json = payload
-        row.observation_sha256 = canonical_digest(payload)
+        row, _ = await create_execution_capacity_observation(session, **payload)
         receipt = {key: getattr(row, key) for key in ('target_id', 'source', 'source_version',
             'provider_capacity_state', 'autoscaler_state', 'observation_sha256')}
         receipt.update(id=str(row.id), created=True, observed_at=observed.isoformat())
@@ -63,14 +70,14 @@ async def test_collector_publication_is_fresh_exact_and_read_only(sessions, tmp_
         if case == 'receipt':
             receipt['source_version'] = 'another-collection'
         elif case == 'checksum':
-            row.observation_sha256 = receipt['observation_sha256'] = 'sha256:' + '0' * 64
+            receipt['observation_sha256'] = 'sha256:' + '0' * 64
         elif case == 'scope':
-            payload = copy.deepcopy(payload)
-            payload['placement']['target_scope'] = {'schema_version': 'loom.execution-capacity-target-scope.v1',
-                'owner_target_id': target.target_id, 'namespace_name': target.namespace_name,
-                'target_ids': sorted([target.target_id, 'unexpected-alias'])}
-            row.observation_json = payload
-            row.observation_sha256 = receipt['observation_sha256'] = canonical_digest(payload)
+            # The family changes legitimately after this immutable observation.
+            guest = target.model_copy(update={'target_id': target.target_id + '-guest',
+                'execution_class_id': NEBIUS_CPU_GUEST_EXECUTION_CLASS_V1.class_id,
+                'capacity_owner_target_id': target.target_id})
+            await persist_execution_catalog(session, execution_class=NEBIUS_CPU_GUEST_EXECUTION_CLASS_V1, targets=(guest,))
+            expected['targets'].append(guest.model_dump(mode='json'))
         elif case == 'node_group':
             expected['node_group_id'] = 'another-node-group'
         elif case == 'quota':
@@ -88,13 +95,9 @@ async def test_collector_publication_is_fresh_exact_and_read_only(sessions, tmp_
         elif case == 'policy_missing':
             await session.execute(delete(ExecutionCapacityPolicy).where(ExecutionCapacityPolicy.target_id == target.target_id))
         elif case == 'missing':
-            await session.delete(row)
+            receipt['id'] = str(uuid4())
         elif case == 'superseded':
-            successor = {column.name: copy.deepcopy(getattr(row, column.name)) for column in row.__table__.columns}
-            successor.update(id=uuid4(), source_version='new-collection', observed_at=now)
-            successor['observation_json'].update(source_version='new-collection', observed_at=now.isoformat())
-            successor['observation_sha256'] = canonical_digest(successor['observation_json'])
-            session.add(ExecutionCapacityObservation(**successor))
+            await create_execution_capacity_observation(session, **(payload | {'source_version': 'new-collection', 'observed_at': now}))
 
     async def retained():
         async with sessions() as session:
@@ -110,7 +113,9 @@ async def test_collector_publication_is_fresh_exact_and_read_only(sessions, tmp_
     environment = {key: value for key, value in os.environ.items() if not key.startswith(('LOOM_', 'DATABASE_'))}
     # The real settings' pooled URL takes precedence. Never connect to this
     # deliberately invalid direct URL or disclose either one in diagnostics.
-    environment.update(LOOM_CP_DB_URL='postgresql+psycopg://private-wrong:private-secret@invalid.example/db', LOOM_CP_DB_URL_POOL=url)
+    environment.update(LOOM_CP_DB_URL='postgresql+psycopg://private-wrong:private-secret@invalid.example/db',
+        LOOM_CP_DB_URL_POOL=url, LOOM_CP_MINIO_ACCESS_KEY='private-fixture', LOOM_CP_MINIO_SECRET_KEY='private-fixture',
+        LOOM_CP_STEP_JWT_SIGNING_KEY='private-fixture-signing-key')
     result = await asyncio.to_thread(subprocess.run,
         [sys.executable, '-c', commands.BOUND_TARGET_COLLECTOR_COMMAND, json.dumps(expected), nonce,
             '0' * 64 if case == 'wrong_database' else response],
