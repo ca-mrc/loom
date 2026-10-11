@@ -2671,14 +2671,27 @@ internal host entry now composes the phase-aware pool adapter and completed-rele
 predecessor promotion. Its new-release preparation resolves the exact publication,
 qualifies a complete source/receipt-bound live inventory, retains it once, and
 runs protected preflight without acquiring a guard. Retrying preparation reloads
-the original anchor; recovery never prepares again. Runner transport and normal
-workflow routing remain required before operational use. Local retained inputs
-are not installed readiness.
+the original anchor; recovery never prepares again. The runner and normal workflow
+route are source-implemented; protected installation, route selection and live
+acceptance remain required. Local retained inputs are not installed readiness.
 
 The operator-only `scripts.ops.install_nebius_pool_participant_entrypoint`
 installer adds separate participant-release authority; do not invoke it with an
 existing rollout key or widen the exact-bundle shared-handoff grant. From reviewed
-integrated source, preview with:
+integrated source, first build the tooling archive locally:
+
+```bash
+uv export --locked --no-default-groups --extra cluster --group nebius-certificates --no-emit-workspace \
+  --format requirements-txt --output-file PRIVATE_REQUIREMENTS
+uv run --no-sync python -m scripts.ops.nebius_pool_participant_rollout bundle \
+  --source-sha INTEGRATED_SOURCE_SHA --requirements PRIVATE_REQUIREMENTS \
+  --output PRIVATE_TOOLING_BUNDLE
+```
+
+Keep both outputs outside the repository. The builder uses the pinned uv version,
+committed source wheels and exact archive membership, refuses a dirty/unintegrated
+checkout, and prints the bundle digest. It does not contact the operator or cluster.
+Then preview the grant:
 
 ```bash
 uv run --no-sync python -m scripts.ops.install_nebius_pool_participant_entrypoint \
@@ -2708,6 +2721,37 @@ and the eight-release retention bound stop installation for reconciliation;
 the installer does not delete old releases or reconstruct private history.
 Installation itself does not acquire a guard, deploy resources, or prove live
 readiness. Keep the guard unacquired during installation and workflow preparation.
+
+Store this dedicated key in the protected `nebius-integration` Environment as
+`NEBIUS_PARTICIPANT_SSH_KEY`. It uses the existing verified
+`NEBIUS_DEPLOY_SSH_TARGET` and `NEBIUS_DEPLOY_SSH_KNOWN_HOSTS`; confirm the target
+matches the host configuration before installation. The ordinary read-only check
+continues using its existing deploy key and kubeconfig.
+
+`NEBIUS_ROLLOUT_MODE=shared` explicitly selects the installed shared route for
+normal rollout/recovery. Leave it unset or `standalone` before the handoff; unknown
+values fail closed. Install and qualify the dedicated authority before the
+protected handoff, then select shared routing after completed handoff readback
+and before resuming normal rollout scheduling. Never use standalone routing as
+recovery for a shared-pool installation. Workflow serialization must exclude an
+ordinary rollout between handoff and this route change.
+
+Shared rollout sends only the exact publication selection for preparation. Before
+rendering, the installed reader obtains that approved commit's rendering source
+from GitHub, without a host Git checkout or runner-supplied source paths. Its
+existing repository-contents read access must cover the exact-commit archive API.
+An unavailable or invalid archive stops preparation before guard acquisition;
+never substitute the installed tooling's templates. Recovery and later baseline
+capture use the original retained rendering, not a new download.
+
+Before execute/recover, the runner persists one `deployment-RUN-ATTEMPT.json` record and a GitHub
+deployment intent with the original release reference and guard/platform binding.
+Lost transport responses stop without retry; use the existing protected `recover`
+operation with its original failed run ID. Recovery loads that original reference,
+not a new preparation or publication for the same SHA. Retain both GitHub and
+operator evidence. GitHub success requires a matching completed host report;
+busy/skipped outcomes remain inactive. Source tests do not establish installed
+handoff, resumed task execution or multi-owner acceptance.
 
 The shared rollout records the pre-upgrade backup Job name before creation and
 rechecks guard ownership before that write. A failed or unconfirmed backup keeps

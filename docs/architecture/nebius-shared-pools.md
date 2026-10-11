@@ -1827,14 +1827,27 @@ predecessor's resources, manager and catalog. A second observation checks that
 the cluster, objects, private inputs and handoff receipts stayed unchanged.
 This capture does not replace the qualifier's whole-pool writer census.
 
-Preparation renders and retains the qualified successor, then runs the same
+Preparation obtains the exact candidate commit's `deploy/k8s`, `src/loom` and
+renderer entrypoint through the installed GitHub reader. The numeric repository
+API, exact-commit codeload redirect and archive commit identity must agree.
+Downloads and expanded archives are bounded; unsafe paths, duplicate members and
+links in rendering inputs are rejected. Unselected repository content is never
+extracted. This source archive is not byte-identical to the publication's local
+`git archive`, so its compressed digest is not substituted for that source digest.
+The selected renderer and imports run in a separate Python process with the
+existing bounded private watchdog and no inherited operator credentials or Python
+paths. Installed operator templates never stand in for a new candidate's source.
+A completed predecessor's retained rendering defines the next capture's inventory,
+even if the installed tooling's templates have changed.
+
+Preparation retains the qualified successor rendering, then runs the same
 protected preflight without acquiring a guard. Repeating an operation uses its
 original anchored inputs; it cannot recapture a newer baseline or rebuild lost
 evidence under the same UUID. Recovery never calls preparation. Publication
 resolution and normal observation share the installed-reader implementation,
 which checks the reader Secret identity before and after both resolution and
-ancestry reads. Protected transport and normal workflow routing remain required
-before these internal functions form an operational rollout route.
+ancestry and selected-source reads. Installed protected transport, explicitly selected workflow routing
+and live acceptance remain required before treating this as operational readiness.
 
 The fixed host dispatcher accepts only bounded, direction-specific JSON commands:
 prepare selects a publication and operation UUID; execute selects the retained
@@ -1850,9 +1863,9 @@ A bare success status without the matching deployment binding is rejected.
 Its process entry suppresses private process output and checks the configuration
 again before acknowledging the outcome. This dispatcher does not itself install
 an SSH grant. The separate operator-only participant installer binds a dedicated
-key to exact tooling and private host configuration. Runner-owned persisted
-deployment intent and normal workflow routing are still required; the exact-bundle
-shared handoff grant cannot authorize this new command surface.
+key to exact tooling and private host configuration. The separate runner persists
+deployment intent and uses that installed authority; the exact-bundle shared
+handoff grant cannot authorize this new command surface.
 
 Participant tooling has a separate archive allowlist containing the complete
 host dispatcher and release dependencies. The archive includes pinned wheels,
@@ -1876,6 +1889,22 @@ commands with bounded data on stdin, verifies retained source hashes before and
 after dispatch, and uses the existing private-process watchdog. Installing it
 performs no cluster operation and does not establish live handoff acceptance.
 
+The protected workflow explicitly selects `standalone` or `shared` routing using
+`NEBIUS_ROLLOUT_MODE`; an unset value preserves the existing standalone route, and
+unknown values fail before deployment. The selected route is pinned in the check
+job's output. Shared mode uses `NEBIUS_PARTICIPANT_SSH_KEY` with fixed commands,
+strict host authentication and bounded data; it cannot fall back to standalone.
+The runner pins the selected publication's run attempt, artifact ID/digest and
+merged-dev PR; the host independently validates CI, signatures, ancestry and source.
+The runner saves the exact reference, original previous candidate and platform/
+guard binding locally and in GitHub deployment intent before requesting execution.
+An uncertain SSH or GitHub response is not retried. Explicit recovery keeps the
+original reference and never prepares another release. A public completion must
+match that entire binding before GitHub success is reported. Busy/skipped outcomes
+are inactive, not successful deployments. Host history and private diagnostics do
+not leave the operator. The tooling builder is a separate local command requiring
+clean integrated source, not part of remote rollout requests.
+
 The deployer has an internal finalization hook inside its existing error/evidence
 boundary, after verified guard release and before reporting success. Protected
 composition uses that hook for latest-head promotion. It also runs after successful
@@ -1888,9 +1917,9 @@ not available as a CLI flag; standalone behavior remains unchanged.
 
 The transaction, pool-effect adapter and parent interface do not establish
 publication, history, full runtime readiness or recovery authority on their own.
-The protected entry and phase-aware live qualifier must still connect the normal
-workflow to these child operations before this is an operational route. They
-also must invoke latest-head promotion only after verified
+The protected entry and phase-aware live qualifier connect the normal workflow
+to these child operations, but installed qualification and live acceptance remain
+required. They invoke latest-head promotion only after verified
 guard release, so later releases use the latest predecessor rather than the
 original handoff. Retained inputs and a deployer result alone are not that proof.
 Fence, catalog staging and reopening each invalidate prior capacity captures;

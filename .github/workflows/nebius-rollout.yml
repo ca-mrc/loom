@@ -72,6 +72,7 @@ jobs:
       candidate_sha: ${{ steps.publication.outputs.sha }}
       run_id: ${{ steps.publication.outputs.run_id }}
       artifact: ${{ steps.publication.outputs.artifact }}
+      mode: ${{ steps.route.outputs.mode }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment:
@@ -94,6 +95,18 @@ jobs:
           cache-dependency-glob: uv.lock
       - name: Install deployment tooling
         run: uv sync --locked --no-dev --extra cluster
+      - name: Select installed rollout route
+        id: route
+        env:
+          ROLLOUT_MODE: ${{ vars.NEBIUS_ROLLOUT_MODE }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$ROLLOUT_MODE" in
+            ''|standalone) printf 'mode=standalone\n' >> "$GITHUB_OUTPUT" ;;
+            shared) printf 'mode=shared\n' >> "$GITHUB_OUTPUT" ;;
+            *) echo 'Unknown protected rollout mode' >&2; exit 1 ;;
+          esac
       - name: Select successful platform publication
         id: publication
         env:
@@ -147,6 +160,11 @@ jobs:
   rollout:
     name: Deploy selected candidate
     needs: check
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      deployments: write
     if: >-
       needs.check.outputs.status == 'ready' &&
       github.repository_id == '1281629473' &&
@@ -193,6 +211,7 @@ jobs:
           fi
           uv run --no-sync python scripts/ops/nebius_idle_rollout.py select "${args[@]}"
       - name: Download selected candidate
+        if: needs.check.outputs.mode == 'standalone'
         env:
           PUBLICATION_RUN_ID: ${{ needs.check.outputs.run_id }}
           ARTIFACT_NAME: ${{ needs.check.outputs.artifact }}
@@ -200,6 +219,7 @@ jobs:
           gh run download "$PUBLICATION_RUN_ID" --repo "$GITHUB_REPOSITORY"
           --name "$ARTIFACT_NAME" --dir "$RUNNER_TEMP/publication"
       - name: Deploy once if idle
+        if: needs.check.outputs.mode == 'standalone'
         env:
           DEPLOY_SSH_KEY: ${{ secrets.NEBIUS_DEPLOY_SSH_KEY }}
           DEPLOY_KNOWN_HOSTS: ${{ vars.NEBIUS_DEPLOY_SSH_KNOWN_HOSTS }}
@@ -232,6 +252,36 @@ jobs:
             --candidate "$CANDIDATE_SHA" --kubeconfig "$REMOTE_KUBECONFIG" \
             --expected-cluster-id "$CLUSTER_ID" \
             --evidence-dir "$RUNNER_TEMP/nebius-rollout" --github "${extra_args[@]}"
+      - name: Deploy retained shared participant
+        if: needs.check.outputs.mode == 'shared'
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.NEBIUS_PARTICIPANT_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ vars.NEBIUS_DEPLOY_SSH_KNOWN_HOSTS }}
+          LOOM_DEPLOY_SSH_TARGET: ${{ vars.NEBIUS_DEPLOY_SSH_TARGET }}
+          CANDIDATE_SHA: ${{ needs.check.outputs.candidate_sha }}
+          PUBLICATION_RUN_ID: ${{ needs.check.outputs.run_id }}
+          ARTIFACT_NAME: ${{ needs.check.outputs.artifact }}
+          AUTOMATIC: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_run' }}
+          RECOVERY_EVIDENCE: ${{ steps.recovery.outputs.recovery_evidence }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          export LOOM_DEPLOY_SSH_KEY_FILE="$RUNNER_TEMP/nebius-participant-key"
+          export LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE="$RUNNER_TEMP/nebius-participant-known-hosts"
+          trap 'rm -f -- "$LOOM_DEPLOY_SSH_KEY_FILE" "$LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE"' EXIT
+          test -n "$DEPLOY_SSH_KEY"
+          test -n "$DEPLOY_KNOWN_HOSTS"
+          test -n "$LOOM_DEPLOY_SSH_TARGET"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$LOOM_DEPLOY_SSH_KEY_FILE"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE"
+          unset DEPLOY_SSH_KEY DEPLOY_KNOWN_HOSTS
+          extra_args=()
+          if [[ "$AUTOMATIC" == 'true' ]]; then extra_args+=(--automatic); fi
+          if [[ -n "$RECOVERY_EVIDENCE" ]]; then extra_args+=(--recovery-evidence "$RECOVERY_EVIDENCE"); fi
+          uv run --no-sync python -m scripts.ops.nebius_pool_participant_rollout run \
+            --publication-run-id "$PUBLICATION_RUN_ID" --candidate "$CANDIDATE_SHA" \
+            --artifact "$ARTIFACT_NAME" --evidence-dir "$RUNNER_TEMP/nebius-rollout" "${extra_args[@]}"
       - name: Preserve sanitized deployment evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
