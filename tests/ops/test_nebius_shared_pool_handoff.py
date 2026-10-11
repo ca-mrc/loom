@@ -397,6 +397,7 @@ def test_restored_collector_uses_completed_current_lineage_and_bound_publication
             'uid': job['metadata']['uid'], 'controller': True}]}, 'spec': copy.deepcopy(job['spec']['template']['spec']),
         'status': {'phase': 'Succeeded'}}
     pod['spec']['nodeName'] = 'qualified-platform-node'
+    pod['metadata']['labels']['topology.kubernetes.io/region'] = attachment.config['region']
     pod['spec'].setdefault('tolerations', []).extend({'key': 'node.kubernetes.io/' + key,
         'operator': 'Exists', 'effect': 'NoExecute', 'tolerationSeconds': 300} for key in ('not-ready', 'unreachable'))
     for field, statuses in (('containers', 'containerStatuses'), ('initContainers', 'initContainerStatuses')):
@@ -482,7 +483,7 @@ def test_restored_collector_uses_completed_current_lineage_and_bound_publication
     assert len(publications) == 1
     baseline = copy.deepcopy((documents, listing, attachment.config))
     for case in ('missing', 'running', 'failed', 'old_template', 'stale', 'foreign_job', 'foreign_pod', 'duplicate',
-            'truncated', 'pod_image', 'sidecar', 'config', 'late_secret', 'late_pod', 'late_binding', 'suspended'):
+            'truncated', 'pod_image', 'region', 'sidecar', 'config', 'late_secret', 'late_pod', 'late_binding', 'suspended'):
         documents.clear()
         documents.update(copy.deepcopy(baseline[0]))
         listing.clear()
@@ -505,6 +506,8 @@ def test_restored_collector_uses_completed_current_lineage_and_bound_publication
             listing['pods']['metadata']['continue'] = 'more'
         elif case == 'pod_image':
             listing['pods']['items'][0]['spec']['containers'][0]['image'] = 'other/image'
+        elif case == 'region':
+            listing['pods']['items'][0]['metadata']['labels']['topology.kubernetes.io/region'] = 'wrong-region'
         elif case == 'sidecar':
             listing['pods']['items'][0]['spec']['containers'].append({'name': 'foreign', 'image': 'other/image'})
         elif case == 'config':
@@ -551,14 +554,18 @@ def test_restored_collector_uses_completed_current_lineage_and_bound_publication
         return readiness(bindings.plan.development.runtime.request, 'recovery-restart', before, desired, current)
 
     assert callback(next(row for row in bindings.plan.staging.originals.values() if row['kind'] == 'CronJob')) is True
+    mode['case'] = 'stale'
+    assert callback(next(row for row in bindings.plan.staging.originals.values() if row['kind'] == 'CronJob')) is False
     original_publication = api.observe_collector_publication
     def late_database(*args, **kwargs):
         result = original_publication(*args, **kwargs)
         database_pod['status']['containerStatuses'][0]['restartCount'] += 1
         return result
     monkeypatch.setattr(api, 'observe_collector_publication', late_database)
-    with pytest.raises(ValueError, match='restored staging runtime unqualified'):
-        callback(next(row for row in bindings.plan.staging.originals.values() if row['kind'] == 'CronJob'))
+    for pending in (None, 'stale'):
+        mode['case'] = pending
+        with pytest.raises(ValueError, match='restored staging runtime unqualified'):
+            callback(next(row for row in bindings.plan.staging.originals.values() if row['kind'] == 'CronJob'))
     monkeypatch.setattr(api, 'observe_collector_publication', original_publication)
     probes = []
     def probe(name, target, *, original, expected, **kwargs):
