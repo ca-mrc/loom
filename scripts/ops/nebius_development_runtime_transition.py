@@ -60,8 +60,10 @@ def _advance_fixed_resources(*, originals: dict[str, dict[str, Any]], targets: d
         qualify_defaulted: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]]) -> bool:
     """Retain exact UID, preview and CAS; return False only for a known wait.
 
-The transport must compare UID AND resourceVersion atomically, return False only
-for an explicit server rejection and prove old Pods drained / target Pods ready.
+The transport must compare UID AND resourceVersion atomically and return False
+only for an explicit server rejection. Its readiness callback owns the selected
+phase's condition: runtime transitions prove drain/startup, while candidate-write
+children prove resource readback and leave runtime readiness to their full parent.
 Completed child phases are read as history by the parent, never replayed after a
 subsequent phase intentionally changed their live workload specifications.
 """

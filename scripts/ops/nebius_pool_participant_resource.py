@@ -45,7 +45,8 @@ _SERVICE_ALLOCATION = ('clusterIP', 'clusterIPs', 'ipFamilies', 'ipFamilyPolicy'
 def _inputs(retained: RetainedParticipantRollout, key: str) -> tuple[dict[str, Any], dict[str, Any], str]:
     original, = (row for row in retained.inputs.current if _key(row) == key)
     candidate, = (row for rows in retained.release.files.values() for row in rows if _key(row) == key)
-    if candidate['kind'] not in _KINDS or key in retained.release.preserved:
+    if (candidate['kind'] not in _KINDS or key in retained.release.preserved
+            or original['metadata'].get('annotations', {}).get(_MARKER) == str(retained.reference.operation_id)):
         raise ValueError
     _uid(original)
     desired = _snapshot(candidate)
