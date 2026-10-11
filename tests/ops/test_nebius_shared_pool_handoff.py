@@ -5635,6 +5635,9 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
 
     assert importlib.util.find_spec('scripts.ops.nebius_pool_participant_entry') is not None, 'protected release qualification is not composed'
     from scripts.ops.nebius_pool_participant_entry import ParticipantReleaseQualifier
+    from scripts.ops import nebius_pool_participant_entry as participant_entry
+
+    assert hasattr(participant_entry, 'connected_participant_release'), 'protected candidate and pool delivery are not composed'
 
     predecessor = load_completed_shared_pool_operation(**args, bindings=bindings, api=parent_api)
     attached = bindings.plan.staging.attachment
@@ -6246,6 +6249,33 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
             connected.under_guard(kube, retained.release)
             peer_fault.clear()
             assert pool_state.effects == effects
+
+            # Socket transport alone is replaced here: the protected connection
+            # must construct the real qualifier, candidate APIs and pool adapter.
+            # A lost guard must stop both existing-resource and Job access.
+            patch.setattr(httpx, 'HTTPTransport', lambda **_: httpx.MockTransport(respond))
+            with participant_entry.connected_participant_release(
+                    retained=retained, initial=predecessor, expected=predecessor,
+                    bindings=bindings, shared_state=state, kube=kube, kubeconfig=kubeconfig,
+                    executable=Path('/usr/bin/kubectl'), operator_credentials=operator,
+                    private_files={kubeconfig: kubeconfig.read_bytes(), operator: operator.read_bytes()},
+                    ssl_context=ssl.create_default_context(), token='test-operator-token') as delivery:
+                before_writes = list(writes)
+                delivery.pool.under_guard(kube, retained.release)
+                delivery.writer.apply_file('20-database.yaml')
+                with delivery.writer.open_creation('pre-upgrade-backup') as api:
+                    assert api.client.headers['Authorization'] == 'Bearer test-operator-token'
+                    assert api.get_resource(api.document) is None
+                selected_guard['status'] = 'foreign'
+                with pytest.raises(ValueError, match='preserve'):
+                    delivery.writer.apply_file('20-database.yaml')
+                with delivery.writer.open_creation('pre-upgrade-backup') as api:
+                    with pytest.raises(ValueError, match='preserve'):
+                        api.get_resource(api.document)
+                selected_guard['status'] = 'held'
+                assert writes == before_writes and pool_state.effects == effects
+                observer_client = delivery.qualifier.observer.client
+            assert observer_client.is_closed
 
 
 def _exercise_recovery_writer_census(kwargs, state, transport, inventory, kinds, calls, mode, replace_live, forward_api):

@@ -609,26 +609,31 @@ def test_latest_participant_head_advances_only_from_exact_completed_predecessor(
 @pytest.mark.parametrize('failure', [None, 'before-promotion', 'after-promotion'])
 def test_deployment_reports_success_only_after_history_promotion(
         operation_inputs, connection, tmp_path, monkeypatch, failure):
+    from scripts.ops import nebius_pool_participant_entry as entry
     from scripts.ops.nebius_pool_participant_completion import (
         initialize_participant_head,
         load_participant_head,
         promote_participant_head,
     )
 
+    assert hasattr(entry, 'run_participant_release'), 'protected delivery does not finalize actual rollout history'
     retained = connection[0].retained
     options = dict(initial=operation_inputs['predecessor'], state_root=retained.state_dir.parent,
         anchor_dir=retained.anchor_dir)
     initialize_participant_head(**options)
-    original_rollout = idle.rollout
     finalized, statuses, arguments = [], [], []
 
-    def finalize():
+    def promote(**kwargs):
         finalized.append(True)
         if failure == 'before-promotion' and len(finalized) == 1:
             raise ValueError('simulated promotion failure')
-        promote_participant_head(**options, expected=options['initial'], reference=retained.reference)
+        result = promote_participant_head(**kwargs)
         if failure == 'after-promotion' and len(finalized) == 1:
             raise ValueError('simulated promotion acknowledgement loss')
+        return result
+
+    monkeypatch.setattr(entry, 'promote_participant_head', promote)
+    original_rollout = idle.rollout
 
     def connected(args, **kwargs):
         arguments.append((args, kwargs))
@@ -644,7 +649,12 @@ def test_deployment_reports_success_only_after_history_promotion(
 
         with monkeypatch.context() as patch:
             patch.setattr(idle, 'github', report)
-            return original_rollout(args, participant_finalize=finalize, **kwargs)
+            patch.setattr(idle, 'rollout', original_rollout)
+            kube = connection[0].kube
+            kube.kubeconfig = args.kubeconfig
+            return entry.run_participant_release(args, retained=retained,
+                initial=options['initial'], expected=options['initial'],
+                pool=kwargs['pool'], writer=kwargs['candidate_writer'], kube=kube)
 
     monkeypatch.setattr(idle, 'rollout', connected)
     if failure:
