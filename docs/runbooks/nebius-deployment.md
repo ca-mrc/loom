@@ -2670,6 +2670,11 @@ partly updated cluster or choose another publication of the same commit. The
 concrete phase-aware pool adapter, completed-release predecessor promotion and
 protected delivery entry remain required before operational use. Local retained
 inputs are not publication approval or installed readiness.
+The shared rollout records the pre-upgrade backup Job name before creation and
+rechecks guard ownership before that write. A failed or unconfirmed backup keeps
+the shared release's pause for recovery, even before registry refresh starts.
+That dispatch record is not a UID-bound Job lineage receipt or permission to
+recreate an uncertain backup; those remain part of the protected parent connection.
 Do not invoke refresh directly against the live database,
 remove global settings to pass the standalone deployer, or release a local idle
 guard using a capacity sample taken before the participant was reopened.

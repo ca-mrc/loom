@@ -1130,11 +1130,16 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None,
             mutation_started = True
 
         if state["backup_required"]:
-            phase("pre-upgrade-backup")
             backup_name = (
                 "loom-predeploy-" + manifest["candidate_sha"][:12] + "-" + uuid.uuid4().hex[:8]
             )
             evidence["backup_job"] = backup_name
+            if pool is not None:
+                # Backup creation can commit before its response is lost. The
+                # shared release must retain its pause even before pool refresh,
+                # and must still own that pause immediately before dispatch.
+                before_write()
+            phase("pre-upgrade-backup")
             kube.run("create", "job", backup_name, "--from=cronjob/loom-platform-backup", "-n", ns)
             wait_for_job(kube, backup_name, ns, 1860)
         if retire_target is not None:
