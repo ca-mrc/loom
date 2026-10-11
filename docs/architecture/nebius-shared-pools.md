@@ -1396,6 +1396,13 @@ undoes the transaction; there is no public refresh API or implicit commit.
 The normal-release projection derives the successor catalog from actual candidate
 platform templates, using the same catalog derivation as initial staging
 attachment. It does not fabricate a live observation to qualify new templates.
+When normal delivery renders an isolated selected commit, projection accepts a
+copy of those exact files instead of re-rendering with the operator's source.
+The shared disk/in-memory validator checks phase names, unique resource identities,
+namespace scope and target-bound admission policy. Projection additionally binds
+the persisted environment, complete runtime profile and public keyring. These
+checks are not publication or deployment authorization; the protected parent must
+retain the source-qualified input together with its release history.
 The current namespace identities, global participant settings, management origin
 and persisted environment/keyring must match the retained registration. New
 CP/API/ordinary and guest actuator templates retain the shared machine identity,

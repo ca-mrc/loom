@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid5
 
+from scripts.ops.deploy_nebius_platform import validate_render
 from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
 from scripts.ops.nebius_pool_migration import PoolMigrationRequest, migration_contract
 from scripts.ops.nebius_pool_runtime import (
@@ -53,7 +54,8 @@ def _body(document: dict[str, Any]) -> dict[str, Any]:
 
 def _prepare(*, previous: PoolMigrationRequest, current: tuple[dict[str, Any], ...],
         config: dict[str, Any], candidate: dict[str, Any], runtime_profile: ServiceExecutionRuntimeProfileV1,
-        operation_id: UUID, management_origin: str, repo_root: Path) -> PreparedParticipantRelease:
+        operation_id: UUID, management_origin: str, repo_root: Path,
+        rendered_files: dict[str, list[dict[str, Any]]] | None) -> PreparedParticipantRelease:
     migration_contract(previous)
     spec = PoolInstallation.model_validate(previous.registration.spec.model_dump())
     selected, = (row for row in spec.participants if row.environment_class == 'staging')
@@ -114,9 +116,16 @@ def _prepare(*, previous: PoolMigrationRequest, current: tuple[dict[str, Any], .
     for target in successor['targets']:
         target['profile_id'] = str(uuid5(operation_id, target['profile_id']))
     participant = PoolParticipantV1.model_validate(successor)
-    files = build_platform(copy.deepcopy(config), candidate, runtime_profile.model_dump(mode='json'),
+    files = (build_platform(copy.deepcopy(config), candidate, runtime_profile.model_dump(mode='json'),
         spec.profiles.image_admission_keyring, repo_root=repo_root)
+        if rendered_files is None else copy.deepcopy(rendered_files))
+    _, rendered_config, _ = validate_render(files)
     desired = {_key(row): row for group in files.values() for row in group}
+    rendered_data = desired[platform_key]['data']
+    if (rendered_config != config
+            or json.loads(rendered_data['profile.json']) != runtime_profile.model_dump(mode='json')
+            or json.loads(rendered_data['keyring.json']) != spec.profiles.image_admission_keyring):
+        raise ValueError
     profiles, actuators = derive_staging_profiles(participant=participant, data=desired[platform_key]['data'],
         runtime_profile=runtime_profile, node_group_id=spec.node_group_id,
         deployments={row['metadata']['name']: row for row in desired.values()
@@ -189,10 +198,12 @@ def _prepare(*, previous: PoolMigrationRequest, current: tuple[dict[str, Any], .
 
 def prepare_staging_pool_release(*, previous: PoolMigrationRequest, current: tuple[dict[str, Any], ...],
         config: dict[str, Any], candidate: dict[str, Any], runtime_profile: ServiceExecutionRuntimeProfileV1,
-        operation_id: UUID, management_origin: str, repo_root: Path) -> PreparedParticipantRelease:
+        operation_id: UUID, management_origin: str, repo_root: Path,
+        rendered_files: dict[str, list[dict[str, Any]]] | None = None) -> PreparedParticipantRelease:
     try:
         return _prepare(previous=previous, current=current, config=config, candidate=candidate,
-            runtime_profile=runtime_profile, operation_id=operation_id, management_origin=management_origin, repo_root=repo_root)
+            runtime_profile=runtime_profile, operation_id=operation_id, management_origin=management_origin,
+            repo_root=repo_root, rendered_files=rendered_files)
     except Exception:
         raise ValueError('pool participant release unqualified') from None
 

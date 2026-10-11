@@ -162,6 +162,26 @@ def load_render(
         filename: list(yaml.safe_load_all((render_dir / filename).read_text()))
         for filename in PHASE_FILES
     }
+    policy_file = render_dir / "00-task-identity-policy.yaml"
+    if policy_file.exists():
+        files[policy_file.name] = list(yaml.safe_load_all(policy_file.read_text()))
+    return validate_render(files)
+
+
+def validate_render(
+    files: dict[str, list[dict[str, Any]]],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, list[dict[str, Any]]]]:
+    """Validate in-memory candidate files without re-rendering or changing them.
+
+    This establishes render scope, not source/publication or deployment authority.
+    Both disk loading and shared-release projection use the same boundaries.
+    """
+    if not set(PHASE_FILES) <= files.keys() <= set(PHASE_FILES) | {"00-task-identity-policy.yaml"}:
+        raise DeploymentError("candidate render has unexpected or missing phases")
+    identities = [(row["kind"], row["metadata"].get("namespace"), row["metadata"]["name"])
+                  for rows in files.values() for row in rows]
+    if len(identities) != len(set(identities)):
+        raise DeploymentError("candidate resource identity is ambiguous")
     configs = [
         row
         for row in files["10-config-network.yaml"]
@@ -171,18 +191,15 @@ def load_render(
         raise DeploymentError("platform configuration identity is ambiguous")
     config = json.loads(configs[0]["data"]["environment.json"])
     validate_environment(config)
-    policy_file = render_dir / "00-task-identity-policy.yaml"
     if config.get("task_identity_policy") is not None:
-        try:
-            policy_docs = list(yaml.safe_load_all(policy_file.read_text()))
-        except OSError as exc:
-            raise DeploymentError("task identity policy artifact is missing") from exc
+        policy_docs = files.get("00-task-identity-policy.yaml")
+        if policy_docs is None:
+            raise DeploymentError("task identity policy artifact is missing")
         if policy_docs != identity_policy_documents(config["execution_namespace"], config["target_id"],
                 guest_target_id=config.get("guest_execution_target", {}).get("target_id"),
                 emulated_auth_target_id=config.get("emulated_auth_execution_target", {}).get("target_id")):
             raise DeploymentError("task identity policy differs from the target-bound contract")
-        files[policy_file.name] = policy_docs
-    elif policy_file.exists():
+    elif "00-task-identity-policy.yaml" in files:
         raise DeploymentError("task identity policy requires an explicit target configuration")
     execution_namespaces = [row for row in files["00-namespaces.yaml"]
                             if row["kind"] == "Namespace" and row["metadata"]["name"] == config["execution_namespace"]]
