@@ -6281,7 +6281,7 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
             external_mode['hook'] = lambda: resources[reader_key]['metadata'].update(uid=str(uuid4()))
             with pytest.raises(ValueError, match='preserve'):
                 external()
-            resources[reader_key] = original_reader
+            resources[reader_key] = copy.deepcopy(original_reader)
             original_connection = observer.api_server
             external_mode['hook'] = lambda: setattr(observer, 'api_server', 'https://foreign.invalid')
             reads_before = len(provider_reads)
