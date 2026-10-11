@@ -1300,6 +1300,24 @@ the reads, including terminal recovery replay. This observation performs no
 write and proves neither restored runtime health nor whole-pool writer/provider
 qualification; those remain separate protected-parent requirements.
 
+Restored target-mode collector publication has a separate read-only controller
+probe. Its input is public source-qualified target specifications, physical
+node-group/quota identities and the completed collector's publication receipt.
+A fresh nonce/HMAC binds the controller's actual effective database URL without
+putting credentials in arguments or output. The fixed command uses the existing
+target-family resolver and latest-observation ordering in a bounded, PostgreSQL
+read-only repeatable-read transaction. The immutable row, receipt, payload hash,
+indexed columns and complete target family must agree. Freshness uses the current
+capacity policy and database clock, including the existing 60-second future
+allowance; no new capacity limit or recovery-specific freshness policy is added.
+Missing, superseded, future or stale publication is pending, while mismatched identity
+or contents rejects qualification. A valid observation of exhausted quota or
+zero workers remains a successful collection, not an admission decision.
+Controller and database process identities, pinned credentials and input scope
+are checked on both sides of the probe, including pending results. This primitive
+does not by itself establish completed CronJob/Job/Pod/configuration lineage;
+the recovery observer must bind that evidence before using publication health.
+
 Authenticated Kubernetes/worker identity and capacity observations remain
 mandatory. Detailed kubelet samples retain the existing optional-telemetry
 contract; unavailable samples are not zero usage or evidence of certificate trust.
