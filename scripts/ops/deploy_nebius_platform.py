@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import re
@@ -17,7 +18,7 @@ import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import yaml  # type: ignore[import-untyped]
 
@@ -28,6 +29,9 @@ if __package__ in {None, ""}:
 
 from loom.nebius_platform_render import canonical, validate_environment  # noqa: E402
 from loom.nebius_task_identity_policy import identity_policy_documents  # noqa: E402
+
+if TYPE_CHECKING:
+    from scripts.ops.nebius_pool_participant_release import PreparedParticipantRelease
 
 PHASE_FILES = (
     "00-namespaces.yaml",
@@ -50,6 +54,66 @@ class TaskIdentityPolicyDeniedError(DeploymentError):
     def __init__(self, policy_name: str):
         self.policy_name = policy_name
         super().__init__("task identity policy rejected the admission probe")
+
+
+class ParticipantRolloutAPI(Protocol):
+    """Protected pool I/O owned by a source/history-bound release operation.
+
+    This internal interface does not authorize a caller or expose a CLI bypass.
+    The concrete adapter must retain child intent before writes and reconcile
+    uncertain outcomes without replaying mutations. Every method must qualify
+    the exact supplied release, not reinterpret current resources as its source.
+    """
+
+    def preflight(self, kube: Kubectl, release: PreparedParticipantRelease) -> None:
+        """Qualify publication/history, full live inventory and manager compatibility."""
+        ...
+
+    def under_guard(self, kube: Kubectl, release: PreparedParticipantRelease) -> None:
+        """Fresh phase-aware qualification; no effects or historical read reuse."""
+        ...
+
+    def activate(self, kube: Kubectl, release: PreparedParticipantRelease) -> Literal["ready", "busy"]:
+        """Fence only this participant, stage registry/catalog and ready the manager.
+
+        Busy requires positive proof that fence changed nothing and no subsequent
+        phase was dispatched. Unknown/pending effects must raise, never return busy.
+        Recovery reads retained child outcomes before any permitted next effect.
+        """
+        ...
+
+    def finish(self, kube: Kubectl, release: PreparedParticipantRelease) -> None:
+        """Qualify current shared workloads, reopen and prove fresh post-open capacity."""
+        ...
+
+
+def _participant_release_binding(release: PreparedParticipantRelease, manifest: dict[str, Any],
+        config: dict[str, Any], files: dict[str, list[dict[str, Any]]]) -> bytes:
+    """Bind this parent to exactly the source-derived shared candidate files."""
+    from scripts.ops.nebius_ingress_stage import _key
+    from scripts.ops.nebius_pool_migration import migration_contract
+    from scripts.ops.nebius_pool_participant_release import PreparedParticipantRelease
+
+    from loom_service.pool_management.participant_refresh import PoolParticipantRefresh
+
+    try:
+        if not isinstance(release, PreparedParticipantRelease):
+            raise ValueError
+        refresh = PoolParticipantRefresh.model_validate(release.refresh.model_dump())
+        migration = migration_contract(release.migration)
+        participant, = (row for row in refresh.after.participants if row.participant_id == refresh.participant_id)
+        guard, = (row for row in release.migration.guards if row.participant_id == refresh.participant_id)
+        if (release.migration.registration.spec != refresh.after or files != release.files
+                or manifest['candidate_sha'] != release.migration.registration.candidate['candidate_sha']
+                or (config['namespace'], config['execution_namespace'], config['cluster_id']) != (
+                    guard.namespace, participant.execution_namespace.name, refresh.after.cluster_id)
+                or participant.environment_class != 'staging'
+                or release.preserved.keys() & {_key(row) for group in files.values() for row in group}):
+            raise ValueError
+        return canonical({'refresh': refresh.model_dump(mode='json'), 'migration': migration,
+            'files': release.files, 'preserved': release.preserved})
+    except Exception:
+        raise DeploymentError('shared candidate does not match its protected release') from None
 
 
 def load_render(
@@ -528,6 +592,12 @@ def preflight(
     verify_cluster_identity(kube, config, expected_cluster_id)
     verify_ingress_mode(kube, config)
     verify_standalone_pool_boundary(kube, config, completions=pool_completions)
+    return _platform_prerequisites(kube, manifest, config, files)
+
+
+def _platform_prerequisites(kube: Kubectl, manifest: dict[str, Any], config: dict[str, Any],
+        files: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+    """Common checks only; the caller must qualify its standalone/shared mode."""
     for (namespace, secret), required in sorted(secret_requirements(files, config).items()):
         # Return only names of populated keys, never secret values.
         observed = kube.run(
@@ -829,7 +899,12 @@ def _rollout_candidate_files(*, kube: Kubectl, manifest: dict[str, Any], config:
     verify_deployed_images(kube, files)
 
 
-def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str, Any]:
+def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None,
+        participant_release: PreparedParticipantRelease | None = None,
+        pool: ParticipantRolloutAPI | None = None) -> dict[str, Any]:
+    if (participant_release is None) != (pool is None):
+        raise DeploymentError('shared release and protected adapter must be supplied together')
+    participant_release = copy.deepcopy(participant_release)
     snapshot = tempfile.TemporaryDirectory(prefix="loom-nebius-deploy-")
     snapshot_root = Path(snapshot.name)
     args.evidence_dir.mkdir(parents=True, exist_ok=True)
@@ -849,6 +924,13 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
         raise DeploymentError("invalid rollout guard owner")
     if resume_owner:
         evidence["guard_owner"] = guard_owner
+    if participant_release is not None:
+        shared_owner = 'rollout-' + participant_release.refresh.after.operation_id.hex
+        if ((resume_owner is not None and resume_owner != shared_owner)
+                or (getattr(args, 'guard_owner', None) is not None and args.guard_owner != shared_owner)
+                or getattr(args, 'retire_target', None) is not None):
+            raise DeploymentError('shared release differs from its guard or target scope')
+        guard_owner = shared_owner
     guard_acquired = False
     mutation_started = False
 
@@ -878,7 +960,27 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
         kube = kube or Kubectl(args.kubeconfig)
         phase("preflight")
         pool_completions: dict[str, dict[str, Any]] = {}
-        state = preflight(kube, manifest, config, files, args.expected_cluster_id, pool_completions=pool_completions)
+        release_binding: bytes | None = None
+
+        def check_release() -> None:
+            if participant_release is not None and _participant_release_binding(participant_release, manifest, config, files) != release_binding:
+                raise DeploymentError('shared release changed during rollout')
+
+        if pool is None:
+            state = preflight(kube, manifest, config, files, args.expected_cluster_id, pool_completions=pool_completions)
+        else:
+            assert participant_release is not None
+            release_binding = _participant_release_binding(participant_release, manifest, config, files)
+            verify_cluster_identity(kube, config, args.expected_cluster_id)
+            verify_ingress_mode(kube, config)
+            pool.preflight(kube, copy.deepcopy(participant_release))
+            check_release()
+            state = _platform_prerequisites(kube, manifest, config, files)
+            if not state['database_exists']:
+                raise DeploymentError('shared release requires its existing participant database')
+            evidence['pool_refresh'] = {'operation_id': str(participant_release.refresh.after.operation_id),
+                'participant_id': str(participant_release.refresh.participant_id),
+                'pool_id': str(participant_release.refresh.after.pool_id)}
         evidence["preflight"] = state
         retire_target = getattr(args, "retire_target", None)
         current = kube.get("configmap", "loom-platform-config", config["namespace"])
@@ -925,7 +1027,13 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
             # A same-candidate ingress cutover may have finished after preflight
             # but before we acquired the shared rollout guard.
             verify_ingress_mode(kube, config)
-            verify_standalone_pool_boundary(kube, config, completions=pool_completions, allow_load=False)
+            if pool is None:
+                verify_standalone_pool_boundary(kube, config, completions=pool_completions, allow_load=False)
+            else:
+                assert participant_release is not None
+                check_release()
+                pool.under_guard(kube, copy.deepcopy(participant_release))
+                check_release()
             current = kube.get("configmap", "loom-platform-config", ns)
             validate_target_replacement(current, config, retire_target)
             if retire_target is not None and canonical(current.get("data", {})) != replacement_source:
@@ -948,6 +1056,8 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
 
         def before_write() -> None:
             nonlocal mutation_started
+            if pool is not None and observe_rollout_guard(kube, ns, guard_owner, manifest['candidate_sha'])['status'] != 'held':
+                raise DeploymentError('shared release no longer owns its idle guard')
             mutation_started = True
 
         if state["backup_required"]:
@@ -965,13 +1075,37 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
             phase("retire-previous-target")
             execution_target_action(kube, ns, "retire", retire_target, config["target_id"])
             evidence["target_replacement"]["previous_target_retired"] = True
+        if pool is not None:
+            assert participant_release is not None and guard_acquired
+            check_release()
+            # Any lost pool-write response must retain the original idle guard.
+            before_write()
+            phase('shared-pool-refresh')
+            readiness = pool.activate(kube, copy.deepcopy(participant_release))
+            check_release()
+            if readiness == 'busy':
+                pool.under_guard(kube, copy.deepcopy(participant_release))
+                check_release()
+                rollout_guard(kube, ns, 'release', guard_owner, manifest['candidate_sha'])
+                guard_acquired = False
+                evidence['status'] = 'skipped_busy'
+                return evidence
+            if readiness != 'ready':
+                raise DeploymentError('shared pool refresh outcome unconfirmed')
         if config.get("task_identity_policy") is not None:
-            mutation_started = True
+            before_write()
             phase("install-and-verify-task-identity-policy")
             install_task_identity_policy(kube, config, snapshot_root)
         _rollout_candidate_files(kube=kube, manifest=manifest, config=config, files=files,
             snapshot_root=snapshot_root, retry_failed_jobs=args.retry_failed_jobs,
             phase=phase, before_write=before_write)
+        if pool is not None:
+            assert participant_release is not None and guard_acquired
+            check_release()
+            before_write()
+            phase('shared-pool-reopen-and-capacity')
+            pool.finish(kube, copy.deepcopy(participant_release))
+            check_release()
         if retire_target is not None:
             phase("target-replacement-readback")
             execution_target_action(kube, ns, "verify", retire_target, config["target_id"])

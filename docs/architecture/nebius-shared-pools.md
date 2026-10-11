@@ -1415,10 +1415,19 @@ read, not current registry state. The catalog projection changes only the manage
 catalog mount reference, preserving its executable, credentials and other settings;
 the parent still owns compatibility qualification and restart/readiness checks.
 
-This transaction does not establish rollout ownership, source publication,
-Kubernetes readiness or recovery authority. The protected normal-rollout parent
-must connect those checks, catalog mounting/manager restart, schema/configuration
-Jobs and participant workload updates before this is an operational route.
+The existing deploy parent has an internal shared-release path paired with a
+protected pool I/O adapter. It binds the exact projected files and release/guard
+identity, retains the ordinary backup/schema/configuration/workload sequence,
+and checks current guard ownership before shared mutation phases and reopening. Unknown
+pool effects or stale post-open capacity retain the guard for the original
+candidate's roll-forward recovery. A busy result may release it only when the
+adapter positively proves the fence changed nothing and no later phase began.
+No CLI mode disables the standalone boundary.
+
+The transaction and parent interface do not establish publication, history,
+Kubernetes readiness or recovery authority on their own. The concrete protected
+adapter and normal workflow must still connect those checks, catalog mounting/
+manager restart and fixed child journals before this is an operational route.
 Fence, catalog staging and reopening each invalidate prior capacity captures;
 the parent must wait for a fresh capture after reopening before releasing the
 local idle guard. Other participants retain their grants/activation plans, and
