@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -464,11 +465,30 @@ def test_shared_delivery_uses_published_schema_and_scoped_ancestry_without_git(
 def test_operator_host_executes_retained_source_without_runner_paths_or_github(
         operation_inputs, connection, tmp_path, monkeypatch, recovery):
     from scripts.ops import nebius_pool_participant_entry as entry
+    from scripts.ops import nebius_shared_pool_entry as shared_entry
     from scripts.ops.nebius_pool_participant_completion import initialize_participant_head
 
-    assert callable(getattr(entry.ParticipantReleaseConnection, 'execute', None)), 'operator host cannot consume the retained release'
+    from loom.nebius_kubernetes import NebiusKubernetesConnection
+
+    assert callable(getattr(entry, 'execute_retained_participant_release', None)), 'host release intake is not connected'
     retained, initial = connection[0].retained, operation_inputs['predecessor']
     initialize_participant_head(initial=initial, state_root=retained.state_dir.parent, anchor_dir=retained.anchor_dir)
+    ca, credential = (tmp_path / name for name in ('current-ca.pem', 'current-operator.json'))
+    for path in (ca, credential):
+        path.write_bytes(b'current-private-test-material')
+        path.chmod(0o600)
+    operator = NebiusKubernetesConnection(endpoint=retained.inputs.config['kubernetes_api_server'],
+        ca_file=ca, credentials_file=credential)
+    historical = SimpleNamespace(bindings=object(), files={path: path.read_bytes() for path in initial.history})
+    shared_operation = tmp_path / 'original-shared-operation.json'
+
+    def shared_history(**kwargs):
+        assert kwargs == {'operation_path': shared_operation, 'operation_sha256': 'c' * 64}
+        # This lifecycle fixture supplies the parent's qualified initial history;
+        # real semantic handoff loading has separate coverage, not a fake receipt.
+        return historical, initial
+
+    monkeypatch.setattr(shared_entry, 'load_completed_history', shared_history)
     original = idle.rollout
     paths, completed, arguments = [], [], []
 
@@ -481,6 +501,16 @@ def test_operator_host_executes_retained_source_without_runner_paths_or_github(
         qualifier = SimpleNamespace(retained=retained, initial=initial, kube=kube,
             kubeconfig=kube.kubeconfig, candidate_follows=lambda *_: True)
         delivery = entry.ParticipantReleaseConnection(qualifier, initial, kwargs['pool'], kwargs['candidate_writer'])
+
+        @contextmanager
+        def authenticated(**options):
+            assert options['retained'] == retained and options['initial'] == initial
+            assert options['expected'] == initial and options['bindings'] is historical.bindings
+            assert options['shared_state'] == initial.state_dir
+            assert options['operator_connection'] == operator
+            assert options['operator_credentials'] == credential
+            assert options['private_files'] == {**historical.files, ca: ca.read_bytes(), credential: credential.read_bytes()}
+            yield delivery
 
         def deployed(host_args, **host_kwargs):
             paths.append(host_args.publication_dir)
@@ -498,8 +528,12 @@ def test_operator_host_executes_retained_source_without_runner_paths_or_github(
             patch.setattr(idle, 'rollout', deployed)
             patch.setattr(idle, 'candidate_follows', lambda *_: pytest.fail('host has no Git checkout'))
             patch.setattr(idle, 'candidate_schema_head', lambda *_: pytest.fail('host has no migrations checkout'))
+            patch.setattr(entry, 'authenticated_participant_release', authenticated)
             try:
-                result = delivery.execute(recovery=incoming)
+                result = entry.execute_retained_participant_release(reference=retained.reference,
+                    shared_operation=shared_operation, shared_operation_sha256='c' * 64,
+                    state_root=retained.state_dir.parent, anchor_dir=retained.anchor_dir,
+                    operator_connection=operator, executable=tmp_path / 'kubectl', recovery=incoming)
                 completed.append(result)
             finally:
                 assert not paths[-1].exists(), 'private temporary publication survived the host call'
@@ -510,6 +544,64 @@ def test_operator_host_executes_retained_source_without_runner_paths_or_github(
         operation_inputs, connection, tmp_path, monkeypatch, recover=recovery, file_writes=True, host_delivery=True)
     assert completed[-1]['status'] == 'complete'
     assert all(not path.exists() for path in paths)
+
+
+@pytest.mark.parametrize('damage', ['shared-history', 'inputs', 'predecessor', 'credential-public',
+    'credential-symlink', 'credential-history-alias', 'changed-history', 'changed-credential'])
+def test_host_intake_requires_original_history_and_current_private_material(operation_inputs, tmp_path, monkeypatch, damage):
+    from scripts.ops import nebius_pool_participant_entry as entry
+    from scripts.ops import nebius_shared_pool_entry as shared_entry
+
+    from loom.nebius_kubernetes import NebiusKubernetesConnection
+
+    assert callable(getattr(entry, 'execute_retained_participant_release', None)), 'host release intake is not connected'
+    retained = operation.retain_participant_rollout(**operation_inputs)
+    initial = operation_inputs['predecessor']
+    history, = initial.history
+    ca, credential = (tmp_path / name for name in ('current-ca.pem', 'current-operator.json'))
+    for path in (ca, credential):
+        path.write_bytes(b'current-private-test-material')
+        path.chmod(0o600)
+    if damage == 'credential-public':
+        credential.chmod(0o644)
+    elif damage == 'credential-symlink':
+        original = credential
+        credential = tmp_path / 'credential-link'
+        credential.symlink_to(original)
+    elif damage == 'credential-history-alias':
+        credential = history
+    elif damage == 'inputs':
+        (retained.state_dir / 'inputs.json').unlink()
+    elif damage == 'predecessor':
+        initial = replace(initial, migration=replace(initial.migration, guards=()))
+    operator = NebiusKubernetesConnection(endpoint=retained.inputs.config['kubernetes_api_server'],
+        ca_file=ca, credentials_file=credential)
+    historical = SimpleNamespace(bindings=object(), files={history: history.read_bytes()})
+
+    def shared_history(**kwargs):
+        if damage == 'shared-history':
+            raise ValueError('private-semantic-history-error')
+        return historical, initial
+
+    calls = []
+
+    @contextmanager
+    def authenticated(**options):
+        assert damage in {'changed-history', 'changed-credential'}, 'invalid selection reached authentication'
+        target = history if damage == 'changed-history' else credential
+        target.write_bytes(b'changed-after-input-read')
+        yield SimpleNamespace(execute=lambda **kwargs: calls.append(kwargs))
+
+    monkeypatch.setattr(shared_entry, 'load_completed_history', shared_history)
+    monkeypatch.setattr(entry, 'authenticated_participant_release', authenticated)
+    monkeypatch.setattr(operation, 'retain_participant_rollout', lambda **_: pytest.fail('execution cannot recapture a release'))
+    with pytest.raises(ValueError, match='participant') as error:
+        entry.execute_retained_participant_release(reference=retained.reference,
+            shared_operation=tmp_path / 'original-shared-operation.json', shared_operation_sha256='c' * 64,
+            state_root=retained.state_dir.parent, anchor_dir=retained.anchor_dir,
+            operator_connection=operator, executable=tmp_path / 'kubectl')
+    assert 'private-semantic-history-error' not in str(error.value)
+    assert not calls and not (retained.state_dir / 'deployment-evidence').exists()
 
 
 @pytest.mark.parametrize('damage', ['reference', 'candidate', 'previous', 'guard', 'cluster', 'namespace', 'automatic', 'automatic-type'])
