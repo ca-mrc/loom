@@ -787,11 +787,24 @@ def test_connected_shared_parent_gates_real_guard_acquisition_and_unknown_replie
     def connect():
         connection = module.HTTPSSharedPoolOperationAPI(**kwargs)
         connection.client.close()
-        connection.client = httpx.Client(base_url=connection.api_server, transport=httpx.MockTransport(handle))
+        connection.client = type(connection.client)(base_url=connection.api_server, transport=httpx.MockTransport(handle))
         # Teach the external kubectl fixture the parent's freshly generated
         # private connection. Keep the actual parent-owned guard adapter intact.
-        guard.prefix = list(connection.prefix)
+        guard.prefix = list(connection.guards.prefix)
         return connection
+
+    def run(api):
+        try:
+            return parent.run_shared_pool_operation(**args, bindings=bindings, api=api, action='install')
+        except ValueError as exc:
+            import traceback
+
+            frames, cause = [], exc
+            while cause is not None:
+                frames.extend(f'{Path(frame.filename).name}:{frame.lineno}:{frame.name}'
+                    for frame in traceback.extract_tb(cause.__traceback__))
+                cause = cause.__context__
+            raise ValueError('connected parent failure at ' + ', '.join(frames)) from None
 
     with connect() as api:
         model.busy = bindings.migration.guards[0].namespace
@@ -801,7 +814,7 @@ def test_connected_shared_parent_gates_real_guard_acquisition_and_unknown_replie
                 parent.run_shared_pool_operation(**args, bindings=bindings, api=api, action='install')
             failures.clear()
             assert not model.acquires and not model.held
-        result = parent.run_shared_pool_operation(**args, bindings=bindings, api=api, action='install')
+        result = run(api)
         assert result['status'] == 'pending' and result['phase'] == 'forward-guards'
         assert seen == {'publication', 'provider', 'writers', 'processes'}
         assert model.acquires == [bindings.migration.guards[0].namespace]
@@ -824,6 +837,113 @@ def test_connected_shared_parent_gates_real_guard_acquisition_and_unknown_replie
         with pytest.raises(ValueError):
             parent.run_shared_pool_operation(**args, bindings=bindings, api=api, action='install')
         assert model.acquires == attempts
+
+
+def test_connected_shared_parent_forward_completion_requires_current_health(shared_operation, tmp_path, monkeypatch):
+    """Real final child and parent; preceding effects and component observation boundaries are fixtures."""
+    import ssl
+    from types import SimpleNamespace
+
+    from scripts.ops import nebius_certificates as private_state
+    from scripts.ops import nebius_shared_pool_api as module
+    from scripts.ops import nebius_shared_pool_operation as parent
+    from scripts.ops.nebius_development_runtime_install import _read
+
+    args, bindings = shared_operation
+    manager = args['runtime'].database.manager.retained.request.retained
+    state = Path(manager.operation['state_dir']).parent / 'shared-pool-handoff'
+    predecessor = SharedPhaseAPI(parent)
+    predecessor.prepare_failure = ('forward-activate', 'before')
+    with pytest.raises(ValueError):
+        parent.run_shared_pool_operation(**args, bindings=bindings, api=predecessor, action='install')
+    # Represent the already tested opening's completed remote effect, keeping
+    # its actual semantic receipt and parent checksum validation in this test.
+    activation = state / 'forward-activate'
+    module.activation.prepare_shared_pool_activation(bindings=bindings, state_dir=activation)
+    opened = _read(activation / 'activation.json')
+    opened['opening'] = 'opened'
+    for row in opened['guards'].values():
+        row['release'] = 'released'
+    private_state._atomic_json(activation / 'activation.json', opened)
+    frame = _read(state / 'operation.json')
+    frame['forward']['forward-activate'].update(status='complete', files=parent._files(activation))
+    private_state._atomic_json(state / 'operation.json', frame)
+    operator = tmp_path / 'forward-operator'
+    operator.write_bytes(b'private-forward-test')
+    operator.chmod(0o600)
+    mode = {'damage': None}
+
+    async def publication(**options):
+        assert options['request'] == args['runtime']
+
+    async def provider(**options):
+        assert options['runtime'] == args['runtime']
+        return SimpleNamespace(plan=bindings.plan)
+
+    def processes(**options):
+        assert options['bindings'] == bindings and options['state_dir'] == state
+        if mode['damage'] == 'unhealthy':
+            raise ValueError('simulated failed current process challenge')
+        if mode['damage'] == 'receipt':
+            path = state / 'forward-verify/verify.json'
+            path.write_bytes(path.read_bytes() + b'\n')
+        return module.SharedPoolForwardProcessObservation(bindings,
+            'closed' if mode['damage'] == 'closed' else 'global',
+            {target.namespace: 'held' if mode['damage'] == 'held' else 'open' for target in bindings.migration.guards},
+            'revoked', ('Deployment:loom-dev:loom-service',) if mode['damage'] == 'pending' else (), {}, bindings.input_digest)
+
+    monkeypatch.setattr(module, 'qualify_runtime_publication', publication)
+    monkeypatch.setattr(module, 'observe_shared_pool_provider', provider)
+    monkeypatch.setattr(module, 'observe_shared_pool_forward_writers', lambda **_: module.SharedPoolWriterObservation(
+        bindings.plan, '501', {}, {}, bindings.input_digest))
+    monkeypatch.setattr(module, 'observe_shared_pool_forward_processes', processes)
+
+    context = ssl.create_default_context(cadata=args['runtime'].database.foundation.bootstrap['material']['loom-platform-db']['ca.crt'])
+    with module.HTTPSSharedPoolOperationAPI(bindings=bindings, observation=args['observation'], repo_root=ROOT,
+            api_server=args['runtime'].database.foundation.inputs.config['kubernetes_api_server'], ssl_context=context,
+            token='operator-test', operator_credentials=operator, private_files={operator: operator.read_bytes()}) as api:
+        registry = api._registry()
+        for phase in parent.FORWARD_PHASES[:-2]:
+            def validate(*, state_dir, complete, bindings, prepared=False):
+                if prepared:
+                    predecessor.validate_prepared_phase(state_dir.name, state_dir)
+                else:
+                    predecessor.validate_phase(state_dir.name, state_dir, complete=complete)
+            registry[phase] = ((lambda **_: pytest.fail('completed predecessor must not be prepared again'), validate),)
+        monkeypatch.setattr(api, '_registry', lambda: registry)
+        # Effective permissions are exercised with real rule reviews in the
+        # connected recovery test; this test owns final phase/health composition.
+        monkeypatch.setattr(api, '_permissions', lambda *_, **__: None)
+        child = state / 'forward-verify'
+        api.prepare('forward-verify', bindings, child)
+        api.prepare('forward-verify', bindings, child)  # Interrupted local preparation is resumable.
+        assert _read(child / 'verify.json')['status'] == 'prepared'
+        frame['forward']['forward-verify']['status'] = 'started'
+        private_state._atomic_json(state / 'operation.json', frame)
+        with pytest.raises(ValueError):
+            api.validate_prepared_phase('forward-verify', child)  # Started authority cannot masquerade as unstarted.
+        raw = (child / 'verify.json').read_bytes()
+        for damage in ('pending', 'closed', 'held', 'unhealthy', 'receipt'):
+            mode['damage'] = damage
+            with pytest.raises(ValueError):
+                api.advance('forward-verify', bindings, child)
+            assert _read(child / 'verify.json')['status'] == 'prepared'
+            (child / 'verify.json').write_bytes(raw)
+        mode['damage'] = None
+        assert api.advance('forward-verify', bindings, child)
+        assert _read(child / 'verify.json')['status'] == 'observed'
+        result = parent.run_shared_pool_operation(**args, bindings=bindings, api=api, action='install')
+        assert result['status'] == 'shared_pool_handoff_complete'
+        assert result['admission_open'] and result['writer_migration_complete']
+        retained = {path: path.read_bytes() for path in state.rglob('*') if path.is_file()}
+        assert parent.run_shared_pool_operation(**args, bindings=bindings, api=api, action='preflight')['admission_open']
+        mode['damage'] = 'unhealthy'
+        with pytest.raises(ValueError):
+            parent.run_shared_pool_operation(**args, bindings=bindings, api=api, action='preflight')
+        for phase in api.supported_phases:
+            with pytest.raises(ValueError):
+                api.advance(phase, bindings, state / phase)
+        assert all(path.read_bytes() == value for path, value in retained.items())
 
 
 @pytest.mark.timeout(420)
@@ -3536,6 +3656,128 @@ def _exercise_recovery_processes(*, kwargs, state, api, documents, probes, mode,
         finally:
             captured.update(original)
             mode['process_hook'] = None
+        _exercise_connected_parent_terminal_recovery(kwargs=kwargs, state=state, documents=documents, mode=mode)
+
+
+def _exercise_connected_parent_terminal_recovery(*, kwargs, state, documents, mode):
+    """Real concrete replay, SQL/process readers and permission reviews; cloud/census I/O are controlled boundaries."""
+    import json
+    import ssl
+    from types import SimpleNamespace
+
+    import httpx
+    from scripts.ops import nebius_shared_pool_api as module
+    from scripts.ops.nebius_development_runtime_install import _read
+    from scripts.ops.nebius_shared_pool_handoff_live import (
+        SharedPoolWriterObservation,
+        _authority_roots,
+    )
+
+    bindings = kwargs['bindings']
+    request = kwargs['runtime']
+    authority = _authority_roots(bindings.plan)
+    for row in authority.values():
+        row['metadata'].setdefault('resourceVersion', '501')
+    reviews = []
+
+    def handle(message):
+        if message.method == 'GET':
+            plural = message.url.path.rsplit('/', 1)[-1]
+            kind = {'roles': 'Role', 'rolebindings': 'RoleBinding', 'clusterroles': 'ClusterRole',
+                'clusterrolebindings': 'ClusterRoleBinding'}[plural]
+            return httpx.Response(200, json={'apiVersion': 'rbac.authorization.k8s.io/v1', 'kind': kind + 'List',
+                'metadata': {'resourceVersion': '501'}, 'items': [row for row in authority.values() if row['kind'] == kind]})
+        assert message.method == 'POST' and message.url.path == '/apis/authorization.k8s.io/v1/selfsubjectrulesreviews'
+        principal = message.headers['Impersonate-User']
+        account_namespace, account = principal.split(':')[2:]
+        namespace = json.loads(message.content)['spec']['namespace']
+        reviews.append((account_namespace, account, namespace))
+        rules = []
+        # Simulate Kubernetes' effective rights from this independent fixture
+        # inventory; the production validator still sees actual review documents.
+        for binding in authority.values():
+            if binding['kind'] not in {'RoleBinding', 'ClusterRoleBinding'}:
+                continue
+            if binding['kind'] == 'RoleBinding' and binding['metadata']['namespace'] != namespace:
+                continue
+            if not any(subject['kind'] == 'ServiceAccount' and subject['name'] == account
+                    and subject['namespace'] == account_namespace for subject in binding.get('subjects', [])):
+                continue
+            reference = binding['roleRef']
+            selected = reference['kind'] + ':' + (binding['metadata']['namespace'] if reference['kind'] == 'Role' else '-') + ':' + reference['name']
+            rules.extend(copy.deepcopy(authority[selected]['rules']))
+        if mode.get('parent_permission_failure') == account:
+            rules.append({'apiGroups': ['batch'], 'resources': ['jobs'], 'verbs': ['deletecollection']})
+        return httpx.Response(201, json={'apiVersion': 'authorization.k8s.io/v1', 'kind': 'SelfSubjectRulesReview', 'spec': {},
+            'status': {'incomplete': False, 'evaluationError': '', 'resourceRules': rules, 'nonResourceRules': []}})
+
+    async def publication(**options):
+        assert options['request'] == request
+
+    async def provider(**options):
+        assert options['runtime'] == request and options['development'].shared_bindings == bindings
+        return SimpleNamespace(plan=bindings.plan)
+
+    def census(**options):
+        assert options['bindings'] == bindings and options['state_dir'] == state
+        return SharedPoolWriterObservation(bindings.plan, '501', {}, copy.deepcopy(authority), bindings.input_digest)
+
+    def active_child(**options):
+        pytest.fail('terminal replay must not construct active phase adapters')
+
+    operator = state.parent / 'terminal-operator-connection'
+    operator.write_bytes(b'private-terminal-operator')
+    operator.chmod(0o600)
+    context = ssl.create_default_context(cadata=request.database.foundation.bootstrap['material']['loom-platform-db']['ca.crt'])
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(module, 'qualify_runtime_publication', publication)
+        patch.setattr(module, 'observe_shared_pool_provider', provider)
+        patch.setattr(module, 'observe_shared_pool_recovery_writers', census)
+        for component, name in ((module.recovery_gateway, 'HTTPSSharedRecoveryGateway'),
+                (module.recovery_roles, 'HTTPSSharedRecoveryRoles'), (module.restart, 'HTTPSSharedRecoveryRestart')):
+            patch.setattr(component, name, active_child)
+        with module.HTTPSSharedPoolOperationAPI(bindings=bindings, observation=kwargs['observation'], repo_root=ROOT,
+                api_server=request.database.foundation.inputs.config['kubernetes_api_server'], ssl_context=context,
+                token='operator-test', operator_credentials=operator, private_files={operator: operator.read_bytes()}) as api:
+            api.client.close()
+            api.client = type(api.client)(base_url=api.api_server, transport=httpx.MockTransport(handle))
+            frame = _read(state / 'operation.json')
+            def qualify():
+                try:
+                    api.qualify(bindings, frame, recovering=True)
+                except ValueError as exc:
+                    import traceback
+
+                    frames, cause = [], exc
+                    while cause is not None:
+                        frames.extend(f'{Path(item.filename).name}:{item.lineno}:{item.name}'
+                            for item in traceback.extract_tb(cause.__traceback__))
+                        cause = cause.__context__
+                    raise ValueError('terminal parent failure at ' + ', '.join(frames)) from None
+            qualify()
+            assert reviews and any(account == 'loom-pool-gateway' for _, account, _ in reviews)
+            assert any(account == 'loom-platform' for _, account, _ in reviews)
+            for account in ('loom-pool-gateway', 'loom-platform'):
+                mode['parent_permission_failure'] = account
+                with pytest.raises(ValueError):
+                    qualify()
+            mode['parent_permission_failure'] = None
+            for phase in api.supported_phases:
+                with pytest.raises(ValueError):
+                    api.advance(phase, bindings, state / phase)
+            before = copy.deepcopy(documents)
+            def late_dev_backend():
+                pod, = (row for row in documents['/api/v1/namespaces/loom-dev/pods']['items']
+                    if row['metadata']['name'] == 'loom-postgres-0')
+                pod['status']['containerStatuses'][0]['restartCount'] += 1
+            mode['process_hook'] = late_dev_backend
+            try:
+                with pytest.raises(ValueError):
+                    qualify()  # All retained DBs must remain pinned across the process/collector reads.
+            finally:
+                mode['process_hook'] = None
+                documents.clear()
+                documents.update(before)
 
 
 def _exercise_scoped_process_observation(*, development, documents, state, calls, catalog_path):
