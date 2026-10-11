@@ -185,8 +185,11 @@ def idle_snapshot(kube: Kubectl, namespace: str) -> dict:
     return result
 
 
-def check_rollout(args: argparse.Namespace) -> dict:
-    kube = Kubectl(args.kubeconfig)
+def check_rollout(args: argparse.Namespace, *, kube: Kubectl | None = None,
+        candidate_ancestry: Callable[[str, str], bool] | None = None) -> dict:
+    if kube is not None and kube.kubeconfig != args.kubeconfig:
+        raise DeploymentError('protected rollout check connection differs')
+    kube = kube or Kubectl(args.kubeconfig)
     data = kube.get("configmap", "loom-platform-config", args.namespace)["data"]
     config = json.loads(data["environment.json"])
     if (config["namespace"] != args.namespace or config["cluster_id"] != args.expected_cluster_id
@@ -205,7 +208,7 @@ def check_rollout(args: argparse.Namespace) -> dict:
         if decision["status"] == "skipped_already_deployed" or (
                 getattr(args, "automatic", False) and decision["status"] == "blocked_recovery"):
             return {**result, **decision}
-    if current != candidate and not candidate_follows(current, candidate):
+    if current != candidate and not (candidate_ancestry or candidate_follows)(current, candidate):
         return {**result, "status": "skipped_superseded"}
     if any(snapshot["active"].values()):
         return {**result, "status": "skipped_busy", "guard": {"active": snapshot["active"]}}
@@ -374,7 +377,8 @@ def rollout(args: argparse.Namespace, *, participant_rollout: RetainedParticipan
         pool: ParticipantRolloutAPI | None = None,
         candidate_writer: RetainedCandidateFileWriter | None = None,
         participant_finalize: Callable[[], None] | None = None,
-        kube: Kubectl | None = None) -> dict:
+        kube: Kubectl | None = None,
+        candidate_ancestry: Callable[[str, str], bool] | None = None) -> dict:
     """Ordinary lifecycle, optionally bound by the protected shared delivery.
 
     No CLI flag accepts shared files or an operation as deployment authority.
@@ -387,6 +391,8 @@ def rollout(args: argparse.Namespace, *, participant_rollout: RetainedParticipan
         raise DeploymentError('candidate writer differs from shared operation')
     if participant_finalize is not None and (candidate_writer is None or not callable(participant_finalize)):
         raise DeploymentError('shared finalization requires its retained candidate writer')
+    if candidate_ancestry is not None and (participant_rollout is None or not callable(candidate_ancestry)):
+        raise DeploymentError('protected source ancestry requires its retained shared operation')
     if kube is not None and kube.kubeconfig != args.kubeconfig:
         raise DeploymentError('protected rollout connection differs')
 
@@ -405,7 +411,8 @@ def rollout(args: argparse.Namespace, *, participant_rollout: RetainedParticipan
 
     check_retained()
     if getattr(args, "automatic", False):
-        decision = check_rollout(args)
+        decision = (check_rollout(args) if kube is None and candidate_ancestry is None
+            else check_rollout(args, kube=kube, candidate_ancestry=candidate_ancestry))
         if decision["status"] != "ready":
             return decision
     kube = kube or Kubectl(args.kubeconfig)
@@ -425,7 +432,7 @@ def rollout(args: argparse.Namespace, *, participant_rollout: RetainedParticipan
         if (record["candidate_sha"] != sha or current not in {sha, record.get("previous_candidate_sha", sha)}
                 or any(record[key] != config[key] for key in ("cluster_id", "namespace", "execution_namespace"))):
             raise DeploymentError("recovery binding differs from the failed candidate and live platform")
-    elif current != sha and not candidate_follows(current, sha):
+    elif current != sha and not (candidate_ancestry or candidate_follows)(current, sha):
         return {"status": "skipped_superseded", "candidate_sha": sha}
     shared_reference = None
     if participant_rollout is not None:
@@ -447,7 +454,12 @@ def rollout(args: argparse.Namespace, *, participant_rollout: RetainedParticipan
         from loom.nebius_platform_render import write_platform
 
         write_platform(participant_rollout.release.files, config, candidate, args.render_dir)
-    args.migration_schema_head = candidate_schema_head(sha)
+    if participant_rollout is None:
+        args.migration_schema_head = candidate_schema_head(sha)
+    else:
+        from loom.nebius_candidate_contract import candidate_service_schema_head
+
+        args.migration_schema_head = candidate_service_schema_head(participant_rollout.inputs.candidate)
     args.apply = True
     args.retry_failed_jobs = False
     args.expected_current_candidate = current

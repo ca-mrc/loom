@@ -16,7 +16,7 @@ import os
 import ssl
 import tempfile
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -106,6 +106,22 @@ class ParticipantReleaseQualifier:
             await self.observer.observe_external(bindings=self.bindings, shared_state=self.shared_state,
                 operator_credentials=self.operator_credentials, http=http, preparing=preparing)
 
+    def candidate_follows(self, current: str, candidate: str) -> bool:
+        """Use the exact retained publication and authenticated source reader."""
+        async def compare() -> bool:
+            async with httpx.AsyncClient(timeout=30, follow_redirects=False, trust_env=False) as http:
+                return await self.observer.candidate_follows(bindings=self.bindings, current_sha=current, http=http)
+
+        try:
+            self._source('preflight')
+            if candidate != self.retained.inputs.publication.source_sha or candidate != self.retained.inputs.candidate['candidate_sha']:
+                raise ValueError
+            result = asyncio.run(compare())
+            self._source('preflight')
+            return result
+        except Exception:
+            raise ValueError('participant protected ancestry unavailable; preserve evidence') from None
+
     def __call__(self, kube: Kubectl, retained: RetainedParticipantRollout,
             phase: QualificationPhase, *, preparing: str | None = None) -> None:
         """Fresh whole-pool checks; only a known process transition may wait.
@@ -156,7 +172,7 @@ class ParticipantReleaseQualifier:
 def run_participant_release(args: argparse.Namespace, *, retained: RetainedParticipantRollout,
         initial: ParticipantPredecessor, expected: ParticipantPredecessor,
         pool: RetainedParticipantPoolAdapter, writer: RetainedCandidateFileWriter,
-        kube: Kubectl) -> dict[str, Any]:
+        kube: Kubectl, candidate_ancestry: Callable[[str, str], bool] | None = None) -> dict[str, Any]:
     """Run the real idle/deploy lifecycle and promote its exact predecessor.
 
     Inputs come from protected semantic history loading, not public documents.
@@ -166,6 +182,8 @@ def run_participant_release(args: argparse.Namespace, *, retained: RetainedParti
     """
     from scripts.ops.nebius_idle_rollout import rollout
 
+    if not callable(candidate_ancestry):
+        raise ValueError('participant protected ancestry reader required; preserve evidence')
     initial, expected = copy.deepcopy(initial), copy.deepcopy(expected)
     original = load_participant_predecessor(initial=initial, retained=retained)
     if (original.state_dir, original.migration, original.history) != (expected.state_dir, expected.migration, expected.history):
@@ -185,7 +203,7 @@ def run_participant_release(args: argparse.Namespace, *, retained: RetainedParti
             anchor_dir=retained.anchor_dir, expected=expected, reference=retained.reference)
 
     result: dict[str, Any] = rollout(args, participant_rollout=retained, pool=pool,
-        candidate_writer=writer, participant_finalize=finalize, kube=kube)
+        candidate_writer=writer, participant_finalize=finalize, kube=kube, candidate_ancestry=candidate_ancestry)
     return result
 
 
@@ -199,7 +217,7 @@ class ParticipantReleaseConnection:
     def rollout(self, args: argparse.Namespace) -> dict[str, Any]:
         return run_participant_release(args, retained=self.qualifier.retained,
             initial=self.qualifier.initial, expected=self.expected, pool=self.pool,
-            writer=self.writer, kube=self.qualifier.kube)
+            writer=self.writer, kube=self.qualifier.kube, candidate_ancestry=self.qualifier.candidate_follows)
 
 
 @contextmanager

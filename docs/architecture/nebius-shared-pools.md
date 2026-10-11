@@ -1772,6 +1772,21 @@ It checks the exact migration/history and initial installation ancestry, even if
 the latest pointer already advanced. Lost predecessor evidence is never repaired
 from the current cluster or replaced with the latest head.
 
+Protected delivery does not require a Git checkout on the operator host. New
+platform publications bind the concrete `service_schema_head` to the clean
+candidate source and signed provenance; shared delivery requires that revision
+instead of inspecting a local migration tree. The installed publication reader
+validates the exact retained candidate/profile and compares exact commits through
+GitHub. Diverged or superseded candidates cannot start a new release, and malformed
+comparison responses fail closed. The reader must be able to read commit
+comparisons (repository contents read) as well as publication artifacts and checks;
+denied, unavailable or rate-limited comparisons never authorize deployment.
+Reader Secret identity, retained history and the
+explicit connection are checked around the read; credentials are never exported
+to the runner or artifact host. Automatic idle checks reuse the same authenticated
+Kubernetes connection and ancestry reader. Historical standalone candidates keep
+their existing Git-based path, not a fallback for protected shared delivery.
+
 `authenticated_participant_release` exchanges the explicitly selected Nebius
 operator credential using the existing authenticated transport. It pins private
 CA/credential bytes around that exchange and rejects an endpoint mismatch or
