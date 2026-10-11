@@ -1383,6 +1383,10 @@ def test_root_shards_distribute_shared_handoff_phases_and_observation() -> None:
         ("shared_pool_handoff_recovery_authority", "pool_startup_repair_rollback"),
         ("shared_pool_handoff_recovery_release", "shared_pool_handoff_forward"),
         ("pool_participant_delivery", "pool_cutover_entry"),
+        # Run 38167845683: fencing plus forward exhausted the recovery test
+        # budget; recovery release never finished beside the legacy shutdown.
+        ("shared_pool_handoff_recovery_fences", "shared_pool_handoff_forward"),
+        ("shared_pool_handoff_recovery_release", "pool_shutdown_live"),
     ):
         assert placement[f"tests/ops/test_nebius_{left}.py"] != placement[f"tests/ops/test_nebius_{right}.py"]
 
