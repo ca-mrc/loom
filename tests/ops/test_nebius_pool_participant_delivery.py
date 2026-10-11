@@ -266,6 +266,7 @@ def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation
         assert not set(phases) & {'00-namespaces.yaml', '10-config-network.yaml', '20-database.yaml',
             '40-services.yaml', '60-execution.yaml', '70-public.yaml', '80-backup.yaml'}
         assert len(written) == len(set(written)), 'recovery must read back prior writes'
+        assert not any(key.startswith(('PersistentVolumeClaim:', 'ResourceQuota:')) for key in written)
         assert {'Deployment:' + config['namespace'] + ':loom-service',
             'Deployment:' + config['execution_namespace'] + ':loom-execution-actuator',
             'Service:' + config['namespace'] + ':loom-web'} <= set(written)

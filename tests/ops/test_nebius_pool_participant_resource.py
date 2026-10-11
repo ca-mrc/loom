@@ -156,7 +156,7 @@ def test_candidate_file_writer_refuses_changed_storage_spec_before_application_w
     state.rows[key]['spec']['resources']['requests']['storage'] = '900Gi'
     with pytest.raises(ValueError, match='preserve'):
         file_writer(state, connect).apply_file('40-services.yaml')
-    assert key not in state.writes
+    assert state.writes == []
 
 
 @pytest.mark.parametrize('failure', ['lost-before', 'lost-after'])
