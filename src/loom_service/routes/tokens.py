@@ -353,6 +353,7 @@ async def rotate_token(
     if target.team_id is None and not is_admin(ctx):
         raise HTTPException(status_code=403, detail="admin scope required")
 
+    _validate_requested_scopes(ctx, list(target.scopes), admin=admin)
     raw = _raw_api_token()
     token_hash = hashlib.sha256(raw.encode()).digest()
     token_hash_prefix = _hash_prefix(token_hash)

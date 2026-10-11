@@ -41,7 +41,10 @@ the one-time reset link. Completing a reset revokes the user's active browser
 sessions, user-owned API tokens, and other unconsumed password-reset links.
 
 Invite-code routes remain available for compatibility. New onboarding should
-use registration requests and setup links.
+use registration requests and setup links. An invite can bootstrap a new
+identity, but an existing email-backed recipient must sign in before accepting
+it. The invite issuer's knowledge of the code does not prove the recipient's
+identity. Rejected acceptance leaves the invite and memberships unchanged.
 
 ## Roles and teams
 
@@ -52,6 +55,10 @@ Membership roles are enforced by service authorization checks:
 | `viewer` | Read the current team's permitted resources |
 | `member` | Viewer access plus submission |
 | `owner` | Member access plus team, provider-connection, and API-token management |
+
+API-token creation and rotation enforce the same scope ceiling: non-admin
+callers cannot grant scopes they do not hold or internal worker scopes.
+Rejected rotation leaves the existing token valid and creates no replacement.
 
 Changing the current team requires a membership unless the user is a platform
 administrator. A team can be disabled, have new submissions paused, or have

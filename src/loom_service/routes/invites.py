@@ -424,6 +424,10 @@ async def accept_invite(
             )
 
         user = session_user or await _find_user_by_email(session, accepted_email)
+        if session_user is None and user is not None:
+            # Invite issuers know the code. It authorizes team membership,
+            # never authentication as an existing recipient account.
+            raise HTTPException(status_code=403, detail="sign in before accepting this invite")
         if user is None:
             username = await _unique_legacy_username(session, accepted_email)
             user = User(
