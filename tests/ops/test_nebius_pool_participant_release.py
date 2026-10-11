@@ -668,6 +668,83 @@ def test_guarded_deployer_orders_shared_refresh_and_never_releases_uncertain_mut
     assert len(observations) == len(set(observations))
 
 
+@pytest.mark.parametrize('fault', ['before-create', 'after-create', 'terminal-failure', 'guard-lost'])
+def test_shared_backup_dispatch_records_intent_and_preserves_uncertain_pause(release_inputs, tmp_path, monkeypatch, fault):
+    """A backup Job is a write even before registry or workload mutation starts."""
+    import argparse
+
+    from scripts.ops import deploy_nebius_platform as deploy
+    from tests.ops.test_deploy_nebius_platform import FakeKubectl
+
+    from loom.nebius_platform_render import write_platform
+
+    release = module().prepare_staging_pool_release(**release_inputs)
+    config = release_inputs['config']
+    render_dir = tmp_path / 'render'
+    write_platform(release.files, config, release_inputs['candidate'], render_dir)
+    args = argparse.Namespace(render_dir=render_dir, kubeconfig=tmp_path / 'kubeconfig',
+        evidence_dir=tmp_path / 'evidence', expected_cluster_id=config['cluster_id'],
+        apply=True, retry_failed_jobs=False)
+    dispatches, activations = [], []
+
+    class Kube(FakeKubectl):
+        def run(self, *command, **kwargs):
+            backup = command[:2] == ('create', 'job')
+            if backup:
+                record, = args.evidence_dir.glob('deployment-*.json')
+                dispatches.append((command[2], json.loads(record.read_text())))
+                if fault == 'before-create':
+                    raise deploy.DeploymentError('backup create response unavailable')
+            result = super().run(*command, **kwargs)
+            if backup and fault == 'after-create':
+                raise deploy.DeploymentError('backup create response unavailable')
+            if command[:2] == ('config', 'view'):
+                view = json.loads(result)
+                view['clusters'][0]['name'] = config['cluster_id']
+                return json.dumps(view)
+            return result
+
+    kube = Kube(config, release.files, database=True)
+    for row in release_inputs['current']:
+        kube.objects[row['kind'].lower(), row['metadata']['name']] = copy.deepcopy(row)
+    kube.fail_backup = fault == 'terminal-failure'
+    readiness = deploy.migration_readiness
+
+    def schema_readiness(*values):
+        result = readiness(*values)
+        if fault == 'guard-lost':
+            kube.guard_identity = None
+        return result
+
+    monkeypatch.setattr(deploy, 'migration_readiness', schema_readiness)
+
+    class PoolIO:
+        def preflight(self, *_):
+            pass
+
+        def under_guard(self, *_):
+            pass
+
+        def activate(self, *_):
+            activations.append(True)
+            raise deploy.DeploymentError('unexpected activation after backup failure')
+
+    with pytest.raises(deploy.DeploymentError):
+        deploy.deploy(args, kube=kube, participant_release=release, pool=PoolIO())
+    assert not activations
+    assert not any(command[0] in {'apply', 'delete'} for command in kube.commands)
+    if fault == 'guard-lost':
+        assert dispatches == [], 'lost guard must be observed before creating the backup'
+        assert kube.guard_identity is None
+    else:
+        assert kube.guard_identity == ('rollout-' + release.refresh.after.operation_id.hex,
+            release_inputs['candidate']['candidate_sha']), 'backup write must retain its recovery pause'
+        name, persisted = dispatches[0]
+        assert persisted['backup_job'] == name, 'backup identity must precede dispatch'
+        assert len(dispatches) == 1
+        assert (('job', name) in kube.objects) == (fault != 'before-create')
+
+
 @pytest.mark.parametrize('damage', ['missing-adapter', 'missing-release', 'standalone-files', 'wrong-guard', 'retire-target'])
 def test_shared_deploy_has_no_unbound_mode_or_standalone_render_escape(release_inputs, tmp_path, damage):
     import argparse
