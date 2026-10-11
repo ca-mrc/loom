@@ -665,6 +665,86 @@ class HTTPSParticipantResourceObserver(ManagementKubernetesTransport):
         except Exception:
             raise ValueError('participant manager process unqualified; preserve evidence') from None
 
+    def observe_gateway_process(self, *, bindings: SharedPoolGuardBindings, shared_state: Path,
+            kubeconfig: Path, executable: Path, preparing: str | None = None) -> None:
+        """Keep the shared gateway healthy through a selected participant fence.
+
+        Current whole-pool writer authority and completed gateway history select
+        the running workload. This continuous process check neither requires all
+        participants active nor substitutes for registry/final capacity checks.
+        """
+        from scripts.ops.nebius_development_runtime_probes import HTTPSDevelopmentRuntimeProbes
+        from scripts.ops.nebius_development_runtime_readiness import qualify_started_deployment
+        from scripts.ops.nebius_pool_origin_history import KubectlPoolHistoryAPI
+        from scripts.ops.nebius_pool_participant_operation import _paths
+        from scripts.ops.nebius_shared_pool_forward_processes import _gateway_history_target
+
+        try:
+            bound, retained = copy.deepcopy(bindings), self.retained
+            current = self.observe_writers(bindings=bound, shared_state=shared_state, preparing=preparing)
+            view = _ResourceView(retained, preparing)
+            manager = bound.plan.development.runtime.request.database.manager.retained.request.retained
+            if not {path: hashlib.sha256(raw).hexdigest() for path, raw in manager.files.items()}.items() <= retained.inputs.history.items():
+                raise ValueError
+            secret_path = '/api/v1/namespaces/' + manager.binding.namespace + '/secrets/loom-platform-db'
+            credential = self._request('GET', secret_path)
+            if credential is None:
+                raise ValueError
+            original_target = _gateway_history_target(bound, credential)
+            if (_key(original_target.controller) != _key(retained.inputs.manager)
+                    or _uid(original_target.controller) != _uid(retained.inputs.manager)):
+                raise ValueError
+            target = replace(original_target, controller=retained.inputs.manager)
+            original = bound.plan.development.gateway_original
+            key = _key(original)
+            workload = current.workloads[key]
+            history = KubectlPoolHistoryAPI(request=retained.inputs.previous, target=target,
+                kubeconfig=kubeconfig, executable=executable)
+            prefix = tuple(history.prefix)
+            _, marker = _paths(retained.reference, retained.state_dir.parent, retained.anchor_dir)
+            anchor = private_state._private_read(marker)
+
+            def unchanged() -> None:
+                if (bindings != bound or self.retained != retained or tuple(history.prefix) != prefix
+                        or hashlib.sha256(private_state._private_read(kubeconfig, limit=512 * 1024)).hexdigest() != history.kubeconfig_sha256
+                        or hashlib.sha256(private_state._private_read(retained.state_dir / 'inputs.json', limit=16 * 1024**2)).hexdigest()
+                            != retained.reference.inputs_sha256
+                        or private_state._private_read(marker) != anchor
+                        or _ResourceView(retained, preparing).files != view.files
+                        or any(private_state._private_read(path, limit=4 * 1024**2) != raw for path, raw in manager.files.items())):
+                    raise ValueError
+
+            def ready() -> None:
+                actual = history._get('deployment', original['metadata']['name'], target.namespace)
+                if not _matches(actual, workload, _uid(original)):
+                    raise ValueError
+                children = history._run(['get', '--raw', f'/apis/apps/v1/namespaces/{target.namespace}/replicasets?limit=1000'])
+                pods = history._run(['get', '--raw', f'/api/v1/namespaces/{target.namespace}/pods?limit=1000'])
+                if not qualify_started_deployment(current=actual, children=children, pods=pods,
+                        region=retained.release.refresh.before.quota_identities['nodes'][1]):
+                    raise ValueError
+
+            unchanged()
+            ready()
+            identity = HTTPSDevelopmentRuntimeProbes._process_identity
+            backend = identity(history._database(target, url_variable='LOOM_SVC_DB_URL'))
+            process = identity(history._runtime(target, original=original, expected=workload))
+            history.qualify_gateway_process(original=original, expected=workload)
+            final = self.observe_writers(bindings=bound, shared_state=shared_state, preparing=preparing)
+            if (final.workloads.keys() != current.workloads.keys()
+                    or any(not _matches(final.workloads[name], row, _uid(row)) for name, row in current.workloads.items())):
+                raise ValueError
+            ready()
+            credential = self._request('GET', secret_path)
+            if (credential is None or _gateway_history_target(bound, credential) != original_target
+                    or identity(history._runtime(target, original=original, expected=workload)) != process
+                    or identity(history._database(target, url_variable='LOOM_SVC_DB_URL')) != backend):
+                raise ValueError
+            unchanged()
+            self._source()
+        except Exception:
+            raise ValueError('participant gateway process unqualified; preserve evidence') from None
+
     def observe_registry(self, *, bindings: SharedPoolGuardBindings, kubeconfig: Path,
             executable: Path, preparing: str | None = None) -> ParticipantRegistryState:
         """Read exact management authority allowed by this release's dispatch.

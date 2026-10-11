@@ -1628,6 +1628,20 @@ credential, source and connection readbacks bracket these probes. Only the
 recorded catalog restart may be pending, and ready/released checks reject it
 until complete. This observation neither changes the manager nor opens admission.
 
+Gateway process qualification is separate from the startup capacity/admission
+probe. A normal participant refresh deliberately has a fenced registration while
+the shared gateway must remain running. The continuous probe therefore checks
+the retained gateway's actual database URL, loaded settings and token, and its
+projected Kubernetes namespace access without an all-active capacity transaction.
+It does not prove capacity or grant admission. Startup/opening still execute
+both checks, and the ordinary release still requires exact phase-aware registry
+qualification and fresh post-open capacity evidence before releasing intake.
+The normal-release gateway observer selects the unchanged running gateway from
+the completed handoff and current whole-pool writer/permission census. It checks
+complete Deployment/ReplicaSet/Pod readiness and brackets the continuous probe
+with another census plus process, backend, credential and private-history reads.
+An unready gateway or a restart during observation is a failure, not a candidate-update wait.
+
 The participant registry observation reads the retained manager's database through
 its pinned credential, namespace, StatefulSet, Service and actual backend process.
 A fixed repeatable-read, read-only SQL snapshot checks the exact pool, participant,
