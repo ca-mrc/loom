@@ -453,16 +453,23 @@ class KubectlPoolHistoryAPI(KubectlPoolGuardAPI):
     def qualify_gateway_runtime(self, *, original: dict[str, Any], expected: dict[str, Any], active: bool = False) -> None:
         self._qualified_gateway(original=original, expected=expected, active=active)
 
-    def _qualified_gateway(self, *, original: dict[str, Any], expected: dict[str, Any], active: bool = False) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Bind the journal's closed gateway child to its actual running settings.
+    def qualify_gateway_process(self, *, original: dict[str, Any], expected: dict[str, Any]) -> None:
+        """Continuous runtime check while a participant may be fenced.
 
-        The startup parent supplies the retained child identity, not an operator
-        manifest. This proves DB correspondence, machine material and actual
-        projected Kubernetes access plus current accepted capacity evidence;
-        effective RBAC remains a separate barrier.
+        This opens no SQL transaction or admission and is not capacity proof.
+        The parent must separately qualify the exact phase-aware registry and
+        fresh capacity before release. Startup/opening retain their full probe.
+        """
+        self._qualified_gateway_process(original=original, expected=expected)
+
+    def _qualified_gateway_process(self, *, original: dict[str, Any], expected: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Retained child, loaded settings/DB/token and projected Kubernetes access.
+
+        The protected parent supplies the original and journal-qualified target,
+        not an operator manifest; effective RBAC remains a separate barrier.
         """
         try:
-            if (type(active) is not bool or digest(migration_contract(self.request)) != self.contract_sha256
+            if (digest(migration_contract(self.request)) != self.contract_sha256
                     or digest(_target_contract(self.target)) != self.history_sha256
                     or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
                 raise ValueError
@@ -500,6 +507,23 @@ class KubectlPoolHistoryAPI(KubectlPoolGuardAPI):
                 'python', '-c', BOUND_GATEWAY_KUBERNETES_COMMAND, json.dumps(sorted(namespaces)), nonce, response])
             if report != {'status': 'qualified'}:
                 raise ValueError
+            if (_uid(self._runtime(self.target, original=original, expected=expected)) != _uid(before)
+                    or _uid(self._database(self.target, url_variable='LOOM_SVC_DB_URL')) != _uid(before_database)
+                    or digest(migration_contract(self.request)) != self.contract_sha256
+                    or digest(_target_contract(self.target)) != self.history_sha256
+                    or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
+                raise ValueError
+            return before, before_database
+        except Exception:
+            raise PoolMigrationError('gateway_runtime') from None
+
+    def _qualified_gateway(self, *, original: dict[str, Any], expected: dict[str, Any], active: bool = False) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Startup/opening still require both runtime and all-active capacity."""
+        try:
+            if type(active) is not bool:
+                raise ValueError
+            before, before_database = self._qualified_gateway_process(original=original, expected=expected)
+            spec = self.request.registration.spec
             nonce = secrets.token_hex(32)
             response = hmac.new(bytes.fromhex(nonce),
                 json.dumps(expected_startup_capacity(spec), sort_keys=True, separators=(',', ':')).encode(), 'sha256').hexdigest()
