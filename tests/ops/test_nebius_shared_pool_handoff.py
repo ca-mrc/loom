@@ -4992,7 +4992,8 @@ def test_shared_activation_binds_own_parent_and_never_replays_unknown_writes(sha
 @pytest.mark.parametrize('forward_census', [False, True, 'recovery', 'participant'],
     ids=['initial', 'forward', 'recovery', 'participant'])
 def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writers(
-        shared_runtime, staging_history, staging_observation, completed_pool, handoff, shared_operation, forward_census):
+        shared_runtime, staging_history, staging_observation, completed_pool, handoff, shared_operation, forward_census,
+        publisher_cloud):
     """A historical template or a stopped clone must not hide a live writer."""
     import json
     import ssl
@@ -5084,7 +5085,8 @@ def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writ
             transport=httpx.MockTransport(respond))
         if forward_census:
             _exercise_forward_writer_census(shared_operation, transport, inventory, kinds, calls, mode,
-                recovery=forward_census == 'recovery', participant=forward_census == 'participant')
+                recovery=forward_census == 'recovery', participant=forward_census == 'participant',
+                publisher_cloud=publisher_cloud)
             return
         from scripts.ops.nebius_shared_pool_handoff_live import observe_shared_pool_writers
 
@@ -5226,7 +5228,7 @@ def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writ
 
 
 def _exercise_forward_writer_census(shared_operation, transport, inventory, kinds, calls, mode, *,
-        recovery=False, participant=False):
+        recovery=False, participant=False, publisher_cloud=None):
     """Observe real parent/child receipts; remote transitions are fixture state.
 
     Accepting an unrecorded successor, an old template after completion, or a
@@ -5595,7 +5597,7 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
         private_state._atomic_json(activation_path, record)
         api.activation_complete = True
         assert parent.run_shared_pool_operation(**kwargs)['status'] == 'shared_pool_handoff_complete'
-        _exercise_participant_writer_census(args, bindings, state, api, transport, inventory, kinds, mode)
+        _exercise_participant_writer_census(args, bindings, state, api, transport, inventory, kinds, mode, publisher_cloud)
         return
     if recovery:
         _exercise_recovery_writer_census(kwargs, state, transport, inventory, kinds, calls, mode, replace_live, CensusPhaseAPI)
@@ -5608,7 +5610,7 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
     assert len(calls) == before
 
 
-def _exercise_participant_writer_census(args, bindings, state, parent_api, transport, inventory, kinds, mode):
+def _exercise_participant_writer_census(args, bindings, state, parent_api, transport, inventory, kinds, mode, publisher_cloud):
     """Normal release must retain the entire shared pool, not just its resources."""
     import json
     import ssl
@@ -5623,9 +5625,12 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
         _resource_path,
     )
     from scripts.ops.nebius_shared_pool_operation import load_completed_shared_pool_operation
+    from tests.ops.nebius_participant_external_fixture import (
+        external_connection,
+        publication_fixture,
+    )
 
     from loom.nebius_platform_render import build_platform
-    from loom_service.environment_management.candidates import ProtectedPublication
 
     predecessor = load_completed_shared_pool_operation(**args, bindings=bindings, api=parent_api)
     attached = bindings.plan.staging.attachment
@@ -5651,8 +5656,7 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
     candidate.update(schema_version='loom.nebius-candidate.v1', candidate_sha='d' * 40,
         run_id=812, source_archive_sha256='sha256:' + 'a' * 64)
     profile = attached.runtime_profile.model_copy(update={'candidate_sha': candidate['candidate_sha']})
-    publication = ProtectedPublication(candidate_id=uuid4(), source_sha=candidate['candidate_sha'], run_id=812,
-        run_attempt=1, artifact_id=923, artifact_sha256='sha256:' + 'b' * 64, pull_request=2425)
+    publication, published_payload = publication_fixture(candidate, profile)
     release_inputs = dict(predecessor=predecessor, current=tuple(current.values()),
         config=attached.config, candidate=candidate, runtime_profile=profile, operation_id=uuid4(),
         management_origin='https://' + args['runtime'].database.manager.deployment.public_host, repo_root=ROOT,
@@ -6045,6 +6049,11 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
                 patch=patch, fallback=execute)
             peer_result = peer_process()
             assert peer_result['status'] == 'available'
+            external, external_fault, external_mode, external_calls, provider_reads, collector_key, reader_key, operator = external_connection(
+                observer=observer, bindings=bindings, shared_state=state, resources=resources,
+                publisher_cloud=publisher_cloud, patch=patch, payload=published_payload)
+            capacity = external()
+            assert capacity.node_count == capacity.ready_node_count == capacity.target_node_count == 0
             assert manager_process() == ()
             assert gateway_process() is None
             registry_mode['manager-pending'] = True
@@ -6076,6 +6085,7 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
                     assert manager_process('ready') == ()
                     assert gateway_process() is None
                     assert peer_process()['status'] == 'available'
+                    external()
 
             pool_state.qualify = qualify_pool
             pool = connect_pool()
@@ -6092,6 +6102,11 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
                 pool.finish(kube, retained.release)
             assert 'open' not in pool_state.effects
             peer_fault.clear()
+            external_fault('checks')
+            with pytest.raises(ValueError, match='preserve'):
+                pool.finish(kube, retained.release)
+            assert 'open' not in pool_state.effects
+            external_fault(None)
             pool.finish(kube, retained.release)
             pool.read_capacity(kube, retained.release, observation_id=uuid4())
             assert pool_state.effects == ['config', 'fence', 'stage', 'config', 'manager', 'open', 'capacity']
@@ -6133,6 +6148,32 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
             assert unavailable['checks'] >= 2 and unavailable['unavailable'] == unavailable['checks']
             assert unavailable['reasons'] == ['kubelet_network']
             peer_fault.clear()
+            for damage in ('artifact', 'deleting', 'cluster'):
+                external_fault(damage)
+                with pytest.raises(ValueError, match='preserve'):
+                    external()
+            for condition in ('exhausted', 'scaling'):
+                external_fault(condition)
+                observed = external()
+                if condition == 'exhausted':
+                    assert observed.used_nodes == observed.quota_nodes
+                else:
+                    assert observed.autoscaler_state == 'scaling'
+            external_fault(None)
+            for key in (collector_key, reader_key):
+                original = copy.deepcopy(resources[key])
+                reads_before = len(provider_reads)
+                resources[key]['metadata']['uid'] = str(uuid4())
+                with pytest.raises(ValueError, match='preserve'):
+                    external()
+                assert len(provider_reads) == reads_before
+                resources[key] = original
+            original = operator.read_bytes()
+            external_mode['hook'] = lambda: operator.write_bytes(original + b' ')
+            with pytest.raises(ValueError, match='preserve'):
+                external()
+            operator.write_bytes(original)
+            assert external_calls and provider_reads
             original_database_rows = copy.deepcopy(database_rows)
             for damage in ('backend', 'bad-report', 'history', 'connection', 'credential', 'restart'):
                 registry_mode[damage] = True
