@@ -14,7 +14,7 @@ from typing import Any
 
 from scripts.ops.nebius_management_transport import ManagementKubernetesTransport
 from scripts.ops.nebius_shared_pool_activation import shared_forward_activation_view
-from scripts.ops.nebius_shared_pool_gateway import shared_forward_gateway_view
+from scripts.ops.nebius_shared_pool_gateway import shared_gateway_history_view
 from scripts.ops.nebius_shared_pool_handoff_live import (
     SharedPoolGuardBindings,
     SharedPoolWriterObservation,
@@ -24,21 +24,21 @@ from scripts.ops.nebius_shared_pool_handoff_live import (
     _resource_roots,
 )
 from scripts.ops.nebius_shared_pool_material import validate_shared_staging_material
-from scripts.ops.nebius_shared_pool_operation import _files
+from scripts.ops.nebius_shared_pool_operation import FORWARD_PHASES, _files
 from scripts.ops.nebius_shared_pool_roles import shared_forward_role_options
 from scripts.ops.nebius_shared_pool_workloads import _frame, shared_forward_staging_options
 
 from loom.nebius_platform_render import digest
 
 
-def _forward_options(bindings: SharedPoolGuardBindings, state: Path
+def _frozen_options(bindings: SharedPoolGuardBindings, state: Path
         ) -> tuple[dict[str, Any], WriterOptions, WriterOptions, dict[str, dict[str, str]]]:
-    opening = shared_forward_activation_view(bindings=bindings, state_dir=state)
-    frame = opening.frame
+    """Forward receipt projections; each caller supplies its live direction gate."""
+    frame = _frame(bindings, state)
     roots: WriterOptions = {key: (row,) for key, row in
         _resource_roots(bindings.plan, frozenset({'Deployment', 'StatefulSet', 'CronJob'})).items()}
     roots.update(shared_forward_staging_options(bindings=bindings, state_dir=state))
-    gateway = shared_forward_gateway_view(bindings=bindings, state_dir=state)
+    gateway = shared_gateway_history_view(bindings=bindings, state_dir=state)
     if gateway[0] != frame or not gateway[2].keys() <= roots.keys():
         raise ValueError
     roots.update(gateway[2])
@@ -69,15 +69,21 @@ def _forward_options(bindings: SharedPoolGuardBindings, state: Path
                     expected['metadata']['uid'] = row['uid']
                     authority[key] = (expected,)
     receipts = {phase: _files(state / phase, allow_empty=True)
-        for phase in ('forward-stop', 'forward-roles', 'forward-material', 'forward-wire', 'forward-start')
+        for phase in FORWARD_PHASES
         if (state / phase).exists() or (state / phase).is_symlink()}
-    receipts['forward-gateway'] = gateway[1]
-    receipts['forward-activate'] = opening.files
     if (_frame(bindings, state) != frame
-            or shared_forward_gateway_view(bindings=bindings, state_dir=state) != gateway
-            or shared_forward_activation_view(bindings=bindings, state_dir=state) != opening):
+            or shared_gateway_history_view(bindings=bindings, state_dir=state) != gateway):
         raise ValueError
     return frame, roots, authority, receipts
+
+
+def _forward_options(bindings: SharedPoolGuardBindings, state: Path
+        ) -> tuple[dict[str, Any], WriterOptions, WriterOptions, dict[str, dict[str, str]]]:
+    opening = shared_forward_activation_view(bindings=bindings, state_dir=state)
+    result = _frozen_options(bindings, state)
+    if result[0] != opening.frame or shared_forward_activation_view(bindings=bindings, state_dir=state) != opening:
+        raise ValueError
+    return result
 
 
 def observe_shared_pool_forward_writers(*, bindings: SharedPoolGuardBindings, state_dir: Path,

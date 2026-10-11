@@ -153,16 +153,17 @@ def prepare_shared_gateway(*, bindings: SharedPoolGuardBindings, state_dir: Path
             raise ValueError
 
 
-def shared_forward_gateway_view(*, bindings: SharedPoolGuardBindings, state_dir: Path
+def shared_gateway_history_view(*, bindings: SharedPoolGuardBindings, state_dir: Path
         ) -> tuple[dict[str, Any], dict[str, str], dict[str, tuple[dict[str, Any], ...]], WriterOptions]:
-    """Exact workload and grant alternatives from retained forward receipts.
+    """Recorded forward alternatives, not authority to run a forward operation.
 
     Intent permits either recorded side for observation, never a write retry.
     Created grants require their recorded UID. Include all child receipt bytes
     so readers can reject changes even before the parent pins completed history.
+    Recovery callers must apply their own recorded successors to these frozen
+    initial choices; they cannot use this projection as current runtime proof.
     """
-    opening = shared_forward_activation_view(bindings=bindings, state_dir=state_dir)
-    frame = opening.frame
+    frame = _frame(bindings, state_dir)
     plan = bindings.plan.development
     original = copy.deepcopy(plan.gateway_original)
     workloads: dict[str, tuple[dict[str, Any], ...]] = {_key(original): (original,)}
@@ -191,9 +192,19 @@ def shared_forward_gateway_view(*, bindings: SharedPoolGuardBindings, state_dir:
                     workloads[_key(original)] = (original, after) if item['status'] == 'intent' else (after,)
         if _files(child, allow_empty=phase == 'prepared') != files:
             raise ValueError
-    if shared_forward_activation_view(bindings=bindings, state_dir=state_dir) != opening:
+    if _frame(bindings, state_dir) != frame:
         raise ValueError
     return frame, files, workloads, authority
+
+
+def shared_forward_gateway_view(*, bindings: SharedPoolGuardBindings, state_dir: Path
+        ) -> tuple[dict[str, Any], dict[str, str], dict[str, tuple[dict[str, Any], ...]], WriterOptions]:
+    """Forward-only wrapper; a recovery anchor still rejects this live view."""
+    opening = shared_forward_activation_view(bindings=bindings, state_dir=state_dir)
+    result = shared_gateway_history_view(bindings=bindings, state_dir=state_dir)
+    if result[0] != opening.frame or shared_forward_activation_view(bindings=bindings, state_dir=state_dir) != opening:
+        raise ValueError
+    return result
 
 
 class HTTPSSharedGateway(HTTPSDevelopmentRuntimeResources, HTTPSDevelopmentRuntimeWorkloads):

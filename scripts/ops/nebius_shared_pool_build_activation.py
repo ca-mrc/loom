@@ -104,16 +104,15 @@ def prepare_shared_build_activation(*, bindings: SharedPoolGuardBindings, state_
             raise ValueError
 
 
-def shared_forward_build_namespace_view(*, bindings: SharedPoolGuardBindings, state_dir: Path
+def shared_build_namespace_history_view(*, bindings: SharedPoolGuardBindings, state_dir: Path
         ) -> tuple[dict[str, Any], dict[str, str], dict[str, tuple[dict[str, Any], ...]]]:
-    """Receipt-bound namespace choices, not an arbitrary inventory override.
+    """Historical namespace choices, not authority for a forward operation.
 
     Includes parent history and receipt bytes so a caller can bracket a remote
     observation. This projects only the namespace; the combined runtime view
-    separately qualifies gateway successors. Recovery remains excluded.
+    separately qualifies workload successors and its current direction.
     """
-    opening = shared_forward_activation_view(bindings=bindings, state_dir=state_dir)
-    frame = opening.frame
+    frame = _frame(bindings, state_dir)
     plan = bindings.plan.development
     status, files = 'prepared', {}
     child = state_dir / _PHASE
@@ -129,9 +128,19 @@ def shared_forward_build_namespace_view(*, bindings: SharedPoolGuardBindings, st
     before, after = copy.deepcopy(plan.build_namespace_original), copy.deepcopy(plan.build_namespace_target)
     after['metadata']['uid'] = _uid(before)
     choices = (before,) if status == 'prepared' else (before, after) if status == 'intent' else (after,)
-    if shared_forward_activation_view(bindings=bindings, state_dir=state_dir) != opening:
+    if _frame(bindings, state_dir) != frame:
         raise ValueError
     return frame, files, {_key(before): choices}
+
+
+def shared_forward_build_namespace_view(*, bindings: SharedPoolGuardBindings, state_dir: Path
+        ) -> tuple[dict[str, Any], dict[str, str], dict[str, tuple[dict[str, Any], ...]]]:
+    """Forward-only namespace projection; recovery cannot reuse this authority."""
+    opening = shared_forward_activation_view(bindings=bindings, state_dir=state_dir)
+    result = shared_build_namespace_history_view(bindings=bindings, state_dir=state_dir)
+    if result[0] != opening.frame or shared_forward_activation_view(bindings=bindings, state_dir=state_dir) != opening:
+        raise ValueError
+    return result
 
 
 class HTTPSSharedBuildActivation(ManagementKubernetesTransport):

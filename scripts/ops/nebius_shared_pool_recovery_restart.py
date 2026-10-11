@@ -48,14 +48,8 @@ def _active(bindings: SharedPoolGuardBindings, state: Path, status: str) -> dict
     return frame
 
 
-def _inputs(bindings: SharedPoolGuardBindings, state: Path) -> tuple[Documents, Documents]:
-    frame = _frame(bindings, state)
-    if frame['recovery']['recovery-restore-roles']['status'] != 'complete':
-        raise ValueError
-    # This validates the complete dependency chain once, including the exact
-    # template/stop records consumed below. Active boundaries seal their bytes.
-    validate_shared_recovery_roles(bindings=bindings, state_dir=state / 'recovery-restore-roles', complete=True)
-    stop = _read(state / 'recovery-stop/stop.json')
+def _project_inputs(bindings: SharedPoolGuardBindings, stop: dict[str, Any]) -> tuple[Documents, Documents]:
+    """Pure targets from a semantically validated, byte-pinned stop receipt."""
     originals = {}
     for key, row in stop['resources'].items():
         original = copy.deepcopy(row['expected'])
@@ -73,9 +67,20 @@ def _inputs(bindings: SharedPoolGuardBindings, state: Path) -> tuple[Documents, 
         before['metadata']['uid'] = _uid(captured)
         before['spec']['suspend' if captured['kind'] == 'CronJob' else 'replicas'] = True if captured['kind'] == 'CronJob' else 0
         originals[key], targets[key] = before, target
+    return originals, targets
+
+
+def _inputs(bindings: SharedPoolGuardBindings, state: Path) -> tuple[Documents, Documents]:
+    frame = _frame(bindings, state)
+    if frame['recovery']['recovery-restore-roles']['status'] != 'complete':
+        raise ValueError
+    # This validates the complete dependency chain once, including the exact
+    # template/stop records consumed below. Active boundaries seal their bytes.
+    validate_shared_recovery_roles(bindings=bindings, state_dir=state / 'recovery-restore-roles', complete=True)
+    result = _project_inputs(bindings, _read(state / 'recovery-stop/stop.json'))
     if _frame(bindings, state) != frame:
         raise ValueError
-    return originals, targets
+    return result
 
 
 def _identity(bindings: SharedPoolGuardBindings, state: Path, originals: Documents, targets: Documents) -> dict[str, str]:

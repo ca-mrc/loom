@@ -54,12 +54,8 @@ def _active(bindings: SharedPoolGuardBindings, state: Path, status: str) -> dict
     return frame
 
 
-def _inputs(bindings: SharedPoolGuardBindings, state: Path) -> tuple[WriterOptions, Documents, WriterOptions]:
-    frame = _frame(bindings, state)
-    if frame['recovery']['recovery-restore-workloads']['status'] != 'complete':
-        raise ValueError
-    validate_shared_recovery_templates(bindings=bindings, state_dir=state / 'recovery-restore-workloads', complete=True)
-    sources: WriterOptions = dict(shared_forward_role_options(bindings=bindings, state_dir=state))
+def _targets(bindings: SharedPoolGuardBindings) -> Documents:
+    """Pure captured-current Role targets, without live or history authority."""
     targets = {}
     for key, original in bindings.plan.staging_role_originals.items():
         target = _snapshot(original)
@@ -67,6 +63,16 @@ def _inputs(bindings: SharedPoolGuardBindings, state: Path) -> tuple[WriterOptio
             raise ValueError
         target['metadata'].setdefault('annotations', {})[MARKER] = str(bindings.migration.registration.spec.operation_id)
         targets[key] = target
+    return targets
+
+
+def _inputs(bindings: SharedPoolGuardBindings, state: Path) -> tuple[WriterOptions, Documents, WriterOptions]:
+    frame = _frame(bindings, state)
+    if frame['recovery']['recovery-restore-workloads']['status'] != 'complete':
+        raise ValueError
+    validate_shared_recovery_templates(bindings=bindings, state_dir=state / 'recovery-restore-workloads', complete=True)
+    sources: WriterOptions = dict(shared_forward_role_options(bindings=bindings, state_dir=state))
+    targets = _targets(bindings)
     # A cancelled forward material stage may have installed only part of its
     # read-only catalog. Planned names are not proof of installed authority.
     readers: WriterOptions = dict.fromkeys(bindings.plan.staging_reader_authority, (None,))

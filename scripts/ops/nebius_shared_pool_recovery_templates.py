@@ -58,9 +58,8 @@ def _active(bindings: SharedPoolGuardBindings, state: Path, status: str) -> dict
     return frame
 
 
-def _inputs(bindings: SharedPoolGuardBindings, state: Path) -> tuple[Documents, Documents]:
-    frame = _frame(bindings, state)
-    stop = validate_shared_recovery_workloads(bindings=bindings, state_dir=state / 'recovery-stop', complete=True)
+def _project_inputs(bindings: SharedPoolGuardBindings, stop: dict[str, Any]) -> tuple[Documents, Documents]:
+    """Pure targets from a semantically validated, byte-pinned stop receipt."""
     originals, targets = {}, {}
     for key, row in stop['resources'].items():
         value = copy.deepcopy(row['expected'])
@@ -73,9 +72,16 @@ def _inputs(bindings: SharedPoolGuardBindings, state: Path) -> tuple[Documents, 
         target['metadata'].setdefault('annotations', {})[MARKER] = str(bindings.migration.registration.spec.operation_id)
         target['spec']['suspend' if captured['kind'] == 'CronJob' else 'replicas'] = True if captured['kind'] == 'CronJob' else 0
         targets[key] = target
+    return originals, targets
+
+
+def _inputs(bindings: SharedPoolGuardBindings, state: Path) -> tuple[Documents, Documents]:
+    frame = _frame(bindings, state)
+    stop = validate_shared_recovery_workloads(bindings=bindings, state_dir=state / 'recovery-stop', complete=True)
+    result = _project_inputs(bindings, stop)
     if _base_frame(bindings, state) != frame:
         raise ValueError
-    return originals, targets
+    return result
 
 
 def _identity(bindings: SharedPoolGuardBindings, state: Path, originals: Documents, targets: Documents) -> dict[str, str]:

@@ -951,7 +951,7 @@ These transitions still require the connected parent's fresh process, database,
 drain and whole-pool authority checks; historical receipts alone are not runtime
 readiness or recovery authority.
 
-The pre-opening forward writer observer reuses the complete revision-bound census
+The forward writer observer reuses the complete revision-bound census
 but derives its permitted workloads and Roles from these child receipts. A
 planned successor is not accepted before dispatch intent; an uncertain PATCH
 admits only its recorded before/after states, and a completed transition admits
@@ -961,8 +961,8 @@ object, and finally retain their recorded created UID. Child receipt bytes and t
 again after observation, including started children not yet covered by completed
 byte pins. Gateway startup likewise accepts only the recorded stopped or started
 workload while its PATCH is uncertain, then only its applied successor. This
-observer performs no mutations and rejects recovery or started activation phases;
-those require their own successor authority checks.
+observer performs no mutations and rejects recovery. During opening, it also
+validates and pins the activation child's exact recorded authority alternatives.
 
 The pre-opening process observer likewise follows the actual guard, workload and
 database receipts. It keeps the old manager revoked and the new manager CLOSED,
@@ -1245,6 +1245,38 @@ that the cancelled ledger can be installed or opened again. A later attempt need
 a separately qualified successor. This controller is not a protected deployment
 entry point: concrete live forward/recovery adapters, rollout continuity and
 installed multi-owner acceptance are still required.
+
+The recovery writer census starts with the frozen forward workload and grant
+choices, then applies only the alternatives authorized by actual recovery child
+receipts. A planned stop, restriction, restoration or restart is not accepted
+before its intent; uncertain writes permit only their recorded before/after
+states, and completed effects permit only the successor. Created grants retain
+their recorded UIDs, and an uncertain same-name read-only create preserves the
+possibility that it is still absent. Current staging templates and Roles may be
+restored while the cancelled development and gateway workloads stay stopped.
+The same complete revision-bound workload/RBAC census still rejects unrelated
+writers. Parent history and every existing forward and recovery child's receipt
+bytes are rechecked around the observation, including reopening receipts. These
+historical projections confer no forward mutation authority and do not substitute
+for current process, database, effective-permission or provider checks.
+Each observation derives its semantic projections once from a copied binding,
+then freshly verifies that the caller's binding, parent/private history and
+complete receipt set are unchanged. The latest present recovery phase validates
+its completed dependency chain; the two independent revocation children are both
+validated when that phase is latest. Projections then reuse the children's pure
+target builders without revalidating that chain for each earlier phase. There is
+no history reconstruction after remote reads or observation cache between calls.
+
+Retained development inventory selects recovery only through the verified
+recovery anchor. Its permitted workloads come from those same recovery receipts;
+the build namespace retains its frozen forward-policy choice. Only roots already
+owned by the completed development installation enter this reader, never staging
+resources. The binding also reaches nested runtime probes, so an authorized stop
+of one development component does not invalidate observation of another still
+running component. Ordinary unbound installation reads and explicit forward-only
+views remain strict. Missing intent, changed root identity or receipt changes
+during a read reject the observation; accepting a recorded template is not proof
+that its processes are drained or ready.
 
 Authenticated Kubernetes/worker identity and capacity observations remain
 mandatory. Detailed kubelet samples retain the existing optional-telemetry
