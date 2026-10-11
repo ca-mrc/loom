@@ -5101,8 +5101,8 @@ def test_shared_activation_binds_own_parent_and_never_replays_unknown_writes(sha
 
 
 @pytest.mark.timeout(420)
-@pytest.mark.parametrize('forward_census', [False, True, 'recovery', 'participant'],
-    ids=['initial', 'forward', 'recovery', 'participant'])
+@pytest.mark.parametrize('forward_census', [False, True, 'recovery', 'participant', 'preparation'],
+    ids=['initial', 'forward', 'recovery', 'participant', 'preparation'])
 def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writers(
         shared_runtime, staging_history, staging_observation, completed_pool, handoff, shared_operation, forward_census,
         publisher_cloud):
@@ -5197,7 +5197,8 @@ def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writ
             transport=httpx.MockTransport(respond))
         if forward_census:
             _exercise_forward_writer_census(shared_operation, transport, inventory, kinds, calls, mode,
-                recovery=forward_census == 'recovery', participant=forward_census == 'participant',
+                recovery=forward_census == 'recovery',
+                participant=forward_census if forward_census in {'participant', 'preparation'} else False,
                 publisher_cloud=publisher_cloud)
             return
         from scripts.ops.nebius_shared_pool_handoff_live import observe_shared_pool_writers
@@ -5709,7 +5710,8 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
         private_state._atomic_json(activation_path, record)
         api.activation_complete = True
         assert parent.run_shared_pool_operation(**kwargs)['status'] == 'shared_pool_handoff_complete'
-        _exercise_participant_writer_census(args, bindings, state, api, transport, inventory, kinds, mode, publisher_cloud)
+        _exercise_participant_writer_census(args, bindings, state, api, transport, inventory, kinds, mode, publisher_cloud,
+            preparation=participant == 'preparation')
         return
     if recovery:
         _exercise_recovery_writer_census(kwargs, state, transport, inventory, kinds, calls, mode, replace_live, CensusPhaseAPI)
@@ -5722,7 +5724,8 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
     assert len(calls) == before
 
 
-def _exercise_participant_writer_census(args, bindings, state, parent_api, transport, inventory, kinds, mode, publisher_cloud):
+def _exercise_participant_writer_census(args, bindings, state, parent_api, transport, inventory, kinds, mode, publisher_cloud,
+        *, preparation=False):
     """Normal release must retain the entire shared pool, not just its resources."""
     import importlib.util
     import json
@@ -5785,6 +5788,38 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
             source_archive_sha256=candidate['source_archive_sha256']), publication=publication,
         manager=manager, catalog=catalog, state_root=state.parent / 'participant-releases',
         anchor_dir=state.parent / 'participant-anchors')
+    if preparation:
+        from scripts.ops.nebius_management_transport import ManagementKubernetesTransport
+        from scripts.ops.nebius_pool_participant_prepare import capture_participant_release
+
+        # Actual receipt-selected manager/catalog, not the historical helper's
+        # independently generated catalog identity. Initial parent sequencing is
+        # still fixture-qualified; this tests its real forward receipt consumer.
+        catalog = copy.deepcopy(bindings.plan.development.runtime.resources[_key(catalog)])
+        captured_resources = {**current, _key(manager): manager, _key(catalog): catalog}
+        paths = {_resource_path(row): row for row in captured_resources.values()}
+        capture_calls = []
+
+        def read(message):
+            assert message.method == 'GET' and not message.url.query
+            capture_calls.append(message.url.path)
+            if message.url.path == '/api/v1/namespaces/kube-system':
+                return transport.client.send(message)
+            row = paths.get(message.url.path)
+            return httpx.Response(404) if row is None else httpx.Response(200, json=row)
+
+        with ManagementKubernetesTransport(api_server=transport.api_server, ssl_context=ssl.create_default_context()) as capture_api:
+            capture_api.client.close()
+            capture_api.client = type(transport.client)(base_url=transport.api_server, transport=httpx.MockTransport(read))
+            snapshot = capture_participant_release(predecessor=predecessor, bindings=bindings,
+                shared_state=state, repo_root=ROOT, transport=capture_api)
+        assert {_key(row): row for row in snapshot.current} == {
+            key: row for key, row in current.items() if row['kind'] != 'Job'}
+        assert snapshot.manager == manager and snapshot.catalog == catalog and capture_calls
+        retained = retain_participant_rollout(**{**release_inputs, 'current': snapshot.current,
+            'manager': snapshot.manager, 'catalog': snapshot.catalog})
+        assert retained.inputs.current == snapshot.current
+        return
     retained = retain_participant_rollout(**release_inputs)
     resources = {**current, _key(manager): manager, _key(catalog): catalog}
     writes = []
