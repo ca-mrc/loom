@@ -2395,6 +2395,14 @@ such as `refresh_resource_inventory`, `refresh_persistent_storage`,
 `refresh_shared_material`, `refresh_publication` or `refresh_cloud_identity`.
 Unknown details retain a coarse stage. These codes expose no resource contents or
 provider messages and do not authorize retrying a blocked installation.
+When refresh reconnects retained pool authority, exact typed prerequisite failures
+retain the `refresh_pool_` prefix: `publication`, `operator_readers`,
+`runtime_databases`, `runtime_telemetry`, `management_database`, `provider`,
+`connected_scope` or `private_inputs`. Telemetry may append the same bounded
+detail used by pool preflight, for example
+`refresh_pool_runtime_telemetry_tls_api_verify_20`. Unknown messages, extra
+message text or an unrelated exception type remain `refresh_connection`; raw
+exceptions and chained provider payloads never leave the protected report.
 For `refresh_platform_capacity`, an optional closed `capacity` diagnostic
 distinguishes rendering, inventory, controller decoding/counting, placement and
 resource fit. For eligible nodes it reports only node UUIDs and numeric CPU,

@@ -76,6 +76,16 @@ OPTIONAL_TELEMETRY_STAGES = frozenset({
     'tls_kubelet', 'kubelet_authorization', 'kubelet_network', 'kubelet_http', 'counters',
     *(f'tls_kubelet_verify_{code}' for code in range(256)),
 })
+POOL_CONNECTION_STAGES = frozenset({
+    'publication', 'operator_readers', 'runtime_databases', 'runtime_telemetry',
+    *('runtime_telemetry_' + detail for detail in {
+        'binding', 'pod', 'nodes', 'probe', 'recheck', 'settings', 'client', 'tls',
+        'authorization', 'network', 'http', 'reader', 'counters', 'close',
+        'identity', 'address', 'authority', 'payload', 'tls_api', 'tls_kubelet',
+        *OPTIONAL_TELEMETRY_STAGES,
+        *(f'tls_{transport}_verify_{code}' for transport in ('api', 'kubelet', 'unknown') for code in range(256))}),
+    'management_database', 'provider', 'connected_scope', 'private_inputs',
+})
 TOOLING_PREPARATION_STAGES = frozenset({
     'tooling_lock', 'tooling_retained_incomplete', 'tooling_retained_integrity', 'tooling_release_limit',
     'tooling_extract', 'tooling_venv', 'tooling_dependency_sync', 'tooling_wheel_install',
@@ -104,19 +114,13 @@ DIAGNOSTIC_STAGES = frozenset({*TOOLING_PREPARATION_STAGES,
     "refresh_post_migration_probe", "refresh_activate", "refresh_activation", "refresh_public",
     "refresh_public_authentication", "refresh_completion", "refresh_supersession", "refresh_pool_authority",
     *("refresh_" + stage for stage in REFRESH_RETAINED_PREFLIGHT_STAGES),
+    *('refresh_pool_' + stage for stage in POOL_CONNECTION_STAGES),
     *('pool_' + stage.replace('-', '_') for stage in POOL_PHASES | {
         'operation', 'connection', 'preflight', 'cancellation', 'completion',
         *('preflight_' + detail for detail in {
             'writer_bindings', 'writer_workloads', 'connected_prerequisites', 'capacity',
             'scope', 'database_report', 'pending_source', 'pending_page', 'origin_history', 'database_readiness'}),
-        'publication', 'operator_readers', 'runtime_databases', 'runtime_telemetry',
-        *('runtime_telemetry_' + detail for detail in {
-            'binding', 'pod', 'nodes', 'probe', 'recheck', 'settings', 'client', 'tls',
-            'authorization', 'network', 'http', 'reader', 'counters', 'close',
-            'identity', 'address', 'authority', 'payload', 'tls_api', 'tls_kubelet',
-            *OPTIONAL_TELEMETRY_STAGES,
-            *(f'tls_{transport}_verify_{code}' for transport in ('api', 'kubelet', 'unknown') for code in range(256))}),
-        'management_database', 'provider', 'connected_scope', 'private_inputs'})})
+        *POOL_CONNECTION_STAGES})})
 _ENTRY = "import sys; sys.path.insert(0, sys.argv[1]); from scripts.ops.nebius_management_entry import main; raise SystemExit(main(sys.argv[2], sys.argv[3]))"
 
 

@@ -1,5 +1,6 @@
 """Unpublished image owners need bounded retirement independent of registry GC."""
 
+import gc
 import importlib
 from datetime import UTC, datetime, timedelta
 
@@ -69,6 +70,10 @@ async def _image(journal, tmp_path):
 
 async def _observe(journal, image_id, now=INSTANT):
     module = importlib.import_module("loom_control_plane.task_image_materializations")
+    # Reclaim cyclic garbage left by earlier integration tests before opening
+    # the deliberately short transaction. A full collection inside its one-
+    # second idle limit can disconnect an otherwise healthy database session.
+    gc.collect()
     # A deliberately stale observation must still fail; it does not rewind the
     # scenario clock used by subsequent reference, publication and GC writes.
     _RetirementClock.instant = max(_RetirementClock.instant, now)

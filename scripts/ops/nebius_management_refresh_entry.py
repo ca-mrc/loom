@@ -192,6 +192,13 @@ def execute_refresh(context: RefreshContext, operation: dict[str, Any], action: 
                 state_dir=Path(operation['state_dir']), anchor_dir=Path(operation['anchor_dir']))
     except Exception as error:
         stage = getattr(error, 'stage', 'connection')
+        if isinstance(error, EntryError):
+            from scripts.ops.nebius_pool_cutover_entry import _CONNECTION_ERRORS
+
+            # Reuse only exact, locally authored pool prerequisite categories.
+            # Unknown/private messages never become diagnostic stages.
+            pool_stage = _CONNECTION_ERRORS.get(str(error))
+            stage = 'pool_' + pool_stage if pool_stage is not None else 'connection'
         if stage == 'prerequisites' and api is not None:
             stage = api.diagnostic_stage or stage
         if not isinstance(stage, str):
