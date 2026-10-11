@@ -6038,6 +6038,13 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
                         cause = cause.__context__
                     raise ValueError('gateway process unqualified; preserve evidence; ' + ', '.join(frames)) from None
 
+            from tests.ops.test_nebius_pool_participant_processes import peer_process_connection
+
+            peer_process, peer_fault = peer_process_connection(observer=observer, bindings=bindings,
+                shared_state=state, inventory=inventory, resources=resources, kubeconfig=kubeconfig,
+                patch=patch, fallback=execute)
+            peer_result = peer_process()
+            assert peer_result['status'] == 'available'
             assert manager_process() == ()
             assert gateway_process() is None
             registry_mode['manager-pending'] = True
@@ -6068,6 +6075,7 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
                 if _phase == 'ready':
                     assert manager_process('ready') == ()
                     assert gateway_process() is None
+                    assert peer_process()['status'] == 'available'
 
             pool_state.qualify = qualify_pool
             pool = connect_pool()
@@ -6079,6 +6087,11 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
                 pool.finish(kube, retained.release)
             assert 'open' not in pool_state.effects
             registry_mode.clear()
+            peer_fault['mode'] = 'settings'
+            with pytest.raises(ValueError, match='preserve'):
+                pool.finish(kube, retained.release)
+            assert 'open' not in pool_state.effects
+            peer_fault.clear()
             pool.finish(kube, retained.release)
             pool.read_capacity(kube, retained.release, observation_id=uuid4())
             assert pool_state.effects == ['config', 'fence', 'stage', 'config', 'manager', 'open', 'capacity']
@@ -6109,6 +6122,17 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
                 secret['metadata']['resourceVersion'] = '701'
                 registry_mode.clear()
             assert gateway_process() is None
+            for damage in ('database', 'pending', 'restart', 'credential', 'telemetry-binding', 'telemetry-restart'):
+                peer_fault['mode'] = damage
+                with pytest.raises(ValueError, match='preserve'):
+                    peer_process()
+                peer_fault.clear()
+            peer_fault['mode'] = 'telemetry-unavailable'
+            unavailable = peer_process()
+            assert unavailable['status'] == 'unavailable'
+            assert unavailable['checks'] >= 2 and unavailable['unavailable'] == unavailable['checks']
+            assert unavailable['reasons'] == ['kubelet_network']
+            peer_fault.clear()
             original_database_rows = copy.deepcopy(database_rows)
             for damage in ('backend', 'bad-report', 'history', 'connection', 'credential', 'restart'):
                 registry_mode[damage] = True
