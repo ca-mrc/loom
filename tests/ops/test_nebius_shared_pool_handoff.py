@@ -3265,7 +3265,7 @@ def _exercise_recovery_processes(*, kwargs, state, api, documents, probes, mode,
         return mode.get('collector_ready', True)
 
     def current(key):
-        return documents[runtime_resource_path(roots[key])]
+        return documents[runtime_resource_path(roots[key]) + '/' + roots[key]['metadata']['name']]
 
     def replace(key, wanted):
         actual = current(key)
@@ -3286,6 +3286,9 @@ def _exercise_recovery_processes(*, kwargs, state, api, documents, probes, mode,
                 row['items'] = []
         populate_runtime_pods(documents)
         for row in tuple(documents.values()):
+            if row['kind'] == 'PodList':
+                for pod in row['items']:
+                    pod['spec']['nodeName'] = 'platform-test'
             if row['kind'] == 'ReplicaSetList':
                 for child in row['items']:
                     documents['/apis/apps/v1/namespaces/' + child['metadata']['namespace']
@@ -3298,8 +3301,18 @@ def _exercise_recovery_processes(*, kwargs, state, api, documents, probes, mode,
                 {'apiVersion': 'batch/v1', 'kind': 'JobList', 'metadata': {'resourceVersion': '501'}, 'items': []})
 
     def observe():
-        return module.observe_shared_pool_recovery_processes(bindings=bindings, state_dir=state,
-            kubeconfig=Path(probes.prefix[probes.prefix.index('--kubeconfig') + 1]), executable=Path(probes.prefix[0]))
+        try:
+            return module.observe_shared_pool_recovery_processes(bindings=bindings, state_dir=state,
+                kubeconfig=Path(probes.prefix[probes.prefix.index('--kubeconfig') + 1]), executable=Path(probes.prefix[0]))
+        except ValueError as exc:
+            import traceback
+
+            frames, cause = [], exc
+            while cause is not None:
+                frames.extend(f'{Path(frame.filename).name}:{frame.lineno}:{frame.name}'
+                    for frame in traceback.extract_tb(cause.__traceback__))
+                cause = cause.__context__
+            raise ValueError('shared pool recovery process observation unqualified: ' + ', '.join(frames)) from None
 
     error = 'shared pool recovery process observation unqualified'
     with pytest.raises(ValueError, match=error):
@@ -3319,7 +3332,7 @@ def _exercise_recovery_processes(*, kwargs, state, api, documents, probes, mode,
     key = next(key for key in record['resources'] if roots[key]['kind'] == 'Deployment')
     # A later root cannot borrow pending permission from another root's intent.
     assert observe().pending_workloads == ()
-    for selected, choices in stop._sources(bindings, state).items():
+    for selected in stop._sources(bindings, state):
         before = _snapshot(current(selected))
         before['metadata']['uid'] = _uid(current(selected))
         expected = stop._stopped(bindings, before)
@@ -3391,6 +3404,20 @@ def _exercise_recovery_processes(*, kwargs, state, api, documents, probes, mode,
         mode['process_hook'] = None
         documents.clear()
         documents.update(before)
+        # A service restart during the earlier collector challenge is not
+        # covered by that callback's controller/database checks. The aggregate
+        # selected-process readback must reject the changed service too.
+        before = copy.deepcopy(documents)
+        def late_service():
+            pod, = (row for row in documents['/api/v1/namespaces/' + staging.namespace + '/pods']['items']
+                if row['metadata']['name'] == 'loom-service-a12b34-test')
+            pod['status']['containerStatuses'][0]['restartCount'] += 1
+        mode['process_hook'] = late_service
+        with pytest.raises(ValueError, match=error):
+            observe()
+        mode['process_hook'] = None
+        documents.clear()
+        documents.update(before)
         api.block = None
         assert parent.run_shared_pool_operation(**kwargs)['status'] == 'staging_restored_dev_closed'
         assert observe().pending_workloads == ()  # Terminal replay constructs no active child.
@@ -3401,6 +3428,15 @@ def _exercise_recovery_processes(*, kwargs, state, api, documents, probes, mode,
         mode['process_hook'] = None
         journal.write_bytes(raw)
         assert observe().pending_workloads == ()
+        captured = bindings.plan.staging.originals
+        original = copy.deepcopy(captured)
+        mode['process_hook'] = captured.clear
+        try:
+            with pytest.raises(ValueError, match=error):
+                observe()  # Caller-owned nested bindings cannot change mid-read.
+        finally:
+            captured.update(original)
+            mode['process_hook'] = None
 
 
 def _exercise_scoped_process_observation(*, development, documents, state, calls, catalog_path):
