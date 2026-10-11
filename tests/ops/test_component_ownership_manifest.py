@@ -1374,6 +1374,17 @@ def test_root_shards_distribute_shared_handoff_phases_and_observation() -> None:
     assert len(set(phases)) >= 6
     assert max(phases.count(index) for index in set(phases)) <= 2
     assert placement["tests/ops/test_nebius_pool_participant_observation.py"] not in phases
+    # Run 38163731249 exhausted the unchanged 40m job budget at these
+    # collisions. Keep the new lifecycle work apart from its measured heavy
+    # predecessors; the executable workflow test still proves full coverage.
+    for left, right in (
+        ("shared_pool_handoff_processes", "pool_startup_repair"),
+        ("shared_pool_handoff_recovery_fences", "pool_manager_image_history"),
+        ("shared_pool_handoff_recovery_authority", "pool_startup_repair_rollback"),
+        ("shared_pool_handoff_recovery_release", "shared_pool_handoff_forward"),
+        ("pool_participant_delivery", "pool_cutover_entry"),
+    ):
+        assert placement[f"tests/ops/test_nebius_{left}.py"] != placement[f"tests/ops/test_nebius_{right}.py"]
 
 
 def test_stable_hash_sharding_is_order_independent_and_has_zero_insertion_churn() -> None:
