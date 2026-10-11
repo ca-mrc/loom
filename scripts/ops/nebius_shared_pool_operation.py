@@ -20,21 +20,13 @@ from scripts.ops.nebius_ingress_stage import _key, _uid
 from scripts.ops.nebius_management_switch import _matches
 from scripts.ops.nebius_pool_migration import migration_contract
 from scripts.ops.nebius_pool_predecessor import CompletedPoolCutover
+from scripts.ops.nebius_shared_pool_command import FORWARD_PHASES as FORWARD_PHASES
+from scripts.ops.nebius_shared_pool_command import RECOVERY_PHASES as RECOVERY_PHASES
 from scripts.ops.nebius_shared_pool_handoff import prepare_shared_pool_handoff
 from scripts.ops.nebius_shared_pool_handoff_live import SharedPoolGuardBindings
 
 from loom.nebius_platform_render import digest
 
-FORWARD_PHASES = (
-    'forward-guards', 'forward-drain', 'forward-stop', 'forward-roles',
-    'forward-database', 'forward-material', 'forward-wire', 'forward-start',
-    'forward-build-policy', 'forward-gateway', 'forward-activate', 'forward-verify',
-)
-RECOVERY_PHASES = (
-    'recovery-fence', 'recovery-drain', 'recovery-stop', 'recovery-revoke',
-    'recovery-restore-workloads', 'recovery-restore-roles', 'recovery-restart',
-    'recovery-reopen', 'recovery-verify',
-)
 _COMPLETE = 'shared_pool_handoff_complete'
 _RECOVERED = 'staging_restored_dev_closed'
 

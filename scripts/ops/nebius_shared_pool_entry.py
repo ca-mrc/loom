@@ -40,6 +40,7 @@ from scripts.ops.nebius_pool_predecessor import (
     load_completed_pool,
 )
 from scripts.ops.nebius_shared_pool_api import HTTPSSharedPoolOperationAPI
+from scripts.ops.nebius_shared_pool_command import validate_operation
 from scripts.ops.nebius_shared_pool_handoff import prepare_shared_pool_handoff
 from scripts.ops.nebius_shared_pool_handoff_live import SharedPoolGuardBindings
 from scripts.ops.nebius_shared_pool_operation import _qualify_bindings, run_shared_pool_operation
@@ -51,33 +52,6 @@ from loom_service.environment_management.manager import CandidateBundle
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE_RECORD = ROOT / 'shared-pool-source.json'
-
-
-def validate_operation(value: dict[str, Any]) -> None:
-    """One installation and catalog; no caller-selected phase or state path."""
-    try:
-        if (not isinstance(value, dict) or set(value) != {'schema', 'source_sha', 'installation_id', 'namespace',
-                'operation_id', 'inputs_path', 'inputs_sha256'}
-                or any(not isinstance(item, str) or not 0 < len(item) <= 1024 for item in value.values())
-                or value['schema'] != 'loom.nebius-shared-pool-operation.v1'
-                or value['namespace'] != 'loom-nebius-management-dev'
-                or not re.fullmatch(r'[0-9a-f]{40}', value['source_sha'])
-                or not re.fullmatch(r'[0-9a-f]{64}', value['inputs_sha256'])):
-            raise ValueError
-        for key in ('installation_id', 'operation_id'):
-            identity = UUID(value[key])
-            if not identity.int or str(identity) != value[key]:
-                raise ValueError
-        path = Path(value['inputs_path'])
-        root = path.parent
-        if (not path.is_absolute() or str(path) != value['inputs_path'] or path != path.resolve()
-                or not re.fullmatch(r'/[A-Za-z0-9_./-]+', str(path)) or path.name != 'inputs.json'
-                or root.name != value['operation_id'] or root.parent.name != value['installation_id']
-                or root.parent.parent.name != 'nebius-shared-pool' or root.parent.parent.parent.name != '.loom'
-                or root.parent.parent.parent.parent == Path('/')):
-            raise ValueError
-    except Exception:
-        raise ValueError('shared pool operation unqualified') from None
 
 
 class RetainedRuntimeReference(BaseModel):

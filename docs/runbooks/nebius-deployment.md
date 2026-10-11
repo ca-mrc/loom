@@ -661,6 +661,54 @@ could skip enforcement. Its generated gateway/namespace targets are not
 permission to apply them manually; the protected live activation and recovery
 composition must be connected and qualified first.
 
+### Shared-pool handoff delivery
+
+The separate `shared-pool-preflight`, `shared-pool-install` and
+`shared-pool-recover` actions use the protected `nebius-rollout` workflow,
+`NEBIUS_SHARED_POOL_SSH_KEY` and `NEBIUS_SHARED_POOL_OPERATION_JSON`. They do not
+extend the CLOSED-runtime key. They are source-implemented delivery routes, not
+evidence that a grant or multi-owner environment is installed. Complete ordinary
+rollout continuity and qualify all installation prerequisites before invoking a
+live handoff; do not acquire a staging guard while waiting for these prerequisites.
+
+The fixed operation schema is `loom.nebius-shared-pool-operation.v1`. It selects
+the exact integrated `source_sha`, management `installation_id`, registered pool
+`operation_id`, namespace `loom-nebius-management-dev`, and the SHA-256 of
+`OPERATOR_HOME/.loom/nebius-shared-pool/INSTALLATION_UUID/POOL_OPERATION_UUID/inputs.json`.
+The `loom.nebius-shared-pool-inputs.v1` private document contains:
+
+- `runtime`: the completed runtime operation path and SHA-256. Its archived source
+  and runtime material must match; retired operator CA/key files are not reopened.
+- `legacy`: the completed original pool/rollback selector.
+- `staging_observation_file` and `staging_observation_sha256`: the captured
+  current-source staging observation, not an arbitrary target manifest.
+- `development_guard`: the exact database-bound result of the read-only guard
+  observer. The parent reconstructs the plan and qualifies current live state;
+  this input cannot assert readiness or bypass the census.
+- `operator_connection`: a current, separately protected Kubernetes endpoint,
+  CA and credential file. Private bytes are rechecked around authentication and
+  throughout the operation.
+
+Prepare an immutable bundle from the exact clean integrated source with
+`scripts.ops.nebius_shared_pool_rollout --operation preflight --requirements
+LOCKED_REQUIREMENTS --evidence-dir PRIVATE_EVIDENCE --prepare-bundle PRIVATE_BUNDLE`.
+The operator grants only that bundle digest through
+`scripts.ops.install_nebius_shared_pool_entrypoint`. Existing SSH grants remain
+unchanged. The source-bound bootstrap imports only the standard library before
+installing locked dependencies and the exact-source wheels. Private inputs and
+credentials are not included in the bundle or public result.
+
+Preflight observes current authority without acquiring guards or creating handoff
+history. `pending` names the exact forward/recovery phase; it does not mean
+admission is open. Preserve every anchor and child receipt and repeat only the
+unchanged protected action after the pending condition progresses. A `blocked`
+result or lost reply requires inspection of retained evidence before another
+invocation; never delete uncertain intent to force a write retry. Recovery cannot
+start without an anchored handoff or replace a completed successful handoff.
+`shared_pool_handoff_complete` reports open admission only after current parent
+qualification; `staging_restored_dev_closed` reports terminal recovery with dev
+closed. Neither replaces actual owner build/deploy/task/result acceptance.
+
 Subsequent lifecycle changes use the same management context:
 
 ```bash

@@ -1365,6 +1365,18 @@ guards and no pending workload readiness. This internal connection is not a
 protected deployment entrypoint or installed multi-owner acceptance. Protected
 delivery and ordinary rollout continuity must be connected before live handoff.
 
+The shared-pool private entry reconstructs the completed development runtime and
+legacy pool from exact retained input/source/history bytes. It uses a separately
+protected current operator connection, without reopening retired operator keys.
+The captured staging snapshot and development guard are requalified by the real
+parent; private inputs cannot assert readiness. Its fixed preflight, install and
+recover actions preserve unknown-write intent across invocations and emit only
+bounded status and identity fields. Dedicated source-bound delivery packages the
+entry, both phase directions and exact-source Loom wheels; its bootstrap imports
+only the standard library before dependencies are installed. This does not widen
+the existing CLOSED-runtime key. Source packaging and local command tests do not
+establish an installed grant, protected workflow execution or live readiness.
+
 Authenticated Kubernetes/worker identity and capacity observations remain
 mandatory. Detailed kubelet samples retain the existing optional-telemetry
 contract; unavailable samples are not zero usage or evidence of certificate trust.
