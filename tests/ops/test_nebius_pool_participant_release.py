@@ -5,9 +5,11 @@ import copy
 import importlib
 import json
 from dataclasses import replace
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
+import yaml
 from scripts.ops.nebius_ingress_stage import _key
 from tests.ops.test_nebius_pool_migration import migration_request
 from tests.ops.test_nebius_pool_runtime import env
@@ -308,6 +310,84 @@ def test_refresh_mutation_identity_cannot_be_rotated_to_retry(catalog_inputs, ac
     with pytest.raises(ValueError):
         module().refresh_documents(catalog_inputs['release'], manager=catalog_inputs['manager'],
             action=action, observation_id=identity)
+
+
+@pytest.mark.parametrize('failure', [None, 'migrate', 'configure', 'actuator', 'https', 'readback'])
+def test_shared_candidate_uses_full_normal_rollout_without_restoring_local_writers(release_inputs, tmp_path, monkeypatch, failure):
+    """Missing schema/config phases or restoring the collector must break this path.
+
+    This exercises the common workload executor, not the still-pending protected
+    shared parent. Kubernetes and public HTTPS are the external test boundaries.
+    """
+    from scripts.ops import deploy_nebius_platform as deploy
+    from tests.ops.test_deploy_nebius_platform import FakeKubectl
+
+    release = module().prepare_staging_pool_release(**release_inputs)
+    config, files = release_inputs['config'], release.files
+    for name, rows in files.items():
+        (tmp_path / name).write_text(yaml.safe_dump_all(rows))
+
+    class CandidateKube(FakeKubectl):
+        def run(self, *args, **kwargs):
+            result = super().run(*args, **kwargs)
+            if args[0] == 'apply':
+                filename = Path(args[2]).name
+                if (failure, filename) in {('migrate', '30-migrate.yaml'), ('configure', '50-configure.yaml')}:
+                    raise deploy.DeploymentError('ambiguous test write')
+            if failure == 'actuator' and args[:3] == ('rollout', 'status', 'deployment/loom-execution-actuator'):
+                raise deploy.DeploymentError('actuator not ready')
+            return result
+
+    kube = CandidateKube(config, files, database=True)
+    for row in release_inputs['current']:
+        kube.objects[row['kind'].lower(), row['metadata']['name']] = copy.deepcopy(row)
+    before_collector = copy.deepcopy(kube.objects['cronjob', 'loom-execution-capacity-collector'])
+    events = []
+
+    def smoke(origin, environment):
+        assert origin == 'https://' + config['public_host'] and environment == 'staging'
+        events.append('https')
+        if failure == 'https':
+            raise deploy.DeploymentError('HTTPS not ready')
+        if failure == 'readback':
+            kube.objects['deployment', 'loom-service']['spec']['template']['spec']['containers'][0]['image'] = 'wrong'
+
+    monkeypatch.setattr(deploy, 'public_smoke', smoke)
+    kwargs = dict(kube=kube, manifest={'public_origin': 'https://' + config['public_host']}, config=config,
+        files=files, snapshot_root=tmp_path, retry_failed_jobs=False, phase=events.append,
+        before_write=lambda: events.append('write-intent'))
+    if failure:
+        with pytest.raises(deploy.DeploymentError):
+            deploy._rollout_candidate_files(**kwargs)
+    else:
+        deploy._rollout_candidate_files(**kwargs)
+        assert [event for event in events if event not in {'write-intent', 'https'}] == [
+            '00-namespaces', '10-config-network', '20-database', 'database-ready', '80-backup', '30-migrate',
+            '40-services', '50-configure', '60-execution', '70-public', 'public-load-balancer-ready',
+            'public-https-smoke', 'candidate-readback']
+        for name in ('30-migrate.yaml', '50-configure.yaml'):
+            assert deploy.job_complete(kube.objects['job', files[name][0]['metadata']['name']])
+        for row in files['60-execution.yaml']:
+            if row['kind'] == 'Deployment':
+                assert ('rollout', 'status', 'deployment/' + row['metadata']['name'], '-n',
+                    config['execution_namespace'], '--timeout=300s') in kube.commands
+        settings = env(kube.objects['deployment', 'loom-execution-actuator'])
+        assert PoolRuntimeSettings.model_validate_json(settings['LOOM_EXECUTION_ACTUATOR_GLOBAL_POOL']['value']).participant == release.refresh.after.participants[0]
+        assert events[-1] == 'candidate-readback'
+    applied = [Path(command[2]).name for command in kube.commands if command[0] == 'apply']
+    if failure in {'migrate', 'configure'}:
+        assert '60-execution.yaml' not in applied
+    if failure == 'actuator':
+        assert '70-public.yaml' not in applied
+    assert kube.objects['cronjob', 'loom-execution-capacity-collector'] == before_collector
+    assert not any(command[0] in {'exec', 'patch', 'delete', 'create'} for command in kube.commands)
+    for command in kube.commands:
+        if command[0] == 'apply':
+            assert not any(row['kind'] in {'ClusterRole', 'ClusterRoleBinding'}
+                for row in yaml.safe_load_all(Path(command[2]).read_text()))
+    for row in files['60-execution.yaml']:
+        if row['kind'] == 'Role':
+            assert all(set(rule['verbs']) <= {'get', 'list', 'watch'} for rule in row['rules'])
 
 
 @pytest.mark.parametrize('damage', ['namespace', 'catalog', 'volume', 'mount', 'setting', 'mode', 'replicas', 'mutable-image'])
