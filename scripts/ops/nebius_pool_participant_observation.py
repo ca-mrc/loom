@@ -80,6 +80,7 @@ class _ResourceView:
         self.files: dict[Path, bytes | None] = {}
         self.documents: dict[str, Document] = {}
         self.options: dict[str, tuple[_Choice | None, ...]] = {}
+        self.process_transitions: set[str] = set()
         for row in (*retained.inputs.current, retained.inputs.manager, retained.inputs.catalog):
             key = _key(row)
             if key in self.documents:
@@ -140,6 +141,9 @@ class _ResourceView:
         self.documents[key] = original
         self.options[key] = ((before,) if item['status'] == 'prepared' else
             (before, after) if item['status'] == 'intent' else (after,))
+        if (original['kind'] == 'Deployment' and item['status'] in {'intent', 'applied'} and after is not None
+                and original['spec']['template'] != after.document['spec']['template']):
+            self.process_transitions.add(key)
         return item
 
     def _stage(self, path: Path, *, document: Document, revision: str, phase: str,
@@ -449,6 +453,125 @@ class HTTPSParticipantResourceObserver(ManagementKubernetesTransport):
             return result[0]
         except Exception:
             raise ValueError('participant guard observation unqualified; preserve evidence') from None
+
+    def observe_participant_processes(self, *, kubeconfig: Path, executable: Path,
+            phase: Literal['preflight', 'guarded', 'ready', 'released'], preparing: str | None = None) -> tuple[str, ...]:
+        """Challenge this participant's CP, API and every registered actuator.
+
+        Known candidate transitions can return pending keys before final readiness;
+        a pending result is NOT permission for more writes. The protected caller
+        must wait/read again. Manager, gateway, other participants, guard and live
+        registry qualification remain independent whole-pool requirements.
+        """
+        from scripts.ops.nebius_development_runtime_probes import HTTPSDevelopmentRuntimeProbes
+        from scripts.ops.nebius_development_runtime_readiness import qualify_started_deployment
+        from scripts.ops.nebius_pool_migration_guard import KubectlPoolGuardAPI
+        from scripts.ops.nebius_pool_participant_operation import _paths
+
+        try:
+            if phase not in {'preflight', 'guarded', 'ready', 'released'}:
+                raise ValueError
+            retained = self.retained
+            current = self.observe(preparing=preparing)
+            view = _ResourceView(retained, preparing)
+            original, = (row for row in retained.inputs.previous.guards
+                if row.participant_id == retained.release.refresh.participant_id)
+            database = original.database
+            if (database is None or database.actuator_credential_uid is None
+                    or database.actuator_credential_resource_version is None):
+                raise ValueError
+            keys = {f'Deployment:{original.namespace}:{name}' for name in ('loom-control-plane', 'loom-service')}
+            keys.update(_key(row) for row in retained.release.files['60-execution.yaml'] if row['kind'] == 'Deployment')
+            originals = {_key(row): row for row in retained.inputs.current if _key(row) in keys}
+            if originals.keys() != keys or not keys <= current.keys():
+                raise ValueError
+            controller = originals[_key(original.controller)]
+            statefulset, service = (current[_key(row)] for row in (database.statefulset, database.service))
+            if (_uid(controller) != _uid(original.controller) or _uid(statefulset) != _uid(database.statefulset)
+                    or _uid(service) != _uid(database.service)):
+                raise ValueError
+            target = replace(original, controller=controller,
+                database=replace(database, statefulset=statefulset, service=service))
+            previous = replace(retained.inputs.previous,
+                guards=tuple(target if row == original else row for row in retained.inputs.previous.guards))
+            successor = replace(previous, registration=replace(previous.registration, spec=retained.release.refresh.after))
+            before_api, after_api = (KubectlPoolGuardAPI(request=request, kubeconfig=kubeconfig, executable=executable)
+                for request in (previous, successor))
+            prefix = tuple(before_api.prefix)
+            _, marker = _paths(retained.reference, retained.state_dir.parent, retained.anchor_dir)
+            anchor = private_state._private_read(marker)
+            region = retained.release.refresh.before.quota_identities['nodes'][1]
+
+            def unchanged() -> None:
+                if (self.retained != retained or tuple(before_api.prefix) != prefix or tuple(after_api.prefix) != prefix
+                        or hashlib.sha256(private_state._private_read(kubeconfig, limit=512 * 1024)).hexdigest() != before_api.kubeconfig_sha256
+                        or hashlib.sha256(private_state._private_read(retained.state_dir / 'inputs.json', limit=16 * 1024**2)).hexdigest()
+                            != retained.reference.inputs_sha256
+                        or private_state._private_read(marker) != anchor
+                        or _ResourceView(retained, preparing).files != view.files):
+                    raise ValueError
+
+            def ready(row: Document) -> bool:
+                namespace = row['metadata']['namespace']
+                actual = before_api._get('deployment', row['metadata']['name'], namespace)
+                if not _matches(actual, row, _uid(row)):
+                    raise ValueError
+                children = before_api._run(['get', '--raw', f'/apis/apps/v1/namespaces/{namespace}/replicasets?limit=1000'])
+                pods = before_api._run(['get', '--raw', f'/api/v1/namespaces/{namespace}/pods?limit=1000'])
+                return qualify_started_deployment(current=actual, children=children, pods=pods, region=region)
+
+            credentials: dict[str, tuple[str, UUID, str]] = {}
+            for key, row in originals.items():
+                actuator = row['metadata']['namespace'] != target.namespace
+                variable = ('LOOM_EXECUTION_ACTUATOR_DB_URL' if actuator else 'LOOM_CP_DB_URL'
+                    if row['metadata']['name'] == 'loom-control-plane' else 'LOOM_SVC_DB_URL')
+                credentials[key] = (variable,
+                    database.actuator_credential_uid if actuator else database.credential_uid,
+                    database.actuator_credential_resource_version if actuator else database.credential_resource_version)
+
+            def urls() -> dict[str, str]:
+                return {key: before_api._workload_database_url(originals[key], url_variable=variable,
+                    credential_uid=uid, credential_resource_version=version)
+                    for key, (variable, uid, version) in credentials.items()}
+
+            unchanged()
+            before_urls = urls()
+            identity = HTTPSDevelopmentRuntimeProbes._process_identity
+            backend = identity(before_api._database(target))
+            processes: dict[str, tuple[KubectlPoolGuardAPI, tuple[Any, ...]]] = {}
+            pending = []
+            for key in sorted(keys):
+                row, prior = current[key], originals[key]
+                updated = not _matches(row, prior, _uid(prior))
+                if not ready(row):
+                    if phase in {'ready', 'released'} or key not in view.process_transitions or not updated:
+                        raise ValueError
+                    pending.append(key)
+                    continue
+                api = after_api if updated else before_api
+                process = identity(api._runtime(target, original=prior, expected=row))
+                _, uid, version = credentials[key]
+                api.qualify_runtime_database(target, original=prior, expected=row,
+                    credential_uid=uid, credential_resource_version=version)
+                api.qualify_runtime_pool_settings(target, original=prior, expected=row)
+                if identity(api._runtime(target, original=prior, expected=row)) != process:
+                    raise ValueError
+                processes[key] = api, process
+                unchanged()
+            final = self.observe(preparing=preparing)
+            if (final.keys() != current.keys()
+                    or any(not _matches(final[key], row, _uid(row)) for key, row in current.items())):
+                raise ValueError
+            for key, (api, process) in processes.items():
+                if not ready(final[key]) or identity(api._runtime(target, original=originals[key], expected=final[key])) != process:
+                    raise ValueError
+            if identity(before_api._database(target)) != backend or urls() != before_urls:
+                raise ValueError
+            unchanged()
+            self._source()
+            return tuple(pending)
+        except Exception:
+            raise ValueError('participant process observation unqualified; preserve evidence') from None
 
     def observe_registry(self, *, bindings: SharedPoolGuardBindings, kubeconfig: Path,
             executable: Path, preparing: str | None = None) -> ParticipantRegistryState:

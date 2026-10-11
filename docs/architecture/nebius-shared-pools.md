@@ -1603,6 +1603,22 @@ The released-state check requires open intake, but does not establish completed
 release history. None of these observations acquires/releases a guard, qualifies
 application processes or replaces the other protected release checks.
 
+The selected participant's process observation challenges its current control
+plane, API and every ordinary/guest actuator. It selects original or candidate
+registration from each receipt-qualified workload, preserves retained controller,
+database, Service and credential identities, and checks complete Deployment/
+ReplicaSet/Pod readiness before the existing effective-settings and database-URL
+probes. Process identities (including restart counts), database backends, every
+consumer's credential, source, receipts and connection are rechecked before
+returning. No credential value is reported.
+
+Only a recorded Pod-template transition may return pending workloads during
+preflight or guarded observation. An unready original is rejected, and ready/
+released phases require every selected process ready. A pending result is not
+write permission: the protected parent must wait and observe again before its
+next effect. This check does not replace manager/gateway/other-participant process
+checks, actuator telemetry or the full-pool registry and writer observations.
+
 The participant registry observation reads the retained manager's database through
 its pinned credential, namespace, StatefulSet, Service and actual backend process.
 A fixed repeatable-read, read-only SQL snapshot checks the exact pool, participant,
