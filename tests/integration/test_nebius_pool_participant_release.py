@@ -12,10 +12,12 @@ from loom.db.nebius_pool_schema import NebiusPoolBinding, NebiusPoolParticipant
 from loom_service.pool_management.installation import register_installation
 from loom_service.pool_management.participant_refresh import refresh_participant
 from tests.integration.test_nebius_pool_registry import sessions as sessions
+from tests.ops.test_nebius_pool_participant_release import catalog_inputs as catalog_inputs
 from tests.ops.test_nebius_pool_participant_release import release_inputs as release_inputs
 from tests.ops.test_nebius_staging_pool_attachment import (
     staging_attachment_inputs as staging_attachment_inputs,
 )
+from tests.unit.test_nebius_management_render import management_inputs as management_inputs
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
@@ -41,8 +43,11 @@ async def test_real_candidate_release_stages_and_opens_only_its_participant(sess
         assert pool.mode == 'global' and pool.admission_epoch == plan.refresh.before.admission_epoch
 
 
-async def test_fixed_refresh_command_commits_real_source_derived_transaction_before_reporting(sessions, release_inputs, tmp_path):
-    from scripts.ops.nebius_pool_participant_release import prepare_staging_pool_release
+async def test_fixed_refresh_command_commits_real_source_derived_transaction_before_reporting(sessions, release_inputs, catalog_inputs, tmp_path):
+    from scripts.ops.nebius_pool_participant_release import (
+        prepare_staging_pool_release,
+        refresh_documents,
+    )
 
     plan = prepare_staging_pool_release(**release_inputs)
     async with sessions.begin() as session:
@@ -50,11 +55,17 @@ async def test_fixed_refresh_command_commits_real_source_derived_transaction_bef
         await session.execute(update(NebiusPoolBinding).where(NebiusPoolBinding.pool_id == plan.refresh.before.pool_id)
             .values(mode='global'))
     path = tmp_path / 'refresh.json'
-    path.write_text(plan.refresh.model_dump_json())
-    env = {**os.environ, 'LOOM_POOL_PARTICIPANT_REFRESH_FILE': str(path),
-        'LOOM_POOL_PARTICIPANT_REFRESH_DB_URL': sessions.kw['bind'].url.render_as_string(hide_password=False)}
     for action, expected in (('observe', 'ready'), ('fence', 'fenced'), ('stage', 'staged'), ('open', 'complete')):
-        child = subprocess.run([sys.executable, '-m', 'loom_service.pool_management.participant_refresh', action],
+        config, job = refresh_documents(plan, manager=catalog_inputs['manager'], action=action)
+        path.write_text(config['data']['refresh.json'])
+        container, = job['spec']['template']['spec']['containers']
+        # Execute the actual rendered command; only the mounted input path and
+        # disposable DB Secret are substituted at this external boundary.
+        file_env, db_env = container['env']
+        assert db_env['valueFrom']['secretKeyRef'] == {'name': 'loom-platform-db', 'key': 'admin-url'}
+        env = {**os.environ, file_env['name']: str(path),
+            db_env['name']: sessions.kw['bind'].url.render_as_string(hide_password=False)}
+        child = subprocess.run([sys.executable, *container['command'][1:]],
             env=env, text=True, capture_output=True, timeout=25, check=False)
         assert child.returncode == 0, child.stderr
         assert json.loads(child.stdout)['status'] == expected

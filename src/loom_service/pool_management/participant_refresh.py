@@ -6,12 +6,18 @@ These database states establish neither Kubernetes readiness nor guard ownership
 """
 from __future__ import annotations
 
-from typing import Any, Literal
+import asyncio
+import json
+import os
+import stat
+import sys
+from pathlib import Path
+from typing import Any, Literal, cast
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, model_validator
-from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, text, update
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from loom.db.nebius_pool_schema import (
     NebiusPoolBinding,
@@ -21,10 +27,15 @@ from loom.db.nebius_pool_schema import (
     NebiusPoolRequest,
 )
 from loom.db.schema import Token
+from loom.db.schema_startup import assert_schema_at_head
 from loom_service.pool_management.capacity import CHARGED_PHASES, digest
 from loom_service.pool_management.control import _clock
 from loom_service.pool_management.installation import PoolInstallation
 from loom_service.pool_management.locks import acquire_pool_mutation_lock
+from loom_service.pool_management.profiles import _object
+
+RefreshAction = Literal["observe", "fence", "stage", "open"]
+_ACTIONS = {"observe", "fence", "stage", "open"}
 
 
 class PoolParticipantRefresh(BaseModel):
@@ -34,6 +45,24 @@ class PoolParticipantRefresh(BaseModel):
     participant_id: UUID
     before: PoolInstallation
     after: PoolInstallation
+
+    @classmethod
+    def load(cls, path: Path) -> PoolParticipantRefresh:
+        """Bounded regular input, including Kubernetes projected ConfigMap links."""
+        try:
+            descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+            try:
+                if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                    raise ValueError
+                with os.fdopen(descriptor, "rb", closefd=False) as stream:
+                    raw = stream.read(4 * 1024**2 + 1)
+            finally:
+                os.close(descriptor)
+            if len(raw) > 4 * 1024**2:
+                raise ValueError
+            return cls.model_validate(json.loads(raw, object_pairs_hook=_object))
+        except (OSError, ValueError, TypeError):
+            raise ValueError("invalid_pool_participant_refresh") from None
 
     @model_validator(mode="after")
     def release_only(self) -> PoolParticipantRefresh:
@@ -147,14 +176,14 @@ async def _authority(session: AsyncSession, spec: PoolInstallation) -> None:
 
 
 async def refresh_participant(session: AsyncSession, request: PoolParticipantRefresh, *,
-        action: Literal["observe", "fence", "stage", "open"]) -> dict[str, Any]:
+        action: RefreshAction) -> dict[str, Any]:
     """Use the existing mutation lock and monotonic revisions, never a new epoch.
 
     Exact completed readback does not require idleness or refence current work.
     Outstanding waiting/charged requests are never cancelled to make rollout fit.
     """
     request = PoolParticipantRefresh.model_validate(request.model_dump())
-    if action not in {"observe", "fence", "stage", "open"} or session.new or session.dirty or session.deleted:
+    if action not in _ACTIONS or session.new or session.dirty or session.deleted:
         raise ValueError("participant_refresh_requires_clean_transaction")
     await acquire_pool_mutation_lock(session)
     pool = await session.get(NebiusPoolBinding, request.before.pool_id, populate_existing=True, with_for_update=True)
@@ -214,3 +243,41 @@ async def refresh_participant(session: AsyncSession, request: PoolParticipantRef
         "participant_id": str(request.participant_id), "pool_id": str(pool.pool_id), "status": status,
         "before_sha256": digest(request.before.model_dump(mode="json")),
         "after_sha256": digest(request.after.model_dump(mode="json"))}
+
+
+async def run_refresh(path: Path, *, db_url: str, action: RefreshAction) -> dict[str, Any]:
+    """Fixed protected Job entry; report only after its one transaction commits.
+
+    The operator's retained parent supplies guard/phase authority. No write retry,
+    schema change or initial-registration fallback belongs in this command.
+    """
+    if action not in _ACTIONS:
+        raise ValueError("invalid_pool_participant_refresh_action")
+    request = PoolParticipantRefresh.load(path)
+    engine = create_async_engine(db_url, pool_pre_ping=True)
+    try:
+        await assert_schema_at_head(engine, db_url_env_var="LOOM_POOL_PARTICIPANT_REFRESH_DB_URL")
+        async with async_sessionmaker(engine, expire_on_commit=False).begin() as session:
+            await session.execute(text("SET LOCAL statement_timeout='10s'"))
+            await session.execute(text("SET LOCAL lock_timeout='2s'"))
+            result = await refresh_participant(session, request, action=action)
+        return result
+    finally:
+        await engine.dispose()
+
+
+def main() -> int:
+    try:
+        if len(sys.argv) != 2 or sys.argv[1] not in _ACTIONS:
+            raise ValueError
+        result = asyncio.run(run_refresh(Path(os.environ["LOOM_POOL_PARTICIPANT_REFRESH_FILE"]),
+            db_url=os.environ["LOOM_POOL_PARTICIPANT_REFRESH_DB_URL"], action=cast(RefreshAction, sys.argv[1])))
+        print(json.dumps(result, sort_keys=True))
+        return 0
+    except Exception:
+        print(json.dumps({"status": "pool_participant_refresh_unavailable"}))
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

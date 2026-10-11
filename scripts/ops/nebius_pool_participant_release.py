@@ -21,15 +21,17 @@ from scripts.ops.nebius_pool_runtime import (
     participant_readonly_roles,
     wire_participant,
 )
-from scripts.ops.nebius_staging_pool_attachment import derive_staging_profiles
+from scripts.ops.nebius_staging_pool_attachment import _exact_pod, derive_staging_profiles
 
-from loom.nebius_platform_render import build_platform
+from loom.nebius_platform_render import _obj, build_platform
 from loom.nebius_pool_contract import PoolParticipantV1
 from loom.nebius_pool_priority import PoolSubmissionSourceV1
 from loom.nebius_pool_settings import PoolRuntimeSettings
 from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1
 from loom_service.pool_management.installation import PoolInstallation
-from loom_service.pool_management.participant_refresh import PoolParticipantRefresh
+from loom_service.pool_management.installation_render import render_registration
+from loom_service.pool_management.participant_refresh import PoolParticipantRefresh, RefreshAction
+from loom_service.pool_management.profiles import PoolProfileCatalog
 
 _RBAC = {'Role', 'RoleBinding', 'ClusterRole', 'ClusterRoleBinding'}
 _HISTORY = {'loom.nebius/pool-retirement-operation', 'loom.nebius/pool-cutover-operation',
@@ -193,3 +195,93 @@ def prepare_staging_pool_release(*, previous: PoolMigrationRequest, current: tup
             runtime_profile=runtime_profile, operation_id=operation_id, management_origin=management_origin, repo_root=repo_root)
     except Exception:
         raise ValueError('pool participant release unqualified') from None
+
+
+def _manager(release: PreparedParticipantRelease, manager: dict[str, Any]) -> tuple[PoolParticipantRefresh, dict[str, Any]]:
+    refresh = PoolParticipantRefresh.model_validate(release.refresh.model_dump())
+    binding = release.migration.registration.binding
+    _uid(manager)
+    _snapshot(manager)
+    if (release.migration.registration.spec != refresh.after or binding.installation_id != str(refresh.before.installation_id)
+            or manager.get('apiVersion') != 'apps/v1' or manager.get('kind') != 'Deployment'
+            or manager['metadata'].get('name') != 'loom-service' or manager['metadata'].get('namespace') != binding.namespace
+            or manager['metadata'].get('labels', {}).get('loom.nebius/management-installation') != binding.installation_id
+            or type(manager['spec'].get('replicas')) is not int or manager['spec']['replicas'] != 1
+            or manager['spec'].get('strategy') != {'type': 'Recreate'}):
+        raise ValueError
+    pod = manager['spec']['template']['spec']
+    container, = pod['containers']
+    settings = _environment(container)
+    if (container['name'] != 'loom-service' or container.get('envFrom')
+            or re.fullmatch(r'.+@sha256:[0-9a-f]{64}', container['image']) is None
+            or settings['LOOM_SVC_SERVICE_MODE'] != {'name': 'LOOM_SVC_SERVICE_MODE', 'value': 'management'}
+            or settings['LOOM_SVC_POOL_PROFILES_FILE'] != {'name': 'LOOM_SVC_POOL_PROFILES_FILE',
+                'value': '/var/run/loom-pool-profiles/profiles.json'}):
+        raise ValueError
+    volume, = (row for row in pod['volumes'] if row['name'] == 'pool-profiles')
+    mount, = (row for row in container['volumeMounts'] if row['name'] == 'pool-profiles')
+    if (not _exact_pod(volume, {'name': 'pool-profiles', 'configMap': {
+            'name': 'loom-pool-profiles-' + refresh.before.operation_id.hex,
+            'items': [{'key': 'profiles.json', 'path': 'profiles.json'}]}}, ('volumes', '*'))
+            or not _exact_pod(mount, {'name': 'pool-profiles', 'mountPath': '/var/run/loom-pool-profiles',
+                'readOnly': True}, ('containers', '*', 'volumeMounts', '*'))):
+        raise ValueError
+    return refresh, container
+
+
+def prepare_manager_catalog_refresh(*, release: PreparedParticipantRelease, manager: dict[str, Any],
+        catalog: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Catalog-only desired resources; parent must qualify and retain the restart."""
+    try:
+        refresh, _ = _manager(release, manager)
+        _uid(catalog)
+        _snapshot(catalog)
+        namespace = release.migration.registration.binding.namespace
+        if (catalog.get('apiVersion') != 'v1' or catalog.get('kind') != 'ConfigMap'
+                or catalog['metadata'].get('namespace') != namespace
+                or catalog['metadata'].get('name') != 'loom-pool-profiles-' + refresh.before.operation_id.hex
+                or catalog.get('immutable') is not True or set(catalog['data']) != {'profiles.json'}
+                or PoolProfileCatalog.model_validate_json(catalog['data']['profiles.json']) != refresh.before.profiles):
+            raise ValueError
+        successor = _obj('ConfigMap', 'loom-pool-profiles-' + refresh.after.operation_id.hex, namespace)
+        successor['metadata']['labels'] = {'loom.nebius/management-installation': str(refresh.after.installation_id),
+            'loom.nebius/pool': str(refresh.after.pool_id), 'loom.nebius/pool-operation': str(refresh.after.operation_id)}
+        successor.update(immutable=True, data={'profiles.json': refresh.after.profiles.model_dump_json()})
+        target = _snapshot(manager)
+        volume, = (row for row in target['spec']['template']['spec']['volumes'] if row['name'] == 'pool-profiles')
+        volume['configMap']['name'] = successor['metadata']['name']
+        return {'catalog': successor, 'manager': target}
+    except Exception:
+        raise ValueError('pool manager catalog refresh unqualified') from None
+
+
+def refresh_documents(release: PreparedParticipantRelease, *, manager: dict[str, Any],
+        action: RefreshAction) -> tuple[dict[str, Any], dict[str, Any]]:
+    """One fixed, non-retrying Job per phase, using the retained manager image."""
+    try:
+        if action not in {'observe', 'fence', 'stage', 'open'}:
+            raise ValueError
+        refresh, manager_container = _manager(release, manager)
+        namespace = release.migration.registration.binding.namespace
+        config, job = render_registration(refresh.before, namespace=namespace, service_image=manager_container['image'])
+        name = 'loom-pool-refresh-' + refresh.after.operation_id.hex
+        config['metadata']['name'] = name
+        config['data'] = {'refresh.json': refresh.model_dump_json()}
+        job['metadata']['name'] = name + '-' + action
+        labels = {'loom.nebius/management-installation': str(refresh.after.installation_id),
+            'loom.nebius/pool-operation': str(refresh.after.operation_id)}
+        config['metadata']['labels'] = labels.copy()
+        job['metadata']['labels'] = labels.copy()
+        job['spec']['template']['metadata']['labels'] = labels.copy()
+        pod = job['spec']['template']['spec']
+        container, = pod['containers']
+        container['command'] = ['python', '-m', 'loom_service.pool_management.participant_refresh', action]
+        container['env'] = [
+            {'name': 'LOOM_POOL_PARTICIPANT_REFRESH_FILE', 'value': '/var/run/loom-pool-installation/refresh.json'},
+            {'name': 'LOOM_POOL_PARTICIPANT_REFRESH_DB_URL',
+                'valueFrom': {'secretKeyRef': {'name': 'loom-platform-db', 'key': 'admin-url'}}}]
+        volume, = (row for row in pod['volumes'] if row['name'] == 'installation')
+        volume['configMap']['name'] = name
+        return config, job
+    except Exception:
+        raise ValueError('pool participant refresh command unqualified') from None
