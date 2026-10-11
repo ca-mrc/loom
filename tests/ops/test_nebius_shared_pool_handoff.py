@@ -5829,11 +5829,19 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
         from tests.ops.test_nebius_pool_participant_adapter import connection as pool_connection
 
         with pytest.MonkeyPatch.context() as patch:
+            import base64
+            import hmac
             import subprocess
             from types import SimpleNamespace
-            from urllib.parse import urlsplit
+            from urllib.parse import parse_qs, urlsplit
 
+            from pydantic import PostgresDsn
             from scripts.ops.nebius_management_material import _documents as manager_material
+            from scripts.ops.nebius_pool_migration_guard import _BOUND_DATABASE_COMMAND
+            from scripts.ops.nebius_pool_runtime_settings import (
+                BOUND_POOL_SETTINGS_COMMAND,
+                expected_pool_runtime_settings,
+            )
             from scripts.ops.nebius_pool_startup_database import pool_participant_authority_sql
             from scripts.ops.nebius_shared_pool_forward_processes import _gateway_history_target
             from tests.ops.test_nebius_development_pool_retained import populate_database_backends
@@ -5854,14 +5862,43 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
             kubeconfig = state.parent / 'participant-registry-kubeconfig'
             kubeconfig.write_text('private-test-only')
             kubeconfig.chmod(0o600)
-            registry_mode, registry_reads = {}, []
+            registry_mode, registry_reads, manager_checks = {}, [], []
 
             def execute(command, **options):
                 assert command[:3] == ['/usr/bin/kubectl', '--kubeconfig', str(kubeconfig)]
                 assert options['timeout'] == 40 and options['check'] is False
                 offset = next(index for index, value in enumerate(command) if value in {'get', 'exec'})
                 selected = command[offset:]
-                if selected[0] == 'exec':
+                if selected[0] == 'exec' and selected[2:4] != [target.namespace, 'pod/loom-postgres-0']:
+                    pod, = pool_state.children[1]['items']
+                    assert selected[:9] == ['exec', '-n', target.namespace, 'pod/' + pod['metadata']['name'],
+                        '-c', 'loom-service', '--', 'python', '-c']
+                    script, component, nonce, challenge = selected[9:]
+                    manager_checks.append(component)
+                    if script == _BOUND_DATABASE_COMMAND:
+                        assert component == 'service'
+                        container, = pool_state.manager['spec']['template']['spec']['containers']
+                        reference, = (row['valueFrom']['secretKeyRef'] for row in container['env'] if row['name'] == 'LOOM_SVC_DB_URL')
+                        payload = str(PostgresDsn(base64.b64decode(secret['data'][reference['key']]).decode())).encode()
+                    else:
+                        assert script == BOUND_POOL_SETTINGS_COMMAND and component == 'manager'
+                        profiles = (retained.release.refresh.after if 'manager' in pool_state.effects else retained.release.refresh.before).profiles
+                        wanted = expected_pool_runtime_settings('manager', pool_state.manager,
+                            catalog_sha256=hashlib.sha256(profiles.model_dump_json().encode()).hexdigest())
+                        payload = json.dumps(wanted, sort_keys=True, separators=(',', ':')).encode()
+                    assert challenge == hmac.new(bytes.fromhex(nonce), payload, hashlib.sha256).hexdigest()
+                    result = {'status': 'unqualified' if registry_mode.get('manager-settings') else 'qualified'}
+                    if registry_mode.get('manager-restart'):
+                        status = pod['status']['containerStatuses'][0]
+                        status['restartCount'] = status.get('restartCount', 0) + 1
+                    if registry_mode.get('manager-history'):
+                        path = retained.state_dir / 'pool-refresh/dispatch.json'
+                        path.write_bytes(path.read_bytes() + b'\n')
+                    if registry_mode.get('manager-connection'):
+                        kubeconfig.write_text('changed-test-connection')
+                    if registry_mode.get('manager-credential') and component == 'manager':
+                        secret['metadata']['resourceVersion'] = '702'
+                elif selected[0] == 'exec':
                     assert selected[:-1] == ['exec', '-n', target.namespace, 'pod/loom-postgres-0', '-c', 'loom-postgres', '--',
                         'psql', '-X', '-qAt', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', 'loom', '-c']
                     assert selected[-1] == pool_participant_authority_sql(retained.release.refresh)
@@ -5894,9 +5931,24 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
                         uid = str(target.namespace_uid)
                     result = {'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': name, 'uid': uid}}
                 elif selected[1] == '--raw':
-                    result = copy.deepcopy(database_rows[urlsplit(selected[2]).path])
+                    parsed = urlsplit(selected[2])
+                    if parsed.path.endswith('/replicasets'):
+                        result = copy.deepcopy(pool_state.children[0])
+                    else:
+                        result = copy.deepcopy(database_rows[parsed.path])
+                    if result['kind'] == 'PodList':
+                        result['items'].extend(copy.deepcopy(pool_state.children[1]['items']))
+                    if 'labelSelector' in parse_qs(parsed.query):
+                        label, value = parse_qs(parsed.query)['labelSelector'][0].split('=', 1)
+                        result['items'] = [row for row in result['items'] if row['metadata']['labels'].get(label) == value]
                     if registry_mode.get('backend') and result['kind'] == 'EndpointSliceList':
                         result['items'][0]['endpoints'][0]['targetRef']['uid'] = str(uuid4())
+                elif selected[1] in {'deployment', 'replicaset'}:
+                    result = pool_state.manager if selected[1] == 'deployment' else pool_state.children[0]['items'][0]
+                    assert selected[2:] == [result['metadata']['name'], '-n', target.namespace, '-o', 'json']
+                    result = copy.deepcopy(result)
+                    if registry_mode.get('manager-pending') and selected[1] == 'deployment':
+                        result['status']['readyReplicas'] = 0
                 else:
                     kind = selected[1]
                     assert kind in {'statefulset', 'service', 'secret'}
@@ -5921,6 +5973,15 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
                     raise ValueError('participant registry unqualified; preserve evidence; ' + ', '.join(frames)) from None
 
             assert registry() == 'ready'
+            def manager_process(phase='guarded'):
+                return observer.observe_manager_process(bindings=bindings, kubeconfig=kubeconfig,
+                    executable=Path('/usr/bin/kubectl'), phase=phase)
+
+            assert manager_process() == ()
+            registry_mode['manager-pending'] = True
+            with pytest.raises(ValueError, match='preserve'):
+                manager_process()
+            registry_mode.clear()
             for foreign in ('fenced', 'staged', 'complete'):
                 registry_mode['state'] = foreign
                 with pytest.raises(ValueError, match='preserve'):
@@ -5942,17 +6003,40 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
                     inventory[kinds[row['kind']]].append(row)
                 observe()
                 registry()
+                if _phase == 'ready':
+                    assert manager_process('ready') == ()
 
             pool_state.qualify = qualify_pool
             pool = connect_pool()
             assert pool.activate(kube, retained.release) == 'ready'
+            registry_mode['manager-settings'] = True
+            with pytest.raises(ValueError, match='preserve'):
+                pool.finish(kube, retained.release)
+            assert 'open' not in pool_state.effects
+            registry_mode.clear()
             pool.finish(kube, retained.release)
             pool.read_capacity(kube, retained.release, observation_id=uuid4())
             assert pool_state.effects == ['config', 'fence', 'stage', 'config', 'manager', 'open', 'capacity']
             assert observe().workloads[_key(manager)] == pool_state.manager
             assert registry() == 'complete'
+            assert manager_process('ready') == ()
             record = retained.state_dir / 'pool-refresh/dispatch.json'
             before = record.read_bytes()
+            for damage in ('manager-settings', 'manager-restart', 'manager-history', 'manager-connection', 'manager-credential', 'backend'):
+                registry_mode[damage] = True
+                with pytest.raises(ValueError, match='preserve'):
+                    manager_process('ready')
+                record.write_bytes(before)
+                kubeconfig.write_text('private-test-only')
+                secret['metadata']['resourceVersion'] = '701'
+                registry_mode.clear()
+            registry_mode['manager-pending'] = True
+            assert manager_process() == (_key(manager),)
+            with pytest.raises(ValueError, match='preserve'):
+                manager_process('ready')
+            registry_mode.clear()
+            assert manager_process('released') == ()
+            assert {'service', 'manager'} <= set(manager_checks)
             original_database_rows = copy.deepcopy(database_rows)
             for damage in ('backend', 'bad-report', 'history', 'connection', 'credential', 'restart'):
                 registry_mode[damage] = True
