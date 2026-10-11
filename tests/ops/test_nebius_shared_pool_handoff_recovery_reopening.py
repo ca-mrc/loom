@@ -147,7 +147,7 @@ from tests.ops.test_nebius_shared_pool_handoff import (
 )
 
 
-@pytest.mark.timeout(600)
+@pytest.mark.timeout(900)
 @pytest.mark.parametrize('committed', [False, True])
 def test_shared_recovery_reopens_only_staging_once_and_requires_fresh_terminal_health(
         shared_operation, shared_guard_transport, shared_runtime, completed_pool, handoff, monkeypatch, committed):

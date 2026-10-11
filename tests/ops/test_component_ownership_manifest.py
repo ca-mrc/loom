@@ -1387,6 +1387,7 @@ def test_root_shards_distribute_shared_handoff_phases_and_observation() -> None:
         # budget; recovery release never finished beside the legacy shutdown.
         ("shared_pool_handoff_recovery_fences", "shared_pool_handoff_forward"),
         ("shared_pool_handoff_recovery_release", "pool_shutdown_live"),
+        ("shared_pool_handoff_recovery_stop", "shared_pool_handoff_recovery_stop_committed"),
     ):
         assert placement[f"tests/ops/test_nebius_{left}.py"] != placement[f"tests/ops/test_nebius_{right}.py"]
 

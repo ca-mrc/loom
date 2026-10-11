@@ -184,6 +184,10 @@ pins = [
   { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_authority.py", shard_index = 11 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_release.py", shard_index = 19 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_stop.py", shard_index = 12 },
+  # The stop matrix exceeded its original CI test budget.
+  # Templates completed in 8m06s in 38172223205; this placement gives the
+  # committed outcome room without stacking both outcomes in one 40m job.
+  { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_stop_committed.py", shard_index = 14 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_gateway.py", shard_index = 13 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_templates.py", shard_index = 14 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_roles.py", shard_index = 15 },
