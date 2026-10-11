@@ -1619,6 +1619,15 @@ write permission: the protected parent must wait and observe again before its
 next effect. This check does not replace manager/gateway/other-participant process
 checks, actuator telemetry or the full-pool registry and writer observations.
 
+The manager process observation uses its separately retained management database
+and original workload identity. The live manager must match either the recorded
+original or catalog-only successor; its real settings loader must read that
+version's exact profile-catalog hash, and its effective database URL must match
+its qualified backend. Full descendant readiness and process, database,
+credential, source and connection readbacks bracket these probes. Only the
+recorded catalog restart may be pending, and ready/released checks reject it
+until complete. This observation neither changes the manager nor opens admission.
+
 The participant registry observation reads the retained manager's database through
 its pinned credential, namespace, StatefulSet, Service and actual backend process.
 A fixed repeatable-read, read-only SQL snapshot checks the exact pool, participant,

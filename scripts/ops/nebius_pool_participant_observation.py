@@ -573,6 +573,98 @@ class HTTPSParticipantResourceObserver(ManagementKubernetesTransport):
         except Exception:
             raise ValueError('participant process observation unqualified; preserve evidence') from None
 
+    def observe_manager_process(self, *, bindings: SharedPoolGuardBindings, kubeconfig: Path,
+            executable: Path, phase: Literal['preflight', 'guarded', 'ready', 'released'],
+            preparing: str | None = None) -> tuple[str, ...]:
+        """Bind the current manager process to its recorded catalog and backend.
+
+        Pending means a known catalog restart is unfinished, never permission to
+        open participant admission. Whole-pool writer/registry and other process
+        observations remain separate requirements of the protected parent.
+        """
+        from scripts.ops.nebius_development_runtime_probes import HTTPSDevelopmentRuntimeProbes
+        from scripts.ops.nebius_development_runtime_readiness import qualify_started_deployment
+        from scripts.ops.nebius_pool_origin_history import KubectlPoolHistoryAPI
+        from scripts.ops.nebius_pool_participant_operation import _paths
+        from scripts.ops.nebius_shared_pool_forward_processes import _gateway_history_target
+
+        try:
+            if phase not in {'preflight', 'guarded', 'ready', 'released'}:
+                raise ValueError
+            bound, retained = copy.deepcopy(bindings), self.retained
+            current = self.observe(preparing=preparing)
+            view = _ResourceView(retained, preparing)
+            manager = bound.plan.development.runtime.request.database.manager.retained.request.retained
+            if (bound.migration.registration.binding != retained.inputs.previous.registration.binding
+                    or not {path: hashlib.sha256(raw).hexdigest() for path, raw in manager.files.items()}.items()
+                        <= retained.inputs.history.items()):
+                raise ValueError
+            secret_path = '/api/v1/namespaces/' + manager.binding.namespace + '/secrets/loom-platform-db'
+            credential = self._request('GET', secret_path)
+            if credential is None:
+                raise ValueError
+            original = _gateway_history_target(bound, credential)
+            key = _key(retained.inputs.manager)
+            if _key(original.controller) != key or _uid(original.controller) != _uid(retained.inputs.manager):
+                raise ValueError
+            target = replace(original, controller=retained.inputs.manager)
+            workload = current[key]
+            updated = not _matches(workload, target.controller, _uid(target.controller))
+            request = retained.inputs.previous
+            if updated:
+                request = replace(request, registration=replace(request.registration, spec=retained.release.refresh.after))
+            history = KubectlPoolHistoryAPI(request=request, target=target, kubeconfig=kubeconfig, executable=executable)
+            prefix = tuple(history.prefix)
+            _, marker = _paths(retained.reference, retained.state_dir.parent, retained.anchor_dir)
+            anchor = private_state._private_read(marker)
+
+            def unchanged() -> None:
+                if (bindings != bound or self.retained != retained or tuple(history.prefix) != prefix
+                        or hashlib.sha256(private_state._private_read(kubeconfig, limit=512 * 1024)).hexdigest() != history.kubeconfig_sha256
+                        or hashlib.sha256(private_state._private_read(retained.state_dir / 'inputs.json', limit=16 * 1024**2)).hexdigest()
+                            != retained.reference.inputs_sha256
+                        or private_state._private_read(marker) != anchor
+                        or _ResourceView(retained, preparing).files != view.files
+                        or any(private_state._private_read(path, limit=4 * 1024**2) != raw for path, raw in manager.files.items())):
+                    raise ValueError
+
+            def ready() -> bool:
+                actual = history._get('deployment', target.controller['metadata']['name'], target.namespace)
+                if not _matches(actual, workload, _uid(target.controller)):
+                    raise ValueError
+                children = history._run(['get', '--raw', f'/apis/apps/v1/namespaces/{target.namespace}/replicasets?limit=1000'])
+                pods = history._run(['get', '--raw', f'/api/v1/namespaces/{target.namespace}/pods?limit=1000'])
+                return qualify_started_deployment(current=actual, children=children, pods=pods,
+                    region=request.registration.spec.quota_identities['nodes'][1])
+
+            unchanged()
+            identity = HTTPSDevelopmentRuntimeProbes._process_identity
+            backend = identity(history._database(target, url_variable='LOOM_SVC_DB_URL'))
+            pending = not ready()
+            process = None
+            if pending:
+                if phase in {'ready', 'released'} or key not in view.process_transitions or not updated:
+                    raise ValueError
+            else:
+                process = identity(history._runtime(target, expected=workload))
+                history.qualify_manager_database(expected=workload)
+                history.qualify_manager_pool_settings(expected=workload)
+            final = self.observe(preparing=preparing)
+            if (final.keys() != current.keys()
+                    or any(not _matches(final[name], row, _uid(row)) for name, row in current.items())):
+                raise ValueError
+            if process is not None and (not ready() or identity(history._runtime(target, expected=workload)) != process):
+                raise ValueError
+            credential = self._request('GET', secret_path)
+            if (credential is None or _gateway_history_target(bound, credential) != original
+                    or identity(history._database(target, url_variable='LOOM_SVC_DB_URL')) != backend):
+                raise ValueError
+            unchanged()
+            self._source()
+            return (key,) if pending else ()
+        except Exception:
+            raise ValueError('participant manager process unqualified; preserve evidence') from None
+
     def observe_registry(self, *, bindings: SharedPoolGuardBindings, kubeconfig: Path,
             executable: Path, preparing: str | None = None) -> ParticipantRegistryState:
         """Read exact management authority allowed by this release's dispatch.
