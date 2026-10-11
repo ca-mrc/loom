@@ -21,7 +21,9 @@ from tests.ops.test_nebius_pool_participant_operation import management_inputs a
 from tests.ops.test_nebius_pool_participant_operation import operation_inputs as operation_inputs
 from tests.ops.test_nebius_pool_participant_operation import platform_inputs as platform_inputs
 from tests.ops.test_nebius_pool_participant_operation import release_inputs as release_inputs
-from tests.ops.test_nebius_pool_participant_operation import staging_attachment_inputs as staging_attachment_inputs
+from tests.ops.test_nebius_pool_participant_operation import (
+    staging_attachment_inputs as staging_attachment_inputs,
+)
 
 from loom_service.pool_management.capacity import digest
 
@@ -45,14 +47,17 @@ def connection(operation_inputs, monkeypatch):
     api.resources[_key(manager)] = manager
     api.resources[_key(retained.inputs.catalog)] = copy.deepcopy(retained.inputs.catalog)
     state = SimpleNamespace(retained=retained, api=api, effects=[], allow=True, ready=True, busy=False,
-        failure=None, pods={}, reports={}, gates=[], manager=manager)
-    kube = object()
+        failure=None, pods={}, reports={}, gates=[], manager=manager, children=live_children(manager),
+        kube=object(), qualify=None)
+    kube = state.kube
 
     def qualify(observed_kube, operation, phase):
-        assert observed_kube is kube and operation == retained and phase in {'preflight', 'guarded', 'ready'}
+        assert observed_kube is state.kube and operation == retained and phase in {'preflight', 'guarded', 'ready'}
         state.gates.append(phase)
         if not state.allow or (phase == 'ready' and not state.ready):
             raise ValueError('qualification unavailable')
+        if state.qualify is not None:
+            state.qualify(phase)
 
     def respond(request):
         path = request.url.path
@@ -68,7 +73,7 @@ def connection(operation_inputs, monkeypatch):
                 uid = request.url.params['labelSelector'].split('=', 1)[1]
                 pods = [pod for pod in state.pods.values() if pod['metadata']['ownerReferences'][0]['uid'] == uid]
                 return httpx.Response(200, json={'apiVersion': 'v1', 'kind': 'PodList', 'metadata': {}, 'items': pods})
-            replicas, pods = live_children(state.manager)
+            replicas, pods = state.children
             return httpx.Response(200, json=pods if path.endswith('/pods') else replicas)
         if request.method == 'GET' and '/pods/' in path:
             name = path.split('/pods/')[1].split('/')[0]
@@ -101,6 +106,7 @@ def connection(operation_inputs, monkeypatch):
                 value['metadata'].update(resourceVersion='22', generation=2)
                 value['status']['observedGeneration'] = 2
                 state.manager = value
+                state.children = live_children(value)
                 api.resources[_key(value)] = value
             return httpx.Response(200, json=value)
         assert request.method == 'POST'
@@ -117,6 +123,9 @@ def connection(operation_inputs, monkeypatch):
         if document['kind'] == 'Job':
             actual['status'] = {'conditions': [{'type': 'Complete', 'status': 'True'}], 'succeeded': 1, 'active': 0, 'failed': 0}
             pod = terminal_pod(actual, succeeded=True)
+            for field in ('containerStatuses', 'initContainerStatuses'):
+                for row in pod['status'].get(field, []):
+                    row['restartCount'] = 0
             name = pod['metadata']['name']
             state.pods[name] = pod
             refresh = retained.release.refresh
@@ -138,8 +147,9 @@ def connection(operation_inputs, monkeypatch):
         return httpx.Response(201, json=actual)
 
     real_client = httpx.Client
-    monkeypatch.setattr(httpx, 'Client', lambda *args, **kwargs: real_client(
-        base_url=retained.inputs.config['kubernetes_api_server'], transport=httpx.MockTransport(respond)))
+    monkeypatch.setattr(httpx, 'Client', lambda *args, **kwargs: real_client(*args,
+        **{**kwargs, 'transport': kwargs['transport'] if isinstance(kwargs.get('transport'), httpx.MockTransport)
+            else httpx.MockTransport(respond)}))
 
     def connect():
         return module().RetainedParticipantPoolAdapter(retained=retained,
@@ -210,3 +220,49 @@ def test_pool_adapter_requires_live_qualification_and_final_readiness(connection
     state.ready = True
     pool.finish(kube, release)
     assert state.effects[-1] == 'open'
+
+
+@pytest.mark.parametrize('damage', ['endpoint', 'state-root'])
+def test_pool_adapter_cannot_change_connection_or_operation_root_after_binding(connection, damage):
+    state, kube, connect = connection
+    pool = connect()
+    if damage == 'endpoint':
+        pool.api_server = 'https://foreign.invalid'
+    else:
+        pool.root = state.retained.state_dir / 'foreign-parent'
+    with pytest.raises(ValueError, match='preserve'):
+        pool.activate(kube, state.retained.release)
+    assert state.effects == []
+
+
+def test_missing_child_evidence_cannot_recreate_deleted_pool_jobs(connection):
+    state, kube, connect = connection
+    pool = connect()
+    pool.activate(kube, state.retained.release)
+    before = list(state.effects)
+    path, = pool.root.glob('commands/jobs/*-fence/stage.json')
+    path.unlink()  # Fault injection only in this test's private temporary directory.
+    for key in list(state.api.resources):
+        if key.startswith('Job:'):
+            del state.api.resources[key]
+    with pytest.raises(ValueError, match='preserve'):
+        connect().activate(kube, state.retained.release)
+    assert state.effects == before
+
+
+def test_empty_parent_without_anchor_cannot_adopt_old_child_effects(connection):
+    from scripts.ops import nebius_certificates as private_state
+
+    state, kube, connect = connection
+    pool = connect()
+    pool.activate(kube, state.retained.release)
+    path = pool.root / 'dispatch.json'
+    record = json.loads(path.read_bytes())
+    record.update(steps={}, intents=[])
+    private_state._atomic_json(path, record)
+    marker, = state.retained.anchor_dir.glob('*-pool-effects.json')
+    marker.unlink()
+    before = list(state.effects)
+    with pytest.raises(ValueError, match='preserve'):
+        connect().activate(kube, state.retained.release)
+    assert state.effects == before

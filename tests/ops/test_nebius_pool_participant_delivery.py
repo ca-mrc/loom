@@ -4,7 +4,6 @@ from __future__ import annotations
 import copy
 import json
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID, uuid4
@@ -15,6 +14,7 @@ from scripts.ops import nebius_idle_rollout as idle
 from scripts.ops import nebius_pool_participant_operation as operation
 from tests.ops.test_deploy_nebius_platform import FakeKubectl
 from tests.ops.test_nebius_idle_rollout import recovery_api
+from tests.ops.test_nebius_pool_participant_adapter import connection as connection
 from tests.ops.test_nebius_pool_participant_operation import catalog_inputs as catalog_inputs
 from tests.ops.test_nebius_pool_participant_operation import management_inputs as management_inputs
 from tests.ops.test_nebius_pool_participant_operation import operation_inputs as operation_inputs
@@ -25,7 +25,6 @@ from tests.ops.test_nebius_pool_participant_operation import (
 )
 
 from loom_service.environment_management.candidates import ProtectedPublication
-from loom_service.pool_management.participant_refresh import ParticipantCapacityReceipt
 
 
 def reference():
@@ -111,10 +110,11 @@ def test_shared_recovery_selects_original_publication_not_another_success_for_sa
 
 @pytest.mark.parametrize('recover,file_writes', [(False, False), (False, True), (True, False), (True, True),
     ('pre-upgrade-backup', True), ('30-migrate.yaml', True), ('50-configure.yaml', True)])
-def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation_inputs, tmp_path, monkeypatch, recover, file_writes):
-    """Only Kubernetes/GitHub/HTTPS and the pending concrete pool I/O are doubled."""
+def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation_inputs, connection, tmp_path, monkeypatch, recover, file_writes):
+    """Real pool effects and deployment lifecycle; external I/O/qualification doubled."""
     inputs = operation_inputs
-    retained = operation.retain_participant_rollout(**inputs)
+    pool_state, _, connect = connection
+    retained = pool_state.retained
     config, plan = inputs['config'], retained.release
     publication = tmp_path / 'publication'
     publication.mkdir()
@@ -123,10 +123,10 @@ def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation
     args = SimpleNamespace(kubeconfig=tmp_path / 'unused', namespace=config['namespace'],
         expected_cluster_id=config['cluster_id'], publication_dir=publication,
         candidate=inputs['candidate']['candidate_sha'], evidence_dir=tmp_path / 'evidence', github=True)
-    intents, phases, mutations = [], [], []
+    intents, phases = [], []
     failed_job = ('loom-predeploy-' + retained.reference.operation_id.hex if recover == 'pre-upgrade-backup' else
         plan.files[recover][0]['metadata']['name'] if isinstance(recover, str) else None)
-    state = {'pool': 'ready', 'fail_https': recover is True, 'fail_job': failed_job}
+    state = {'fail_https': recover is True, 'fail_job': failed_job}
 
     class Kube(FakeKubectl):
         def get(self, kind, name, namespace):
@@ -141,7 +141,7 @@ def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation
                 assert intents[-1]['shared_pool_release'] == retained.reference.model_dump(mode='json')
                 assert intents[-1]['guard_owner'] == retained.guard_owner
             if command[0] == 'apply':
-                assert self.guard_identity is not None and state['pool'] in {'staged', 'open'}
+                assert self.guard_identity is not None and 'manager' in pool_state.effects
                 phases.append(Path(command[2]).name)
                 if '--dry-run=server' in command:
                     import yaml
@@ -158,6 +158,7 @@ def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation
             return result
 
     kube = Kube(config, plan.files, database=True)
+    pool_state.kube = kube
     for row in inputs['current']:
         kube.objects[row['kind'].lower(), row['metadata']['name']] = copy.deepcopy(row)
     previous_candidate = json.loads(kube.objects['configmap', 'loom-platform-config']['data']['profile.json'])['candidate_sha']
@@ -173,32 +174,11 @@ def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation
             state['fail_https'] = False
             raise deploy.DeploymentError('simulated post-workload HTTPS failure')
 
-    class PoolIO:
-        def preflight(self, observed_kube, release):
-            assert observed_kube is kube and release == plan
+    def qualify_pool(phase):
+        if phase != 'preflight':
+            assert kube.guard_identity == (retained.guard_owner, inputs['candidate']['candidate_sha'])
 
-        def under_guard(self, observed_kube, release):
-            assert observed_kube is kube and release == plan and kube.guard_identity is not None
-
-        def activate(self, observed_kube, release):
-            self.under_guard(observed_kube, release)
-            if state['pool'] == 'ready':
-                mutations.append('stage')
-                state['pool'] = 'staged'
-            return 'ready'
-
-        def finish(self, observed_kube, release):
-            self.under_guard(observed_kube, release)
-            if state['pool'] != 'open':
-                mutations.append('open')
-                state['pool'] = 'open'
-
-        def read_capacity(self, observed_kube, release, *, observation_id):
-            self.under_guard(observed_kube, release)
-            assert isinstance(observation_id, UUID) and state['pool'] == 'open'
-            now = datetime.now(UTC)
-            return ParticipantCapacityReceipt(checked_at=now, valid_until=now + timedelta(seconds=60),
-                selected_observation_id=uuid4(), selected_observed_at=now, connected_pools=1, observations_sha256='f' * 64)
+    pool_state.qualify = qualify_pool
 
     monkeypatch.setattr(idle, 'Kubectl', lambda _: kube)
     monkeypatch.setattr(idle, 'github', github)
@@ -208,7 +188,7 @@ def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation
     monkeypatch.setattr(deploy, 'public_smoke', smoke)
     monkeypatch.setenv('GITHUB_RUN_ID', '991')
     monkeypatch.setenv('GITHUB_RUN_ATTEMPT', '1')
-    pool = PoolIO()
+    pool = connect()
     writer_args = {}
     written = []
     job_creates = []
@@ -286,7 +266,7 @@ def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation
 
         class ResourceIO:
             def qualify(self):
-                assert kube.guard_identity is not None and state['pool'] in {'staged', 'open'}
+                assert kube.guard_identity is not None and 'manager' in pool_state.effects
 
             def read_workload(self, key):
                 return copy.deepcopy(inventory[key])
@@ -331,7 +311,7 @@ def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation
     result = idle.rollout(args, participant_rollout=retained, pool=pool, **writer_args)
     assert result['status'] == 'complete' and kube.guard_identity is None
     assert result['shared_pool_release'] == retained.reference.model_dump(mode='json')
-    assert mutations == ['stage', 'open']
+    assert pool_state.effects == ['config', 'fence', 'stage', 'config', 'manager', 'open', 'capacity']
     if file_writes:
         assert not set(phases) & {'00-namespaces.yaml', '10-config-network.yaml', '20-database.yaml',
             '40-services.yaml', '60-execution.yaml', '70-public.yaml', '80-backup.yaml',
