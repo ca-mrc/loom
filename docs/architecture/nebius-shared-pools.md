@@ -1377,6 +1377,26 @@ only the standard library before dependencies are installed. This does not widen
 the existing CLOSED-runtime key. Source packaging and local command tests do not
 establish an installed grant, protected workflow execution or live readiness.
 
+The protected participant-refresh transaction supports release-only updates to
+one idle execution/task-image participant. It preserves physical capacity,
+admission policy and epoch, credentials, trust keys, namespace/incarnation
+identities and every other participant's profiles and requests. Only the selected
+participant is fenced; a successor catalog uses fresh profile IDs and increments
+its binding revision and the pool policy revision once. Waiting or charged work
+blocks transition rather than being cancelled. Exact completed replay neither
+requires idleness nor fences work accepted after the update. Caller rollback
+undoes the transaction; there is no public refresh API or implicit commit.
+
+This transaction does not establish rollout ownership, source publication,
+Kubernetes readiness or recovery authority. The protected normal-rollout parent
+must connect those checks, catalog mounting/manager restart, schema/configuration
+Jobs and participant workload updates before this is an operational route.
+Fence, catalog staging and reopening each invalidate prior capacity captures;
+the parent must wait for a fresh capture after reopening before releasing the
+local idle guard. Other participants retain their grants/activation plans, and
+new admission resumes when current capacity is observed. The standalone deployer
+continues to reject global wiring; bypassing that check is not a refresh.
+
 Authenticated Kubernetes/worker identity and capacity observations remain
 mandatory. Detailed kubelet samples retain the existing optional-telemetry
 contract; unavailable samples are not zero usage or evidence of certificate trust.
