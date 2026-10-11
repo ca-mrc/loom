@@ -1377,6 +1377,12 @@ only the standard library before dependencies are installed. This does not widen
 the existing CLOSED-runtime key. Source packaging and local command tests do not
 establish an installed grant, protected workflow execution or live readiness.
 
+The completed shared-handoff reader reuses the parent journal's child validators
+and binds the anchor, terminal journal, child receipts and inherited installation
+history. Missing, unfinished or recovery histories cannot qualify a normal shared
+release. Loading this historical predecessor does not replay effects or establish
+current runtime readiness; the release parent must obtain a new live inventory.
+
 The protected participant-refresh transaction supports release-only updates to
 one idle execution/task-image participant. It preserves physical capacity,
 admission policy and epoch, credentials, trust keys, namespace/incarnation

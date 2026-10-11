@@ -1420,6 +1420,42 @@ def test_normal_release_predecessor_requires_completed_shared_history_without_li
     assert module.load_completed_shared_pool_operation(**kwargs) == proof
     assert effects == (api.events, api.qualifications, api.preflights)
 
+    # Consume the actual completed registration in the normal-release renderer.
+    # Kubernetes current state is projected from this handoff's real targets;
+    # completion history alone is not presented as an observation of live Pods.
+    from scripts.ops.nebius_pool_participant_release import prepare_staging_pool_release
+
+    from loom.nebius_platform_render import build_platform
+
+    attachment = bindings.plan.staging.attachment
+    previous_files = build_platform(attachment.config, proof.migration.registration.candidate,
+        attachment.runtime_profile.model_dump(mode='json'), proof.migration.registration.spec.profiles.image_admission_keyring,
+        repo_root=ROOT)
+    current = {_key(row): copy.deepcopy(row) for rows in previous_files.values() for row in rows}
+    for row in current.values():
+        row['metadata'].update(uid=str(uuid4()), resourceVersion='899')
+    # Handoff observation covers selected processes/authority, not the complete
+    # rollout inventory (notably ServiceAccounts). Preserve its known identities
+    # within this synthetic full Kubernetes readback.
+    current.update({_key(row): copy.deepcopy(row) for row in attachment.resources})
+    for key, desired in {**bindings.plan.staging_targets, **bindings.plan.staging_role_targets}.items():
+        observed = current[key]
+        current[key] = copy.deepcopy(desired)
+        current[key]['metadata'].update(uid=observed['metadata']['uid'], resourceVersion='900')
+        if current[key]['kind'] == 'Deployment':
+            current[key]['spec']['replicas'] = 1
+    candidate = copy.deepcopy(proof.migration.registration.candidate)
+    candidate['candidate_sha'] = 'd' * 40
+    runtime_profile = attachment.runtime_profile.model_copy(update={'candidate_sha': candidate['candidate_sha']})
+    release = prepare_staging_pool_release(previous=proof.migration, current=tuple(current.values()),
+        config=attachment.config, candidate=candidate, runtime_profile=runtime_profile, operation_id=uuid4(),
+        management_origin='https://' + args['runtime'].database.manager.deployment.public_host, repo_root=ROOT)
+    assert release.refresh.before == proof.migration.registration.spec
+    assert release.refresh.after.policy_revision == proof.migration.registration.spec.policy_revision + 1
+    before_dev, = (row for row in proof.migration.registration.spec.participants if row.environment_class == 'development')
+    after_dev, = (row for row in release.refresh.after.participants if row.environment_class == 'development')
+    assert after_dev == before_dev
+
     for path in (marker, state / 'operation.json', state / 'forward-wire' / 'receipt.json'):
         original = path.read_bytes()
         try:

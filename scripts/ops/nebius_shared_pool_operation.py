@@ -11,6 +11,7 @@ import copy
 import hashlib
 import os
 import stat
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
@@ -18,7 +19,7 @@ from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_development_runtime_install import DevelopmentRuntimeInstallRequest, _read
 from scripts.ops.nebius_ingress_stage import _key, _uid
 from scripts.ops.nebius_management_switch import _matches
-from scripts.ops.nebius_pool_migration import migration_contract
+from scripts.ops.nebius_pool_migration import PoolMigrationRequest, migration_contract
 from scripts.ops.nebius_pool_predecessor import CompletedPoolCutover
 from scripts.ops.nebius_shared_pool_command import FORWARD_PHASES as FORWARD_PHASES
 from scripts.ops.nebius_shared_pool_command import RECOVERY_PHASES as RECOVERY_PHASES
@@ -29,6 +30,15 @@ from loom.nebius_platform_render import digest
 
 _COMPLETE = 'shared_pool_handoff_complete'
 _RECOVERED = 'staging_restored_dev_closed'
+
+
+@dataclass(frozen=True, repr=False)
+class CompletedSharedPoolOperation:
+    """Historical predecessor only; no assertion about current live readiness."""
+
+    migration: PoolMigrationRequest
+    state_dir: Path
+    history: dict[Path, str]
 
 
 class SharedPoolOperationAPI(Protocol):
@@ -202,6 +212,51 @@ def _record(*, state: Path, marker: Path, recovery_marker: Path, identity: dict[
     if {path.name for path in state.iterdir()} != permitted:
         raise ValueError
     return record, recovering
+
+
+def load_completed_shared_pool_operation(*, runtime: DevelopmentRuntimeInstallRequest, observation: dict[str, Any],
+        legacy: CompletedPoolCutover, repo_root: Path, bindings: SharedPoolGuardBindings,
+        api: SharedPoolOperationAPI) -> CompletedSharedPoolOperation:
+    """Read the actual terminal parent and its semantically validated children.
+
+    Normal release must freeze this history, not replay handoff or reinterpret
+    pending/recovered evidence as shared readiness. No live observer, guard or
+    mutation is invoked. The later release parent still owns current qualification.
+    """
+    try:
+        if api.supported_phases != frozenset((*FORWARD_PHASES, *RECOVERY_PHASES)):
+            raise ValueError
+        bindings = copy.deepcopy(bindings)
+        _qualify_bindings(runtime=runtime, observation=observation, legacy=legacy, repo_root=repo_root, bindings=bindings)
+        manager = runtime.database.manager.retained.request.retained
+        state = Path(manager.operation['state_dir']).parent / 'shared-pool-handoff'
+        anchor = Path(manager.operation['anchor_dir'])
+        _directory(anchor)
+        marker, recovery_marker = anchor / 'shared-pool-handoff.json', anchor / 'shared-pool-recovery.json'
+        identity = {'schema': 'loom.nebius-shared-pool-handoff.v1',
+            'operation_id': str(bindings.migration.registration.spec.operation_id),
+            'state_dir': str(state), 'input_digest': bindings.input_digest}
+        _history(bindings)
+        record, recovering = _record(state=state, marker=marker, recovery_marker=recovery_marker, identity=identity, api=api)
+        if recovering or record['outcome'] != _COMPLETE:
+            raise ValueError
+        history = dict(bindings.plan.history)
+        completed = {path: hashlib.sha256(private_state._private_read(path, limit=4 * 1024**2)).hexdigest()
+            for path in (marker, state / 'operation.json')}
+        for phase in FORWARD_PHASES:
+            completed.update({state / phase / name: checksum for name, checksum in record['forward'][phase]['files'].items()})
+        if any(path in history and history[path] != checksum for path, checksum in completed.items()):
+            raise ValueError
+        history.update(completed)
+        if _record(state=state, marker=marker, recovery_marker=recovery_marker, identity=identity, api=api) != (record, False):
+            raise ValueError
+        for path, checksum in history.items():
+            if (path != path.resolve()
+                    or hashlib.sha256(private_state._private_read(path, limit=4 * 1024**2)).hexdigest() != checksum):
+                raise ValueError
+        return CompletedSharedPoolOperation(bindings.migration, state, history)
+    except Exception:
+        raise ValueError('completed shared pool history unavailable') from None
 
 
 def run_shared_pool_operation(*, runtime: DevelopmentRuntimeInstallRequest, observation: dict[str, Any],
