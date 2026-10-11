@@ -496,6 +496,10 @@ def test_connected_shared_parent_gates_real_guard_acquisition_and_unknown_replie
         assert model.acquires == attempts
 
 
+# The real retained-installation fixture takes ~27s before this connected
+# completion/replay matrix runs. Give it a bounded lifecycle budget rather
+# than the 60s unit-test default (CI run 38167845683 exhausted that total).
+@pytest.mark.timeout(120)
 def test_connected_shared_parent_forward_completion_requires_current_health(shared_operation, tmp_path, monkeypatch):
     """Real final child and parent; preceding effects and component observation boundaries are fixtures."""
     import ssl
