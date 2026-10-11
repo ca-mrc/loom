@@ -41,7 +41,16 @@ class CompletedSharedPoolOperation:
     history: dict[Path, str]
 
 
-class SharedPoolOperationAPI(Protocol):
+class SharedPoolEvidenceAPI(Protocol):
+    """Semantic child-history validation without a live connection or effects."""
+
+    supported_phases: frozenset[str]
+
+    def validate_prepared_phase(self, phase: str, state: Path) -> None: ...
+    def validate_phase(self, phase: str, state: Path, *, complete: bool) -> None: ...
+
+
+class SharedPoolOperationAPI(SharedPoolEvidenceAPI, Protocol):
     """Protected, phase-aware observations and durable child operations.
 
     ``preflight`` combines live writer, provider and SQL/process observations,
@@ -60,13 +69,9 @@ class SharedPoolOperationAPI(Protocol):
     False means pending, never permission to skip to the following phase.
     """
 
-    supported_phases: frozenset[str]
-
     def preflight(self, bindings: SharedPoolGuardBindings) -> None: ...
     def qualify(self, bindings: SharedPoolGuardBindings, record: dict[str, Any], *, recovering: bool) -> None: ...
     def prepare(self, phase: str, bindings: SharedPoolGuardBindings, state: Path) -> None: ...
-    def validate_prepared_phase(self, phase: str, state: Path) -> None: ...
-    def validate_phase(self, phase: str, state: Path, *, complete: bool) -> None: ...
     def advance(self, phase: str, bindings: SharedPoolGuardBindings, state: Path) -> bool: ...
 
 
@@ -146,7 +151,7 @@ def _frozen_forward(state: Path, record: dict[str, Any]) -> dict[str, Any]:
 
 
 def _record(*, state: Path, marker: Path, recovery_marker: Path, identity: dict[str, Any],
-        api: SharedPoolOperationAPI) -> tuple[dict[str, Any], bool]:
+        api: SharedPoolEvidenceAPI) -> tuple[dict[str, Any], bool]:
     if not marker.exists() and not marker.is_symlink():
         if state.exists() or state.is_symlink() or recovery_marker.exists() or recovery_marker.is_symlink():
             raise ValueError
@@ -216,7 +221,7 @@ def _record(*, state: Path, marker: Path, recovery_marker: Path, identity: dict[
 
 def load_completed_shared_pool_operation(*, runtime: DevelopmentRuntimeInstallRequest, observation: dict[str, Any],
         legacy: CompletedPoolCutover, repo_root: Path, bindings: SharedPoolGuardBindings,
-        api: SharedPoolOperationAPI) -> CompletedSharedPoolOperation:
+        api: SharedPoolEvidenceAPI) -> CompletedSharedPoolOperation:
     """Read the actual terminal parent and its semantically validated children.
 
     Normal release must freeze this history, not replay handoff or reinterpret

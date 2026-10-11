@@ -39,11 +39,19 @@ from scripts.ops.nebius_pool_predecessor import (
     PoolPredecessorV1,
     load_completed_pool,
 )
-from scripts.ops.nebius_shared_pool_api import HTTPSSharedPoolOperationAPI
+from scripts.ops.nebius_shared_pool_api import (
+    HTTPSSharedPoolOperationAPI,
+    SharedPoolPhaseEvidence,
+)
 from scripts.ops.nebius_shared_pool_command import validate_operation
 from scripts.ops.nebius_shared_pool_handoff import prepare_shared_pool_handoff
 from scripts.ops.nebius_shared_pool_handoff_live import SharedPoolGuardBindings
-from scripts.ops.nebius_shared_pool_operation import _qualify_bindings, run_shared_pool_operation
+from scripts.ops.nebius_shared_pool_operation import (
+    CompletedSharedPoolOperation,
+    _qualify_bindings,
+    load_completed_shared_pool_operation,
+    run_shared_pool_operation,
+)
 
 from loom.nebius_kubernetes import NebiusKubernetesConnection
 from loom.nebius_platform_render import digest
@@ -245,6 +253,21 @@ def load_historical_inputs(*, operation_path: Path, operation_sha256: str) -> Sh
             context.observation, context.bindings, files)
     except Exception:
         raise ValueError('shared pool historical inputs unqualified; preserve evidence') from None
+
+
+def load_completed_history(*, operation_path: Path, operation_sha256: str
+        ) -> tuple[SharedPoolHistoricalContext, CompletedSharedPoolOperation]:
+    """Load the original input binding and real terminal children, without I/O authority."""
+    try:
+        historical = load_historical_inputs(operation_path=operation_path, operation_sha256=operation_sha256)
+        completed = load_completed_shared_pool_operation(runtime=historical.runtime,
+            observation=historical.observation, legacy=historical.legacy, repo_root=ROOT,
+            bindings=historical.bindings, api=SharedPoolPhaseEvidence(bindings=historical.bindings))
+        if any(_private(path) != before for path, before in historical.files.items()):
+            raise ValueError
+        return historical, completed
+    except Exception:
+        raise ValueError('completed shared pool history unavailable; preserve evidence') from None
 
 
 @contextmanager

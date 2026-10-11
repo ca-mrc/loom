@@ -106,6 +106,96 @@ class _RuntimeArguments(_ConnectionArguments):
     qualify_runtime: Callable[[DevelopmentRuntimeInstallRequest, str, bool], None]
 
 
+class SharedPoolPhaseEvidence:
+    """The real child validators without credentials, transport or mutators.
+
+    Historical completion and the live parent use the same semantic validators.
+    This reader never supplies preflight, qualification or dispatch authority.
+    """
+
+    supported_phases = frozenset((*FORWARD_PHASES, *RECOVERY_PHASES))
+
+    def __init__(self, *, bindings: SharedPoolGuardBindings):
+        self.bindings = copy.deepcopy(bindings)
+        manager = self.bindings.plan.development.runtime.request.database.manager.retained.request.retained
+        self.state = Path(manager.operation['state_dir']).parent / 'shared-pool-handoff'
+
+    def validators(self) -> dict[str, tuple[PhaseFunction, ...]]:
+        result: dict[str, tuple[PhaseFunction, ...]] = {phase: (validate,) for phase, validate in {
+            'forward-guards': guard_phase.validate_shared_pool_guards,
+            'forward-drain': drain.validate_shared_pool_drain,
+            'forward-roles': roles.validate_shared_staging_roles,
+            'forward-database': database.validate_shared_staging_database,
+            'forward-material': material.validate_shared_staging_material,
+            'forward-build-policy': build.validate_shared_build_activation,
+            'forward-gateway': gateway.validate_shared_gateway,
+            'forward-activate': activation.validate_shared_pool_activation,
+            'forward-verify': self.validate_forward_verification,
+            'recovery-fence': fence.validate_shared_recovery_fence,
+            'recovery-drain': recovery_drain.validate_shared_recovery_drain,
+            'recovery-stop': recovery_workloads.validate_shared_recovery_workloads,
+            'recovery-restore-workloads': templates.validate_shared_recovery_templates,
+            'recovery-restore-roles': recovery_roles.validate_shared_recovery_roles,
+            'recovery-restart': restart.validate_shared_recovery_restart,
+            'recovery-reopen': reopening.validate_shared_recovery_reopening,
+            'recovery-verify': reopening.validate_shared_recovery_verification,
+        }.items()}
+        for phase in ('forward-stop', 'forward-wire', 'forward-start'):
+            result[phase] = (partial(workloads.validate_shared_staging_workloads, phase=phase),)
+        result['recovery-revoke'] = (machines.validate_shared_recovery_machines,
+            recovery_gateway.validate_shared_recovery_gateway)
+        return result
+
+    def validate_prepared_phase(self, phase: str, state: Path) -> None:
+        self._validate(phase, state, complete=False, prepared=True)
+
+    def validate_phase(self, phase: str, state: Path, *, complete: bool) -> None:
+        self._validate(phase, state, complete=complete, prepared=False)
+
+    def _validate(self, phase: str, state: Path, *, complete: bool, prepared: bool) -> None:
+        if phase not in self.supported_phases or state != self.state / phase:
+            raise ValueError('shared child validation scope differs')
+        _history(self.bindings)
+        _validate_child(phase, state, bindings=self.bindings, validators=self.validators()[phase],
+            complete=complete, prepared=prepared)
+        _history(self.bindings)
+
+    def verification_identity(self, state: Path) -> Document:
+        if state != self.state / 'forward-verify':
+            raise ValueError('shared verification path differs')
+        return {'schema': 'loom.nebius-shared-forward-verification.v1',
+            'input_digest': self.bindings.input_digest, 'state_dir': str(state)}
+
+    def validate_forward_verification(self, *, bindings: SharedPoolGuardBindings, state_dir: Path,
+            complete: bool, prepared: bool = False) -> Document:
+        if bindings != self.bindings:
+            raise ValueError('shared verification binding differs')
+        frame = _frame(self.bindings, self.state)
+        identity = self.verification_identity(state_dir)
+        value = _read(state_dir / 'verify.json')
+        if (type(complete) is not bool or type(prepared) is not bool or (complete and prepared)
+                or set(value) != {*identity, 'status'} or any(value[key] != item for key, item in identity.items())
+                or value['status'] not in {'prepared', 'observed'} or (complete and value['status'] != 'observed')
+                or (prepared and (value['status'] != 'prepared' or frame['forward']['forward-verify']['status'] != 'prepared'))
+                or any(frame['forward'][phase]['status'] != 'complete' for phase in FORWARD_PHASES[:-1])):
+            raise ValueError('shared forward verification differs')
+        activation.validate_shared_pool_activation(bindings=self.bindings, state_dir=self.state / 'forward-activate', complete=True)
+        if _frame(self.bindings, self.state) != frame:
+            raise ValueError('shared forward verification inputs changed')
+        return value
+
+
+def _validate_child(phase: str, state: Path, *, bindings: SharedPoolGuardBindings,
+        validators: tuple[PhaseFunction, ...], complete: bool, prepared: bool) -> None:
+    for validate in validators:
+        if phase == 'forward-guards':
+            record = validate(bindings=bindings, state_dir=state, complete=complete)
+            if prepared and set(record['guards'].values()) != {'prepared'}:
+                raise ValueError('prepared guard already has intent')
+        else:
+            validate(bindings=bindings, state_dir=state, complete=complete, prepared=prepared)
+
+
 class HTTPSSharedPoolOperationAPI(HTTPSSharedPoolRuntimeProbes):
     supported_phases = frozenset((*FORWARD_PHASES, *RECOVERY_PHASES))
 
@@ -123,6 +213,7 @@ class HTTPSSharedPoolOperationAPI(HTTPSSharedPoolRuntimeProbes):
         self.context, self.token = ssl_context, token
         manager = self.request.database.manager.retained.request.retained
         self.shared_state = Path(manager.operation['state_dir']).parent / 'shared-pool-handoff'
+        self._evidence = SharedPoolPhaseEvidence(bindings=self._captured)
         self.anchor = Path(manager.operation['anchor_dir'])
         self.guards = KubectlPoolGuardAPI(request=self.shared_bindings.migration,
             kubeconfig=Path(self.prefix[self.prefix.index('--kubeconfig') + 1]), executable=Path(self.prefix[0]))
@@ -132,6 +223,7 @@ class HTTPSSharedPoolOperationAPI(HTTPSSharedPoolRuntimeProbes):
     def _scope(self, bindings: SharedPoolGuardBindings | None = None) -> None:
         if (self.shared_bindings != self._captured or (bindings is not None and bindings != self._captured)
                 or self.request != self._captured.plan.development.runtime.request
+                or self._evidence.bindings != self._captured or self._evidence.state != self.shared_state
                 or (self.observation, self.repo_root) != self._origin
                 or self.guards.request != self._captured.migration or tuple(self.prefix) != self._connection_prefix
                 or tuple(self.guards.prefix) != self._guard_prefix or self.operator_credentials not in self.private_files):
@@ -313,32 +405,32 @@ class HTTPSSharedPoolOperationAPI(HTTPSSharedPoolRuntimeProbes):
             history=self._history_api(), state_dir=self.shared_state, qualify=self._qualify_current)
 
     def _registry(self) -> dict[str, tuple[tuple[PhaseFunction, PhaseFunction], ...]]:
-        pairs: dict[str, tuple[PhaseFunction, PhaseFunction]] = {
-            'forward-guards': (guard_phase.prepare_shared_pool_guards, guard_phase.validate_shared_pool_guards),
-            'forward-drain': (drain.prepare_shared_pool_drain, drain.validate_shared_pool_drain),
-            'forward-roles': (roles.prepare_shared_staging_roles, roles.validate_shared_staging_roles),
-            'forward-database': (database.prepare_shared_staging_database, database.validate_shared_staging_database),
-            'forward-material': (material.prepare_shared_staging_material, material.validate_shared_staging_material),
-            'forward-build-policy': (build.prepare_shared_build_activation, build.validate_shared_build_activation),
-            'forward-gateway': (gateway.prepare_shared_gateway, gateway.validate_shared_gateway),
-            'forward-activate': (activation.prepare_shared_pool_activation, activation.validate_shared_pool_activation),
-            'forward-verify': (self._prepare_forward_verification, self._validate_forward_verification),
-            'recovery-fence': (fence.prepare_shared_recovery_fence, fence.validate_shared_recovery_fence),
-            'recovery-drain': (recovery_drain.prepare_shared_recovery_drain, recovery_drain.validate_shared_recovery_drain),
-            'recovery-stop': (recovery_workloads.prepare_shared_recovery_workloads, recovery_workloads.validate_shared_recovery_workloads),
-            'recovery-restore-workloads': (templates.prepare_shared_recovery_templates, templates.validate_shared_recovery_templates),
-            'recovery-restore-roles': (recovery_roles.prepare_shared_recovery_roles, recovery_roles.validate_shared_recovery_roles),
-            'recovery-restart': (restart.prepare_shared_recovery_restart, restart.validate_shared_recovery_restart),
-            'recovery-reopen': (reopening.prepare_shared_recovery_reopening, reopening.validate_shared_recovery_reopening),
-            'recovery-verify': (reopening.prepare_shared_recovery_verification, reopening.validate_shared_recovery_verification),
-        }
-        result: dict[str, tuple[tuple[PhaseFunction, PhaseFunction], ...]] = {phase: (pair,) for phase, pair in pairs.items()}
+        prepares: dict[str, tuple[PhaseFunction, ...]] = {phase: (prepare,) for phase, prepare in {
+            'forward-guards': guard_phase.prepare_shared_pool_guards,
+            'forward-drain': drain.prepare_shared_pool_drain,
+            'forward-roles': roles.prepare_shared_staging_roles,
+            'forward-database': database.prepare_shared_staging_database,
+            'forward-material': material.prepare_shared_staging_material,
+            'forward-build-policy': build.prepare_shared_build_activation,
+            'forward-gateway': gateway.prepare_shared_gateway,
+            'forward-activate': activation.prepare_shared_pool_activation,
+            'forward-verify': self._prepare_forward_verification,
+            'recovery-fence': fence.prepare_shared_recovery_fence,
+            'recovery-drain': recovery_drain.prepare_shared_recovery_drain,
+            'recovery-stop': recovery_workloads.prepare_shared_recovery_workloads,
+            'recovery-restore-workloads': templates.prepare_shared_recovery_templates,
+            'recovery-restore-roles': recovery_roles.prepare_shared_recovery_roles,
+            'recovery-restart': restart.prepare_shared_recovery_restart,
+            'recovery-reopen': reopening.prepare_shared_recovery_reopening,
+            'recovery-verify': reopening.prepare_shared_recovery_verification,
+        }.items()}
         for phase in ('forward-stop', 'forward-wire', 'forward-start'):
-            result[phase] = ((partial(workloads.prepare_shared_staging_workloads, phase=phase),
-                partial(workloads.validate_shared_staging_workloads, phase=phase)),)
-        result['recovery-revoke'] = ((machines.prepare_shared_recovery_machines, machines.validate_shared_recovery_machines),
-            (recovery_gateway.prepare_shared_recovery_gateway, recovery_gateway.validate_shared_recovery_gateway))
-        return result
+            prepares[phase] = (partial(workloads.prepare_shared_staging_workloads, phase=phase),)
+        prepares['recovery-revoke'] = (machines.prepare_shared_recovery_machines,
+            recovery_gateway.prepare_shared_recovery_gateway)
+        validators = self._evidence.validators()
+        validators['forward-verify'] = (self._validate_forward_verification,)
+        return {phase: tuple(zip(prepare, validators[phase], strict=True)) for phase, prepare in prepares.items()}
 
     def prepare(self, phase: str, bindings: SharedPoolGuardBindings, state: Path) -> None:
         self._scope(bindings)
@@ -352,13 +444,8 @@ class HTTPSSharedPoolOperationAPI(HTTPSSharedPoolRuntimeProbes):
         self._scope()
         if phase not in self.supported_phases or state != self.shared_state / phase:
             raise ValueError('shared child validation scope differs')
-        for _, validate in self._registry()[phase]:
-            if phase == 'forward-guards':
-                record = validate(bindings=self._captured, state_dir=state, complete=complete)
-                if prepared and set(record['guards'].values()) != {'prepared'}:
-                    raise ValueError('prepared guard already has intent')
-            else:
-                validate(bindings=self._captured, state_dir=state, complete=complete, prepared=prepared)
+        _validate_child(phase, state, bindings=self._captured,
+            validators=tuple(validate for _, validate in self._registry()[phase]), complete=complete, prepared=prepared)
 
     def validate_prepared_phase(self, phase: str, state: Path) -> None:
         self._validate(phase, state, complete=False, prepared=True)
@@ -367,27 +454,13 @@ class HTTPSSharedPoolOperationAPI(HTTPSSharedPoolRuntimeProbes):
         self._validate(phase, state, complete=complete, prepared=False)
 
     def _verification_identity(self, state: Path) -> Document:
-        if state != self.shared_state / 'forward-verify':
-            raise ValueError('shared verification path differs')
-        return {'schema': 'loom.nebius-shared-forward-verification.v1',
-            'input_digest': self._captured.input_digest, 'state_dir': str(state)}
+        return self._evidence.verification_identity(state)
 
     def _validate_forward_verification(self, *, bindings: SharedPoolGuardBindings, state_dir: Path,
             complete: bool, prepared: bool = False) -> Document:
         self._scope(bindings)
-        frame = _frame(self._captured, self.shared_state)
-        identity = self._verification_identity(state_dir)
-        value = _read(state_dir / 'verify.json')
-        if (type(complete) is not bool or type(prepared) is not bool or (complete and prepared)
-                or set(value) != {*identity, 'status'} or any(value[key] != item for key, item in identity.items())
-                or value['status'] not in {'prepared', 'observed'} or (complete and value['status'] != 'observed')
-                or (prepared and (value['status'] != 'prepared' or frame['forward']['forward-verify']['status'] != 'prepared'))
-                or any(frame['forward'][phase]['status'] != 'complete' for phase in FORWARD_PHASES[:-1])):
-            raise ValueError('shared forward verification differs')
-        activation.validate_shared_pool_activation(bindings=self._captured, state_dir=self.shared_state / 'forward-activate', complete=True)
-        if _frame(self._captured, self.shared_state) != frame:
-            raise ValueError('shared forward verification inputs changed')
-        return value
+        return self._evidence.validate_forward_verification(
+            bindings=bindings, state_dir=state_dir, complete=complete, prepared=prepared)
 
     def _prepare_forward_verification(self, *, bindings: SharedPoolGuardBindings, state_dir: Path) -> None:
         self._scope(bindings)
