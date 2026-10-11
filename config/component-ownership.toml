@@ -175,6 +175,10 @@ pins = [
   { path = "tests/ops/test_nebius_management_refresh_connected.py", shard_index = 6 },
   { path = "tests/ops/test_nebius_development_activation.py", shard_index = 7 },
   { path = "tests/ops/test_nebius_pool_participant_delivery.py", shard_index = 8 },
+  # Delivery passed all cases but hit 40m during cleanup in 38172223205.
+  # Its completed-release/history matrix shares the measured 9m47s authority
+  # shard instead of leaving normal delivery at the job deadline.
+  { path = "tests/ops/test_nebius_pool_participant_delivery_history.py", shard_index = 11 },
   { path = "tests/ops/test_nebius_shared_pool_handoff.py", shard_index = 7 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_parent.py", shard_index = 9 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_forward.py", shard_index = 10 },

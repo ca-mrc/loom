@@ -176,7 +176,8 @@ connected recovery modules using the October 2026 duration sample. The expanded
 shared-pool handoff and participant-delivery suites have dedicated placements;
 the eight- and twelve-shard layouts exhausted multiple jobs' 40-minute limits.
 Recovery stop, gateway, template, role, restart and reopening scenarios are
-separate files, as is the participant host/dispatch/runner matrix. These files
+separate files, as are participant host/dispatch/runner and completed-release
+history matrices. These files
 retain every parameterized scenario and independent fixture. Connected
 transport tests retain independent fixtures and share only immutable
 inputs; full roster tests retain all environments. Duplicate mode-independent
