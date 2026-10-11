@@ -5,6 +5,8 @@ import copy
 import importlib
 import json
 import ssl
+from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 import httpx
@@ -65,6 +67,185 @@ def observer(retained, resources, *, after_read=None):
 def evidence(retained):
     return {path: path.read_bytes() for root in (retained.state_dir, retained.anchor_dir)
         for path in root.rglob('*') if path.is_file()}
+
+
+@pytest.fixture
+def guard_connection(resource_connection, tmp_path, monkeypatch):
+    """Only remote Kubernetes/SQL output is doubled; database checks stay real."""
+    import base64
+    import subprocess
+    from urllib.parse import urlsplit
+
+    from scripts.ops.deploy_nebius_platform import rollout_guard_observation_sql
+    from tests.ops.test_nebius_development_pool_retained import populate_database_backends
+
+    state, connect = resource_connection
+    retained = state.retained
+    target, = (row for row in retained.inputs.previous.guards
+        if row.participant_id == retained.release.refresh.participant_id)
+    namespace = target.namespace
+    kubeconfig = tmp_path / 'participant-kubeconfig'
+    kubeconfig.write_text('private-test-config')
+    kubeconfig.chmod(0o600)
+    state.guard_status, state.guard_fault, state.guard_queries = 'held', None, []
+    state.guard_calls = []
+    state.guard_hook = None
+    documents, template = {}, None
+    database_key = f'StatefulSet:{namespace}:loom-postgres'
+    service_key = f'Service:{namespace}:loom-postgres'
+    reference, = (row['valueFrom']['secretKeyRef'] for row in target.controller['spec']['template']['spec']['containers'][0]['env']
+        if row['name'] == 'LOOM_CP_DB_URL')
+    secret = {'apiVersion': 'v1', 'kind': 'Secret', 'metadata': {'name': reference['name'], 'namespace': namespace,
+        'uid': str(target.database.credential_uid), 'resourceVersion': target.database.credential_resource_version},
+        'data': {reference['key']: base64.b64encode(
+            f'postgresql+psycopg://loom_cp:private-test@loom-postgres.{namespace}.svc:5432/loom'.encode()).decode()}}
+
+    def execute(command, **kwargs):
+        nonlocal template
+        assert command[:3] == ['/usr/bin/kubectl', '--kubeconfig', str(kubeconfig)]
+        assert kwargs['timeout'] == 40 and kwargs['check'] is False
+        position = next(index for index, value in enumerate(command) if value in {'get', 'exec'})
+        args = command[position:]
+        state.guard_calls.append(args)
+        database = state.rows[database_key]
+        documents[_resource_path(database)] = database
+        documents[_resource_path(state.rows[service_key])] = state.rows[service_key]
+        if template != database['spec']:
+            # Model completed StatefulSet replacement, not two live primaries.
+            documents.pop(f'/api/v1/namespaces/{namespace}/pods', None)
+            populate_database_backends(documents)
+            template = copy.deepcopy(database['spec'])
+        if args[0] == 'exec':
+            assert args[:-1] == ['exec', '-n', namespace, 'pod/loom-postgres-0', '-c', 'loom-postgres', '--',
+                'psql', '-X', '-qAt', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', 'loom', '-c']
+            assert args[-1] == rollout_guard_observation_sql(owner=retained.guard_owner,
+                candidate=retained.inputs.candidate['candidate_sha'])
+            state.guard_queries.append(args[-1])
+            value = {'status': state.guard_status}
+            if state.guard_fault == 'extra-report':
+                value['private'] = 'must-not-export'
+            elif state.guard_fault == 'pod-restart':
+                documents[f'/api/v1/namespaces/{namespace}/pods']['items'][0]['status']['containerStatuses'][0]['restartCount'] += 1
+            elif state.guard_fault == 'guard-changed':
+                state.guard_status = 'open'
+            if state.guard_hook is not None:
+                state.guard_hook()
+        else:
+            assert args[0] == 'get'
+            kind, name = args[1:3]
+            if kind == 'namespace':
+                uid = retained.inputs.previous.registration.binding.kube_system_uid if name == 'kube-system' else str(target.namespace_uid)
+                value = {'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': name, 'uid': uid}}
+            elif kind == '--raw':
+                value = copy.deepcopy(documents[urlsplit(name).path])
+                if state.guard_fault == 'backend' and value['kind'] == 'EndpointSliceList':
+                    value['items'][0]['endpoints'][0]['targetRef']['uid'] = str(uuid4())
+            else:
+                assert kind in {'statefulset', 'service', 'secret'}
+                value = copy.deepcopy({'statefulset': database, 'service': state.rows[service_key], 'secret': secret}[kind])
+                if state.guard_fault == 'credential' and kind == 'secret':
+                    value['metadata']['uid'] = str(uuid4())
+        return SimpleNamespace(returncode=0, stdout=json.dumps(value).encode(), stderr=b'')
+
+    monkeypatch.setattr(subprocess, 'run', execute)
+    return state, connect, {'kubeconfig': kubeconfig, 'executable': Path('/usr/bin/kubectl')}
+
+
+@pytest.mark.parametrize('phase,status,accepted', [('preflight', 'open', True), ('preflight', 'held', True),
+    ('guarded', 'held', True), ('ready', 'held', True), ('released', 'open', True),
+    ('guarded', 'open', False), ('ready', 'skipped_locked', False), ('released', 'held', False),
+    ('preflight', 'skipped_locked', False)])
+def test_selected_guard_uses_release_owner_and_real_backend(guard_connection, phase, status, accepted):
+    state, _, options = guard_connection
+    state.guard_status = status
+    with observer(state.retained, lambda: state.rows)[0] as live:
+        before = evidence(state.retained)
+        if accepted:
+            assert live.observe_guard(phase=phase, **options) == status
+            assert len(state.guard_queries) >= 2
+        else:
+            with pytest.raises(ValueError, match='preserve'):
+                live.observe_guard(phase=phase, **options)
+        assert evidence(state.retained) == before
+        assert state.writes == []
+
+
+@pytest.mark.parametrize('damage', ['backend', 'credential', 'pod-restart', 'guard-changed', 'extra-report'])
+def test_selected_guard_refuses_wrong_backend_and_late_changes(guard_connection, damage):
+    state, _, options = guard_connection
+    state.guard_fault = damage
+    with observer(state.retained, lambda: state.rows)[0] as live:
+        with pytest.raises(ValueError, match='preserve'):
+            live.observe_guard(phase='guarded', **options)
+    assert len(state.guard_queries) == (0 if damage in {'backend', 'credential'} else 1 if damage != 'guard-changed' else 2)
+    assert state.writes == []
+
+
+def test_selected_guard_follows_real_database_writer_without_recapturing_authority(guard_connection):
+    state, connect, options = guard_connection
+    with observer(state.retained, lambda: state.rows)[0] as live:
+        def qualified(key):
+            api = connect(key)
+            original = api.qualify_resource
+
+            def qualify(retained, selected):
+                original(retained, selected)
+                live.observe_guard(phase='guarded', preparing=selected, **options)
+
+            api.qualify_resource = qualify
+            return api
+
+        file_writer(state, qualified).apply_file('20-database.yaml')
+        assert len(state.writes) == 2
+        assert live.observe_guard(phase='ready', **options) == 'held'
+        state.guard_status = 'open'
+        with pytest.raises(ValueError, match='preserve'):
+            file_writer(state, qualified).apply_file('20-database.yaml')
+        assert len(state.writes) == 2
+
+
+@pytest.mark.parametrize('damage', ['source', 'kubeconfig', 'resource'])
+def test_selected_guard_does_not_outlive_its_release_and_connection(guard_connection, damage):
+    state, _, options = guard_connection
+
+    def changed():
+        if damage == 'resource':
+            key = 'Deployment:' + state.retained.inputs.config['namespace'] + ':loom-control-plane'
+            state.rows[key]['spec']['replicas'] = 0
+        else:
+            path = options['kubeconfig'] if damage == 'kubeconfig' else state.retained.state_dir / 'inputs.json'
+            path.write_bytes(path.read_bytes() + b'\n')
+
+    state.guard_hook = changed
+    with observer(state.retained, lambda: state.rows)[0] as live:
+        with pytest.raises(ValueError, match='preserve'):
+            live.observe_guard(phase='guarded', **options)
+    assert state.writes == []
+
+
+@pytest.mark.timeout(180)
+def test_selected_guard_blocks_real_pool_effects_after_ownership_loss(guard_connection, pool_connection):
+    state, _, options = guard_connection
+    pool_state, kube, connect = pool_connection
+    assert state.retained == pool_state.retained
+    with observer(state.retained, lambda: {**state.rows, **pool_state.api.resources})[0] as live:
+        pool_state.qualify = lambda phase: live.observe_guard(phase=phase, **options)
+        pool = connect()
+        state.guard_status = 'open'
+        pool.preflight(kube, state.retained.release)
+        with pytest.raises(ValueError, match='preserve'):
+            pool.activate(kube, state.retained.release)
+        assert pool_state.effects == []
+        state.guard_status = 'held'
+        assert pool.activate(kube, state.retained.release) == 'ready'
+        state.guard_status = 'skipped_locked'
+        with pytest.raises(ValueError, match='preserve'):
+            pool.finish(kube, state.retained.release)
+        assert pool_state.effects == ['config', 'fence', 'stage', 'config', 'manager']
+        state.guard_status = 'held'
+        pool.finish(kube, state.retained.release)
+        pool.read_capacity(kube, state.retained.release, observation_id=uuid4())
+        assert pool_state.effects == ['config', 'fence', 'stage', 'config', 'manager', 'open', 'capacity']
 
 
 def test_observation_is_read_only_and_keeps_unwritten_resources_at_original(resource_connection):
