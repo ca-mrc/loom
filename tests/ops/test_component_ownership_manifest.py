@@ -1389,6 +1389,7 @@ def test_root_shards_distribute_shared_handoff_phases_and_observation() -> None:
         ("shared_pool_handoff_recovery_release", "pool_shutdown_live"),
         ("shared_pool_handoff_recovery_stop", "shared_pool_handoff_recovery_stop_committed"),
         ("pool_participant_delivery", "pool_participant_delivery_history"),
+        ("shared_pool_handoff_parent", "shared_pool_handoff_processes"),
     ):
         assert placement[f"tests/ops/test_nebius_{left}.py"] != placement[f"tests/ops/test_nebius_{right}.py"]
 
