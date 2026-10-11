@@ -1314,9 +1314,31 @@ Missing, superseded, future or stale publication is pending, while mismatched id
 or contents rejects qualification. A valid observation of exhausted quota or
 zero workers remains a successful collection, not an admission decision.
 Controller and database process identities, pinned credentials and input scope
-are checked on both sides of the probe, including pending results. This primitive
-does not by itself establish completed CronJob/Job/Pod/configuration lineage;
-the recovery observer must bind that evidence before using publication health.
+are checked on both sides of the probe, including pending results.
+
+The source-qualified recovery readiness callback connects that probe to actual
+completed collection. It reads complete namespace Job/Pod collections, binds
+CronJob → Job → Pod ownership and the current executable template, and selects
+the latest matching completed singleton Job with a successful, fully terminated
+collector Pod. Scheduled-node placement and standard Kubernetes Pod defaults are
+qualified without accepting another image, sidecar or ServiceAccount. Failed or
+old-template history does not become successful collection. The sole JSON log
+receipt must identify the configured target and collector source before the
+database publication challenge. Current catalog/collector ConfigMaps, referenced
+Secret identities/versions and nonempty mounted keys, workload generation and
+selected descendant snapshots are checked again; unrelated namespace work is
+not pinned as collector state.
+Missing completion or stale publication remains pending.
+
+For restored Deployments, the same callback challenges current-source legacy
+settings and the exact retained database, plus existing optional actuator
+telemetry. It accepts only the fixed captured staging roster, source templates
+and this recovery operation's marker. A closing controller/database process
+barrier follows collector and configuration reads, including pending outcomes.
+Dormant originals remain dormant; their descendant drain is checked by the
+restart child. This read-only callback does not acquire guards or replace the
+parent's phase/receipt validation, whole-pool census, current provider checks or
+installed acceptance. Those protected-parent connections remain required.
 
 Authenticated Kubernetes/worker identity and capacity observations remain
 mandatory. Detailed kubelet samples retain the existing optional-telemetry
