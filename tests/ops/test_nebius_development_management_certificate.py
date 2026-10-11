@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import subprocess
 import sys
 import zipfile
@@ -14,6 +15,9 @@ import pytest
 from scripts.ops import install_nebius_certificate_entrypoint as installer
 from scripts.ops import nebius_certificate_gateway as gateway
 from scripts.ops import nebius_certificate_rollout as runner
+from tests.ops.test_install_nebius_certificate_entrypoint import inputs as inputs
+from tests.ops.test_nebius_rollout_skip_workflow import selected_jobs
+from tests.ops.test_nebius_rollout_skip_workflow import workflow as workflow
 
 COMMAND = "loom-nebius-development-management-certificate-v1"
 HOST = "development-management.example.test"
@@ -132,8 +136,8 @@ def test_manager_forced_command_rejects_unapproved_bundle(selection, monkeypatch
     assert not Path(selection[0]["state_dir"]).parent.exists()
 
 
-def test_installed_entrypoint_freezes_mode_and_preserves_foreign_keys(legacy_inputs):
-    old_root, keys, key, _, _ = legacy_inputs
+def test_installed_entrypoint_freezes_mode_and_preserves_foreign_keys(inputs):
+    old_root, keys, key, _, _ = inputs
     root = old_root.with_name("nebius-development-management-certificates")
     source = b'def authorized_main(expected, *, management_only=False):\n    return 0 if management_only else 99\n'
     config = {"schema": "loom.nebius-management-certificate-installation.v1",
@@ -215,3 +219,58 @@ def test_management_preparation_never_falls_back_to_legacy_configuration(selecti
     if configured:
         with zipfile.ZipFile(output) as archive:
             assert json.loads(archive.read("installation.json")) == config
+
+
+@pytest.mark.parametrize("enabled", ["true", "false"])
+def test_workflow_dispatch_selects_only_the_separately_protected_issuer(workflow, enabled):
+    assert selected_jobs(workflow, event="workflow_dispatch", operation="development-management-certificate",
+        enabled=enabled) == {"development-management-certificate"}
+    job = workflow["jobs"]["development-management-certificate"]
+    assert job["environment"]["name"] == "nebius-integration"
+    assert job["permissions"] == {"contents": "read"}
+    step = next(item for item in job["steps"] if item.get("name") == "Qualify dev-manager certificate on the private gateway")
+    assert step["env"]["DEPLOY_SSH_KEY"] == "${{ secrets.NEBIUS_DEVELOPMENT_MANAGEMENT_CERTIFICATE_SSH_KEY }}"
+    assert step["env"]["NEBIUS_DEVELOPMENT_MANAGEMENT_CERTIFICATE_INSTALLATION_JSON"] == (
+        "${{ vars.NEBIUS_DEVELOPMENT_MANAGEMENT_CERTIFICATE_INSTALLATION_JSON }}")
+    assert "NEBIUS_CERTIFICATE_INSTALLATION_JSON" not in step["env"]
+
+
+@pytest.mark.parametrize("context", [{"repository_id": "999"}, {"ref": "refs/heads/feature"},
+    {"event": "pull_request"}, {"operation": "certificate"}])
+def test_dev_certificate_job_rejects_foreign_dispatch_without_changing_legacy(workflow, context):
+    args = {"event": "workflow_dispatch", "operation": "development-management-certificate"} | context
+    assert "development-management-certificate" not in selected_jobs(workflow, **args)
+    assert selected_jobs(workflow, event="workflow_dispatch", operation="certificate") == {"certificate"}
+
+
+@pytest.mark.parametrize("outcome", ["success", "failure", "missing_key"])
+def test_dev_certificate_workflow_executes_fixed_runner_and_cleans_keys(workflow, tmp_path, outcome):
+    job = workflow["jobs"]["development-management-certificate"]
+    step = next(item for item in job["steps"] if item.get("name") == "Qualify dev-manager certificate on the private gateway")
+    executable = tmp_path / "uv"
+    record = tmp_path / "invocation.json"
+    executable.write_text("#!/usr/bin/env python3\nimport json,os,sys\nfrom pathlib import Path\n"
+        "key=Path(os.environ['LOOM_DEPLOY_SSH_KEY_FILE'])\n"
+        "hosts=Path(os.environ['LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE'])\n"
+        "assert key.read_text().strip()=='dedicated-test-key'\n"
+        "assert key.stat().st_mode & 0o077 == 0 and hosts.stat().st_mode & 0o077 == 0\n"
+        "assert 'DEPLOY_SSH_KEY' not in os.environ\n"
+        "Path(os.environ['PROBE_RECORD']).write_text(json.dumps({'args':sys.argv[1:], 'key':str(key), 'hosts':str(hosts)}))\n"
+        "raise SystemExit(int(os.environ['PROBE_EXIT']))\n")
+    executable.chmod(0o700)
+    result = subprocess.run(["bash", "-c", step["run"]], capture_output=True, timeout=15,
+        env={"PATH": str(tmp_path) + os.pathsep + os.environ["PATH"], "RUNNER_TEMP": str(tmp_path),
+            "DEPLOY_SSH_KEY": "" if outcome == "missing_key" else "dedicated-test-key",
+            "NEBIUS_CERTIFICATE_SSH_KEY": "legacy-key-must-not-be-used",
+            "DEPLOY_KNOWN_HOSTS": "qualified-test-host", "LOOM_DEPLOY_SSH_TARGET": "codex@192.0.2.1",
+            "NEBIUS_DEVELOPMENT_MANAGEMENT_CERTIFICATE_INSTALLATION_JSON": "{}",
+            "PROBE_RECORD": str(record), "PROBE_EXIT": "23" if outcome == "failure" else "0"})
+    assert result.returncode == {"success": 0, "failure": 23, "missing_key": 1}[outcome]
+    assert b"dedicated-test-key" not in result.stdout + result.stderr
+    if outcome == "missing_key":
+        assert not record.exists()
+    else:
+        value = json.loads(record.read_text())
+        assert value["args"][:4] == ["run", "--no-sync", "python", "scripts/ops/nebius_certificate_rollout.py"]
+        assert "--management-only" in value["args"]
+        assert not Path(value["key"]).exists() and not Path(value["hosts"]).exists()
