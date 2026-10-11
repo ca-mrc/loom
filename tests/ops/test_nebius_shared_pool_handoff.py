@@ -2752,6 +2752,7 @@ def _exercise_recovery_databases(*, bindings, documents, mode, checked, commands
     from scripts.ops.nebius_development_runtime_install import _read
     from scripts.ops.nebius_ingress_stage import _snapshot, _uid
     from scripts.ops.nebius_management_switch import _stable
+    from scripts.ops.nebius_pool_activation_database import pool_activation_state_sql
 
     name = 'scripts.ops.nebius_shared_pool_recovery_databases'
     assert importlib.util.find_spec(name) is not None, 'phase-bound recovery database observation is missing'
@@ -2875,6 +2876,20 @@ def _exercise_recovery_databases(*, bindings, documents, mode, checked, commands
     assert observe().pool_state == 'closed'
     record['pool'], mode['pool_state'] = 'fenced', 'fenced'
     private_state._atomic_json(fence_path, record)
+    first_guard = bindings.migration.guards[0]
+    mode['guard_states'] = {first_guard.namespace: 'fenced'}
+    with pytest.raises(ValueError, match=error):
+        observe()
+    record['guards'][str(first_guard.participant_id)] = 'intent'
+    private_state._atomic_json(fence_path, record)
+    assert observe().guard_states[first_guard.namespace] == 'fenced'
+    mode['guard_states'][first_guard.namespace] = 'open'
+    assert observe().guard_states[first_guard.namespace] == 'open'
+    record['guards'][str(first_guard.participant_id)] = 'fenced'
+    private_state._atomic_json(fence_path, record)
+    with pytest.raises(ValueError, match=error):
+        observe()
+    mode['guard_states'][first_guard.namespace] = 'fenced'
     api.block = 'recovery-drain'
     assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'recovery-drain'
     mode.update(pool_busy=True, busy={'loom-dev', staging})
@@ -2891,6 +2906,25 @@ def _exercise_recovery_databases(*, bindings, documents, mode, checked, commands
         documents.clear()
         documents.update(copy.deepcopy(baseline))
     mode['damage'] = None
+    namespaces = (bindings.migration.registration.binding.namespace,
+        bindings.plan.staging.legacy.context.original.upgrade.setup.binding.namespace, 'loom-dev', staging)
+    for namespace in namespaces:
+        observed = {'queries': 0, 'injected': False}
+        def restart_database(argv, observed=observed, namespace=namespace):
+            if argv[-1] == pool_activation_state_sql(bindings.migration.registration.spec):
+                observed['queries'] += 1
+                if observed['queries'] == 2:
+                    pod, = (row for row in documents['/api/v1/namespaces/' + namespace + '/pods']['items']
+                        if row['metadata']['name'] == 'loom-postgres-0')
+                    pod['status']['containerStatuses'][0]['restartCount'] += 1
+                    observed['injected'] = True
+        mode['sql_hook'] = restart_database
+        with pytest.raises(ValueError, match=error):
+            observe()
+        assert observed['injected']
+        documents.clear()
+        documents.update(copy.deepcopy(baseline))
+    mode['sql_hook'] = None
     receipt_bytes = fence_path.read_bytes()
     mode['sql_hook'] = lambda argv: fence_path.write_bytes(receipt_bytes + b'\n')
     with pytest.raises(ValueError, match=error):
