@@ -180,15 +180,20 @@ separate files, as are participant host/dispatch/runner and completed-release
 history matrices. These files
 retain every parameterized scenario and independent fixture. Connected
 parent and process-preflight matrices also use separate shards after their
-combined duration exhausted a job's budget. Connected
+combined duration exhausted a job's budget. Recovery census, recovery-process
+preflight and forward process-observation scenarios have separate wrappers that
+invoke their unchanged assertion bodies and complete independent fixtures. These
+long scenarios remain in the original collected coverage, without being stacked
+with every variant of their lifecycle matrix. Connected
 transport tests retain independent fixtures and share only immutable
 inputs; full roster tests retain all environments. Duplicate mode-independent
 qualification cases run once, while mode-specific grants and failure cases remain.
 The job limit remains 40 minutes. Connected participant lifecycle tests have
 explicit 120-second budgets (180 seconds for two successive releases). The
 complete workflow-selector integration also has a 120-second budget. Exhaustive
-shared census and recovery reopening each use 900 seconds.
-Delayed-stop commit outcomes use 1200 seconds each and run in separate file
+shared census uses 1200 seconds, with 1500 seconds for the independently scheduled
+recovery matrix; process-preflight matrices use 1200 seconds. Recovery reopening
+uses 900 seconds. Delayed-stop commit outcomes use 1800 seconds each and run in separate file
 shards. These test-only limits include retained-chain setup and fault/replay
 validation; production deadlines and fresh authority checks are unchanged.
 Each shard stops on its first failing test to

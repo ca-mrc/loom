@@ -185,7 +185,14 @@ pins = [
   { path = "tests/ops/test_nebius_shared_pool_handoff_parent.py", shard_index = 15 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_forward.py", shard_index = 10 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_processes.py", shard_index = 9 },
+  # The process shard exceeded 37m before its fifth scenario timed out.
+  # Give both successor scenarios a separate job.
+  { path = "tests/ops/test_nebius_shared_pool_handoff_processes_recovery.py", shard_index = 17 },
+  { path = "tests/ops/test_nebius_shared_pool_handoff_processes_observation.py", shard_index = 10 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_census.py", shard_index = 18 },
+  # Completed release used 13m06s in 38176447484; the full recovery census
+  # runs beside it instead of sharing one job with all other census variants.
+  { path = "tests/ops/test_nebius_shared_pool_handoff_census_recovery.py", shard_index = 19 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_fences.py", shard_index = 4 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_authority.py", shard_index = 11 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_release.py", shard_index = 19 },

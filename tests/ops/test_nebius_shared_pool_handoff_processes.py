@@ -150,9 +150,10 @@ from tests.ops.test_nebius_shared_pool_handoff import (
 )
 
 
-@pytest.mark.timeout(600)
-@pytest.mark.parametrize('forward_processes', [False, True, 'activation', 'recovery-databases', 'recovery-processes', 'process-observation'],
-    ids=['initial', 'forward', 'activation', 'recovery-databases', 'recovery-processes', 'process-observation'])
+# Hosted-runner activation took 587s including its independent fixture.
+@pytest.mark.timeout(1200)
+@pytest.mark.parametrize('forward_processes', [False, True, 'activation', 'recovery-databases'],
+    ids=['initial', 'forward', 'activation', 'recovery-databases'])
 def test_shared_process_preflight_reads_current_databases_and_retired_authority(
         shared_runtime, staging_history, staging_observation, completed_pool, handoff, monkeypatch, forward_processes):
     """Reject active old authority, failed real challenges and changed bindings.

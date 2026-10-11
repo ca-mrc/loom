@@ -147,7 +147,9 @@ from tests.ops.test_nebius_shared_pool_handoff import (
 )
 
 
-@pytest.mark.timeout(1200)
+# Independent CI outcomes took 1013s and exceeded 1200s respectively.
+# These whole-lifecycle fault matrices run in separate file shards.
+@pytest.mark.timeout(1800)
 @pytest.mark.parametrize('forward_commit', [False])
 def test_shared_recovery_stop_fences_delayed_forward_cas_without_replaying_unknown_stops(
         shared_operation, shared_guard_transport, shared_runtime, completed_pool, handoff, monkeypatch, forward_commit):
