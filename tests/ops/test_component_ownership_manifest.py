@@ -1401,6 +1401,9 @@ def test_root_shards_distribute_shared_handoff_phases_and_observation() -> None:
         # image lifecycle predecessors rather than increasing the job limit.
         ("pool_participant_observation", "pool_image_cancellation_gateway"),
         ("pool_participant_observation", "pool_image_transport"),
+        # Both matrices passed in 38181207030, but together left only 94s
+        # of job headroom. Keep their measured long bodies on separate jobs.
+        ("shared_pool_handoff_census_recovery", "shared_pool_handoff_recovery_release"),
     ):
         assert placement[f"tests/ops/test_nebius_{left}.py"] != placement[f"tests/ops/test_nebius_{right}.py"]
 
