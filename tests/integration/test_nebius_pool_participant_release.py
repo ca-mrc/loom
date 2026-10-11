@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+from uuid import uuid4
 
 from sqlalchemy import select, update
 
@@ -55,8 +56,14 @@ async def test_fixed_refresh_command_commits_real_source_derived_transaction_bef
         await session.execute(update(NebiusPoolBinding).where(NebiusPoolBinding.pool_id == plan.refresh.before.pool_id)
             .values(mode='global'))
     path = tmp_path / 'refresh.json'
-    for action, expected in (('observe', 'ready'), ('fence', 'fenced'), ('stage', 'staged'), ('open', 'complete')):
-        config, job = refresh_documents(plan, manager=catalog_inputs['manager'], action=action)
+    observed_jobs = set()
+    for action, expected in (('observe', 'ready'), ('fence', 'fenced'), ('observe', 'fenced'),
+            ('stage', 'staged'), ('observe', 'staged'), ('open', 'complete'), ('observe', 'complete')):
+        config, job = refresh_documents(plan, manager=catalog_inputs['manager'], action=action,
+            observation_id=uuid4() if action == 'observe' else None)
+        if action == 'observe':
+            assert job['metadata']['name'] not in observed_jobs
+            observed_jobs.add(job['metadata']['name'])
         path.write_text(config['data']['refresh.json'])
         container, = job['spec']['template']['spec']['containers']
         # Execute the actual rendered command; only the mounted input path and
@@ -71,9 +78,9 @@ async def test_fixed_refresh_command_commits_real_source_derived_transaction_bef
         assert json.loads(child.stdout)['status'] == expected
         async with sessions() as session:
             participant = await session.get(NebiusPoolParticipant, plan.refresh.participant_id)
-            assert participant.phase == ('fenced' if action in {'fence', 'stage'} else 'active')
+            assert participant.phase == ('fenced' if expected in {'fenced', 'staged'} else 'active')
             assert participant.binding_revision == (plan.refresh.after.participants[0].binding_revision
-                if action in {'stage', 'open'} else plan.refresh.before.participants[0].binding_revision)
+                if expected in {'staged', 'complete'} else plan.refresh.before.participants[0].binding_revision)
     # Malformed input and unsupported action never echo private contents or report success.
     path.write_text('{"private-marker": "not-an-operation"}')
     for action in ('stage', 'register'):
