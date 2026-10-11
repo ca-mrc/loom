@@ -2507,8 +2507,8 @@ def test_shared_guard_binding_uses_live_dev_database_and_real_bound_guard_reader
 
 
 @pytest.mark.timeout(600)
-@pytest.mark.parametrize('forward_processes', [False, True, 'activation', 'recovery-databases', 'process-observation'],
-    ids=['initial', 'forward', 'activation', 'recovery-databases', 'process-observation'])
+@pytest.mark.parametrize('forward_processes', [False, True, 'activation', 'recovery-databases', 'recovery-processes', 'process-observation'],
+    ids=['initial', 'forward', 'activation', 'recovery-databases', 'recovery-processes', 'process-observation'])
 def test_shared_process_preflight_reads_current_databases_and_retired_authority(
         shared_runtime, staging_history, staging_observation, completed_pool, handoff, monkeypatch, forward_processes):
     """Reject active old authority, failed real challenges and changed bindings.
@@ -2939,9 +2939,9 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
         assert checked == {'old-revoked', 'new-closed', 'telemetry', ('guard', 'loom-dev'), ('guard', staging.namespace),
             *((check, namespace, name) for namespace, name in roles for check in ('settings', 'database'))}
         assert 'private-test-only' not in repr(result)
-        if forward_processes == 'recovery-databases':
+        if forward_processes in {'recovery-databases', 'recovery-processes'}:
             _exercise_recovery_databases(bindings=result.bindings, documents=documents, mode=mode, checked=checked,
-                commands=commands, probes=probes,
+                commands=commands, probes=probes, process_observation=forward_processes == 'recovery-processes',
                 args=dict(runtime=request, observation=staging_observation, legacy=staging_history, repo_root=ROOT))
             return
         if forward_processes:
@@ -2971,7 +2971,7 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
     assert all(path.read_bytes() == raw for path, raw in history.items())
 
 
-def _exercise_recovery_databases(*, bindings, documents, mode, checked, commands, probes, args):
+def _exercise_recovery_databases(*, bindings, documents, mode, checked, commands, probes, args, process_observation=False):
     """Real parent/child records and fixed SQL transports; earlier effects are doubled."""
     import importlib.util
 
@@ -3079,6 +3079,11 @@ def _exercise_recovery_databases(*, bindings, documents, mode, checked, commands
     api.block = 'forward-guards'
     kwargs = {**args, 'bindings': bindings, 'api': api, 'action': 'install'}
     assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-guards'
+
+    if process_observation:
+        _exercise_recovery_processes(kwargs=kwargs, state=state, api=api, documents=documents,
+            probes=probes, mode=mode, checked=checked)
+        return
 
     def observe():
         return module.observe_shared_pool_recovery_databases(bindings=bindings, state_dir=state,
@@ -3223,6 +3228,179 @@ def _exercise_recovery_databases(*, bindings, documents, mode, checked, commands
     mode['sql_hook'] = None
     assert 'private-test-only' not in repr(result)
     assert all(row[0] == 'get' or (row[0] == 'exec' and row[7] == 'psql') for row in commands[first_command:])
+
+
+def _exercise_recovery_processes(*, kwargs, state, api, documents, probes, mode, checked):
+    """Real recovery history/readiness; external I/O and collector publication are explicit doubles."""
+    import importlib.util
+
+    from scripts.ops import nebius_certificates as private_state
+    from scripts.ops import nebius_shared_pool_operation as parent
+    from scripts.ops import nebius_shared_pool_recovery_restart as restart
+    from scripts.ops import nebius_shared_pool_recovery_workloads as stop
+    from scripts.ops.nebius_development_runtime_install import _read
+    from scripts.ops.nebius_development_runtime_live import runtime_resource_path
+    from scripts.ops.nebius_ingress_stage import _snapshot, _uid
+    from scripts.ops.nebius_management_switch import _stable
+    from tests.ops.test_nebius_development_pool_retained import populate_runtime_pods
+
+    name = 'scripts.ops.nebius_shared_pool_recovery_processes'
+    assert importlib.util.find_spec(name) is not None, 'phase-bound recovery process observation is missing'
+    module = __import__(name, fromlist=['observe_shared_pool_recovery_processes'])
+    bindings = kwargs['bindings']
+    staging = bindings.plan.staging.attachment.guard
+    completed = bindings.plan.development.runtime
+    roots = {**bindings.plan.staging.originals,
+        **{key: completed.resources[key] for key in (*completed.plan.fixed['workloads'], *completed.plan.originals)},
+        _key(bindings.plan.development.gateway_original): bindings.plan.development.gateway_original}
+    # The fixture's original collector is active. Its lineage/publication reader
+    # has a separate real callback regression; this test controls just that read.
+    collector_calls = []
+    def collection_health(**options):
+        assert options['bindings'] == bindings and options['guards'].request == bindings.migration
+        assert _key(options['expected']) in bindings.plan.staging.originals
+        collector_calls.append(_key(options['expected']))
+        if mode.get('process_hook') is not None:
+            mode['process_hook']()
+        return mode.get('collector_ready', True)
+
+    def current(key):
+        return documents[runtime_resource_path(roots[key])]
+
+    def replace(key, wanted):
+        actual = current(key)
+        identity = {field: actual['metadata'][field] for field in ('uid', 'resourceVersion')}
+        generation = actual['metadata'].get('generation', 1) + 1
+        actual.clear()
+        actual.update(copy.deepcopy(wanted))
+        actual['metadata'].update(**identity, generation=generation)
+        actual['status'] = {'observedGeneration': generation}
+
+    def descendants():
+        # Model the controllers completing their actual desired state. Keep the
+        # retained database Pods; the real runtime challenges must still find them.
+        for row in documents.values():
+            if row['kind'] == 'PodList':
+                row['items'] = [pod for pod in row['items'] if pod['metadata']['name'] == 'loom-postgres-0']
+            elif row['kind'] == 'ReplicaSetList':
+                row['items'] = []
+        populate_runtime_pods(documents)
+        for row in tuple(documents.values()):
+            if row['kind'] == 'ReplicaSetList':
+                for child in row['items']:
+                    documents['/apis/apps/v1/namespaces/' + child['metadata']['namespace']
+                        + '/replicasets/' + child['metadata']['name']] = copy.deepcopy(child)
+
+    for row in roots.values():
+        if row['kind'] == 'CronJob':
+            namespace = row['metadata']['namespace']
+            documents.setdefault('/apis/batch/v1/namespaces/' + namespace + '/jobs',
+                {'apiVersion': 'batch/v1', 'kind': 'JobList', 'metadata': {'resourceVersion': '501'}, 'items': []})
+
+    def observe():
+        return module.observe_shared_pool_recovery_processes(bindings=bindings, state_dir=state,
+            kubeconfig=Path(probes.prefix[probes.prefix.index('--kubeconfig') + 1]), executable=Path(probes.prefix[0]))
+
+    error = 'shared pool recovery process observation unqualified'
+    with pytest.raises(ValueError, match=error):
+        observe()  # No recovery marker exists.
+    kwargs['action'], api.block = 'recover', 'recovery-fence'
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'recovery-fence'
+    for row in documents.values():
+        if row['kind'] == 'PodList':
+            row['items'] = [pod for pod in row['items'] if pod['metadata']['name'] == 'loom-postgres-0']
+    checked.clear()
+    assert observe().pending_workloads == ()  # Crashed apps cannot prevent fencing.
+    assert not checked  # No application or SQL health challenge before restoration.
+    api.block = 'recovery-stop'
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'recovery-stop'
+    journal = state / 'recovery-stop/stop.json'
+    record = _read(journal)
+    key = next(key for key in record['resources'] if roots[key]['kind'] == 'Deployment')
+    # A later root cannot borrow pending permission from another root's intent.
+    assert observe().pending_workloads == ()
+    for selected, choices in stop._sources(bindings, state).items():
+        before = _snapshot(current(selected))
+        before['metadata']['uid'] = _uid(current(selected))
+        expected = stop._stopped(bindings, before)
+        record['resources'][selected].update(status='intent', before=before,
+            before_resource_version=current(selected)['metadata']['resourceVersion'], expected=expected)
+        private_state._atomic_json(journal, record)
+        assert observe().pending_workloads == (selected,)
+        replace(selected, expected)
+        descendants()
+        assert observe().pending_workloads == ()
+        record['resources'][selected]['status'] = 'stopped'
+        private_state._atomic_json(journal, record)
+    # A stale stopped status cannot mask a currently lingering Pod.
+    namespace = roots[key]['metadata']['namespace']
+    pod_path = '/api/v1/namespaces/' + namespace + '/pods'
+    lingering = {'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {'name': 'lingering', 'namespace': namespace,
+        'uid': str(uuid4()), 'labels': copy.deepcopy(roots[key]['spec']['selector']['matchLabels'])},
+        'spec': copy.deepcopy(roots[key]['spec']['template']['spec']), 'status': {'phase': 'Running'}}
+    documents[pod_path]['items'].append(lingering)
+    with pytest.raises(ValueError, match=error):
+        observe()
+    documents[pod_path]['items'].remove(lingering)
+    api.block = 'recovery-restart'
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'recovery-restart'
+    originals, targets = restart._inputs(bindings, state)
+    for selected, original in originals.items():
+        replace(selected, original)
+    descendants()
+    assert observe().pending_workloads == ()
+    journal = state / 'recovery-restart/restart.json'
+    record = _read(journal)
+    from scripts.ops import nebius_shared_pool_recovery_collector as collector
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(collector, 'observe_restored_staging_collector', collection_health)
+        for selected, wanted in targets.items():
+            changed = _stable(originals[selected]) != _stable(wanted)
+            if changed:
+                record['resources'][selected].update(status='intent',
+                    before_resource_version=current(selected)['metadata']['resourceVersion'])
+                private_state._atomic_json(journal, record)
+                assert observe().pending_workloads == (selected,)
+                replace(selected, wanted)
+                if wanted['kind'] == 'Deployment':
+                    assert observe().pending_workloads == (selected,)  # Spec alone is not Pod readiness.
+                descendants()
+                if wanted['kind'] == 'CronJob':
+                    mode['collector_ready'] = False
+                    assert observe().pending_workloads == (selected,)
+                    mode['collector_ready'] = True
+                assert observe().pending_workloads == ()
+            record['resources'][selected].update(status='started', before_resource_version='701' if changed else None)
+            private_state._atomic_json(journal, record)
+        assert observe().pending_workloads == ()
+        assert collector_calls and ('settings', staging.namespace, 'loom-control-plane') in checked
+        assert ('database', staging.namespace, 'loom-service') in checked
+        mode['collector_ready'] = False
+        with pytest.raises(ValueError, match=error):
+            observe()  # Completed restoration cannot borrow another phase's wait.
+        mode['collector_ready'] = True
+        before = copy.deepcopy(documents)
+        def late_backend():
+            pod, = (row for row in documents['/api/v1/namespaces/' + staging.namespace + '/pods']['items']
+                if row['metadata']['name'] == 'loom-postgres-0')
+            pod['status']['containerStatuses'][0]['restartCount'] += 1
+        mode['process_hook'] = late_backend
+        with pytest.raises(ValueError, match=error):
+            observe()
+        mode['process_hook'] = None
+        documents.clear()
+        documents.update(before)
+        api.block = None
+        assert parent.run_shared_pool_operation(**kwargs)['status'] == 'staging_restored_dev_closed'
+        assert observe().pending_workloads == ()  # Terminal replay constructs no active child.
+        raw = journal.read_bytes()
+        mode['process_hook'] = lambda: journal.write_bytes(raw + b'\n')
+        with pytest.raises(ValueError, match=error):
+            observe()
+        mode['process_hook'] = None
+        journal.write_bytes(raw)
+        assert observe().pending_workloads == ()
 
 
 def _exercise_scoped_process_observation(*, development, documents, state, calls, catalog_path):
