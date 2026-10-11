@@ -564,14 +564,16 @@ submitting. Unset fields keep the task's own value:
 {
   "schema_version": "loom.execution-selection.v1",
   "harness": {"name": "terminus-2"},
-  "network_policy": {"mode": "allowlist", "allow": ["pypi.org"]},
+  "network_policy": {"mode": "web-allowlist", "allow": ["https://pypi.org"]},
   "verification": "separate",
   "isolation": "guest"
 }
 ```
 
 ```bash
-loom eval batch create --benchmark terminal-bench --execution-config selection.json --dry-run
+loom eval batch create --purpose evaluation \
+  --benchmark terminal-bench-2 --provider smoke-openai --model gpt-4o-mini \
+  --execution-config selection.json --dry-run
 ```
 
 `--dry-run` prints each task's resolved axes, or every rejection reason per task,
@@ -604,6 +606,7 @@ for the rules the service applies:
 
 ```bash
 loom eval batch create \
+  --purpose evaluation \
   --name-suffix glm-vs-qwen \
   --benchmark humaneval \
   --combinations-json '[
@@ -633,6 +636,7 @@ target team:
 
 ```bash
 loom eval batch create \
+  --purpose evaluation \
   --team-id <target-team-id> \
   --name-suffix admin-provider-smoke \
   --agent direct-completion \
@@ -1740,6 +1744,7 @@ For a cheap oracle smoke that does not call a model, omit provider/model flags:
 
 ```bash
 loom eval batch create \
+  --purpose evaluation \
   --name-suffix oracle-smoke \
   --agent oracle \
   --benchmark team-evals \
@@ -1750,6 +1755,7 @@ For model-backed agents, include a provider connection and model:
 
 ```bash
 loom eval batch create \
+  --purpose evaluation \
   --name-suffix direct-completion-smoke \
   --agent direct-completion \
   --provider smoke-openai \
@@ -1922,6 +1928,8 @@ loom run
   ```bash
   # Path A — K1/K2 blocks (default when --multi-model is set without --beta)
   loom eval batch create \
+    --purpose evaluation \
+    --benchmark <benchmark> \
     --agent terminus-2 \
     --provider <name> \
     --model <student> \
@@ -1933,6 +1941,8 @@ loom run
 
   # Path B — per-episode teacher coin
   loom eval batch create \
+    --purpose evaluation \
+    --benchmark <benchmark> \
     --agent terminus-2 \
     --provider <name> \
     --model <student> \

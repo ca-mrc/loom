@@ -162,6 +162,7 @@ loom tasksets status <task-set-id>
 loom tasksets list
 
 loom eval batch create \
+  --purpose trajectory_generation \
   --task-set <task-set-id> \
   --agent <agent> \
   --provider <provider-connection> \

@@ -13,7 +13,7 @@ Use one of these case-sensitive version labels; arbitrary image URLs are not
 accepted. Omit `agent_version` to keep the deployment default.
 
 ```sh
-loom eval batch create --agent terminus-2 \
+loom eval batch create --purpose evaluation --agent terminus-2 \
   --agent-version harbor-0.18.0-abc123 --provider my-provider \
   --model my-model --benchmark my-benchmark
 ```

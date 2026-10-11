@@ -90,6 +90,7 @@ services:
       LOOM_GW_DB_URL: "postgresql+psycopg://${LOOM_DEV_POSTGRES_USER:-loom}:${LOOM_DEV_POSTGRES_PASSWORD:-loom}@postgres/${LOOM_DEV_POSTGRES_DB:-loom}"
       LOOM_GW_ANTHROPIC_API_KEY: ${LOOM_GW_ANTHROPIC_API_KEY:-stub-key}
       LOOM_GW_OPENAI_API_KEY: ${LOOM_GW_OPENAI_API_KEY:-stub-key}
+      LOOM_GW_GOOGLE_API_KEY: "${LOOM_GW_GOOGLE_API_KEY:-}"
       LOOM_GW_DEV_RELOAD: "1"
       LOOM_GW_ADMIN_SECRET_FILE: /var/run/loom/admin/secrets.toml
       # HS256 secret shared with the Control Plane to sign + verify
@@ -106,8 +107,8 @@ services:
       # Route every facade upstream call through Envoy.
       # Empty by default → fall through to direct mode; the dev compose
       # opts in so development exercises the chain end-to-end. Set it to an
-      # empty string and restart to use direct mode.
-      LOOM_GW_EGRESS_PROXY_URL: "${LOOM_GW_EGRESS_PROXY_URL:-http://egress-proxy:30443}"
+      # empty string and rerun `loom service up` to use direct mode.
+      LOOM_GW_EGRESS_PROXY_URL: "${LOOM_GW_EGRESS_PROXY_URL-http://egress-proxy:30443}"
       # QA matrix relay api-key passthrough (see loom-service block below).
       LOOM_QA_RELAY_API_KEY: "${LOOM_QA_RELAY_API_KEY:-}"
     volumes:
@@ -187,6 +188,10 @@ services:
       LOOM_SVC_LOG_LEVEL: debug
       LOOM_SVC_DEV_RELOAD: "1"
       LOOM_SVC_AUTH_LOCAL_HTTP: "true"
+      LOOM_SVC_AUTH_SESSION_TTL_SEC: "${LOOM_SVC_AUTH_SESSION_TTL_SEC:-604800}"
+      LOOM_SVC_AUTH_LOGIN_CHALLENGE_TTL_SEC: "${LOOM_SVC_AUTH_LOGIN_CHALLENGE_TTL_SEC:-900}"
+      LOOM_SVC_AUTH_RETURN_LOGIN_TOKEN: "${LOOM_SVC_AUTH_RETURN_LOGIN_TOKEN:-false}"
+      LOOM_SVC_TEAM_REGISTRATION_OPEN: "${LOOM_SVC_TEAM_REGISTRATION_OPEN:-false}"
       LOOM_SVC_ADMIN_SECRET_FILE: /var/run/loom/admin/secrets.toml
       # Minted by `loom service up` via POST /admin/batch-runner-tokens
       # and written to .env. Without this token the batch fan-out loop

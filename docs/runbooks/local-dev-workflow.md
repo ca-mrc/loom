@@ -157,13 +157,13 @@ credentials between reads or test cases.
 Preserve local volumes:
 
 ```bash
-loom service down --environment local
+loom service down
 ```
 
 Delete Compose volumes only when you explicitly want a clean local data reset:
 
 ```bash
-loom service down --environment local -v
+loom service down -v
 ```
 
 The volume-deleting command is destructive and cannot restore prior local
