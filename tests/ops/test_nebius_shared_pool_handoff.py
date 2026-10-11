@@ -2431,7 +2431,10 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
         assert message.method == 'GET'
         if message.url.path in documents:
             calls.append(message)
-            return httpx.Response(200, json=read(str(message.url)))
+            response = httpx.Response(200, json=read(str(message.url)))
+            if mode.get('http_hook') is not None:
+                mode['http_hook'](message)
+            return response
         return fallback(message)
 
     commands, checked = [], set()
@@ -3178,6 +3181,25 @@ def _exercise_forward_processes(*, bindings, development, documents, mode, check
     assert sum(call.url.path == catalog_path for call in calls[reads_before:]) <= 4
     assert {'new-closed', 'old-revoked', ('runtime-role', 'loom-dev')} <= checked
     if observation_only:
+        saved = copy.deepcopy(documents)
+        inventory_reads = 0
+        def late_restart(message):
+            nonlocal inventory_reads
+            if message.url.path == catalog_path:
+                inventory_reads += 1
+                if inventory_reads == 4:
+                    pod, = (row for row in documents['/api/v1/namespaces/' + manager.binding.namespace + '/pods']['items']
+                        if row['metadata']['name'] == 'loom-postgres-0')
+                    pod['status']['containerStatuses'][0]['restartCount'] += 1
+        mode['http_hook'] = late_restart
+        try:
+            with pytest.raises(ValueError):
+                observe()  # The last inventory scan must precede the final DB identity check.
+            assert inventory_reads == 4
+        finally:
+            mode['http_hook'] = None
+            documents.clear()
+            documents.update(saved)
         _exercise_scoped_process_observation(development=development, documents=documents,
             state=state, calls=calls, catalog_path=catalog_path)
         return
