@@ -214,13 +214,17 @@ def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation
         from scripts.ops.nebius_management_switch import _matches
         from scripts.ops.nebius_pool_participant_resource import RetainedCandidateFileWriter
 
+        # The older kubectl fake indexes only kind/name. The real API separates
+        # identically named execution/build ServiceAccounts by namespace.
+        inventory = {row['kind'] + ':' + row['metadata'].get('namespace', '-') + ':' + row['metadata']['name']:
+            copy.deepcopy(row) for row in inputs['current']}
+
         class ResourceIO:
             def qualify(self):
                 assert kube.guard_identity is not None and state['pool'] in {'staged', 'open'}
 
             def read_workload(self, key):
-                kind, _, name = key.split(':')
-                return copy.deepcopy(kube.objects[kind.lower(), name])
+                return copy.deepcopy(inventory[key])
 
             def preview_workload(self, key, before, desired):
                 return copy.deepcopy(desired)
@@ -236,6 +240,7 @@ def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation
                     value['status'] = {'observedGeneration': 1, 'replicas': replicas,
                         'updatedReplicas': replicas, 'availableReplicas': replicas, 'readyReplicas': replicas}
                 kube.objects[value['kind'].lower(), value['metadata']['name']] = value
+                inventory[key] = copy.deepcopy(value)
                 written.append(key)
                 return True
 

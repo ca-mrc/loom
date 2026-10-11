@@ -6,6 +6,7 @@ import importlib
 import json
 import ssl
 from contextlib import nullcontext
+from decimal import Decimal
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -133,6 +134,34 @@ def test_candidate_file_writer_preserves_order_and_reads_back_repeated_dispatch(
     ns = state.retained.inputs.config['namespace']
     assert state.writes == ['Service:' + ns + ':loom-postgres', 'StatefulSet:' + ns + ':loom-postgres']
     assert state.rows[state.writes[0]]['spec']['clusterIP'] == '10.0.0.7'
+
+
+@pytest.mark.parametrize('kind', ['PersistentVolumeClaim', 'ResourceQuota'])
+@pytest.mark.parametrize('different', [False, True])
+def test_preserved_infrastructure_accepts_quantity_spellings_but_not_changed_amounts(operation_inputs, kind, different):
+    original = next(row for row in operation_inputs['current'] if row['kind'] == kind)
+    if kind == 'PersistentVolumeClaim':
+        assert original['spec']['resources']['requests']['storage'] == '4Gi'
+        original['spec']['resources']['requests']['storage'] = '8192Mi' if different else '4096Mi'
+    else:
+        value = original['spec']['hard']['requests.cpu']
+        if value.endswith('m'):
+            original['spec']['hard']['requests.cpu'] = str(Decimal(value[:-1]) / 1000 * (2 if different else 1))
+        else:
+            original['spec']['hard']['requests.cpu'] = str(Decimal(value) * 1000 * (2 if different else 1)) + 'm'
+    retained = operation.retain_participant_rollout(**operation_inputs)
+
+    def connect():
+        return module().HTTPSParticipantResourceAPI(retained=retained, key=_key(original),
+            api_server=retained.inputs.config['kubernetes_api_server'], ssl_context=ssl.create_default_context(),
+            qualify_resource=lambda *_: None)
+
+    if different:
+        with pytest.raises(ValueError, match='unqualified'):
+            connect()
+    else:
+        with connect() as api:
+            assert api.targets[_key(original)]['spec'] == original['spec'], 'preserve the actual storage/quota allocation'
 
 
 @pytest.mark.parametrize('changed', [False, True])
