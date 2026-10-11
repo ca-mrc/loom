@@ -14,9 +14,17 @@ import pytest
 from tests.ops.test_nebius_management_stage import PhaseAPI
 from tests.ops.test_nebius_pool_participant_release import (
     catalog_inputs as catalog_inputs,
+)
+from tests.ops.test_nebius_pool_participant_release import (
     management_inputs as management_inputs,
+)
+from tests.ops.test_nebius_pool_participant_release import (
     platform_inputs as platform_inputs,
+)
+from tests.ops.test_nebius_pool_participant_release import (
     release_inputs as release_inputs,
+)
+from tests.ops.test_nebius_pool_participant_release import (
     staging_attachment_inputs as staging_attachment_inputs,
 )
 
@@ -82,6 +90,63 @@ def test_replaced_shared_input_blocks_later_action_before_job_create(catalog_inp
     with pytest.raises(ValueError, match='preserve'):
         module().stage_participant_job(request=replace(current, action='fence', observation_id=None), api=api, state_dir=tmp_path)
     assert len(api.creates) == 2
+
+
+@pytest.mark.parametrize('outcome', ['complete', 'lost-before-create', 'lost-after-create'])
+def test_concrete_https_adapter_stages_only_fixed_documents_without_write_retry(catalog_inputs, tmp_path, outcome):
+    current = job_request(catalog_inputs)
+    binding = current.release.migration.registration.binding
+    external = PhaseAPI(binding)
+    calls = []
+
+    def respond(message):
+        calls.append(message)
+        path = message.url.path
+        if path in ('/api/v1/namespaces/kube-system', '/api/v1/namespaces/' + binding.namespace):
+            assert message.method == 'GET'
+            namespace = path.rsplit('/', 1)[-1]
+            return httpx.Response(200, json={'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {
+                'name': namespace, 'uid': binding.kube_system_uid if namespace == 'kube-system' else binding.namespace_uid,
+                'labels': {'loom.nebius/management-installation': binding.installation_id,
+                    'pod-security.kubernetes.io/enforce': 'restricted'}}})
+        if message.method == 'GET':
+            collection, name = path.rsplit('/', 2)[-2:]
+            kind = {'jobs': 'Job', 'configmaps': 'ConfigMap'}[collection]
+            row = external.resources.get(kind + ':' + name)
+            return httpx.Response(404) if row is None else httpx.Response(200, json=row)
+        assert message.method == 'POST'
+        document = json.loads(message.content)
+        assert path == ('/api/v1' if document['kind'] == 'ConfigMap' else '/apis/batch/v1') + '/namespaces/' + binding.namespace + (
+            '/configmaps' if document['kind'] == 'ConfigMap' else '/jobs')
+        if message.url.params:
+            assert dict(message.url.params) == {'dryRun': 'All'}
+            return httpx.Response(201, json=external.default_resource(document))
+        if document['kind'] == 'Job' and outcome == 'lost-before-create':
+            raise httpx.ReadError('private-marker')
+        external.create_resource(document)
+        if document['kind'] == 'Job' and outcome == 'lost-after-create':
+            raise httpx.ReadError('private-marker')
+        return httpx.Response(201, json=external.resources[external.key(document)])
+
+    api = module().HTTPSPoolParticipantJobAPI(request=current, api_server='https://cluster.example', ssl_context=ssl.create_default_context())
+    api.client.close()
+    api.client = httpx.Client(base_url='https://cluster.example', transport=httpx.MockTransport(respond))
+    with api:
+        for _ in range(2):
+            if outcome == 'lost-before-create':
+                with pytest.raises(ValueError, match='preserve') as error:
+                    module().stage_participant_job(request=current, api=api, state_dir=tmp_path)
+                assert 'private-marker' not in str(error.value)
+            else:
+                result = module().stage_participant_job(request=current, api=api, state_dir=tmp_path)
+                assert len(result['resource_uids']) == 2
+                assert api.refresh_report(tmp_path) is None  # Creation alone is not SQL success.
+    actual_writes = [message for message in calls if message.method == 'POST' and not message.url.params]
+    assert len(actual_writes) == 2  # One ConfigMap attempt and one Job attempt, even on response loss.
+    job = json.loads(actual_writes[-1].content)
+    container, = job['spec']['template']['spec']['containers']
+    assert container['command'] == ['python', '-m', 'loom_service.pool_management.participant_refresh', 'fence']
+    assert container['image'] == current.manager['spec']['template']['spec']['containers'][0]['image']
 
 
 @pytest.fixture

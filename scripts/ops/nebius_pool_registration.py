@@ -82,6 +82,7 @@ class HTTPSPoolRegistrationAPI(HTTPSManagementStageAPI):
         self.documents = registration_documents(request)
         self.binding = request.binding
         self.request = request
+        self.region = request.spec.quota_identities['nodes'][1]
         ManagementKubernetesTransport.__init__(self, api_server=api_server, ssl_context=ssl_context, token=token)
 
     def _recorded(self, state_dir: Path) -> dict[str, dict[str, Any]]:
@@ -99,8 +100,16 @@ class HTTPSPoolRegistrationAPI(HTTPSManagementStageAPI):
             result[actual["kind"]] = actual
         return result
 
-    def registration_report(self, state_dir: Path) -> dict[str, Any] | None:
-        """Read-only proof of the fixed Job's commit receipt; never opens intake."""
+    def _validate_execution_report(self, report: Any) -> None:
+        spec = self.request.spec
+        expected = {"schema_version": "loom.pool-installation-receipt.v1", "operation_id": str(spec.operation_id),
+            "pool_id": str(spec.pool_id), "installation_sha256": installation_digest(spec.model_dump(mode="json")),
+            "mode": "closed", "participants": len(spec.participants), "machines": len(spec.machines)}
+        if report != expected or type(report.get('participants')) is not int or type(report.get('machines')) is not int:
+            raise ValueError
+
+    def _execution_report(self, state_dir: Path) -> dict[str, Any] | None:
+        """Qualify fixed Job/Pod lineage and a subclass's closed receipt contract."""
         try:
             resources = self._recorded(state_dir)
             job = resources["Job"]
@@ -132,7 +141,7 @@ class HTTPSPoolRegistrationAPI(HTTPSManagementStageAPI):
             labels = {**job["spec"]["template"]["metadata"].get("labels", {}), "batch.kubernetes.io/controller-uid": uid}
             region_label = "topology.kubernetes.io/region"
             if isinstance(meta.get("labels"), dict) and region_label not in labels and region_label in meta["labels"]:
-                labels[region_label] = self.request.spec.quota_identities["nodes"][1]
+                labels[region_label] = self.region
             expected, actual = job["spec"]["template"]["spec"], pod["spec"]
             if (meta.get("labels") != labels or not _matches_backup_template(actual, expected)
                     or actual.get("securityContext", {}) != expected.get("securityContext", {})
@@ -165,17 +174,20 @@ class HTTPSPoolRegistrationAPI(HTTPSManagementStageAPI):
                         raise ValueError
                     content.extend(chunk)
             report = _json(bytes(content))
-            spec = self.request.spec
-            expected_report = {"schema_version": "loom.pool-installation-receipt.v1", "operation_id": str(spec.operation_id),
-                "pool_id": str(spec.pool_id), "installation_sha256": installation_digest(spec.model_dump(mode="json")),
-                "mode": "closed", "participants": len(spec.participants), "machines": len(spec.machines)}
-            if (report != expected_report or type(report.get("participants")) is not int or type(report.get("machines")) is not int
-                    or self._request("GET", path) != pod or self._recorded(state_dir) != resources):
+            self._validate_execution_report(report)
+            if self._request("GET", path) != pod or self._recorded(state_dir) != resources:
                 raise ValueError
             self.verify_identity(self.binding)
-            return {"job_uid": uid, "pod_uid": pod_uid, "registration": report}
+            return {"job_uid": uid, "pod_uid": pod_uid, "receipt": report}
         except Exception:
             raise ManagementStageError("pool registration execution unqualified; preserve evidence") from None
+
+    def registration_report(self, state_dir: Path) -> dict[str, Any] | None:
+        """Read-only proof of the fixed Job's commit receipt; never opens intake."""
+        result = self._execution_report(state_dir)
+        if result is None:
+            return None
+        return {'job_uid': result['job_uid'], 'pod_uid': result['pod_uid'], 'registration': result['receipt']}
 
 
 def stage_pool_registration(*, request: PoolRegistrationRequest, api: ManagementStageAPI,

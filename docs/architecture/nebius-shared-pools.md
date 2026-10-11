@@ -1415,6 +1415,13 @@ read, not current registry state. The catalog projection changes only the manage
 catalog mount reference, preserving its executable, credentials and other settings;
 the parent still owns compatibility qualification and restart/readiness checks.
 
+The concrete refresh Job adapter retains the immutable request ConfigMap once
+and journals each action Job separately. It reuses the fixed HTTPS staging and
+Job/Pod lineage checks, verifies the action-specific committed receipt and rereads
+both recorded resources before returning evidence. Unknown creates are read back,
+never retried or adopted into fresh history. A successfully created Job is not a
+successful database action, and an old observation receipt is not current state.
+
 The existing deploy parent has an internal shared-release path paired with a
 protected pool I/O adapter. It binds the exact projected files and release/guard
 identity, retains the ordinary backup/schema/configuration/workload sequence,
