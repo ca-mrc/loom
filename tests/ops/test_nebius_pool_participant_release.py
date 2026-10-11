@@ -273,8 +273,8 @@ def test_manager_refresh_changes_only_catalog_reference_and_keeps_executable_cre
     assert result['catalog']['immutable'] is True
     assert 'uid' not in result['catalog']['metadata']
     assert PoolProfileCatalog.model_validate_json(result['catalog']['data']['profiles.json']) == after.profiles
-    for action in ('observe', 'fence', 'stage', 'open'):
-        observation_id = uuid4() if action == 'observe' else None
+    for action in ('observe', 'capacity', 'fence', 'stage', 'open'):
+        observation_id = uuid4() if action in {'observe', 'capacity'} else None
         config, job = module().refresh_documents(catalog_inputs['release'], manager=catalog_inputs['manager'],
             action=action, observation_id=observation_id)
         pod = job['spec']['template']['spec']
@@ -285,17 +285,18 @@ def test_manager_refresh_changes_only_catalog_reference_and_keeps_executable_cre
         assert pod['automountServiceAccountToken'] is False
         assert config['immutable'] is True
         assert json.loads(config['data']['refresh.json']) == catalog_inputs['release'].refresh.model_dump(mode='json')
-        assert job['metadata']['name'] == ('loom-pool-observe-' + observation_id.hex if observation_id else
+        assert job['metadata']['name'] == ('loom-pool-' + action + '-' + observation_id.hex if observation_id else
             'loom-pool-refresh-' + after.operation_id.hex + '-' + action)
 
 
-def test_refresh_readbacks_have_distinct_jobs_without_changing_the_request(catalog_inputs):
+@pytest.mark.parametrize('action', ['observe', 'capacity'])
+def test_refresh_readbacks_have_distinct_jobs_without_changing_the_request(catalog_inputs, action):
     """A completed pre-fence Job must not stand in for a post-open database read."""
     observations = []
     for _ in range(2):
         observation_id = uuid4()
         config, job = module().refresh_documents(catalog_inputs['release'], manager=catalog_inputs['manager'],
-            action='observe', observation_id=observation_id)
+            action=action, observation_id=observation_id)
         assert job['metadata']['labels']['loom.nebius/pool-observation'] == str(observation_id)
         assert job['spec']['template']['metadata']['labels'] == job['metadata']['labels']
         observations.append((config, job))
@@ -305,7 +306,7 @@ def test_refresh_readbacks_have_distinct_jobs_without_changing_the_request(catal
 
 
 @pytest.mark.parametrize('action,identity', [('observe', None), ('observe', UUID(int=0)),
-    ('fence', uuid4()), ('stage', uuid4()), ('open', uuid4())])
+    ('capacity', None), ('capacity', UUID(int=0)), ('fence', uuid4()), ('stage', uuid4()), ('open', uuid4())])
 def test_refresh_mutation_identity_cannot_be_rotated_to_retry(catalog_inputs, action, identity):
     with pytest.raises(ValueError):
         module().refresh_documents(catalog_inputs['release'], manager=catalog_inputs['manager'],

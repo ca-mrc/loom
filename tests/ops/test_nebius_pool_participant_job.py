@@ -6,6 +6,7 @@ import importlib
 import json
 import ssl
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -39,7 +40,7 @@ def module():
 
 def job_request(inputs, action='fence'):
     return module().PoolParticipantJobRequest(release=inputs['release'], manager=inputs['manager'],
-        action=action, observation_id=uuid4() if action == 'observe' else None)
+        action=action, observation_id=uuid4() if action in {'observe', 'capacity'} else None)
 
 
 def test_refresh_actions_share_one_input_and_keep_distinct_recorded_jobs(catalog_inputs, tmp_path):
@@ -169,9 +170,17 @@ def refresh_live(catalog_inputs, tmp_path, request):
     refresh = current.release.refresh
     report = {'schema_version': 'loom.pool-participant-refresh-receipt.v1', 'operation_id': str(refresh.after.operation_id),
         'participant_id': str(refresh.participant_id), 'pool_id': str(refresh.after.pool_id),
-        'status': {'observe': 'ready', 'fence': 'fenced', 'stage': 'staged', 'open': 'complete'}[action],
+        'status': {'observe': 'ready', 'fence': 'fenced', 'stage': 'staged', 'open': 'complete', 'capacity': 'complete'}[action],
         'before_sha256': digest(refresh.before.model_dump(mode='json')),
         'after_sha256': digest(refresh.after.model_dump(mode='json'))}
+    if action == 'capacity':
+        # Deliberately historical: this API verifies a receipt, not its usability
+        # for today's guard release. The consuming parent must require freshness.
+        observed = datetime(2026, 1, 1, tzinfo=UTC)
+        report['capacity'] = {'checked_at': (observed + timedelta(seconds=1)).isoformat(),
+            'valid_until': (observed + timedelta(seconds=refresh.after.admission.observation_max_age_seconds)).isoformat(),
+            'selected_observation_id': str(uuid4()), 'selected_observed_at': observed.isoformat(),
+            'connected_pools': 1, 'observations_sha256': 'e' * 64}
     state = SimpleNamespace(request=current, state_dir=tmp_path, job=job, config=config, pod=pod, report=report,
         log=None, calls=[], extra_pod=False, continuation=False, namespace_drift=False, final_drift=False)
 
@@ -210,7 +219,7 @@ def refresh_live(catalog_inputs, tmp_path, request):
     return api, state
 
 
-@pytest.mark.parametrize('refresh_live', ['observe', 'fence', 'stage', 'open'], indirect=True)
+@pytest.mark.parametrize('refresh_live', ['observe', 'fence', 'stage', 'open', 'capacity'], indirect=True)
 def test_refresh_receipt_binds_exact_action_job_pod_and_committed_result(refresh_live):
     api, state = refresh_live
     with api:
@@ -218,6 +227,38 @@ def test_refresh_receipt_binds_exact_action_job_pod_and_committed_result(refresh
         assert proof == {'job_uid': state.job['metadata']['uid'], 'pod_uid': state.pod['metadata']['uid'],
             'refresh': state.report}
         assert api.refresh_report(state.state_dir) == proof  # Historical receipt, not fresh observation.
+
+
+@pytest.mark.parametrize('refresh_live', ['capacity'], indirect=True)
+@pytest.mark.parametrize('damage', ['missing', 'status', 'unknown-field', 'zero-id', 'bool-count', 'zero-count',
+    'too-many', 'checksum', 'naive-time', 'negative-window', 'extended-window', 'future-observation'])
+def test_capacity_receipt_rejects_malformed_or_unbounded_readiness(refresh_live, damage):
+    from scripts.ops.nebius_management_stage import ManagementStageError
+
+    api, state = refresh_live
+    proof = state.report['capacity']
+    if damage == 'missing':
+        del state.report['capacity']
+    elif damage == 'status':
+        state.report['status'] = 'staged'
+    elif damage == 'unknown-field':
+        proof['private_plan'] = 'private-marker'
+    elif damage == 'zero-id':
+        proof['selected_observation_id'] = '00000000-0000-0000-0000-000000000000'
+    elif damage in {'bool-count', 'zero-count', 'too-many'}:
+        proof['connected_pools'] = {'bool-count': True, 'zero-count': 0, 'too-many': 1001}[damage]
+    elif damage == 'checksum':
+        proof['observations_sha256'] = 'not-a-fingerprint'
+    elif damage == 'naive-time':
+        proof['checked_at'] = '2026-01-01T00:00:01'
+    elif damage == 'negative-window':
+        proof['valid_until'] = proof['selected_observed_at']
+    elif damage == 'extended-window':
+        proof['valid_until'] = '2026-01-02T00:00:00+00:00'
+    else:
+        proof['selected_observed_at'] = '2026-01-02T00:00:00+00:00'
+    with api, pytest.raises(ManagementStageError):
+        api.refresh_report(state.state_dir)
 
 
 @pytest.mark.parametrize('damage', ['pending', 'failed', 'replaced_job', 'config', 'extra_pod', 'continuation',
