@@ -14,6 +14,7 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
+from pydantic import SecretStr
 from sqlalchemy import create_engine, delete, insert, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
@@ -1129,6 +1130,20 @@ async def test_gemini_native_passthrough(gateway, postgres_url):  # type: ignore
     assert row["provider_extras"]["thoughtsTokenCount"] == 12
     assert row["trial_id"] == trial_id
     assert row["team_id"] == team_id
+
+
+@pytest.mark.parametrize("key", [None, ""])
+async def test_gemini_missing_key_returns_unavailable_without_upstream(gateway, key):
+    app, step_jwt, _team_id, _trial_id = gateway
+    app.state.settings.google_api_key = None if key is None else SecretStr(key)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://gw") as client:
+        response = await client.post(
+            "/v1beta/models/gemini-2.0-flash:generateContent",
+            headers={"Authorization": f"Bearer {step_jwt}"},
+            json={"contents": [{"role": "user", "parts": [{"text": "hi"}]}]},
+        )
+    assert response.status_code == 503
+    assert response.json()["detail"] == "google_api_key not configured on Gateway"
 
 
 async def test_gemini_rejects_invalid_bearer_with_shared_auth_contract(
