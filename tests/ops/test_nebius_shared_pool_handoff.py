@@ -496,8 +496,11 @@ def test_shared_history_loads_original_source_without_retired_operator_credentia
 
 def test_shared_history_refuses_synthetic_completion_without_opening_a_connection(shared_operation, monkeypatch):
     """A completed parent/checksums cannot replace its actual child contracts."""
+    from scripts.ops import nebius_pool_participant_entry as participant_entry
     from scripts.ops import nebius_shared_pool_entry as entry
     from scripts.ops import nebius_shared_pool_operation as parent
+
+    from loom.nebius_kubernetes import NebiusKubernetesConnection
 
     assert callable(getattr(entry, 'load_completed_history', None)), 'protected entry lacks semantic shared history loading'
     args, bindings = shared_operation
@@ -520,6 +523,19 @@ def test_shared_history_refuses_synthetic_completion_without_opening_a_connectio
     before = {path: path.read_bytes() for path in state.rglob('*') if path.is_file()}
     with pytest.raises(ValueError, match='completed shared pool history'):
         entry.load_completed_history(**options)
+    assert {path: path.read_bytes() for path in state.rglob('*') if path.is_file()} == before
+    # The actual normal-release host entry must use this semantic loader before
+    # credentials or reference data can reach a release connection. In particular,
+    # an initial handoff's parent status plus checksums is insufficient.
+    monkeypatch.setattr(participant_entry, 'authenticated_participant_release',
+        lambda **_: pytest.fail('synthetic completion must not reach authentication'))
+    with pytest.raises(ValueError, match='participant host inputs'):
+        participant_entry.execute_retained_participant_release(reference=None,
+            shared_operation=options['operation_path'], shared_operation_sha256=options['operation_sha256'],
+            state_root=root / 'participant-releases', anchor_dir=root / 'participant-anchors',
+            operator_connection=NebiusKubernetesConnection.model_validate(inputs['operator_connection']),
+            executable=root / 'kubectl')
+    assert not (root / 'participant-releases').exists() and not (root / 'participant-anchors').exists()
     assert {path: path.read_bytes() for path in state.rglob('*') if path.is_file()} == before
 
 

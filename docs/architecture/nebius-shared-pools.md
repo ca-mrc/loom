@@ -1805,9 +1805,16 @@ cluster ID and only the selected endpoint, CA and bearer; it has no credential
 plugins. Protected local kubectl uses an exact executable, an isolated discovery
 cache and a minimal environment without ambient credentials/proxies. The temporary
 configuration and cache are removed on success or failure, without hiding an
-original deployment error. This is an internal connection, not an installed
-authority or public CLI. Initial history loading and the protected host/workflow
-entry still need to be connected before operational rollout is available.
+original deployment error. `execute_retained_participant_release` first loads the
+original shared handoff through its semantic completion reader, then loads the
+exact retained reference and its original predecessor. It reads the separately
+selected current operator material, rejects aliases to historical input files,
+and checks those bytes around authenticated execution. Recovery does not reconstruct
+retained input or initialize head records, and never captures a replacement live baseline. All paths
+and the connection come from the protected installed caller, not runner data.
+This is an internal connection, not an installed authority or public CLI.
+New-release preparation and protected transport/workflow routing remain required
+before operational rollout is available.
 
 The deployer has an internal finalization hook inside its existing error/evidence
 boundary, after verified guard release and before reporting success. Protected

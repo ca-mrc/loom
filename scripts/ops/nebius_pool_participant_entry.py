@@ -1,9 +1,10 @@
 """Live qualification for an authenticated protected operator-host release.
 
 This composes real source/history, guard, writer, process, registry and external
-authority readers. It is not a public document-input command or authentication
-bootstrap. The protected entry must load the semantic initial handoff and supply
-its separately authenticated current connection; no default-success probe exists.
+authority readers. Retained execution loads the semantic initial handoff before
+authenticating an explicitly selected current operator identity. It is not a
+public document-input command; paths belong to the protected installed caller,
+and no default-success probe exists.
 """
 from __future__ import annotations
 
@@ -42,6 +43,7 @@ from scripts.ops.nebius_pool_participant_observation import (
 )
 from scripts.ops.nebius_pool_participant_operation import (
     ParticipantPredecessor,
+    ParticipantRolloutReference,
     RetainedParticipantRollout,
     load_participant_rollout,
 )
@@ -268,6 +270,53 @@ class ParticipantReleaseConnection:
                 args.recovery_evidence = publication / 'recovery.json'
                 private_state._write_private(args.recovery_evidence, json.dumps(record, allow_nan=False).encode())
             return self.rollout(args)
+
+
+def execute_retained_participant_release(*, reference: ParticipantRolloutReference,
+        shared_operation: Path, shared_operation_sha256: str, state_root: Path, anchor_dir: Path,
+        operator_connection: NebiusKubernetesConnection, executable: Path,
+        automatic: bool = False, recovery: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Consume a reference using the protected host's original history and identity.
+
+    The installed caller, not the runner, selects all paths and the current
+    operator connection. A reference selects retained data only. This never
+    prepares a new release, initializes a lost head, or recaptures cluster state.
+    The returned evidence remains private until the gateway's bounded projection.
+    """
+    from scripts.ops.nebius_shared_pool_entry import load_completed_history
+
+    try:
+        historical, initial = load_completed_history(operation_path=shared_operation,
+            operation_sha256=shared_operation_sha256)
+        retained = load_participant_rollout(reference=reference, state_root=state_root, anchor_dir=anchor_dir)
+        expected = load_participant_predecessor(initial=initial, retained=retained)
+        files = dict(historical.files)
+        paths = (operator_connection.ca_file, operator_connection.credentials_file)
+        if len(set(paths)) != len(paths) or set(paths) & files.keys():
+            raise ValueError
+        for path in paths:
+            if not path.is_absolute() or path != path.resolve():
+                raise ValueError
+            files[path] = private_state._private_read(path, limit=16 * 1024**2)
+    except Exception:
+        raise ValueError('participant host inputs unqualified; preserve evidence') from None
+
+    def unchanged() -> None:
+        try:
+            if any(private_state._private_read(path, limit=16 * 1024**2) != raw for path, raw in files.items()):
+                raise ValueError
+        except Exception:
+            raise ValueError('participant host material changed; preserve evidence') from None
+
+    unchanged()
+    with authenticated_participant_release(retained=retained, initial=initial, expected=expected,
+            bindings=historical.bindings, shared_state=initial.state_dir, operator_connection=operator_connection,
+            executable=executable, operator_credentials=operator_connection.credentials_file,
+            private_files=files) as delivery:
+        unchanged()
+        result = delivery.execute(automatic=automatic, recovery=recovery)
+        unchanged()
+        return result
 
 
 @contextmanager
