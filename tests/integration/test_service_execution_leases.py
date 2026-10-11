@@ -618,14 +618,16 @@ async def _seed_ready_trial(
     task_id: str | None = None,
     execution_class: ExecutionClassV1 = NEBIUS_CPU_EXECUTION_CLASS_V1,
     pool_origin: dict[str, Any] | None = None,
-    catalog_environment: str = "staging",
+    catalog_environment: str | None = None,
 ) -> tuple[UUID, ExecutionTargetV1]:
     suffix = uuid4().hex[:12]
     team_id = uuid4()
     trial_id = uuid4()
     task_id = task_id or f"service-execution/{suffix}"
-    target = _target(suffix).model_copy(
-        update={"execution_class_id": execution_class.class_id, "environment": catalog_environment},
+    target = _target(suffix)
+    target = target.model_copy(
+        update={"execution_class_id": execution_class.class_id,
+                "environment": target.environment if catalog_environment is None else catalog_environment},
     )
     session.add_all(
         (
