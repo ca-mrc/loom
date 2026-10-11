@@ -728,6 +728,105 @@ def shared_guard_transport(shared_operation, tmp_path, monkeypatch):
 
 
 @pytest.mark.timeout(420)
+def test_connected_shared_parent_gates_real_guard_acquisition_and_unknown_replies(shared_operation, shared_guard_transport,
+        tmp_path, monkeypatch):
+    """Concrete parent and real child/SQL binding; separately covered observation adapters are boundaries here."""
+    import importlib.util
+    import ssl
+    from types import SimpleNamespace
+
+    from scripts.ops import nebius_shared_pool_operation as parent
+
+    name = 'scripts.ops.nebius_shared_pool_api'
+    assert importlib.util.find_spec(name) is not None, 'concrete shared-pool parent is missing'
+    module = __import__(name, fromlist=['HTTPSSharedPoolOperationAPI'])
+    args, bindings = shared_operation
+    guard, model = shared_guard_transport
+    operator = tmp_path / 'operator-connection'
+    operator.write_bytes(b'private-test-operator')
+    operator.chmod(0o600)
+    failures, seen = set(), set()
+
+    def checked(gate, **options):
+        seen.add(gate)
+        if gate in failures:
+            raise ValueError('simulated ' + gate + ' rejection')
+        if 'bindings' in options:
+            assert options['bindings'] == bindings
+        return SimpleNamespace(plan=bindings.plan, bindings=bindings, pending_workloads=(),
+            pool_state='closed', guard_states={target.namespace: 'held' if target.namespace in model.held else 'open'
+                for target in bindings.migration.guards}, input_digest=bindings.input_digest, authority={})
+
+    async def publication(**options):
+        assert options['request'] == args['runtime']
+        checked('publication')
+
+    async def provider(**options):
+        assert options['operator_credentials'] == operator and options['runtime'] == args['runtime']
+        return checked('provider', **options)
+
+    monkeypatch.setattr(module, 'qualify_runtime_publication', publication)
+    monkeypatch.setattr(module, 'observe_shared_pool_provider', provider)
+    monkeypatch.setattr(module, 'observe_shared_pool_writers', lambda **options: checked('writers', **options))
+    monkeypatch.setattr(module, 'observe_shared_pool_forward_writers', lambda **options: checked('writers', **options))
+    monkeypatch.setattr(module, 'observe_shared_pool_processes', lambda **options: checked('processes', **options))
+    monkeypatch.setattr(module, 'observe_shared_pool_forward_processes', lambda **options: checked('processes', **options))
+    # Check absence through the real parent's HTTP reader, without a live API.
+    import httpx
+
+    def handle(request):
+        assert request.method == 'GET'
+        return httpx.Response(404)
+
+    context = ssl.create_default_context(cadata=args['runtime'].database.foundation.bootstrap['material']['loom-platform-db']['ca.crt'])
+    kwargs = dict(bindings=bindings, observation=args['observation'], repo_root=ROOT,
+        api_server=args['runtime'].database.foundation.inputs.config['kubernetes_api_server'],
+        ssl_context=context, token='operator-test', operator_credentials=operator,
+        private_files={operator: operator.read_bytes()})
+
+    def connect():
+        connection = module.HTTPSSharedPoolOperationAPI(**kwargs)
+        connection.client.close()
+        connection.client = httpx.Client(base_url=connection.api_server, transport=httpx.MockTransport(handle))
+        # Teach the external kubectl fixture the parent's freshly generated
+        # private connection. Keep the actual parent-owned guard adapter intact.
+        guard.prefix = list(connection.prefix)
+        return connection
+
+    with connect() as api:
+        model.busy = bindings.migration.guards[0].namespace
+        for failed in ('publication', 'provider', 'writers', 'processes'):
+            failures.add(failed)
+            with pytest.raises(ValueError):
+                parent.run_shared_pool_operation(**args, bindings=bindings, api=api, action='install')
+            failures.clear()
+            assert not model.acquires and not model.held
+        result = parent.run_shared_pool_operation(**args, bindings=bindings, api=api, action='install')
+        assert result['status'] == 'pending' and result['phase'] == 'forward-guards'
+        assert seen == {'publication', 'provider', 'writers', 'processes'}
+        assert model.acquires == [bindings.migration.guards[0].namespace]
+        manager = args['runtime'].database.manager.retained.request.retained
+        state = Path(manager.operation['state_dir']).parent / 'shared-pool-handoff'
+        # Intent with no response must not be redispatched by this parent.
+        model.busy, model.uncertain = None, bindings.migration.guards[0].namespace
+        with pytest.raises(ValueError):
+            parent.run_shared_pool_operation(**args, bindings=bindings, api=api, action='install')
+        attempts = list(model.acquires)
+        with pytest.raises(ValueError):
+            parent.run_shared_pool_operation(**args, bindings=bindings, api=api, action='install')
+        assert model.acquires == attempts
+        for changed_phase in ('forward-drain', 'recovery-fence', '../forward-guards'):
+            with pytest.raises(ValueError):
+                api.advance(changed_phase, bindings, state / changed_phase)
+        assert model.acquires == attempts
+    # Reconstructing the concrete transport keeps the uncertain intent intact.
+    with connect() as api:
+        with pytest.raises(ValueError):
+            parent.run_shared_pool_operation(**args, bindings=bindings, api=api, action='install')
+        assert model.acquires == attempts
+
+
+@pytest.mark.timeout(420)
 def test_shared_guard_child_retains_busy_and_unknown_acquisitions_without_registering_again(shared_operation, shared_guard_transport):
     import importlib.util
 
