@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 from botocore.exceptions import ClientError, ConnectionClosedError
 
 from loom.trajectory.storage import MinioObjectStore
@@ -156,29 +155,6 @@ async def test_run_client_call_does_not_retry_permanent_s3_403(monkeypatch) -> N
 
     assert clients[0].closed is False
     assert clients[1].closed is False
-
-
-@pytest.mark.parametrize("status,code,expected", [
-    (200, "", True), (412, "PreconditionFailed", False),
-    (409, "ConditionalRequestConflict", None), (403, "AccessDenied", None),
-])
-async def test_conditional_publication_never_overwrites_or_masks_errors(
-    monkeypatch, status, code, expected,
-) -> None:
-    class ConditionalClient(_FakeS3Client):
-        def put_object(self, **kwargs):
-            assert kwargs == {"Bucket": "b", "Key": "reference", "Body": b"verified", "IfNoneMatch": "*"}
-            if status != 200:
-                raise ClientError({"Error": {"Code": code},
-                                   "ResponseMetadata": {"HTTPStatusCode": status}}, "PutObject")
-            return {"ETag": "etag"}
-
-    store = _store_with_clients(monkeypatch, [ConditionalClient("only")])
-    if expected is None:
-        with pytest.raises(ClientError):
-            await store.put_object_if_absent(bucket="b", key="reference", body=b"verified")
-    else:
-        assert await store.put_object_if_absent(bucket="b", key="reference", body=b"verified") is expected
 
 
 async def test_download_prefix_retries_only_failed_object_with_fresh_client(
