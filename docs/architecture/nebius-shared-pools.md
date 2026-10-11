@@ -1619,6 +1619,23 @@ write permission: the protected parent must wait and observe again before its
 next effect. This check does not replace manager/gateway/other-participant process
 checks, actuator telemetry or the full-pool registry and writer observations.
 
+The peer process observation uses the current source-qualified whole-pool census
+for every other participant's control plane, API and ordinary/guest actuators.
+It challenges their effective settings and pinned database credentials, checks
+complete descendant readiness, and rechecks processes, backends and all consumer
+credentials after the closing census. It does not query task activity or require
+other participants to become idle. The selected participant's process check must
+finish any known transition before this observation; peers receive no pending
+exemption from another participant's release.
+
+The same observation runs the existing direct-kubelet probe inside every current
+actuator, including the selected participant. Each registered trial target must
+have its actuator; each probe checks the complete pool Node roster and actuator
+host, including at scale-zero. Process restarts and binding errors fail the check.
+Optional kubelet sampling failures remain explicitly `unavailable`, not healthy
+or zero usage. Telemetry is diagnostic and never substitutes for registry,
+capacity or provider authority. None of these checks writes or drains workloads.
+
 The manager process observation uses its separately retained management database
 and original workload identity. The live manager must match either the recorded
 original or catalog-only successor; its real settings loader must read that

@@ -573,6 +573,141 @@ class HTTPSParticipantResourceObserver(ManagementKubernetesTransport):
         except Exception:
             raise ValueError('participant process observation unqualified; preserve evidence') from None
 
+    def observe_peer_processes(self, *, bindings: SharedPoolGuardBindings, shared_state: Path,
+            kubeconfig: Path, executable: Path, preparing: str | None = None) -> Document:
+        """Keep peers running and sample every actuator without draining peers.
+
+        The selected participant's separate process check must finish any known
+        transition first. This check has no pending exemption: peers cannot be
+        upgraded by this release, and telemetry must run in ready actuators.
+        The returned availability report is diagnostic, never capacity authority.
+        """
+        from scripts.ops.nebius_development_runtime_probes import HTTPSDevelopmentRuntimeProbes
+        from scripts.ops.nebius_development_runtime_readiness import qualify_started_deployment
+        from scripts.ops.nebius_pool_migration_guard import KubectlPoolGuardAPI
+        from scripts.ops.nebius_pool_participant_operation import _paths
+
+        try:
+            bound, retained = copy.deepcopy(bindings), self.retained
+            current = self.observe_writers(bindings=bound, shared_state=shared_state, preparing=preparing)
+            view = _ResourceView(retained, preparing)
+            original_selected = {_key(row): row for row in retained.inputs.current}
+            targets, originals, owners, peers, actuators = [], {}, {}, set(), set()
+            credentials: dict[str, tuple[str, UUID, str]] = {}
+            for original in retained.inputs.previous.guards:
+                participant, = (row for row in retained.release.refresh.before.participants
+                    if row.participant_id == original.participant_id)
+                peer = original.participant_id != retained.release.refresh.participant_id
+                database = original.database
+                if (database is None or database.actuator_credential_uid is None
+                        or database.actuator_credential_resource_version is None):
+                    raise ValueError
+                execution = {key: row for key, row in current.workloads.items() if row['kind'] == 'Deployment'
+                    and row['metadata']['namespace'] == participant.execution_namespace.name}
+                target_ids = []
+                for row in execution.values():
+                    container, = row['spec']['template']['spec']['containers']
+                    target_id, = (item['value'] for item in container['env']
+                        if item['name'] == 'LOOM_EXECUTION_ACTUATOR_TARGET_ID')
+                    participant.target(target_id, 'trial')
+                    target_ids.append(target_id)
+                if (len(set(target_ids)) != len(target_ids)
+                        or set(target_ids) != {row.target_id for row in participant.targets if 'trial' in row.workload_kinds}):
+                    raise ValueError
+                keys = set(execution)
+                actuators.update(keys)
+                if peer:
+                    keys.update(f'Deployment:{original.namespace}:{name}' for name in ('loom-control-plane', 'loom-service'))
+                    peers.update(keys)
+                selected = current.workloads if peer else original_selected
+                controller = selected[_key(original.controller)]
+                if _uid(controller) != _uid(original.controller):
+                    raise ValueError
+                statefulset = current.workloads[_key(database.statefulset)]
+                service = self._request('GET', _resource_path(database.service))
+                if (service is None or _uid(statefulset) != _uid(database.statefulset)
+                        or (peer and not _matches(service, database.service, _uid(database.service)))
+                        or _uid(service) != _uid(database.service)):
+                    raise ValueError
+                target = replace(original, controller=controller,
+                    database=replace(database, statefulset=statefulset, service=service))
+                targets.append(target)
+                for key in keys:
+                    originals[key], owners[key] = selected[key], target
+                    actuator = key in execution
+                    variable = ('LOOM_EXECUTION_ACTUATOR_DB_URL' if actuator else 'LOOM_CP_DB_URL'
+                        if originals[key]['metadata']['name'] == 'loom-control-plane' else 'LOOM_SVC_DB_URL')
+                    credentials[key] = (variable,
+                        database.actuator_credential_uid if actuator else database.credential_uid,
+                        database.actuator_credential_resource_version if actuator else database.credential_resource_version)
+            request = replace(retained.inputs.previous, guards=tuple(targets))
+            api = KubectlPoolGuardAPI(request=request, kubeconfig=kubeconfig, executable=executable)
+            prefix = tuple(api.prefix)
+            _, marker = _paths(retained.reference, retained.state_dir.parent, retained.anchor_dir)
+            anchor = private_state._private_read(marker)
+
+            def unchanged() -> None:
+                if (bindings != bound or self.retained != retained or tuple(api.prefix) != prefix
+                        or hashlib.sha256(private_state._private_read(kubeconfig, limit=512 * 1024)).hexdigest() != api.kubeconfig_sha256
+                        or hashlib.sha256(private_state._private_read(retained.state_dir / 'inputs.json', limit=16 * 1024**2)).hexdigest()
+                            != retained.reference.inputs_sha256
+                        or private_state._private_read(marker) != anchor
+                        or _ResourceView(retained, preparing).files != view.files):
+                    raise ValueError
+
+            def urls() -> dict[str, str]:
+                return {key: api._workload_database_url(originals[key], url_variable=variable,
+                    credential_uid=uid, credential_resource_version=version)
+                    for key, (variable, uid, version) in credentials.items()}
+
+            def ready(row: Document) -> None:
+                namespace = row['metadata']['namespace']
+                actual = api._get('deployment', row['metadata']['name'], namespace)
+                if not _matches(actual, row, _uid(row)):
+                    raise ValueError
+                children = api._run(['get', '--raw', f'/apis/apps/v1/namespaces/{namespace}/replicasets?limit=1000'])
+                pods = api._run(['get', '--raw', f'/api/v1/namespaces/{namespace}/pods?limit=1000'])
+                if not qualify_started_deployment(current=actual, children=children, pods=pods,
+                        region=retained.release.refresh.before.quota_identities['nodes'][1]):
+                    raise ValueError
+
+            unchanged()
+            before_urls = urls()
+            identity = HTTPSDevelopmentRuntimeProbes._process_identity
+            backends = {target.participant_id: identity(api._database(target)) for target in targets
+                if target.participant_id != retained.release.refresh.participant_id}
+            processes = {}
+            for key, prior in sorted(originals.items()):
+                row, target = current.workloads[key], owners[key]
+                ready(row)
+                processes[key] = identity(api._runtime(target, original=prior, expected=row))
+                if key in peers:
+                    _, uid, version = credentials[key]
+                    api.qualify_runtime_database(target, original=prior, expected=row,
+                        credential_uid=uid, credential_resource_version=version)
+                    api.qualify_runtime_pool_settings(target, original=prior, expected=row)
+                if key in actuators:
+                    api.qualify_runtime_telemetry(target, original=prior, expected=row)
+                unchanged()
+            final = self.observe_writers(bindings=bound, shared_state=shared_state, preparing=preparing)
+            if (final.workloads.keys() != current.workloads.keys()
+                    or any(not _matches(final.workloads[key], row, _uid(row)) for key, row in current.workloads.items())):
+                raise ValueError
+            for key, process in processes.items():
+                ready(final.workloads[key])
+                if identity(api._runtime(owners[key], original=originals[key], expected=final.workloads[key])) != process:
+                    raise ValueError
+            for target in targets:
+                if target.participant_id in backends and identity(api._database(target)) != backends[target.participant_id]:
+                    raise ValueError
+            if urls() != before_urls:
+                raise ValueError
+            unchanged()
+            self._source()
+            return api.telemetry_report()
+        except Exception:
+            raise ValueError('participant peer processes unqualified; preserve evidence') from None
+
     def observe_manager_process(self, *, bindings: SharedPoolGuardBindings, kubeconfig: Path,
             executable: Path, phase: Literal['preflight', 'guarded', 'ready', 'released'],
             preparing: str | None = None) -> tuple[str, ...]:
