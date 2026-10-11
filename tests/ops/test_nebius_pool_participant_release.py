@@ -194,6 +194,59 @@ def test_successive_normal_releases_keep_original_handoff_lineage_and_current_re
     assert second.preserved == first.preserved
 
 
+def test_shared_release_preserves_selected_candidates_isolated_render(release_inputs):
+    """Re-rendering with operator code would discard the candidate's new template."""
+    options = copy.deepcopy(release_inputs)
+    files = build_platform(options['config'], options['candidate'], options['runtime_profile'].model_dump(mode='json'),
+        options['previous'].registration.spec.profiles.image_admission_keyring, repo_root=ROOT)
+    web, = (row for row in files['40-services.yaml'] if row['kind'] == 'Deployment' and row['metadata']['name'] == 'loom-web')
+    web['spec']['template']['spec']['containers'][0]['resources']['requests']['cpu'] = '333m'
+    frozen = copy.deepcopy(files)
+    plan = module().prepare_staging_pool_release(**options, rendered_files=files)
+    projected, = (row for row in plan.files['40-services.yaml'] if row['kind'] == 'Deployment'
+        and row['metadata']['name'] == 'loom-web')
+    assert projected['spec']['template']['spec']['containers'][0]['resources']['requests']['cpu'] == '333m'
+    assert files == frozen
+    # The isolated render still gets shared wiring and read-only worker authority.
+    cp, = (row for row in plan.files['40-services.yaml'] if row['kind'] == 'Deployment'
+        and row['metadata']['name'] == 'loom-control-plane')
+    assert json.loads(env(cp)['LOOM_CP_SERVICE_EXECUTION_GLOBAL_POOL_JSON']['value'])['participant']['binding_revision'] == 2
+    for phase in plan.files.values():
+        for row in phase:
+            if row['kind'] == 'Role' and row['metadata']['name'] in {'loom-execution-actuator', 'loom-task-image-builder'}:
+                assert all(set(rule['verbs']) <= {'get', 'list'} for rule in row['rules'])
+
+
+@pytest.mark.parametrize('damage', ['phase', 'duplicate', 'foreign-namespace', 'foreign-cluster-resource',
+    'profile', 'environment', 'keyring'])
+def test_isolated_candidate_render_cannot_change_release_scope(release_inputs, damage):
+    options = copy.deepcopy(release_inputs)
+    files = build_platform(options['config'], options['candidate'], options['runtime_profile'].model_dump(mode='json'),
+        options['previous'].registration.spec.profiles.image_admission_keyring, repo_root=ROOT)
+    config, = (row for row in files['10-config-network.yaml'] if row['kind'] == 'ConfigMap'
+        and row['metadata']['name'] == 'loom-platform-config')
+    if damage == 'phase':
+        files['99-extra.yaml'] = []
+    elif damage == 'duplicate':
+        files['10-config-network.yaml'].append(copy.deepcopy(config))
+    elif damage == 'foreign-namespace':
+        config['metadata']['namespace'] = 'foreign'
+    elif damage == 'foreign-cluster-resource':
+        files['00-namespaces.yaml'].append({'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': 'foreign'}})
+    elif damage == 'profile':
+        value = json.loads(config['data']['profile.json'])
+        value['candidate_sha'] = 'e' * 40
+        config['data']['profile.json'] = json.dumps(value)
+    elif damage == 'environment':
+        value = json.loads(config['data']['environment.json'])
+        value['execution_node_group_id'] = 'different'
+        config['data']['environment.json'] = json.dumps(value)
+    else:
+        config['data']['keyring.json'] = '{}'
+    with pytest.raises(ValueError, match='pool participant release unqualified'):
+        module().prepare_staging_pool_release(**options, rendered_files=files)
+
+
 @pytest.mark.parametrize('damage', ['source', 'operation', 'scope', 'namespace-uid', 'global-participant',
     'global-origin', 'build-policy', 'runtime-profile', 'collector-active', 'readonly-role', 'role-binding', 'cluster-role'])
 def test_normal_release_rejects_scope_or_live_binding_drift(release_inputs, damage):
