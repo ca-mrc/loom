@@ -362,6 +362,154 @@ class SharedPhaseAPI:
         return True
 
 
+def test_restored_collector_uses_completed_current_lineage_and_bound_publication(shared_operation, tmp_path, monkeypatch):
+    """Real source attachment/lineage; only Kubernetes and the separately tested SQL read are doubled."""
+    import importlib.util
+    import json
+
+    from scripts.ops.nebius_pool_migration_guard import KubectlPoolGuardAPI
+
+    name = 'scripts.ops.nebius_shared_pool_recovery_collector'
+    assert importlib.util.find_spec(name) is not None, 'restored collector publication has no completed-job consumer'
+    module = __import__(name, fromlist=['observe_restored_staging_collector'])
+    _, bindings = shared_operation
+    attachment = bindings.plan.staging.attachment
+    collector, = (copy.deepcopy(row) for row in bindings.plan.staging.originals.values() if row['kind'] == 'CronJob')
+    controller = copy.deepcopy(attachment.guard.controller)
+    for row in (collector, controller):
+        row['metadata'].setdefault('annotations', {})['loom.nebius/shared-pool-recovery'] = 'fixture'
+    namespace = collector['metadata']['namespace']
+    job = {'apiVersion': 'batch/v1', 'kind': 'Job', 'metadata': {'name': 'collector-100', 'namespace': namespace,
+        'uid': str(uuid4()), 'resourceVersion': '401', 'ownerReferences': [{'apiVersion': 'batch/v1', 'kind': 'CronJob',
+            'name': collector['metadata']['name'], 'uid': collector['metadata']['uid'], 'controller': True}]},
+        'spec': copy.deepcopy(collector['spec']['jobTemplate']['spec']),
+        'status': {'succeeded': 1, 'completionTime': '2026-10-10T20:00:00Z', 'conditions': [{'type': 'Complete', 'status': 'True'}]}}
+    generated = {prefix + key: value for prefix in ('', 'batch.kubernetes.io/') for key, value in (
+        ('controller-uid', job['metadata']['uid']), ('job-name', job['metadata']['name']))}
+    job['spec'].update(selector={'matchLabels': {'batch.kubernetes.io/controller-uid': job['metadata']['uid']}},
+        completions=1, parallelism=1, completionMode='NonIndexed', manualSelector=False,
+        podReplacementPolicy='TerminatingOrFailed', suspend=False)
+    job['spec']['template']['metadata']['labels'].update(generated)
+    pod = {'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {'name': 'collector-100-abcde', 'namespace': namespace,
+        'uid': str(uuid4()), 'resourceVersion': '402', **copy.deepcopy(job['spec']['template']['metadata']),
+        'ownerReferences': [{'apiVersion': 'batch/v1', 'kind': 'Job', 'name': job['metadata']['name'],
+            'uid': job['metadata']['uid'], 'controller': True}]}, 'spec': copy.deepcopy(job['spec']['template']['spec']),
+        'status': {'phase': 'Succeeded'}}
+    pod['spec']['nodeName'] = 'qualified-platform-node'
+    pod['spec'].setdefault('tolerations', []).extend({'key': 'node.kubernetes.io/' + key,
+        'operator': 'Exists', 'effect': 'NoExecute', 'tolerationSeconds': 300} for key in ('not-ready', 'unreachable'))
+    for field, statuses in (('containers', 'containerStatuses'), ('initContainers', 'initContainerStatuses')):
+        pod['status'][statuses] = [{'name': row['name'], 'restartCount': 0, 'state': {'terminated': {'exitCode': 0}}}
+            for row in pod['spec'].get(field, [])]
+    documents = {_key(row): copy.deepcopy(row) for row in attachment.resources}
+    documents[_key(collector)] = collector
+    for volume in collector['spec']['jobTemplate']['spec']['template']['spec']['volumes']:
+        for source in volume.get('projected', {}).get('sources', []):
+            if 'secret' in source:
+                ref = source['secret']
+                documents['Secret:' + namespace + ':' + ref['name']] = {'apiVersion': 'v1', 'kind': 'Secret',
+                    'metadata': {'name': ref['name'], 'namespace': namespace, 'uid': str(uuid4()), 'resourceVersion': '403'},
+                    'data': {item['key']: 'cHJpdmF0ZS10ZXN0' for item in ref['items']}}
+    listing = {'jobs': {'apiVersion': 'batch/v1', 'kind': 'JobList', 'metadata': {'resourceVersion': '404'}, 'items': [job]},
+        'pods': {'apiVersion': 'v1', 'kind': 'PodList', 'metadata': {'resourceVersion': '405'}, 'items': [pod]}}
+    receipt = {'id': str(uuid4()), 'created': True, 'target_id': attachment.config['target_id'],
+        'source': 'nebius-kubernetes-capacity-collector', 'source_version': 'current-provider-kubernetes-digest',
+        'observed_at': '2026-10-10T20:00:00Z', 'provider_capacity_state': 'insufficient',
+        'autoscaler_state': 'ready', 'observation_sha256': 'sha256:' + 'a' * 64}
+    kubeconfig = tmp_path / 'collector-kubeconfig'
+    kubeconfig.write_text('private-test-config')
+    kubeconfig.chmod(0o600)
+    api = KubectlPoolGuardAPI(request=bindings.migration, kubeconfig=kubeconfig, executable=Path('/usr/bin/kubectl'))
+    mode, calls, publications = {'case': None}, [], []
+
+    def get(kind, name, selected=None):
+        calls.append(('get', kind, name, selected))
+        if kind == 'namespace' and name == 'kube-system':
+            return {'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': name,
+                'uid': bindings.migration.registration.binding.kube_system_uid}}
+        wanted_kind = {'configmap': 'ConfigMap', 'secret': 'Secret', 'cronjob': 'CronJob',
+            'deployment': 'Deployment', 'namespace': 'Namespace'}[kind]
+        return copy.deepcopy(documents[wanted_kind + ':' + (selected or '') + ':' + name])
+
+    def run(args):
+        calls.append(tuple(args))
+        if args[0] == 'logs':
+            assert args == ['logs', '-n', namespace, 'pod/' + pod['metadata']['name'], '-c', 'collector',
+                '--limit-bytes=16384', '--timestamps=false']
+            if mode['case'] == 'late_secret':
+                next(row for row in documents.values() if row['kind'] == 'Secret')['metadata']['resourceVersion'] = 'changed'
+            if mode['case'] == 'late_binding':
+                attachment.config['region'] = 'changed'
+            return copy.deepcopy(receipt)
+        assert args[:2] == ['get', '--raw']
+        kind = 'jobs' if args[2] == '/apis/batch/v1/namespaces/' + namespace + '/jobs?limit=1000' else 'pods'
+        assert args[2] == ('/apis/batch/v1' if kind == 'jobs' else '/api/v1') + '/namespaces/' + namespace + '/' + kind + '?limit=1000'
+        return copy.deepcopy(listing[kind])
+
+    def publication(target, *, expected, publication):
+        assert target == attachment.guard and expected == controller
+        assert publication['receipt'] == receipt
+        assert publication['source'] == 'nebius-kubernetes-capacity-collector'
+        assert publication['node_group_id'] == bindings.migration.registration.spec.node_group_id
+        assert publication['quota_identities'] == {key: list(value) for key, value in bindings.migration.registration.spec.quota_identities.items()}
+        assert {row['target_id'] for row in publication['targets']} == {row.target_id for row in attachment.participant.targets}
+        publications.append(copy.deepcopy(publication))
+        if mode['case'] == 'late_pod':
+            listing['pods']['items'][0]['status']['containerStatuses'][0]['restartCount'] = 1
+        return mode['case'] != 'stale'
+
+    monkeypatch.setattr(api, '_get', get)
+    monkeypatch.setattr(api, '_run', run)
+    monkeypatch.setattr(api, 'observe_collector_publication', publication)
+
+    def observe():
+        return module.observe_restored_staging_collector(bindings=bindings, guards=api, expected=collector, controller=controller)
+
+    assert observe() is True
+    assert len(publications) == 1
+    baseline = copy.deepcopy((documents, listing, attachment.config))
+    for case in ('missing', 'running', 'failed', 'old_template', 'stale', 'foreign_job', 'foreign_pod', 'duplicate',
+            'truncated', 'pod_image', 'sidecar', 'config', 'late_secret', 'late_pod', 'late_binding', 'suspended'):
+        documents.clear()
+        documents.update(copy.deepcopy(baseline[0]))
+        listing.clear()
+        listing.update(copy.deepcopy(baseline[1]))
+        attachment.config.clear()
+        attachment.config.update(copy.deepcopy(baseline[2]))
+        mode['case'] = case
+        if case == 'missing':
+            listing['jobs']['items'], listing['pods']['items'] = [], []
+        elif case in {'running', 'failed'}:
+            listing['jobs']['items'][0]['status'] = {'active': 1} if case == 'running' else {
+                'failed': 1, 'conditions': [{'type': 'Failed', 'status': 'True'}]}
+        elif case == 'old_template':
+            listing['jobs']['items'][0]['spec']['template']['spec']['containers'][0]['image'] = 'old/image'
+        elif case in {'foreign_job', 'foreign_pod'}:
+            listing['jobs' if case == 'foreign_job' else 'pods']['items'][0]['metadata']['ownerReferences'][0]['uid'] = str(uuid4())
+        elif case == 'duplicate':
+            listing['pods']['items'].append(copy.deepcopy(listing['pods']['items'][0]))
+        elif case == 'truncated':
+            listing['pods']['metadata']['continue'] = 'more'
+        elif case == 'pod_image':
+            listing['pods']['items'][0]['spec']['containers'][0]['image'] = 'other/image'
+        elif case == 'sidecar':
+            listing['pods']['items'][0]['spec']['containers'].append({'name': 'foreign', 'image': 'other/image'})
+        elif case == 'config':
+            documents['ConfigMap:' + namespace + ':loom-execution-capacity-collector']['data']['EXTRA_OVERRIDE'] = 'changed'
+        elif case == 'suspended':
+            documents[_key(collector)]['spec']['suspend'] = True
+        before = len(publications)
+        if case in {'missing', 'running', 'failed', 'old_template', 'stale'}:
+            assert observe() is False, case
+        else:
+            with pytest.raises(ValueError, match='restored staging collector unqualified'):
+                observe()
+        if case not in {'stale', 'late_pod', 'late_secret', 'late_binding'}:
+            assert len(publications) == before, case
+    assert all(row[0] in {'get', 'logs'} for row in calls)
+    assert 'private-' not in json.dumps(publications)
+
+
 @pytest.fixture
 def shared_guard_transport(shared_operation, tmp_path, monkeypatch):
     """Actual bound guard adapter; only kubectl's external transport is doubled."""
