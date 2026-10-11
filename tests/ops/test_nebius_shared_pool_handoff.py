@@ -5635,7 +5635,6 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
 
     assert importlib.util.find_spec('scripts.ops.nebius_pool_participant_entry') is not None, 'protected release qualification is not composed'
     from scripts.ops import nebius_pool_participant_entry as participant_entry
-    from scripts.ops.nebius_pool_participant_entry import ParticipantReleaseQualifier
 
     assert hasattr(participant_entry, 'connected_participant_release'), 'protected candidate and pool delivery are not composed'
 
@@ -6220,36 +6219,8 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
             initialize_participant_head(initial=predecessor, state_root=retained.state_dir.parent,
                 anchor_dir=retained.anchor_dir)
             kube = SimpleNamespace(kubeconfig=kubeconfig, context=None)
-            gate = ParticipantReleaseQualifier(retained=retained, initial=predecessor, bindings=bindings,
-                shared_state=state, observer=observer, kube=kube, kubeconfig=kubeconfig,
-                executable=Path('/usr/bin/kubectl'), operator_credentials=operator,
-                private_files={kubeconfig: kubeconfig.read_bytes(), operator: operator.read_bytes()})
-            connected = connect_pool()
-            connected.qualifier = gate
             effects = list(pool_state.effects)
-            connected.under_guard(kube, retained.release)
-            assert pool_state.effects == effects
-            for damage in ('guard', 'publication', 'selected-process', 'connection'):
-                if damage == 'guard':
-                    selected_guard['status'] = 'foreign'
-                elif damage == 'publication':
-                    external_fault('checks')
-                elif damage == 'selected-process':
-                    peer_fault['mode'] = 'settings'
-                else:
-                    kubeconfig.write_text('foreign-connection')
-                with pytest.raises(ValueError, match='preserve'):
-                    connected.under_guard(kube, retained.release)
-                assert pool_state.effects == effects
-                selected_guard['status'] = 'held'
-                external_fault(None)
-                peer_fault.clear()
-                kubeconfig.write_text('private-test-only')
-            peer_fault['mode'] = 'telemetry-unavailable'
-            connected.under_guard(kube, retained.release)
-            peer_fault.clear()
-            assert pool_state.effects == effects
-
+            database_key = 'StatefulSet:' + attached.config['namespace'] + ':loom-postgres'
             # Socket transport alone is replaced here: the protected connection
             # must construct the real qualifier, candidate APIs and pool adapter.
             # A lost guard must stop both existing-resource and Job access.
@@ -6262,17 +6233,36 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
                     ssl_context=ssl.create_default_context(), token='test-operator-token') as delivery:
                 before_writes = list(writes)
                 delivery.pool.under_guard(kube, retained.release)
-                delivery.writer.apply_file('20-database.yaml')
+                with delivery.writer.open_resource(database_key) as api:
+                    assert api.read_workload(database_key) == resources[database_key]
                 with delivery.writer.open_creation('pre-upgrade-backup') as api:
                     assert api.client.headers['Authorization'] == 'Bearer test-operator-token'
                     assert api.get_resource(api.document) is None
-                selected_guard['status'] = 'foreign'
-                with pytest.raises(ValueError, match='preserve'):
-                    delivery.writer.apply_file('20-database.yaml')
-                with delivery.writer.open_creation('pre-upgrade-backup') as api:
+                for damage in ('guard', 'publication', 'selected-process', 'connection'):
+                    if damage == 'guard':
+                        selected_guard['status'] = 'foreign'
+                    elif damage == 'publication':
+                        external_fault('checks')
+                    elif damage == 'selected-process':
+                        peer_fault['mode'] = 'settings'
+                    else:
+                        kubeconfig.write_text('foreign-connection')
                     with pytest.raises(ValueError, match='preserve'):
-                        api.get_resource(api.document)
-                selected_guard['status'] = 'held'
+                        if damage == 'guard':
+                            with delivery.writer.open_resource(database_key) as api:
+                                api.read_workload(database_key)
+                        elif damage == 'publication':
+                            with delivery.writer.open_creation('pre-upgrade-backup') as api:
+                                api.get_resource(api.document)
+                        else:
+                            delivery.pool.under_guard(kube, retained.release)
+                    selected_guard['status'] = 'held'
+                    external_fault(None)
+                    peer_fault.clear()
+                    kubeconfig.write_text('private-test-only')
+                peer_fault['mode'] = 'telemetry-unavailable'
+                delivery.pool.under_guard(kube, retained.release)
+                peer_fault.clear()
                 assert writes == before_writes and pool_state.effects == effects
                 observer_client = delivery.qualifier.observer.client
             assert observer_client.is_closed
