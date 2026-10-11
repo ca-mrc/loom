@@ -194,7 +194,7 @@ def test_successive_normal_releases_keep_original_handoff_lineage_and_current_re
     assert second.preserved == first.preserved
 
 
-def test_shared_release_preserves_selected_candidates_isolated_render(release_inputs):
+def test_shared_release_preserves_selected_candidates_isolated_render(release_inputs, monkeypatch):
     """Re-rendering with operator code would discard the candidate's new template."""
     options = copy.deepcopy(release_inputs)
     files = build_platform(options['config'], options['candidate'], options['runtime_profile'].model_dump(mode='json'),
@@ -202,6 +202,11 @@ def test_shared_release_preserves_selected_candidates_isolated_render(release_in
     web, = (row for row in files['40-services.yaml'] if row['kind'] == 'Deployment' and row['metadata']['name'] == 'loom-web')
     web['spec']['template']['spec']['containers'][0]['resources']['requests']['cpu'] = '333m'
     frozen = copy.deepcopy(files)
+
+    def wrong_renderer(*args, **kwargs):
+        raise AssertionError('isolated candidate must not invoke the operator renderer')
+
+    monkeypatch.setattr(module(), 'build_platform', wrong_renderer)
     plan = module().prepare_staging_pool_release(**options, rendered_files=files)
     projected, = (row for row in plan.files['40-services.yaml'] if row['kind'] == 'Deployment'
         and row['metadata']['name'] == 'loom-web')
@@ -217,8 +222,26 @@ def test_shared_release_preserves_selected_candidates_isolated_render(release_in
                 assert all(set(rule['verbs']) <= {'get', 'list'} for rule in row['rules'])
 
 
-@pytest.mark.parametrize('damage', ['phase', 'duplicate', 'foreign-namespace', 'foreign-cluster-resource',
-    'profile', 'environment', 'keyring'])
+def test_isolated_candidate_profile_accepts_omitted_optional_default(release_inputs):
+    """An older renderer may omit optional fields without changing the profile."""
+    options = copy.deepcopy(release_inputs)
+    files = build_platform(options['config'], options['candidate'], options['runtime_profile'].model_dump(mode='json'),
+        options['previous'].registration.spec.profiles.image_admission_keyring, repo_root=ROOT)
+    config, = (row for row in files['10-config-network.yaml'] if row['kind'] == 'ConfigMap'
+        and row['metadata']['name'] == 'loom-platform-config')
+    profile = json.loads(config['data']['profile.json'])
+    assert profile.pop('controller_resources') is None
+    config['data']['profile.json'] = json.dumps(profile)
+    plan = module().prepare_staging_pool_release(**options, rendered_files=files)
+    projected, = (row for row in plan.files['10-config-network.yaml'] if row['kind'] == 'ConfigMap'
+        and row['metadata']['name'] == 'loom-platform-config')
+    assert 'controller_resources' not in json.loads(projected['data']['profile.json'])
+    assert plan.refresh.after.policy_revision == plan.refresh.before.policy_revision + 1
+
+
+@pytest.mark.parametrize('damage', ['phase', 'missing-phase', 'duplicate', 'duplicate-across-phases',
+    'foreign-namespace', 'foreign-cluster-resource', 'cluster-authority', 'policy', 'profile',
+    'profile-default-change', 'profile-unknown', 'environment', 'keyring'])
 def test_isolated_candidate_render_cannot_change_release_scope(release_inputs, damage):
     options = copy.deepcopy(release_inputs)
     files = build_platform(options['config'], options['candidate'], options['runtime_profile'].model_dump(mode='json'),
@@ -227,15 +250,29 @@ def test_isolated_candidate_render_cannot_change_release_scope(release_inputs, d
         and row['metadata']['name'] == 'loom-platform-config')
     if damage == 'phase':
         files['99-extra.yaml'] = []
+    elif damage == 'missing-phase':
+        del files['20-database.yaml']
     elif damage == 'duplicate':
         files['10-config-network.yaml'].append(copy.deepcopy(config))
+    elif damage == 'duplicate-across-phases':
+        web, = (row for row in files['40-services.yaml'] if row['kind'] == 'Deployment' and row['metadata']['name'] == 'loom-web')
+        files['70-public.yaml'].append(copy.deepcopy(web))
     elif damage == 'foreign-namespace':
         config['metadata']['namespace'] = 'foreign'
     elif damage == 'foreign-cluster-resource':
         files['00-namespaces.yaml'].append({'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': 'foreign'}})
+    elif damage == 'cluster-authority':
+        role = next(row for group in files.values() for row in group if row['kind'] == 'ClusterRole')
+        role['metadata']['name'] = 'foreign'
+    elif damage == 'policy':
+        files['00-task-identity-policy.yaml'] = []
     elif damage == 'profile':
         value = json.loads(config['data']['profile.json'])
         value['candidate_sha'] = 'e' * 40
+        config['data']['profile.json'] = json.dumps(value)
+    elif damage in {'profile-default-change', 'profile-unknown'}:
+        value = json.loads(config['data']['profile.json'])
+        value['max_log_bytes_per_stream' if damage == 'profile-default-change' else 'unknown'] = 1
         config['data']['profile.json'] = json.dumps(value)
     elif damage == 'environment':
         value = json.loads(config['data']['environment.json'])
