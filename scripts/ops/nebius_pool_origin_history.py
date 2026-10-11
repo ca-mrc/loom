@@ -38,7 +38,9 @@ from scripts.ops.nebius_pool_legacy_settings import expected_legacy_runtime_sett
 from scripts.ops.nebius_pool_machine_database import (
     MachineRetirementState,
     pool_machine_retirement_sql,
+    pool_recovery_machine_state_sql,
     qualify_machine_retirement_report,
+    qualify_recovery_machine_state_report,
 )
 from scripts.ops.nebius_pool_migration import (
     PoolGuardDatabase,
@@ -367,6 +369,27 @@ class KubectlPoolHistoryAPI(KubectlPoolGuardAPI):
             return drained
         except Exception:
             raise PoolMigrationError("recovery_pool_drain") from None
+
+    def recovery_machine_state(self) -> MachineRetirementState:
+        """Read exact retained credentials without blocking unfinished cleanup."""
+        try:
+            def scope() -> None:
+                if (digest(migration_contract(self.request)) != self.contract_sha256
+                        or digest(_target_contract(self.target)) != self.history_sha256
+                        or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
+                    raise ValueError
+            scope()
+            spec = self.request.registration.spec
+            before = self._database(self.target, url_variable='LOOM_SVC_DB_URL')
+            report = self._run(['exec', '-n', self.target.namespace, 'pod/' + before['metadata']['name'], '-c', 'loom-postgres', '--',
+                'psql', '-X', '-qAt', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', 'loom', '-c', pool_recovery_machine_state_sql(spec)])
+            result = qualify_recovery_machine_state_report(spec, report)
+            if _uid(self._database(self.target, url_variable='LOOM_SVC_DB_URL')) != _uid(before):
+                raise ValueError
+            scope()
+            return result
+        except Exception:
+            raise PoolMigrationError('recovery_machine_state') from None
 
     def machine_retirement(self, action: Literal['observe', 'revoke']) -> MachineRetirementState:
         """Fixed exact-scope revocation/readback; the parent owns durable intent."""

@@ -18,7 +18,7 @@ from loom_service.pool_management.installation import PoolInstallation
 MachineRetirementState = Literal['active', 'revoked']
 
 
-def _state_sql(spec: PoolInstallation) -> str:
+def _state_sql(spec: PoolInstallation, *, recovering: bool = False) -> str:
     participants = {str(row.participant_id): {'participant_id': str(row.participant_id),
         'pool_id': str(spec.pool_id), 'environment_id': str(row.environment_id), 'incarnation': str(row.incarnation),
         'binding_revision': row.binding_revision, 'admission_epoch': spec.admission_epoch, 'phase': 'active',
@@ -29,13 +29,16 @@ def _state_sql(spec: PoolInstallation) -> str:
         'credential_epoch': row.credential_epoch} for row in spec.machines}
     encoded = json.dumps({'participants': participants, 'machines': machines,
         'credentials': [row.model_dump(mode='json') for row in spec.machines]}, sort_keys=True, separators=(',', ':')).encode().hex()
+    binding_state = f"b.mode='closed' AND b.policy_revision={spec.policy_revision + 1}"
+    if recovering:
+        binding_state = f"({binding_state}) OR (b.mode IN ('closed','global') AND b.policy_revision={spec.policy_revision})"
     return f"""WITH expected AS (SELECT convert_from(decode('{encoded}','hex'),'UTF8')::jsonb AS value),
 machines AS (SELECT * FROM public.nebius_pool_machines WHERE pool_id='{spec.pool_id}'::uuid),
 credentials AS (SELECT c.*,t.revoked_at FROM public.nebius_pool_machine_credentials c
     JOIN machines m USING(machine_id) JOIN public.tokens t USING(token_hash))
 SELECT CASE WHEN
     EXISTS (SELECT 1 FROM public.nebius_pool_bindings b WHERE b.pool_id='{spec.pool_id}'::uuid
-        AND b.mode='closed' AND b.policy_revision={spec.policy_revision + 1}
+        AND ({binding_state})
         AND to_jsonb(b)-'mode'-'policy_revision'=convert_from(decode('{_binding_hex(spec)}','hex'),'UTF8')::jsonb)
     AND (SELECT jsonb_object_agg(p.participant_id::text,to_jsonb(p)) FROM public.nebius_pool_participants p
         WHERE p.pool_id='{spec.pool_id}'::uuid)=value->'participants'
@@ -97,6 +100,33 @@ SELECT json_build_object('schema','loom.pool-machine-retirement.v1',
     'state',authority.state) AS report FROM ({_state_sql(spec)}) authority;
 {'COMMIT' if write else 'ROLLBACK'};
 """
+
+
+def pool_recovery_machine_state_sql(spec: PoolInstallation) -> str:
+    """Inspect exact authority before/after fencing while cleanup may proceed.
+
+    This is not retirement readiness: it neither requires nor proves drain.
+    Keep the existing retirement reader and writer's fresh drain barrier intact.
+    Expired original credentials remain identifiable without renewing them.
+    The anchored parent separately qualifies mode and active/revoked alternatives.
+    """
+    spec = PoolInstallation.model_validate(spec.model_dump())
+    return _header(read_only=True) + f"""SELECT json_build_object('schema','loom.pool-recovery-machine-state.v1',
+    'operation_id','{spec.operation_id}', 'installation_sha256','{digest(spec.model_dump(mode='json'))}',
+    'read_only',current_setting('transaction_read_only')='on',
+    'state',authority.state) AS report FROM ({_state_sql(spec, recovering=True)}) authority;
+ROLLBACK;
+"""
+
+
+def qualify_recovery_machine_state_report(spec: PoolInstallation, report: Any) -> MachineRetirementState:
+    spec = PoolInstallation.model_validate(spec.model_dump())
+    if (not isinstance(report, dict) or report.get('state') not in ('active', 'revoked')
+            or report.get('read_only') is not True
+            or report != {'schema': 'loom.pool-recovery-machine-state.v1', 'operation_id': str(spec.operation_id),
+                'installation_sha256': digest(spec.model_dump(mode='json')), 'read_only': True, 'state': report['state']}):
+        raise ValueError('pool_recovery_machine_state_unqualified')
+    return cast(MachineRetirementState, report['state'])
 
 
 def qualify_machine_retirement_report(spec: PoolInstallation, report: Any) -> MachineRetirementState:

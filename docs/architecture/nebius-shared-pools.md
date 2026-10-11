@@ -1742,6 +1742,14 @@ running application/gateway nor its runtime token. A separate read-only runtime
 ACL inspection accepts active work and absent/recovery guards while preserving
 the same schema and least-privilege checks; the initial role stage/observation
 still requires the original idle guard. Inspection never repairs grants or work.
+A separate read-only recovery machine-state query identifies the exact original
+participants, machine scopes and credentials with the original closed/global or
+terminally fenced binding. It permits unfinished work and expired original
+credentials, because neither prevents identifying and fencing that authority.
+It does not renew credentials, prove drain or authorize retirement. The existing
+machine-retirement reader and writer still require the exact terminal fence and
+fresh empty journal. The anchored parent must separately constrain the observed
+pool and active/revoked state to its recorded recovery intents and outcomes.
 Opening uses the exact gateway Pod from fresh settings, database, projected-API
 and capacity qualification. A separate fresh challenge invokes only the fixed
 opening command, once. Its result and the retained Pod/backend/operator scope are
