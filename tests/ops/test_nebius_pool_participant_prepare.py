@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import importlib
 import ssl
+from contextlib import asynccontextmanager, contextmanager
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -102,8 +103,9 @@ def test_new_release_captures_complete_live_baseline_then_retains_it(operation_i
     current = {_key(row): row for row in captured.current}
     expected = {_key(row): row for row in operation_inputs['current'] if row['kind'] != 'Job'}
     assert current == expected
-    assert {'ServiceAccount', 'NetworkPolicy', 'ValidatingAdmissionPolicy', 'ValidatingAdmissionPolicyBinding'} <= {
-        row['kind'] for row in captured.current}
+    assert {'ServiceAccount', 'NetworkPolicy'} <= {row['kind'] for row in captured.current}
+    policies = {key: row for key, row in expected.items() if row['kind'].startswith('ValidatingAdmissionPolicy')}
+    assert all(current[key] == row for key, row in policies.items())
     assert captured.config == operation_inputs['config']
     assert captured.management_origin == 'https://manage.example.test'
     assert captured.manager == operation_inputs['manager'] and captured.catalog == operation_inputs['catalog']
@@ -131,7 +133,9 @@ def test_new_release_rejects_incomplete_changed_or_foreign_baseline(operation_in
         row = next(row for row in live.resources.values() if row['kind'] == 'NetworkPolicy')
         row['spec']['podSelector'] = {'matchLabels': {'foreign': 'true'}}
     elif damage == 'policy':
-        row = next(row for row in live.resources.values() if row['kind'] == 'ValidatingAdmissionPolicy')
+        row = next((row for row in live.resources.values() if row['kind'] == 'ValidatingAdmissionPolicy'), None)
+        if row is None:
+            pytest.skip('the zero-guest baseline has no admission policy')
         row['spec']['validations'] = [{'expression': 'true'}]
     elif damage.startswith('controller-'):
         row = live.resources[f'Deployment:{namespace}:loom-control-plane']
@@ -158,3 +162,100 @@ def test_new_release_rejects_incomplete_changed_or_foreign_baseline(operation_in
     with pytest.raises(ValueError, match='participant preparation'):
         module().capture_participant_release(**options)
     assert not operation_inputs['state_root'].exists() and not operation_inputs['anchor_dir'].exists()
+
+
+@pytest.mark.parametrize('failure', [None, 'publication', 'ancestry', 'qualification'])
+def test_host_prepares_exact_publication_and_replays_only_retained_inputs(
+        operation_inputs, preparation, tmp_path, monkeypatch, failure):
+    from scripts.ops import nebius_development_entry as authentication
+    from scripts.ops import nebius_pool_participant_entry as entry
+    from scripts.ops import nebius_shared_pool_entry as shared_entry
+
+    from loom.nebius_kubernetes import NebiusKubernetesConnection
+    from loom_service.environment_management.manager import CandidateBundle
+
+    assert callable(getattr(entry, 'prepare_retained_participant_release', None)), 'host publication preparation is not connected'
+    options, live = preparation
+    inputs = operation_inputs
+    ca, credential = (tmp_path / name for name in ('current-ca.pem', 'current-operator.json'))
+    for path in (ca, credential):
+        path.write_bytes(b'current-private-test-material')
+        path.chmod(0o600)
+    operator = NebiusKubernetesConnection(endpoint=inputs['config']['kubernetes_api_server'],
+        ca_file=ca, credentials_file=credential)
+    historical = SimpleNamespace(bindings=options['bindings'], files={path: path.read_bytes()
+        for path in inputs['predecessor'].history})
+    monkeypatch.setattr(shared_entry, 'load_completed_history', lambda **_: (historical, inputs['predecessor']))
+
+    async def authenticate(selected):
+        assert selected == operator
+        return ssl.create_default_context(), 'current-operator-token'
+
+    monkeypatch.setattr(authentication, '_transport', authenticate)
+    @contextmanager
+    def transport(**selected):
+        assert selected['api_server'] == operator.endpoint and selected['token'] == 'current-operator-token'
+        yield options['transport']
+
+    monkeypatch.setattr(entry, 'ManagementKubernetesTransport', transport, raising=False)
+    bundle = CandidateBundle(inputs['publication'].candidate_id, inputs['candidate'],
+        inputs['runtime_profile'].model_dump(mode='json'))
+    publications, qualified = [], []
+
+    async def follows(**selected):
+        assert selected == {'candidate_id': inputs['publication'].candidate_id,
+            'current_sha': inputs['predecessor'].migration.registration.candidate['candidate_sha']}
+        return failure != 'ancestry'
+
+    @asynccontextmanager
+    async def publication(**selected):
+        assert selected['publication'] == inputs['publication']
+        assert selected['transport'] is options['transport']
+        publications.append(selected['publication'])
+        if failure == 'publication':
+            raise ValueError('private-publication-error')
+        yield SimpleNamespace(candidate_follows=follows), copy.deepcopy(bundle)
+
+    monkeypatch.setattr(module(), 'resolve_participant_publication', publication, raising=False)
+
+    # A callable qualifier is an injected external runtime boundary. The actual
+    # source/history, HTTPS capture, retention and original replay are exercised.
+    @contextmanager
+    def delivery(**selected):
+        class Qualifier:
+            kube = object()
+
+            def __call__(self, kube, retained, phase):
+                assert kube is self.kube and phase == 'preflight' and retained == selected['retained']
+                assert selected['expected'] == inputs['predecessor']
+                qualified.append(retained.reference)
+                if failure == 'qualification':
+                    raise ValueError('private-preflight-error')
+        yield SimpleNamespace(qualifier=Qualifier())
+
+    monkeypatch.setattr(entry, 'authenticated_participant_release', delivery)
+    selected = dict(publication=inputs['publication'], operation_id=inputs['operation_id'],
+        shared_operation=tmp_path / 'original-shared-operation.json', shared_operation_sha256='c' * 64,
+        state_root=inputs['state_root'], anchor_dir=inputs['anchor_dir'],
+        operator_connection=operator, executable=tmp_path / 'kubectl', repo_root=inputs['repo_root'])
+    if failure is not None:
+        with pytest.raises(ValueError, match='participant preparation') as error:
+            entry.prepare_retained_participant_release(**selected)
+        assert 'private-' not in str(error.value)
+        if failure in {'publication', 'ancestry'}:
+            assert not inputs['state_root'].exists() and not inputs['anchor_dir'].exists()
+        return
+    retained = entry.prepare_retained_participant_release(**selected)
+    assert retained.inputs.publication == inputs['publication']
+    assert retained.inputs.candidate == bundle.candidate
+    assert {_key(row): row for row in retained.inputs.current} == {
+        _key(row): row for row in inputs['current'] if row['kind'] != 'Job'}
+    assert publications == [inputs['publication']] and qualified == [retained.reference]
+    count = len(live.reads)
+    monkeypatch.setattr(module(), 'capture_participant_release', lambda **_: pytest.fail('repeat preparation cannot recapture'))
+    repeated = entry.prepare_retained_participant_release(**selected)
+    assert repeated == retained and len(live.reads) == count
+    assert publications == [inputs['publication']] and qualified == [retained.reference, retained.reference]
+    wrong = inputs['publication'].model_copy(update={'run_attempt': 3})
+    with pytest.raises(ValueError, match='participant preparation'):
+        entry.prepare_retained_participant_release(**{**selected, 'publication': wrong})

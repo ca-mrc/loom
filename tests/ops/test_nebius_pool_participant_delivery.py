@@ -641,9 +641,16 @@ def test_operator_host_rejects_foreign_recovery_before_private_writes(operation_
 
 def test_completed_release_is_the_next_receipt_selected_predecessor(
         operation_inputs, connection, tmp_path, monkeypatch):
+    import ssl
+
+    import httpx
     from scripts.ops import nebius_pool_participant_completion as completion
+    from scripts.ops import nebius_shared_pool_forward_census as census
     from scripts.ops.nebius_ingress_stage import _key, _uid
     from scripts.ops.nebius_management_switch import _stable
+    from scripts.ops.nebius_management_transport import ManagementKubernetesTransport
+    from scripts.ops.nebius_pool_participant_prepare import capture_participant_release
+    from scripts.ops.nebius_pool_participant_resource import _resource_path
 
     test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(
         operation_inputs, connection, tmp_path, monkeypatch, recover=False, file_writes=True)
@@ -681,10 +688,33 @@ def test_completed_release_is_the_next_receipt_selected_predecessor(
 
     # Prepare another real release using the receipt-derived starting point,
     # including the updated manager/catalog and the unchanged peer.
+    resources = {_resource_path(row): row for row in successor.resources.values()}
+    cluster = successor.migration.registration.binding.kube_system_uid
+
+    def read(request):
+        assert request.method == 'GET'
+        if request.url.path == '/api/v1/namespaces/kube-system':
+            return httpx.Response(200, json={'apiVersion': 'v1', 'kind': 'Namespace',
+                'metadata': {'name': 'kube-system', 'uid': cluster}})
+        row = resources.get(request.url.path)
+        return httpx.Response(404) if row is None else httpx.Response(200, json=row)
+
+    bindings = SimpleNamespace(plan=SimpleNamespace(development=SimpleNamespace(runtime=SimpleNamespace(
+        request=SimpleNamespace(database=SimpleNamespace(manager=SimpleNamespace(deployment=SimpleNamespace(
+            public_host='manage.example.test'))))))))
+    with monkeypatch.context() as patch, ManagementKubernetesTransport(
+            api_server=retained.inputs.config['kubernetes_api_server'], ssl_context=ssl.create_default_context()) as transport:
+        patch.setattr(census, '_forward_options', lambda *_: pytest.fail('next release cannot replay the initial baseline'))
+        transport.client.close()
+        transport.client = httpx.Client(base_url=transport.api_server, transport=httpx.MockTransport(read))
+        captured = capture_participant_release(predecessor=successor, bindings=bindings,
+            shared_state=operation_inputs['predecessor'].state_dir, repo_root=operation_inputs['repo_root'], transport=transport)
+    assert captured.manager == successor.manager and captured.catalog == successor.catalog
+    assert {_key(row): row for row in captured.current} == {
+        _key(row): successor.resources[_key(row)] for row in retained.inputs.current if row['kind'] != 'Job'}
     inputs = copy.deepcopy(operation_inputs)
-    inputs.update(predecessor=successor, operation_id=uuid4(), manager=successor.manager,
-        catalog=successor.catalog, current=tuple(successor.resources[_key(row)] for row in retained.inputs.current
-            if row['kind'] != 'Job'))
+    inputs.update(predecessor=successor, operation_id=uuid4(), manager=captured.manager,
+        catalog=captured.catalog, current=captured.current)
     from tests.support.execution_image_admission import signed_image_admission_bundle
 
     from loom.nebius_platform_render import build_platform
