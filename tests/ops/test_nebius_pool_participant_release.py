@@ -392,6 +392,88 @@ def test_shared_candidate_uses_full_normal_rollout_without_restoring_local_write
             assert all(set(rule['verbs']) <= {'get', 'list', 'watch'} for rule in row['rules'])
 
 
+@pytest.mark.parametrize('outcome', ['complete', 'busy', 'preflight', 'guard-drift', 'activation-unknown', 'capacity-stale'])
+def test_guarded_deployer_orders_shared_refresh_and_never_releases_uncertain_mutations(release_inputs, tmp_path, monkeypatch, outcome):
+    """Use the real deploy parent; only the protected pool I/O adapter is doubled."""
+    import argparse
+
+    from scripts.ops import deploy_nebius_platform as deploy
+    from tests.ops.test_deploy_nebius_platform import FakeKubectl
+
+    from loom.nebius_platform_render import write_platform
+
+    release = module().prepare_staging_pool_release(**release_inputs)
+    config = release_inputs['config']
+    render_dir = tmp_path / 'render'
+    write_platform(release.files, config, release_inputs['candidate'], render_dir)
+    args = argparse.Namespace(render_dir=render_dir, kubeconfig=tmp_path / 'kubeconfig',
+        evidence_dir=tmp_path / 'evidence', expected_cluster_id=config['cluster_id'],
+        apply=True, retry_failed_jobs=False)
+    events = []
+    pool = {'phase': 'ready', 'capacity': False}
+
+    class Kube(FakeKubectl):
+        def run(self, *command, **kwargs):
+            if command[0] == 'apply':
+                assert pool['phase'] == 'staged' and self.guard_identity is not None
+                events.append('workload:' + Path(command[2]).name)
+            if command[0] == 'exec' and 'release' in command:
+                assert pool['phase'] == 'ready' or (pool['phase'] == 'open' and pool['capacity'])
+                events.append('release')
+            return super().run(*command, **kwargs)
+
+    kube = Kube(config, release.files, database=True)
+    for row in release_inputs['current']:
+        kube.objects[row['kind'].lower(), row['metadata']['name']] = copy.deepcopy(row)
+    monkeypatch.setattr(deploy, 'public_smoke', lambda *_: events.append('https'))
+
+    class PoolIO:
+        def preflight(self, observed_kube, plan):
+            assert observed_kube is kube and plan == release and kube.guard_identity is None
+            events.append('preflight')
+            if outcome == 'preflight':
+                raise deploy.DeploymentError('retained manager does not support this catalog')
+
+        def under_guard(self, observed_kube, plan):
+            assert observed_kube is kube and plan == release and kube.guard_identity is not None
+            events.append('guarded')
+            if outcome == 'guard-drift':
+                raise deploy.DeploymentError('current shared history changed')
+
+        def activate(self, observed_kube, plan):
+            assert observed_kube is kube and plan == release and kube.guard_identity is not None
+            events.append('activate')
+            if outcome == 'busy':
+                return 'busy'  # Fixed fence receipt positively proves no change.
+            pool['phase'] = 'staged'
+            if outcome == 'activation-unknown':
+                raise deploy.DeploymentError('lost write response')
+            return 'ready'
+
+        def finish(self, observed_kube, plan):
+            assert observed_kube is kube and plan == release and kube.guard_identity is not None
+            assert 'https' in events
+            events.append('open')
+            pool['phase'] = 'open'
+            if outcome == 'capacity-stale':
+                raise deploy.DeploymentError('post-open capacity unavailable')
+            pool['capacity'] = True
+            events.append('fresh-capacity')
+
+    if outcome in {'complete', 'busy'}:
+        report = deploy.deploy(args, kube=kube, participant_release=release, pool=PoolIO())
+        assert report['status'] == ('complete' if outcome == 'complete' else 'skipped_busy')
+    else:
+        with pytest.raises(deploy.DeploymentError):
+            deploy.deploy(args, kube=kube, participant_release=release, pool=PoolIO())
+    if outcome == 'complete':
+        assert events.index('guarded') < events.index('activate') < events.index('workload:30-migrate.yaml')
+        assert events.index('workload:50-configure.yaml') < events.index('open') < events.index('fresh-capacity') < events.index('release')
+    if outcome in {'busy', 'preflight', 'guard-drift', 'activation-unknown'}:
+        assert not any(event.startswith('workload:') for event in events)
+    assert (kube.guard_identity is not None) == (outcome in {'activation-unknown', 'capacity-stale'})
+
+
 @pytest.mark.parametrize('damage', ['namespace', 'catalog', 'volume', 'mount', 'setting', 'mode', 'replicas', 'mutable-image'])
 def test_manager_refresh_refuses_changed_catalog_or_process_binding(catalog_inputs, damage):
     options = copy.deepcopy(catalog_inputs)
