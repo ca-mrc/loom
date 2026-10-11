@@ -1448,6 +1448,18 @@ checks complete Pod/ReplicaSet observations, including init-container completion
 and absence of lingering old Pods, then rereads the manager and catalog. This
 child does not qualify publication or own the participant fence or idle guard.
 
+The retained pool-effect adapter connects those concrete children to ordinary
+deployment in fixed order: fence, stage, catalog creation, manager readiness,
+then reopening and a separately identified capacity read. Its independently
+anchored parent journal records each child's actual dispatch intent; missing
+started child evidence cannot reopen writes, while interrupted preparation
+without effects can resume. Source, endpoint and operation-directory bindings
+are rechecked throughout recovery. Only the fence's `pending_work` receipt,
+before any later phase, permits a busy exit. The adapter
+requires a protected, phase-aware live qualifier with no default success path.
+This composition does not itself supply that qualifier, completed/latest release
+history, or the protected operator entry, and is not installed acceptance.
+
 The existing deploy parent has an internal shared-release path paired with a
 protected pool I/O adapter. It binds the exact projected files and release/guard
 identity, retains the ordinary backup/schema/configuration/workload sequence,
@@ -1545,11 +1557,11 @@ Parent phase authority and full protected rollout integration remain required
 connections. The read-only unchanged-policy path does not cover upgrades that
 change admission policy; the candidate file loop alone does not cover every effect.
 
-The transaction and parent interface do not establish publication, history,
-Kubernetes readiness or recovery authority on their own. The concrete protected
-adapter and normal workflow must still connect those checks, catalog mounting/
-manager restart and fixed child journals before this is an operational route.
-They also must promote semantically completed release history only after verified
+The transaction, pool-effect adapter and parent interface do not establish
+publication, history, full runtime readiness or recovery authority on their own.
+The protected entry and phase-aware live qualifier must still connect the normal
+workflow to these child operations before this is an operational route. They
+also must promote semantically completed release history only after verified
 guard release, so later releases use the latest predecessor rather than the
 original handoff. Retained inputs and a deployer result alone are not that proof.
 Fence, catalog staging and reopening each invalidate prior capacity captures;

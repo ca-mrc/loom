@@ -113,6 +113,9 @@ def connection(operation_inputs, monkeypatch):
         document = json.loads(request.content)
         if request.url.params:
             assert dict(request.url.params) == {'dryRun': 'All'}
+            if state.failure == 'preview':
+                state.failure = None
+                return httpx.Response(503)
             return httpx.Response(201, json=api.default_resource(document))
         action = document['spec']['template']['spec']['containers'][0]['command'][-1] if document['kind'] == 'Job' else 'config'
         state.effects.append(action)
@@ -202,6 +205,16 @@ def test_lost_pool_create_reconciles_only_original_job(connection, failure):
         else:
             assert connect().activate(kube, state.retained.release) == 'ready'
     assert state.effects.count('fence') == 1
+
+
+def test_effect_free_interrupted_pool_preparation_can_resume(connection):
+    state, kube, connect = connection
+    state.failure = 'preview'
+    with pytest.raises(ValueError, match='preserve'):
+        connect().activate(kube, state.retained.release)
+    assert state.effects == []
+    assert connect().activate(kube, state.retained.release) == 'ready'
+    assert state.effects == ['config', 'fence', 'stage', 'config', 'manager']
 
 
 def test_pool_adapter_requires_live_qualification_and_final_readiness(connection):
