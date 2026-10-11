@@ -382,6 +382,53 @@ loss or an unknown create outcome requires reconciliation, not blind recreation.
 Both private-only and opted-in histories remain usable by manager-only TLS renewal;
 renewal does not modify the shared dev route or wildcard certificate.
 
+#### Issue the independent dev manager certificate
+
+Before installing the independent manager, issue its own exact-host certificate
+with the protected `development-management-certificate` operation. It uses the
+existing issuer's DNS-01 hooks, locked Certbot, watchdog and retained recovery
+journals, but has a separate forced command, key, configuration and state root.
+It does not modify Kubernetes, the shared wildcard certificate, or the legacy
+management route. No policy-quota increase is needed for certificate issuance.
+
+Configure `NEBIUS_DEVELOPMENT_MANAGEMENT_CERTIFICATE_INSTALLATION_JSON` in the
+protected `nebius-integration` Environment. Use the certificate installation
+fields described below, with schema
+`loom.nebius-management-certificate-installation.v1`, **no `child_domain` field**,
+a new installation UUID and the independent manager's exact `management_host`.
+Its state path must be
+`<operator-home>/.loom/nebius-development-management-certificates/state`.
+Use a hostname outside the personal child zone which is not owned by an existing
+route, and the approved DNS credential file. Never repoint the legacy
+`NEBIUS_CERTIFICATE_INSTALLATION_JSON` or copy its retained issuer history.
+
+From exact integrated source, export the locked certificate requirements as in
+the protected certificate procedure below. Run its bundle preparation command
+with `--management-only`, using the dedicated configuration variable above.
+Preview and then apply `install_nebius_certificate_entrypoint.py` with the same
+`--management-only` flag, the reviewed bundle digest and a **new** Ed25519 public
+key. Omission of the flag or use of the legacy root/schema is rejected. Existing
+SSH grants are preserved; an already authorized key cannot gain this authority.
+Store the matching private key only as
+`NEBIUS_DEVELOPMENT_MANAGEMENT_CERTIFICATE_SSH_KEY` in that protected Environment.
+
+After verifying the exact-bundle grant and configuration, dispatch:
+
+```bash
+gh workflow run nebius-rollout.yml --repo ca-mrc/loom --ref dev \
+  -f operation=development-management-certificate
+```
+
+This manual action uses the common operation queue and cannot select application
+rollout. Neither the runner nor workflow falls back to a legacy certificate key
+or configuration. Its sanitized receipt must match the selected installation and
+single hostname. Supply the returned immutable generation and issuer configuration
+to the independent manager's initial installation; a certificate receipt alone
+does not establish DNS routing, manager readiness or multi-owner acceptance.
+For renewal, issue through this same retained issuer and then use the separate
+manager renewal operation below. Preserve ambiguous issuance/DNS journals and
+reconcile them before retrying; issuance has no automatic write retries.
+
 #### Renew the independent dev manager certificate
 
 Do not edit initial installation inputs or replay the initial installer to renew
