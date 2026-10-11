@@ -423,23 +423,25 @@ def test_failed_job_retry_rejects_missing_authority_or_changed_attempt(connectio
 
 
 @pytest.mark.parametrize('selected', [0, 2])
-@pytest.mark.parametrize('outcome', ['pending', 'complete', 'failed', 'draining'])
+@pytest.mark.parametrize('outcome', ['pending', 'complete', 'failed', 'draining', 'success-without-pod'])
 def test_job_observation_requires_terminal_owned_processes_without_writes(connection, selected, outcome):
     state, connect = connection
     with connect(state.keys[selected]) as api:
         stage(state, api, state.keys[selected])
         job, = state.external.resources.values()
         if outcome != 'pending':
-            complete = outcome == 'complete'
+            complete = outcome in {'complete', 'success-without-pod'}
             job['status'] = {'conditions': [{'type': 'Complete' if complete else 'Failed', 'status': 'True'}],
                 'active': 0, 'succeeded': int(complete), 'failed': int(not complete)}
             state.pods = [terminal_pod(job, succeeded=complete)]
             if outcome == 'draining':
                 state.pods[0]['status']['phase'] = 'Running'
                 state.pods[0]['status']['containerStatuses'][0]['state'] = {'running': {}}
+            elif outcome == 'success-without-pod':
+                state.pods = []
         state.requests.clear()
         result = api.job_outcome()
-        if outcome in {'pending', 'draining'}:
+        if outcome in {'pending', 'draining', 'success-without-pod'}:
             assert result is None
         else:
             assert result == {'status': outcome, 'job_uid': job['metadata']['uid'], 'job_name': job['metadata']['name'],

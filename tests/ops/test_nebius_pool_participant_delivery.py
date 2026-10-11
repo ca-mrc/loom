@@ -109,8 +109,8 @@ def test_shared_recovery_selects_original_publication_not_another_success_for_sa
     assert 'actions/runs/42/attempts/2' in calls
 
 
-@pytest.mark.parametrize('file_writes', [False, True])
-@pytest.mark.parametrize('recover', [False, True])
+@pytest.mark.parametrize('recover,file_writes', [(False, False), (False, True), (True, False), (True, True),
+    ('pre-upgrade-backup', True), ('30-migrate.yaml', True), ('50-configure.yaml', True)])
 def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation_inputs, tmp_path, monkeypatch, recover, file_writes):
     """Only Kubernetes/GitHub/HTTPS and the pending concrete pool I/O are doubled."""
     inputs = operation_inputs
@@ -124,7 +124,9 @@ def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation
         expected_cluster_id=config['cluster_id'], publication_dir=publication,
         candidate=inputs['candidate']['candidate_sha'], evidence_dir=tmp_path / 'evidence', github=True)
     intents, phases, mutations = [], [], []
-    state = {'pool': 'ready', 'fail_https': recover}
+    failed_job = ('loom-predeploy-' + retained.reference.operation_id.hex if recover == 'pre-upgrade-backup' else
+        plan.files[recover][0]['metadata']['name'] if isinstance(recover, str) else None)
+    state = {'pool': 'ready', 'fail_https': recover is True, 'fail_job': failed_job}
 
     class Kube(FakeKubectl):
         def get(self, kind, name, namespace):
@@ -158,6 +160,7 @@ def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation
     kube = Kube(config, plan.files, database=True)
     for row in inputs['current']:
         kube.objects[row['kind'].lower(), row['metadata']['name']] = copy.deepcopy(row)
+    previous_candidate = json.loads(kube.objects['configmap', 'loom-platform-config']['data']['profile.json'])['candidate_sha']
 
     def github(path, payload):
         if path == 'deployments':
@@ -209,6 +212,7 @@ def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation
     writer_args = {}
     written = []
     job_creates = []
+    job_deletes = []
     if file_writes:
         import ssl
         from contextlib import nullcontext
@@ -243,6 +247,20 @@ def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation
                     assert request.url.path.startswith('/apis/batch/v1/namespaces/' + config['namespace'] + '/jobs/')
                     row = inventory.get('Job:' + config['namespace'] + ':' + request.url.path.rsplit('/', 1)[-1])
                     return httpx.Response(404) if row is None else httpx.Response(200, json=row)
+                if request.method == 'DELETE':
+                    name = request.url.path.rsplit('/', 1)[-1]
+                    assert name == failed_job
+                    assert request.url.path == '/apis/batch/v1/namespaces/' + config['namespace'] + '/jobs/' + name
+                    row = inventory['Job:' + config['namespace'] + ':' + name]
+                    assert json.loads(request.content) == {'apiVersion': 'v1', 'kind': 'DeleteOptions',
+                        'propagationPolicy': 'Foreground', 'preconditions': {
+                            'uid': row['metadata']['uid'], 'resourceVersion': row['metadata']['resourceVersion']}}
+                    del inventory[jobs.key(row)]
+                    del kube.objects['job', name]
+                    pods[:] = [pod for pod in pods
+                        if pod['metadata']['ownerReferences'][0]['uid'] != row['metadata']['uid']]
+                    job_deletes.append(name)
+                    return httpx.Response(202, json={'apiVersion': 'v1', 'kind': 'Status', 'status': 'Success'})
                 assert request.method == 'POST'
                 assert request.url.path == '/apis/batch/v1/namespaces/' + config['namespace'] + '/jobs'
                 document = json.loads(request.content)
@@ -251,10 +269,14 @@ def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation
                     return httpx.Response(201, json=jobs.default_resource(document))
                 jobs.create_resource(document)
                 row = jobs.get_resource(document)
-                row['status'] = {'conditions': [{'type': 'Complete', 'status': 'True'}], 'succeeded': 1, 'active': 0}
+                success = row['metadata']['name'] != state['fail_job']
+                if not success:
+                    state['fail_job'] = None
+                row['status'] = {'conditions': [{'type': 'Complete' if success else 'Failed', 'status': 'True'}],
+                    'succeeded': int(success), 'failed': int(not success), 'active': 0}
                 inventory[jobs.key(row)] = row
                 kube.objects['job', row['metadata']['name']] = row
-                pods.append(terminal_pod(row, succeeded=True))
+                pods.append(terminal_pod(row, succeeded=success))
                 job_creates.append(row['metadata']['name'])
                 return httpx.Response(201, json=row)
 
@@ -294,7 +316,7 @@ def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation
         writer_args['candidate_writer'] = RetainedCandidateFileWriter(retained=retained,
             open_resource=lambda _: nullcontext(ResourceIO()), open_creation=open_job)
     if recover:
-        with pytest.raises(deploy.DeploymentError, match='HTTPS'):
+        with pytest.raises(deploy.DeploymentError, match='HTTPS' if recover is True else 'execution unconfirmed'):
             idle.rollout(args, participant_rollout=retained, pool=pool, **writer_args)
         failed, = args.evidence_dir.glob('deployment-*.json')
         assert json.loads(failed.read_text())['shared_pool_release'] == retained.reference.model_dump(mode='json')
@@ -302,7 +324,8 @@ def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation
         args.recovery_evidence = failed
         # Recovery uses the original snapshot even though the platform's live
         # configuration now identifies the partially deployed new candidate.
-        assert json.loads(kube.objects['configmap', 'loom-platform-config']['data']['profile.json'])['candidate_sha'] == 'd' * 40
+        expected_candidate = previous_candidate if recover == 'pre-upgrade-backup' else 'd' * 40
+        assert json.loads(kube.objects['configmap', 'loom-platform-config']['data']['profile.json'])['candidate_sha'] == expected_candidate
         retained = operation.load_participant_rollout(reference=retained.reference,
             state_root=inputs['state_root'], anchor_dir=inputs['anchor_dir'])
     result = idle.rollout(args, participant_rollout=retained, pool=pool, **writer_args)
@@ -314,8 +337,12 @@ def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation
             '40-services.yaml', '60-execution.yaml', '70-public.yaml', '80-backup.yaml',
             'identity-policy-bootstrap.yaml', '00-task-identity-policy.yaml', '30-migrate.yaml', '50-configure.yaml'}
         assert not any(command[0] in {'create', 'delete'} for command in kube.commands)
-        assert job_creates == ['loom-predeploy-' + retained.reference.operation_id.hex,
+        expected_jobs = ['loom-predeploy-' + retained.reference.operation_id.hex,
             plan.files['30-migrate.yaml'][0]['metadata']['name'], plan.files['50-configure.yaml'][0]['metadata']['name']]
+        if failed_job is not None:
+            expected_jobs.insert(expected_jobs.index(failed_job), failed_job)
+        assert job_creates == expected_jobs
+        assert job_deletes == ([] if failed_job is None else [failed_job])
         assert len(written) == len(set(written)), 'recovery must read back prior writes'
         assert not any(key.startswith(('PersistentVolumeClaim:', 'ResourceQuota:')) for key in written)
         assert {'Deployment:' + config['namespace'] + ':loom-service',
