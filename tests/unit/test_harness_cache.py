@@ -3,6 +3,7 @@ install identity, verified end to end, and only ever an optimization."""
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from collections.abc import AsyncIterator
@@ -162,6 +163,57 @@ async def test_store_publishes_only_verified_archives_once() -> None:
     assert not await store_entry(store, bucket="b", entry=entry, body=_chunks(b"replacement-xx"),
                                  declared_size=14, declared_digest=_digest(b"replacement-xx"))
     assert store.objects[entry.archive_key] == archive
+
+
+@pytest.mark.usefixtures("_registered")
+async def test_concurrent_first_uploads_publish_exactly_one_verified_archive() -> None:
+    store, entry = _MemoryStore(), harness_cache_entry(team_id=uuid4(), plan=_plan())
+    ready = asyncio.Event()
+    arrivals = 0
+
+    async def concurrent_body(payload: bytes) -> AsyncIterator[bytes]:
+        nonlocal arrivals
+        arrivals += 1
+        if arrivals == 2:
+            ready.set()
+        await asyncio.wait_for(ready.wait(), timeout=2)
+        yield payload
+
+    archives = [b"first-install", b"other-install"]
+    accepted = await asyncio.gather(*[
+        store_entry(store, bucket="b", entry=entry, body=concurrent_body(archive),
+                    declared_size=len(archive), declared_digest=_digest(archive))
+        for archive in archives
+    ])
+    assert accepted.count(True) == 1
+    winner = archives[accepted.index(True)]
+    assert await read_entry_digest(store, bucket="b", entry=entry) == _digest(winner)
+    assert store.objects[entry.archive_key] == winner
+
+
+@pytest.mark.usefixtures("_registered")
+async def test_failed_concurrent_upload_cannot_replace_published_archive() -> None:
+    store, entry = _MemoryStore(), harness_cache_entry(team_id=uuid4(), plan=_plan())
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def invalid_body() -> AsyncIterator[bytes]:
+        started.set()
+        await asyncio.wait_for(release.wait(), timeout=2)
+        yield b"wrong"
+
+    pending = asyncio.create_task(store_entry(
+        store, bucket="b", entry=entry, body=invalid_body(),
+        declared_size=5, declared_digest=_digest(b"right")))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=2)
+        assert await store_entry(store, bucket="b", entry=entry, body=_chunks(b"valid"),
+                                 declared_size=5, declared_digest=_digest(b"valid"))
+    finally:
+        release.set()
+    with pytest.raises(HarnessCacheError, match="digest_mismatch"):
+        await pending
+    assert await read_entry_digest(store, bucket="b", entry=entry) == _digest(b"valid")
+    assert store.objects[entry.archive_key] == b"valid"
 
 
 @pytest.mark.usefixtures("_registered")
