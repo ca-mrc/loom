@@ -4231,6 +4231,151 @@ def _exercise_recovery_writer_census(kwargs, state, transport, inventory, kinds,
 
 
 @pytest.mark.timeout(240)
+def test_shared_recovery_runtime_inventory_reaches_nested_probes_without_staging_scope(
+        shared_operation, shared_runtime, completed_pool, handoff):
+    """Real anchored stop receipts and inventory; only remote phase effects/HTTP are doubled."""
+    import ssl
+
+    import httpx
+    from scripts.ops import nebius_certificates as private_state
+    from scripts.ops import nebius_shared_pool_guards as guards
+    from scripts.ops import nebius_shared_pool_operation as parent
+    from scripts.ops import nebius_shared_pool_recovery_drain as drain
+    from scripts.ops import nebius_shared_pool_recovery_fence as fence
+    from scripts.ops import nebius_shared_pool_recovery_workloads as stop
+    from scripts.ops import nebius_shared_pool_runtime_observation as runtime_observation
+    from scripts.ops.nebius_development_runtime_install import _read
+    from scripts.ops.nebius_development_runtime_live import runtime_resource_path
+    from scripts.ops.nebius_development_runtime_observation import HTTPSDevelopmentRuntimeObserver
+    from scripts.ops.nebius_ingress_stage import _snapshot, _uid
+    from tests.ops.test_nebius_development_pool_retained import (
+        populate_runtime_pods,
+        runtime_http_inventory,
+    )
+
+    assert callable(getattr(runtime_observation, 'shared_recovery_runtime_view', None)), 'recovery runtime inventory is missing'
+    args, bindings = shared_operation
+    runtime, runtime_parent = shared_runtime
+    completed = bindings.plan.development.runtime
+    manager = runtime.database.manager.retained.request.retained
+    state = Path(manager.operation['state_dir']).parent / 'shared-pool-handoff'
+    children = {
+        'forward-guards': (guards.prepare_shared_pool_guards, guards.validate_shared_pool_guards, 'guards.json'),
+        'recovery-fence': (fence.prepare_shared_recovery_fence, fence.validate_shared_recovery_fence, 'fence.json'),
+        'recovery-drain': (drain.prepare_shared_recovery_drain, drain.validate_shared_recovery_drain, 'drain.json'),
+        'recovery-stop': (stop.prepare_shared_recovery_workloads, stop.validate_shared_recovery_workloads, 'stop.json'),
+    }
+
+    class API(SharedPhaseAPI):
+        def prepare(self, phase, bound, directory):
+            children[phase][0](bindings=bound, state_dir=directory)
+
+        def validate_prepared_phase(self, phase, directory):
+            if phase == 'forward-guards':
+                record = children[phase][1](bindings=bindings, state_dir=directory, complete=False)
+                assert set(record['guards'].values()) == {'prepared'}
+            else:
+                children[phase][1](bindings=bindings, state_dir=directory, complete=False, prepared=True)
+
+        def validate_phase(self, phase, directory, *, complete):
+            children[phase][1](bindings=bindings, state_dir=directory, complete=complete)
+
+        def advance(self, phase, bound, directory):
+            if phase in {'forward-guards', 'recovery-stop'}:
+                return False
+            path = directory / children[phase][2]
+            record = _read(path)
+            if phase == 'recovery-fence':
+                record['pool'] = 'fenced'
+                record['guards'].update(dict.fromkeys(record['guards'], 'fenced'))
+            else:
+                assert phase == 'recovery-drain'
+                record['status'] = 'observed'
+            private_state._atomic_json(path, record)
+            return True
+
+    api = API(parent)
+    kwargs = {**args, 'bindings': bindings, 'api': api}
+    assert parent.run_shared_pool_operation(**kwargs, action='install')['phase'] == 'forward-guards'
+    assert parent.run_shared_pool_operation(**kwargs, action='recover')['phase'] == 'recovery-stop'
+    sources = stop._sources(bindings, state)
+    dev_keys = [key for key in sources if key in completed.resources
+        and completed.resources[key]['kind'] == 'Deployment'
+        and completed.resources[key]['metadata']['name'] != 'loom-pool-gateway']
+    assert len(dev_keys) >= 2
+    stopped_key, nested_key = dev_keys[0], dev_keys[-1]
+    calls, documents, handler = runtime_http_inventory(runtime, runtime_parent, completed_pool[3].server, handoff[2])
+    journal = state / 'recovery-stop/stop.json'
+    record = _read(journal)
+    for key, choices in sources.items():
+        original = choices[0]
+        before = _snapshot(original)
+        before['metadata']['uid'] = _uid(original)
+        expected = stop._stopped(bindings, before)
+        record['resources'][key].update(status='intent' if key == stopped_key else 'stopped',
+            before=before, before_resource_version='500', expected=expected)
+        if key == stopped_key:
+            break
+    private_state._atomic_json(journal, record)
+    target = copy.deepcopy(record['resources'][stopped_key]['expected'])
+    target['metadata']['uid'] = _uid(completed.resources[stopped_key])
+    documents[runtime_resource_path(target)] = target
+
+    def connect(observer, read=handler):
+        for connection in (observer, observer.manager, observer.foundation):
+            connection.client.close()
+            connection.client = type(completed_pool[3].api.client)(base_url=connection.api_server,
+                transport=httpx.MockTransport(read))
+
+    with HTTPSDevelopmentRuntimeObserver(request=runtime,
+            api_server=runtime.database.foundation.inputs.config['kubernetes_api_server'],
+            ssl_context=ssl.create_default_context()) as observer:
+        connect(observer)
+        with pytest.raises(ValueError):
+            observer.inspect(state_dir=completed.state_dir)
+        observed = observer.inspect(state_dir=completed.state_dir, _shared_handoff=bindings)
+        assert observed[stopped_key]['spec']['replicas'] == 0
+        assert observed[nested_key]['spec']['replicas'] == 1
+        raw = journal.read_bytes()
+        # Removing intent must make this live recovery marker unauthorized.
+        record['resources'][stopped_key] = stop._prepared()
+        private_state._atomic_json(journal, record)
+        with pytest.raises(ValueError):
+            observer.inspect(state_dir=completed.state_dir, _shared_handoff=bindings)
+        journal.write_bytes(raw)
+        documents[runtime_resource_path(target)]['metadata']['uid'] = str(uuid4())
+        with pytest.raises(ValueError):
+            observer.inspect(state_dir=completed.state_dir, _shared_handoff=bindings)
+        documents[runtime_resource_path(target)]['metadata']['uid'] = _uid(completed.resources[stopped_key])
+
+    populate_runtime_pods(documents)
+    with runtime_observation.HTTPSSharedPoolRuntimeProbes(bindings=bindings,
+            api_server=runtime.database.foundation.inputs.config['kubernetes_api_server'], token='fixture-token',
+            ssl_context=ssl.create_default_context(cadata=runtime.database.foundation.bootstrap['material']['loom-platform-db']['ca.crt'])) as probes:
+        connect(probes)
+        _, current, pod = probes._running(nested_key, completed.state_dir)
+        assert _key(current) == nested_key and pod['status']['phase'] == 'Running'
+        changed = []
+
+        def changing_read(message):
+            response = handler(message)
+            if not changed:
+                journal.write_bytes(raw + b'\n')
+                changed.append(True)
+            return response
+
+        connect(probes, changing_read)
+        with pytest.raises(ValueError):
+            probes._running(nested_key, completed.state_dir)
+        assert changed
+        journal.write_bytes(raw)
+    assert calls and all(message.method == 'GET' for message in calls)
+    staging_namespaces = {row['metadata']['namespace'] for row in bindings.plan.staging.originals.values()}
+    assert all('/namespaces/' + namespace + '/' not in message.url.path
+        for message in calls for namespace in staging_namespaces)
+
+
+@pytest.mark.timeout(240)
 @pytest.mark.parametrize('connection', ['protocol', 'database'])
 @pytest.mark.parametrize('forward_point', ['partial-acquire', 'partial-release'])
 def test_shared_recovery_fence_preserves_forward_history_and_observes_unknown_writes(
