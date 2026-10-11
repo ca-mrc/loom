@@ -289,3 +289,43 @@ def test_recovery_loads_original_evidence_in_deployment_job(workflow, tmp_path):
     deploy = next(step for step in steps if step.get("name") == "Deploy once if idle")
     assert deploy["env"]["RECOVERY_EVIDENCE"] == "${{ steps.recovery.outputs.recovery_evidence }}"
     assert deploy["env"]["CANDIDATE_SHA"] == "${{ needs.check.outputs.candidate_sha }}"
+
+
+@pytest.mark.parametrize('mode', ['', 'standalone', 'shared', 'typo'])
+def test_rollout_mode_is_explicit_and_unknown_modes_fail_closed(workflow, tmp_path, mode):
+    steps = workflow['jobs']['check']['steps']
+    route = next((step for step in steps if step.get('id') == 'route'), None)
+    assert route is not None, 'protected rollout has no explicit shared route'
+    output = tmp_path / 'output'
+    result = subprocess.run(['bash', '-e', '-c', route['run']], capture_output=True, text=True,
+        env={**os.environ, 'ROLLOUT_MODE': mode, 'GITHUB_OUTPUT': str(output)})
+    if mode == 'typo':
+        assert result.returncode != 0 and not output.exists()
+    else:
+        assert result.returncode == 0
+        assert output.read_text() == 'mode=' + (mode or 'standalone') + '\n'
+    assert workflow['jobs']['check']['outputs']['mode'] == '${{ steps.route.outputs.mode }}'
+
+
+@pytest.mark.parametrize('automatic', ['true', 'false'])
+def test_shared_rollout_shell_uses_dedicated_key_and_never_standalone_fallback(workflow, tmp_path, automatic):
+    steps = workflow['jobs']['rollout']['steps']
+    shared = next((step for step in steps if step.get('name') == 'Deploy retained shared participant'), None)
+    assert shared is not None, 'shared participant is not connected to the protected workflow'
+    args = run_step_with_recorded_uv(tmp_path, shared['run'], AUTOMATIC=automatic,
+        RECOVERY_EVIDENCE='', DEPLOY_SSH_KEY='test-participant-key', DEPLOY_KNOWN_HOSTS='test-host',
+        LOOM_DEPLOY_SSH_TARGET='operator@gateway.example.test', CANDIDATE_SHA='a' * 40,
+        PUBLICATION_RUN_ID='42', ARTIFACT_NAME='nebius-candidate-' + 'a' * 40 + '-42-2')
+    assert args[:5] == ['run', '--no-sync', 'python', '-m', 'scripts.ops.nebius_pool_participant_rollout']
+    assert '--kubeconfig' not in args and '--publication-dir' not in args
+    assert args[args.index('--publication-run-id') + 1] == '42'
+    assert ('--automatic' in args) == (automatic == 'true')
+    assert shared['env']['DEPLOY_SSH_KEY'] == '${{ secrets.NEBIUS_PARTICIPANT_SSH_KEY }}'
+    assert not list(tmp_path.glob('nebius-*-key')) and not list(tmp_path.glob('nebius-*-known-hosts'))
+    standalone = next(step for step in steps if step.get('name') == 'Deploy once if idle')
+    download = next(step for step in steps if step.get('name') == 'Download selected candidate')
+    for mode in ('shared', 'standalone', 'unknown'):
+        context = {'needs': SimpleNamespace(check=SimpleNamespace(outputs=SimpleNamespace(mode=mode)))}
+        enabled = [eval(step['if'], {'__builtins__': {}}, context) for step in (shared, standalone, download)]
+        assert enabled == {'shared': [True, False, False], 'standalone': [False, True, True],
+            'unknown': [False, False, False]}[mode]

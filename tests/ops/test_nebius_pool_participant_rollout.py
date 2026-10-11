@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib
 import json
 import subprocess
@@ -291,3 +292,68 @@ def test_evidence_write_failure_preserves_existing_attempt_and_never_dispatches(
         assert path.read_bytes() == original
     else:
         assert not path.exists()
+
+
+@pytest.mark.parametrize('recover', [False, True])
+def test_cli_keeps_exact_workflow_selection_and_recovery(tmp_path, monkeypatch, publication_api, recover):
+    runner = module()
+    assert callable(getattr(runner, 'main', None)), 'runner CLI is not connected'
+    monkeypatch.setenv('GITHUB_REPOSITORY_ID', str(REPOSITORY_ID))
+    monkeypatch.setenv('GITHUB_REF', 'refs/heads/dev')
+    monkeypatch.setenv('GITHUB_RUN_ID', '92')
+    monkeypatch.setenv('GITHUB_RUN_ATTEMPT', '1')
+    monkeypatch.setenv('LOOM_DEPLOY_SSH_TARGET', 'operator@gateway.example.test')
+    monkeypatch.setenv('LOOM_DEPLOY_SSH_KEY_FILE', str(tmp_path / 'key'))
+    monkeypatch.setenv('LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE', str(tmp_path / 'hosts'))
+    args = ['runner', 'run', '--publication-run-id', '42', '--candidate', 'a' * 40,
+        '--artifact', 'nebius-candidate-' + 'a' * 40 + '-42-2', '--evidence-dir', str(tmp_path / 'evidence')]
+    if recover:
+        binding = report()['release']
+        record = {'schema_version': 'loom.nebius-deployment.v1', 'mode': 'apply', 'status': 'failed',
+            'shared_pool_release': binding['reference'], 'run_id': 91, 'run_attempt': 2,
+            **{key: binding[key] for key in ('candidate_sha', 'previous_candidate_sha', 'guard_owner',
+                'cluster_id', 'namespace', 'execution_namespace')}}
+        evidence = tmp_path / 'original.json'
+        evidence.write_text(json.dumps(record))
+        args.extend(['--recovery-evidence', str(evidence)])
+        monkeypatch.setattr(idle, 'github', lambda *a, **k: pytest.fail('recovery cannot select the latest run attempt'))
+    else:
+        args.append('--automatic')
+    captured = []
+
+    def run(**kwargs):
+        captured.append(kwargs)
+        return {'status': 'complete', 'candidate_sha': 'a' * 40}
+
+    monkeypatch.setattr(runner, 'run_release', run)
+    monkeypatch.setattr(runner.sys, 'argv', args)
+    assert runner.main() == 0
+    selected, = captured
+    assert selected['run_id'] == 92 and selected['run_attempt'] == 1
+    assert selected['automatic'] is not recover
+    if recover:
+        assert selected['publication'] is None and selected['recovery'] == record
+    else:
+        assert selected['publication'].artifact_id == 72 and selected['recovery'] is None
+
+
+def test_tooling_builder_is_deterministic_and_excludes_host_configuration(tmp_path):
+    runner = module()
+    from scripts.ops import nebius_pool_participant_gateway as gateway
+
+    assert callable(getattr(runner, 'build_bundle', None)), 'reviewed tooling bundle builder is missing'
+    uv, requirements, wheels = tmp_path / 'uv', tmp_path / 'requirements.txt', tmp_path / 'wheels'
+    uv.write_bytes(b'test-uv')
+    requirements.write_bytes(b'test==1 --hash=sha256:' + b'a' * 64)
+    wheels.mkdir()
+    (wheels / 'loom-0.1.0-py3-none-any.whl').write_bytes(b'test-wheel')
+    (wheels / 'loom_bundle_checksum-0.1.0-py3-none-any.whl').write_bytes(b'test-checksum-wheel')
+    source = {'source_sha': 'a' * 40, 'source_archive_sha256': 'sha256:' + 'b' * 64}
+    kwargs = dict(source=source, uv=uv, requirements=requirements, wheels=wheels)
+    content = runner.build_bundle(**kwargs)
+    assert content == runner.build_bundle(**kwargs)
+    files, selection = gateway.unpack_bundle(content)
+    assert selection == {**source, 'schema_version': 'loom.nebius-participant-tooling.v1'}
+    assert 'host.json' not in files and 'operation.json' not in files
+    assert files['scripts/ops/nebius_pool_participant_dispatch.py']
+    assert json.loads(files['manifest.json'])['uv'] == hashlib.sha256(b'test-uv').hexdigest()
