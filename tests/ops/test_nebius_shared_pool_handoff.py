@@ -437,6 +437,121 @@ def test_shared_private_entry_binds_retained_runtime_without_retired_operator_ac
         module.load_inputs(operation)
 
 
+@pytest.mark.timeout(420)
+def test_shared_private_entry_dispatches_real_parent_and_preserves_uncertain_intent(
+        shared_operation, shared_guard_transport, monkeypatch, capsys):
+    """Entry, concrete parent and guard child are real; external observations/transport are controlled."""
+    import json
+    import ssl
+    from types import SimpleNamespace
+
+    import httpx
+    from scripts.ops import nebius_shared_pool_api as concrete
+    from scripts.ops import nebius_shared_pool_entry as entry
+
+    assert callable(getattr(entry, 'main', None)), 'protected shared entry dispatch is missing'
+    assert callable(getattr(entry, 'connected_api', None)), 'protected shared connection is missing'
+    args, bindings = shared_operation
+    guard, model = shared_guard_transport
+    root, operation, _, _, _ = _shared_entry_inputs(args, bindings)
+    monkeypatch.setattr(entry, 'SOURCE_RECORD', root / 'shared-pool-source.json')
+    operator = root / 'operator-key.json'
+    credentials, configs, failures = [], [], set()
+    context = ssl.create_default_context(cadata=(root / 'operator-ca.pem').read_text())
+
+    async def transport(connection):
+        assert connection.endpoint == args['runtime'].database.foundation.inputs.config['kubernetes_api_server']
+        assert connection.ca_file == root / 'operator-ca.pem' and connection.credentials_file == operator
+        credentials.append(operator.read_bytes())
+        if 'authentication' in failures:
+            operator.write_bytes(b'changed-during-token-exchange')
+        return context, 'test-operator-token'
+
+    monkeypatch.setattr(entry, '_transport', transport)
+
+    def checked(**options):
+        if 'bindings' in options:
+            assert options['bindings'] == bindings
+        return SimpleNamespace(plan=bindings.plan, bindings=bindings, pending_workloads=(),
+            pool_state='closed', guard_states={target.namespace: 'held' if target.namespace in model.held else 'open'
+                for target in bindings.migration.guards}, input_digest=bindings.input_digest, authority={})
+
+    async def publication(**options):
+        assert options['request'] == args['runtime']
+
+    async def provider(**options):
+        assert options['operator_credentials'] == operator and options['runtime'] == args['runtime']
+        return checked(**options)
+
+    monkeypatch.setattr(concrete, 'qualify_runtime_publication', publication)
+    monkeypatch.setattr(concrete, 'observe_shared_pool_provider', provider)
+    for name in ('observe_shared_pool_writers', 'observe_shared_pool_forward_writers',
+            'observe_shared_pool_processes', 'observe_shared_pool_forward_processes'):
+        monkeypatch.setattr(concrete, name, checked)
+    real_api = concrete.HTTPSSharedPoolOperationAPI
+
+    def api(**options):
+        connection = real_api(**options)
+        connection.client.close()
+        connection.client = type(connection.client)(base_url=connection.api_server,
+            transport=httpx.MockTransport(lambda request: httpx.Response(404)))
+        guard.prefix = list(connection.guards.prefix)
+        configs.append(Path(connection.prefix[connection.prefix.index('--kubeconfig') + 1]))
+        return connection
+
+    monkeypatch.setattr(entry, 'HTTPSSharedPoolOperationAPI', api)
+    manager = args['runtime'].database.manager.retained.request.retained
+    anchor = Path(manager.operation['anchor_dir'])
+    state = Path(manager.operation['state_dir']).parent / 'shared-pool-handoff'
+
+    def run(action, code, status):
+        assert entry.main(str(root / 'operation.json'), action) == code
+        raw = capsys.readouterr().out
+        assert 'private-new-shared-operator' not in raw and 'test-operator-token' not in raw
+        value = json.loads(raw)
+        assert value['status'] == status
+        assert all(not path.exists() for path in configs), 'temporary connection leaked after entry exit'
+        return value
+
+    assert run('qualify', 0, 'tooling_qualified') == {'status': 'tooling_qualified'}
+    assert not credentials
+    assert run('forward-guards', 1, 'blocked') == {'status': 'blocked', 'stage': 'operation'}
+    assert not credentials and not model.acquires and not state.exists()
+    report = run('preflight', 0, 'shared_pool_preflight_qualified')
+    assert {key: report[key] for key in ('source_sha', 'installation_id', 'namespace', 'operation_id')} == {
+        key: operation[key] for key in ('source_sha', 'installation_id', 'namespace', 'operation_id')}
+    assert report['admission_open'] is False and report['writer_migration_complete'] is False
+    assert not state.exists() and not (anchor / 'shared-pool-handoff.json').exists() and not model.acquires
+    # Selecting recovery without an existing handoff must never become install.
+    assert run('recover', 1, 'blocked')['stage'] == 'handoff'
+    assert not state.exists() and not model.acquires
+
+    failures.add('authentication')
+    assert run('install', 1, 'blocked')['stage'] == 'connection'
+    assert not model.acquires and not state.exists()
+    failures.clear()
+    operator.write_bytes(b'private-new-shared-operator')
+    # A changed pinned file is rejected even before another credential exchange.
+    loaded = entry.load_inputs(operation)
+    before = len(credentials)
+    operator.write_bytes(b'changed-before-connect')
+    with pytest.raises(ValueError):
+        with entry.connected_api(loaded):
+            pytest.fail('changed private input reached the handoff')
+    assert len(credentials) == before
+    operator.write_bytes(b'private-new-shared-operator')
+
+    model.busy = bindings.migration.guards[0].namespace
+    assert run('install', 0, 'pending')['phase'] == 'forward-guards'
+    assert model.acquires == [model.busy] and not model.held
+    model.busy, model.uncertain = None, bindings.migration.guards[0].namespace
+    assert run('install', 1, 'blocked')['stage'] == 'handoff'
+    attempted = list(model.acquires)
+    assert run('install', 1, 'blocked')['stage'] == 'handoff'
+    assert model.acquires == attempted
+    assert json.loads((state / 'operation.json').read_bytes())['forward']['forward-guards']['status'] == 'started'
+
+
 class SharedPhaseAPI:
     """Only the phase-adapter boundary is doubled in parent-journal tests.
 
