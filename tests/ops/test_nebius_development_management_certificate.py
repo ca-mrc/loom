@@ -197,6 +197,42 @@ def test_installed_entrypoint_freezes_mode_and_preserves_foreign_keys(inputs):
     assert denied.returncode == 126 and b"substituted" not in denied.stdout
 
 
+def test_installed_manager_entrypoint_runs_actual_isolated_gateway_payload(inputs, tmp_path):
+    """Execute the bundled gateway; only uv/package install and issuance are substitutes."""
+    old_root, keys, key, _, _ = inputs
+    tools = tmp_path / "tooling"
+    tools.mkdir()
+    config, uv, requirements = selection.__wrapped__(tools)
+    root = old_root.with_name("nebius-development-management-certificates")
+    config["state_dir"] = str(root / "state")
+    issuer = (f"#!{sys.executable}\nimport json,sys\nfrom pathlib import Path\n"
+        "assert sys.argv[1].endswith('/scripts/ops/nebius_certificates.py')\n"
+        "assert sys.argv[2:4] == ['issue-management', '--config']\n"
+        "config=json.loads(Path(sys.argv[4]).read_text())\n"
+        f"assert config['management_host'] == {HOST!r}\n"
+        f"print(json.dumps({report()!r}))\n")
+    uv.write_text(f"#!{sys.executable}\nimport sys\nfrom pathlib import Path\n"
+        "if sys.argv[1]=='venv':\n"
+        " target=Path(sys.argv[-1])/'bin'/'python'\n"
+        " target.parent.mkdir(parents=True, mode=0o700)\n"
+        f" target.write_text({issuer!r})\n"
+        " target.chmod(0o700)\n"
+        "else:\n"
+        " assert sys.argv[1:3]==['pip','sync'] and '--require-hashes' in sys.argv\n")
+    content = bundle((config, uv, requirements))
+    checksum = hashlib.sha256(content).hexdigest()
+    previous = keys.read_bytes()
+    installer.install(content, expected_sha256=checksum, public_key=key, management_only=True, apply=True)
+    entry = root / "authority" / checksum / "entrypoint.py"
+    result = subprocess.run([sys.executable, "-I", str(entry)], input=content, capture_output=True,
+        env={"SSH_ORIGINAL_COMMAND": COMMAND}, timeout=15)
+    assert result.returncode == 0, result.stderr.decode()
+    assert json.loads(result.stdout) == report()
+    assert keys.read_bytes().startswith(previous)
+    assert not old_root.exists()
+    assert (root / "releases" / checksum / "complete").read_bytes() == b"complete"
+
+
 @pytest.mark.parametrize("change", [None, "host", "installation", "failure"])
 def test_runner_uses_dedicated_command_and_rejects_foreign_success_or_retries(selection, change, monkeypatch):
     value = report()
