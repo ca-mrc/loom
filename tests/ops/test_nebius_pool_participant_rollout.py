@@ -5,7 +5,6 @@ import copy
 import importlib
 import json
 import subprocess
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -151,8 +150,8 @@ def test_runner_persists_original_intent_before_execute(tmp_path, monkeypatch, o
             return {'id': 99}
         assert path == 'deployments/99/statuses'
         payloads.append(payload)
-        if (outcome == 'status-lost' and payload['state'] == 'in_progress'
-                or outcome == 'success-status-lost' and payload['state'] == 'success'):
+        if ((outcome == 'status-lost' and payload['state'] == 'in_progress')
+                or (outcome == 'success-status-lost' and payload['state'] == 'success')):
             raise RuntimeError('private GitHub diagnostic')
         return {'id': 100}
 
@@ -251,3 +250,44 @@ def test_recovery_uses_original_reference_without_preparation(tmp_path, monkeypa
         assert intents[0]['run_id'] == 92 and intents[0]['run_attempt'] == 1
         assert intents[0]['shared_pool_release'] == record['shared_pool_release']
     assert 'prepare' not in events and len(events) <= 1
+
+
+@pytest.mark.parametrize('failure', ['exclusive-race', 'disk-error'])
+def test_evidence_write_failure_preserves_existing_attempt_and_never_dispatches(tmp_path, monkeypatch, failure):
+    runner = module()
+    from loom_service.environment_management.candidates import ProtectedPublication
+
+    publication = ProtectedPublication.model_validate(report()['release']['reference']['publication'])
+    evidence = tmp_path / 'evidence'
+    path = evidence / 'deployment-91-2.json'
+    original = b'{"foreign":"original immutable evidence"}'
+    calls = []
+    real_save = runner._save
+
+    def save(selected, value, *, initial=False):
+        calls.append(initial)
+        if initial:
+            if failure == 'exclusive-race':
+                selected.write_bytes(original)
+            else:
+                raise OSError('private disk path and diagnostic')
+        return real_save(selected, value, initial=initial)
+
+    def transport(request, *, action):
+        assert action == 'prepare', 'failed evidence retention must precede remote execution'
+        result = report('prepared')
+        result['release']['reference']['operation_id'] = request['operation_id']
+        result['release']['guard_owner'] = 'rollout-' + request['operation_id'].replace('-', '')
+        return result
+
+    monkeypatch.setattr(runner, '_save', save)
+    monkeypatch.setattr(idle, 'github', lambda path, payload=None: [])
+    with pytest.raises(runner.RolloutError) as error:
+        runner.run_release(publication=publication, run_id=91, run_attempt=2, evidence_dir=evidence,
+            transport=transport)
+    assert 'private' not in str(error.value)
+    assert calls == [True]
+    if failure == 'exclusive-race':
+        assert path.read_bytes() == original
+    else:
+        assert not path.exists()
