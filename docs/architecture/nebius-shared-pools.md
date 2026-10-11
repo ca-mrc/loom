@@ -1592,6 +1592,17 @@ final source/resource readback. This observation still does not prove semantic
 latest-release completion, process/database readiness, publication/provider scope
 or guard ownership; the protected caller must establish those independently.
 
+The selected participant's idle-guard observation uses the current source/receipt-
+qualified PostgreSQL StatefulSet and Service with the retained namespace and
+credential UID/version. It proves the actual ready database Pod and Service
+backend before running the existing read-only owner/candidate query. Repeated
+guard, process-identity, source and connection reads reject a changed backend,
+restart, credential, release or guard while observing. Preflight accepts open or
+this release's held guard; guarded/ready phases require that exact held owner.
+The released-state check requires open intake, but does not establish completed
+release history. None of these observations acquires/releases a guard, qualifies
+application processes or replaces the other protected release checks.
+
 The transaction, pool-effect adapter and parent interface do not establish
 publication, history, full runtime readiness or recovery authority on their own.
 The protected entry and phase-aware live qualifier must still connect the normal

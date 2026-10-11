@@ -13,7 +13,7 @@ import json
 import ssl
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import UUID
 
 from scripts.ops import nebius_certificates as private_state
@@ -348,6 +348,77 @@ class HTTPSParticipantResourceObserver(ManagementKubernetesTransport):
             return result
         except Exception:
             raise ValueError('participant live resources unqualified; preserve evidence') from None
+
+    def observe_guard(self, *, kubeconfig: Path, executable: Path,
+            phase: Literal['preflight', 'guarded', 'ready', 'released'], preparing: str | None = None) -> str:
+        """Read this release's idle guard through its currently qualified database.
+
+        Original credential/namespace/database identities remain pinned. Only
+        source-and-journal-qualified database resources may replace their prior
+        manifests. This does not acquire/release intake, attest application
+        readiness or authorize treating an open guard as completed history.
+        """
+        from scripts.ops.deploy_nebius_platform import rollout_guard_observation_sql
+        from scripts.ops.nebius_development_runtime_probes import HTTPSDevelopmentRuntimeProbes
+        from scripts.ops.nebius_pool_migration_guard import KubectlPoolGuardAPI
+        from scripts.ops.nebius_pool_participant_operation import _paths
+
+        try:
+            allowed = {'preflight': {'open', 'held'}, 'guarded': {'held'}, 'ready': {'held'}, 'released': {'open'}}[phase]
+            retained = self.retained
+            current = self.observe(preparing=preparing)
+            receipts = _ResourceView(retained, preparing).files
+            _, marker = _paths(retained.reference, retained.state_dir.parent, retained.anchor_dir)
+            anchor = private_state._private_read(marker)
+            original, = (row for row in retained.inputs.previous.guards
+                if row.participant_id == retained.release.refresh.participant_id)
+            database = original.database
+            if database is None:
+                raise ValueError
+            statefulset, service = (current[_key(row)] for row in (database.statefulset, database.service))
+            if (_uid(statefulset) != _uid(database.statefulset) or _uid(service) != _uid(database.service)):
+                raise ValueError
+            target = replace(original, database=replace(database, statefulset=statefulset, service=service))
+            request = replace(retained.inputs.previous,
+                guards=tuple(target if row == original else row for row in retained.inputs.previous.guards))
+            guards = KubectlPoolGuardAPI(request=request, kubeconfig=kubeconfig, executable=executable)
+            prefix = tuple(guards.prefix)
+            query = rollout_guard_observation_sql(owner=retained.guard_owner, candidate=retained.inputs.candidate['candidate_sha'])
+
+            def unchanged() -> None:
+                if (self.retained != retained or guards.request != request or tuple(guards.prefix) != prefix
+                        or hashlib.sha256(private_state._private_read(kubeconfig, limit=512 * 1024)).hexdigest() != guards.kubeconfig_sha256
+                        or hashlib.sha256(private_state._private_read(retained.state_dir / 'inputs.json', limit=16 * 1024**2)).hexdigest()
+                            != retained.reference.inputs_sha256
+                        or private_state._private_read(marker) != anchor
+                        or _ResourceView(retained, preparing).files != receipts):
+                    raise ValueError
+                # Full semantic source loading brackets this read-only scope.
+                # Nested SQL challenges recheck its exact bytes, not rebuild
+                # the unchanged release and every ancestor for each read.
+
+            def read() -> tuple[str, tuple[Any, ...]]:
+                unchanged()
+                before = HTTPSDevelopmentRuntimeProbes._process_identity(guards._database(target))
+                report = guards._run(['exec', '-n', target.namespace, 'pod/loom-postgres-0', '-c', 'loom-postgres', '--',
+                    'psql', '-X', '-qAt', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', 'loom', '-c', query])
+                if (set(report) != {'status'} or report['status'] not in allowed
+                        or HTTPSDevelopmentRuntimeProbes._process_identity(guards._database(target)) != before):
+                    raise ValueError
+                unchanged()
+                return cast(str, report['status']), before
+
+            result = read()
+            after = self.observe(preparing=preparing)
+            if (after.keys() != current.keys()
+                    or any(not _matches(after[key], row, _uid(row)) for key, row in current.items())
+                    or read() != result):
+                raise ValueError
+            unchanged()
+            self._source()
+            return result[0]
+        except Exception:
+            raise ValueError('participant guard observation unqualified; preserve evidence') from None
 
     def observe_writers(self, *, bindings: SharedPoolGuardBindings, shared_state: Path,
             preparing: str | None = None) -> SharedPoolWriterObservation:
