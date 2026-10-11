@@ -293,6 +293,150 @@ def shared_operation(shared_runtime, staging_history, staging_observation, compl
     return args, bound
 
 
+def _shared_entry_inputs(args, bindings):
+    """Retain genuine runtime input/source and a separately captured shared operation."""
+    import base64
+    import json
+    from dataclasses import asdict
+
+    from scripts.ops import nebius_certificates as private_state
+
+    runtime = args['runtime']
+    manager = runtime.database.manager.retained.request.retained
+    owner = Path(manager.operation['inputs_path']).parents[3]
+    root = owner / '.loom/nebius-development-runtime' / manager.binding.installation_id / str(runtime.database.operation_id)
+    root.mkdir(parents=True, mode=0o700)
+    material = {}
+    values = runtime.database.material[0]['data']
+    for field, raw in (('collector_credential_file', runtime.collector_credential),
+            ('registry_credential_file', runtime.registry_credential),
+            ('actuator_password_file', base64.b64decode(values['actuator-password'])),
+            ('batch_runner_token_file', base64.b64decode(values['batch-runner-token']))):
+        path = root / (field + '.private')
+        private_state._write_private(path, raw)
+        material[field] = str(path)
+    cache = None
+    if runtime.cache_material is not None:
+        cache = {}
+        for index, (key, value) in enumerate(runtime.cache_material.items()):
+            path = root / f'cache-{index}.private'
+            private_state._write_private(path, value.encode())
+            cache[key] = str(path)
+    publication = runtime.database.manager.publication
+    source = publication.source.model_dump(mode='json')
+    private_state._atomic_json(root / 'development-runtime-source.json', source)
+    retired = {'endpoint': runtime.database.foundation.inputs.config['kubernetes_api_server'],
+        'ca_file': str(root / 'retired-operator-ca.pem'), 'credentials_file': str(root / 'retired-operator-key.json')}
+    value = {'schema_version': 'loom.nebius-development-runtime-inputs.v1',
+        'retained': runtime.database.reference.model_dump(mode='json'),
+        'publication': publication.publication.model_dump(mode='json'),
+        'candidate': publication.bundle.candidate, 'profile': publication.bundle.profile,
+        'collector_scope': runtime.collector_scope.model_dump(mode='json'),
+        'registry_scope': runtime.registry_scope.model_dump(mode='json'),
+        'cache_files': cache, 'operator_connection': retired, **material}
+    private_state._atomic_json(root / 'inputs.json', value)
+    runtime_operation = {'schema': 'loom.nebius-development-runtime-operation.v1',
+        'source_sha': source['source_sha'], 'installation_id': manager.binding.installation_id,
+        'namespace': manager.binding.namespace, 'operation_id': str(runtime.database.operation_id),
+        'inputs_path': str(root / 'inputs.json'), 'inputs_sha256': hashlib.sha256((root / 'inputs.json').read_bytes()).hexdigest()}
+    private_state._atomic_json(root / 'operation.json', runtime_operation)
+    shared_root = owner / '.loom/nebius-shared-pool' / manager.binding.installation_id / str(bindings.migration.registration.spec.operation_id)
+    shared_root.mkdir(parents=True, mode=0o700)
+    private_state._atomic_json(shared_root / 'shared-pool-source.json', source)
+    private_state._write_private(shared_root / 'operator-ca.pem', runtime.database.foundation.bootstrap['material']['loom-platform-db']['ca.crt'].encode())
+    private_state._write_private(shared_root / 'operator-key.json', b'private-new-shared-operator')
+    private_state._atomic_json(shared_root / 'staging.json', args['observation'])
+    dev, = (row for row in bindings.migration.guards if row.namespace == 'loom-dev')
+    inputs = {'schema_version': 'loom.nebius-shared-pool-inputs.v1',
+        'runtime': {'operation_path': str(root / 'operation.json'),
+            'operation_sha256': hashlib.sha256((root / 'operation.json').read_bytes()).hexdigest()},
+        'legacy': args['legacy'].selector.model_dump(mode='json'),
+        'staging_observation_file': str(shared_root / 'staging.json'),
+        'staging_observation_sha256': hashlib.sha256((shared_root / 'staging.json').read_bytes()).hexdigest(),
+        'development_guard': json.loads(json.dumps(asdict(dev), default=str)),
+        'operator_connection': {'endpoint': retired['endpoint'], 'ca_file': str(shared_root / 'operator-ca.pem'),
+            'credentials_file': str(shared_root / 'operator-key.json')}}
+    private_state._atomic_json(shared_root / 'inputs.json', inputs)
+    operation = {'schema': 'loom.nebius-shared-pool-operation.v1', 'source_sha': source['source_sha'],
+        'installation_id': manager.binding.installation_id, 'namespace': manager.binding.namespace,
+        'operation_id': str(bindings.migration.registration.spec.operation_id),
+        'inputs_path': str(shared_root / 'inputs.json'),
+        'inputs_sha256': hashlib.sha256((shared_root / 'inputs.json').read_bytes()).hexdigest()}
+    private_state._atomic_json(shared_root / 'operation.json', operation)
+    return shared_root, operation, inputs, root, retired
+
+
+def test_shared_private_entry_binds_retained_runtime_without_retired_operator_access(shared_operation, monkeypatch):
+    import importlib.util
+
+    from scripts.ops import nebius_certificates as private_state
+
+    name = 'scripts.ops.nebius_shared_pool_entry'
+    assert importlib.util.find_spec(name) is not None, 'protected shared-pool private entry is missing'
+    module = __import__(name, fromlist=['load_inputs'])
+    args, bindings = shared_operation
+    root, operation, inputs, runtime_root, retired = _shared_entry_inputs(args, bindings)
+    monkeypatch.setattr(module, 'SOURCE_RECORD', root / 'shared-pool-source.json')
+    monkeypatch.setattr(module, '_transport', lambda *_: pytest.fail('intake must finish before credential exchange'))
+    context = module.load_inputs(operation)
+    assert context.runtime == args['runtime'] and context.legacy == args['legacy']
+    assert context.bindings == bindings and context.observation == args['observation']
+    assert all(path.read_bytes() == raw for path, raw in context.files.items())
+    assert {root / 'inputs.json', root / 'staging.json', runtime_root / 'operation.json',
+        runtime_root / 'inputs.json', runtime_root / 'development-runtime-source.json'} <= context.files.keys()
+    assert all(not Path(retired[key]).exists() and Path(retired[key]) not in context.files
+        for key in ('ca_file', 'credentials_file'))
+    assert 'private-new-shared-operator' not in repr(context)
+    original = {path: path.read_bytes() for path in context.files}
+    for damage in ('source', 'runtime-source', 'snapshot', 'runtime-reference', 'dev-database', 'dev-controller',
+            'staging-namespace', 'pool-operation', 'legacy', 'missing-runtime-child', 'non-private-key'):
+        changed = copy.deepcopy(operation)
+        altered = copy.deepcopy(inputs)
+        try:
+            if damage == 'source':
+                changed['source_sha'] = 'f' * 40
+            elif damage == 'runtime-source':
+                private_state._atomic_json(runtime_root / 'development-runtime-source.json',
+                    {'source_sha': 'f' * 40, 'source_archive_sha256': 'sha256:' + 'e' * 64})
+            elif damage == 'snapshot':
+                (root / 'staging.json').write_bytes((root / 'staging.json').read_bytes() + b'\n')
+            elif damage == 'runtime-reference':
+                altered['runtime']['operation_sha256'] = 'f' * 64
+            elif damage == 'dev-database':
+                altered['development_guard']['database']['credential_uid'] = str(uuid4())
+            elif damage == 'dev-controller':
+                altered['development_guard']['controller']['spec']['replicas'] = 0
+            elif damage == 'staging-namespace':
+                changed['namespace'] = 'loom-staging'
+            elif damage == 'pool-operation':
+                changed['operation_id'] = str(uuid4())
+            elif damage == 'legacy':
+                altered['legacy']['completion_sha256'] = 'f' * 64
+            elif damage == 'missing-runtime-child':
+                (bindings.plan.development.runtime.state_dir / 'start/transition.json').unlink()
+            else:
+                (root / 'operator-key.json').chmod(0o644)
+            private_state._atomic_json(root / 'inputs.json', altered)
+            changed['inputs_sha256'] = hashlib.sha256((root / 'inputs.json').read_bytes()).hexdigest()
+            with pytest.raises(ValueError, match='shared pool private inputs unqualified'):
+                module.load_inputs(changed)
+        finally:
+            for path, raw in original.items():
+                path.write_bytes(raw)
+                path.chmod(0o600)
+    # Old operation paths may reside in their authenticated immutable release;
+    # an arbitrary same-content operation copied elsewhere is not a predecessor.
+    copied = root / 'foreign/operation.json'
+    copied.parent.mkdir(mode=0o700)
+    copied.write_bytes((runtime_root / 'operation.json').read_bytes())
+    copied.chmod(0o600)
+    inputs['runtime']['operation_path'] = str(copied)
+    private_state._atomic_json(root / 'inputs.json', inputs)
+    operation['inputs_sha256'] = hashlib.sha256((root / 'inputs.json').read_bytes()).hexdigest()
+    with pytest.raises(ValueError, match='shared pool private inputs unqualified'):
+        module.load_inputs(operation)
+
+
 class SharedPhaseAPI:
     """Only the phase-adapter boundary is doubled in parent-journal tests.
 
