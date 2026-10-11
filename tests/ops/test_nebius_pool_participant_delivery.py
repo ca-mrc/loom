@@ -111,7 +111,8 @@ def test_shared_recovery_selects_original_publication_not_another_success_for_sa
 @pytest.mark.parametrize('recover,file_writes', [(False, False), (False, True), (True, False), (True, True),
     ('pre-upgrade-backup', True), ('30-migrate.yaml', True), ('50-configure.yaml', True), ('guard-release', True),
     ('release-before-commit', True), ('completion-prepare', True), ('completion-ack', True)])
-def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation_inputs, connection, tmp_path, monkeypatch, recover, file_writes):
+def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation_inputs, connection, tmp_path, monkeypatch, recover, file_writes,
+        host_delivery=False):
     """Real pool effects and deployment lifecycle; external I/O/qualification doubled."""
     inputs = operation_inputs
     pool_state, _, connect = connection
@@ -162,8 +163,11 @@ def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation
 
         def run(self, *command, **kwargs):
             if command[0] == 'exec' and 'acquire' in command:
-                assert intents[-1]['shared_pool_release'] == retained.reference.model_dump(mode='json')
-                assert intents[-1]['guard_owner'] == retained.guard_owner
+                if host_delivery:
+                    assert not intents, 'operator host must not write GitHub deployment records'
+                else:
+                    assert intents[-1]['shared_pool_release'] == retained.reference.model_dump(mode='json')
+                    assert intents[-1]['guard_owner'] == retained.guard_owner
             if command[0] == 'apply':
                 assert self.guard_identity is not None and 'manager' in pool_state.effects
                 phases.append(Path(command[2]).name)
@@ -195,6 +199,7 @@ def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation
     previous_candidate = json.loads(kube.objects['configmap', 'loom-platform-config']['data']['profile.json'])['candidate_sha']
 
     def github(path, payload):
+        assert not host_delivery, 'operator host must not use ambient GitHub authority'
         if path == 'deployments':
             intents.append(copy.deepcopy(payload['payload']))
             return {'id': len(intents)}
@@ -392,7 +397,7 @@ def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation
         assert {'40-services.yaml', '60-execution.yaml', '70-public.yaml'} <= set(phases)
         assert {'30-migrate.yaml', '50-configure.yaml'} <= set(phases)
     assert all(row['shared_pool_release'] == retained.reference.model_dump(mode='json') for row in intents)
-    assert len(intents) == (2 if recover else 1)
+    assert len(intents) == (0 if host_delivery else 2 if recover else 1)
     if recover in completion_faults:
         # Completion reconciliation must not reacquire intake or repeat any
         # build/deploy/pool effect after the original release committed.
@@ -453,6 +458,93 @@ def test_shared_delivery_uses_published_schema_and_scoped_ancestry_without_git(
     test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(
         operation_inputs, connection, tmp_path, monkeypatch, recover=False, file_writes=True)
     assert calls and completed[-1]['status'] == 'complete'
+
+
+@pytest.mark.parametrize('recovery', [False, True])
+def test_operator_host_executes_retained_source_without_runner_paths_or_github(
+        operation_inputs, connection, tmp_path, monkeypatch, recovery):
+    from scripts.ops import nebius_pool_participant_entry as entry
+    from scripts.ops.nebius_pool_participant_completion import initialize_participant_head
+
+    assert callable(getattr(entry.ParticipantReleaseConnection, 'execute', None)), 'operator host cannot consume the retained release'
+    retained, initial = connection[0].retained, operation_inputs['predecessor']
+    initialize_participant_head(initial=initial, state_root=retained.state_dir.parent, anchor_dir=retained.anchor_dir)
+    original = idle.rollout
+    paths, completed, arguments = [], [], []
+
+    def connected(args, **kwargs):
+        # The runner's publication/kubeconfig/evidence paths are unavailable on
+        # the host. Only the reference and bounded recovery projection cross it.
+        incoming = idle.recovery_record(json.loads(args.recovery_evidence.read_bytes())) if getattr(args, 'recovery_evidence', None) else None
+        kube = connection[0].kube
+        kube.kubeconfig = tmp_path / 'private-host-kubeconfig'
+        qualifier = SimpleNamespace(retained=retained, initial=initial, kube=kube,
+            kubeconfig=kube.kubeconfig, candidate_follows=lambda *_: True)
+        delivery = entry.ParticipantReleaseConnection(qualifier, initial, kwargs['pool'], kwargs['candidate_writer'])
+
+        def deployed(host_args, **host_kwargs):
+            paths.append(host_args.publication_dir)
+            assert host_args.kubeconfig == kube.kubeconfig and host_args.github is False
+            assert host_args.evidence_dir == retained.state_dir / 'deployment-evidence'
+            assert json.loads((host_args.publication_dir / 'candidate.json').read_bytes()) == retained.inputs.candidate
+            assert host_args.publication_dir != args.publication_dir
+            # Feed this private path back only to the local lifecycle fixture's
+            # recovery reader, not to a runner or a public operation report.
+            args.evidence_dir = host_args.evidence_dir
+            arguments.append(host_args)
+            return original(host_args, **host_kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(idle, 'rollout', deployed)
+            patch.setattr(idle, 'candidate_follows', lambda *_: pytest.fail('host has no Git checkout'))
+            patch.setattr(idle, 'candidate_schema_head', lambda *_: pytest.fail('host has no migrations checkout'))
+            try:
+                result = delivery.execute(recovery=incoming)
+                completed.append(result)
+            finally:
+                assert not paths[-1].exists(), 'private temporary publication survived the host call'
+        return result
+
+    monkeypatch.setattr(idle, 'rollout', connected)
+    test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(
+        operation_inputs, connection, tmp_path, monkeypatch, recover=recovery, file_writes=True, host_delivery=True)
+    assert completed[-1]['status'] == 'complete'
+    assert all(not path.exists() for path in paths)
+
+
+@pytest.mark.parametrize('damage', ['reference', 'candidate', 'previous', 'guard', 'cluster', 'namespace', 'automatic', 'automatic-type'])
+def test_operator_host_rejects_foreign_recovery_before_private_writes(operation_inputs, damage):
+    from scripts.ops.nebius_pool_participant_entry import ParticipantReleaseConnection
+
+    assert callable(getattr(ParticipantReleaseConnection, 'execute', None)), 'operator host cannot consume the retained release'
+    retained = operation.retain_participant_rollout(**operation_inputs)
+    config = retained.inputs.config
+    previous = next(row for row in retained.inputs.current
+        if row['kind'] == 'ConfigMap' and row['metadata']['name'] == 'loom-platform-config')
+    record = {'schema_version': 'loom.nebius-deployment.v1', 'mode': 'apply', 'status': 'failed',
+        'shared_pool_release': retained.reference.model_dump(mode='json'), 'guard_owner': retained.guard_owner,
+        'candidate_sha': retained.inputs.candidate['candidate_sha'],
+        'previous_candidate_sha': json.loads(previous['data']['profile.json'])['candidate_sha'],
+        **{key: config[key] for key in ('cluster_id', 'namespace', 'execution_namespace')}}
+    if damage == 'reference':
+        record.pop('shared_pool_release')
+    elif damage == 'candidate':
+        record['candidate_sha'] = 'f' * 40
+    elif damage == 'previous':
+        record['previous_candidate_sha'] = 'f' * 40
+    elif damage == 'guard':
+        record['guard_owner'] = 'rollout-' + 'f' * 32
+    elif damage in {'cluster', 'namespace'}:
+        record['cluster_id' if damage == 'cluster' else 'namespace'] = 'foreign'
+    qualifier = SimpleNamespace(retained=retained)
+    writer = SimpleNamespace(validate=lambda: pytest.fail('invalid host selection must stop before accessing release effects'))
+    delivery = ParticipantReleaseConnection(qualifier, None, None, writer)
+    before = {path: path.read_bytes() for root in (retained.state_dir, retained.anchor_dir)
+        for path in root.rglob('*') if path.is_file()}
+    with pytest.raises(ValueError, match='host|recovery'):
+        delivery.execute(automatic=1 if damage == 'automatic-type' else damage == 'automatic', recovery=record)
+    assert {path: path.read_bytes() for root in (retained.state_dir, retained.anchor_dir)
+        for path in root.rglob('*') if path.is_file()} == before
 
 
 def test_completed_release_is_the_next_receipt_selected_predecessor(
