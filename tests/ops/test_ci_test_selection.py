@@ -176,6 +176,7 @@ def test_empty_selection_is_safe_and_selector_failure_still_fails_the_job(
     assert result.returncode == expected, result.stderr
 
 
+@pytest.mark.timeout(120)
 @pytest.mark.parametrize("scope", ["all", "nebius"])
 def test_root_workflow_runs_complete_disjoint_fail_fast_shards(tmp_path: Path, scope: str) -> None:
     """Exercise the workflow/selector boundary, not a second shard algorithm."""
