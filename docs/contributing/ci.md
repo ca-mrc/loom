@@ -170,9 +170,11 @@ manual compatibility selection.
 
 ## Test shard balance
 
-The root Python lane uses eight complete, non-overlapping file shards with the
+The root Python lane uses twelve complete, non-overlapping file shards with the
 existing manifest-owned stable hash salt. Explicit pins distribute the slow
-connected recovery modules using the October 2026 duration sample. Connected
+connected recovery modules using the October 2026 duration sample. The expanded
+shared-pool handoff and participant-delivery suites have dedicated placements;
+the eight-shard layout exhausted multiple jobs' 40-minute limits. Connected
 transport tests use independent two-owner fixtures and share only immutable
 inputs; full roster tests retain all environments. Duplicate mode-independent
 qualification cases run once, while mode-specific grants and failure cases remain.

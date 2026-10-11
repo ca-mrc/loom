@@ -146,7 +146,7 @@ isolation commands run only in main or manual compatibility scope. These checks
 are credential-free candidate evidence; real model-backed tasks and live
 environment readiness require deployment acceptance rather than PR jobs.
 
-Changed paths select static checks, up to eight nonempty root-test shards and
+Changed paths select static checks, up to twelve nonempty root-test shards and
 package tests as needed, in parallel on GitHub-hosted runners. Web-only changes
 skip backend baseline jobs; dependency, shared and unknown changes retain them.
 `repository-checks` verifies every selected result. Coverage instrumentation and

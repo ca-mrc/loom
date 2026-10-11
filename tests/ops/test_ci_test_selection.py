@@ -177,7 +177,7 @@ def test_empty_selection_is_safe_and_selector_failure_still_fails_the_job(
 
 
 @pytest.mark.parametrize("scope", ["all", "nebius"])
-def test_root_workflow_runs_eight_complete_disjoint_fail_fast_shards(tmp_path: Path, scope: str) -> None:
+def test_root_workflow_runs_complete_disjoint_fail_fast_shards(tmp_path: Path, scope: str) -> None:
     """Exercise the workflow/selector boundary, not a second shard algorithm."""
     root = Path(__file__).resolve().parents[2]
     workflow = yaml.safe_load((root / ".github/workflows/ci.yml").read_text())
