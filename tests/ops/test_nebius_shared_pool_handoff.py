@@ -465,6 +465,7 @@ def test_shared_history_loads_original_source_without_retired_operator_credentia
 
     # The immutable installed tooling location is a valid historical reference.
     release = root / 'releases' / ('a' * 64)
+    private_state._private_directory(release.parent)
     private_state._private_directory(release)
     for name in ('operation.json', 'shared-pool-source.json'):
         private_state._write_private(release / name, (root / name).read_bytes())

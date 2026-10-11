@@ -89,6 +89,18 @@ class SharedPoolEntryContext:
     files: dict[Path, bytes]
 
 
+@dataclass(frozen=True, repr=False)
+class SharedPoolHistoricalContext:
+    """Original inputs only; deliberately has no active operator connection."""
+
+    operation: dict[str, Any]
+    runtime: DevelopmentRuntimeInstallRequest
+    legacy: CompletedPoolCutover
+    observation: dict[str, Any]
+    bindings: SharedPoolGuardBindings
+    files: dict[Path, bytes]
+
+
 def _private(path: Path) -> bytes:
     if not path.is_absolute() or path != path.resolve():
         raise ValueError
@@ -150,14 +162,18 @@ def _retained_runtime(reference: RetainedRuntimeReference, files: dict[Path, byt
 
 def load_inputs(operation: dict[str, Any]) -> SharedPoolEntryContext:
     """Bind exact retained and captured scope before authentication or effects."""
+    return _load_inputs(operation, source_record=SOURCE_RECORD, include_operator=True)
+
+
+def _load_inputs(operation: dict[str, Any], *, source_record: Path, include_operator: bool) -> SharedPoolEntryContext:
     try:
         validate_operation(operation)
         path = Path(operation['inputs_path'])
-        files = {path: _private(path), SOURCE_RECORD: _private(SOURCE_RECORD)}
+        files = {path: _private(path), source_record: _private(source_record)}
         if len(files) != 2 or hashlib.sha256(files[path]).hexdigest() != operation['inputs_sha256']:
             raise ValueError
         inputs = SharedPoolPrivateInputs.model_validate(_json(files[path]))
-        source = PreparedDevelopmentSource.model_validate(_json(files[SOURCE_RECORD]))
+        source = PreparedDevelopmentSource.model_validate(_json(files[source_record]))
         runtime = _retained_runtime(inputs.runtime, files)
         manager = runtime.database.manager.retained.request.retained
         registration = runtime.database.manager.retained.request.registration
@@ -170,7 +186,9 @@ def load_inputs(operation: dict[str, Any]) -> SharedPoolEntryContext:
         paths = (inputs.staging_observation_file, inputs.operator_connection.ca_file, inputs.operator_connection.credentials_file)
         if len(set(paths)) != len(paths) or set(paths) & files.keys():
             raise ValueError
-        files.update({item: _private(item) for item in paths})
+        # Old operator credentials are neither ancestor evidence nor current
+        # authority. Normal-release history must remain readable after rotation.
+        files.update({item: _private(item) for item in (paths if include_operator else paths[:1])})
         if hashlib.sha256(files[inputs.staging_observation_file]).hexdigest() != inputs.staging_observation_sha256:
             raise ValueError
         observation = _json(files[inputs.staging_observation_file])
@@ -194,6 +212,39 @@ def load_inputs(operation: dict[str, Any]) -> SharedPoolEntryContext:
         return SharedPoolEntryContext(dict(operation), inputs, runtime, legacy, observation, bindings, files)
     except Exception:
         raise ValueError('shared pool private inputs unqualified') from None
+
+
+def load_historical_inputs(*, operation_path: Path, operation_sha256: str) -> SharedPoolHistoricalContext:
+    """Read a pinned original handoff without adopting its connection.
+
+    The original operation and source sidecar must remain in their prepared root
+    or immutable tooling release. The currently executing candidate's source
+    sidecar is unrelated. This does not assert that the handoff was completed;
+    its anchored parent and child receipts still require semantic validation.
+    """
+    try:
+        raw = _private(operation_path)
+        if (re.fullmatch(r'[0-9a-f]{64}', operation_sha256) is None
+                or hashlib.sha256(raw).hexdigest() != operation_sha256):
+            raise ValueError
+        operation = _json(raw)
+        validate_operation(operation)
+        root = Path(operation['inputs_path']).parent
+        if (operation_path != root / 'operation.json'
+                and (operation_path.name != 'operation.json' or operation_path.parent.parent != root / 'releases'
+                    or re.fullmatch(r'[0-9a-f]{64}', operation_path.parent.name) is None)):
+            raise ValueError
+        context = _load_inputs(operation, source_record=operation_path.parent / 'shared-pool-source.json',
+            include_operator=False)
+        if operation_path in context.files or _private(operation_path) != raw:
+            raise ValueError
+        files = {**context.files, operation_path: raw}
+        if any(_private(path) != before for path, before in files.items()):
+            raise ValueError
+        return SharedPoolHistoricalContext(dict(operation), context.runtime, context.legacy,
+            context.observation, context.bindings, files)
+    except Exception:
+        raise ValueError('shared pool historical inputs unqualified; preserve evidence') from None
 
 
 @contextmanager

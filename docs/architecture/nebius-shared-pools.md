@@ -1377,6 +1377,13 @@ only the standard library before dependencies are installed. This does not widen
 the existing CLOSED-runtime key. Source packaging and local command tests do not
 establish an installed grant, protected workflow execution or live readiness.
 
+Normal releases can load the original shared input/source record from its prepared
+root or immutable tooling release without reading its retired operator CA/key.
+The operation hash, captured input bytes and completed runtime/legacy histories
+remain mandatory. This history-only context does not expose an active operator
+connection and is not evidence that the shared handoff itself completed. The new
+candidate's source record cannot substitute for the original installation source.
+
 The completed shared-handoff reader reuses the parent journal's child validators
 and binds the anchor, terminal journal, child receipts and inherited installation
 history. Missing, unfinished or recovery histories cannot qualify a normal shared
