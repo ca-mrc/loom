@@ -11,6 +11,7 @@ from sqlalchemy import insert, select, text, update
 from sqlalchemy.engine import make_url
 
 from loom.db.nebius_pool_schema import (
+    NebiusPoolBinding,
     NebiusPoolMachine,
     NebiusPoolMachineCredential,
     NebiusPoolParticipant,
@@ -190,7 +191,7 @@ async def test_retirement_does_not_disable_cleanup_for_a_reserved_request(sessio
     assert await principal('gateway') is not None
 
 
-async def test_fenced_authority_can_be_observed_while_real_requests_still_need_cleanup(sessions, tmp_path):
+async def test_recovery_authority_can_be_observed_while_real_requests_still_need_cleanup(sessions, tmp_path):
     from scripts.ops import nebius_pool_machine_database as module
     from scripts.ops.nebius_pool_activation_database import fence_pool_activation_sql
     from scripts.ops.nebius_pool_recovery_database import (
@@ -200,13 +201,13 @@ async def test_fenced_authority_can_be_observed_while_real_requests_still_need_c
 
     from tests.integration.test_nebius_pool_recovery_drain import request_setup
 
-    assert hasattr(module, 'pool_fenced_machine_state_sql'), 'read-only fenced authority without a drain precondition is missing'
+    assert hasattr(module, 'pool_recovery_machine_state_sql'), 'read-only recovery authority without a drain precondition is missing'
     spec, url, principal, _ = await request_setup(sessions, tmp_path)
     read_sql(url, fence_pool_activation_sql(spec))
     before = read_sql(url, pool_recovery_drain_sql(spec))
     assert not qualify_pool_recovery_drain(spec, before)
-    report = read_sql(url, module.pool_fenced_machine_state_sql(spec))
-    assert module.qualify_fenced_machine_state_report(spec, report) == 'active'
+    report = read_sql(url, module.pool_recovery_machine_state_sql(spec))
+    assert module.qualify_recovery_machine_state_report(spec, report) == 'active'
     assert report['read_only'] is True
     assert read_sql(url, pool_recovery_drain_sql(spec)) == before
     # Observing authority must not retire credentials, cancel work, or relax the
@@ -217,18 +218,19 @@ async def test_fenced_authority_can_be_observed_while_real_requests_still_need_c
     assert await principal('gateway') is not None
 
 
-@pytest.mark.parametrize('damage', [None, 'no_fence', 'partial', 'token_scope', 'extra_credential'])
-async def test_fenced_authority_observation_requires_exact_machine_state(sessions, damage):
+@pytest.mark.parametrize('damage', [None, 'binding', 'partial', 'token_scope', 'extra_credential'])
+async def test_recovery_authority_observation_requires_exact_machine_state(sessions, damage):
     from scripts.ops import nebius_pool_machine_database as module
     from scripts.ops.nebius_pool_activation_database import fence_pool_activation_sql
 
-    assert hasattr(module, 'pool_fenced_machine_state_sql'), 'read-only fenced authority without a drain precondition is missing'
+    assert hasattr(module, 'pool_recovery_machine_state_sql'), 'read-only recovery authority without a drain precondition is missing'
     spec, _, url = await registered(sessions)
-    if damage != 'no_fence':
-        read_sql(url, fence_pool_activation_sql(spec))
+    read_sql(url, fence_pool_activation_sql(spec))
     machine = spec.machines[0]
     async with sessions.begin() as session:
-        if damage == 'partial':
+        if damage == 'binding':
+            await session.execute(update(NebiusPoolBinding).where(NebiusPoolBinding.pool_id == spec.pool_id).values(policy_revision=spec.policy_revision + 2))
+        elif damage == 'partial':
             await session.execute(update(Token).where(Token.token_hash == bytes.fromhex(machine.token_sha256)).values(revoked_at=datetime.now(UTC)))
         elif damage == 'token_scope':
             await session.execute(update(Token).where(Token.token_hash == bytes.fromhex(machine.token_sha256)).values(scopes=['admin']))
@@ -238,7 +240,7 @@ async def test_fenced_authority_observation_requires_exact_machine_state(session
                 machine_id=machine.machine_id, credential_epoch=machine.credential_epoch))
 
     def observe():
-        return module.qualify_fenced_machine_state_report(spec, read_sql(url, module.pool_fenced_machine_state_sql(spec)))
+        return module.qualify_recovery_machine_state_report(spec, read_sql(url, module.pool_recovery_machine_state_sql(spec)))
 
     if damage is not None:
         with pytest.raises(ValueError):
@@ -249,11 +251,14 @@ async def test_fenced_authority_observation_requires_exact_machine_state(session
         assert observe() == 'revoked'
 
 
-async def test_expired_original_credentials_can_be_retired_without_renewal(sessions, monkeypatch):
+@pytest.mark.parametrize('mode', ['closed', 'global'])
+async def test_expired_original_credentials_can_be_observed_and_retired_without_renewal(sessions, monkeypatch, mode):
     from scripts.ops.nebius_pool_activation_database import fence_pool_activation_sql
     from scripts.ops.nebius_pool_machine_database import (
         pool_machine_retirement_sql,
+        pool_recovery_machine_state_sql,
         qualify_machine_retirement_report,
+        qualify_recovery_machine_state_report,
     )
 
     import loom_service.pool_management.installation as module
@@ -268,8 +273,13 @@ async def test_expired_original_credentials_can_be_retired_without_renewal(sessi
     spec = PoolInstallation.model_validate(config)
     async with sessions.begin() as session:
         await register_installation(session, spec)
+        if mode == 'global':
+            await session.execute(update(NebiusPoolBinding).where(NebiusPoolBinding.pool_id == spec.pool_id).values(mode='global'))
     url = sessions.kw['bind'].url.render_as_string(hide_password=False)
+    assert qualify_recovery_machine_state_report(spec, read_sql(url, pool_recovery_machine_state_sql(spec))) == 'active'
     read_sql(url, fence_pool_activation_sql(spec))
+    assert qualify_recovery_machine_state_report(spec, read_sql(url, pool_recovery_machine_state_sql(spec))) == 'active'
     assert qualify_machine_retirement_report(spec, read_sql(url, pool_machine_retirement_sql(spec, action='revoke'))) == 'revoked'
+    assert qualify_recovery_machine_state_report(spec, read_sql(url, pool_recovery_machine_state_sql(spec))) == 'revoked'
     async with sessions() as session:
         assert set(await session.scalars(select(Token.expires_at))) == {old + timedelta(hours=1)}
