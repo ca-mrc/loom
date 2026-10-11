@@ -1181,13 +1181,17 @@ def test_shared_parent_recovery_freezes_forward_history_and_is_terminal(shared_o
 
 
 @pytest.mark.timeout(420)
-def test_shared_parent_connects_current_staging_workload_transitions_without_replaying_unknown_patch(shared_operation):
+@pytest.mark.parametrize('connected_parent', [False, True], ids=['adapter', 'parent'])
+def test_shared_parent_connects_current_staging_workload_transitions_without_replaying_unknown_patch(
+        shared_operation, connected_parent, tmp_path, monkeypatch):
     import importlib.util
     import json
     import ssl
     from contextlib import ExitStack
+    from types import SimpleNamespace
 
     import httpx
+    from scripts.ops import nebius_shared_pool_api as concrete
     from scripts.ops import nebius_shared_pool_operation as parent
     from scripts.ops.nebius_development_runtime_live import runtime_resource_path
     from scripts.ops.nebius_management_switch import _stable
@@ -1262,29 +1266,41 @@ def test_shared_parent_connects_current_staging_workload_transitions_without_rep
         return httpx.Response(200, json=documents[path])
 
     with ExitStack() as stack:
+        connection = None
         class ConnectedWorkloadsAPI(SharedPhaseAPI):
             def prepare(self, phase, bound, state):
                 if phase in phases:
-                    module.prepare_shared_staging_workloads(bindings=bound, phase=phase, state_dir=state)
+                    if connection is not None:
+                        connection.prepare(phase, bound, state)
+                    else:
+                        module.prepare_shared_staging_workloads(bindings=bound, phase=phase, state_dir=state)
                 else:
                     super().prepare(phase, bound, state)
 
             def validate_prepared_phase(self, phase, state):
                 if phase in phases:
-                    module.validate_shared_staging_workloads(bindings=bindings, phase=phase, state_dir=state,
-                        complete=False, prepared=True)
+                    if connection is not None:
+                        connection.validate_prepared_phase(phase, state)
+                    else:
+                        module.validate_shared_staging_workloads(bindings=bindings, phase=phase, state_dir=state,
+                            complete=False, prepared=True)
                 else:
                     super().validate_prepared_phase(phase, state)
 
             def validate_phase(self, phase, state, *, complete):
                 if phase in phases:
-                    module.validate_shared_staging_workloads(bindings=bindings, phase=phase, state_dir=state, complete=complete)
+                    if connection is not None:
+                        connection.validate_phase(phase, state, complete=complete)
+                    else:
+                        module.validate_shared_staging_workloads(bindings=bindings, phase=phase, state_dir=state, complete=complete)
                 else:
                     super().validate_phase(phase, state, complete=complete)
 
             def advance(self, phase, bound, state):
                 if phase not in phases:
                     return super().advance(phase, bound, state)
+                if connection is not None:
+                    return connection.advance(phase, bound, state)
                 def qualify_runtime(request, child_phase, writing):
                     assert request == runtime and child_phase == phase
                     if writing and mode['delete_before_write']:
@@ -1301,6 +1317,68 @@ def test_shared_parent_connects_current_staging_workload_transitions_without_rep
                 return module.advance_shared_staging_workloads(bindings=bound, phase=phase, api=api, state_dir=state)
 
         api = ConnectedWorkloadsAPI(parent)
+        if connected_parent:
+            # Keep the actual connected parent, child construction, phase
+            # preparation/validation, CAS dispatch and readiness adapter. Only
+            # earlier effects and separately exercised external observations
+            # are boundaries in this workload-route regression.
+            operator = tmp_path / 'workload-operator'
+            operator.write_bytes(b'private-workload-test')
+            operator.chmod(0o600)
+            context = ssl.create_default_context(cadata=runtime.database.foundation.bootstrap['material']['loom-platform-db']['ca.crt'])
+            connection = stack.enter_context(concrete.HTTPSSharedPoolOperationAPI(bindings=bindings,
+                observation=args['observation'], repo_root=ROOT,
+                api_server=runtime.database.foundation.inputs.config['kubernetes_api_server'], ssl_context=context,
+                token='operator-test', operator_credentials=operator, private_files={operator: operator.read_bytes()}))
+            registry = connection._registry()
+            for phase in parent.FORWARD_PHASES:
+                if phase not in phases:
+                    def validate(*, state_dir, complete, bindings, prepared=False):
+                        if prepared:
+                            api.validate_prepared_phase(state_dir.name, state_dir)
+                            return {'guards': {'fixture': 'prepared'}}
+                        api.validate_phase(state_dir.name, state_dir, complete=complete)
+                    registry[phase] = ((lambda **_: pytest.fail('earlier phase preparation is a fixture boundary'), validate),)
+            monkeypatch.setattr(connection, '_registry', lambda: registry)
+            monkeypatch.setattr(connection, '_permissions', lambda *_, **__: None)
+
+            async def publication(**options):
+                assert options['request'] == runtime
+
+            async def provider(**options):
+                assert options['runtime'] == runtime
+                return SimpleNamespace(plan=bindings.plan)
+
+            def processes(**options):
+                assert options['bindings'] == bindings and options['state_dir'] == connection.shared_state
+                return concrete.SharedPoolForwardProcessObservation(bindings, 'closed', {}, 'revoked', (), {}, bindings.input_digest)
+
+            monkeypatch.setattr(concrete, 'qualify_runtime_publication', publication)
+            monkeypatch.setattr(concrete, 'observe_shared_pool_provider', provider)
+            monkeypatch.setattr(concrete, 'observe_shared_pool_forward_writers', lambda **_: concrete.SharedPoolWriterObservation(
+                bindings.plan, '501', {}, {}, bindings.input_digest))
+            monkeypatch.setattr(concrete, 'observe_shared_pool_forward_processes', processes)
+            original_qualify = connection._child_qualify
+
+            def qualify(request, phase, writing):
+                original_qualify(request, phase, writing)
+                if writing and mode['delete_before_write']:
+                    mode['delete_before_write'] = False
+                    path = connection.shared_state / phase / 'transition.json'
+                    mode['deleted_receipt'] = path.read_bytes()
+                    path.unlink()
+
+            monkeypatch.setattr(connection, '_child_qualify', qualify)
+            child_type = module.HTTPSSharedStagingWorkloads
+
+            def child(**options):
+                result = child_type(**options)
+                client_type = type(result.client)
+                result.client.close()
+                result.client = client_type(base_url=result.api_server, transport=httpx.MockTransport(handle))
+                return result
+
+            monkeypatch.setattr(module, 'HTTPSSharedStagingWorkloads', child)
         api.block = 'forward-build-policy'
         kwargs = {**args, 'bindings': bindings, 'api': api, 'action': 'install'}
         manager = runtime.database.manager.retained.request.retained
