@@ -392,7 +392,8 @@ def test_shared_candidate_uses_full_normal_rollout_without_restoring_local_write
             assert all(set(rule['verbs']) <= {'get', 'list', 'watch'} for rule in row['rules'])
 
 
-@pytest.mark.parametrize('outcome', ['complete', 'busy', 'preflight', 'guard-drift', 'activation-unknown', 'capacity-stale'])
+@pytest.mark.parametrize('outcome', ['complete', 'busy', 'preflight', 'guard-drift', 'activation-unknown', 'capacity-stale',
+    'recover-activation-unknown', 'recover-capacity-stale', 'guard-lost'])
 def test_guarded_deployer_orders_shared_refresh_and_never_releases_uncertain_mutations(release_inputs, tmp_path, monkeypatch, outcome):
     """Use the real deploy parent; only the protected pool I/O adapter is doubled."""
     import argparse
@@ -411,16 +412,39 @@ def test_guarded_deployer_orders_shared_refresh_and_never_releases_uncertain_mut
         apply=True, retry_failed_jobs=False)
     events = []
     pool = {'phase': 'ready', 'capacity': False}
+    fault = outcome.removeprefix('recover-')
+    registry_mutations = []
 
     class Kube(FakeKubectl):
+        def get(self, kind, name, namespace):
+            result = super().get(kind, name, namespace)
+            if kind == 'validatingadmissionpolicy' and result:
+                result['metadata']['generation'] = 1
+                result['status'] = {'observedGeneration': 1}
+            return result
+
         def run(self, *command, **kwargs):
             if command[0] == 'apply':
-                assert pool['phase'] == 'staged' and self.guard_identity is not None
+                assert pool['phase'] in {'staged', 'open'} and self.guard_identity is not None
                 events.append('workload:' + Path(command[2]).name)
+                if '--dry-run=server' in command:
+                    self.commands.append(command)
+                    pod = yaml.safe_load(Path(command[2]).read_text())
+                    if pod['spec']['containers'][0]['securityContext']['capabilities'].get('add'):
+                        raise deploy.TaskIdentityPolicyDeniedError(config['execution_namespace'] + '-private-root-v1')
+                    return ''
             if command[0] == 'exec' and 'release' in command:
                 assert pool['phase'] == 'ready' or (pool['phase'] == 'open' and pool['capacity'])
                 events.append('release')
-            return super().run(*command, **kwargs)
+            result = super().run(*command, **kwargs)
+            if command[:2] == ('create', 'job') and fault == 'guard-lost':
+                self.guard_identity = None
+                events.append('lost-guard')
+            if command[:2] == ('config', 'view'):
+                view = json.loads(result)
+                view['clusters'][0]['name'] = config['cluster_id']
+                return json.dumps(view)
+            return result
 
     kube = Kube(config, release.files, database=True)
     for row in release_inputs['current']:
@@ -429,24 +453,27 @@ def test_guarded_deployer_orders_shared_refresh_and_never_releases_uncertain_mut
 
     class PoolIO:
         def preflight(self, observed_kube, plan):
-            assert observed_kube is kube and plan == release and kube.guard_identity is None
+            assert observed_kube is kube and plan == release
+            assert kube.guard_identity is None or getattr(args, 'resume_guard_owner', None) == kube.guard_identity[0]
             events.append('preflight')
-            if outcome == 'preflight':
+            if fault == 'preflight':
                 raise deploy.DeploymentError('retained manager does not support this catalog')
 
         def under_guard(self, observed_kube, plan):
             assert observed_kube is kube and plan == release and kube.guard_identity is not None
             events.append('guarded')
-            if outcome == 'guard-drift':
+            if fault == 'guard-drift':
                 raise deploy.DeploymentError('current shared history changed')
 
         def activate(self, observed_kube, plan):
             assert observed_kube is kube and plan == release and kube.guard_identity is not None
             events.append('activate')
-            if outcome == 'busy':
+            if fault == 'busy':
                 return 'busy'  # Fixed fence receipt positively proves no change.
-            pool['phase'] = 'staged'
-            if outcome == 'activation-unknown':
+            if pool['phase'] == 'ready':
+                registry_mutations.append('stage')
+                pool['phase'] = 'staged'
+            if fault == 'activation-unknown':
                 raise deploy.DeploymentError('lost write response')
             return 'ready'
 
@@ -454,13 +481,15 @@ def test_guarded_deployer_orders_shared_refresh_and_never_releases_uncertain_mut
             assert observed_kube is kube and plan == release and kube.guard_identity is not None
             assert 'https' in events
             events.append('open')
+            if pool['phase'] != 'open':
+                registry_mutations.append('open')
             pool['phase'] = 'open'
-            if outcome == 'capacity-stale':
+            if fault == 'capacity-stale':
                 raise deploy.DeploymentError('post-open capacity unavailable')
             pool['capacity'] = True
             events.append('fresh-capacity')
 
-    if outcome in {'complete', 'busy'}:
+    if fault in {'complete', 'busy'}:
         report = deploy.deploy(args, kube=kube, participant_release=release, pool=PoolIO())
         assert report['status'] == ('complete' if outcome == 'complete' else 'skipped_busy')
     else:
@@ -469,9 +498,54 @@ def test_guarded_deployer_orders_shared_refresh_and_never_releases_uncertain_mut
     if outcome == 'complete':
         assert events.index('guarded') < events.index('activate') < events.index('workload:30-migrate.yaml')
         assert events.index('workload:50-configure.yaml') < events.index('open') < events.index('fresh-capacity') < events.index('release')
-    if outcome in {'busy', 'preflight', 'guard-drift', 'activation-unknown'}:
+    if fault in {'busy', 'preflight', 'guard-drift', 'activation-unknown', 'guard-lost'}:
         assert not any(event.startswith('workload:') for event in events)
-    assert (kube.guard_identity is not None) == (outcome in {'activation-unknown', 'capacity-stale'})
+    assert {'preflight': 'preflight', 'guard-drift': 'guarded', 'activation-unknown': 'activate',
+        'capacity-stale': 'open', 'complete': 'fresh-capacity', 'busy': 'activate', 'guard-lost': 'lost-guard'}[fault] in events
+    assert (kube.guard_identity is not None) == (fault in {'activation-unknown', 'capacity-stale'})
+    if outcome.startswith('recover-'):
+        args.resume_guard_owner = kube.guard_identity[0]
+        args.retry_failed_jobs = True
+        fault = None
+        assert deploy.deploy(args, kube=kube, participant_release=release, pool=PoolIO())['status'] == 'complete'
+        assert kube.guard_identity is None and pool['capacity'] is True
+        assert registry_mutations == ['stage', 'open']
+
+
+@pytest.mark.parametrize('damage', ['missing-adapter', 'missing-release', 'standalone-files', 'wrong-guard', 'retire-target'])
+def test_shared_deploy_has_no_unbound_mode_or_standalone_render_escape(release_inputs, tmp_path, damage):
+    import argparse
+
+    from scripts.ops import deploy_nebius_platform as deploy
+    from tests.ops.test_deploy_nebius_platform import FakeKubectl
+
+    from loom.nebius_platform_render import write_platform
+
+    release = module().prepare_staging_pool_release(**release_inputs)
+    config = release_inputs['config']
+    files = release.files
+    if damage == 'standalone-files':
+        files = build_platform(config, release_inputs['candidate'], release_inputs['runtime_profile'].model_dump(mode='json'),
+            release.refresh.after.profiles.image_admission_keyring, repo_root=ROOT)
+    write_platform(files, config, release_inputs['candidate'], tmp_path / 'render')
+    args = argparse.Namespace(render_dir=tmp_path / 'render', kubeconfig=tmp_path / 'kubeconfig',
+        evidence_dir=tmp_path / 'evidence', expected_cluster_id=config['cluster_id'],
+        apply=True, retry_failed_jobs=False)
+    if damage == 'wrong-guard':
+        args.resume_guard_owner = 'rollout-' + uuid4().hex
+    if damage == 'retire-target':
+        args.retire_target = 'different-target'
+    kube = FakeKubectl(config, files, database=True)
+
+    class ForbiddenAdapter:
+        def preflight(self, *_):
+            pytest.fail('invalid shared binding reached pool I/O')
+
+    with pytest.raises(deploy.DeploymentError):
+        deploy.deploy(args, kube=kube,
+            participant_release=None if damage == 'missing-release' else release,
+            pool=None if damage == 'missing-adapter' else ForbiddenAdapter())
+    assert not any(command[0] in {'apply', 'create', 'delete', 'exec', 'patch'} for command in kube.commands)
 
 
 @pytest.mark.parametrize('damage', ['namespace', 'catalog', 'volume', 'mount', 'setting', 'mode', 'replicas', 'mutable-image'])
