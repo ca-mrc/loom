@@ -223,6 +223,26 @@ def test_selected_guard_does_not_outlive_its_release_and_connection(guard_connec
     assert state.writes == []
 
 
+@pytest.mark.parametrize('kind', ['StatefulSet', 'Service'])
+def test_selected_guard_rejects_recaptured_database_identity(guard_connection, operation_inputs, tmp_path, kind):
+    from scripts.ops.nebius_pool_participant_operation import retain_participant_rollout
+
+    state, _, options = guard_connection
+    inputs = copy.deepcopy(operation_inputs)
+    namespace = state.retained.inputs.config['namespace']
+    key = kind + ':' + namespace + ':loom-postgres'
+    row, = (row for row in inputs['current'] if _key(row) == key)
+    row['metadata']['uid'] = str(uuid4())
+    inputs.update(state_root=tmp_path / 'recaptured', anchor_dir=tmp_path / 'recaptured-anchors')
+    retained = retain_participant_rollout(**inputs)
+    state.rows[key]['metadata']['uid'] = row['metadata']['uid']
+    with observer(retained, lambda: state.rows)[0] as live:
+        assert live.observe()[key]['metadata']['uid'] == row['metadata']['uid']
+        with pytest.raises(ValueError, match='preserve'):
+            live.observe_guard(phase='guarded', **options)
+    assert state.guard_calls == [], 'a fresh capture must not replace the retained database identity'
+
+
 @pytest.mark.timeout(180)
 def test_selected_guard_blocks_real_pool_effects_after_ownership_loss(guard_connection, pool_connection):
     state, _, options = guard_connection
