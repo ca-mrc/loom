@@ -292,6 +292,12 @@ def test_gateway_active_probe_uses_read_only_global_capacity_qualification(manag
     _gateway_runtime_case(management_history, projected_gateway, monkeypatch, damage, action='active-probe')
 
 
+@pytest.mark.parametrize('damage', [None, 'db_settings', 'token', 'unready', 'secret', 'backend',
+    'history', 'authority', 'kubernetes', 'late_kubernetes_secret', 'late_kubernetes_backend', 'late_kubernetes_pod'])
+def test_gateway_process_probe_does_not_require_all_active_admission(management_history, projected_gateway, monkeypatch, damage):
+    _gateway_runtime_case(management_history, projected_gateway, monkeypatch, damage, action='process')
+
+
 def _gateway_runtime_case(management_history, projected_gateway, monkeypatch, damage, *, action, journal_metadata=False):
     """The new gateway has no running predecessor; only its scalar start is valid."""
     import hashlib
@@ -400,6 +406,8 @@ def _gateway_runtime_case(management_history, projected_gateway, monkeypatch, da
             assert args[:9] == ['exec', '-n', namespace, 'pod/' + pod['metadata']['name'], '-c', 'gateway', '--', 'python', '-c']
             assert 'private-' not in repr(args)
             if args[9] in {BOUND_POOL_CAPACITY_COMMAND, BOUND_POOL_ACTIVE_CAPACITY_COMMAND, BOUND_POOL_ACTIVATION_COMMAND}:
+                if action == 'process':
+                    pytest.fail('continuous process qualification must not lock or require an all-active registry')
                 # This fixture doubles the remote database only; owning
                 # integration tests execute the exact command against PostgreSQL.
                 assert len(args) == 12 and all(len(value) == 64 for value in args[10:])
@@ -464,7 +472,8 @@ def _gateway_runtime_case(management_history, projected_gateway, monkeypatch, da
         return api._run(args)
 
     monkeypatch.setattr(selected, '_run', run)
-    invoke = selected.open_pool if action == 'open' else selected.qualify_gateway_runtime
+    invoke = (selected.open_pool if action == 'open' else selected.qualify_gateway_process
+        if action == 'process' else selected.qualify_gateway_runtime)
     options = {'active': True} if action == 'active-probe' else {}
     if damage:
         with pytest.raises(PoolMigrationError) as error:
@@ -472,7 +481,8 @@ def _gateway_runtime_case(management_history, projected_gateway, monkeypatch, da
         assert error.value.stage == ('activation_open' if action == 'open' else 'gateway_runtime') and 'private-' not in str(error.value)
     else:
         assert invoke(original=original, expected=expected, **options) is None
-        assert len(processes) == (5 if action == 'open' else 4) and all(row.returncode == 0 for row in processes)
+        assert len(processes) == (5 if action == 'open' else 3 if action == 'process' else 4)
+        assert all(row.returncode == 0 for row in processes)
         assert {path for _, path, _ in wire['requests']} == {'/api/v1/namespaces/' + name for name in wire['namespaces']}
     assert sum(row[0] == 'exec' and row[9] == BOUND_POOL_ACTIVATION_COMMAND for row in calls) == (
         1 if action == 'open' and (damage is None or damage.startswith('open_')) else 0)
