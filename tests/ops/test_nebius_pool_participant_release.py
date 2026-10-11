@@ -403,8 +403,9 @@ def test_refresh_mutation_identity_cannot_be_rotated_to_retry(catalog_inputs, ac
             action=action, observation_id=identity)
 
 
+@pytest.mark.parametrize('retained_writes', [False, True])
 @pytest.mark.parametrize('failure', [None, 'migrate', 'configure', 'actuator', 'https', 'readback'])
-def test_shared_candidate_uses_full_normal_rollout_without_restoring_local_writers(release_inputs, tmp_path, monkeypatch, failure):
+def test_shared_candidate_uses_full_normal_rollout_without_restoring_local_writers(release_inputs, tmp_path, monkeypatch, failure, retained_writes):
     """Missing schema/config phases or restoring the collector must break this path.
 
     This exercises the common workload executor, not the still-pending protected
@@ -446,9 +447,20 @@ def test_shared_candidate_uses_full_normal_rollout_without_restoring_local_write
             kube.objects['deployment', 'loom-service']['spec']['template']['spec']['containers'][0]['image'] = 'wrong'
 
     monkeypatch.setattr(deploy, 'public_smoke', smoke)
+    written = []
+
+    def write_file(filename):
+        assert events[-2:] == ['write-intent', filename.removesuffix('.yaml')]
+        written.append(filename)
+        # External resource effects; candidate sequence/readiness remain real.
+        FakeKubectl.run(kube, 'apply', '-f', str(tmp_path / filename))
+        kube.commands.pop()
+
     kwargs = dict(kube=kube, manifest={'public_origin': 'https://' + config['public_host']}, config=config,
         files=files, snapshot_root=tmp_path, retry_failed_jobs=False, phase=events.append,
         before_write=lambda: events.append('write-intent'))
+    if retained_writes:
+        kwargs['write_candidate_file'] = write_file
     if failure:
         with pytest.raises(deploy.DeploymentError):
             deploy._rollout_candidate_files(**kwargs)
@@ -468,6 +480,9 @@ def test_shared_candidate_uses_full_normal_rollout_without_restoring_local_write
         assert PoolRuntimeSettings.model_validate_json(settings['LOOM_EXECUTION_ACTUATOR_GLOBAL_POOL']['value']).participant == release.refresh.after.participants[0]
         assert events[-1] == 'candidate-readback'
     applied = [Path(command[2]).name for command in kube.commands if command[0] == 'apply']
+    if retained_writes:
+        assert set(applied) <= {'30-migrate.yaml', '50-configure.yaml'}
+        assert written[:3] == ['00-namespaces.yaml', '10-config-network.yaml', '20-database.yaml']
     if failure in {'migrate', 'configure'}:
         assert '60-execution.yaml' not in applied
     if failure == 'actuator':

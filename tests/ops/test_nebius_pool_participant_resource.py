@@ -5,6 +5,7 @@ import copy
 import importlib
 import json
 import ssl
+from contextlib import nullcontext
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -114,6 +115,112 @@ def connection(operation_inputs):
 
 def advance(state, api, key):
     return module().update_participant_resource(retained=state.retained, key=key, api=api)
+
+
+def file_writer(state, connect):
+    return module().RetainedCandidateFileWriter(retained=state.retained,
+        open_resource=connect, open_creation=lambda _: pytest.fail('unexpected candidate creation'))
+
+
+def test_candidate_file_writer_preserves_order_and_reads_back_repeated_dispatch(connection):
+    state, connect = connection
+    writer = file_writer(state, connect)
+    writer.apply_file('20-database.yaml')
+    writer.apply_file('20-database.yaml')
+    ns = state.retained.inputs.config['namespace']
+    assert state.writes == ['Service:' + ns + ':loom-postgres', 'StatefulSet:' + ns + ':loom-postgres']
+    assert state.rows[state.writes[0]]['spec']['clusterIP'] == '10.0.0.7'
+
+
+@pytest.mark.parametrize('failure', ['lost-before', 'lost-after'])
+def test_candidate_file_writer_recovery_does_not_repeat_uncertain_patch(connection, failure):
+    state, connect = connection
+    writer = file_writer(state, connect)
+    state.failure = failure
+    if failure == 'lost-before':
+        for _ in range(2):
+            with pytest.raises(ValueError, match='preserve'):
+                writer.apply_file('20-database.yaml')
+        assert len(state.writes) == 1
+    else:
+        writer.apply_file('20-database.yaml')
+        writer.apply_file('20-database.yaml')
+        assert len(state.writes) == 2
+
+
+@pytest.mark.parametrize('lost', ['child', 'parent', 'anchor'])
+def test_candidate_file_writer_rejects_lost_dispatch_evidence(connection, lost):
+    state, connect = connection
+    writer = file_writer(state, connect)
+    writer.apply_file('20-database.yaml')
+    if lost == 'child':
+        path = next((state.retained.state_dir / 'candidate-resources').rglob('transition.json'))
+    elif lost == 'parent':
+        path = state.retained.state_dir / 'candidate-file-writes' / 'dispatch.json'
+    else:
+        path = state.retained.anchor_dir / (str(state.retained.reference.operation_id) + '-candidate-file-writes.json')
+    path.unlink()
+    state.requests.clear()
+    with pytest.raises(ValueError, match='preserve'):
+        file_writer(state, connect).apply_file('20-database.yaml')
+    assert len(state.writes) == 2
+    assert not any(row.method != 'GET' for row in state.requests)
+
+
+@pytest.mark.parametrize('filename', ['30-migrate.yaml', '50-configure.yaml', '00-task-identity-policy.yaml', '../20-database.yaml'])
+def test_candidate_file_writer_cannot_claim_job_or_admission_bootstrap_authority(connection, filename):
+    state, connect = connection
+    with pytest.raises(ValueError, match='preserve'):
+        file_writer(state, connect).apply_file(filename)
+    assert state.requests == []
+
+
+def test_candidate_file_writer_stages_new_objects_in_renderer_order(operation_inputs):
+    from scripts.ops.nebius_management_stage import _qualified_defaulted
+    from tests.ops.test_nebius_management_stage import PhaseAPI
+
+    # Database file has an existing Service and StatefulSet; add a fixed new
+    # ConfigMap. Only external API I/O is doubled; use both real journal engines.
+    ns = operation_inputs['config']['namespace']
+    operation_inputs['rendered_files']['20-database.yaml'].append({
+        'apiVersion': 'v1', 'kind': 'ConfigMap', 'metadata': {'name': 'loom-db-options', 'namespace': ns},
+        'data': {'mode': 'feature'}})
+    retained = operation.retain_participant_rollout(**operation_inputs)
+    state = PhaseAPI(retained.release.migration.registration.binding)
+    state.key = _key
+    state.resources = {_key(row): copy.deepcopy(row) for row in retained.inputs.current}
+    effects = []
+
+    class Updates:
+        def qualify(self):
+            pass
+
+        def read_workload(self, key):
+            return copy.deepcopy(state.resources[key])
+
+        def preview_workload(self, key, before, desired):
+            return copy.deepcopy(desired)
+
+        def patch_workload(self, key, before, desired):
+            effects.append(key)
+            state.resources[key] = {**copy.deepcopy(desired), 'metadata': {
+                **copy.deepcopy(desired['metadata']), 'uid': before['metadata']['uid'], 'resourceVersion': '22'}}
+            return True
+
+        def workload_ready(self, key, expected):
+            return _qualified_defaulted(expected, state.resources[key]) is not None
+
+    def creations(key):
+        effects.append(key)
+        return nullcontext(state)
+
+    writer = module().RetainedCandidateFileWriter(retained=retained,
+        open_resource=lambda _: nullcontext(Updates()), open_creation=creations)
+    writer.apply_file('20-database.yaml')
+    assert effects == ['Service:' + ns + ':loom-postgres', 'StatefulSet:' + ns + ':loom-postgres',
+        'ConfigMap:' + ns + ':loom-db-options']
+    assert state.resources[effects[-1]]['data'] == {'mode': 'feature'}
+    assert len(state.creates) == 1
 
 
 def test_candidate_updates_cover_non_workload_resources_without_changing_allocations(connection):
