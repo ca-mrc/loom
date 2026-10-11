@@ -463,7 +463,7 @@ def test_shared_delivery_uses_published_schema_and_scoped_ancestry_without_git(
 
 @pytest.mark.parametrize('recovery', [False, True])
 def test_operator_host_executes_retained_source_without_runner_paths_or_github(
-        operation_inputs, connection, tmp_path, monkeypatch, recovery):
+        operation_inputs, connection, tmp_path, monkeypatch, recovery, *, via_dispatch=False):
     from scripts.ops import nebius_pool_participant_entry as entry
     from scripts.ops import nebius_shared_pool_entry as shared_entry
     from scripts.ops.nebius_pool_participant_completion import initialize_participant_head
@@ -490,7 +490,7 @@ def test_operator_host_executes_retained_source_without_runner_paths_or_github(
 
     monkeypatch.setattr(shared_entry, 'load_completed_history', shared_history)
     original = idle.rollout
-    paths, completed, arguments = [], [], []
+    paths, completed, arguments, private_results, private_errors = [], [], [], [], []
 
     def connected(args, **kwargs):
         # The runner's publication/kubeconfig/evidence paths are unavailable on
@@ -522,7 +522,13 @@ def test_operator_host_executes_retained_source_without_runner_paths_or_github(
             # recovery reader, not to a runner or a public operation report.
             args.evidence_dir = host_args.evidence_dir
             arguments.append(host_args)
-            return original(host_args, **host_kwargs)
+            try:
+                outcome = original(host_args, **host_kwargs)
+                private_results.append(outcome)
+                return outcome
+            except Exception as error:
+                private_errors.append(error)
+                raise
 
         with monkeypatch.context() as patch:
             patch.setattr(idle, 'rollout', deployed)
@@ -530,10 +536,36 @@ def test_operator_host_executes_retained_source_without_runner_paths_or_github(
             patch.setattr(idle, 'candidate_schema_head', lambda *_: pytest.fail('host has no migrations checkout'))
             patch.setattr(entry, 'authenticated_participant_release', authenticated)
             try:
-                result = entry.execute_retained_participant_release(reference=retained.reference,
-                    shared_operation=shared_operation, shared_operation_sha256='c' * 64,
+                selection = dict(shared_operation=shared_operation, shared_operation_sha256='c' * 64,
                     state_root=retained.state_dir.parent, anchor_dir=retained.anchor_dir,
-                    operator_connection=operator, executable=tmp_path / 'kubectl', recovery=incoming)
+                    operator_connection=operator, executable=tmp_path / 'kubectl')
+                if via_dispatch:
+                    from scripts.ops.nebius_pool_participant_dispatch import (
+                        ParticipantReleaseHost,
+                        dispatch_participant_release,
+                    )
+
+                    action = 'recover' if incoming is not None else 'execute'
+                    request = {'schema_version': 'loom.nebius-participant-command.v1', 'action': action,
+                        'reference': retained.reference.model_dump(mode='json'),
+                        **({'recovery': incoming} if incoming is not None else {'automatic': False})}
+                    report = dispatch_participant_release(json.dumps(request).encode(), action=action,
+                        host=ParticipantReleaseHost(**selection, repo_root=operation_inputs['repo_root']))
+                    assert report['release']['reference'] == retained.reference.model_dump(mode='json')
+                    assert str(retained.state_dir) not in json.dumps(report)
+                    if report['status'] == 'blocked':
+                        assert private_errors, 'dispatch failed without an injected deployment fault'
+                        assert set(report) == {'schema_version', 'status', 'stage', 'release'}
+                        assert report['stage'] == 'execution'
+                        # Only the local fixture needs the original exception
+                        # for its fault assertions; the public report has none.
+                        raise private_errors.pop()
+                    assert set(report) == {'schema_version', 'status', 'release'} and report['status'] == 'complete'
+                    assert report['release']['guard_owner'] == retained.guard_owner
+                    result = private_results[-1]
+                else:
+                    result = entry.execute_retained_participant_release(reference=retained.reference,
+                        recovery=incoming, **selection)
                 completed.append(result)
             finally:
                 assert not paths[-1].exists(), 'private temporary publication survived the host call'
@@ -544,6 +576,13 @@ def test_operator_host_executes_retained_source_without_runner_paths_or_github(
         operation_inputs, connection, tmp_path, monkeypatch, recover=recovery, file_writes=True, host_delivery=True)
     assert completed[-1]['status'] == 'complete'
     assert all(not path.exists() for path in paths)
+
+
+@pytest.mark.parametrize('recovery', [False, True, 'completion-ack'])
+def test_data_only_dispatch_runs_actual_release_and_original_recovery(
+        operation_inputs, connection, tmp_path, monkeypatch, recovery):
+    test_operator_host_executes_retained_source_without_runner_paths_or_github(
+        operation_inputs, connection, tmp_path, monkeypatch, recovery, via_dispatch=True)
 
 
 @pytest.mark.parametrize('damage', ['shared-history', 'inputs', 'predecessor', 'credential-public',

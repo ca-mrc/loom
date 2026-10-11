@@ -1836,6 +1836,23 @@ which checks the reader Secret identity before and after both resolution and
 ancestry reads. Protected transport and normal workflow routing remain required
 before these internal functions form an operational rollout route.
 
+The fixed host dispatcher accepts only bounded, direction-specific JSON commands:
+prepare selects a publication and operation UUID; execute selects the retained
+reference and automatic-check mode; recover selects that reference and the
+original bounded recovery record. Unknown fields, duplicate JSON keys, coerced
+booleans and cross-direction inputs are rejected before private intake. Host
+history, state roots, trust files and kubectl come from a private, hash-pinned
+installed configuration, not the command. The tooling root comes from the installed
+module itself. Preparation and execution use the existing host functions above.
+Reports expose only the original reference, platform/guard binding, public URL
+and a recognized outcome; private exceptions, diagnostics and paths are omitted.
+A bare success status without the matching deployment binding is rejected.
+Its process entry suppresses private process output and checks the configuration
+again before acknowledging the outcome. This dispatcher does not itself install
+an SSH grant. A separate restricted launcher, runner-owned persisted deployment
+intent and normal workflow routing are still required; the exact-bundle shared
+handoff grant cannot authorize this new command surface.
+
 The deployer has an internal finalization hook inside its existing error/evidence
 boundary, after verified guard release and before reporting success. Protected
 composition uses that hook for latest-head promotion. It also runs after successful
