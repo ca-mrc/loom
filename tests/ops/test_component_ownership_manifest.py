@@ -1373,7 +1373,13 @@ def test_root_shards_distribute_shared_handoff_phases_and_observation() -> None:
     )]
     assert len(set(phases)) >= 6
     assert max(phases.count(index) for index in set(phases)) <= 2
-    assert placement["tests/ops/test_nebius_pool_participant_observation.py"] not in phases
+    # The forward shard finished in 12m49s in 38181207030 and can share
+    # the observation matrix. Keep it apart from the other heavy phases.
+    for suffix in ("", "_parent", "_processes", "_census", "_recovery_fences",
+                   "_recovery_authority", "_recovery_release"):
+        assert placement["tests/ops/test_nebius_pool_participant_observation.py"] != placement[
+            f"tests/ops/test_nebius_shared_pool_handoff{suffix}.py"
+        ]
     # Run 38163731249 exhausted the unchanged 40m job budget at these
     # collisions. Keep the new lifecycle work apart from its measured heavy
     # predecessors; the executable workflow test still proves full coverage.
@@ -1390,6 +1396,11 @@ def test_root_shards_distribute_shared_handoff_phases_and_observation() -> None:
         ("shared_pool_handoff_recovery_stop", "shared_pool_handoff_recovery_stop_committed"),
         ("pool_participant_delivery", "pool_participant_delivery_history"),
         ("shared_pool_handoff_parent", "shared_pool_handoff_processes"),
+        # Run 38181207030 reached 38m41s with observation still unfinished.
+        # Keep its retained-resource matrix away from these measured heavy
+        # image lifecycle predecessors rather than increasing the job limit.
+        ("pool_participant_observation", "pool_image_cancellation_gateway"),
+        ("pool_participant_observation", "pool_image_transport"),
     ):
         assert placement[f"tests/ops/test_nebius_{left}.py"] != placement[f"tests/ops/test_nebius_{right}.py"]
 
