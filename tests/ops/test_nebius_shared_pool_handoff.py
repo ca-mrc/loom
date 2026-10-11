@@ -437,6 +437,62 @@ def test_shared_private_entry_binds_retained_runtime_without_retired_operator_ac
         module.load_inputs(operation)
 
 
+def test_shared_history_loads_original_source_without_retired_operator_credentials(shared_operation, monkeypatch, tmp_path):
+    from scripts.ops import nebius_certificates as private_state
+    from scripts.ops import nebius_shared_pool_entry as entry
+
+    assert hasattr(entry, 'load_historical_inputs'), 'normal release cannot load historical shared inputs independently'
+    args, bindings = shared_operation
+    root, operation, inputs, _, _ = _shared_entry_inputs(args, bindings)
+    path = root / 'operation.json'
+    checksum = hashlib.sha256(path.read_bytes()).hexdigest()
+    retired = {Path(inputs['operator_connection'][field]) for field in ('ca_file', 'credentials_file')}
+    for credential in retired:
+        credential.unlink()
+    newer_source = tmp_path / 'new-installer-source.json'
+    private_state._atomic_json(newer_source, {'source_sha': 'e' * 40, 'source_archive_sha256': 'sha256:' + '9' * 64})
+    monkeypatch.setattr(entry, 'SOURCE_RECORD', newer_source)
+    monkeypatch.setattr(entry, '_transport', lambda *_: pytest.fail('history must not exchange credentials'))
+    context = entry.load_historical_inputs(operation_path=path, operation_sha256=checksum)
+    assert context.operation == operation and context.runtime == args['runtime']
+    assert context.legacy == args['legacy'] and context.bindings == bindings
+    assert context.observation == args['observation']
+    assert context.files[path] == path.read_bytes()
+    assert root / 'shared-pool-source.json' in context.files
+    assert not ({newer_source, *retired} & context.files.keys())
+    assert not hasattr(context, 'inputs'), 'historical scope must not masquerade as a current operator connection'
+    before = {item: item.read_bytes() for item in context.files}
+
+    # The immutable installed tooling location is a valid historical reference.
+    release = root / 'releases' / ('a' * 64)
+    private_state._private_directory(release)
+    for name in ('operation.json', 'shared-pool-source.json'):
+        private_state._write_private(release / name, (root / name).read_bytes())
+    loaded = entry.load_historical_inputs(operation_path=release / 'operation.json', operation_sha256=checksum)
+    assert loaded.bindings == context.bindings
+    for damage in ('operation-digest', 'foreign-path', 'changed-source', 'changed-inputs', 'missing-child'):
+        selected, digest = path, checksum
+        if damage == 'operation-digest':
+            digest = 'f' * 64
+        elif damage == 'foreign-path':
+            selected = tmp_path / 'operation.json'
+            private_state._write_private(selected, path.read_bytes())
+            private_state._write_private(tmp_path / 'shared-pool-source.json', (root / 'shared-pool-source.json').read_bytes())
+        elif damage == 'changed-source':
+            (root / 'shared-pool-source.json').write_bytes(newer_source.read_bytes())
+        elif damage == 'changed-inputs':
+            (root / 'inputs.json').write_bytes(b'{}')
+        else:
+            (bindings.plan.development.runtime.state_dir / 'start/transition.json').unlink()
+        with pytest.raises(ValueError, match='historical'):
+            entry.load_historical_inputs(operation_path=selected, operation_sha256=digest)
+        for item, raw in before.items():
+            item.write_bytes(raw)
+            item.chmod(0o600)
+    assert all(item.read_bytes() == raw for item, raw in before.items())
+    assert all(not item.exists() for item in retired)
+
+
 @pytest.mark.timeout(420)
 def test_shared_private_entry_dispatches_real_parent_and_preserves_uncertain_intent(
         shared_operation, shared_guard_transport, monkeypatch, capsys):
