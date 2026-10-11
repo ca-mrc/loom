@@ -50,6 +50,7 @@ def test_publication_schema_is_derived_from_the_same_clean_source(source_checkou
     schema = root / 'database/migrations'
     (schema / 'versions').mkdir(parents=True)
     (schema / 'alembic.ini').write_text('[alembic]\n')
+    (schema / '.gitignore').write_text('__pycache__/\n')
     (schema / 'versions/one.py').write_text("revision = 'fixture_1'\ndown_revision = None\n")
     (schema / 'versions/two.py').write_text("revision = 'fixture_2'\ndown_revision = 'fixture_1'\n")
     subprocess.run(['git', 'add', 'database'], cwd=root, check=True, capture_output=True)
@@ -608,6 +609,9 @@ def test_publication_builds_selected_images_and_reuses_platform_admission(
     else:
         manifest = json.loads((output / "candidate.json").read_text())
         assert manifest['source_archive_sha256'] == 'sha256:' + 'f' * 64
+        from loom.db.schema_startup import service_schema_head
+
+        assert manifest['service_schema_head'] == service_schema_head(candidate.ROOT / 'database/migrations/alembic.ini')
         assert manifest['repository'] == repository
         profile = json.loads((output / "runtime-profile.json").read_text())
         assert profile["execution_class_id"] == (

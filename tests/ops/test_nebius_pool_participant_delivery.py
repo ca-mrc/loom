@@ -417,6 +417,32 @@ def test_completion_preserves_the_existing_database_clock_skew_allowance(
         operation_inputs, connection, tmp_path, monkeypatch, recover=False, file_writes=True)
 
 
+def test_shared_delivery_uses_published_schema_and_scoped_ancestry_without_git(
+        operation_inputs, connection, tmp_path, monkeypatch):
+    """Real deployment lifecycle; source authority is a separate HTTP-bound test."""
+    original_rollout = idle.rollout
+    calls, completed = [], []
+
+    def ancestry(current, candidate):
+        calls.append((current, candidate))
+        assert candidate == operation_inputs['candidate']['candidate_sha']
+        return True
+
+    def connected(args, **kwargs):
+        with monkeypatch.context() as patch:
+            patch.setattr(idle, 'candidate_follows', lambda *_: pytest.fail('operator bundle has no Git history'))
+            patch.setattr(idle, 'candidate_schema_head', lambda *_: pytest.fail('operator bundle has no migration checkout'))
+            result = original_rollout(args, **kwargs, candidate_ancestry=ancestry)
+            assert args.migration_schema_head == '0175'
+            completed.append(result)
+            return result
+
+    monkeypatch.setattr(idle, 'rollout', connected)
+    test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(
+        operation_inputs, connection, tmp_path, monkeypatch, recover=False, file_writes=True)
+    assert calls and completed[-1]['status'] == 'complete'
+
+
 def test_completed_release_is_the_next_receipt_selected_predecessor(
         operation_inputs, connection, tmp_path, monkeypatch):
     from scripts.ops import nebius_pool_participant_completion as completion

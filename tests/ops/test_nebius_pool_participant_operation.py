@@ -41,7 +41,8 @@ def operation_inputs(release_inputs, catalog_inputs, tmp_path):
     previous = inputs.pop('previous')
     candidate = inputs['candidate']
     candidate.update(schema_version='loom.nebius-candidate.v1', run_id=812,
-        source_archive_sha256='sha256:' + 'a' * 64, registry_prefix='cr.eu-north1.nebius.cloud/test')
+        source_archive_sha256='sha256:' + 'a' * 64, service_schema_head='0175',
+        registry_prefix='cr.eu-north1.nebius.cloud/test')
     predecessor_dir = tmp_path / 'predecessor'
     private_state._private_directory(predecessor_dir)
     history = predecessor_dir / 'completed.json'

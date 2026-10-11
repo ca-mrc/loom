@@ -5733,6 +5733,7 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
     from scripts.ops import nebius_pool_participant_entry as participant_entry
 
     assert hasattr(participant_entry, 'connected_participant_release'), 'protected candidate and pool delivery are not composed'
+    assert hasattr(participant_entry.ParticipantReleaseQualifier, 'candidate_follows'), 'protected source ancestry is not connected'
 
     predecessor = load_completed_shared_pool_operation(**args, bindings=bindings, api=parent_api)
     attached = bindings.plan.staging.attachment
@@ -5756,7 +5757,7 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
         'immutable': True, 'data': {'profiles.json': spec.profiles.model_dump_json()}}
     candidate = copy.deepcopy(predecessor.migration.registration.candidate)
     candidate.update(schema_version='loom.nebius-candidate.v1', candidate_sha='d' * 40,
-        run_id=812, source_archive_sha256='sha256:' + 'a' * 64)
+        run_id=812, source_archive_sha256='sha256:' + 'a' * 64, service_schema_head='0175')
     profile = attached.runtime_profile.model_copy(update={'candidate_sha': candidate['candidate_sha']})
     publication, published_payload = publication_fixture(candidate, profile)
     release_inputs = dict(predecessor=predecessor, current=tuple(current.values()),
@@ -6327,6 +6328,16 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
                     executable=Path('/usr/bin/kubectl'), operator_credentials=operator,
                     private_files={kubeconfig: kubeconfig.read_bytes(), operator: operator.read_bytes()},
                     ssl_context=ssl.create_default_context(), token='test-operator-token') as delivery:
+                previous_source = json.loads(current['ConfigMap:' + attached.config['namespace']
+                    + ':loom-platform-config']['data']['profile.json'])['candidate_sha']
+                assert delivery.qualifier.candidate_follows(previous_source, candidate['candidate_sha']) is True
+                external_fault('ancestry-diverged')
+                assert delivery.qualifier.candidate_follows(previous_source, candidate['candidate_sha']) is False
+                external_fault(None)
+                external_mode['hook'] = lambda: resources[reader_key]['metadata'].update(uid=str(uuid4()))
+                with pytest.raises(ValueError, match='preserve'):
+                    delivery.qualifier.candidate_follows(previous_source, candidate['candidate_sha'])
+                resources[reader_key] = copy.deepcopy(original_reader)
                 before_writes = list(writes)
                 delivery.pool.under_guard(kube, retained.release)
                 with delivery.writer.open_resource(database_key) as api:

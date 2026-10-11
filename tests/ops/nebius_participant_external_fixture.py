@@ -49,8 +49,14 @@ def external_connection(*, observer, bindings, shared_state, resources, publishe
         request, publisher_cloud, patch, shared_state.parent)
     mode, calls = {}, []
     reference = retained.inputs.publication
+    original_config, = (row for row in retained.inputs.current
+        if row['kind'] == 'ConfigMap' and row['metadata']['name'] == 'loom-platform-config')
+    previous_source = json.loads(original_config['data']['profile.json'])['candidate_sha']
     repo = {'full_name': 'ca-mrc/loom', 'id': 1281629473}
     responses = {
+        f'compare/{previous_source}...{reference.source_sha}': {'status': 'ahead',
+            'base_commit': {'sha': previous_source}, 'merge_base_commit': {'sha': previous_source},
+            'ahead_by': 3, 'behind_by': 0},
         f'actions/runs/{reference.run_id}/attempts/1': {
             'id': reference.run_id, 'run_attempt': 1, 'head_sha': reference.source_sha, 'head_branch': 'dev',
             'repository': repo, 'head_repository': repo, 'status': 'completed', 'conclusion': 'success',
@@ -77,6 +83,8 @@ def external_connection(*, observer, bindings, shared_state, resources, publishe
             if path == 'actions/artifacts/923/zip':
                 return httpx.Response(302, headers={'Location': 'https://fixture.blob.core.windows.net/artifact'})
             result = copy.deepcopy(responses[path])
+            if path.startswith('compare/') and mode.get('damage') == 'ancestry-diverged':
+                result.update(status='diverged', merge_base_commit={'sha': 'e' * 40}, behind_by=2)
             if mode.get('damage') == 'checks' and 'check_runs' in result:
                 result['check_runs'][0]['conclusion'] = 'failure'
             return httpx.Response(200, json=result)

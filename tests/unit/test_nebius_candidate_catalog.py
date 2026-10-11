@@ -113,6 +113,7 @@ async def test_protected_publication_resolves_actual_squash_not_nonexistent_dev_
 ])
 async def test_exact_candidate_ancestry_uses_scoped_github_reader(publication, status, current, merge_base, ahead, behind, want):
     from loom.execution_image_admission import ImageAdmissionKeyring
+
     from loom_service.environment_management.candidates import GitHubCandidateCatalog, ProtectedPublication
 
     reference, responses, payload, keyring, candidate = publication
