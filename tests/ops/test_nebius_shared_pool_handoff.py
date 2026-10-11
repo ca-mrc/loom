@@ -2273,8 +2273,8 @@ def test_shared_guard_binding_uses_live_dev_database_and_real_bound_guard_reader
 
 
 @pytest.mark.timeout(600)
-@pytest.mark.parametrize('forward_processes', [False, True, 'activation', 'recovery-databases'],
-    ids=['initial', 'forward', 'activation', 'recovery-databases'])
+@pytest.mark.parametrize('forward_processes', [False, True, 'activation', 'recovery-databases', 'process-observation'],
+    ids=['initial', 'forward', 'activation', 'recovery-databases', 'process-observation'])
 def test_shared_process_preflight_reads_current_databases_and_retired_authority(
         shared_runtime, staging_history, staging_observation, completed_pool, handoff, monkeypatch, forward_processes):
     """Reject active old authority, failed real challenges and changed bindings.
@@ -2716,8 +2716,9 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
                     connection.client.close()
                     connection.client = type(completed_pool[3].api.client)(base_url=connection.api_server, transport=httpx.MockTransport(handle))
                 _exercise_forward_processes(bindings=result.bindings, development=shared_probes, documents=documents,
-                    mode=mode, checked=checked, commands=commands, add=add,
+                    mode=mode, checked=checked, commands=commands, add=add, calls=calls,
                     activation_transport=forward_processes == 'activation',
+                    observation_only=forward_processes == 'process-observation',
                     args=dict(runtime=request, observation=staging_observation, legacy=staging_history, repo_root=ROOT))
             return
         baseline = copy.deepcopy(documents)
@@ -2987,8 +2988,64 @@ def _exercise_recovery_databases(*, bindings, documents, mode, checked, commands
     assert all(row[0] == 'get' or (row[0] == 'exec' and row[7] == 'psql') for row in commands[first_command:])
 
 
-def _exercise_forward_processes(*, bindings, development, documents, mode, checked, commands, add, args,
-        activation_transport=False):
+def _exercise_scoped_process_observation(*, development, documents, state, calls, catalog_path):
+    """Bound API traffic without reusing live readiness or changed history."""
+    runtime_state = development.shared_bindings.plan.development.runtime.state_dir
+    key = 'Deployment:loom-dev:loom-control-plane'
+    workload_path = '/apis/apps/v1/namespaces/loom-dev/deployments/loom-control-plane'
+
+    def running():
+        return development._running(key, runtime_state)
+
+    before = len(calls)
+    with development.process_observation(state_dir=runtime_state):
+        first = running()
+        assert running() == first
+        development.qualify_runtime_settings(key=key, state_dir=runtime_state)
+        development.qualify_runtime_database(key=key, state_dir=runtime_state)
+    assert sum(call.url.path == catalog_path for call in calls[before:]) == 2
+    assert sum(call.url.path == workload_path for call in calls[before:]) >= 12
+    for path in (state / 'forward-guards/guards.json', runtime_state / 'installation.json'):
+        raw = path.read_bytes()
+        try:
+            with pytest.raises(ValueError):
+                with development.process_observation(state_dir=runtime_state):
+                    running()
+                    path.write_bytes(raw + b'\n')
+                    running()  # Semantically equal receipt bytes are still changed.
+        finally:
+            path.write_bytes(raw)
+            path.chmod(0o600)
+        assert running()[0] == 'controller'  # Failed scopes never leak their view.
+    for path in (catalog_path, workload_path):
+        saved = copy.deepcopy(documents[path])
+        try:
+            with pytest.raises(ValueError):
+                with development.process_observation(state_dir=runtime_state):
+                    running()
+                    documents[path]['metadata']['uid'] = str(uuid4())
+                    if path == workload_path:
+                        running()  # Target identity is checked on every nested read.
+                    # Unrelated inventory drift must be rejected at scope exit.
+        finally:
+            documents[path] = saved
+    original = copy.deepcopy(development.shared_bindings.plan.staging.originals)
+    try:
+        with pytest.raises(ValueError):
+            with development.process_observation(state_dir=runtime_state):
+                development.shared_bindings.plan.staging.originals.clear()
+                running()
+    finally:
+        development.shared_bindings.plan.staging.originals.update(original)
+    with development.process_observation(state_dir=runtime_state):
+        with pytest.raises(ValueError):
+            with development.process_observation(state_dir=runtime_state):
+                pytest.fail('nested observation must not replace the active scope')
+        assert running()[0] == 'controller'
+
+
+def _exercise_forward_processes(*, bindings, development, documents, mode, checked, commands, add, calls, args,
+        activation_transport=False, observation_only=False):
     """Real parent, process transports and readiness validators; no live effects."""
     import importlib.util
     import json
@@ -3112,8 +3169,18 @@ def _exercise_forward_processes(*, bindings, development, documents, mode, check
             raise ValueError('forward process failure at ' + ', '.join(frames)) from None
 
     checked.clear()
+    reads_before = len(calls)
     assert observe().pending_workloads == ()
+    # Each whole inventory reads this unrelated retained ConfigMap. Repeating
+    # the full inventory for every nested process challenge exhausted the
+    # existing timeout and amplifies real API traffic as components increase.
+    catalog_path = next(path for path, row in documents.items() if row['kind'] == 'ConfigMap')
+    assert sum(call.url.path == catalog_path for call in calls[reads_before:]) <= 4
     assert {'new-closed', 'old-revoked', ('runtime-role', 'loom-dev')} <= checked
+    if observation_only:
+        _exercise_scoped_process_observation(development=development, documents=documents,
+            state=state, calls=calls, catalog_path=catalog_path)
+        return
     guard_path = state / 'forward-guards/guards.json'
     guard_record = json.loads(guard_path.read_bytes())
     first = bindings.migration.guards[0]
