@@ -241,6 +241,106 @@ def test_failed_job_retry_preserves_attempt_history_and_uses_exact_delete_precon
     assert len(state.deletes) == 1 and len(state.external.creates) == 2
 
 
+def test_multiple_failed_job_retries_preserve_every_predecessor(connection):
+    state, connect = connection
+    key = state.keys[0]
+    history = {}
+    retired_uids = []
+    for _ in range(2):
+        with connect(key) as api:
+            original = fail_recorded_job(state, api, key)
+            retired_uids.append(original['metadata']['uid'])
+            history.update({path: path.read_bytes() for path in
+                (state.retained.state_dir / 'candidate-creations').rglob('stage.json')})
+            assert api.retry_failed_job() is True
+    with connect(key) as api:
+        result = stage(state, api, key)
+        assert stage(state, api, key) == result
+    assert all(path.read_bytes() == raw for path, raw in history.items())
+    assert len(list((state.retained.state_dir / 'candidate-creations').rglob('stage.json'))) == 3
+    assert len(set(retired_uids + list(result['resource_uids'].values()))) == 3
+    assert len(state.external.creates) == 3 and len(state.deletes) == 2
+
+
+@pytest.mark.parametrize('damage', ['predecessor', 'successor', 'retry-lineage'])
+def test_missing_retry_history_cannot_recreate_a_job(connection, damage):
+    state, connect = connection
+    key = state.keys[0]
+    with connect(key) as api:
+        fail_recorded_job(state, api, key)
+        assert api.retry_failed_job() is True
+    with connect(key) as api:
+        stage(state, api, key)
+    root, = (path for path in (state.retained.state_dir / 'candidate-creations').iterdir() if path.is_dir())
+    # Only the test-owned journal is removed, simulating loss of retained evidence.
+    path = {'predecessor': root / 'stage.json', 'successor': root / 'attempt-1' / 'stage.json',
+        'retry-lineage': root / 'retries.json'}[damage]
+    path.unlink()
+    del state.external.resources[key]
+    with pytest.raises(ValueError, match=r'preserve|participant creation'):
+        with connect(key) as api:
+            stage(state, api, key)
+    assert len(state.external.creates) == 2 and len(state.deletes) == 1
+
+
+@pytest.mark.parametrize('failure', ['before', 'after'])
+def test_unknown_retry_generation_create_remains_readback_only(connection, failure):
+    state, connect = connection
+    key = state.keys[0]
+    with connect(key) as api:
+        fail_recorded_job(state, api, key)
+        assert api.retry_failed_job() is True
+    state.external.failure = failure
+    for _ in range(2):
+        with connect(key) as api:
+            if failure == 'before':
+                with pytest.raises(ValueError, match='preserve'):
+                    stage(state, api, key)
+            else:
+                assert len(stage(state, api, key)['resource_uids']) == 1
+    assert len(state.external.creates) == 2 and len(state.deletes) == 1
+
+
+def test_paginated_cleanup_observation_cannot_authorize_recreation(connection):
+    state, connect = connection
+    key = state.keys[0]
+    with connect(key) as api:
+        fail_recorded_job(state, api, key)
+        state.retain_deleted_pods = True
+        assert api.retry_failed_job() is False
+        state.continuation = True
+        state.pods = []
+        with pytest.raises(ValueError, match='preserve'):
+            api.reconcile_retry()
+        with pytest.raises(ValueError, match='preserve'):
+            stage(state, api, key)
+        assert len(state.external.creates) == 1 and len(state.deletes) == 1
+        state.continuation = False
+        assert api.reconcile_retry() is True
+    with connect(key) as api:
+        stage(state, api, key)
+    assert len(state.external.creates) == 2 and len(state.deletes) == 1
+
+
+@pytest.mark.parametrize('selected', [0, 2])
+def test_failed_job_that_never_started_a_pod_can_be_explicitly_retried(connection, selected):
+    state, connect = connection
+    key = state.keys[selected]
+    with connect(key) as api:
+        stage(state, api, key)
+        job = state.external.resources[_key(api.document)]
+        # Native Job deadline can expire while Pod admission is unavailable.
+        job['status'] = {'conditions': [{'type': 'Failed', 'status': 'True', 'reason': 'DeadlineExceeded'}],
+            'active': 0, 'succeeded': 0, 'failed': 0}
+        assert state.pods == []
+        assert api.job_outcome() == {'status': 'failed', 'job_uid': job['metadata']['uid'],
+            'job_name': job['metadata']['name'], 'pod_uids': []}
+        assert api.retry_failed_job() is True
+    with connect(key) as api:
+        stage(state, api, key)
+    assert len(state.external.creates) == 2 and len(state.deletes) == 1
+
+
 @pytest.mark.parametrize('failure', ['before', 'after'])
 def test_failed_job_retry_resolves_lost_delete_response_without_unconditional_delete(connection, failure):
     state, connect = connection
