@@ -977,6 +977,14 @@ Pending identities are evidence for the child readiness engine, never permission
 to advance the parent. The observer rechecks dev and staging process identities,
 staging templates and completed drain/readiness after all other probes; a late
 restart or a newly appearing descendant invalidates the earlier challenge.
+Nested development process challenges and their final identity readbacks each
+use a read-only observation scope. Full inventory checks bracket each group;
+every nested challenge still reads the actual Deployment and descendants and
+rechecks the retained private inputs, anchor and receipt bytes. No live readiness
+is cached, no view survives the group, and an ordinary unscoped probe still
+performs its full inventory checks. The final inventory scan precedes the final
+staging, gateway, guard and database identity checks, so a backend restart during
+that scan cannot escape the closing checks.
 Gateway startup uses the same receipt-selected workload and descendant checks.
 Its settings, database correspondence, projected namespace access and fresh
 aggregate capacity are challenged in the actual gateway process. The database

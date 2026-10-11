@@ -7,13 +7,18 @@ from __future__ import annotations
 
 import copy
 import ssl
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from scripts.ops.nebius_development_runtime_probes import HTTPSDevelopmentRuntimeProbes
-from scripts.ops.nebius_ingress_stage import _key
+from scripts.ops.nebius_ingress_stage import _key, _uid
+from scripts.ops.nebius_management_switch import _matches
 from scripts.ops.nebius_shared_pool_activation import shared_forward_activation_view
 from scripts.ops.nebius_shared_pool_handoff_live import SharedPoolGuardBindings
+from scripts.ops.nebius_shared_pool_operation import _files, _history
 
 
 def shared_forward_runtime_view(*, bindings: SharedPoolGuardBindings, state_dir: Path
@@ -79,13 +84,79 @@ def shared_runtime_view(*, bindings: SharedPoolGuardBindings, state_dir: Path
     return shared_forward_runtime_view(bindings=bindings, state_dir=state_dir)
 
 
+@dataclass(frozen=True, repr=False)
+class _ProcessObservation:
+    bindings: SharedPoolGuardBindings
+    state: Path
+    inventory: dict[str, dict[str, Any]]
+    receipts: dict[str, dict[str, str]]
+
+
 class HTTPSSharedPoolRuntimeProbes(HTTPSDevelopmentRuntimeProbes):
     def __init__(self, *, bindings: SharedPoolGuardBindings, api_server: str,
             ssl_context: ssl.SSLContext, token: str,
             private_files: dict[Path, bytes] | None = None):
         self.shared_bindings = copy.deepcopy(bindings)
+        self._process_observation: _ProcessObservation | None = None
         super().__init__(request=self.shared_bindings.plan.development.runtime.request,
             api_server=api_server, ssl_context=ssl_context, token=token, private_files=private_files)
+
+    def _process_receipts(self, bindings: SharedPoolGuardBindings, state: Path) -> dict[str, dict[str, str]]:
+        completed = bindings.plan.development.runtime
+        manager = completed.request.database.manager.retained.request.retained
+        if (self.shared_bindings != bindings or self.request != completed.request or self.plan != completed.plan
+                or state != completed.state_dir
+                or self.api_server.rstrip('/') != completed.request.database.foundation.inputs.config['kubernetes_api_server'].rstrip('/')):
+            raise ValueError('shared process observation binding changed')
+        self._private_inputs()
+        _history(bindings)
+        # Re-read bytes, ownership and paths, not recursively reconstruct every
+        # completed ancestor for each process. No remote state is cached here.
+        return {name: _files(path) for name, path in (
+            ('runtime', state), ('shared', Path(manager.operation['state_dir']).parent / 'shared-pool-handoff'),
+            ('anchors', Path(manager.operation['anchor_dir'])))}
+
+    @contextmanager
+    def process_observation(self, *, state_dir: Path) -> Iterator[None]:
+        """Full inventory barriers around fresh, targeted nested process probes.
+
+        The scope is read-only and cannot span a mutation or another observation.
+        Current Deployment, ReplicaSet, Pod, Secret and backend checks still run
+        at each challenge. Only unchanged local history projections are reused.
+        """
+        if self._process_observation is not None:
+            raise ValueError('shared process observation is already active')
+        bindings = copy.deepcopy(self.shared_bindings)
+        receipts = self._process_receipts(bindings, state_dir)
+        before = self.inspect(state_dir=state_dir)
+        if self._process_receipts(bindings, state_dir) != receipts:
+            raise ValueError('shared process observation history changed')
+        self._process_observation = _ProcessObservation(bindings, state_dir, copy.deepcopy(before), receipts)
+        try:
+            yield
+            after = self.inspect(state_dir=state_dir)
+            if (after.keys() != before.keys()
+                    or any(not _matches(after[key], original, _uid(original))
+                        or after[key]['metadata'].get('generation') != original['metadata'].get('generation')
+                        for key, original in before.items())
+                    or self._process_receipts(bindings, state_dir) != receipts):
+                raise ValueError('shared process observation changed')
+        finally:
+            self._process_observation = None
+
+    def _running_workload(self, key: str, state_dir: Path) -> dict[str, Any]:
+        view = self._process_observation
+        if view is None:
+            return super()._running_workload(key, state_dir)
+        if state_dir != view.state or self._process_receipts(view.bindings, view.state) != view.receipts:
+            raise ValueError('shared process observation history changed')
+        original = view.inventory[key]
+        current = self._get(original)
+        if (not _matches(current, original, _uid(original))
+                or current['metadata'].get('generation') != original['metadata'].get('generation')
+                or self._process_receipts(view.bindings, view.state) != view.receipts):
+            raise ValueError('shared process observation workload changed')
+        return current
 
     def inspect(self, *, state_dir: Path, _prechild_phase: str | None = None,
             _expected_record: dict[str, Any] | None = None,

@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from scripts.ops.nebius_development_runtime_probes import HTTPSDevelopmentRuntimeProbes
 from scripts.ops.nebius_development_runtime_readiness import qualify_started_deployment
 from scripts.ops.nebius_ingress_stage import _snapshot, _uid
 from scripts.ops.nebius_management_material import _documents as management_material
@@ -32,6 +31,7 @@ from scripts.ops.nebius_shared_pool_gateway import shared_forward_gateway_view
 from scripts.ops.nebius_shared_pool_guards import validate_shared_pool_guards
 from scripts.ops.nebius_shared_pool_handoff_live import SharedPoolGuardBindings
 from scripts.ops.nebius_shared_pool_operation import _files
+from scripts.ops.nebius_shared_pool_runtime_observation import HTTPSSharedPoolRuntimeProbes
 from scripts.ops.nebius_shared_pool_workloads import _frame, shared_forward_staging_options
 
 from loom.nebius_platform_render import digest
@@ -138,7 +138,7 @@ def _gateway_history_target(bindings: SharedPoolGuardBindings, credential: dict[
 
 
 def observe_shared_pool_forward_processes(*, bindings: SharedPoolGuardBindings, state_dir: Path,
-        development: HTTPSDevelopmentRuntimeProbes, kubeconfig: Path, executable: Path) -> SharedPoolForwardProcessObservation:
+        development: HTTPSSharedPoolRuntimeProbes, kubeconfig: Path, executable: Path) -> SharedPoolForwardProcessObservation:
     """Challenge current sources without replaying original open-guard preflight.
 
     The child readiness engine must finish every pending workload before the
@@ -152,10 +152,9 @@ def observe_shared_pool_forward_processes(*, bindings: SharedPoolGuardBindings, 
         runtime = completed.request
 
         def dev_scope() -> None:
-            if (development.request != runtime or development.plan != completed.plan
+            if (development.shared_bindings != bindings or development.request != runtime or development.plan != completed.plan
                     or development.api_server.rstrip('/') != runtime.database.foundation.inputs.config['kubernetes_api_server'].rstrip('/')):
                 raise ValueError
-            development.inspect(state_dir=completed.state_dir)
 
         dev_scope()
         guards = KubectlPoolGuardAPI(request=migration, kubeconfig=kubeconfig, executable=executable)
@@ -203,13 +202,14 @@ def observe_shared_pool_forward_processes(*, bindings: SharedPoolGuardBindings, 
         participant = plan.staging.attachment.participant
         dev_participant, = (row for row in migration.registration.spec.participants if row.participant_id != participant.participant_id)
         dev_processes = {}
-        for namespace, name in ((migration.registration.binding.namespace, 'loom-service'),
-                ('loom-dev', 'loom-service'), ('loom-dev', 'loom-control-plane'),
-                (dev_participant.execution_namespace.name, 'loom-execution-actuator')):
-            key = 'Deployment:' + namespace + ':' + name
-            dev_processes[key] = development._process_identity(development._running(key, completed.state_dir)[2])
-            development.qualify_runtime_settings(key=key, state_dir=completed.state_dir)
-            development.qualify_runtime_database(key=key, state_dir=completed.state_dir)
+        with development.process_observation(state_dir=completed.state_dir):
+            for namespace, name in ((migration.registration.binding.namespace, 'loom-service'),
+                    ('loom-dev', 'loom-service'), ('loom-dev', 'loom-control-plane'),
+                    (dev_participant.execution_namespace.name, 'loom-execution-actuator')):
+                key = 'Deployment:' + namespace + ':' + name
+                dev_processes[key] = development._process_identity(development._running(key, completed.state_dir)[2])
+                development.qualify_runtime_settings(key=key, state_dir=completed.state_dir)
+                development.qualify_runtime_database(key=key, state_dir=completed.state_dir)
         target, = (row for row in migration.guards if row.participant_id == participant.participant_id)
         database = target.database
         if (database is None or database.actuator_credential_uid is None
@@ -310,9 +310,13 @@ def observe_shared_pool_forward_processes(*, bindings: SharedPoolGuardBindings, 
                 or guards._get('secret', 'loom-platform-db', old_namespace) != old_credential):
             raise ValueError
         dev_scope()
-        for key, identity in dev_processes.items():
-            if development._process_identity(development._running(key, completed.state_dir)[2]) != identity:
-                raise ValueError
+        # Finish the full inventory barrier before the final staging, gateway,
+        # guard and database identities. No scope-exit remote read may follow
+        # those final checks and leave a newly changed backend unchallenged.
+        with development.process_observation(state_dir=completed.state_dir):
+            for key, identity in dev_processes.items():
+                if development._process_identity(development._running(key, completed.state_dir)[2]) != identity:
+                    raise ValueError
         for key, current in observed.items():
             original = plan.staging.originals[key]
             final = read_staging(original)

@@ -163,6 +163,9 @@ class HTTPSDevelopmentRuntimeProbes(HTTPSDevelopmentRuntimeObserver):
         except Exception:
             raise ValueError('development runtime closed database unqualified') from None
 
+    def _running_workload(self, key: str, state_dir: Path) -> dict[str, Any]:
+        return self.inspect(state_dir=state_dir)[key]
+
     def _running(self, key: str, state_dir: Path) -> tuple[PoolSettingsComponent, dict[str, Any], dict[str, Any]]:
         """Resolve only a regenerated started target through anchored live history."""
         desired = copy.deepcopy({**self.plan.targets, **self.plan.fixed['workloads']}[key])
@@ -181,7 +184,7 @@ class HTTPSDevelopmentRuntimeProbes(HTTPSDevelopmentRuntimeObserver):
                 raise ValueError
             component = 'actuator'
         desired['spec']['replicas'] = 1
-        current = self.inspect(state_dir=state_dir)[key]
+        current = self._running_workload(key, state_dir)
         _qualified_defaulted(desired, current)
         children = self._read('/apis/apps/v1/namespaces/' + namespace + '/replicasets?limit=1000')
         pods = self._read('/api/v1/namespaces/' + namespace + '/pods?limit=1000')
