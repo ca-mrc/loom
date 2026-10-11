@@ -394,15 +394,19 @@ def test_shared_candidate_uses_full_normal_rollout_without_restoring_local_write
 
 
 @pytest.mark.parametrize('outcome', ['complete', 'busy', 'preflight', 'guard-drift', 'activation-unknown', 'capacity-stale',
-    'recover-activation-unknown', 'recover-capacity-stale', 'guard-lost', 'guard-lost-after-activation'])
+    'recover-activation-unknown', 'recover-capacity-stale', 'guard-lost', 'guard-lost-after-activation',
+    'capacity-missing', 'capacity-expired', 'capacity-future', 'capacity-expires-before-release',
+    'recover-capacity-expired'])
 def test_guarded_deployer_orders_shared_refresh_and_never_releases_uncertain_mutations(release_inputs, tmp_path, monkeypatch, outcome):
     """Use the real deploy parent; only the protected pool I/O adapter is doubled."""
     import argparse
+    from datetime import UTC, datetime, timedelta
 
     from scripts.ops import deploy_nebius_platform as deploy
     from tests.ops.test_deploy_nebius_platform import FakeKubectl
 
     from loom.nebius_platform_render import write_platform
+    from loom_service.pool_management.participant_refresh import ParticipantCapacityReceipt
 
     release = module().prepare_staging_pool_release(**release_inputs)
     config = release_inputs['config']
@@ -415,6 +419,24 @@ def test_guarded_deployer_orders_shared_refresh_and_never_releases_uncertain_mut
     pool = {'phase': 'ready', 'capacity': False}
     fault = outcome.removeprefix('recover-')
     registry_mutations = []
+    observations = []
+    clock = {'now': datetime.now(UTC)}
+
+    class Clock:
+        @staticmethod
+        def now(_zone):
+            return clock['now']
+
+    monkeypatch.setattr(deploy, 'datetime', Clock)
+    binding = deploy._participant_release_binding
+
+    def checked_binding(*values):
+        result = binding(*values)
+        if fault == 'capacity-expires-before-release' and pool['capacity']:
+            clock['now'] += timedelta(seconds=121)
+        return result
+
+    monkeypatch.setattr(deploy, '_participant_release_binding', checked_binding)
 
     class Kube(FakeKubectl):
         def get(self, kind, name, namespace):
@@ -481,10 +503,11 @@ def test_guarded_deployer_orders_shared_refresh_and_never_releases_uncertain_mut
                 events.append('lost-guard-after-activation')
             return 'ready'
 
-        def finish(self, observed_kube, plan):
+        def finish(self, observed_kube, plan, *, observation_id=None):
             assert observed_kube is kube and plan == release and kube.guard_identity is not None
             assert 'https' in events
             events.append('open')
+            observations.append(observation_id)
             if pool['phase'] != 'open':
                 registry_mutations.append('open')
             pool['phase'] = 'open'
@@ -492,6 +515,16 @@ def test_guarded_deployer_orders_shared_refresh_and_never_releases_uncertain_mut
                 raise deploy.DeploymentError('post-open capacity unavailable')
             pool['capacity'] = True
             events.append('fresh-capacity')
+            if fault == 'capacity-missing':
+                return None
+            checked = clock['now']
+            if fault == 'capacity-expired':
+                checked -= timedelta(seconds=180)
+            elif fault == 'capacity-future':
+                checked += timedelta(seconds=180)
+            return ParticipantCapacityReceipt(checked_at=checked, valid_until=checked + timedelta(seconds=120),
+                selected_observation_id=uuid4(), selected_observed_at=checked,
+                connected_pools=1, observations_sha256='a' * 64)
 
     if fault in {'complete', 'busy'}:
         report = deploy.deploy(args, kube=kube, participant_release=release, pool=PoolIO())
@@ -506,8 +539,11 @@ def test_guarded_deployer_orders_shared_refresh_and_never_releases_uncertain_mut
         assert not any(event.startswith('workload:') for event in events)
     assert {'preflight': 'preflight', 'guard-drift': 'guarded', 'activation-unknown': 'activate',
         'capacity-stale': 'open', 'complete': 'fresh-capacity', 'busy': 'activate', 'guard-lost': 'lost-guard',
-        'guard-lost-after-activation': 'lost-guard-after-activation'}[fault] in events
-    assert (kube.guard_identity is not None) == (fault in {'activation-unknown', 'capacity-stale'})
+        'guard-lost-after-activation': 'lost-guard-after-activation', 'capacity-missing': 'fresh-capacity',
+        'capacity-expired': 'fresh-capacity', 'capacity-future': 'fresh-capacity',
+        'capacity-expires-before-release': 'fresh-capacity'}[fault] in events
+    assert (kube.guard_identity is not None) == (fault in {'activation-unknown', 'capacity-stale',
+        'capacity-missing', 'capacity-expired', 'capacity-future', 'capacity-expires-before-release'})
     if outcome.startswith('recover-'):
         args.resume_guard_owner = kube.guard_identity[0]
         args.retry_failed_jobs = True
@@ -515,6 +551,8 @@ def test_guarded_deployer_orders_shared_refresh_and_never_releases_uncertain_mut
         assert deploy.deploy(args, kube=kube, participant_release=release, pool=PoolIO())['status'] == 'complete'
         assert kube.guard_identity is None and pool['capacity'] is True
         assert registry_mutations == ['stage', 'open']
+    assert all(isinstance(identity, UUID) and identity.int for identity in observations)
+    assert len(observations) == len(set(observations))
 
 
 @pytest.mark.parametrize('damage', ['missing-adapter', 'missing-release', 'standalone-files', 'wrong-guard', 'retire-target'])
