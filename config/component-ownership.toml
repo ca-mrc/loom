@@ -180,7 +180,9 @@ pins = [
   # shard instead of leaving normal delivery at the job deadline.
   { path = "tests/ops/test_nebius_pool_participant_delivery_history.py", shard_index = 11 },
   { path = "tests/ops/test_nebius_shared_pool_handoff.py", shard_index = 7 },
-  { path = "tests/ops/test_nebius_shared_pool_handoff_parent.py", shard_index = 9 },
+  # Parent passed in about 9m40s before the co-located process matrix hit
+  # the job deadline. Place it beside the measured 11m07s recovery-role job.
+  { path = "tests/ops/test_nebius_shared_pool_handoff_parent.py", shard_index = 15 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_forward.py", shard_index = 10 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_processes.py", shard_index = 9 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_census.py", shard_index = 18 },

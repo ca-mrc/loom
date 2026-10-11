@@ -179,6 +179,8 @@ Recovery stop, gateway, template, role, restart and reopening scenarios are
 separate files, as are participant host/dispatch/runner and completed-release
 history matrices. These files
 retain every parameterized scenario and independent fixture. Connected
+parent and process-preflight matrices also use separate shards after their
+combined duration exhausted a job's budget. Connected
 transport tests retain independent fixtures and share only immutable
 inputs; full roster tests retain all environments. Duplicate mode-independent
 qualification cases run once, while mode-specific grants and failure cases remain.
