@@ -606,6 +606,69 @@ def test_latest_participant_head_advances_only_from_exact_completed_predecessor(
         state_root=retained.state_dir.parent, anchor_dir=retained.anchor_dir) == successor
 
 
+@pytest.mark.parametrize('failure', [None, 'before-promotion', 'after-promotion'])
+def test_deployment_reports_success_only_after_history_promotion(
+        operation_inputs, connection, tmp_path, monkeypatch, failure):
+    from scripts.ops.nebius_pool_participant_completion import (
+        initialize_participant_head,
+        load_participant_head,
+        promote_participant_head,
+    )
+
+    retained = connection[0].retained
+    options = dict(initial=operation_inputs['predecessor'], state_root=retained.state_dir.parent,
+        anchor_dir=retained.anchor_dir)
+    initialize_participant_head(**options)
+    original_rollout = idle.rollout
+    finalized, statuses, arguments = [], [], []
+
+    def finalize():
+        finalized.append(True)
+        if failure == 'before-promotion' and len(finalized) == 1:
+            raise ValueError('simulated promotion failure')
+        promote_participant_head(**options, expected=options['initial'], reference=retained.reference)
+        if failure == 'after-promotion' and len(finalized) == 1:
+            raise ValueError('simulated promotion acknowledgement loss')
+
+    def connected(args, **kwargs):
+        arguments.append((args, kwargs))
+        github = idle.github
+
+        def report(path, payload):
+            if path.endswith('/statuses'):
+                statuses.append(payload['state'])
+                if payload['state'] == 'success':
+                    assert finalized
+                    assert load_participant_head(**options).retained.reference == retained.reference
+            return github(path, payload)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(idle, 'github', report)
+            return original_rollout(args, participant_finalize=finalize, **kwargs)
+
+    monkeypatch.setattr(idle, 'rollout', connected)
+    if failure:
+        with pytest.raises(ValueError, match='simulated promotion'):
+            test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(
+                operation_inputs, connection, tmp_path, monkeypatch, recover=False, file_writes=True)
+        assert statuses == ['in_progress', 'failure']
+        args, kwargs = arguments[-1]
+        failed, = args.evidence_dir.glob('deployment-*.json')
+        evidence = json.loads(failed.read_bytes())
+        assert evidence['status'] == 'failed' and evidence['dispatch_paused'] is False
+        assert idle.recovery_record(evidence)['shared_pool_release'] == retained.reference.model_dump(mode='json')
+        args.recovery_evidence = failed
+        effects = list(connection[0].effects)
+        assert connected(args, **kwargs)['status'] == 'complete'
+        assert connection[0].effects == effects, 'promotion recovery must not replay pool effects'
+        assert len(finalized) == 2
+    else:
+        test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(
+            operation_inputs, connection, tmp_path, monkeypatch, recover=False, file_writes=True)
+        assert len(finalized) == 1
+    assert statuses[-2:] == ['in_progress', 'success']
+
+
 def test_expired_monotonic_capacity_cannot_create_a_release_intent(operation_inputs, connection, tmp_path, monkeypatch):
     import time
 
