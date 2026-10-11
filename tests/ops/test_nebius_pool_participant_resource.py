@@ -199,3 +199,16 @@ def test_candidate_resource_transport_has_no_arbitrary_write_scope(connection, o
         module().HTTPSParticipantResourceAPI(retained=state.retained, key=keys[outside],
             api_server='https://foreign.invalid' if outside == 'endpoint' else state.retained.inputs.config['kubernetes_api_server'],
             ssl_context=ssl.create_default_context(), qualify_resource=lambda *_: None)
+
+
+def test_original_cannot_already_contain_this_release_write_marker(operation_inputs):
+    """An unchanged before-image must never look like an uncertain committed write."""
+    ns = operation_inputs['config']['namespace']
+    key = 'Namespace:-:' + ns
+    original, = (row for row in operation_inputs['current'] if _key(row) == key)
+    original['metadata'].setdefault('annotations', {})['loom.nebius/participant-candidate-operation'] = str(operation_inputs['operation_id'])
+    retained = operation.retain_participant_rollout(**operation_inputs)
+    with pytest.raises(ValueError, match='participant resource'):
+        module().HTTPSParticipantResourceAPI(retained=retained, key=key,
+            api_server=retained.inputs.config['kubernetes_api_server'], ssl_context=ssl.create_default_context(),
+            qualify_resource=lambda *_: None)
