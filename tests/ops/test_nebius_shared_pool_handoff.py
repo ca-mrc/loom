@@ -5824,6 +5824,38 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
         record.write_bytes(raw)
         assert observe().workloads[key] == resources[key]
 
+        # Exercise the real fence/catalog/manager/open/capacity children with
+        # this same whole-pool qualifier, not the former resource-only callback.
+        from tests.ops.test_nebius_pool_participant_adapter import connection as pool_connection
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(httpx, 'Client', type(transport.client))
+            pool_state, kube, connect_pool = pool_connection.__wrapped__(release_inputs, patch)
+            injected = set()
+
+            def qualify_pool(_phase):
+                nonlocal injected
+                resources.update(pool_state.api.resources)
+                for row in pool_state.api.resources.values():
+                    if row['kind'] in kinds:
+                        collection = inventory[kinds[row['kind']]]
+                        collection[:] = [other for other in collection if _key(other) != _key(row)] + [row]
+                descendants = (*pool_state.children[0]['items'], *pool_state.children[1]['items'], *pool_state.pods.values())
+                for plural in ('replicasets', 'pods'):
+                    inventory[plural][:] = [row for row in inventory[plural] if row['metadata']['uid'] not in injected]
+                injected = {row['metadata']['uid'] for row in descendants}
+                for row in descendants:
+                    inventory[kinds[row['kind']]].append(row)
+                observe()
+
+            pool_state.qualify = qualify_pool
+            pool = connect_pool()
+            assert pool.activate(kube, retained.release) == 'ready'
+            pool.finish(kube, retained.release)
+            pool.read_capacity(kube, retained.release, observation_id=uuid4())
+            assert pool_state.effects == ['config', 'fence', 'stage', 'config', 'manager', 'open', 'capacity']
+            assert observe().workloads[_key(manager)] == pool_state.manager
+
 
 def _exercise_recovery_writer_census(kwargs, state, transport, inventory, kinds, calls, mode, replace_live, forward_api):
     """Real phase journals and cluster census; remote recovery effects are fixture state."""
