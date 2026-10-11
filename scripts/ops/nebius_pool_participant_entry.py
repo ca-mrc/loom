@@ -60,7 +60,6 @@ from scripts.ops.nebius_shared_pool_handoff_live import SharedPoolGuardBindings
 
 from loom.nebius_candidate_contract import candidate_service_schema_head
 from loom.nebius_kubernetes import NebiusKubernetesConnection
-from loom.nebius_platform_render import build_platform
 from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1
 from loom_service.environment_management.candidates import ProtectedPublication
 from loom_service.environment_management.manager import CandidateBundle
@@ -294,6 +293,7 @@ def prepare_retained_participant_release(*, publication: ProtectedPublication, o
     from scripts.ops.nebius_development_entry import _transport
     from scripts.ops.nebius_pool_participant_prepare import (
         capture_participant_release,
+        render_participant_candidate,
         resolve_participant_publication,
     )
     from scripts.ops.nebius_shared_pool_entry import load_completed_history
@@ -342,7 +342,7 @@ def prepare_retained_participant_release(*, publication: ProtectedPublication, o
             context, token = asyncio.run(_transport(operator_connection))
             unchanged()
             with ManagementKubernetesTransport(api_server=endpoint, ssl_context=context, token=token) as transport:
-                async def resolve() -> CandidateBundle:
+                async def resolve() -> tuple[CandidateBundle, dict[str, bytes]]:
                     async with httpx.AsyncClient(timeout=30, follow_redirects=False, trust_env=False) as http:
                         async with resolve_participant_publication(completed=historical.bindings.plan.development.runtime,
                                 publication=publication, keyring=expected.migration.registration.spec.profiles.image_admission_keyring,
@@ -350,9 +350,11 @@ def prepare_retained_participant_release(*, publication: ProtectedPublication, o
                             if not await catalog.candidate_follows(candidate_id=publication.candidate_id,
                                     current_sha=expected.migration.registration.candidate['candidate_sha']):
                                 raise ValueError
-                            return bundle
+                            candidate_service_schema_head(bundle.candidate)
+                            source_files = await catalog.render_source(candidate_id=publication.candidate_id)
+                            return bundle, source_files
 
-                bundle = asyncio.run(resolve())
+                bundle, source_files = asyncio.run(resolve())
                 unchanged()
                 snapshot = capture_participant_release(predecessor=expected, bindings=historical.bindings,
                     shared_state=initial.state_dir, repo_root=repo_root, transport=transport)
@@ -360,9 +362,8 @@ def prepare_retained_participant_release(*, publication: ProtectedPublication, o
             profile = ServiceExecutionRuntimeProfileV1.model_validate(bundle.profile)
             source = PreparedDevelopmentSource(source_sha=bundle.candidate['candidate_sha'],
                 source_archive_sha256=bundle.candidate['source_archive_sha256'])
-            candidate_service_schema_head(bundle.candidate)
-            rendered = build_platform(snapshot.config, bundle.candidate, bundle.profile,
-                expected.migration.registration.spec.profiles.image_admission_keyring, repo_root=repo_root)
+            rendered = render_participant_candidate(bundle=bundle, source_files=source_files, config=snapshot.config,
+                keyring=expected.migration.registration.spec.profiles.image_admission_keyring)
             if initialize_participant_head(initial=initial, state_root=state_root, anchor_dir=anchor_dir) != expected:
                 raise ValueError
             retained = retain_participant_rollout(predecessor=expected, current=snapshot.current,
