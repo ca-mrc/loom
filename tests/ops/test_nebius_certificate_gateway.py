@@ -163,12 +163,14 @@ def test_report_does_not_forward_remote_payloads():
         module().safe_report(json.dumps(value).encode())
 
 
-def test_private_command_has_no_ambient_credentials_or_public_logs(tmp_path, monkeypatch):
+@pytest.mark.parametrize("gateway_name", ["nebius_certificate_gateway", "nebius_development_management_certificate_gateway"])
+def test_private_command_has_no_ambient_credentials_or_public_logs(tmp_path, monkeypatch, gateway_name):
     import sys
 
     monkeypatch.setenv("PRIVATE_CREDENTIAL", "private-key")
     path = tmp_path / "child.json"
-    result = module().run_private([sys.executable, "-c", "import os,json,sys; "
+    gateway = importlib.import_module("scripts.ops." + gateway_name)
+    result = gateway.run_private([sys.executable, "-c", "import os,json,sys; "
                                   "open(sys.argv[1],'w').write(json.dumps(dict(os.environ))); print('ok')", str(path)], timeout=10)
     assert result.strip() == b"ok"
     assert "private-key" not in path.read_text()
@@ -176,7 +178,8 @@ def test_private_command_has_no_ambient_credentials_or_public_logs(tmp_path, mon
 
 
 @pytest.mark.parametrize("termination", ["outer_timeout", "owner_sigkill"])
-def test_owner_death_or_outer_timeout_does_not_leave_detached_certificate_client(tmp_path, termination):
+@pytest.mark.parametrize("gateway_name", ["nebius_certificate_gateway", "nebius_development_management_certificate_gateway"])
+def test_owner_death_or_outer_timeout_does_not_leave_detached_certificate_client(tmp_path, termination, gateway_name):
     pid = tmp_path / "certificate.pid"
     script = (
         "import subprocess,sys; from pathlib import Path; "
@@ -192,7 +195,7 @@ def test_owner_death_or_outer_timeout_does_not_leave_detached_certificate_client
     worker = None
     if termination == "outer_timeout":
         with pytest.raises(subprocess.TimeoutExpired):
-            module().run_private(args, timeout=2)
+            importlib.import_module("scripts.ops." + gateway_name).run_private(args, timeout=2)
     else:
         worker = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         for _ in range(200):

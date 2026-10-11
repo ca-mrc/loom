@@ -144,7 +144,7 @@ def _write(path: Path, value: bytes, *, executable: bool = False) -> None:
         os.fsync(stream.fileno())
 
 
-def prepare_release(content: bytes, *, management_only: bool = False) -> tuple[Path, Path]:
+def prepare_release(content: bytes) -> tuple[Path, Path]:
     if not 0 < len(content) <= MAX_BUNDLE:
         raise GatewayError("tooling bundle exceeds bound")
     try:
@@ -162,10 +162,8 @@ def prepare_release(content: bytes, *, management_only: bool = False) -> tuple[P
         config = json.loads(files["installation.json"])
         state = Path(config["state_dir"])
         root = state.parent
-        expected_root = "nebius-development-management-certificates" if management_only else "nebius-certificates"
         if (not state.is_absolute() or state != state.resolve() or state.name != "state"
-                or root.name != expected_root
-                or (management_only and config.get("schema") != "loom.nebius-management-certificate-installation.v1")):
+                or root.name != "nebius-certificates"):
             raise GatewayError("tooling requires its dedicated certificate root")
     except GatewayError:
         raise
@@ -213,17 +211,16 @@ def prepare_release(content: bytes, *, management_only: bool = False) -> tuple[P
         raise GatewayError("private tooling storage unavailable or in use") from None
 
 
-def safe_report(raw: bytes, *, management_only: bool = False) -> dict[str, Any]:
+def safe_report(raw: bytes) -> dict[str, Any]:
     if len(raw) > 65_536:
         raise GatewayError("certificate report exceeds bound")
     try:
         value = json.loads(raw)
         if (value["status"] != "qualified" or UUID(value["installation_id"]).int == 0
                 or not all(re.fullmatch(r"[0-9a-f]{64}", value[key]) for key in ("generation", "fingerprint_sha256"))
-                or not isinstance(value["sans"], list) or len(value["sans"]) != (1 if management_only else 2)
+                or not isinstance(value["sans"], list) or len(value["sans"]) != 2
                 or any(not isinstance(name, str) or len(name) > 253
-                       or not re.fullmatch(r"(?:\*\.)?[a-z0-9.-]+", name)
-                       or (management_only and "*" in name) for name in value["sans"])
+                       or not re.fullmatch(r"(?:\*\.)?[a-z0-9.-]+", name) for name in value["sans"])
                 or datetime.fromisoformat(value["expires_at"]).tzinfo is None):
             raise GatewayError("invalid certificate report")
         return {key: value[key] for key in ("status", "installation_id", "generation", "fingerprint_sha256", "sans", "expires_at")}
@@ -233,37 +230,24 @@ def safe_report(raw: bytes, *, management_only: bool = False) -> dict[str, Any]:
         raise GatewayError("invalid certificate report") from None
 
 
-def management_report(raw: bytes, config: dict[str, Any]) -> dict[str, Any]:
-    """A structurally valid receipt must still identify the selected issuer."""
-    report = safe_report(raw, management_only=True)
-    if (report["installation_id"] != config.get("installation_id")
-            or report["sans"] != [config.get("management_host")]):
-        raise GatewayError("certificate report differs from selected management issuer")
-    return report
-
-
-def qualify_bundle(content: bytes, *, management_only: bool = False) -> dict[str, Any]:
-    release, config = prepare_release(content, management_only=management_only)
+def qualify_bundle(content: bytes) -> dict[str, Any]:
+    release, config = prepare_release(content)
     result = run_private([str(release / "venv" / "bin" / "python"),
                           str(release / "scripts" / "ops" / "nebius_certificates.py"),
-                          "issue-management" if management_only else "issue", "--config", str(config)], timeout=1900)
-    if management_only:
-        return management_report(result, json.loads(_read(config, LIMITS["installation.json"])))
+                          "issue", "--config", str(config)], timeout=1900)
     return safe_report(result)
 
 
-def authorized_main(expected_sha256: str, *, management_only: bool = False) -> int:
+def authorized_main(expected_sha256: str) -> int:
     """Forced-command boundary: expected digest is installed, never caller input."""
-    command = "loom-nebius-development-management-certificate-v1" if management_only else "loom-nebius-certificate-v1"
-    if (os.environ.get("SSH_ORIGINAL_COMMAND") != command
+    if (os.environ.get("SSH_ORIGINAL_COMMAND") != "loom-nebius-certificate-v1"
             or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256)):
         return 126
     content = sys.stdin.buffer.read(MAX_BUNDLE + 1)
     if not 0 < len(content) <= MAX_BUNDLE or hashlib.sha256(content).hexdigest() != expected_sha256:
         return 126
     try:
-        report = qualify_bundle(content, management_only=True) if management_only else qualify_bundle(content)
-        print(json.dumps(report, sort_keys=True))
+        print(json.dumps(qualify_bundle(content), sort_keys=True))
         return 0
     except Exception:
         print("protected certificate operation failed; preserve gateway state for reconciliation", file=sys.stderr)

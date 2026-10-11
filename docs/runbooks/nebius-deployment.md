@@ -388,6 +388,9 @@ Before installing the independent manager, issue its own exact-host certificate
 with the protected `development-management-certificate` operation. It uses the
 existing issuer's DNS-01 hooks, locked Certbot, watchdog and retained recovery
 journals, but has a separate forced command, key, configuration and state root.
+Its separately bundled gateway leaves the existing legacy certificate, ingress
+and management payloads byte-for-byte unchanged; installing dev-manager authority
+does not require widening or replacing their exact-bundle grants.
 It does not modify Kubernetes, the shared wildcard certificate, or the legacy
 management route. No policy-quota increase is needed for certificate issuance.
 

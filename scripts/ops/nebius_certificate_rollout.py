@@ -23,10 +23,15 @@ if __package__ in {None, ""}:
 from scripts.ops.nebius_certificate_gateway import (  # noqa: E402
     LIMITS,
     MAX_BUNDLE,
-    management_report,
     safe_report,
 )
 from scripts.ops.nebius_certificates import load_installation  # noqa: E402
+from scripts.ops.nebius_development_management_certificate_gateway import (  # noqa: E402
+    LIMITS as MANAGEMENT_LIMITS,
+)
+from scripts.ops.nebius_development_management_certificate_gateway import (  # noqa: E402
+    management_report,
+)
 
 
 class RolloutError(RuntimeError):
@@ -37,15 +42,18 @@ class CertificateAuthorityDeniedError(RolloutError):
     """The forced command rejected its command or installed bundle authority."""
 
 
-def build_bundle(config: dict[str, Any], *, uv: Path, requirements: Path) -> bytes:
+def build_bundle(config: dict[str, Any], *, uv: Path, requirements: Path,
+                 management_only: bool = False) -> bytes:
     files = {"uv": uv.read_bytes(), "requirements.txt": requirements.read_bytes(),
              "installation.json": json.dumps(config, sort_keys=True).encode()}
-    for name in ("scripts/ops/nebius_certificates.py", "scripts/ops/nebius_dns_challenge.py",
-                 "scripts/ops/nebius_certificate_gateway.py"):
+    gateway = ("scripts/ops/nebius_development_management_certificate_gateway.py" if management_only
+               else "scripts/ops/nebius_certificate_gateway.py")
+    limits = MANAGEMENT_LIMITS if management_only else LIMITS
+    for name in ("scripts/ops/nebius_certificates.py", "scripts/ops/nebius_dns_challenge.py", gateway):
         files[name] = (ROOT / name).read_bytes()
     files["manifest.json"] = json.dumps({name: hashlib.sha256(value).hexdigest() for name, value in files.items()},
                                        sort_keys=True).encode()
-    if any(len(value) > LIMITS[name] for name, value in files.items()):
+    if any(len(value) > limits[name] for name, value in files.items()):
         raise RolloutError("certificate tooling member exceeds bound")
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
@@ -120,7 +128,8 @@ def main() -> int:
         version = subprocess.run([executable, "--version"], capture_output=True, timeout=15, check=False)
         if version.returncode or version.stdout.strip() != b"uv 0.11.26 (x86_64-unknown-linux-gnu)":
             raise RolloutError("tooling installer differs from qualified pin or architecture")
-        content = build_bundle(config, uv=Path(executable), requirements=args.requirements)
+        content = build_bundle(config, uv=Path(executable), requirements=args.requirements,
+                               management_only=args.management_only)
         if args.prepare_bundle is not None:
             descriptor = os.open(args.prepare_bundle, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
             with os.fdopen(descriptor, "wb") as stream:

@@ -86,7 +86,6 @@ def _entrypoint(source_digest: str, bundle_digest: str, *, management_only: bool
     # Isolated Python and verified local source: SSH callers control neither
     # import search paths nor the expected bundle digest nor executable code.
     command = "loom-nebius-development-management-certificate-v1" if management_only else COMMAND
-    mode = ", management_only=True" if management_only else ""
     return f'''import hashlib, os, stat, sys
 from pathlib import Path
 try:
@@ -103,7 +102,7 @@ try:
         raise ValueError()
     namespace = {{"__name__": "loom_certificate_authority", "__file__": str(path)}}
     exec(compile(source, str(path), "exec"), namespace)
-    code = namespace["authorized_main"]({bundle_digest!r}{mode})
+    code = namespace["authorized_main"]({bundle_digest!r})
 except Exception:
     code = 126
 raise SystemExit(code)
@@ -121,11 +120,13 @@ def install(content: bytes, *, expected_sha256: str, public_key: str, apply: boo
             names = archive.namelist()
             if len(names) > 10 or len(set(names)) != len(names):
                 raise InstallError("invalid tooling archive")
-            for name, maximum in (("installation.json", 16384), ("scripts/ops/nebius_certificate_gateway.py", 262144)):
+            gateway = ("scripts/ops/nebius_development_management_certificate_gateway.py" if management_only
+                       else "scripts/ops/nebius_certificate_gateway.py")
+            for name, maximum in (("installation.json", 16384), (gateway, 262144)):
                 if archive.getinfo(name).file_size > maximum:
                     raise InstallError("tooling member exceeds bound")
             config = json.loads(archive.read("installation.json"))
-            source = archive.read("scripts/ops/nebius_certificate_gateway.py")
+            source = archive.read(gateway)
         identity = str(UUID(config["installation_id"]))
         if UUID(identity).int == 0:
             raise ValueError()
