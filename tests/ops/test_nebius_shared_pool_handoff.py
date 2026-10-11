@@ -483,7 +483,8 @@ def test_restored_collector_uses_completed_current_lineage_and_bound_publication
     assert len(publications) == 1
     baseline = copy.deepcopy((documents, listing, attachment.config))
     for case in ('missing', 'running', 'failed', 'old_template', 'stale', 'foreign_job', 'foreign_pod', 'duplicate',
-            'truncated', 'pod_image', 'region', 'sidecar', 'config', 'late_secret', 'late_pod', 'late_binding', 'suspended'):
+            'truncated', 'pod_image', 'region', 'sidecar', 'config', 'missing_secret_key', 'empty_secret_key',
+            'late_secret', 'late_pod', 'late_binding', 'suspended'):
         documents.clear()
         documents.update(copy.deepcopy(baseline[0]))
         listing.clear()
@@ -512,6 +513,10 @@ def test_restored_collector_uses_completed_current_lineage_and_bound_publication
             listing['pods']['items'][0]['spec']['containers'].append({'name': 'foreign', 'image': 'other/image'})
         elif case == 'config':
             documents['ConfigMap:' + namespace + ':loom-execution-capacity-collector']['data']['EXTRA_OVERRIDE'] = 'changed'
+        elif case in {'missing_secret_key', 'empty_secret_key'}:
+            secret = next(row for row in documents.values() if row['kind'] == 'Secret')
+            secret['data'] = ({'unrelated': 'dW5yZWxhdGVk'} if case == 'missing_secret_key'
+                else dict.fromkeys(secret['data'], ''))
         elif case == 'suspended':
             documents[_key(collector)]['spec']['suspend'] = True
         before = len(publications)
