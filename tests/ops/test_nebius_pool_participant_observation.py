@@ -12,17 +12,23 @@ import pytest
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_ingress_stage import _key
 from scripts.ops.nebius_pool_participant_resource import _resource_path
-from tests.ops.test_nebius_pool_participant_adapter import connection as pool_connection
-from tests.ops.test_nebius_pool_participant_creation import connection as creation_connection
+from tests.ops.test_nebius_pool_participant_adapter import connection as _pool_connection
+from tests.ops.test_nebius_pool_participant_creation import connection as _creation_connection
 from tests.ops.test_nebius_pool_participant_creation import job_writer
 from tests.ops.test_nebius_pool_participant_operation import catalog_inputs as catalog_inputs
 from tests.ops.test_nebius_pool_participant_operation import management_inputs as management_inputs
 from tests.ops.test_nebius_pool_participant_operation import operation_inputs as operation_inputs
 from tests.ops.test_nebius_pool_participant_operation import platform_inputs as platform_inputs
 from tests.ops.test_nebius_pool_participant_operation import release_inputs as release_inputs
-from tests.ops.test_nebius_pool_participant_operation import staging_attachment_inputs as staging_attachment_inputs
-from tests.ops.test_nebius_pool_participant_resource import connection as resource_connection
+from tests.ops.test_nebius_pool_participant_operation import (
+    staging_attachment_inputs as staging_attachment_inputs,
+)
+from tests.ops.test_nebius_pool_participant_resource import connection as _resource_connection
 from tests.ops.test_nebius_pool_participant_resource import file_writer
+
+pool_connection = _pool_connection
+creation_connection = _creation_connection
+resource_connection = _resource_connection
 
 
 def module():
@@ -104,7 +110,7 @@ def test_observer_qualifies_real_resource_writer_during_preparation_and_recovery
         assert evidence(state.retained) == before
 
 
-@pytest.mark.parametrize('damage', ['parent', 'anchor', 'child', 'unknown-journal'])
+@pytest.mark.parametrize('damage', ['parent', 'anchor', 'child', 'unknown-journal', 'symlink-directory'])
 def test_observer_rejects_missing_or_unrelated_dispatch_evidence(resource_connection, damage):
     state, connect = resource_connection
     file_writer(state, connect).apply_file('20-database.yaml')
@@ -114,6 +120,11 @@ def test_observer_rejects_missing_or_unrelated_dispatch_evidence(resource_connec
         next(state.retained.anchor_dir.glob('*-candidate-file-writes.json')).unlink()
     elif damage == 'child':
         next((state.retained.state_dir / 'candidate-resources').rglob('transition.json')).unlink()
+    elif damage == 'symlink-directory':
+        root = state.retained.state_dir / 'candidate-resources'
+        moved = state.retained.state_dir / 'moved-resources'
+        root.rename(moved)
+        root.symlink_to(moved, target_is_directory=True)
     else:
         private_state._atomic_json(state.retained.state_dir / 'candidate-resources/foreign.json', {})
     with observer(state.retained, lambda: state.rows)[0] as live:
@@ -172,5 +183,33 @@ def test_changed_receipt_during_live_reads_cannot_return_qualification(resource_
             changed = True
 
     with observer(state.retained, lambda: state.rows, after_read=change)[0] as live:
+        with pytest.raises(ValueError, match='preserve'):
+            live.observe()
+
+
+def test_unrecorded_creation_after_absence_read_is_rejected(creation_connection):
+    state, _ = creation_connection
+    document = next(row for row in state.retained.release.files['10-config-network.yaml']
+        if row['metadata']['name'] == 'loom-feature-config')
+
+    def appear(path):
+        if path.endswith('/configmaps/loom-feature-config'):
+            row = copy.deepcopy(document)
+            row['metadata'].update(uid=str(uuid4()), resourceVersion='99')
+            state.external.resources[_key(row)] = row
+
+    with observer(state.retained, lambda: state.external.resources, after_read=appear)[0] as live:
+        with pytest.raises(ValueError, match='preserve'):
+            live.observe()
+
+
+def test_pool_completion_receipt_must_identify_the_selected_participant(pool_connection):
+    state, kube, connect = pool_connection
+    assert connect().activate(kube, state.retained.release) == 'ready'
+    path = state.retained.state_dir / 'pool-refresh/dispatch.json'
+    record = json.loads(path.read_bytes())
+    record['steps']['fence']['result']['refresh']['participant_id'] = str(uuid4())
+    private_state._atomic_json(path, record)
+    with observer(state.retained, lambda: state.api.resources)[0] as live:
         with pytest.raises(ValueError, match='preserve'):
             live.observe()
