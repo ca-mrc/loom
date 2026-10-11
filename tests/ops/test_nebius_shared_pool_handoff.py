@@ -6160,7 +6160,12 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
                 else:
                     assert observed.autoscaler_state == 'scaling'
             external_fault(None)
-            for key in (collector_key, reader_key):
+            registry_keys = {key for key, row in resources.items() if row['kind'] == 'Secret'
+                and row['metadata'].get('labels', {}).get('loom.nebius/development-material-purpose') == 'registry'}
+            assert registry_keys
+            collector_config, = (key for key, row in resources.items() if row['kind'] == 'ConfigMap'
+                and row.get('data', {}).get('LOOM_EXECUTION_CAPACITY_COLLECTOR_COLLECTION_MODE') == 'pool')
+            for key in (collector_key, reader_key, collector_config, *sorted(registry_keys)):
                 original = copy.deepcopy(resources[key])
                 reads_before = len(provider_reads)
                 resources[key]['metadata']['uid'] = str(uuid4())
@@ -6168,6 +6173,18 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
                     external()
                 assert len(provider_reads) == reads_before
                 resources[key] = original
+            original_reader = copy.deepcopy(resources[reader_key])
+            external_mode['hook'] = lambda: resources[reader_key]['metadata'].update(uid=str(uuid4()))
+            with pytest.raises(ValueError, match='preserve'):
+                external()
+            resources[reader_key] = original_reader
+            original_connection = observer.api_server
+            external_mode['hook'] = lambda: setattr(observer, 'api_server', 'https://foreign.invalid')
+            reads_before = len(provider_reads)
+            with pytest.raises(ValueError, match='preserve'):
+                external()
+            assert len(provider_reads) == reads_before
+            observer.api_server = original_connection
             original = operator.read_bytes()
             external_mode['hook'] = lambda: operator.write_bytes(original + b' ')
             with pytest.raises(ValueError, match='preserve'):
