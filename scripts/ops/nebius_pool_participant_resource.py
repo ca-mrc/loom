@@ -52,6 +52,24 @@ _CANDIDATE_FILES = frozenset({'00-namespaces.yaml', '10-config-network.yaml', '2
 _JOB_FILES = frozenset({'30-migrate.yaml', '50-configure.yaml'})
 
 
+def candidate_children(retained: RetainedParticipantRollout) -> dict[str, tuple[str, Path]]:
+    """Select the same fixed child journals for writing and pure history loading."""
+    originals = {_key(row) for row in retained.inputs.current}
+    result = {}
+    for filename in _CANDIDATE_FILES | _JOB_FILES:
+        for document in retained.release.files[filename]:
+            key = _key(document)
+            if key in result:
+                raise ValueError
+            update = key in originals
+            root, journal = ('candidate-resources', 'transition.json') if update else ('candidate-creations', 'stage.json')
+            action = 'preserve' if update and document['kind'] in _PRESERVED_KINDS else 'update' if update else 'create'
+            result[key] = (action, retained.state_dir / root / hashlib.sha256(key.encode()).hexdigest() / journal)
+    result['pre-upgrade-backup'] = ('create', retained.state_dir / 'candidate-creations'
+        / hashlib.sha256(b'pre-upgrade-backup').hexdigest() / 'stage.json')
+    return result
+
+
 class RetainedCandidateFileWriter:
     """Connect fixed resource and Job engines to ordinary deployment phases.
 
@@ -116,22 +134,7 @@ class RetainedCandidateFileWriter:
             raise ValueError('installed candidate identity policy differs; preserve evidence') from None
 
     def _children(self) -> dict[str, tuple[str, Path]]:
-        originals = {_key(row) for row in self.retained.inputs.current}
-        result = {}
-        for filename in _CANDIDATE_FILES | _JOB_FILES:
-            for document in self.retained.release.files[filename]:
-                key = _key(document)
-                if key in result:
-                    raise ValueError
-                update = key in originals
-                root, journal = ('candidate-resources', 'transition.json') if update else ('candidate-creations', 'stage.json')
-                action = 'preserve' if update and document['kind'] in _PRESERVED_KINDS else 'update' if update else 'create'
-                result[key] = (action,
-                    self.retained.state_dir / root / hashlib.sha256(key.encode()).hexdigest() / journal)
-        backup = 'pre-upgrade-backup'
-        result[backup] = ('create', self.retained.state_dir / 'candidate-creations'
-            / hashlib.sha256(backup.encode()).hexdigest() / 'stage.json')
-        return result
+        return candidate_children(self.retained)
 
     def _job_key(self, selector: str) -> str:
         if selector == 'pre-upgrade-backup':

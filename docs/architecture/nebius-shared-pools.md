@@ -1705,14 +1705,38 @@ Held intake continues through the existing journal-aware guarded recovery and a
 new capacity query. Missing/altered completion evidence or failed current checks
 refuse reconciliation. A historical capacity receipt is not fresh write authority;
 the deployer still enforces its wall-clock and monotonic expiry immediately before
-any guard release. This final-release record is not yet latest-predecessor
+any guard release. This final-release record alone is not latest-predecessor
 promotion or a connected protected operator entry.
+
+The pure completed-release loader shares those semantic child validators without
+constructing a transport or providing a default-success qualifier. It requires
+released completion, its independent anchor and terminal candidate/pool receipts.
+It derives the successor controller and database/Service from the exact
+receipt-selected resources, including wired settings, server defaults, operation
+annotations and original UIDs. Desired migration projections are not substituted
+for these recorded outcomes. Other participants and credential identities remain
+unchanged; the successor also carries the recorded manager and immutable catalog.
+Its history pins original inputs, anchors, completion, all child receipts and
+ancestor bytes, with readback before return. Loading performs no cluster operation
+or history repair and establishes no current runtime readiness.
+
+Private latest-head selection is separately initialized from the qualified shared
+handoff. An independent initialization anchor prevents a lost pointer from being
+reset to that original handoff. Promotion semantically loads the completed release
+and compares its exact retained predecessor against the current head under the
+private state lock. A competing release from an older predecessor cannot replace
+an advanced head. A committed update whose acknowledgement is lost can be retried
+without another update. Pointer and initialization-anchor bytes are deliberately
+excluded from immutable release ancestry, so normal head advancement does not
+invalidate earlier receipts. These local selection functions are not deployment,
+publication or guard authority; protected entry still must connect them to the
+normal workflow and freshly qualify the selected historical identities.
 
 The transaction, pool-effect adapter and parent interface do not establish
 publication, history, full runtime readiness or recovery authority on their own.
 The protected entry and phase-aware live qualifier must still connect the normal
 workflow to these child operations before this is an operational route. They
-also must promote semantically completed release history only after verified
+also must invoke latest-head promotion only after verified
 guard release, so later releases use the latest predecessor rather than the
 original handoff. Retained inputs and a deployer result alone are not that proof.
 Fence, catalog staging and reopening each invalidate prior capacity captures;
