@@ -170,15 +170,23 @@ manual compatibility selection.
 
 ## Test shard balance
 
-The root Python lane uses twelve complete, non-overlapping file shards with the
+The root Python lane uses twenty complete, non-overlapping file shards with the
 existing manifest-owned stable hash salt. Explicit pins distribute the slow
 connected recovery modules using the October 2026 duration sample. The expanded
 shared-pool handoff and participant-delivery suites have dedicated placements;
-the eight-shard layout exhausted multiple jobs' 40-minute limits. Connected
-transport tests use independent two-owner fixtures and share only immutable
+the eight- and twelve-shard layouts exhausted multiple jobs' 40-minute limits.
+Recovery stop, gateway, template, role, restart and reopening scenarios are
+separate files, as is the participant host/dispatch/runner matrix. These files
+retain every parameterized scenario and independent fixture. Connected
+transport tests retain independent fixtures and share only immutable
 inputs; full roster tests retain all environments. Duplicate mode-independent
 qualification cases run once, while mode-specific grants and failure cases remain.
-The job and per-test limits remain unchanged. Each shard stops on its first failing test to
+The job limit remains 40 minutes. Connected participant lifecycle tests have
+explicit 120-second budgets (180 seconds for two successive releases); the
+exhaustive shared census and delayed-stop matrices have 600- and 900-second
+budgets. These test-only limits include retained-chain setup and fault/replay
+validation; production deadlines and fresh authority checks are unchanged.
+Each shard stops on its first failing test to
 retain the underlying failure report before its deadline; successful shards run
 every selected test. Other shards are not cancelled, and `repository-checks`
 still requires the aggregate result. This repartitions the expanded lane without

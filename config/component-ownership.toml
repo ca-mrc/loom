@@ -113,15 +113,15 @@ attestation_owners = [
 
 [[test_sharding]]
 lane = "tests-root"
-shard_count = 12
+shard_count = 20
 strategy = "stable-hash"
-# Runs 38159584210/38163731249 exceeded the 40m job limit after the connected
-# handoff/release suites expanded. Give those complete modules their own space,
-# retaining the measured >45s predecessors on their previous shards. The
-# participant delivery suite also needs a separate lane from legacy cutover.
+# Runs 38159584210/38163731249/38167845683 exceeded the 40m job limit.
+# Recovery authority/release and participant transport are now separate complete
+# lifecycle modules. Give the 20-30m groups their own space; retain measured heavy
+# predecessors, moving two off their nearly full shards. No scenario is removed.
 # Separation contracts in test_ci_test_selection.py remain enforced. Hash the
 # remaining files; subsequent file additions do not move existing files.
-# Every selected file still runs once; job/per-test limits stay unchanged.
+# Every selected file still runs once; the 40m job limit stays unchanged.
 # Censored CI tails are not duration evidence. Verify the new balance in CI.
 salt = "tests-root-v2-8275"
 pins = [
@@ -136,7 +136,7 @@ pins = [
   { path = "tests/ops/test_nebius_pool_startup_repair.py", shard_index = 1 },
   { path = "tests/ops/test_nebius_pool_template_restoration.py", shard_index = 1 },
   { path = "tests/ops/test_nebius_pool_database_guard.py", shard_index = 2 },
-  { path = "tests/ops/test_nebius_pool_manager_image_history.py", shard_index = 2 },
+  { path = "tests/ops/test_nebius_pool_manager_image_history.py", shard_index = 3 },
   { path = "tests/ops/test_nebius_pool_restart_qualification_live.py", shard_index = 2 },
   { path = "tests/ops/test_nebius_pool_cutover_entry.py", shard_index = 3 },
   { path = "tests/ops/test_nebius_pool_gateway_retirement.py", shard_index = 3 },
@@ -175,14 +175,20 @@ pins = [
   { path = "tests/ops/test_nebius_management_refresh_connected.py", shard_index = 6 },
   { path = "tests/ops/test_nebius_development_activation.py", shard_index = 7 },
   { path = "tests/ops/test_nebius_pool_participant_delivery.py", shard_index = 8 },
-  { path = "tests/ops/test_nebius_shared_pool_handoff.py", shard_index = 6 },
+  { path = "tests/ops/test_nebius_shared_pool_handoff.py", shard_index = 7 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_parent.py", shard_index = 9 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_forward.py", shard_index = 10 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_processes.py", shard_index = 9 },
-  { path = "tests/ops/test_nebius_shared_pool_handoff_census.py", shard_index = 7 },
-  { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_fences.py", shard_index = 10 },
+  { path = "tests/ops/test_nebius_shared_pool_handoff_census.py", shard_index = 18 },
+  { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_fences.py", shard_index = 4 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_authority.py", shard_index = 11 },
-  { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_release.py", shard_index = 4 },
+  { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_release.py", shard_index = 19 },
+  { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_stop.py", shard_index = 12 },
+  { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_gateway.py", shard_index = 13 },
+  { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_templates.py", shard_index = 14 },
+  { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_roles.py", shard_index = 15 },
+  { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_reopening.py", shard_index = 16 },
+  { path = "tests/ops/test_nebius_pool_participant_delivery_transport.py", shard_index = 17 },
 ]
 
 [[test_sharding]]

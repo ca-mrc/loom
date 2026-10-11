@@ -1390,6 +1390,17 @@ def test_root_shards_distribute_shared_handoff_phases_and_observation() -> None:
     ):
         assert placement[f"tests/ops/test_nebius_{left}.py"] != placement[f"tests/ops/test_nebius_{right}.py"]
 
+    # Recovery authority alone exhausted a 40m job. Its now-separated terminal
+    # lifecycles must not be silently collocated again by hash reassignment.
+    isolated = [placement[f"tests/ops/test_nebius_{suffix}.py"] for suffix in (
+        "shared_pool_handoff_recovery_authority", "shared_pool_handoff_recovery_gateway",
+        "shared_pool_handoff_recovery_templates", "shared_pool_handoff_recovery_roles",
+        "shared_pool_handoff_recovery_release", "shared_pool_handoff_recovery_reopening",
+        "shared_pool_handoff_recovery_stop", "shared_pool_handoff_census",
+        "pool_participant_delivery", "pool_participant_delivery_transport",
+    )]
+    assert len(set(isolated)) == len(isolated)
+
 
 def test_stable_hash_sharding_is_order_independent_and_has_zero_insertion_churn() -> None:
     paths = tuple(f"tests/unit/test_{index:03d}.py" for index in range(20))
