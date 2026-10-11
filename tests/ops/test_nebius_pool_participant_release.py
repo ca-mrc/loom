@@ -393,7 +393,7 @@ def test_shared_candidate_uses_full_normal_rollout_without_restoring_local_write
 
 
 @pytest.mark.parametrize('outcome', ['complete', 'busy', 'preflight', 'guard-drift', 'activation-unknown', 'capacity-stale',
-    'recover-activation-unknown', 'recover-capacity-stale', 'guard-lost'])
+    'recover-activation-unknown', 'recover-capacity-stale', 'guard-lost', 'guard-lost-after-activation'])
 def test_guarded_deployer_orders_shared_refresh_and_never_releases_uncertain_mutations(release_inputs, tmp_path, monkeypatch, outcome):
     """Use the real deploy parent; only the protected pool I/O adapter is doubled."""
     import argparse
@@ -475,6 +475,9 @@ def test_guarded_deployer_orders_shared_refresh_and_never_releases_uncertain_mut
                 pool['phase'] = 'staged'
             if fault == 'activation-unknown':
                 raise deploy.DeploymentError('lost write response')
+            if fault == 'guard-lost-after-activation':
+                kube.guard_identity = None
+                events.append('lost-guard-after-activation')
             return 'ready'
 
         def finish(self, observed_kube, plan):
@@ -498,10 +501,11 @@ def test_guarded_deployer_orders_shared_refresh_and_never_releases_uncertain_mut
     if outcome == 'complete':
         assert events.index('guarded') < events.index('activate') < events.index('workload:30-migrate.yaml')
         assert events.index('workload:50-configure.yaml') < events.index('open') < events.index('fresh-capacity') < events.index('release')
-    if fault in {'busy', 'preflight', 'guard-drift', 'activation-unknown', 'guard-lost'}:
+    if fault in {'busy', 'preflight', 'guard-drift', 'activation-unknown', 'guard-lost', 'guard-lost-after-activation'}:
         assert not any(event.startswith('workload:') for event in events)
     assert {'preflight': 'preflight', 'guard-drift': 'guarded', 'activation-unknown': 'activate',
-        'capacity-stale': 'open', 'complete': 'fresh-capacity', 'busy': 'activate', 'guard-lost': 'lost-guard'}[fault] in events
+        'capacity-stale': 'open', 'complete': 'fresh-capacity', 'busy': 'activate', 'guard-lost': 'lost-guard',
+        'guard-lost-after-activation': 'lost-guard-after-activation'}[fault] in events
     assert (kube.guard_identity is not None) == (fault in {'activation-unknown', 'capacity-stale'})
     if outcome.startswith('recover-'):
         args.resume_guard_owner = kube.guard_identity[0]
