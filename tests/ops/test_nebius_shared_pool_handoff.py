@@ -5837,6 +5837,7 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
 
             from pydantic import PostgresDsn
             from scripts.ops.nebius_management_material import _documents as manager_material
+            from scripts.ops.nebius_pool_gateway_probe import BOUND_GATEWAY_KUBERNETES_COMMAND
             from scripts.ops.nebius_pool_migration_guard import _BOUND_DATABASE_COMMAND
             from scripts.ops.nebius_pool_runtime_settings import (
                 BOUND_POOL_SETTINGS_COMMAND,
@@ -5844,7 +5845,10 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
             )
             from scripts.ops.nebius_pool_startup_database import pool_participant_authority_sql
             from scripts.ops.nebius_shared_pool_forward_processes import _gateway_history_target
-            from tests.ops.test_nebius_development_pool_retained import populate_database_backends
+            from tests.ops.test_nebius_development_pool_retained import (
+                populate_database_backends,
+                populate_runtime_pods,
+            )
 
             from loom_service.pool_management.capacity import digest
 
@@ -5859,6 +5863,21 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
             target = _gateway_history_target(bindings, secret)
             database_rows = {_resource_path(row): copy.deepcopy(row) for row in (target.database.statefulset, target.database.service)}
             populate_database_backends(database_rows)
+            gateway = copy.deepcopy(next(row for row in inventory['deployments']
+                if row['metadata']['namespace'] == target.namespace and row['metadata']['name'] == 'loom-pool-gateway'))
+            gateway_rows = {_resource_path(gateway): gateway}
+            populate_runtime_pods(gateway_rows)
+            for plural in ('pods', 'replicasets'):
+                inventory[plural][:] = [row for row in inventory[plural] if not (
+                    row['metadata']['namespace'] == target.namespace
+                    and row['metadata'].get('labels', {}).get('app.kubernetes.io/name') == 'loom-pool-gateway')]
+                children = next(row['items'] for row in gateway_rows.values()
+                    if row['kind'] == ('PodList' if plural == 'pods' else 'ReplicaSetList'))
+                for row in children:
+                    row['metadata']['resourceVersion'] = '501'
+                inventory[plural].extend(children)
+            gateway_pod, = next(row['items'] for row in gateway_rows.values() if row['kind'] == 'PodList')
+            gateway_replica, = next(row['items'] for row in gateway_rows.values() if row['kind'] == 'ReplicaSetList')
             kubeconfig = state.parent / 'participant-registry-kubeconfig'
             kubeconfig.write_text('private-test-only')
             kubeconfig.chmod(0o600)
@@ -5870,24 +5889,45 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
                 offset = next(index for index, value in enumerate(command) if value in {'get', 'exec'})
                 selected = command[offset:]
                 if selected[0] == 'exec' and selected[2:4] != [target.namespace, 'pod/loom-postgres-0']:
-                    pod, = pool_state.children[1]['items']
+                    is_gateway = selected[3] == 'pod/' + gateway_pod['metadata']['name']
+                    pod = gateway_pod if is_gateway else pool_state.children[1]['items'][0]
                     assert selected[:9] == ['exec', '-n', target.namespace, 'pod/' + pod['metadata']['name'],
-                        '-c', 'loom-service', '--', 'python', '-c']
+                        '-c', 'gateway' if is_gateway else 'loom-service', '--', 'python', '-c']
                     script, component, nonce, challenge = selected[9:]
-                    manager_checks.append(component)
-                    if script == _BOUND_DATABASE_COMMAND:
-                        assert component == 'service'
+                    if script == BOUND_GATEWAY_KUBERNETES_COMMAND:
+                        assert is_gateway
+                        namespaces = {ns.name: str(ns.uid) for participant in retained.release.refresh.before.participants
+                            for ns in (participant.execution_namespace, participant.build_namespace)}
+                        assert json.loads(component) == sorted(namespaces)
+                        machine, = (row for row in retained.release.refresh.before.machines if row.role == 'gateway')
+                        wanted = expected_pool_runtime_settings('gateway', gateway, token_sha256=machine.token_sha256)
+                        projection = {key: wanted[key] for key in ('pool_id', 'installation_id', 'machine_id', 'admission_epoch', 'kubernetes')}
+                        payload = json.dumps({**projection, 'namespaces': namespaces}, sort_keys=True, separators=(',', ':')).encode()
+                    elif script == _BOUND_DATABASE_COMMAND:
+                        assert component == ('gateway' if is_gateway else 'service')
                         container, = pool_state.manager['spec']['template']['spec']['containers']
                         reference, = (row['valueFrom']['secretKeyRef'] for row in container['env'] if row['name'] == 'LOOM_SVC_DB_URL')
-                        payload = str(PostgresDsn(base64.b64decode(secret['data'][reference['key']]).decode())).encode()
+                        url = base64.b64decode(secret['data'][reference['key']]).decode()
+                        payload = (url if is_gateway else str(PostgresDsn(url))).encode()
                     else:
-                        assert script == BOUND_POOL_SETTINGS_COMMAND and component == 'manager'
-                        profiles = (retained.release.refresh.after if 'manager' in pool_state.effects else retained.release.refresh.before).profiles
-                        wanted = expected_pool_runtime_settings('manager', pool_state.manager,
-                            catalog_sha256=hashlib.sha256(profiles.model_dump_json().encode()).hexdigest())
+                        assert script == BOUND_POOL_SETTINGS_COMMAND and component == ('gateway' if is_gateway else 'manager')
+                        if is_gateway:
+                            machine, = (row for row in retained.release.refresh.before.machines if row.role == 'gateway')
+                            wanted = expected_pool_runtime_settings('gateway', gateway, token_sha256=machine.token_sha256)
+                        else:
+                            profiles = (retained.release.refresh.after if 'manager' in pool_state.effects else retained.release.refresh.before).profiles
+                            wanted = expected_pool_runtime_settings('manager', pool_state.manager,
+                                catalog_sha256=hashlib.sha256(profiles.model_dump_json().encode()).hexdigest())
                         payload = json.dumps(wanted, sort_keys=True, separators=(',', ':')).encode()
+                    manager_checks.append(component)
                     assert challenge == hmac.new(bytes.fromhex(nonce), payload, hashlib.sha256).hexdigest()
                     result = {'status': 'unqualified' if registry_mode.get('manager-settings') else 'qualified'}
+                    if is_gateway and registry_mode.get('gateway-kubernetes') and script == BOUND_GATEWAY_KUBERNETES_COMMAND:
+                        result['status'] = 'unqualified'
+                    if is_gateway and registry_mode.get('gateway-restart'):
+                        pod['status']['containerStatuses'][0]['restartCount'] += 1
+                    if is_gateway and registry_mode.get('gateway-credential') and script == BOUND_GATEWAY_KUBERNETES_COMMAND:
+                        secret['metadata']['resourceVersion'] = '702'
                     if registry_mode.get('manager-restart'):
                         status = pod['status']['containerStatuses'][0]
                         status['restartCount'] = status.get('restartCount', 0) + 1
@@ -5934,17 +5974,24 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
                     parsed = urlsplit(selected[2])
                     if parsed.path.endswith('/replicasets'):
                         result = copy.deepcopy(pool_state.children[0])
+                        result['items'].append(copy.deepcopy(gateway_replica))
                     else:
                         result = copy.deepcopy(database_rows[parsed.path])
                     if result['kind'] == 'PodList':
                         result['items'].extend(copy.deepcopy(pool_state.children[1]['items']))
+                        result['items'].append(copy.deepcopy(gateway_pod))
                     if 'labelSelector' in parse_qs(parsed.query):
                         label, value = parse_qs(parsed.query)['labelSelector'][0].split('=', 1)
                         result['items'] = [row for row in result['items'] if row['metadata']['labels'].get(label) == value]
                     if registry_mode.get('backend') and result['kind'] == 'EndpointSliceList':
                         result['items'][0]['endpoints'][0]['targetRef']['uid'] = str(uuid4())
                 elif selected[1] in {'deployment', 'replicaset'}:
-                    result = pool_state.manager if selected[1] == 'deployment' else pool_state.children[0]['items'][0]
+                    if selected[2] == gateway['metadata']['name']:
+                        result = gateway
+                    elif selected[2] == gateway_replica['metadata']['name']:
+                        result = gateway_replica
+                    else:
+                        result = pool_state.manager if selected[1] == 'deployment' else pool_state.children[0]['items'][0]
                     assert selected[2:] == [result['metadata']['name'], '-n', target.namespace, '-o', 'json']
                     result = copy.deepcopy(result)
                     if registry_mode.get('manager-pending') and selected[1] == 'deployment':
@@ -5977,7 +6024,22 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
                 return observer.observe_manager_process(bindings=bindings, kubeconfig=kubeconfig,
                     executable=Path('/usr/bin/kubectl'), phase=phase)
 
+            def gateway_process():
+                try:
+                    return observer.observe_gateway_process(bindings=bindings, shared_state=state,
+                        kubeconfig=kubeconfig, executable=Path('/usr/bin/kubectl'))
+                except ValueError as error:
+                    import traceback
+
+                    frames, cause = [], error
+                    while cause is not None:
+                        frames.extend(f'{Path(frame.filename).name}:{frame.lineno}:{frame.name}'
+                            for frame in traceback.extract_tb(cause.__traceback__))
+                        cause = cause.__context__
+                    raise ValueError('gateway process unqualified; preserve evidence; ' + ', '.join(frames)) from None
+
             assert manager_process() == ()
+            assert gateway_process() is None
             registry_mode['manager-pending'] = True
             with pytest.raises(ValueError, match='preserve'):
                 manager_process()
@@ -6005,10 +6067,13 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
                 registry()
                 if _phase == 'ready':
                     assert manager_process('ready') == ()
+                    assert gateway_process() is None
 
             pool_state.qualify = qualify_pool
             pool = connect_pool()
             assert pool.activate(kube, retained.release) == 'ready'
+            assert registry() == 'staged'
+            assert gateway_process() is None  # A fenced participant is not a gateway failure.
             registry_mode['manager-settings'] = True
             with pytest.raises(ValueError, match='preserve'):
                 pool.finish(kube, retained.release)
@@ -6037,6 +6102,13 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
             registry_mode.clear()
             assert manager_process('released') == ()
             assert {'service', 'manager'} <= set(manager_checks)
+            for damage in ('gateway-kubernetes', 'gateway-restart', 'gateway-credential'):
+                registry_mode[damage] = True
+                with pytest.raises(ValueError, match='preserve'):
+                    gateway_process()
+                secret['metadata']['resourceVersion'] = '701'
+                registry_mode.clear()
+            assert gateway_process() is None
             original_database_rows = copy.deepcopy(database_rows)
             for damage in ('backend', 'bad-report', 'history', 'connection', 'credential', 'restart'):
                 registry_mode[damage] = True
