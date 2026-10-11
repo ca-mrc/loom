@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib
 import json
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -169,3 +171,69 @@ def test_dispatch_preserves_uncertain_outcome_without_exporting_or_retrying(sele
     else:
         assert result == {'schema_version': 'loom.nebius-participant-report.v1', 'status': 'blocked', 'stage': 'execution', 'release': binding}
     assert len(calls) == 1 and 'private-' not in json.dumps(result)
+
+
+@pytest.mark.parametrize('damage', [None, 'digest', 'public-file', 'symlink', 'extra', 'relative-path', 'overlapping-roots'])
+def test_installed_host_configuration_is_private_pinned_and_not_runner_selected(tmp_path, damage):
+    source = module()
+    assert callable(getattr(source, 'load_participant_release_host', None)), 'installed host selection is not connected'
+    config = {'schema_version': 'loom.nebius-participant-host.v1',
+        'shared_operation': str(tmp_path / 'original-shared-operation.json'), 'shared_operation_sha256': 'c' * 64,
+        'state_root': str(tmp_path / 'releases'), 'anchor_dir': str(tmp_path / 'anchors'),
+        'operator_connection': {'endpoint': 'https://cluster.example.test',
+            'ca_file': str(tmp_path / 'ca.pem'), 'credentials_file': str(tmp_path / 'operator.json')},
+        'executable': str(tmp_path / 'kubectl')}
+    if damage == 'extra':
+        config['repo_root'] = '/runner/source'
+    elif damage == 'relative-path':
+        config['state_root'] = 'relative'
+    elif damage == 'overlapping-roots':
+        config['anchor_dir'] = str(tmp_path / 'releases/anchors')
+    path = tmp_path / 'host.json'
+    raw = json.dumps(config).encode()
+    path.write_bytes(raw)
+    path.chmod(0o644 if damage == 'public-file' else 0o600)
+    checksum = 'd' * 64 if damage == 'digest' else hashlib.sha256(raw).hexdigest()
+    if damage == 'symlink':
+        link = tmp_path / 'host-link.json'
+        link.symlink_to(path)
+        path = link
+    root = Path(__file__).resolve().parents[2]
+    if damage:
+        with pytest.raises(ValueError, match='host configuration'):
+            source.load_participant_release_host(path, checksum, repo_root=root)
+    else:
+        result = source.load_participant_release_host(path, checksum, repo_root=root)
+        assert result.repo_root == root and result.state_root == tmp_path / 'releases'
+        assert result.operator_connection.credentials_file == tmp_path / 'operator.json'
+    assert not (tmp_path / 'releases').exists() and not (tmp_path / 'anchors').exists()
+
+
+@pytest.mark.parametrize('failure', [False, True])
+def test_fixed_entry_emits_one_closed_report_despite_private_process_output(selected, monkeypatch, tmp_path, capsys, failure):
+    source = module()
+    assert callable(getattr(source, 'main', None)), 'fixed host process entry is not connected'
+    retained, host, binding = selected
+    configuration = {'schema_version': 'loom.nebius-participant-host.v1', **{name: str(getattr(host, name))
+        for name in ('shared_operation', 'state_root', 'anchor_dir', 'executable')},
+        'shared_operation_sha256': host.shared_operation_sha256,
+        'operator_connection': host.operator_connection.model_dump(mode='json')}
+    path = tmp_path / 'installed-host.json'
+    raw = json.dumps(configuration).encode()
+    path.write_bytes(raw)
+    path.chmod(0o600)
+
+    def execute(**options):
+        print('private process diagnostic, never a public report')
+        if failure:
+            raise ValueError('private exception body')
+        return {**recovery(binding), 'status': 'complete'}
+
+    monkeypatch.setattr(entry, 'execute_retained_participant_release', execute)
+    code = source.main(str(path), hashlib.sha256(raw).hexdigest(), 'execute',
+        json.dumps(request(retained, 'execute')))
+    output = capsys.readouterr()
+    assert code == (1 if failure else 0)
+    assert output.err == '' and len(output.out.splitlines()) == 1 and 'private' not in output.out
+    value = json.loads(output.out)
+    assert value['status'] == ('blocked' if failure else 'complete') and value['release'] == binding
