@@ -365,7 +365,6 @@ def test_cluster_template_change_selects_cluster_and_staging() -> None:
 @pytest.mark.parametrize(
     "path",
     [
-        "deploy/terraform/nebius/stack/main.tf",
         "scripts/check_nebius_iac.py",
         "tests/ops/test_nebius_iac.py",
     ],
@@ -381,6 +380,18 @@ def test_nebius_iac_change_uses_owned_validation_route(path: str, independent_te
     assert plan.integration is True
     assert plan.unowned_runtime is False
     assert plan.selected_heavy_checks() == {"integration"}
+
+
+def test_terraform_only_change_uses_iac_without_python_regression() -> None:
+    plan = plan_validations(
+        changed_paths=["deploy/terraform/nebius/stack/main.tf"],
+        labels=set(),
+        event_name="pull_request",
+    )
+    assert plan.nebius_iac is True
+    assert plan.selected_heavy_checks() == set()
+    assert not any((plan.lint_and_static, plan.tests_root, plan.tests_packages,
+                    plan.runtime_payload, plan.go_checks, plan.locked_environments))
 
 
 @pytest.mark.parametrize(

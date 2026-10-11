@@ -105,13 +105,14 @@ validation gates or guarantee upstream availability.
 
 ## Nebius path routing
 
-Static checks remain the ordinary baseline. Frontend-only changes do not start
-Python test, Go, runtime-payload, dependency-lock, Terraform, Compose or Kubernetes
+Static Python checks run for Python changes and ignored retired inputs. Frontend-only changes do not start
+Python lint or test, Go, runtime-payload, dependency-lock, Terraform, Compose or Kubernetes
 runners. The Compose system fixture has no Web service; browser/auth changes are
 covered by the frontend job. Backend/frontend mixed changes and explicit smoke
 labels still select the corresponding checks. Independent
 test edits start their owning test jobs. Shared and unknown inputs retain the full
-baseline; Terraform runs for its own inputs and full-regression requests.
+baseline; Terraform runs for its own inputs and full-regression requests. Terraform-only
+changes use the IaC checks without Python lint, root/package tests, or integration.
 Manifest-ignored retired inputs do not allocate backend test runners; static
 validation still runs. Additional
 heavy validation follows the changed files:
@@ -123,7 +124,8 @@ heavy validation follows the changed files:
 | Independent platform renderer unit tests | Kubernetes |
 | Deployment/render operator scripts and `deploy/nebius/` configuration | Integration, Kubernetes |
 | Restore verifier operator script | Integration |
-| Nebius Terraform and its checker | Integration, the IaC checks |
+| Nebius Terraform | IaC checks |
+| Nebius IaC checker or its tests | Integration, the IaC checks |
 | Action-pin, upgrade-policy and CI selection tooling | Python root contracts and static checks |
 | Retained Go runtime modules | Go checks and their affected Docker/image contracts |
 | Candidate workflow/publisher, registry authentication, shared scan validator | Full validation |
