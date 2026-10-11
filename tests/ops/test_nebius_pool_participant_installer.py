@@ -90,6 +90,10 @@ def test_installer_preserves_other_keys_and_binds_exact_tooling_and_configuratio
     assert planned['status'] == 'prepared' and keys.read_bytes() == previous and not calls
     installed = installer.install(raw, **options, apply=True)
     assert installed['status'] == 'installed' and installed['configuration_sha256'] == options['configuration_sha256']
+    for name in ('state_root', 'anchor_dir'):
+        directory = Path(config[name])
+        assert directory.is_dir(), 'host cannot create release history without its private parent directories'
+        assert directory.stat().st_mode & 0o777 == 0o700 and list(directory.iterdir()) == []
     after = keys.read_bytes()
     assert after.startswith(previous) and len(after.splitlines()) == 3
     assert len(calls) == 5 and 'load_participant_release_host' in calls[-1][3]
@@ -141,3 +145,41 @@ def test_installer_rejects_wrong_scope_before_tooling_or_key_mutation(installati
             configuration_sha256='d' * 64 if damage == 'configuration' else configuration_sha256, apply=True)
     assert keys.read_bytes() == previous and not calls
     assert not (tmp_path / '.loom/nebius-participant-delivery').exists()
+
+
+@pytest.mark.parametrize('change', ['config', 'credential', 'qualification', 'tooling', 'concurrent-key'])
+def test_installer_rechecks_private_selection_and_preserves_concurrent_keys(installation, monkeypatch, change):
+    from scripts.ops import nebius_pool_participant_gateway as gateway
+
+    keys, config, configuration, save, key, _ = installation
+    raw = archive(members())
+    options = dict(expected_sha256=hashlib.sha256(raw).hexdigest(), public_key=key,
+        configuration=configuration, configuration_sha256=save(), apply=True)
+    before = keys.read_bytes()
+    concurrent = b'# concurrently installed unrelated grant\n'
+    original = gateway.run_private
+
+    def process(argv, **kwargs):
+        result = original(argv, **kwargs)
+        if argv[1:3] == ['-I', '-c'] and 'load_participant_release_host' in argv[3]:
+            if change == 'config':
+                configuration.write_bytes(configuration.read_bytes() + b'\n')
+            elif change == 'credential':
+                Path(config['operator_connection']['credentials_file']).write_bytes(b'rotated')
+            elif change == 'qualification':
+                return b'{"status":"unqualified"}'
+            elif change == 'tooling':
+                (Path(argv[4]) / 'scripts/ops/nebius_pool_participant_entry.py').write_bytes(b'changed')
+            else:
+                keys.write_bytes(before + concurrent)
+        return result
+
+    monkeypatch.setattr(gateway, 'run_private', process)
+    installer = module()
+    if change == 'concurrent-key':
+        assert installer.install(raw, **options)['status'] == 'installed'
+        assert keys.read_bytes().startswith(before + concurrent)
+    else:
+        with pytest.raises((installer.InstallError, gateway.GatewayError)):
+            installer.install(raw, **options)
+        assert keys.read_bytes() == before
