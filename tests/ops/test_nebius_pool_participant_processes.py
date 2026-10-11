@@ -256,7 +256,8 @@ def test_real_resource_writer_waits_for_process_qualification_before_next_write(
         assert live.observe_participant_processes(phase='ready', **options) == ()
 
 
-def peer_process_connection(*, observer, bindings, shared_state, inventory, resources, kubeconfig, patch, fallback):
+def peer_process_connection(*, observer, bindings, shared_state, inventory, resources, kubeconfig, patch, fallback,
+        selected_guard=None):
     """External transport only; the real census, readiness and probes stay connected."""
     from uuid import uuid4
 
@@ -336,6 +337,16 @@ def peer_process_connection(*, observer, bindings, shared_state, inventory, reso
         assert command[:3] == ['/usr/bin/kubectl', '--kubeconfig', str(kubeconfig)]
         assert options['check'] is False and options['timeout'] == 40
         if args[0] == 'exec':
+            if selected_guard is not None and args[6:8] == ['--', 'psql']:
+                from scripts.ops.deploy_nebius_platform import rollout_guard_observation_sql
+
+                selected, = (row for row in migration.guards
+                    if row.participant_id == retained.release.refresh.participant_id)
+                assert args[:-1] == ['exec', '-n', selected.namespace, 'pod/loom-postgres-0', '-c', 'loom-postgres', '--',
+                    'psql', '-X', '-qAt', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', 'loom', '-c']
+                assert args[-1] == rollout_guard_observation_sql(owner=retained.guard_owner,
+                    candidate=retained.inputs.candidate['candidate_sha'])
+                return SimpleNamespace(returncode=0, stdout=json.dumps({'status': selected_guard['status']}).encode(), stderr=b'')
             # No SQL/activity/idle probe is permitted for another owner's tasks.
             assert args[6:9] == ['--', 'python', '-c']
             pod, = (row for row in documents[f'/api/v1/namespaces/{namespace}/pods']['items']
@@ -358,7 +369,7 @@ def peer_process_connection(*, observer, bindings, shared_state, inventory, reso
                     pod['status']['containerStatuses'][0]['restartCount'] += 1
             else:
                 assert script in {_BOUND_DATABASE_COMMAND, BOUND_POOL_SETTINGS_COMMAND}
-                assert target.participant_id != retained.release.refresh.participant_id
+                assert selected_guard is not None or target.participant_id != retained.release.refresh.participant_id
                 component, nonce, challenge = args[10:]
                 if script == _BOUND_DATABASE_COMMAND:
                     url = f'postgresql+psycopg://{component}:test-only@loom-postgres.{target.namespace}.svc:5432/loom'

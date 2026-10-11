@@ -5612,6 +5612,7 @@ def _exercise_forward_writer_census(shared_operation, transport, inventory, kind
 
 def _exercise_participant_writer_census(args, bindings, state, parent_api, transport, inventory, kinds, mode, publisher_cloud):
     """Normal release must retain the entire shared pool, not just its resources."""
+    import importlib.util
     import json
     import ssl
 
@@ -5631,6 +5632,9 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
     )
 
     from loom.nebius_platform_render import build_platform
+
+    assert importlib.util.find_spec('scripts.ops.nebius_pool_participant_entry') is not None, 'protected release qualification is not composed'
+    from scripts.ops.nebius_pool_participant_entry import ParticipantReleaseQualifier
 
     predecessor = load_completed_shared_pool_operation(**args, bindings=bindings, api=parent_api)
     attached = bindings.plan.staging.attachment
@@ -6044,9 +6048,10 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
 
             from tests.ops.test_nebius_pool_participant_processes import peer_process_connection
 
+            selected_guard = {'status': 'held'}
             peer_process, peer_fault = peer_process_connection(observer=observer, bindings=bindings,
                 shared_state=state, inventory=inventory, resources=resources, kubeconfig=kubeconfig,
-                patch=patch, fallback=execute)
+                patch=patch, fallback=execute, selected_guard=selected_guard)
             peer_result = peer_process()
             assert peer_result['status'] == 'available'
             external, external_fault, external_mode, external_calls, provider_reads, collector_key, reader_key, operator = external_connection(
@@ -6203,6 +6208,44 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
                 database_rows.update(copy.deepcopy(original_database_rows))
                 registry_mode.clear()
             assert registry_reads and registry() == 'complete'
+
+            # The production composed qualifier, consumed by the actual pool
+            # adapter, must run all real observer families on this same world.
+            # Only Kubernetes/HTTP/SDK transport is doubled above.
+            from scripts.ops.nebius_pool_participant_completion import initialize_participant_head
+
+            initialize_participant_head(initial=predecessor, state_root=retained.state_dir.parent,
+                anchor_dir=retained.anchor_dir)
+            kube = SimpleNamespace(kubeconfig=kubeconfig, context=None)
+            gate = ParticipantReleaseQualifier(retained=retained, initial=predecessor, bindings=bindings,
+                shared_state=state, observer=observer, kube=kube, kubeconfig=kubeconfig,
+                executable=Path('/usr/bin/kubectl'), operator_credentials=operator,
+                private_files={kubeconfig: kubeconfig.read_bytes(), operator: operator.read_bytes()})
+            connected = connect_pool()
+            connected.qualifier = gate
+            effects = list(pool_state.effects)
+            connected.under_guard(kube, retained.release)
+            assert pool_state.effects == effects
+            for damage in ('guard', 'publication', 'selected-process', 'connection'):
+                if damage == 'guard':
+                    selected_guard['status'] = 'foreign'
+                elif damage == 'publication':
+                    external_fault('checks')
+                elif damage == 'selected-process':
+                    peer_fault['mode'] = 'settings'
+                else:
+                    kubeconfig.write_text('foreign-connection')
+                with pytest.raises(ValueError, match='preserve'):
+                    connected.under_guard(kube, retained.release)
+                assert pool_state.effects == effects
+                selected_guard['status'] = 'held'
+                external_fault(None)
+                peer_fault.clear()
+                kubeconfig.write_text('private-test-only')
+            peer_fault['mode'] = 'telemetry-unavailable'
+            connected.under_guard(kube, retained.release)
+            peer_fault.clear()
+            assert pool_state.effects == effects
 
 
 def _exercise_recovery_writer_census(kwargs, state, transport, inventory, kinds, calls, mode, replace_live, forward_api):

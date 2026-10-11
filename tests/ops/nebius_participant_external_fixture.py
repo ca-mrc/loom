@@ -90,6 +90,11 @@ def external_connection(*, observer, bindings, shared_state, resources, publishe
             return await observer.observe_external(bindings=bindings, shared_state=shared_state,
                 operator_credentials=operator, http=http)
 
+    # The protected composed qualifier creates its own real client. Substitute
+    # only that client's HTTP transport, preserving catalog and cloud validators.
+    patch.setattr(httpx, 'AsyncClient', lambda *args, **kwargs: AsyncClient(*args,
+        **{**kwargs, 'transport': httpx.MockTransport(respond)}))
+
     def qualify():
         result = asyncio.run(observe())
         assert sessions == closed and not sessions[-1].path.exists()
