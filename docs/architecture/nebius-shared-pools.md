@@ -1278,6 +1278,20 @@ views remain strict. Missing intent, changed root identity or receipt changes
 during a read reject the observation; accepting a recorded template is not proof
 that its processes are drained or ready.
 
+The recovery database observer separately derives pool, participant-guard and
+machine-state alternatives from those validated receipts. It uses the actual
+retained old/new management and participant PostgreSQL backends, not a running
+application or gateway. The old manager stays revoked. Fencing and revocation
+require their own local intents; staging alone may reopen under its reopening
+receipt. A busy fenced ledger is observable while drain is pending, but a saved
+drain observation cannot replace current empty cancelled-dev/global ledgers.
+Once staging is actually open, new staging work is permitted and its database is
+no longer queried as if it retained a recovery fence. Current backend process
+identities, credentials, guard/authority states and all receipt bytes bracket
+the reads, including terminal recovery replay. This observation performs no
+write and proves neither restored runtime health nor whole-pool writer/provider
+qualification; those remain separate protected-parent requirements.
+
 Authenticated Kubernetes/worker identity and capacity observations remain
 mandatory. Detailed kubelet samples retain the existing optional-telemetry
 contract; unavailable samples are not zero usage or evidence of certificate trust.
