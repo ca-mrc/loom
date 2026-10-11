@@ -27,6 +27,9 @@ from loom.sandbox_identity import ROOT_INSTALL_CAPABILITIES
 from loom_execution_actuator.contracts import ActuatorContractError
 
 _DIGEST_IMAGE = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
+# The output protocol bounds result.json at 1 MiB. Atomic replacement can
+# temporarily retain both versions; kubelet's termination summary adds 4 KiB.
+_OUTPUT_METADATA_BYTES = 2 * 1024 * 1024 + 4096
 
 
 @dataclass(frozen=True)
@@ -303,10 +306,12 @@ def render_execution_job(
                    max_artifact_bytes=plan.max_artifact_bytes)
           for sidecar in plan.sidecars],
     ]
-    output_mib = max(
-        1,
-        (plan.max_artifact_bytes + 2 * plan.max_log_bytes_per_stream + 1_048_575) // 1_048_576,
+    phase_count = len(plan.setup) + 1 + int(plan.verifier is not None)
+    output_bytes = (
+        plan.max_artifact_bytes + 2 * phase_count * plan.max_log_bytes_per_stream
+        + _OUTPUT_METADATA_BYTES
     )
+    output_mib = (output_bytes + 1_048_575) // 1_048_576
     job: dict[str, Any] = {
         "apiVersion": "batch/v1",
         "kind": "Job",

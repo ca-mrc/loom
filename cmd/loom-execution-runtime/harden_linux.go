@@ -20,7 +20,9 @@ func hardenRuntimeIdentity() error {
 }
 
 func openRegularOutputFile(path string) (*os.File, os.FileInfo, error) {
-	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
+	// A task may leave a FIFO at a declared artifact path. Open without
+	// waiting for a writer, then validate the descriptor before reading it.
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, nil, err
 	}
