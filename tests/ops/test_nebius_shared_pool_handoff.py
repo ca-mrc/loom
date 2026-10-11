@@ -368,6 +368,7 @@ def test_restored_collector_uses_completed_current_lineage_and_bound_publication
     import json
 
     from scripts.ops.nebius_pool_migration_guard import KubectlPoolGuardAPI
+    from scripts.ops.nebius_shared_pool_recovery_workloads import MARKER
 
     name = 'scripts.ops.nebius_shared_pool_recovery_collector'
     assert importlib.util.find_spec(name) is not None, 'restored collector publication has no completed-job consumer'
@@ -377,7 +378,7 @@ def test_restored_collector_uses_completed_current_lineage_and_bound_publication
     collector, = (copy.deepcopy(row) for row in bindings.plan.staging.originals.values() if row['kind'] == 'CronJob')
     controller = copy.deepcopy(attachment.guard.controller)
     for row in (collector, controller):
-        row['metadata'].setdefault('annotations', {})['loom.nebius/shared-pool-recovery'] = 'fixture'
+        row['metadata'].setdefault('annotations', {})[MARKER] = str(bindings.migration.registration.spec.operation_id)
     namespace = collector['metadata']['namespace']
     job = {'apiVersion': 'batch/v1', 'kind': 'Job', 'metadata': {'name': 'collector-100', 'namespace': namespace,
         'uid': str(uuid4()), 'resourceVersion': '401', 'ownerReferences': [{'apiVersion': 'batch/v1', 'kind': 'CronJob',
@@ -429,7 +430,7 @@ def test_restored_collector_uses_completed_current_lineage_and_bound_publication
                 'uid': bindings.migration.registration.binding.kube_system_uid}}
         wanted_kind = {'configmap': 'ConfigMap', 'secret': 'Secret', 'cronjob': 'CronJob',
             'deployment': 'Deployment', 'namespace': 'Namespace'}[kind]
-        return copy.deepcopy(documents[wanted_kind + ':' + (selected or '') + ':' + name])
+        return copy.deepcopy(documents[wanted_kind + ':' + (selected or '-') + ':' + name])
 
     def run(args):
         calls.append(tuple(args))
@@ -447,7 +448,9 @@ def test_restored_collector_uses_completed_current_lineage_and_bound_publication
         return copy.deepcopy(listing[kind])
 
     def publication(target, *, expected, publication):
-        assert target == attachment.guard and expected == controller
+        from scripts.ops.nebius_management_switch import _stable
+
+        assert target == attachment.guard and _stable(expected) == _stable(controller)
         assert publication['receipt'] == receipt
         assert publication['source'] == 'nebius-kubernetes-capacity-collector'
         assert publication['node_group_id'] == bindings.migration.registration.spec.node_group_id
@@ -463,7 +466,17 @@ def test_restored_collector_uses_completed_current_lineage_and_bound_publication
     monkeypatch.setattr(api, 'observe_collector_publication', publication)
 
     def observe():
-        return module.observe_restored_staging_collector(bindings=bindings, guards=api, expected=collector, controller=controller)
+        try:
+            return module.observe_restored_staging_collector(bindings=bindings, guards=api, expected=collector, controller=controller)
+        except ValueError as error:
+            import traceback
+
+            frames, cause = [], error
+            while cause is not None:
+                frames.extend(f'{Path(frame.filename).name}:{frame.lineno}:{frame.name}'
+                    for frame in traceback.extract_tb(cause.__traceback__))
+                cause = cause.__context__
+            raise ValueError('restored staging collector unqualified: ' + ', '.join(frames)) from None
 
     assert observe() is True
     assert len(publications) == 1
@@ -508,6 +521,67 @@ def test_restored_collector_uses_completed_current_lineage_and_bound_publication
             assert len(publications) == before, case
     assert all(row[0] in {'get', 'logs'} for row in calls)
     assert 'private-' not in json.dumps(publications)
+
+    # The actual recovery callback connects collector health and process/SQL
+    # challenges without supplying its own stop, restart or reopen authority.
+    from scripts.ops.nebius_ingress_stage import _snapshot
+
+    assert hasattr(module, 'SharedRecoveryRuntimeReadiness'), 'restored health is not connected to the restart callback'
+    documents.clear()
+    documents.update(copy.deepcopy(baseline[0]))
+    listing.clear()
+    listing.update(copy.deepcopy(baseline[1]))
+    attachment.config.clear()
+    attachment.config.update(copy.deepcopy(baseline[2]))
+    mode['case'] = None
+    controller_pod = {'metadata': {'uid': str(uuid4())}, 'status': {'containerStatuses': [{'restartCount': 0}]}}
+    database_pod = {'metadata': {'uid': str(uuid4())}, 'status': {'containerStatuses': [{'restartCount': 0}]}}
+    monkeypatch.setattr(api, '_database', lambda *_: copy.deepcopy(database_pod))
+    monkeypatch.setattr(api, '_runtime', lambda *_, **kwargs: copy.deepcopy(controller_pod))
+    readiness = module.SharedRecoveryRuntimeReadiness(bindings=bindings, guards=api)
+
+    def callback(captured):
+        desired = _snapshot(captured)
+        desired['metadata'].setdefault('annotations', {})[MARKER] = str(bindings.migration.registration.spec.operation_id)
+        before = copy.deepcopy(desired)
+        before['metadata']['uid'] = captured['metadata']['uid']
+        before['spec']['suspend' if captured['kind'] == 'CronJob' else 'replicas'] = True if captured['kind'] == 'CronJob' else 0
+        current = copy.deepcopy(desired)
+        current['metadata']['uid'] = captured['metadata']['uid']
+        return readiness(bindings.plan.development.runtime.request, 'recovery-restart', before, desired, current)
+
+    assert callback(next(row for row in bindings.plan.staging.originals.values() if row['kind'] == 'CronJob')) is True
+    original_publication = api.observe_collector_publication
+    def late_database(*args, **kwargs):
+        result = original_publication(*args, **kwargs)
+        database_pod['status']['containerStatuses'][0]['restartCount'] += 1
+        return result
+    monkeypatch.setattr(api, 'observe_collector_publication', late_database)
+    with pytest.raises(ValueError, match='restored staging runtime unqualified'):
+        callback(next(row for row in bindings.plan.staging.originals.values() if row['kind'] == 'CronJob'))
+    monkeypatch.setattr(api, 'observe_collector_publication', original_publication)
+    probes = []
+    def probe(name, target, *, original, expected, **kwargs):
+        assert target == attachment.guard and original == bindings.plan.staging.originals[_key(original)]
+        assert expected['spec'] == original['spec']
+        if name == mode['case']:
+            raise ValueError('test-only failed process probe')
+        probes.append((name, _key(original)))
+    for method in ('database', 'legacy_settings', 'telemetry'):
+        monkeypatch.setattr(api, 'qualify_runtime_' + method, lambda *args, method=method, **kwargs: probe(method, *args, **kwargs))
+    for captured in bindings.plan.staging.originals.values():
+        if captured['kind'] != 'Deployment' or captured['spec']['replicas'] == 0:
+            continue
+        mode['case'], probes[:] = None, []
+        assert callback(captured) is True
+        names = ['database', 'legacy_settings']
+        if captured['metadata']['namespace'] == namespace:
+            names.append('telemetry')
+        assert probes == [(name, _key(captured)) for name in names]
+        for name in names:
+            mode['case'] = name
+            with pytest.raises(ValueError, match='restored staging runtime unqualified'):
+                callback(captured)
 
 
 @pytest.fixture
