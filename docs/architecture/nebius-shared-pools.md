@@ -1570,10 +1570,27 @@ this is not permission to recreate missing recovery evidence.
 Both presence and absence are read back, and source/cluster identity plus bounded
 private receipt bytes bracket the observation. Foreign receipts, symlinked
 directories and changed records are refused without writing local or cluster
-state. Successful resource observation alone does not prove full writer census,
-effective permissions, process/database readiness, publication/provider scope,
-guard ownership or completed release history; those remain required checks of
-the protected caller.
+state. Successful resource observation alone does not prove writer exclusivity
+or readiness.
+
+Its whole-pool observation composes those resources with the existing complete,
+revision-bound workload/RBAC census. The original shared handoff must be terminal,
+its receipt bytes must belong to the release's retained history, and pool,
+participant namespace and controller identities must agree. Only the selected
+participant's recorded resource transitions and the manager catalog transition
+replace roots; other participants and the retired collectors/gateway remain
+pinned to their retained state. A fresh source capture cannot replace an already
+retained writer UID. Original captured Jobs must remain terminal;
+only fixed new Jobs selected by the release journals can be active roots.
+Candidate Role annotations do not authorize changed grants or binding subjects.
+
+Current effective rules are also reviewed per retained account and namespace,
+including namespaces reached through foreign/group bindings. Reviews are
+nonpersisted authorization queries, not grants or token issuance. Binding
+readbacks bracket these checks, and the complete writer census runs again before
+final source/resource readback. This observation still does not prove semantic
+latest-release completion, process/database readiness, publication/provider scope
+or guard ownership; the protected caller must establish those independently.
 
 The transaction, pool-effect adapter and parent interface do not establish
 publication, history, full runtime readiness or recovery authority on their own.

@@ -264,7 +264,8 @@ def _select_writer_options(options: WriterOptions, inventory: dict[str, list[dic
 
 
 def _observe_shared_writer_options(*, plan: SharedPoolHandoffPlan, transport: ManagementKubernetesTransport,
-        workload_options: WriterOptions, authority_options: WriterOptions) -> SharedPoolWriterObservation:
+        workload_options: WriterOptions, authority_options: WriterOptions,
+        historical_jobs: dict[str, dict[str, Any]] | None = None) -> SharedPoolWriterObservation:
     """Common census mechanics; callers derive and recheck phase authority."""
     try:
         runtime = plan.development.runtime.request
@@ -274,6 +275,11 @@ def _observe_shared_writer_options(*, plan: SharedPoolHandoffPlan, transport: Ma
         legacy_jobs = (*legacy.context.original.retained.values(), *legacy.context.predecessor.retained.values())
         retained_jobs = {_key(row): copy.deepcopy(row) for row in legacy_jobs if row['kind'] == 'Job'}
         retained_jobs.update(_resource_roots(plan, frozenset({'Job'})))
+        for key, row in (historical_jobs or {}).items():
+            if (key != _key(row) or row['kind'] != 'Job'
+                    or (key in retained_jobs and not _matches(row, retained_jobs[key], _uid(retained_jobs[key])))):
+                raise ValueError
+            retained_jobs[key] = copy.deepcopy(row)
         binding = plan.migration.registration.binding
 
         def cluster() -> None:

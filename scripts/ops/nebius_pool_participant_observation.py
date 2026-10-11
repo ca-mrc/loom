@@ -2,7 +2,7 @@
 
 This read-only observer follows fixed create/CAS journals, including failed-Job
 generations. The protected caller must ALSO qualify publication, predecessor
-history, all pool writers/permissions, processes, databases, provider and guard.
+history, processes, databases, provider and guard.
 No resource receipt or successful read substitutes for those independent checks.
 """
 from __future__ import annotations
@@ -11,9 +11,9 @@ import copy
 import hashlib
 import json
 import ssl
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID
 
 from scripts.ops import nebius_certificates as private_state
@@ -49,6 +49,13 @@ from scripts.ops.nebius_shared_pool_operation import _files
 
 from loom.nebius_platform_render import digest
 from loom_service.pool_management.participant_refresh import RefreshAction
+
+if TYPE_CHECKING:
+    from scripts.ops.nebius_pool_migration import PoolMigrationRequest
+    from scripts.ops.nebius_shared_pool_handoff_live import (
+        SharedPoolGuardBindings,
+        SharedPoolWriterObservation,
+    )
 
 Document = dict[str, Any]
 
@@ -341,3 +348,146 @@ class HTTPSParticipantResourceObserver(ManagementKubernetesTransport):
             return result
         except Exception:
             raise ValueError('participant live resources unqualified; preserve evidence') from None
+
+    def observe_writers(self, *, bindings: SharedPoolGuardBindings, shared_state: Path,
+            preparing: str | None = None) -> SharedPoolWriterObservation:
+        """Whole-pool census with only this release's source-bound successors.
+
+        The protected parent supplies the original shared-root bindings and must
+        separately load semantic root/latest completion history. This method
+        checks the root's workload/Role receipts and their frozen membership in
+        the release history, not publication, SQL readiness or guard ownership.
+        No live snapshot becomes persisted authority or a mutation permit.
+        """
+        from scripts.ops.nebius_shared_pool_forward_census import _forward_options
+        from scripts.ops.nebius_shared_pool_handoff_live import _observe_shared_writer_options
+
+        try:
+            bound, retained = copy.deepcopy(bindings), self.retained
+            self._source()
+            baseline = _forward_options(bound, shared_state)
+            if (baseline[0]['outcome'] != 'shared_pool_handoff_complete'
+                    or any(row['status'] != 'complete' for row in baseline[0]['forward'].values())):
+                raise ValueError
+            manager = bound.plan.development.runtime.request.database.manager.retained.request.retained
+            anchor = Path(manager.operation['anchor_dir']) / 'shared-pool-handoff.json'
+            files = {**{shared_state / name: checksum for name, checksum in _files(shared_state).items()},
+                anchor: hashlib.sha256(private_state._private_read(anchor)).hexdigest()}
+            if not files.items() <= retained.inputs.history.items():
+                raise ValueError
+
+            def scope(migration: PoolMigrationRequest) -> Document:
+                spec = migration.registration.spec
+                return {'binding': asdict(migration.registration.binding),
+                    'pool': (spec.pool_id, spec.installation_id, spec.admission_epoch, spec.cluster_id, spec.node_group_id),
+                    'participants': {row.participant_id: (row.environment_id, row.environment_class,
+                        row.execution_namespace, row.build_namespace) for row in spec.participants},
+                    'guards': {row.participant_id: (row.namespace, row.namespace_uid, _key(row.controller), _uid(row.controller))
+                        for row in migration.guards}}
+
+            if scope(retained.inputs.previous) != scope(bound.migration):
+                raise ValueError
+            participant, = (row for row in retained.release.refresh.before.participants
+                if row.participant_id == retained.release.refresh.participant_id)
+            guard, = (row for row in retained.inputs.previous.guards if row.participant_id == participant.participant_id)
+            namespaces = {guard.namespace, participant.execution_namespace.name, participant.build_namespace.name}
+            roots, authority = copy.deepcopy(baseline[1:3])
+            manager_key = _key(retained.inputs.manager)
+            original_keys = {_key(row) for row in retained.inputs.current}
+            source_keys = {_key(row) for rows in retained.release.files.values() for row in rows}
+            receipts = _ResourceView(retained, preparing)
+            current = self.observe(preparing=preparing)
+            for key, row in current.items():
+                kind = row['kind']
+                if kind in {'Role', 'RoleBinding', 'ClusterRole', 'ClusterRoleBinding'}:
+                    choices = authority[key]
+                    original, = choices
+                    # Candidate receipts may add release annotations, never
+                    # change grants, binding subjects or the installed UID.
+                    if (original is None or _uid(row) != _uid(original)
+                            or {k: v for k, v in row.items() if k not in {'metadata', 'status'}}
+                                != {k: v for k, v in original.items() if k not in {'metadata', 'status'}}):
+                        raise ValueError
+                    authority[key] = (row,)
+                elif kind in {'Deployment', 'StatefulSet', 'CronJob', 'Job'}:
+                    if key in roots:
+                        original, = roots[key]
+                        if original is None or _uid(row) != _uid(original):
+                            raise ValueError
+                    if key == manager_key:
+                        if key not in roots:
+                            raise ValueError
+                    elif kind == 'Job' and key not in original_keys:
+                        # Only new Jobs in the fixed candidate/pool journals
+                        # may run. Original captured Jobs remain terminal-only.
+                        if row['metadata']['namespace'] not in namespaces | {retained.inputs.previous.registration.binding.namespace}:
+                            raise ValueError
+                    elif key not in source_keys or row['metadata']['namespace'] not in namespaces:
+                        if key not in roots or not any(original is not None and _matches(row, original, _uid(original))
+                                for original in roots[key]):
+                            if kind != 'Job':
+                                raise ValueError
+                        continue
+                    if kind != 'Job' or key not in original_keys:
+                        roots[key] = (row,)
+            result = _observe_shared_writer_options(plan=bound.plan, transport=self,
+                workload_options=roots, authority_options=authority,
+                historical_jobs={_key(row): row for row in retained.inputs.current if row['kind'] == 'Job'})
+            self._review_writer_permissions(result)
+            # An effective-rule review is not a snapshot lock. Re-run the full
+            # census after it so a late writer/grant cannot hide in that gap.
+            result = _observe_shared_writer_options(plan=bound.plan, transport=self,
+                workload_options=roots, authority_options=authority,
+                historical_jobs={_key(row): row for row in retained.inputs.current if row['kind'] == 'Job'})
+            after = self.observe(preparing=preparing)
+            if (bindings != bound or self.retained != retained or after.keys() != current.keys()
+                    or any(not _matches(after[key], row, _uid(row)) for key, row in current.items())
+                    or _forward_options(bound, shared_state) != baseline
+                    or _ResourceView(retained, preparing).files != receipts.files):
+                raise ValueError
+            return replace(result, input_digest=digest({'reference': retained.reference.model_dump(mode='json'),
+                'census': result.input_digest, 'resources': {key: {'uid': _uid(row), 'body': _stable(row)}
+                    for key, row in current.items()}}))
+        except Exception:
+            raise ValueError('participant writer census unqualified; preserve evidence') from None
+
+    def _review_writer_permissions(self, writers: SharedPoolWriterObservation) -> None:
+        """Current per-account effective rules, including foreign/group bindings."""
+        from scripts.ops.nebius_management_prerequisites import inventory_resources
+        from scripts.ops.nebius_pool_gateway_authority import subject_review_namespaces
+        from scripts.ops.nebius_shared_pool_handoff_live import _resource_roots
+        from scripts.ops.nebius_shared_pool_recovery_roles import _qualify_rules
+
+        def bindings() -> list[Document]:
+            return sorted((row for plural, kind in (('rolebindings', 'RoleBinding'), ('clusterrolebindings', 'ClusterRoleBinding'))
+                for row in inventory_resources(self._request, 'rbac.authorization.k8s.io/v1', plural, kind)), key=_key)
+
+        before = bindings()
+        legacy = writers.plan.staging.legacy
+        subjects = set()
+        for row in (*writers.workloads.values(), *self.retained.inputs.current,
+                *legacy.context.original.retained.values(), *legacy.context.predecessor.retained.values(),
+                *_resource_roots(writers.plan, frozenset({'Job'})).values()):
+            if row['kind'] not in {'Deployment', 'StatefulSet', 'CronJob', 'Job'}:
+                continue
+            pod = row['spec']['jobTemplate']['spec']['template']['spec'] if row['kind'] == 'CronJob' else row['spec']['template']['spec']
+            subjects.add((row['metadata']['namespace'], pod.get('serviceAccountName', 'default')))
+        for subject in sorted(subjects):
+            namespace, account = subject
+            headers = [('Impersonate-User', f'system:serviceaccount:{namespace}:{account}'),
+                *(('Impersonate-Group', group) for group in ('system:serviceaccounts',
+                    'system:serviceaccounts:' + namespace, 'system:authenticated'))]
+            for selected in subject_review_namespaces(self.retained.inputs.previous, before, subject=subject):
+                with self.client.stream('POST', '/apis/authorization.k8s.io/v1/selfsubjectrulesreviews', headers=headers,
+                        json={'apiVersion': 'authorization.k8s.io/v1', 'kind': 'SelfSubjectRulesReview',
+                            'spec': {'namespace': selected}}) as response:
+                    if response.status_code != 201 or response.headers.get('content-encoding', 'identity').lower() != 'identity':
+                        raise ValueError
+                    raw = bytearray()
+                    for chunk in response.iter_bytes(chunk_size=16384):
+                        if len(raw) + len(chunk) > 4 * 1024**2:
+                            raise ValueError
+                        raw.extend(chunk)
+                    _qualify_rules(json.loads(raw), catalog=writers.authority, subject=subject, namespace=selected)
+        if bindings() != before:
+            raise ValueError
