@@ -62,6 +62,7 @@ def connection(operation_inputs):
                 'Service': '/api/v1/namespaces/' + retained.inputs.config['namespace'] + '/services/',
                 'Deployment': '/apis/apps/v1/namespaces/' + retained.inputs.config['namespace'] + '/deployments/',
                 'StatefulSet': '/apis/apps/v1/namespaces/' + retained.inputs.config['namespace'] + '/statefulsets/',
+                'PersistentVolumeClaim': '/api/v1/namespaces/' + retained.inputs.config['namespace'] + '/persistentvolumeclaims/',
             }
             row = state.rows[key]
             assert message.url.path == expected_paths[row['kind']] + row['metadata']['name']
@@ -130,6 +131,32 @@ def test_candidate_file_writer_preserves_order_and_reads_back_repeated_dispatch(
     ns = state.retained.inputs.config['namespace']
     assert state.writes == ['Service:' + ns + ':loom-postgres', 'StatefulSet:' + ns + ':loom-postgres']
     assert state.rows[state.writes[0]]['spec']['clusterIP'] == '10.0.0.7'
+
+
+def test_candidate_file_writer_preserves_existing_storage_without_patch_or_allocation(connection):
+    state, connect = connection
+    key = 'PersistentVolumeClaim:' + state.retained.inputs.config['namespace'] + ':loom-web-tls'
+    original = copy.deepcopy(state.rows[key])
+    writer = file_writer(state, connect)
+    writer.apply_file('40-services.yaml')
+    writer.apply_file('40-services.yaml')
+    assert state.rows[key] == original
+    assert key not in state.writes
+    with connect(key) as api:
+        with pytest.raises(ValueError, match='preserve'):
+            advance(state, api, key)
+        with pytest.raises(ValueError, match='preserve'):
+            api.patch_workload(key, original, api.targets[key])
+    assert key not in state.writes
+
+
+def test_candidate_file_writer_refuses_changed_storage_spec_before_application_writes(connection):
+    state, connect = connection
+    key = 'PersistentVolumeClaim:' + state.retained.inputs.config['namespace'] + ':loom-web-tls'
+    state.rows[key]['spec']['resources']['requests']['storage'] = '900Gi'
+    with pytest.raises(ValueError, match='preserve'):
+        file_writer(state, connect).apply_file('40-services.yaml')
+    assert key not in state.writes
 
 
 @pytest.mark.parametrize('failure', ['lost-before', 'lost-after'])
