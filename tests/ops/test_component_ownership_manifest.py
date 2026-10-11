@@ -1405,6 +1405,29 @@ def test_root_shards_distribute_shared_handoff_phases_and_observation() -> None:
     assert len(set(isolated)) == len(isolated)
 
 
+def test_exhaustive_shared_lifecycle_scenarios_have_independent_shards() -> None:
+    """Run 38176447484 cannot fit all recovery/process variants in two jobs."""
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+    policy = manifest.test_shard_policy("tests-root")
+    assert policy is not None
+    paths = component_ownership.test_paths_for_lane(
+        manifest, tracked_paths=component_ownership._tracked_paths(REPO_ROOT), lane="tests-root",
+    )
+    placement = {
+        path: index
+        for index in range(policy.shard_count)
+        for path in component_ownership.shard_paths(
+            paths, shard_index=index, shard_count=policy.shard_count,
+            strategy=policy.strategy, salt=policy.salt, pins=policy.pins,
+        )
+    }
+    scenarios = [f"tests/ops/test_nebius_shared_pool_handoff{suffix}.py" for suffix in (
+        "_census", "_census_recovery", "_processes", "_processes_recovery", "_processes_observation",
+    )]
+    assert set(scenarios) <= placement.keys(), "long scenarios must be independently schedulable"
+    assert len({placement[path] for path in scenarios}) == len(scenarios)
+
+
 def test_stable_hash_sharding_is_order_independent_and_has_zero_insertion_churn() -> None:
     paths = tuple(f"tests/unit/test_{index:03d}.py" for index in range(20))
 
