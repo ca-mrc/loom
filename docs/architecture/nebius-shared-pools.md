@@ -1353,6 +1353,18 @@ observation. Terminal recovery uses the same current reads without constructing
 active mutation adapters. SQL authority/drain, whole-cluster writer and provider
 qualification remain independent mandatory observations for the protected parent.
 
+The internal concrete shared-pool API composes those observations with the
+anchored forward and recovery phase engines. It pins private connection inputs,
+checks publication and provider scope, reviews effective permissions, and
+qualifies the current writer inventory before database/process checks. Recovery
+database observations bracket the later process checks across every retained
+backend, including stopped development and management databases. Terminal replay
+uses current read-only qualification without constructing active child adapters;
+the forward completion receipt requires an open global pool, open participant
+guards and no pending workload readiness. This internal connection is not a
+protected deployment entrypoint or installed multi-owner acceptance. Protected
+delivery and ordinary rollout continuity must be connected before live handoff.
+
 Authenticated Kubernetes/worker identity and capacity observations remain
 mandatory. Detailed kubelet samples retain the existing optional-telemetry
 contract; unavailable samples are not zero usage or evidence of certificate trust.
