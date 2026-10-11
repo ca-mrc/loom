@@ -1,0 +1,217 @@
+"""Dev-manager certificate delivery cannot inherit legacy wildcard authority."""
+from __future__ import annotations
+
+import hashlib
+import io
+import json
+import subprocess
+import sys
+import zipfile
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+from scripts.ops import install_nebius_certificate_entrypoint as installer
+from scripts.ops import nebius_certificate_gateway as gateway
+from scripts.ops import nebius_certificate_rollout as runner
+
+COMMAND = "loom-nebius-development-management-certificate-v1"
+HOST = "development-management.example.test"
+IDENTITY = "f09f269d-3048-4cf5-af78-e30320960e4a"
+
+
+@pytest.fixture
+def selection(tmp_path):
+    parent = tmp_path / ".loom"
+    parent.mkdir(mode=0o700)
+    config = {
+        "schema": "loom.nebius-management-certificate-installation.v1",
+        "installation_id": IDENTITY,
+        "zone": "example.test",
+        "management_host": HOST,
+        "credential_file": str(tmp_path / "private-dns.json"),
+        "state_dir": str(parent / "nebius-development-management-certificates" / "state"),
+        "email": None,
+    }
+    uv = tmp_path / "uv"
+    uv.write_bytes(b"qualified uv")
+    requirements = tmp_path / "requirements.txt"
+    requirements.write_text("certbot==5.8.0 --hash=sha256:fixture\n")
+    return config, uv, requirements
+
+
+def bundle(selection):
+    config, uv, requirements = selection
+    return runner.build_bundle(config, uv=uv, requirements=requirements)
+
+
+def report():
+    return {"status": "qualified", "installation_id": IDENTITY,
+        "fingerprint_sha256": "a" * 64, "generation": "b" * 64,
+        "expires_at": "2026-12-02T12:00:00+00:00", "sans": [HOST]}
+
+
+def test_manager_report_accepts_only_one_exact_host_and_redacts_private_fields():
+    value = report() | {"private": "secret-marker"}
+    assert gateway.safe_report(json.dumps(value).encode(), management_only=True) == report()
+    for names in (["*.example.test"], [HOST, "*.dev.example.test"], [], [7]):
+        with pytest.raises(gateway.GatewayError):
+            gateway.safe_report(json.dumps(value | {"sans": names}).encode(), management_only=True)
+    with pytest.raises(gateway.GatewayError):
+        gateway.safe_report(json.dumps(value).encode())
+
+
+def test_manager_bundle_uses_separate_immutable_root_and_existing_hash_locked_bootstrap(selection, monkeypatch):
+    content = bundle(selection)
+    calls = []
+    monkeypatch.setattr(gateway, "run_private", lambda args, **kwargs: calls.append(args) or b"")
+    release, path = gateway.prepare_release(content, management_only=True)
+    root = Path(selection[0]["state_dir"]).parent
+    assert release == root / "releases" / hashlib.sha256(content).hexdigest()
+    assert json.loads(path.read_bytes()) == selection[0]
+    assert len(calls) == 2 and "--require-hashes" in calls[1]
+    assert gateway.prepare_release(content, management_only=True) == (release, path)
+    assert len(calls) == 2
+    assert not (root.parent / "nebius-certificates").exists()
+    (release / "uv").write_bytes(b"changed")
+    with pytest.raises(gateway.GatewayError):
+        gateway.prepare_release(content, management_only=True)
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("damage", ["legacy_mode", "legacy_schema", "legacy_root"])
+def test_cross_scope_bundle_is_rejected_before_tooling_writes(selection, damage, monkeypatch):
+    config = selection[0]
+    if damage == "legacy_schema":
+        config["schema"] = "loom.nebius-certificate-installation.v1"
+        config["child_domain"] = "dev.example.test"
+    elif damage == "legacy_root":
+        config["state_dir"] = str(Path(config["state_dir"]).parents[1] / "nebius-certificates" / "state")
+    monkeypatch.setattr(gateway, "run_private", lambda *a, **kw: pytest.fail("cross-scope tooling executed"))
+    with pytest.raises(gateway.GatewayError):
+        gateway.prepare_release(bundle(selection), management_only=damage != "legacy_mode")
+    assert not Path(config["state_dir"]).parent.exists()
+
+
+@pytest.mark.parametrize("changed", [None, "host", "installation"])
+def test_qualification_dispatches_exact_host_issuer_and_binds_returned_identity(selection, changed, monkeypatch):
+    value = report()
+    if changed == "host":
+        value["sans"] = ["foreign.example.test"]
+    elif changed == "installation":
+        value["installation_id"] = "024cfbfb-a7e8-4d85-9c60-c1d838730f9a"
+    issuer_calls = []
+
+    def external(args, **kwargs):
+        if args[1].endswith("nebius_certificates.py"):
+            issuer_calls.append(args)
+            assert args[2] == "issue-management" and kwargs["timeout"] == 1900
+            return json.dumps(value).encode()
+        return b""
+
+    monkeypatch.setattr(gateway, "run_private", external)
+    if changed:
+        with pytest.raises(gateway.GatewayError):
+            gateway.qualify_bundle(bundle(selection), management_only=True)
+    else:
+        assert gateway.qualify_bundle(bundle(selection), management_only=True) == report()
+    assert len(issuer_calls) == 1
+
+
+@pytest.mark.parametrize("command", ["loom-nebius-certificate-v1", COMMAND + " extra", ""])
+def test_manager_forced_command_rejects_legacy_or_unrecognized_command_before_stdin(command, monkeypatch):
+    monkeypatch.setenv("SSH_ORIGINAL_COMMAND", command)
+    monkeypatch.setattr(sys, "stdin", object())
+    assert gateway.authorized_main("a" * 64, management_only=True) == 126
+
+
+def test_manager_forced_command_rejects_unapproved_bundle(selection, monkeypatch):
+    monkeypatch.setenv("SSH_ORIGINAL_COMMAND", COMMAND)
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=io.BytesIO(bundle(selection))))
+    assert gateway.authorized_main("a" * 64, management_only=True) == 126
+    assert not Path(selection[0]["state_dir"]).parent.exists()
+
+
+def test_installed_entrypoint_freezes_mode_and_preserves_foreign_keys(legacy_inputs):
+    old_root, keys, key, _, _ = legacy_inputs
+    root = old_root.with_name("nebius-development-management-certificates")
+    source = b'def authorized_main(expected, *, management_only=False):\n    return 0 if management_only else 99\n'
+    config = {"schema": "loom.nebius-management-certificate-installation.v1",
+        "installation_id": IDENTITY, "state_dir": str(root / "state")}
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as archive:
+        archive.writestr("scripts/ops/nebius_certificate_gateway.py", source)
+        archive.writestr("installation.json", json.dumps(config))
+    content = output.getvalue()
+    digest = hashlib.sha256(content).hexdigest()
+    previous = keys.read_bytes()
+    installer.install(content, expected_sha256=digest, public_key=key, management_only=True)
+    assert keys.read_bytes() == previous and not root.exists()
+    result = installer.install(content, expected_sha256=digest, public_key=key, management_only=True, apply=True)
+    after = keys.read_bytes()
+    assert after.startswith(previous) and not old_root.exists()
+    entry = root / "authority" / digest / "entrypoint.py"
+    for command, code in ((COMMAND, 0), ("loom-nebius-certificate-v1", 126), (COMMAND + " extra", 126)):
+        execution = subprocess.run([sys.executable, "-I", str(entry)], input=content, capture_output=True,
+            env={"SSH_ORIGINAL_COMMAND": command}, timeout=10)
+        assert execution.returncode == code
+    assert installer.install(content, expected_sha256=digest, public_key=key, management_only=True, apply=True) == result
+    assert keys.read_bytes() == after
+    (entry.parent / "gateway.py").write_bytes(b'print("substituted")')
+    denied = subprocess.run([sys.executable, "-I", str(entry)], input=content, capture_output=True,
+        env={"SSH_ORIGINAL_COMMAND": COMMAND}, timeout=10)
+    assert denied.returncode == 126 and b"substituted" not in denied.stdout
+
+
+@pytest.mark.parametrize("change", [None, "host", "installation", "failure"])
+def test_runner_uses_dedicated_command_and_rejects_foreign_success_or_retries(selection, change, monkeypatch):
+    value = report()
+    if change == "host":
+        value["sans"] = ["foreign.example.test"]
+    elif change == "installation":
+        value["installation_id"] = "024cfbfb-a7e8-4d85-9c60-c1d838730f9a"
+    calls = []
+
+    def ssh(args, **kwargs):
+        calls.append(args)
+        assert args[-1] == COMMAND and "StrictHostKeyChecking=yes" in args
+        assert kwargs["input"] == bundle(selection)
+        return subprocess.CompletedProcess(args, int(change == "failure"), json.dumps(value).encode(), b"private-marker")
+
+    monkeypatch.setattr(subprocess, "run", ssh)
+    kwargs = dict(target="codex@192.0.2.1", key=Path("/private/manager-key"),
+        known_hosts=Path("/private/known-hosts"), management_only=True)
+    if change:
+        with pytest.raises((runner.RolloutError, gateway.GatewayError)) as error:
+            runner.transfer(bundle(selection), **kwargs)
+        assert "private-marker" not in str(error.value)
+    else:
+        assert runner.transfer(bundle(selection), **kwargs) == report()
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("configured", [False, True])
+def test_management_preparation_never_falls_back_to_legacy_configuration(selection, configured, tmp_path, monkeypatch, capsys):
+    config, uv, requirements = selection
+    output = tmp_path / "prepared.zip"
+    evidence = tmp_path / "evidence"
+    monkeypatch.setenv("NEBIUS_CERTIFICATE_INSTALLATION_JSON", json.dumps(config))
+    monkeypatch.delenv("NEBIUS_DEVELOPMENT_MANAGEMENT_CERTIFICATE_INSTALLATION_JSON", raising=False)
+    if configured:
+        monkeypatch.setenv("NEBIUS_DEVELOPMENT_MANAGEMENT_CERTIFICATE_INSTALLATION_JSON", json.dumps(config))
+    monkeypatch.setattr(sys, "argv", ["prepare", "--management-only", "--requirements", str(requirements),
+        "--evidence-dir", str(evidence), "--prepare-bundle", str(output)])
+    monkeypatch.setattr(runner.shutil, "which", lambda name: str(uv))
+
+    def version(args, **kwargs):
+        assert args == [str(uv), "--version"]
+        return subprocess.CompletedProcess(args, 0, b"uv 0.11.26 (x86_64-unknown-linux-gnu)\n", b"")
+
+    monkeypatch.setattr(subprocess, "run", version)
+    assert runner.main() == (0 if configured else 1)
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == ("prepared" if configured else "blocked")
+    assert output.exists() == configured
+    if configured:
+        with zipfile.ZipFile(output) as archive:
+            assert json.loads(archive.read("installation.json")) == config
