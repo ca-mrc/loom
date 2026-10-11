@@ -428,6 +428,9 @@ def test_completed_release_is_the_next_receipt_selected_predecessor(
     loader = getattr(completion, 'load_completed_participant_rollout', None)
     assert callable(loader), 'a released operation must have a semantic predecessor loader'
     retained = connection[0].retained
+    original_loader = getattr(completion, 'load_participant_predecessor', None)
+    assert callable(original_loader), 'recovery cannot derive its original semantic predecessor'
+    assert original_loader(initial=operation_inputs['predecessor'], retained=retained) == operation_inputs['predecessor']
     before = {path: path.read_bytes() for root in (retained.state_dir, retained.anchor_dir)
         for path in root.rglob('*') if path.is_file()}
     successor = loader(reference=retained.reference, state_root=retained.state_dir.parent,
@@ -478,11 +481,29 @@ def test_completed_release_is_the_next_receipt_selected_predecessor(
     inputs['rendered_files'] = build_platform(inputs['config'], inputs['candidate'], profile,
         successor.migration.registration.spec.profiles.image_admission_keyring, repo_root=inputs['repo_root'])
     following = operation.retain_participant_rollout(**inputs)
+    assert original_loader(initial=operation_inputs['predecessor'], retained=following) == successor
     assert following.inputs.previous == successor.migration
     assert following.release.refresh.before == retained.release.refresh.after
     assert following.release.refresh.after.policy_revision == retained.release.refresh.after.policy_revision + 1
     assert loader(reference=retained.reference, state_root=retained.state_dir.parent,
         anchor_dir=retained.anchor_dir) == successor
+    # Loading recovery's predecessor is independent of the mutable current head.
+    head_options = dict(initial=operation_inputs['predecessor'], state_root=retained.state_dir.parent,
+        anchor_dir=retained.anchor_dir)
+    completion.initialize_participant_head(**head_options)
+    completion.promote_participant_head(**head_options, expected=operation_inputs['predecessor'], reference=retained.reference)
+    assert original_loader(initial=operation_inputs['predecessor'], retained=retained) == operation_inputs['predecessor']
+    assert original_loader(initial=operation_inputs['predecessor'], retained=following) == successor
+    before = {path: path.read_bytes() for root in (retained.state_dir.parent, retained.anchor_dir)
+        for path in root.rglob('*') if path.is_file()}
+    original_loader(initial=operation_inputs['predecessor'], retained=following)
+    assert {path: path.read_bytes() for root in (retained.state_dir.parent, retained.anchor_dir)
+        for path in root.rglob('*') if path.is_file()} == before
+    marker = retained.anchor_dir / (str(retained.reference.operation_id) + '-participant-rollout.json')
+    marker.unlink()
+    with pytest.raises(ValueError, match='predecessor'):
+        original_loader(initial=operation_inputs['predecessor'], retained=following)
+    assert not marker.exists(), 'recovery loading must not reconstruct a lost predecessor anchor'
 
 
 def test_completed_predecessor_rejects_pending_or_changed_history(
