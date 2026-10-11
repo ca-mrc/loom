@@ -5829,9 +5829,103 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
         from tests.ops.test_nebius_pool_participant_adapter import connection as pool_connection
 
         with pytest.MonkeyPatch.context() as patch:
+            import subprocess
+            from types import SimpleNamespace
+            from urllib.parse import urlsplit
+
+            from scripts.ops.nebius_management_material import _documents as manager_material
+            from scripts.ops.nebius_pool_startup_database import pool_participant_authority_sql
+            from scripts.ops.nebius_shared_pool_forward_processes import _gateway_history_target
+            from tests.ops.test_nebius_development_pool_retained import populate_database_backends
+
+            from loom_service.pool_management.capacity import digest
+
             patch.setattr(httpx, 'Client', type(transport.client))
             pool_state, kube, connect_pool = pool_connection.__wrapped__(release_inputs, patch)
             injected = set()
+            manager_history = bindings.plan.development.runtime.request.database.manager.retained.request.retained
+            material = json.loads(manager_history.files[Path(manager_history.operation['state_dir']) / 'bootstrap/material/material.json'])
+            secret = manager_material(material['material'], manager_history.binding, material['operation_id'])['loom-platform-db']
+            secret['metadata'].update(uid=material['resources']['loom-platform-db']['uid'], resourceVersion='701')
+            resources[_key(secret)] = secret
+            target = _gateway_history_target(bindings, secret)
+            database_rows = {_resource_path(row): copy.deepcopy(row) for row in (target.database.statefulset, target.database.service)}
+            populate_database_backends(database_rows)
+            kubeconfig = state.parent / 'participant-registry-kubeconfig'
+            kubeconfig.write_text('private-test-only')
+            kubeconfig.chmod(0o600)
+            registry_mode, registry_reads = {}, []
+
+            def execute(command, **options):
+                assert command[:3] == ['/usr/bin/kubectl', '--kubeconfig', str(kubeconfig)]
+                assert options['timeout'] == 40 and options['check'] is False
+                offset = next(index for index, value in enumerate(command) if value in {'get', 'exec'})
+                selected = command[offset:]
+                if selected[0] == 'exec':
+                    assert selected[:-1] == ['exec', '-n', target.namespace, 'pod/loom-postgres-0', '-c', 'loom-postgres', '--',
+                        'psql', '-X', '-qAt', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', 'loom', '-c']
+                    assert selected[-1] == pool_participant_authority_sql(retained.release.refresh)
+                    registry_reads.append(selected)
+                    current_state = ('complete' if 'open' in pool_state.effects else 'staged' if 'stage' in pool_state.effects else
+                        'fenced' if 'fence' in pool_state.effects else 'ready')
+                    result = {'schema': 'loom.pool-participant-authority.v1',
+                        'operation_id': str(retained.reference.operation_id), 'pool_id': str(spec.pool_id),
+                        'before_sha256': digest(retained.release.refresh.before.model_dump(mode='json')),
+                        'after_sha256': digest(retained.release.refresh.after.model_dump(mode='json')),
+                        'read_only': True, 'state': registry_mode.get('state', current_state)}
+                    if registry_mode.get('bad-report'):
+                        result['operation_id'] = str(uuid4())
+                    if registry_mode.get('history'):
+                        path = retained.state_dir / 'pool-refresh/dispatch.json'
+                        path.write_bytes(path.read_bytes() + b'\n')
+                    if registry_mode.get('connection'):
+                        kubeconfig.write_text('changed-test-connection')
+                    if registry_mode.get('credential'):
+                        secret['metadata']['resourceVersion'] = '702'
+                    if registry_mode.get('restart'):
+                        listing = next(row for row in database_rows.values() if row['kind'] == 'PodList')
+                        listing['items'][0]['status']['containerStatuses'][0]['restartCount'] = len(registry_reads)
+                elif selected[1] == 'namespace':
+                    name = selected[2]
+                    if name == 'kube-system':
+                        uid = retained.inputs.previous.registration.binding.kube_system_uid
+                    else:
+                        assert name == target.namespace
+                        uid = str(target.namespace_uid)
+                    result = {'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': name, 'uid': uid}}
+                elif selected[1] == '--raw':
+                    result = copy.deepcopy(database_rows[urlsplit(selected[2]).path])
+                    if registry_mode.get('backend') and result['kind'] == 'EndpointSliceList':
+                        result['items'][0]['endpoints'][0]['targetRef']['uid'] = str(uuid4())
+                else:
+                    kind = selected[1]
+                    assert kind in {'statefulset', 'service', 'secret'}
+                    assert selected[2:] == ['loom-platform-db' if kind == 'secret' else 'loom-postgres', '-n', target.namespace, '-o', 'json']
+                    result = (secret if kind == 'secret' else database_rows[_resource_path(
+                        target.database.statefulset if kind == 'statefulset' else target.database.service)])
+                return SimpleNamespace(returncode=0, stdout=json.dumps(result).encode(), stderr=b'')
+
+            patch.setattr(subprocess, 'run', execute)
+
+            def registry():
+                try:
+                    return observer.observe_registry(bindings=bindings, kubeconfig=kubeconfig, executable=Path('/usr/bin/kubectl'))
+                except ValueError as error:
+                    import traceback
+
+                    frames, cause = [], error
+                    while cause is not None:
+                        frames.extend(f'{Path(frame.filename).name}:{frame.lineno}:{frame.name}'
+                            for frame in traceback.extract_tb(cause.__traceback__))
+                        cause = cause.__context__
+                    raise ValueError('participant registry unqualified; preserve evidence; ' + ', '.join(frames)) from None
+
+            assert registry() == 'ready'
+            for foreign in ('fenced', 'staged', 'complete'):
+                registry_mode['state'] = foreign
+                with pytest.raises(ValueError, match='preserve'):
+                    registry()
+            registry_mode.clear()
 
             def qualify_pool(_phase):
                 nonlocal injected
@@ -5847,6 +5941,7 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
                 for row in descendants:
                     inventory[kinds[row['kind']]].append(row)
                 observe()
+                registry()
 
             pool_state.qualify = qualify_pool
             pool = connect_pool()
@@ -5855,6 +5950,21 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
             pool.read_capacity(kube, retained.release, observation_id=uuid4())
             assert pool_state.effects == ['config', 'fence', 'stage', 'config', 'manager', 'open', 'capacity']
             assert observe().workloads[_key(manager)] == pool_state.manager
+            assert registry() == 'complete'
+            record = retained.state_dir / 'pool-refresh/dispatch.json'
+            before = record.read_bytes()
+            original_database_rows = copy.deepcopy(database_rows)
+            for damage in ('backend', 'bad-report', 'history', 'connection', 'credential', 'restart'):
+                registry_mode[damage] = True
+                with pytest.raises(ValueError, match='preserve'):
+                    registry()
+                record.write_bytes(before)
+                kubeconfig.write_text('private-test-only')
+                secret['metadata']['resourceVersion'] = '701'
+                database_rows.clear()
+                database_rows.update(copy.deepcopy(original_database_rows))
+                registry_mode.clear()
+            assert registry_reads and registry() == 'complete'
 
 
 def _exercise_recovery_writer_census(kwargs, state, transport, inventory, kinds, calls, mode, replace_live, forward_api):

@@ -414,3 +414,70 @@ def test_pool_completion_receipt_must_identify_the_selected_participant(pool_con
     with observer(state.retained, lambda: state.api.resources)[0] as live:
         with pytest.raises(ValueError, match='preserve'):
             live.observe()
+
+
+@pytest.mark.parametrize(('phase', 'expected'), [
+    ('preflight', {'ready'}), ('preview', {'ready'}), ('config-only', {'ready'}), ('before', {'ready', 'fenced'}),
+    ('after', {'staged'}), ('busy', {'ready'}), ('staged', {'staged'}), ('complete', {'complete'}),
+])
+def test_registry_alternatives_follow_actual_job_dispatch(pool_connection, phase, expected):
+    """Preparing a ConfigMap is not permission for a registry state transition."""
+    state, kube, connect = pool_connection
+    pool = connect()
+    if phase == 'config-only':
+        def stop_after_config(_):
+            if state.effects == ['config']:
+                raise ValueError('interrupted before Job dispatch')
+
+        state.qualify = stop_after_config
+        with pytest.raises(ValueError, match='preserve'):
+            pool.activate(kube, state.retained.release)
+        assert state.effects == ['config']
+    elif phase in {'preview', 'before'}:
+        state.failure = phase
+        with pytest.raises(ValueError, match='preserve'):
+            pool.activate(kube, state.retained.release)
+    elif phase != 'preflight':
+        state.failure = 'after' if phase == 'after' else None
+        state.busy = phase == 'busy'
+        assert pool.activate(kube, state.retained.release) == ('busy' if state.busy else 'ready')
+        if phase == 'complete':
+            pool.finish(kube, state.retained.release)
+    before = evidence(state.retained)
+    assert module()._ResourceView(state.retained, None).registry_states == frozenset(expected)
+    assert evidence(state.retained) == before
+
+
+@pytest.mark.parametrize(('action', 'expected'), [('stage', {'fenced'}), ('open', {'staged'})])
+def test_registry_pending_work_preserves_prior_state(pool_connection, action, expected):
+    state, kube, connect = pool_connection
+
+    def pending_report(_):
+        for row in state.reports.values():
+            if row['status'] == ('staged' if action == 'stage' else 'complete'):
+                row['status'] = 'pending_work'
+
+    state.qualify = pending_report
+    pool = connect()
+    with pytest.raises(ValueError, match='preserve'):
+        pool.activate(kube, state.retained.release)
+        assert action == 'open'
+        pool.finish(kube, state.retained.release)
+    assert module()._ResourceView(state.retained, None).registry_states == frozenset(expected)
+
+
+@pytest.mark.parametrize('action', ['stage', 'open'])
+def test_registry_rejects_later_dispatch_after_pending_work(pool_connection, action):
+    """A successful Job can report pending work, not a committed transition."""
+    state, kube, connect = pool_connection
+    pool = connect()
+    assert pool.activate(kube, state.retained.release) == 'ready'
+    pool.finish(kube, state.retained.release)
+    pool.read_capacity(kube, state.retained.release, observation_id=uuid4())
+    path = state.retained.state_dir / 'pool-refresh/dispatch.json'
+    record = json.loads(path.read_bytes())
+    record['steps'][action]['result']['refresh']['status'] = 'pending_work'
+    private_state._atomic_json(path, record)
+    with observer(state.retained, lambda: state.api.resources)[0] as live:
+        with pytest.raises(ValueError, match='preserve'):
+            live.observe()
