@@ -2273,7 +2273,8 @@ def test_shared_guard_binding_uses_live_dev_database_and_real_bound_guard_reader
 
 
 @pytest.mark.timeout(600)
-@pytest.mark.parametrize('forward_processes', [False, True, 'activation'], ids=['initial', 'forward', 'activation'])
+@pytest.mark.parametrize('forward_processes', [False, True, 'activation', 'recovery-databases'],
+    ids=['initial', 'forward', 'activation', 'recovery-databases'])
 def test_shared_process_preflight_reads_current_databases_and_retired_authority(
         shared_runtime, staging_history, staging_observation, completed_pool, handoff, monkeypatch, forward_processes):
     """Reject active old authority, failed real challenges and changed bindings.
@@ -2300,12 +2301,19 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
         BOUND_LEGACY_SETTINGS_COMMAND,
         expected_legacy_runtime_settings,
     )
-    from scripts.ops.nebius_pool_machine_database import pool_machine_retirement_sql
+    from scripts.ops.nebius_pool_machine_database import (
+        pool_machine_retirement_sql,
+        pool_recovery_machine_state_sql,
+    )
     from scripts.ops.nebius_pool_migration_guard import (
         _BOUND_DATABASE_COMMAND,
         _BOUND_TELEMETRY_COMMAND,
         pool_guard_activation_sql,
         pool_runtime_role_sql,
+    )
+    from scripts.ops.nebius_pool_recovery_database import (
+        participant_recovery_drain_sql,
+        pool_recovery_drain_sql,
     )
     from scripts.ops.nebius_pool_runtime_settings import (
         BOUND_POOL_SETTINGS_COMMAND,
@@ -2473,6 +2481,20 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
                         'state': 'active' if mode['damage'] == 'old-active' else 'revoked'}
                     checked.add('old-revoked')
                 elif namespace == manager_namespace:
+                    if sql == pool_recovery_machine_state_sql(spec):
+                        checked.add('recovery-machines')
+                        value = {'schema': 'loom.pool-recovery-machine-state.v1', 'operation_id': str(spec.operation_id),
+                            'installation_sha256': digest(spec.model_dump(mode='json')), 'read_only': True,
+                            'state': mode.get('machine_state', 'active')}
+                        return SimpleNamespace(returncode=0, stdout=json.dumps(value).encode(), stderr=b'')
+                    if sql == pool_recovery_drain_sql(spec):
+                        assert mode['pool_state'] == 'fenced'
+                        checked.add('pool-drain')
+                        value = {'schema': 'loom.pool-recovery-drain.v1', 'operation_id': str(spec.operation_id),
+                            'installation_sha256': digest(spec.model_dump(mode='json')), 'read_only': True,
+                            'counts': {'unstarted_requests': int(mode.get('pool_busy', False)), 'active_requests': 0,
+                                'unconfirmed_creates': 0, 'unqualified_releases': 0}}
+                        return SimpleNamespace(returncode=0, stdout=json.dumps(value).encode(), stderr=b'')
                     if sql == pool_activation_state_sql(spec):
                         value = {'schema': 'loom.pool-activation-state.v1', 'operation_id': str(spec.operation_id),
                             'installation_sha256': digest(spec.model_dump(mode='json')), 'state': mode.get('pool_state', 'closed')}
@@ -2520,8 +2542,17 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
                             request.database.foundation.inputs.candidate['candidate_sha'], action='observe'):
                         value = {'schema': 'loom.pool-local-guard.v1', 'operation_id': str(spec.operation_id),
                             'participant_id': str(participant.participant_id), 'status': 'foreign' if mode['damage'] == 'guard-foreign'
-                            else 'held' if namespace in mode.get('held', set()) else 'open'}
+                            else mode.get('guard_states', {}).get(namespace, 'held' if namespace in mode.get('held', set()) else 'open')}
                         checked.add(('active-guard', namespace))
+                    elif sql == participant_recovery_drain_sql(spec.operation_id, participant.participant_id,
+                            request.database.foundation.inputs.candidate['candidate_sha']):
+                        assert mode['guard_states'][namespace] == 'fenced'
+                        checked.add(('participant-drain', namespace))
+                        value = {'schema': 'loom.pool-participant-drain.v1', 'operation_id': str(spec.operation_id),
+                            'participant_id': str(participant.participant_id),
+                            'candidate_sha': request.database.foundation.inputs.candidate['candidate_sha'], 'read_only': True,
+                            'counts': {'trials': int(namespace in mode.get('busy', set())), 'executions': 0,
+                                'builds': 0, 'build_cleanup': 0, 'execution_outboxes': 0, 'build_outboxes': 0}}
                     elif sql == pool_guard_activation_sql(spec.operation_id, participant.participant_id,
                             request.database.foundation.inputs.candidate['candidate_sha'], action='release'):
                         assert forward_processes == 'activation' and mode['pool_state'] == 'global'
@@ -2631,7 +2662,13 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
             assert args[7] in {'psql', 'python'}
         return SimpleNamespace(returncode=0, stdout=json.dumps(value).encode(), stderr=b'')
 
-    monkeypatch.setattr(subprocess, 'run', execute)
+    def execute_with_hook(argv, **kwargs):
+        result = execute(argv, **kwargs)
+        if mode.get('sql_hook') is not None and 'psql' in argv:
+            mode['sql_hook'](argv)
+        return result
+
+    monkeypatch.setattr(subprocess, 'run', execute_with_hook)
     history = {path: path.read_bytes() for path in plan.history}
     with HTTPSDevelopmentRuntimeProbes(request=request,
             api_server=request.database.foundation.inputs.config['kubernetes_api_server'],
@@ -2665,6 +2702,11 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
         assert checked == {'old-revoked', 'new-closed', 'telemetry', ('guard', 'loom-dev'), ('guard', staging.namespace),
             *((check, namespace, name) for namespace, name in roles for check in ('settings', 'database'))}
         assert 'private-test-only' not in repr(result)
+        if forward_processes == 'recovery-databases':
+            _exercise_recovery_databases(bindings=result.bindings, documents=documents, mode=mode, checked=checked,
+                commands=commands, probes=probes,
+                args=dict(runtime=request, observation=staging_observation, legacy=staging_history, repo_root=ROOT))
+            return
         if forward_processes:
             with HTTPSSharedPoolRuntimeProbes(bindings=result.bindings,
                     api_server=request.database.foundation.inputs.config['kubernetes_api_server'],
@@ -2689,6 +2731,226 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
     assert calls and all(row.method == 'GET' for row in calls)
     assert all(row[0] in {'get', 'exec'} for row in commands)
     assert all(path.read_bytes() == raw for path, raw in history.items())
+
+
+def _exercise_recovery_databases(*, bindings, documents, mode, checked, commands, probes, args):
+    """Real parent/child records and fixed SQL transports; earlier effects are doubled."""
+    import importlib.util
+
+    from scripts.ops import nebius_certificates as private_state
+    from scripts.ops import nebius_shared_pool_guards as guards
+    from scripts.ops import nebius_shared_pool_operation as parent
+    from scripts.ops import nebius_shared_pool_recovery_drain as drain
+    from scripts.ops import nebius_shared_pool_recovery_fence as fence
+    from scripts.ops import nebius_shared_pool_recovery_gateway as gateway
+    from scripts.ops import nebius_shared_pool_recovery_machines as machines
+    from scripts.ops import nebius_shared_pool_recovery_reopening as reopening
+    from scripts.ops import nebius_shared_pool_recovery_restart as restart
+    from scripts.ops import nebius_shared_pool_recovery_roles as roles
+    from scripts.ops import nebius_shared_pool_recovery_templates as templates
+    from scripts.ops import nebius_shared_pool_recovery_workloads as stop
+    from scripts.ops.nebius_development_runtime_install import _read
+    from scripts.ops.nebius_ingress_stage import _snapshot, _uid
+    from scripts.ops.nebius_management_switch import _stable
+
+    name = 'scripts.ops.nebius_shared_pool_recovery_databases'
+    assert importlib.util.find_spec(name) is not None, 'phase-bound recovery database observation is missing'
+    module = __import__(name, fromlist=['observe_shared_pool_recovery_databases'])
+    manager = args['runtime'].database.manager.retained.request.retained
+    state = Path(manager.operation['state_dir']).parent / 'shared-pool-handoff'
+    staging = bindings.plan.staging.attachment.guard.namespace
+    children = {
+        'forward-guards': (guards.prepare_shared_pool_guards, guards.validate_shared_pool_guards, 'guards.json'),
+        'recovery-fence': (fence.prepare_shared_recovery_fence, fence.validate_shared_recovery_fence, 'fence.json'),
+        'recovery-drain': (drain.prepare_shared_recovery_drain, drain.validate_shared_recovery_drain, 'drain.json'),
+        'recovery-stop': (stop.prepare_shared_recovery_workloads, stop.validate_shared_recovery_workloads, 'stop.json'),
+        'recovery-restore-workloads': (templates.prepare_shared_recovery_templates, templates.validate_shared_recovery_templates, 'templates.json'),
+        'recovery-restore-roles': (roles.prepare_shared_recovery_roles, roles.validate_shared_recovery_roles, 'roles.json'),
+        'recovery-restart': (restart.prepare_shared_recovery_restart, restart.validate_shared_recovery_restart, 'restart.json'),
+        'recovery-reopen': (reopening.prepare_shared_recovery_reopening, reopening.validate_shared_recovery_reopening, 'reopen.json'),
+        'recovery-verify': (reopening.prepare_shared_recovery_verification, reopening.validate_shared_recovery_verification, 'verify.json'),
+    }
+
+    class API(SharedPhaseAPI):
+        def prepare(self, phase, bound, directory):
+            if phase == 'recovery-revoke':
+                machines.prepare_shared_recovery_machines(bindings=bound, state_dir=directory)
+                gateway.prepare_shared_recovery_gateway(bindings=bound, state_dir=directory)
+            else:
+                children[phase][0](bindings=bound, state_dir=directory)
+
+        def validate_prepared_phase(self, phase, directory):
+            if phase in {'forward-guards', 'recovery-revoke'}:
+                self.validate_phase(phase, directory, complete=False)
+            else:
+                children[phase][1](bindings=bindings, state_dir=directory, complete=False, prepared=True)
+
+        def validate_phase(self, phase, directory, *, complete):
+            if phase == 'recovery-revoke':
+                machines.validate_shared_recovery_machines(bindings=bindings, state_dir=directory, complete=complete)
+                gateway.validate_shared_recovery_gateway(bindings=bindings, state_dir=directory, complete=complete)
+            else:
+                children[phase][1](bindings=bindings, state_dir=directory, complete=complete)
+
+        def advance(self, phase, bound, directory):
+            if phase == self.block:
+                return False
+            if phase == 'recovery-revoke':
+                path = directory / 'machines.json'
+                private_state._atomic_json(path, {**_read(path), 'status': 'revoked'})
+                mode['machine_state'] = 'revoked'
+                path = directory / 'gateway.json'
+                record = _read(path)
+                for row in record['roles'].values():
+                    row['status'] = 'absent'
+                private_state._atomic_json(path, record)
+                return True
+            path = directory / children[phase][2]
+            record = _read(path)
+            if phase == 'recovery-fence':
+                record['pool'] = 'fenced'
+                record['guards'].update(dict.fromkeys(record['guards'], 'fenced'))
+                mode.update(pool_state='fenced', guard_states={row.namespace: 'fenced' for row in bound.migration.guards})
+            elif phase in {'recovery-drain', 'recovery-verify'}:
+                record['status'] = 'observed'
+            elif phase == 'recovery-stop':
+                for key, choices in stop._sources(bound, state).items():
+                    before = _snapshot(choices[-1])
+                    before['metadata']['uid'] = _uid(choices[-1])
+                    record['resources'][key] = {'status': 'stopped', 'before': before,
+                        'before_resource_version': '1', 'expected': stop._stopped(bound, before)}
+            elif phase in {'recovery-restore-workloads', 'recovery-restart'}:
+                component = templates if phase == 'recovery-restore-workloads' else restart
+                before, targets = component._inputs(bound, state)
+                for key, row in record['resources'].items():
+                    row.update(status='restored' if component is templates else 'started',
+                        before_resource_version='2' if _stable(before[key]) != _stable(targets[key]) else None)
+            elif phase == 'recovery-restore-roles':
+                for row in record['roles'].values():
+                    row.update(status='restored', before_resource_version='201')
+            elif phase == 'recovery-reopen':
+                record['status'] = 'released'
+                mode['guard_states'][staging] = 'open'
+            else:
+                pytest.fail('unexpected phase: ' + phase)
+            private_state._atomic_json(path, record)
+            return True
+
+    api = API(parent)
+    api.block = 'forward-guards'
+    kwargs = {**args, 'bindings': bindings, 'api': api, 'action': 'install'}
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'forward-guards'
+
+    def observe():
+        return module.observe_shared_pool_recovery_databases(bindings=bindings, state_dir=state,
+            kubeconfig=Path(probes.prefix[probes.prefix.index('--kubeconfig') + 1]), executable=Path(probes.prefix[0]))
+
+    error = 'shared pool recovery database observation unqualified'
+    with pytest.raises(ValueError, match=error):
+        observe()  # No recovery marker; neither a caller flag nor forward history grants it.
+    kwargs['action'], api.block = 'recover', 'recovery-fence'
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'recovery-fence'
+    # A crashed successor must not make database recovery depend on app health.
+    for document in documents.values():
+        if document['kind'] == 'PodList':
+            document['items'] = [row for row in document['items'] if row['metadata']['name'] == 'loom-postgres-0']
+    checked.clear()
+    first_command = len(commands)
+    result = observe()
+    assert result.pool_state == 'closed' and result.machine_authority == 'active' and result.retired_authority == 'revoked'
+    assert result.guard_states == {'loom-dev': 'open', staging: 'open'}
+    assert result.pool_drained is None and result.participant_drained == {'loom-dev': None, staging: None}
+    assert checked == {'old-revoked', 'recovery-machines', 'pool-state',
+        ('active-guard', 'loom-dev'), ('active-guard', staging), ('runtime-role', 'loom-dev')}
+
+    fence_path = state / 'recovery-fence/fence.json'
+    record = _read(fence_path)
+    mode['pool_state'] = 'fenced'
+    with pytest.raises(ValueError, match=error):
+        observe()  # A remotely fenced state is not adopted before local intent.
+    record['pool'] = 'intent'
+    private_state._atomic_json(fence_path, record)
+    assert observe().pool_state == 'fenced'
+    mode['pool_state'] = 'closed'
+    assert observe().pool_state == 'closed'
+    record['pool'], mode['pool_state'] = 'fenced', 'fenced'
+    private_state._atomic_json(fence_path, record)
+    api.block = 'recovery-drain'
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'recovery-drain'
+    mode.update(pool_busy=True, busy={'loom-dev', staging})
+    result = observe()
+    assert result.pool_drained is False and result.participant_drained == {'loom-dev': False, staging: False}
+    mode.update(pool_busy=False, busy=set())
+
+    # Bracket the final SQL read, not just each database's own first query.
+    baseline = copy.deepcopy(documents)
+    for damage in ('old-active', 'guard-foreign', 'late-manager-database-at-final-state'):
+        mode.update(damage=damage, final_state_reads=1)
+        with pytest.raises(ValueError, match=error):
+            observe()
+        documents.clear()
+        documents.update(copy.deepcopy(baseline))
+    mode['damage'] = None
+    receipt_bytes = fence_path.read_bytes()
+    mode['sql_hook'] = lambda argv: fence_path.write_bytes(receipt_bytes + b'\n')
+    with pytest.raises(ValueError, match=error):
+        observe()
+    mode['sql_hook'] = None
+    fence_path.write_bytes(receipt_bytes)
+
+    api.block = 'recovery-revoke'
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'recovery-revoke'
+    assert observe().machine_authority == 'active'
+    mode['pool_busy'] = True
+    with pytest.raises(ValueError, match=error):
+        observe()  # A previous drain receipt is not current drain proof.
+    mode['pool_busy'] = False
+    mode['machine_state'] = 'revoked'
+    with pytest.raises(ValueError, match=error):
+        observe()
+    machine_path = state / 'recovery-revoke/machines.json'
+    private_state._atomic_json(machine_path, {**_read(machine_path), 'status': 'intent'})
+    assert observe().machine_authority == 'revoked'
+    mode['machine_state'] = 'active'
+    assert observe().machine_authority == 'active'
+    api.block = 'recovery-reopen'
+    assert parent.run_shared_pool_operation(**kwargs)['phase'] == 'recovery-reopen'
+    assert observe().machine_authority == 'revoked'
+    mode['machine_state'] = 'active'
+    with pytest.raises(ValueError, match=error):
+        observe()
+    mode['machine_state'] = 'revoked'
+    mode['guard_states'][staging] = 'open'
+    with pytest.raises(ValueError, match=error):
+        observe()
+    reopen_path = state / 'recovery-reopen/reopen.json'
+    private_state._atomic_json(reopen_path, {**_read(reopen_path), 'status': 'intent'})
+    mode['busy'] = {staging}
+    result = observe()
+    assert result.participant_drained == {'loom-dev': True, staging: None}
+    mode['guard_states'][staging], mode['busy'] = 'fenced', set()
+    assert observe().participant_drained == {'loom-dev': True, staging: True}
+    api.block = None
+    assert parent.run_shared_pool_operation(**kwargs)['status'] == 'staging_restored_dev_closed'
+    mode['busy'] = {staging}
+    assert observe().participant_drained == {'loom-dev': True, staging: None}
+    mode['busy'] = {'loom-dev', staging}
+    with pytest.raises(ValueError, match=error):
+        observe()
+    mode['busy'] = {staging}
+    # A late change to the caller's nested binding cannot reuse a copied proof.
+    captured = bindings.plan.staging.originals
+    saved = copy.deepcopy(captured)
+    def mutate_binding(argv):
+        next(iter(captured.values()))['metadata'].setdefault('annotations', {})['late-test'] = 'changed'
+    mode['sql_hook'] = mutate_binding
+    with pytest.raises(ValueError, match=error):
+        observe()
+    captured.clear()
+    captured.update(saved)
+    mode['sql_hook'] = None
+    assert 'private-test-only' not in repr(result)
+    assert all(row[0] == 'get' or (row[0] == 'exec' and row[7] == 'psql') for row in commands[first_command:])
 
 
 def _exercise_forward_processes(*, bindings, development, documents, mode, checked, commands, add, args,
