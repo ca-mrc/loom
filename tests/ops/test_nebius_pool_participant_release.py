@@ -396,11 +396,12 @@ def test_shared_candidate_uses_full_normal_rollout_without_restoring_local_write
 @pytest.mark.parametrize('outcome', ['complete', 'busy', 'preflight', 'guard-drift', 'activation-unknown', 'capacity-stale',
     'recover-activation-unknown', 'recover-capacity-stale', 'guard-lost', 'guard-lost-after-activation',
     'capacity-missing', 'capacity-expired', 'capacity-future', 'capacity-expires-before-release',
-    'recover-capacity-expired'])
+    'recover-capacity-expired', 'capacity-exceeds-policy', 'capacity-elapsed', 'capacity-clock-reversal', 'slow-reopen'])
 def test_guarded_deployer_orders_shared_refresh_and_never_releases_uncertain_mutations(release_inputs, tmp_path, monkeypatch, outcome):
     """Use the real deploy parent; only the protected pool I/O adapter is doubled."""
     import argparse
     from datetime import UTC, datetime, timedelta
+    from types import SimpleNamespace
 
     from scripts.ops import deploy_nebius_platform as deploy
     from tests.ops.test_deploy_nebius_platform import FakeKubectl
@@ -420,7 +421,10 @@ def test_guarded_deployer_orders_shared_refresh_and_never_releases_uncertain_mut
     fault = outcome.removeprefix('recover-')
     registry_mutations = []
     observations = []
-    clock = {'now': datetime.now(UTC)}
+    clock = {'now': datetime.now(UTC), 'offset': 0}
+    monotonic = deploy.time.monotonic
+    monkeypatch.setattr(deploy, 'time', SimpleNamespace(
+        monotonic=lambda: monotonic() + clock['offset'], sleep=deploy.time.sleep))
 
     class Clock:
         @staticmethod
@@ -433,7 +437,11 @@ def test_guarded_deployer_orders_shared_refresh_and_never_releases_uncertain_mut
     def checked_binding(*values):
         result = binding(*values)
         if fault == 'capacity-expires-before-release' and pool['capacity']:
-            clock['now'] += timedelta(seconds=121)
+            clock['now'] += timedelta(seconds=61)
+        if fault == 'capacity-elapsed' and pool['capacity']:
+            clock['offset'] += 61
+        if fault == 'capacity-clock-reversal' and pool['capacity']:
+            clock['now'] -= timedelta(seconds=1)
         return result
 
     monkeypatch.setattr(deploy, '_participant_release_binding', checked_binding)
@@ -503,14 +511,23 @@ def test_guarded_deployer_orders_shared_refresh_and_never_releases_uncertain_mut
                 events.append('lost-guard-after-activation')
             return 'ready'
 
-        def finish(self, observed_kube, plan, *, observation_id=None):
+        def finish(self, observed_kube, plan):
             assert observed_kube is kube and plan == release and kube.guard_identity is not None
             assert 'https' in events
             events.append('open')
-            observations.append(observation_id)
             if pool['phase'] != 'open':
                 registry_mutations.append('open')
             pool['phase'] = 'open'
+            if fault == 'slow-reopen':
+                clock['offset'] += 61
+
+        def read_capacity(self, observed_kube, plan, *, observation_id):
+            assert observed_kube is kube and plan == release and pool['phase'] == 'open'
+            assert kube.guard_identity is not None
+            records = [json.loads(path.read_text()) for path in args.evidence_dir.glob('deployment-*.json')]
+            pending, = (row for row in records if row['status'] == 'running')
+            assert pending['pool_refresh']['capacity_observation_id'] == str(observation_id)
+            observations.append(observation_id)
             if fault == 'capacity-stale':
                 raise deploy.DeploymentError('post-open capacity unavailable')
             pool['capacity'] = True
@@ -522,13 +539,16 @@ def test_guarded_deployer_orders_shared_refresh_and_never_releases_uncertain_mut
                 checked -= timedelta(seconds=180)
             elif fault == 'capacity-future':
                 checked += timedelta(seconds=180)
-            return ParticipantCapacityReceipt(checked_at=checked, valid_until=checked + timedelta(seconds=120),
+            elif fault == 'capacity-elapsed':
+                checked += timedelta(seconds=30)  # Database clock ahead, still within permitted skew.
+            validity = 120 if fault == 'capacity-exceeds-policy' else 60
+            return ParticipantCapacityReceipt(checked_at=checked, valid_until=checked + timedelta(seconds=validity),
                 selected_observation_id=uuid4(), selected_observed_at=checked,
                 connected_pools=1, observations_sha256='a' * 64)
 
-    if fault in {'complete', 'busy'}:
+    if fault in {'complete', 'busy', 'slow-reopen'}:
         report = deploy.deploy(args, kube=kube, participant_release=release, pool=PoolIO())
-        assert report['status'] == ('complete' if outcome == 'complete' else 'skipped_busy')
+        assert report['status'] == ('skipped_busy' if outcome == 'busy' else 'complete')
     else:
         with pytest.raises(deploy.DeploymentError):
             deploy.deploy(args, kube=kube, participant_release=release, pool=PoolIO())
@@ -541,9 +561,12 @@ def test_guarded_deployer_orders_shared_refresh_and_never_releases_uncertain_mut
         'capacity-stale': 'open', 'complete': 'fresh-capacity', 'busy': 'activate', 'guard-lost': 'lost-guard',
         'guard-lost-after-activation': 'lost-guard-after-activation', 'capacity-missing': 'fresh-capacity',
         'capacity-expired': 'fresh-capacity', 'capacity-future': 'fresh-capacity',
-        'capacity-expires-before-release': 'fresh-capacity'}[fault] in events
+        'capacity-expires-before-release': 'fresh-capacity', 'capacity-exceeds-policy': 'fresh-capacity',
+        'capacity-elapsed': 'fresh-capacity', 'capacity-clock-reversal': 'fresh-capacity',
+        'slow-reopen': 'fresh-capacity'}[fault] in events
     assert (kube.guard_identity is not None) == (fault in {'activation-unknown', 'capacity-stale',
-        'capacity-missing', 'capacity-expired', 'capacity-future', 'capacity-expires-before-release'})
+        'capacity-missing', 'capacity-expired', 'capacity-future', 'capacity-expires-before-release',
+        'capacity-exceeds-policy', 'capacity-elapsed', 'capacity-clock-reversal'})
     if outcome.startswith('recover-'):
         args.resume_guard_owner = kube.guard_identity[0]
         args.retry_failed_jobs = True
