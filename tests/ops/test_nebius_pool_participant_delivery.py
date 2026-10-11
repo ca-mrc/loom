@@ -463,7 +463,7 @@ def test_shared_delivery_uses_published_schema_and_scoped_ancestry_without_git(
 
 @pytest.mark.parametrize('recovery', [False, True])
 def test_operator_host_executes_retained_source_without_runner_paths_or_github(
-        operation_inputs, connection, tmp_path, monkeypatch, recovery, *, via_dispatch=False):
+        operation_inputs, connection, tmp_path, monkeypatch, recovery, *, via_dispatch=False, via_runner=False):
     from scripts.ops import nebius_pool_participant_entry as entry
     from scripts.ops import nebius_shared_pool_entry as shared_entry
     from scripts.ops.nebius_pool_participant_completion import initialize_participant_head
@@ -539,7 +539,7 @@ def test_operator_host_executes_retained_source_without_runner_paths_or_github(
                 selection = dict(shared_operation=shared_operation, shared_operation_sha256='c' * 64,
                     state_root=retained.state_dir.parent, anchor_dir=retained.anchor_dir,
                     operator_connection=operator, executable=tmp_path / 'kubectl')
-                if via_dispatch:
+                if via_dispatch or via_runner:
                     from scripts.ops.nebius_pool_participant_dispatch import (
                         ParticipantReleaseHost,
                         dispatch_participant_release,
@@ -549,8 +549,56 @@ def test_operator_host_executes_retained_source_without_runner_paths_or_github(
                     request = {'schema_version': 'loom.nebius-participant-command.v1', 'action': action,
                         'reference': retained.reference.model_dump(mode='json'),
                         **({'recovery': incoming} if incoming is not None else {'automatic': False})}
-                    report = dispatch_participant_release(json.dumps(request).encode(), action=action,
-                        host=ParticipantReleaseHost(**selection, repo_root=operation_inputs['repo_root']))
+                    host = ParticipantReleaseHost(**selection, repo_root=operation_inputs['repo_root'])
+                    if via_runner:
+                        from scripts.ops import nebius_pool_participant_rollout as runner
+
+                        private_github = idle.github
+                        public = tmp_path / 'runner-evidence'
+                        attempt = 2 if incoming is not None else 1
+                        runner_recovery = idle.recovery_record(json.loads((public / 'deployment-991-1.json').read_text())) if incoming else None
+                        intents = []
+                        reports = []
+
+                        def github(path, payload=None):
+                            if path.startswith('deployments?'):
+                                return []
+                            if path == 'deployments':
+                                intents.append(copy.deepcopy(payload['payload']))
+                            return {'id': 123}
+
+                        def prepare(**options):
+                            # Reuse this fixture's qualified preparation. Actual
+                            # source/receipt preparation is tested separately.
+                            assert options['operation_id'] == retained.reference.operation_id
+                            assert options['publication'] == retained.reference.publication
+                            return retained
+
+                        def transport(command, *, action):
+                            if action != 'prepare':
+                                assert intents and intents[-1]['shared_pool_release'] == command['reference']
+                            with monkeypatch.context() as host_patch:
+                                host_patch.setattr(idle, 'github', private_github)
+                                outcome = dispatch_participant_release(json.dumps(command).encode(), action=action, host=host)
+                            reports.append(outcome)
+                            return outcome
+
+                        patch.setattr(idle, 'github', github)
+                        patch.setattr(entry, 'prepare_retained_participant_release', prepare)
+                        patch.setattr(runner, '_identity', lambda *parts: str(retained.reference.operation_id))
+                        try:
+                            result = runner.run_release(publication=None if incoming else retained.reference.publication,
+                                run_id=991, run_attempt=attempt, evidence_dir=public, transport=transport,
+                                recovery=runner_recovery)
+                            assert result['status'] == 'complete'
+                        except runner.RolloutError:
+                            assert private_errors, 'runner failed without an injected deployment fault'
+                            record = json.loads((public / f'deployment-991-{attempt}.json').read_text())
+                            assert record['status'] == 'failed' and str(retained.state_dir) not in json.dumps(record)
+                            raise private_errors.pop() from None
+                        report = reports[-1]
+                    else:
+                        report = dispatch_participant_release(json.dumps(request).encode(), action=action, host=host)
                     assert report['release']['reference'] == retained.reference.model_dump(mode='json')
                     assert str(retained.state_dir) not in json.dumps(report)
                     if report['status'] == 'blocked':
@@ -583,6 +631,13 @@ def test_data_only_dispatch_runs_actual_release_and_original_recovery(
         operation_inputs, connection, tmp_path, monkeypatch, recovery):
     test_operator_host_executes_retained_source_without_runner_paths_or_github(
         operation_inputs, connection, tmp_path, monkeypatch, recovery, via_dispatch=True)
+
+
+@pytest.mark.parametrize('recovery', [False, True, 'completion-ack'])
+def test_protected_runner_connects_dispatch_to_actual_rollout_and_original_recovery(
+        operation_inputs, connection, tmp_path, monkeypatch, recovery):
+    test_operator_host_executes_retained_source_without_runner_paths_or_github(
+        operation_inputs, connection, tmp_path, monkeypatch, recovery, via_runner=True)
 
 
 @pytest.mark.parametrize('damage', ['shared-history', 'inputs', 'predecessor', 'credential-public',

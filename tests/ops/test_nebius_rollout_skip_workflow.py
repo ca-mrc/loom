@@ -329,3 +329,14 @@ def test_shared_rollout_shell_uses_dedicated_key_and_never_standalone_fallback(w
         enabled = [eval(step['if'], {'__builtins__': {}}, context) for step in (shared, standalone, download)]
         assert enabled == {'shared': [True, False, False], 'standalone': [False, True, True],
             'unknown': [False, False, False]}[mode]
+
+
+def test_shared_publication_selection_has_read_only_pr_api_authority(workflow):
+    rollout = workflow['jobs']['rollout']
+    effective = rollout.get('permissions', workflow['permissions'])
+    # The runner resolves the merged dev PR through commit-associated-pulls and
+    # pulls/{number}; GitHub disables unspecified permissions in an explicit map.
+    assert effective.get('pull-requests') == 'read'
+    assert effective.get('contents') == 'read' and effective.get('actions') == 'read'
+    assert effective.get('deployments') == 'write'
+    assert not set(effective) - {'pull-requests', 'contents', 'actions', 'deployments'}
