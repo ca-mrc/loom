@@ -1653,6 +1653,7 @@ projected Kubernetes namespace access without an all-active capacity transaction
 It does not prove capacity or grant admission. Startup/opening still execute
 both checks, and the ordinary release still requires exact phase-aware registry
 qualification and fresh post-open capacity evidence before releasing intake.
+
 The normal-release gateway observer selects the unchanged running gateway from
 the completed handoff and current whole-pool writer/permission census. It checks
 complete Deployment/ReplicaSet/Pod readiness and brackets the continuous probe
@@ -1674,6 +1675,18 @@ input ConfigMap or prepared Job does not authorize a transition. A completed
 manager, opening or capacity steps. Repeated SQL/backend/credential and private
 history reads reject drift. These reads compose with the full resource/writer and
 runtime checks; they neither establish completed release history nor grant writes.
+
+The external-authority observation resolves the selected release's exact protected
+publication, not the original manager's publication. It verifies the publication
+attempt, merged commit, required CI checks, artifact digest and signed images
+against the retained pool trust. The installed publication-reader Secret,
+collector configuration/credential and registry credentials retain their recorded
+identities. Read-only IAM and provider checks use the existing cloud verifier;
+the result must describe the registered cluster, node group and quota identities.
+An empty, busy, quota-exhausted or scaling pool is valid; spare capacity is not
+required. Current writer census, resource identities, private history, operator
+credential bytes and connection checks bracket the external reads. This neither
+replays installation nor publishes capacity or authorizes admission.
 
 The transaction, pool-effect adapter and parent interface do not establish
 publication, history, full runtime readiness or recovery authority on their own.

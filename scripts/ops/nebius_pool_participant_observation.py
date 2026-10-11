@@ -7,6 +7,7 @@ No resource receipt or successful read substitutes for those independent checks.
 """
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
 import json
@@ -53,9 +54,11 @@ from scripts.ops.nebius_pool_startup_database import (
 from scripts.ops.nebius_shared_pool_operation import _files
 
 from loom.nebius_platform_render import digest
+from loom_execution_capacity_collector.contracts import ProviderCapacitySnapshot
 from loom_service.pool_management.participant_refresh import RefreshAction
 
 if TYPE_CHECKING:
+    import httpx
     from scripts.ops.nebius_pool_migration import PoolMigrationRequest
     from scripts.ops.nebius_shared_pool_handoff_live import (
         SharedPoolGuardBindings,
@@ -382,6 +385,102 @@ class HTTPSParticipantResourceObserver(ManagementKubernetesTransport):
             return result
         except Exception:
             raise ValueError('participant live resources unqualified; preserve evidence') from None
+
+    async def observe_external(self, *, bindings: SharedPoolGuardBindings, shared_state: Path,
+            operator_credentials: Path, http: httpx.AsyncClient, preparing: str | None = None
+            ) -> ProviderCapacitySnapshot:
+        """Qualify this release's publication and the unchanged physical pool.
+
+        Normal releases replace a participant and the manager catalog, not the
+        collector/registry identity. Observe those immutable inputs directly;
+        replaying the initial installation observer would reject valid releases.
+        A busy, empty or scaling pool is valid; this does not publish capacity or
+        authorize opening admission.
+        """
+        from scripts.ops.nebius_development_collector_runtime import prepare_collector_runtime
+        from scripts.ops.nebius_development_pool_registration import development_profile_catalog
+        from scripts.ops.nebius_development_runtime_external import qualify_runtime_cloud
+        from scripts.ops.nebius_development_runtime_retained import load_completed_runtime
+
+        from loom.execution_image_admission import ImageAdmissionKeyring
+        from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1
+        from loom_control_plane.execution_placement import quota_identity
+        from loom_service.environment_management.candidates import GitHubCandidateCatalog, _json
+
+        try:
+            bound, retained = copy.deepcopy(bindings), self.retained
+            operator = private_state._private_read(operator_credentials, limit=1024**2)
+            connection = (self.api_server, self.client, str(self.client.base_url), dict(self.client.headers))
+            current = self.observe_writers(bindings=bound, shared_state=shared_state, preparing=preparing)
+            view = _ResourceView(retained, preparing)
+            completed = bound.plan.development.runtime
+            request = completed.request
+            if load_completed_runtime(request) != completed:
+                raise ValueError
+            manager = request.database.manager.retained.request.retained
+            collector = prepare_collector_runtime(request.database)
+            config = collector.configuration
+            keys = {_key(config), f"Secret:{config['metadata']['namespace']}:{collector.credential_secret_name}"}
+            profiles = development_profile_catalog(request.database.manager.retained.request)
+            keys.update(f'Secret:{row.settings.namespace}:{row.settings.registry_secret_name}'
+                for row in profiles.task_images)
+            keys.update(f'Secret:{row.settings.namespace}:{row.settings.registry_secret_name}'
+                for row in profiles.application_images)
+            if not keys <= completed.plan.fixed['material'].keys():
+                raise ValueError
+            expected = {key: completed.resources[key] for key in keys}
+            reader_key = 'Secret:' + manager.binding.namespace + ':loom-management-publications'
+            record = _json(manager.files[Path(manager.operation['state_dir']) / 'supplied/stage.json'])
+            item = record['resources'][reader_key]
+            reader = copy.deepcopy(item['observed'])
+            reader['metadata']['uid'] = item['uid']
+            expected[reader_key] = reader
+
+            def material() -> None:
+                for row in expected.values():
+                    actual = self._request('GET', _resource_path(row))
+                    if actual is None or not _matches(actual, row, _uid(row)):
+                        raise ValueError
+
+            def unchanged() -> None:
+                if (bindings != bound or self.retained != retained
+                        or (self.api_server, self.client, str(self.client.base_url), dict(self.client.headers)) != connection
+                        or private_state._private_read(operator_credentials, limit=1024**2) != operator
+                        or _ResourceView(retained, preparing).files != view.files
+                        or any(private_state._private_read(path, limit=4 * 1024**2) != raw
+                            for path, raw in completed.files.items())):
+                    raise ValueError
+
+            unchanged()
+            material()
+            spec = retained.release.refresh.before
+            catalog = GitHubCandidateCatalog(http,
+                token=base64.b64decode(reader['data']['token'], validate=True).decode(),
+                publications=[retained.inputs.publication],
+                registry_prefix=request.database.manager.deployment.installation.registry_prefix,
+                keyring=ImageAdmissionKeyring.from_json(json.dumps(spec.profiles.image_admission_keyring)))
+            bundle = await catalog.resolve(retained.inputs.publication.candidate_id)
+            if (bundle.candidate != retained.inputs.candidate
+                    or ServiceExecutionRuntimeProfileV1.model_validate(bundle.profile) != retained.inputs.runtime_profile):
+                raise ValueError
+            unchanged()
+            snapshot = await qualify_runtime_cloud(request=request, operator_credentials=operator_credentials)
+            if (snapshot.node_group is None or snapshot.node_group.id != spec.node_group_id
+                    or {key: quota_identity(value) for key, value in snapshot.quota_resources.items()} != spec.quota_identities
+                    or snapshot.provider_capacity_state != 'available'
+                    or snapshot.autoscaler_state not in {'ready', 'scaling'}):
+                raise ValueError
+            final = self.observe_writers(bindings=bound, shared_state=shared_state, preparing=preparing)
+            for before, after in ((current.workloads, final.workloads), (current.authority, final.authority)):
+                if before.keys() != after.keys() or any(not _matches(after[key], row, _uid(row))
+                        for key, row in before.items()):
+                    raise ValueError
+            material()
+            unchanged()
+            self._source()
+            return snapshot
+        except Exception:
+            raise ValueError('participant external authority unqualified; preserve evidence') from None
 
     def observe_guard(self, *, kubeconfig: Path, executable: Path,
             phase: Literal['preflight', 'guarded', 'ready', 'released'], preparing: str | None = None) -> str:
