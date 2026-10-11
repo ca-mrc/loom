@@ -113,6 +113,35 @@ class GitHubCandidateCatalog:
         _require(redirect is None)
         return _json(payload)
 
+    async def candidate_follows(self, *, candidate_id: UUID, current_sha: str) -> bool:
+        """Compare exact commits using the scoped reader, without a local checkout.
+
+        This is source ancestry only. The caller must independently resolve the
+        protected publication and validate its candidate/profile bytes.
+        """
+        reference = self.publications.get(candidate_id)
+        if reference is None:
+            raise ManagementError('candidate_not_available', 404)
+        _require(isinstance(current_sha, str) and re.fullmatch(r'[0-9a-f]{40}', current_sha) is not None)
+        candidate = reference.source_sha
+        value = await self._api(f'compare/{current_sha}...{candidate}?per_page=1')
+        _require(value['base_commit']['sha'] == current_sha)
+        base, ahead, behind, status = value['merge_base_commit']['sha'], value['ahead_by'], value['behind_by'], value['status']
+        _require(isinstance(base, str) and re.fullmatch(r'[0-9a-f]{40}', base) is not None
+            and type(ahead) is int and ahead >= 0 and type(behind) is int and behind >= 0)
+        if status == 'identical':
+            _require(current_sha == candidate == base and ahead == behind == 0)
+            return True
+        _require(current_sha != candidate)
+        if status == 'ahead':
+            _require(base == current_sha and ahead > 0 and behind == 0)
+            return True
+        if status == 'behind':
+            _require(base == candidate and ahead == 0 and behind > 0)
+            return False
+        _require(status == 'diverged' and base not in {current_sha, candidate} and ahead > 0 and behind > 0)
+        return False
+
     async def _checks(self, head_sha: str) -> None:
         _require(re.fullmatch(r"[0-9a-f]{40}", head_sha) is not None)
         latest: dict[str, dict[str, Any]] = {}
