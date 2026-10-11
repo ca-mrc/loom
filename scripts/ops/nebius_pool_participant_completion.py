@@ -345,6 +345,51 @@ def _head_paths(state_root: Path, anchor_dir: Path) -> tuple[Path, Path]:
     return state_root / 'latest.json', anchor_dir / 'participant-head.json'
 
 
+def load_participant_predecessor(*, initial: ParticipantPredecessor,
+        retained: RetainedParticipantRollout) -> ParticipantPredecessor:
+    """Recover the release's original semantic predecessor, not today's head.
+
+    The protected caller loads the initial shared handoff independently. Later
+    predecessors must be completed releases under these same private roots and
+    inherit that initial history. No missing input or anchor is reconstructed.
+    """
+    try:
+        state_root, anchor_dir = retained.state_dir.parent, retained.anchor_dir
+        if load_participant_rollout(reference=retained.reference,
+                state_root=state_root, anchor_dir=anchor_dir) != retained:
+            raise ValueError
+        initial_value = _head_value(initial)
+        inputs = retained.inputs
+        expected: ParticipantPredecessor = initial
+        if inputs.predecessor_state_dir != initial.state_dir:
+            directory = inputs.predecessor_state_dir
+            operation_id = UUID(directory.name)
+            if (not operation_id.int or str(operation_id) != directory.name
+                    or directory.parent != state_root or directory == retained.state_dir):
+                raise ValueError
+            marker = anchor_dir / (str(operation_id) + '-participant-rollout.json')
+            raw = private_state._private_read(marker)
+            reference = ParticipantRolloutReference.model_validate(json.loads(raw)['reference'])
+            if reference.operation_id != operation_id:
+                raise ValueError
+            expected = load_completed_participant_rollout(reference=reference,
+                state_root=state_root, anchor_dir=anchor_dir)
+            if private_state._private_read(marker) != raw:
+                raise ValueError
+        if (expected.state_dir != inputs.predecessor_state_dir or expected.migration != inputs.previous
+                or expected.history != inputs.history
+                or expected.migration.registration.binding != initial.migration.registration.binding
+                or any(expected.history.get(path) != checksum for path, checksum in initial.history.items())
+                or _head_value(initial) != initial_value
+                or load_participant_rollout(reference=retained.reference,
+                    state_root=state_root, anchor_dir=anchor_dir) != retained):
+            raise ValueError
+        _head_value(expected)
+        return expected
+    except Exception:
+        raise ValueError('participant original predecessor unavailable; preserve evidence') from None
+
+
 def load_participant_head(*, initial: ParticipantPredecessor,
         state_root: Path, anchor_dir: Path) -> ParticipantPredecessor:
     """Read the initialized latest predecessor and semantically load its receipt."""

@@ -32,6 +32,7 @@ from scripts.ops.nebius_pool_participant_adapter import (
 from scripts.ops.nebius_pool_participant_completion import (
     CompletedParticipantRollout,
     load_participant_head,
+    load_participant_predecessor,
     promote_participant_head,
 )
 from scripts.ops.nebius_pool_participant_creation import HTTPSParticipantCreationAPI
@@ -166,6 +167,9 @@ def run_participant_release(args: argparse.Namespace, *, retained: RetainedParti
     from scripts.ops.nebius_idle_rollout import rollout
 
     initial, expected = copy.deepcopy(initial), copy.deepcopy(expected)
+    original = load_participant_predecessor(initial=initial, retained=retained)
+    if (original.state_dir, original.migration, original.history) != (expected.state_dir, expected.migration, expected.history):
+        raise ValueError('participant delivery predecessor differs; preserve evidence')
     writer.validate()
     if (writer.retained != retained or pool.retained != retained
             or expected.state_dir != retained.inputs.predecessor_state_dir

@@ -1389,6 +1389,11 @@ and binds the anchor, terminal journal, child receipts and inherited installatio
 history. Missing, unfinished or recovery histories cannot qualify a normal shared
 release. Loading this historical predecessor does not replay effects or establish
 current runtime readiness; the release parent must obtain a new live inventory.
+The protected input reader composes this check with `SharedPoolPhaseEvidence`,
+which uses the live parent's actual child validators but has no credential,
+transport, live qualification or dispatch interface. Historical loading therefore
+does not need a token exchange. A terminal parent with matching child file hashes
+but invalid child semantics is rejected; no missing evidence is recreated.
 
 The protected participant-refresh transaction supports release-only updates to
 one idle execution/task-image participant. It preserves physical capacity,
@@ -1761,6 +1766,11 @@ retained writer and concrete pool adapter, then promotes the original semantic
 predecessor through the completion hook. A changed predecessor or lost latest-head
 record refuses before deployment starts. An already-promoted release can finish
 lost-acknowledgement recovery without substituting a new predecessor.
+The rollout reloads its original predecessor from either the qualified initial
+handoff or a completed release's independent anchor under the same private roots.
+It checks the exact migration/history and initial installation ancestry, even if
+the latest pointer already advanced. Lost predecessor evidence is never repaired
+from the current cluster or replaced with the latest head.
 
 `authenticated_participant_release` exchanges the explicitly selected Nebius
 operator credential using the existing authenticated transport. It pins private
