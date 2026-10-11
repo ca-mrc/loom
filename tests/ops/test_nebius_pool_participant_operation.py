@@ -10,7 +10,6 @@ import hashlib
 import importlib
 import json
 from dataclasses import replace
-from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -134,10 +133,20 @@ def test_recovery_refuses_lost_or_changed_evidence_without_repairing_it(operatio
         other = tmp_path / 'other-inputs.json'
         path.rename(other)
         path.symlink_to(other)
-    before = {item: item.lstat() for root in (inputs['state_root'], inputs['anchor_dir']) for item in root.rglob('*')}
+    def snapshot():
+        result = {}
+        for root in (inputs['state_root'], inputs['anchor_dir']):
+            for item in root.rglob('*'):
+                info = item.lstat()
+                # A read can legitimately update atime, including rglob itself.
+                result[item] = (info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+                    str(item.readlink()) if item.is_symlink() else item.read_bytes() if item.is_file() else None)
+        return result
+
+    before = snapshot()
     with pytest.raises(ValueError, match='participant rollout'):
         load(inputs, reference)
-    assert {item: item.lstat() for item in before} == before
+    assert snapshot() == before
     if damage in {'inputs-missing', 'inputs-altered', 'anchor-altered'}:
         with pytest.raises(ValueError, match='participant rollout'):
             module().retain_participant_rollout(**inputs)
@@ -187,3 +196,32 @@ def test_original_input_digest_binds_the_projected_release_and_publication(opera
     reference = retained.reference.model_copy(update={'inputs_sha256': hashlib.sha256(path.read_bytes()).hexdigest()})
     with pytest.raises(ValueError, match='participant rollout'):
         load(inputs, reference)
+
+
+@pytest.mark.parametrize('boundary', ['inputs.json', 'anchor'])
+def test_interrupted_local_preparation_resumes_only_identical_effect_free_state(operation_inputs, monkeypatch, boundary):
+    inputs = operation_inputs
+    atomic = private_state._atomic_json
+
+    def interrupted(path, value):
+        atomic(path, value)
+        if path.name == 'inputs.json' if boundary == 'inputs.json' else path.parent == inputs['anchor_dir']:
+            raise RuntimeError('simulated local response loss')
+
+    with monkeypatch.context() as patch:
+        patch.setattr(private_state, '_atomic_json', interrupted)
+        with pytest.raises(ValueError, match='participant rollout'):
+            module().retain_participant_rollout(**inputs)
+    result = module().retain_participant_rollout(**inputs)
+    assert load(inputs, result.reference) == result
+
+
+def test_missing_anchor_with_existing_dispatch_evidence_cannot_be_recreated(operation_inputs):
+    inputs = operation_inputs
+    retained = module().retain_participant_rollout(**inputs)
+    marker, = inputs['anchor_dir'].glob('*.json')
+    marker.unlink()
+    private_state._atomic_json(retained.state_dir / 'dispatch.json', {'status': 'intent'})
+    with pytest.raises(ValueError, match='participant rollout'):
+        module().retain_participant_rollout(**inputs)
+    assert not marker.exists()
