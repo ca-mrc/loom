@@ -6,6 +6,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   apiFetch,
+  apiUpload,
+  apiDownload,
+  getPipelineLivePreviewFrame,
   setCsrfToken,
   setUnauthorizedHandler,
 } from "../api";
@@ -91,6 +94,35 @@ describe("AuthContext", () => {
     setCsrfToken(null);
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it.each([
+    ["JSON", () => apiFetch("/api/v1/trials")],
+    ["upload", () => apiUpload("/api/v1/tasksets", new FormData())],
+    ["download", () => apiDownload("/api/v1/trials/old/atif", "old.json")],
+    ["preview", () => getPipelineLivePreviewFrame("run", "stage", "attempt", 1, null)],
+  ])("ignores a delayed %s 401 after signing into a new session", async (_kind, request) => {
+    let releaseOld!: (response: Response) => void;
+    const pending = new Promise<Response>((resolve) => { releaseOld = resolve; });
+    const nextMe = { ...memberMe, csrf_token: "csrf-new", user: { ...memberMe.user, username: "New session" } };
+    vi.stubGlobal("fetch", vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(memberMe), { status: 200 }))
+      .mockReturnValueOnce(pending)
+      .mockResolvedValueOnce(new Response("", { status: 401 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(nextMe), { status: 200 })));
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(withQueryClient(<AuthProvider><Display /></AuthProvider>, qc));
+    await waitFor(() => expect(screen.getByTestId("auth").textContent).toBe("in"));
+    const oldRequest = request().catch((error: unknown) => error);
+    await act(async () => { await apiFetch("/api/v1/batches").catch(() => undefined); });
+    expect(screen.getByTestId("auth").textContent).toBe("out");
+    await userEvent.click(screen.getByText("password"));
+    await waitFor(() => expect(screen.getByTestId("username").textContent).toBe("New session"));
+    qc.setQueryData(["new-session-data"], "retained");
+    await act(async () => { releaseOld(new Response("", { status: 401 })); await oldRequest; });
+    expect(await oldRequest).toMatchObject({ status: 401 });
+    expect(screen.getByTestId("auth").textContent).toBe("in");
+    expect(qc.getQueryData(["new-session-data"])).toBe("retained");
   });
 
   it("loads the browser session from /auth/me on mount", async () => {

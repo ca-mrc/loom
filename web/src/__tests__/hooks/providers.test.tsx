@@ -3,6 +3,11 @@ import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  useCreateConnection,
+  useRefreshModels,
+  useAddManualModel,
+  useHideModel,
+  useUnhideModel,
   useDeleteConnection,
   useEditConnection,
   useRotateConnectionKey,
@@ -27,6 +32,31 @@ describe("providers hooks", () => {
   });
 
   afterEach(() => vi.restoreAllMocks());
+
+  it("makes a newly created connection discoverable by submission forms", async () => {
+    qc.setQueryData(["provider-connections", "team-1"], { items: [] });
+    qc.setQueryData(["models", "default"], { items: [] });
+    const { result } = renderHook(() => useCreateConnection(), { wrapper: wrap(qc) });
+    await act(async () => {
+      await result.current.mutateAsync({ name: "new", type: "custom", base_url: "https://example.test/v1", api_key: "test-key" });
+    });
+    expect(qc.getQueryState(["provider-connections", "team-1"])?.isInvalidated).toBe(true);
+    expect(qc.getQueryState(["models", "default"])?.isInvalidated).toBe(true);
+  });
+
+  it.each([
+    ["refresh", () => { const mutation = useRefreshModels("abc"); return () => mutation.mutateAsync(); }],
+    ["add", () => { const mutation = useAddManualModel("abc"); return () => mutation.mutateAsync({ model_id: "new" }); }],
+    ["hide", () => { const mutation = useHideModel("abc"); return () => mutation.mutateAsync("old"); }],
+    ["unhide", () => { const mutation = useUnhideModel("abc"); return () => mutation.mutateAsync("old"); }],
+  ])("refreshes default and raw submission catalogs after model %s", async (_name, useMutationAction) => {
+    qc.setQueryData(["models", "default"], { items: [] });
+    qc.setQueryData(["models", "raw"], { items: [] });
+    const { result } = renderHook<() => Promise<unknown>, void>(useMutationAction, { wrapper: wrap(qc) });
+    await act(async () => { await result.current(); });
+    expect(qc.getQueryState(["models", "default"])?.isInvalidated).toBe(true);
+    expect(qc.getQueryState(["models", "raw"])?.isInvalidated).toBe(true);
+  });
 
   it("useEditConnection PATCHes + invalidates providers + detail", async () => {
     qc.setQueryData(["providers"], [{ id: "abc" }]);
@@ -81,6 +111,8 @@ describe("providers hooks", () => {
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
       new Response(JSON.stringify({ status: "valid" }), { status: 200 }),
     );
+    qc.setQueryData(["provider-connections", "team-1"], { items: [] });
+    qc.setQueryData(["models", "default"], { items: [] });
     const { result } = renderHook(() => useTestConnection("abc"), {
       wrapper: wrap(qc),
     });
@@ -89,5 +121,7 @@ describe("providers hooks", () => {
     });
     expect(qc.getQueryState(["providers"])?.isInvalidated).toBe(true);
     expect(qc.getQueryState(["providers", "abc"])?.isInvalidated).toBe(true);
+    expect(qc.getQueryState(["provider-connections", "team-1"])?.isInvalidated).toBe(true);
+    expect(qc.getQueryState(["models", "default"])?.isInvalidated).toBe(true);
   });
 });

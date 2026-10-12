@@ -136,6 +136,11 @@ unauthorized event advances the query client's authority epoch, so a response
 from an older queued or in-flight operation cannot reinstall CSRF after the
 browser has entered `signed-out`.
 
+Protected JSON, upload, download, and preview requests capture the current
+authorization generation before sending. Installing or signing out a session
+advances that generation. A delayed `401` still rejects its own request, but
+cannot sign out a replacement session or erase its cache.
+
 Login completion, password login, invite acceptance, and team switching are
 session-producing mutations. Their response can be lost or malformed after the
 server has already changed a cookie, team, or CSRF value. Any ambiguous
@@ -149,6 +154,21 @@ The application mount marker maps these states to browser-smoke evidence:
 `authenticated` becomes `data-loom-auth-state="authenticated"`, `signed-out`
 becomes `anonymous`, and `unavailable` becomes `error`. Loading remains
 unsettled. Browser smoke must not reinterpret `error` as anonymous success.
+
+## Live trajectory and submission catalog recovery
+
+When a trial event stream is unavailable, the trajectory view polls from its
+last accepted cursor while the trial is active, deduplicates sequenced events,
+and reads the tail again on the terminal transition. An empty current tail is
+not a completed trajectory. Navigation cancels the previous trial's request
+and resets its event state. Additional pages remain available through Load
+more when the response includes a next cursor.
+
+Successful provider creation, editing, key rotation, deletion, and connection
+tests invalidate the provider connection lists and model catalogs used by
+submission forms. Model refresh, preflight, addition, hiding, and unhiding
+invalidate the connection's model list and both default and raw submission
+model catalogs, so revisiting a form reads the updated selection.
 
 ## Redaction invariants
 

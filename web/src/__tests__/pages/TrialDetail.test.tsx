@@ -12,7 +12,7 @@
  */
 import { act, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { Route, Routes } from "react-router-dom";
+import { Link, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { components } from "../../api/schema";
@@ -187,6 +187,73 @@ describe("TrialDetail trajectory section", () => {
     window.localStorage.clear();
     window.localStorage.setItem("loom_token", "test-token");
     vi.restoreAllMocks();
+  });
+
+  it("polls an active fallback through an empty tail, deduplicates events, and drains on completion", async () => {
+    vi.stubGlobal("EventSource", undefined);
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    let terminal = false;
+    let page = 0;
+    const cursors: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = new URL(String(input), "http://localhost");
+      if (url.pathname.endsWith("/trajectory")) {
+        cursors.push(url.searchParams.get("cursor") ?? "0");
+        const events = page === 0 ? [] : page === 1
+          ? [{ seq: 0, kind: "trial_start", trial_id: TRIAL_ID }]
+          : page === 2 ? [{ seq: 0, kind: "trial_start", trial_id: TRIAL_ID }, { seq: 1, kind: "step_start", step_id: "live", trial_id: TRIAL_ID }]
+          : [{ seq: 2, kind: "trial_end", final_state: "succeeded", trial_id: TRIAL_ID }];
+        return new Response(JSON.stringify({ events, next_cursor: null }));
+      }
+      return new Response(JSON.stringify({ ...TRIAL_BODY, state: terminal ? "succeeded" : "running", trajectory_ready: terminal }));
+    });
+    try {
+      renderWithProviders(<Routes><Route path="/trials/:trialId" element={<TrialDetail />} /></Routes>, { route: `/trials/${TRIAL_ID}` });
+      await screen.findByText("0 events · fallback polling");
+      page = 1;
+      await act(async () => { await vi.advanceTimersByTimeAsync(4_000); });
+      await screen.findByText("Trial started");
+      page = 2;
+      await act(async () => { await vi.advanceTimersByTimeAsync(4_000); });
+      await screen.findByText("Step live started");
+      expect(screen.getAllByText("Trial started")).toHaveLength(1);
+      expect(screen.getByText("2 events · fallback polling")).toBeInTheDocument();
+      expect(cursors).toContain("1");
+      terminal = true;
+      page = 3;
+      await act(async () => { await vi.advanceTimersByTimeAsync(4_000); });
+      await screen.findByText("Trial ended — succeeded");
+      await screen.findByText("3 events · complete");
+      const finalRequests = cursors.length;
+      await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+      expect(cursors).toHaveLength(finalRequests);
+      expect(screen.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("discards an old fallback response after navigating to another trial", async () => {
+    vi.stubGlobal("EventSource", undefined);
+    let oldSignal: AbortSignal | null | undefined;
+    let releaseOld!: (response: Response) => void;
+    const pending = new Promise<Response>((resolve) => { releaseOld = resolve; });
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const path = String(input);
+      if (path.includes(`/trials/${TRIAL_ID}/trajectory`)) {
+        oldSignal = init?.signal;
+        return pending;
+      }
+      if (path.includes("/trials/second/trajectory")) return new Response(JSON.stringify({ events: [{ seq: 0, kind: "step_start", step_id: "second-trial" }], next_cursor: null }));
+      return new Response(JSON.stringify({ ...TRIAL_BODY, id: path.includes("second") ? "second" : TRIAL_ID, state: "succeeded" }));
+    });
+    renderWithProviders(<><Link to="/trials/second">Next trial</Link><Routes><Route path="/trials/:trialId" element={<TrialDetail />} /></Routes></>, { route: `/trials/${TRIAL_ID}` });
+    await waitFor(() => expect(globalThis.fetch).toHaveBeenCalledWith(expect.stringContaining(`/trials/${TRIAL_ID}/trajectory`), expect.anything()));
+    await userEvent.click(screen.getByText("Next trial"));
+    await screen.findByText("Step second-trial started");
+    expect(oldSignal?.aborted).toBe(true);
+    await act(async () => { releaseOld(new Response(JSON.stringify({ events: [{ seq: 0, kind: "trial_start" }], next_cursor: null }))); await pending; });
+    expect(screen.queryByText("Trial started")).not.toBeInTheDocument();
+    expect(screen.getByText("Step second-trial started")).toBeInTheDocument();
   });
 
   it("displays new trajectory events after the server rolls over the real hook's stream", async () => {

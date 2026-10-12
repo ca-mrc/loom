@@ -10,6 +10,8 @@ import { queryKeys } from "../api/queryKeys";
  * - create / update / test     → invalidate ["providers"] + ["providers", id]
  * - delete                     → invalidate ["providers"] + remove ["providers", id]
  * - addModel / refresh / preflight / hide / unhide → invalidate ["providers", id, "models"]
+ * - connection mutations also invalidate submission ["provider-connections"]
+ * - all mutations invalidate submission ["models"] catalogs
  */
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 
@@ -22,6 +24,8 @@ export function useCreateConnection() {
       api.createProviderConnection(payload),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: queryKeys["providers"]() });
+      qc.invalidateQueries({ queryKey: queryKeys["provider-connections"]() });
+      qc.invalidateQueries({ queryKey: queryKeys["models"]() });
     },
   });
 }
@@ -73,6 +77,8 @@ export function useTestConnection(id: string) {
     mutationFn: () => api.testProviderConnection(id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: queryKeys["providers"]() });
+      qc.invalidateQueries({ queryKey: queryKeys["provider-connections"]() });
+      qc.invalidateQueries({ queryKey: queryKeys["models"]() });
       qc.invalidateQueries({ queryKey: queryKeys["providers"](id) });
     },
   });
@@ -84,6 +90,7 @@ export function useRefreshModels(id: string) {
     mutationFn: () => api.refreshProviderConnectionModels(id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: queryKeys["providers"](id, "models") });
+      qc.invalidateQueries({ queryKey: queryKeys["models"]() });
     },
   });
 }
@@ -107,6 +114,7 @@ export function useAddManualModel(id: string) {
       api.addProviderConnectionModel(id, model),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: queryKeys["providers"](id, "models") });
+      qc.invalidateQueries({ queryKey: queryKeys["models"]() });
     },
   });
 }
@@ -118,6 +126,7 @@ export function useHideModel(id: string) {
       api.hideProviderConnectionModel(id, modelId),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: queryKeys["providers"](id, "models") });
+      qc.invalidateQueries({ queryKey: queryKeys["models"]() });
     },
   });
 }
@@ -129,6 +138,7 @@ export function useUnhideModel(id: string) {
       api.unhideProviderConnectionModel(id, modelId),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: queryKeys["providers"](id, "models") });
+      qc.invalidateQueries({ queryKey: queryKeys["models"]() });
     },
   });
 }

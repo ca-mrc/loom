@@ -13,6 +13,7 @@ import {
 
 import {
   AuthSessionLoadError,
+  advanceAuthorizationGeneration,
   setCsrfToken,
   setUnauthorizedHandler,
 } from "../api/core";
@@ -51,6 +52,7 @@ function sessionAuthorityEpoch(queryClient: QueryClient): number {
 }
 
 function invalidateSessionAuthority(queryClient: QueryClient): void {
+  advanceAuthorizationGeneration();
   queryClientSessionAuthorityEpoch.set(
     queryClient,
     sessionAuthorityEpoch(queryClient) + 1,
@@ -192,6 +194,7 @@ export function AuthProvider({ children }: { children: ReactNode }): JSX.Element
 
   const installSession = useCallback(
     (next: AuthMe, clearCachedData: boolean): void => {
+      advanceAuthorizationGeneration();
       const nextAuthorization = sessionAuthorizationFingerprint(next);
       if (
         clearCachedData ||
