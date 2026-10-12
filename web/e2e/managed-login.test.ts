@@ -26,7 +26,7 @@ test("built managed login scrubs the proof before startup and submits it only on
     const request = route.request();
     const path = new URL(request.url()).pathname;
     expect(request.url()).not.toContain(token);
-    if (path === "/auth/managed") {
+    if (["/auth/managed", "/settings", "/getting-started"].includes(path)) {
       await route.fulfill({ contentType: "text/html", body: await readFile("dist/index.html") });
       return;
     }
@@ -36,7 +36,9 @@ test("built managed login scrubs the proof before startup and submits it only on
                             body: await readFile("dist/assets/" + asset[1]) });
       return;
     }
-    expect(await page.evaluate(() => window.location.hash + window.location.search)).toBe("");
+    if (new URL(page.url()).pathname === "/auth/managed") {
+      expect(await page.evaluate(() => window.location.hash + window.location.search)).toBe("");
+    }
     if (path === "/loom-frontend-config.json") {
       startupReads += 1;
       await route.fulfill({ json: { environment: "development", environmentLabel: "Personal dev", routePath: "",
@@ -46,6 +48,8 @@ test("built managed login scrubs the proof before startup and submits it only on
     } else if (path === "/api/v1/auth/login/complete") {
       submitted.push(request.postDataJSON().token);
       await route.fulfill({ json: owner });
+    } else if (path === "/api/v1/teams/team") {
+      await route.fulfill({ json: { id: "team", name: "Development alice", user_members: [], api_tokens: [], invites: [] } });
     } else {
       failures.push("unexpected request " + path);
       await route.fulfill({ status: 404, body: "not found" });
@@ -60,6 +64,18 @@ test("built managed login scrubs the proof before startup and submits it only on
   await button.click();
   await expect(page.getByText("Signed in to this environment.")).toBeVisible();
   expect(submitted).toEqual([token]);
+  await page.getByRole("link", { name: "Open environment settings" }).click();
+  await expect(page).toHaveURL(origin + "/settings");
+  await expect(page.getByRole("heading", { name: "Team Settings" })).toBeVisible();
+  await page.getByRole("navigation", { name: "Primary" }).getByRole("link", { name: "Getting started", exact: true }).click();
+  await expect(page).toHaveURL(origin + "/getting-started");
+  await page.goBack();
+  await expect(page).toHaveURL(origin + "/settings");
+  await expect(page.getByRole("heading", { name: "Team Settings" })).toBeVisible();
+  await page.goForward();
+  await expect(page).toHaveURL(origin + "/getting-started");
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Getting started", exact: true })).toBeVisible();
   expect(failures).toEqual([]);
 });
 

@@ -25,12 +25,17 @@ test("provider return navigation keeps the deployment prefix exactly once @proto
     name: "provider detail", method: "GET", path: "/api/v1/provider-connections/return-provider",
     response: { kind: "json", status: 200, body: provider },
   }] });
-  const returnTo = `${browserHarness.routePrefix}/batches/new`;
+  const returnTo = `${browserHarness.routePrefix}/batches/new?taskSet=example#review`;
   await page.goto(`${browserHarness.baseURL}/providers/return-provider?tab=models&returnTo=${encodeURIComponent(returnTo)}`);
   const back = page.getByRole("link", { name: "Back to New Batch" });
   await expect(back).toHaveAttribute("href", returnTo);
   await back.click();
   await expect(page.getByRole("heading", { name: "New batch", exact: true })).toBeVisible();
-  await expect(page).toHaveURL(`${browserHarness.baseURL}/batches/new`);
+  await expect(page).toHaveURL(`${browserHarness.baseURL}/batches/new?taskSet=example#review`);
+  await page.goBack();
+  await expect(page.getByRole("heading", { name: provider.name })).toBeVisible();
+  await page.goForward();
+  await expect(page).toHaveURL(`${browserHarness.baseURL}/batches/new?taskSet=example#review`);
+  await expect(page.getByRole("heading", { name: "New batch", exact: true })).toBeVisible();
 });
 
