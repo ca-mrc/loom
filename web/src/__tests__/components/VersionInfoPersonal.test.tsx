@@ -34,7 +34,7 @@ it("keeps loaded personal source separate from served and backend builds", async
     { status: 200, headers: { "Content-Type": "application/json" } });
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+  render(<MemoryRouter>
     <QueryClientProvider client={client}><VersionInfo environmentLabel="Personal" /></QueryClientProvider>
   </MemoryRouter>);
   expect(screen.getByRole("button", { name: "Deployed version details" })).toHaveTextContent("Personal aaaaaaaaaaaa");

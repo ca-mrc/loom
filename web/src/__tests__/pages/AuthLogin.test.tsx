@@ -395,7 +395,7 @@ describe("AuthLogin", () => {
     render(
       <QueryClientProvider client={queryClient}>
         <MemoryRouter
-          future={{ v7_startTransition: true, v7_relativeSplatPath: true }}
+         
           initialEntries={["/auth/login"]}
         >
           <AuthProvider>

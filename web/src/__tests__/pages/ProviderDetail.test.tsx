@@ -35,7 +35,7 @@ function renderPage(conn: unknown, initialPath = "/providers/abc", basename = ""
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} basename={basename} initialEntries={[initialPath]}>
+      <MemoryRouter basename={basename} initialEntries={[initialPath]}>
         <Routes>
           <Route path="/providers/:id" element={<ProviderDetail />} />
           <Route path="/providers" element={<div>providers-list</div>} />
@@ -128,7 +128,7 @@ describe("ProviderDetail", () => {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={qc}>
-        <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={["/providers/abc"]}>
+        <MemoryRouter initialEntries={["/providers/abc"]}>
           <Routes>
             <Route path="/providers/:id" element={<ProviderDetail />} />
           </Routes>
@@ -157,7 +157,7 @@ describe("ProviderDetail", () => {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={qc}>
-        <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={["/providers/abc?tab=models"]}>
+        <MemoryRouter initialEntries={["/providers/abc?tab=models"]}>
           <Routes>
             <Route path="/providers/:id" element={<ProviderDetail />} />
           </Routes>
@@ -190,7 +190,7 @@ describe("ProviderDetail", () => {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={qc}>
-        <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={["/providers/abc?tab=models&returnTo=/batches/new"]}>
+        <MemoryRouter initialEntries={["/providers/abc?tab=models&returnTo=/batches/new"]}>
           <Routes>
             <Route path="/providers/:id" element={<ProviderDetail />} />
             <Route path="/batches/new" element={<div>new-batch-page</div>} />
@@ -221,7 +221,7 @@ describe("ProviderDetail", () => {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={qc}>
-        <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={["/providers/missing"]}>
+        <MemoryRouter initialEntries={["/providers/missing"]}>
           <Routes>
             <Route path="/providers/:id" element={<ProviderDetail />} />
           </Routes>
@@ -247,7 +247,7 @@ describe("ProviderDetail", () => {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={qc}>
-        <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={["/providers/abc"]}>
+        <MemoryRouter initialEntries={["/providers/abc"]}>
           <Routes>
             <Route path="/providers/:id" element={<ProviderDetail />} />
           </Routes>
@@ -281,7 +281,7 @@ describe("ProviderDetail", () => {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={qc}>
-        <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={["/providers/abc"]}>
+        <MemoryRouter initialEntries={["/providers/abc"]}>
           <Routes>
             <Route path="/providers/:id" element={<ProviderDetail />} />
           </Routes>
@@ -316,7 +316,7 @@ it("edits initialized model prices through PATCH without resetting connection re
   }));
   const user = userEvent.setup();
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(<QueryClientProvider client={qc}><MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={["/providers/abc?tab=settings"]}>
+  render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/providers/abc?tab=settings"]}>
     <Routes><Route path="/providers/:id" element={<ProviderDetail />} /></Routes>
   </MemoryRouter></QueryClientProvider>);
   const input = await screen.findByLabelText("claude-3-opus input_usd_per_1m");

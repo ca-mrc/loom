@@ -13,7 +13,7 @@ function renderPage(items: unknown[]) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+      <MemoryRouter>
         <ProvidersList />
       </MemoryRouter>
     </QueryClientProvider>,

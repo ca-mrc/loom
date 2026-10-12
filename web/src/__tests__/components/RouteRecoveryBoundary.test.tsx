@@ -24,7 +24,7 @@ describe("RouteRecoveryBoundary", () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     const load = vi.fn().mockRejectedValue(new Error("secret module URL"));
     const LazyPage = lazyRoute(load);
-    render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+    render(<MemoryRouter>
       <RouteRecoveryBoundary><LazyPage /></RouteRecoveryBoundary>
     </MemoryRouter>);
     expect(await screen.findByRole("alert")).not.toHaveTextContent("secret module URL");
@@ -47,7 +47,7 @@ describe("RouteRecoveryBoundary", () => {
     }
 
     render(
-      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={["/broken"]}>
+      <MemoryRouter initialEntries={["/broken"]}>
         <nav aria-label="Recovery test navigation">
           <Link to="/healthy">Open healthy route</Link>
         </nav>
@@ -100,7 +100,7 @@ describe("RouteRecoveryBoundary", () => {
     const LazyPage = React.lazy(() => modulePromise);
 
     render(
-      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+      <MemoryRouter>
         <main id="main-content">
           <RouteRecoveryBoundary retryPolicy="reload-required">
             <LazyPage />
@@ -144,7 +144,7 @@ describe("RouteRecoveryBoundary", () => {
 
     try {
       render(
-        <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+        <MemoryRouter>
           <main id="main-content">
             <RouteRecoveryBoundary
               onReload={onReload}

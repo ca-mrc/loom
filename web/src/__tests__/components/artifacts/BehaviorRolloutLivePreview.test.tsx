@@ -36,7 +36,7 @@ function Location(): JSX.Element {
 }
 
 function preview(props: Partial<React.ComponentProps<typeof BehaviorRolloutLivePreview>> = {}): JSX.Element {
-  return <MemoryRouter initialEntries={["/pipelines/run-1"]} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+  return <MemoryRouter initialEntries={["/pipelines/run-1"]}>
     <Routes>
       <Route path="*" element={<>
         <BehaviorRolloutLivePreview

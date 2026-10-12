@@ -11,7 +11,7 @@ function renderPage(initialPath = "/providers/new") {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={[initialPath]}>
+      <MemoryRouter initialEntries={[initialPath]}>
         <Routes>
           <Route path="/providers/new" element={<ProviderCreate />} />
           <Route path="/providers/:id" element={<div>detail-page</div>} />

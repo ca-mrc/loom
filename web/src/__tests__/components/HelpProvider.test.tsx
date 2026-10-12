@@ -13,7 +13,7 @@ function DraftForm() {
 describe("contextual help", () => {
   it("keeps the form mounted, restores trigger focus, and offers repository documentation", async () => {
     const user = userEvent.setup();
-    render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><HelpProvider><DraftForm /></HelpProvider></MemoryRouter>);
+    render(<MemoryRouter><HelpProvider><DraftForm /></HelpProvider></MemoryRouter>);
     const input = screen.getByRole("textbox", { name: "Draft batch name" });
     await user.type(input, "keep my draft");
     const trigger = screen.getByRole("button", { name: "Task help" });
@@ -27,11 +27,11 @@ describe("contextual help", () => {
     expect(trigger).toHaveFocus();
   });
   it("has a navigable guide fallback outside the app shell", () => {
-    render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><HelpButton topic="providers" /></MemoryRouter>);
+    render(<MemoryRouter><HelpButton topic="providers" /></MemoryRouter>);
     expect(screen.getByRole("link", { name: "Help" })).toHaveAttribute("href", "/getting-started?topic=providers");
   });
   it("does not expose rate-card management help to a non-admin", async () => {
-    render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><HelpProvider><HelpButton topic="rates" /></HelpProvider></MemoryRouter>);
+    render(<MemoryRouter><HelpProvider><HelpButton topic="rates" /></HelpProvider></MemoryRouter>);
     await userEvent.setup().click(screen.getByRole("button", { name: "Help" }));
     expect(await screen.findByRole("dialog", { name: "Start using Loom" })).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /Rate-card format/ })).not.toBeInTheDocument();

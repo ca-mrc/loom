@@ -165,7 +165,7 @@ function renderPicker(initial?: AgentModelValue, initialAllow?: boolean): void {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+      <MemoryRouter>
         <Harness initial={initial} initialAllow={initialAllow} />
       </MemoryRouter>
     </QueryClientProvider>,
