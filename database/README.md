@@ -67,3 +67,33 @@ requires an explicit retained-data contract, a proven conversion against an
 isolated restored backup, and a supported route for historical recovery. A Git
 tag alone is not proof that a backup remains restorable. No database reset,
 schema deletion or live conversion is part of this directory reorganization.
+
+## Historical application upgrade boundary
+
+The frozen `0134/guard_0030` application reference includes the independent
+`loom_capacity_guard` schema. Its application-migrator tests qualify upgrades
+through **0170** on PostgreSQL 16 and 17 while preserving runtime/owner separation.
+Crossing migration 0147 still requires the existing journaled
+`ensure_guard_claim_compatibility` prerequisite. This is disposable historical
+reconstruction coverage, not authorization to run retired backends or migrate a
+deployed target. Other historical fixtures retain their own pinned revisions,
+including the capacity-guard fixture at application 0166.
+
+That retained guard profile cannot advance through **0171** unchanged. Its
+`assert_staging_worker_session`, `claim_staging_assigned_trial`, and
+`register_staging_public_worker` routines reference retired pool/job tables.
+Migration 0171 refuses those dependencies even when every retirement table is
+empty. The independent build-guard history may also contain blocking routines.
+A failed transactional upgrade preserves its starting application revision,
+installed guards, roles, and records; an attempt directly from 0134 does not
+partially advance to 0170.
+
+A current application database without those legacy dependencies can upgrade from
+0170 to the application head when the retirement tables are empty and all other
+migration preconditions hold. Before upgrading an older database, follow the
+[retirement inventory and rollback procedure](../docs/historical/legacy-schema-retirement-2026-09.md#migration-and-rollback)
+and qualify the exact source profile against an isolated restored backup.
+Installed dependent routines or retained rows require their own explicitly
+reviewed retention/retirement work. Do not delete data, drop or rewrite guards,
+stamp past 0171, or remove its checks to force an upgrade. No automatic conversion
+from the historical guard profile to the current profile is provided.
