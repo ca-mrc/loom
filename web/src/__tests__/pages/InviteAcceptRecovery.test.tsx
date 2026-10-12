@@ -83,6 +83,7 @@ describe("invite rejection through the real session provider and shell", () => {
     });
     renderFlow();
     await accept();
+    await screen.findByText("Sign in with the account that received this invite, then accept it.");
     const signIn = await screen.findByRole("link", { name: "Sign in to accept invite" });
     expect(screen.getByTestId("session")).toHaveTextContent("signed-out");
     expect(screen.queryByText("Loom could not verify your session")).not.toBeInTheDocument();
@@ -95,12 +96,50 @@ describe("invite rejection through the real session provider and shell", () => {
     expect(screen.getByTestId("location")).toHaveTextContent(/^\/auth\/login$/);
     await userEvent.type(await screen.findByLabelText("Username"), "Recipient");
     await userEvent.type(screen.getByLabelText("Password"), "recipient-password");
-    await userEvent.click(screen.getByRole("button", { name: "Sign in", exact: true }));
+    await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
     await waitFor(() => expect(screen.getByTestId("location")).toHaveTextContent(INVITE_PATH));
     await accept();
     await screen.findByRole("heading", { name: "Joined Invite team" });
     expect(accepted).toBe(true);
     expect(screen.getByTestId("session")).toHaveTextContent("authenticated");
+  });
+
+  it("still creates a session when a new recipient accepts directly", async () => {
+    let accepted = false;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const path = String(input);
+      if (path.endsWith("/auth/me")) return json({}, 401);
+      if (path.includes("/invites/lookup")) return json({ ...lookup, status: accepted ? "accepted" : "pending" });
+      if (path.endsWith("/invites/accept")) { accepted = true; return json(me); }
+      return json({});
+    });
+    renderFlow();
+    await accept();
+    await waitFor(() => expect(screen.getByTestId("session")).toHaveTextContent("authenticated"));
+    expect(accepted).toBe(true);
+    expect(_csrfToken).toBe(me.csrf_token);
+    expect(screen.queryByText("Loom could not verify your session")).not.toBeInTheDocument();
+  });
+
+  it("lets a mismatched signed-in user sign out and use the invited account", async () => {
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const path = String(input);
+      if (path.endsWith("/auth/me")) return json(me);
+      if (path.includes("/invites/lookup")) return json(lookup);
+      if (path.endsWith("/invites/accept")) return json({}, 403, "email-mismatch");
+      if (path.endsWith("/auth/logout")) return new Response(null, { status: 204 });
+      if (path.endsWith("/auth/public-teams")) return json({ items: [] });
+      return json({});
+    });
+    renderFlow();
+    await accept();
+    await userEvent.click(await screen.findByRole("button", { name: "Use another account" }));
+    await screen.findByRole("heading", { name: "Sign in" });
+    expect(screen.getByTestId("location")).toHaveTextContent(/^\/auth\/login$/);
+    expect(screen.getByTestId("session")).toHaveTextContent("signed-out");
+    expect(_csrfToken).toBeNull();
+    expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/auth/logout"), expect.objectContaining({ method: "POST" }));
+    expect(screen.getByText(/You will return to it after signing in/)).toBeInTheDocument();
   });
 
   it.each([
@@ -168,5 +207,11 @@ describe("invite rejection through the real session provider and shell", () => {
     renderFlow({ pathname: "/auth/login", state });
     await screen.findByRole("heading", { name: "Settings destination" });
     expect(screen.getByTestId("location")).toHaveTextContent(/^\/settings$/);
+  });
+
+  it.each(["//attacker.test/route", "/\\attacker.test/route", "loom_invite_a?next=https://attacker.test#fragment"])("encodes an untrusted invite code inside the fixed return route: %s", async (inviteCode) => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => String(input).endsWith("/auth/me") ? json(me) : json(lookup));
+    renderFlow({ pathname: "/auth/login", state: { inviteCode } });
+    await waitFor(() => expect(screen.getByTestId("location")).toHaveTextContent(`/invites/accept?${new URLSearchParams({ code: inviteCode })}`));
   });
 });

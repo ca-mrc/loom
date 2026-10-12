@@ -4,7 +4,7 @@ import { queryKeys } from "../api/queryKeys";
 
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import { Navigate } from "react-router-dom";
+import { Navigate, useLocation } from "react-router-dom";
 
 import { api } from "../api";
 import { useAuth } from "../auth/useAuth";
@@ -25,6 +25,12 @@ const PUBLIC_TEAMS_FAILURE = new Error(
 const FIELD_LABEL = "block text-sm font-medium text-slate-700";
 
 export default function AuthLogin(): JSX.Element {
+  const location = useLocation();
+  // Carry only an invite code in router state; it never becomes a login URL
+  // parameter or an arbitrary return URL. Rebuild the owned route explicitly.
+  const inviteCode: unknown = location.state?.inviteCode;
+  const inviteReturn = typeof inviteCode === "string" && inviteCode.length >= 16 && inviteCode.length <= 256
+    ? `/invites/accept?${new URLSearchParams({ code: inviteCode })}` : null;
   const { isAuthenticated, loginPassword } = useAuth();
   const [loginUsername, setLoginUsername] = useState("");
   const [loginPasswordValue, setLoginPasswordValue] = useState("");
@@ -63,7 +69,7 @@ export default function AuthLogin(): JSX.Element {
   });
 
   if (isAuthenticated) {
-    return <Navigate to="/settings" replace />;
+    return <Navigate to={inviteReturn ?? "/settings"} replace />;
   }
 
   const publicTeamItems = publicTeams.data?.items ?? [];
@@ -90,6 +96,7 @@ export default function AuthLogin(): JSX.Element {
           <Card.Body className="space-y-5 p-6 sm:p-7">
             <div>
               <h2 className="text-xl font-semibold text-slate-900">Sign in</h2>
+              {inviteReturn ? <p className="mt-2 text-sm text-slate-600">Sign in with the account that received the invite. You will return to it after signing in.</p> : null}
               <p className="mt-2 text-sm text-slate-500">
                 Use the username and password you set from an admin-approved
                 account link.
