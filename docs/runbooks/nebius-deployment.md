@@ -391,6 +391,11 @@ journals, but has a separate forced command, key, configuration and state root.
 Its separately bundled gateway leaves the existing legacy certificate, ingress
 and management payloads byte-for-byte unchanged; installing dev-manager authority
 does not require widening or replacing their exact-bundle grants.
+The dev-manager bundle also carries the unchanged legacy gateway module as the
+issuer's private Certbot-launch dependency. Including that module grants no
+legacy operation: the dedicated forced command and exact-host issuer remain the
+only selected entrypoints. Qualify the extracted issuer's real client launch,
+not only its imports or CLI help, before installing an updated bundle grant.
 It does not modify Kubernetes, the shared wildcard certificate, or the legacy
 management route. No policy-quota increase is needed for certificate issuance.
 

@@ -112,6 +112,35 @@ def test_manager_bundle_uses_separate_immutable_root_and_existing_hash_locked_bo
     assert len(calls) == 2
 
 
+def test_extracted_manager_bundle_executes_actual_issuer_client_without_checkout(selection, tmp_path):
+    """Missing transitive launcher code must fail before a live issuance attempt."""
+    extracted = tmp_path / "extracted"
+    with zipfile.ZipFile(io.BytesIO(bundle(selection))) as archive:
+        archive.extractall(extracted)
+    program = """
+import pathlib, subprocess, sys
+root = pathlib.Path(sys.argv[1])
+sys.path.insert(0, str(root))
+from scripts.ops import nebius_certificates as issuer
+assert pathlib.Path(issuer.__file__).resolve().is_relative_to(root)
+marker = root / 'client-executed'
+command = [sys.executable, '-c',
+    'from pathlib import Path; import sys; Path(sys.argv[1]).write_text("executed"); print("private-client-output")',
+    str(marker)]
+result = issuer._run_client(command, timeout=10, start_new_session=True,
+    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+assert result.returncode == 0
+assert marker.read_text() == 'executed'
+print('client executed')
+"""
+    result = subprocess.run([sys.executable, "-I", "-c", program, str(extracted)],
+        cwd=tmp_path, env={"PATH": os.defpath, "LANG": "C.UTF-8"}, capture_output=True, timeout=20)
+    assert result.returncode == 0, result.stderr.decode()
+    assert result.stdout == b"client executed\n"
+    assert b"private-client-output" not in result.stderr
+    assert not Path(selection[0]["state_dir"]).exists()
+
+
 @pytest.mark.parametrize("damage", ["legacy_mode", "legacy_schema", "legacy_root"])
 def test_cross_scope_bundle_is_rejected_before_tooling_writes(selection, damage, monkeypatch):
     config = selection[0]

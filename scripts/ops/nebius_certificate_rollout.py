@@ -51,6 +51,11 @@ def build_bundle(config: dict[str, Any], *, uv: Path, requirements: Path,
     limits = MANAGEMENT_LIMITS if management_only else LIMITS
     for name in ("scripts/ops/nebius_certificates.py", "scripts/ops/nebius_dns_challenge.py", gateway):
         files[name] = (ROOT / name).read_bytes()
+    if management_only:
+        # The unchanged issuer imports this module's private client watchdog.
+        # Include its bytes only here; existing legacy bundle grants stay valid.
+        name = "scripts/ops/nebius_certificate_gateway.py"
+        files[name] = (ROOT / name).read_bytes()
     files["manifest.json"] = json.dumps({name: hashlib.sha256(value).hexdigest() for name, value in files.items()},
                                        sort_keys=True).encode()
     if any(len(value) > limits[name] for name, value in files.items()):
