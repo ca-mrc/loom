@@ -38,4 +38,3 @@ test("provider return navigation keeps the deployment prefix exactly once @proto
   await expect(page).toHaveURL(`${browserHarness.baseURL}/batches/new?taskSet=example#review`);
   await expect(page.getByRole("heading", { name: "New batch", exact: true })).toBeVisible();
 });
-

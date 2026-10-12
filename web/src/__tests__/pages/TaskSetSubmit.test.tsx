@@ -35,7 +35,7 @@ function renderPage(): void {
   render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter
-       
+
         initialEntries={["/task-sets/new"]}
       >
         <Routes>

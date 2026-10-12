@@ -47,7 +47,7 @@ function renderPage(path = "/pipelines/run-1/stages/stage-1/artifacts/artifact-1
   render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter
-       
+
         initialEntries={[path]}
       >
         <Routes>

@@ -9,6 +9,12 @@ test("built managed login scrubs the proof before startup and submits it only on
   const token = "loom_env_login_" + "a".repeat(43);
   const failures: string[] = [];
   const submitted: string[] = [];
+  const scripts: string[] = [];
+  const manifest = JSON.parse(await readFile("dist/.vite/manifest.json", "utf8")) as Record<string, { file: string }>;
+  const sidebarFile = manifest["src/components/NavBar.tsx"].file;
+  page.on("request", request => {
+    if (request.resourceType() === "script") scripts.push(new URL(request.url()).pathname);
+  });
   let startupReads = 0;
   const owner = {
     user: { id: "owner", username: "owner", email: null, display_name: "Alice", is_platform_admin: false },
@@ -60,10 +66,12 @@ test("built managed login scrubs the proof before startup and submits it only on
   await expect(button).toBeVisible();
   expect(startupReads).toBeGreaterThan(0);
   expect(submitted).toEqual([]);
+  expect(scripts.some(path => path.endsWith("/" + sidebarFile))).toBe(false);
   expect(page.url()).toBe(origin + "/auth/managed");
   await button.click();
   await expect(page.getByText("Signed in to this environment.")).toBeVisible();
   expect(submitted).toEqual([token]);
+  expect(scripts.some(path => path.endsWith("/" + sidebarFile))).toBe(false);
   await page.getByRole("link", { name: "Open environment settings" }).click();
   await expect(page).toHaveURL(origin + "/settings");
   await expect(page.getByRole("heading", { name: "Team Settings" })).toBeVisible();

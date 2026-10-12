@@ -142,7 +142,8 @@ test("signed-out onboarding does not download the authenticated sidebar @protoco
   expect(requests).not.toContain(`${browserHarness.routePrefix}/${sidebar.file}`);
 });
 
-test("a delayed sidebar keeps the routed page usable @protocol", async ({ page, apiHarness, browserHarness }) => {
+test("a delayed sidebar keeps the routed page usable", async ({ page, apiHarness, browserHarness, failureSink }) => {
+  void failureSink;
   const sidebar = manifest()["src/components/NavBar.tsx"];
   expect(sidebar).toBeDefined();
   let release!: () => void;
@@ -159,7 +160,8 @@ test("a delayed sidebar keeps the routed page usable @protocol", async ({ page, 
   await expect(page.getByText("Loading navigation…", { exact: true })).toHaveCount(0);
 });
 
-test("a rejected sidebar module preserves the page and recovers on reload @protocol", async ({ page, apiHarness, browserHarness }) => {
+test("a rejected sidebar module preserves the page and recovers on reload", async ({ page, apiHarness, browserHarness, failureSink }) => {
+  void failureSink;
   const sidebar = manifest()["src/components/NavBar.tsx"];
   expect(sidebar).toBeDefined();
   await page.route(`**/${sidebar.file}`, route => route.fulfill({
@@ -170,6 +172,8 @@ test("a rejected sidebar module preserves the page and recovers on reload @proto
   await expect(page.getByRole("heading", { name: "Team overview" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Loom could not load navigation" })).toBeVisible();
   await expect(page.getByRole("alert")).not.toContainText("private-sidebar-diagnostic");
+  await expect(page.getByRole("alert")).toBeFocused();
+  await expect(page.getByRole("link", { name: "Go to Loom home" })).toHaveAttribute("href", `${browserHarness.routePrefix}/`);
   await expect(page.locator("main#main-content")).toHaveCount(1);
   await expect(page.getByRole("button", { name: "Retry", exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "Reload Loom" }).click();
