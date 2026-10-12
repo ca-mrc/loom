@@ -11,11 +11,12 @@ import ProviderForm, {
   type ProviderFormValues,
 } from "../components/providers/ProviderForm";
 import { useCreateConnection } from "../hooks/providers";
+import { internalReturnPath } from "../lib/internalReturnPath";
 
 export default function ProviderCreate(): JSX.Element {
   const navigate = useNavigate();
   const [params] = useSearchParams();
-  const returnTo = params.get("returnTo");
+  const returnTo = internalReturnPath(params.get("returnTo"));
   const [error, setError] = useState<string | null>(null);
   const create = useCreateConnection();
 

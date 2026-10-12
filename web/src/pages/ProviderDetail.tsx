@@ -34,6 +34,7 @@ import {
   providerTestAge,
 } from "../lib/providerDisplay";
 import { formatLocalDateTime } from "../lib/dateTime";
+import { internalReturnPath } from "../lib/internalReturnPath";
 
 const DeleteConnectionModal = lazyRoute(() => import("../components/providers/DeleteConnectionModal"));
 const ModelsTab = lazyRoute(() => import("../components/providers/ModelsTab"));
@@ -60,11 +61,7 @@ export default function ProviderDetail(): JSX.Element {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const tab = parseTab(searchParams.get("tab"));
-  const rawReturnTo = searchParams.get("returnTo");
-  const returnTo =
-    rawReturnTo && rawReturnTo.startsWith("/") && !rawReturnTo.startsWith("//")
-      ? rawReturnTo
-      : null;
+  const returnTo = internalReturnPath(searchParams.get("returnTo"));
   const setTab = (nextTab: TabName): void => {
     const next = new URLSearchParams(searchParams);
     if (nextTab === "overview") next.delete("tab");
