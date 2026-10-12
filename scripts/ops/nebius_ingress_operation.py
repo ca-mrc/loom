@@ -567,7 +567,7 @@ def qualify_capacity(*, nodes: list[dict[str, Any]], pods: list[dict[str, Any]])
             decoded_nodes = decoder.deserialize(SimpleNamespace(data=json.dumps({
                 "apiVersion": "v1", "kind": "NodeList", "items": nodes,
             }).encode()), "V1NodeList").items
-        decoded_pods = accounting._decode_pool_pods(SimpleNamespace(data=json.dumps({
+        decoded_pods = accounting._decode_pods(SimpleNamespace(data=json.dumps({
             "apiVersion": "v1", "kind": "PodList", "items": pods,
         }).encode())).items
         ingress = SimpleNamespace(spec=SimpleNamespace(template=SimpleNamespace(spec=SimpleNamespace(
