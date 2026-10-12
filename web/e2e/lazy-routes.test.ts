@@ -40,8 +40,9 @@ test("pending route modules preserve the shell and announce loading", async ({ p
   await apiHarness.install({ role: "user" });
   await page.goto(`${browserHarness.baseURL}/`, { waitUntil: "domcontentloaded" });
   try {
-    await expect(page.getByRole("status")).toContainText("Loading this Loom page");
+    await expect(page.locator("main#main-content").getByRole("status")).toContainText("Loading this Loom page");
     await expect(page.locator("main#main-content")).toHaveCount(1);
+    await expect(page.getByRole("navigation", { name: "Primary" })).toBeVisible();
     const menu = page.getByRole("button", { name: "Menu", exact: true });
     if (await menu.isVisible()) await menu.click();
     await expect(page.getByRole("button", { name: "Deployed version details" })).toBeVisible();
