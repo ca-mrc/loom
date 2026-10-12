@@ -125,3 +125,53 @@ test("admin tabs load independently", async ({ page, apiHarness, browserHarness 
   expect(requests.has(path)).toBe(true);
   expect(requests.has(`${browserHarness.routePrefix}/${chunks["src/components/admin/AdminAuditLog.tsx"].file}`)).toBe(false);
 });
+
+// The authenticated sidebar has its own import boundary so onboarding does not
+// download its version polling and navigation code.
+test("signed-out onboarding does not download the authenticated sidebar @protocol", async ({ page, apiHarness, browserHarness, failureSink }) => {
+  const sidebar = manifest()["src/components/NavBar.tsx"];
+  expect(sidebar).toBeDefined();
+  const requests: string[] = [];
+  page.on("request", request => requests.push(new URL(request.url()).pathname));
+  failureSink.expectDiagnostic({ kind: "console", level: "error", message: "Failed to load resource: the server responded with a status of 401 (Unauthorized)", count: 1 });
+  await apiHarness.install({ role: "logged-out" });
+  await page.goto(`${browserHarness.baseURL}/auth/login`);
+  await expect(page.getByTestId("public-onboarding-shell")).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "Primary" })).toHaveCount(0);
+  expect(requests).not.toContain(`${browserHarness.routePrefix}/${sidebar.file}`);
+});
+
+test("a delayed sidebar keeps the routed page usable @protocol", async ({ page, apiHarness, browserHarness }) => {
+  const sidebar = manifest()["src/components/NavBar.tsx"];
+  expect(sidebar).toBeDefined();
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  await page.route(`**/${sidebar.file}`, async route => { await held; await route.continue(); });
+  await apiHarness.install({ role: "user" });
+  await page.goto(`${browserHarness.baseURL}/`, { waitUntil: "domcontentloaded" });
+  try {
+    await expect(page.getByRole("heading", { name: "Team overview" })).toBeVisible();
+    await expect(page.getByText("Loading navigation…", { exact: true })).toBeVisible();
+    await expect(page.locator("main#main-content")).toHaveCount(1);
+  } finally { release(); }
+  await expect(page.getByRole("navigation", { name: "Primary" })).toBeVisible();
+  await expect(page.getByText("Loading navigation…", { exact: true })).toHaveCount(0);
+});
+
+test("a rejected sidebar module preserves the page and recovers on reload @protocol", async ({ page, apiHarness, browserHarness }) => {
+  const sidebar = manifest()["src/components/NavBar.tsx"];
+  expect(sidebar).toBeDefined();
+  await page.route(`**/${sidebar.file}`, route => route.fulfill({
+    contentType: "application/javascript", body: 'throw new Error("private-sidebar-diagnostic");',
+  }), { times: 1 });
+  await apiHarness.install({ role: "user" });
+  await page.goto(`${browserHarness.baseURL}/`);
+  await expect(page.getByRole("heading", { name: "Team overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Loom could not load navigation" })).toBeVisible();
+  await expect(page.getByRole("alert")).not.toContainText("private-sidebar-diagnostic");
+  await expect(page.locator("main#main-content")).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "Retry", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Reload Loom" }).click();
+  await expect(page.getByRole("navigation", { name: "Primary" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Team overview" })).toBeVisible();
+});
