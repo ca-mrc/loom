@@ -74,6 +74,13 @@ Immutable candidate images can be reused. Data-store separation does not prevent
 qualified sharing of published results; it avoids giving personal code staging's
 mutable data or credentials.
 
+The `artifacts` and `trajectories` bindings may name the same canonical data
+bucket and use one data-access policy. `source` and `backup` must each name a
+different bucket, separate from all canonical data. Four-bucket installations
+remain valid; this configuration option does not migrate or merge existing data.
+Personal applications reuse the foundation's configured data bindings without
+creating per-owner buckets or policies.
+
 Namespace support is an offline rendering capability, **not a safe shared-pool
 bootstrap procedure**. The current standalone renderer requires enabled local
 capacity and emits its own execution writers/collector. Simply changing the
