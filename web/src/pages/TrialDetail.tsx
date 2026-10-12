@@ -8,7 +8,7 @@ import { TrialProgressPill, TrialProgressTimeline } from "../components/TrialPro
  * non-terminal; pauses cleanly once done.
  */
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Link, useParams, useLocation } from "react-router-dom";
 
 import { api } from "../api";
@@ -611,6 +611,16 @@ function TrialArtifacts({ trial }: { trial: components["schemas"]["TrialDetail"]
   </Card.Body></Card>;
 }
 
+function mergeTrajectoryEvents(current: TrajEvent[], incoming: TrajEvent[]): TrajEvent[] {
+  const seen = new Set(current.map((event) => event.seq).filter((seq) => typeof seq === "number"));
+  return [...current, ...incoming.filter((event) => {
+    if (typeof event.seq !== "number") return true;
+    if (seen.has(event.seq)) return false;
+    seen.add(event.seq);
+    return true;
+  })];
+}
+
 function Trajectory({ trialId, terminal, trajectoryReady }: { trialId: string; terminal: boolean; trajectoryReady: boolean }): JSX.Element {
   // #5 Slice 6: switch the trajectory viewer from manual-paginate
   // `/trajectory?cursor=N` to SSE `/stream`. Events stream in live
@@ -623,31 +633,35 @@ function Trajectory({ trialId, terminal, trajectoryReady }: { trialId: string; t
 
   const useFallback = stream.status === "error";
 
-  const [fallbackPages, setFallbackPages] = useState<TrajEvent[][]>([]);
-  const [fallbackCursor, setFallbackCursor] = useState<number | undefined>(undefined);
+  const [fallbackEvents, setFallbackEvents] = useState<TrajEvent[]>([]);
+  const fallbackCursor = useRef(0);
+  const [fallbackHasMore, setFallbackHasMore] = useState(false);
   const [fallbackDone, setFallbackDone] = useState(false);
+  const polling = useAdaptivePolling({ baseIntervalMs: 4_000, hiddenBehavior: "pause" });
 
   const fallback = useQuery({
-    queryKey: queryKeys["trajectory-fallback"](trialId, fallbackPages.length),
-    queryFn: async () => {
-      const result = await api.getTrajectoryPage(trialId, fallbackCursor, 200);
-      setFallbackPages((prev) => [...prev, result.events]);
-      if (result.next_cursor === null) {
-        setFallbackDone(true);
-      } else {
-        setFallbackCursor(result.next_cursor);
-      }
+    // A terminal transition must read the tail once more even if the last
+    // active read found no events. The component key resets state per trial.
+    queryKey: queryKeys["trajectory-fallback"](trialId, terminal),
+    queryFn: async ({ signal }) => {
+      const cursor = fallbackCursor.current;
+      const result = await api.getTrajectoryPage(trialId, cursor || undefined, 200, signal);
+      if (signal.aborted) throw new DOMException("Trajectory request cancelled", "AbortError");
+      fallbackCursor.current = result.next_cursor ?? cursor + result.events.length;
+      setFallbackEvents((previous) => mergeTrajectoryEvents(previous, result.events));
+      setFallbackHasMore(result.next_cursor !== null);
+      setFallbackDone(terminal && result.next_cursor === null);
       return result;
     },
-    enabled: useFallback && !fallbackDone && fallbackPages.length === 0,
+    enabled: useFallback && !fallbackDone,
+    staleTime: 0,
+    refetchInterval: useFallback && !terminal ? polling.refetchInterval : false,
   });
 
-  const renderedEvents = useFallback
-    ? (fallbackPages.flat() as TrajEvent[])
-    : events;
+  const renderedEvents = mergeTrajectoryEvents(fallbackEvents, events);
 
   const liveBadge = (() => {
-    if (useFallback) return "fallback polling";
+    if (useFallback) return fallbackDone ? "complete" : "fallback polling";
     if (stream.status === "open") return "live";
     if (stream.status === "connecting") return "connecting…";
     if (stream.status === "complete") return renderedEvents.length === 0 ? "ended without recorded events" : "complete";
@@ -665,7 +679,7 @@ function Trajectory({ trialId, terminal, trajectoryReady }: { trialId: string; t
         {!useFallback && stream.status === "connecting" && events.length === 0 ? (
           <LoadingState />
         ) : null}
-        {useFallback && fallback.isPending && fallbackPages.length === 0 ? (
+        {useFallback && fallback.isPending && fallbackEvents.length === 0 ? (
           <LoadingState />
         ) : null}
         {useFallback && fallback.isError ? (
@@ -682,7 +696,7 @@ function Trajectory({ trialId, terminal, trajectoryReady }: { trialId: string; t
           >
             {fallback.isFetching ? "Retrying…" : "Retry"}
           </Button>
-        ) : useFallback && !fallbackDone ? (
+        ) : useFallback && fallbackHasMore ? (
           <Button
             onClick={() => fallback.refetch()}
             disabled={fallback.isFetching}

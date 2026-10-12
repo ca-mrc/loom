@@ -23,6 +23,20 @@ export class AuthSessionLoadError extends Error {
 }
 
 export let _onUnauthorized: () => void = () => {};
+let authorizationGeneration = 0;
+
+/** Retire responses belonging to the session that was just replaced. */
+export function advanceAuthorizationGeneration(): void {
+  authorizationGeneration += 1;
+}
+
+export function captureUnauthorizedHandler(): () => void {
+  const generation = authorizationGeneration;
+  const handler = _onUnauthorized;
+  return () => {
+    if (generation === authorizationGeneration) handler();
+  };
+}
 
 export function setUnauthorizedHandler(cb: () => void): void {
   _onUnauthorized = cb;
@@ -86,7 +100,7 @@ export async function throwIfApiError(resp: Response, onUnauthorized: () => void
 }
 
 export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const onUnauthorized = _onUnauthorized;
+  const onUnauthorized = captureUnauthorizedHandler();
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     ...authHeaders(init.headers, init.method),
@@ -104,7 +118,7 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
 }
 
 export async function apiUpload<T>(path: string, formData: FormData): Promise<T> {
-  const onUnauthorized = _onUnauthorized;
+  const onUnauthorized = captureUnauthorizedHandler();
   const headers: Record<string, string> = authHeaders(undefined, "POST");
 
   const resp = await fetch(`${apiBase()}${path}`, {
@@ -120,7 +134,7 @@ export async function apiUpload<T>(path: string, formData: FormData): Promise<T>
 }
 
 export async function apiDownload(path: string, filename: string): Promise<void> {
-  const onUnauthorized = _onUnauthorized;
+  const onUnauthorized = captureUnauthorizedHandler();
   const resp = await fetch(`${apiBase()}${path}`, {
     headers: authHeaders(),
     credentials: "include",
