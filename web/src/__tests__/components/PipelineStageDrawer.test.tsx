@@ -47,7 +47,7 @@ const attempts = { items: [{
 
 function renderDrawer(element: ReactElement): ReturnType<typeof render> {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><QueryClientProvider client={client}>{element}</QueryClientProvider></MemoryRouter>);
+  return render(<MemoryRouter><QueryClientProvider client={client}>{element}</QueryClientProvider></MemoryRouter>);
 }
 
 afterEach(() => vi.restoreAllMocks());
@@ -99,7 +99,7 @@ test("shows query errors and does not fetch while closed", async () => {
   const { rerender } = renderDrawer(<PipelineStageDrawer stage={stage} events={[]} onClose={vi.fn()} onRetry={vi.fn()} />);
   expect(await screen.findByText(/detail failed/)).toBeInTheDocument();
 
-  rerender(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><QueryClientProvider client={new QueryClient()}><PipelineStageDrawer stage={null} events={[]} onClose={vi.fn()} onRetry={vi.fn()} /></QueryClientProvider></MemoryRouter>);
+  rerender(<MemoryRouter><QueryClientProvider client={new QueryClient()}><PipelineStageDrawer stage={null} events={[]} onClose={vi.fn()} onRetry={vi.fn()} /></QueryClientProvider></MemoryRouter>);
   await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   expect(getDetail).toHaveBeenCalledTimes(1);
 });

@@ -1,209 +1,208 @@
 {
   "initial": {
-    "bytes": 247959,
-    "gzipBytes": 79886
+    "bytes": 253094,
+    "gzipBytes": 81495
   },
   "routes": {
     "src/components/HelpDialog.tsx": {
-      "bytes": 14927,
-      "gzipBytes": 6499
+      "bytes": 14890,
+      "gzipBytes": 6461
     },
     "src/components/JsonTree.tsx": {
       "bytes": 7885,
-      "gzipBytes": 2546
+      "gzipBytes": 2545
+    },
+    "src/components/NavBar.tsx": {
+      "bytes": 15881,
+      "gzipBytes": 6140
     },
     "src/components/VersionDetails.tsx": {
-      "bytes": 11306,
-      "gzipBytes": 4691
+      "bytes": 21467,
+      "gzipBytes": 8399
     },
     "src/components/admin/AdminAuditLog.tsx": {
-      "bytes": 27706,
-      "gzipBytes": 10425
+      "bytes": 36641,
+      "gzipBytes": 13709
     },
     "src/components/artifacts/BehaviorRolloutLivePreview.tsx": {
-      "bytes": 19914,
-      "gzipBytes": 6244
+      "bytes": 19965,
+      "gzipBytes": 6233
     },
     "src/components/artifacts/BehaviorRolloutViewer.tsx": {
-      "bytes": 25258,
-      "gzipBytes": 8202
+      "bytes": 25309,
+      "gzipBytes": 8190
     },
     "src/components/providers/DeleteConnectionModal.tsx": {
-      "bytes": 11152,
-      "gzipBytes": 5417
+      "bytes": 11125,
+      "gzipBytes": 5412
     },
     "src/components/providers/ModelsTab.tsx": {
-      "bytes": 41865,
-      "gzipBytes": 15108
+      "bytes": 51335,
+      "gzipBytes": 18634
     },
     "src/components/providers/ProviderForm.tsx": {
-      "bytes": 28599,
-      "gzipBytes": 9280
+      "bytes": 28650,
+      "gzipBytes": 9263
     },
     "src/components/providers/RotateKeyModal.tsx": {
-      "bytes": 11557,
-      "gzipBytes": 5648
+      "bytes": 11530,
+      "gzipBytes": 5641
     },
     "src/lib/taskSetManifestReview.ts": {
       "bytes": 98074,
-      "gzipBytes": 30235
+      "gzipBytes": 30247
     },
     "src/pages/AdminAccess.tsx": {
-      "bytes": 66512,
-      "gzipBytes": 21787
+      "bytes": 75437,
+      "gzipBytes": 25046
     },
     "src/pages/AdminApiTokens.tsx": {
       "bytes": 10733,
-      "gzipBytes": 4972
+      "gzipBytes": 4959
     },
     "src/pages/AdminLegacyRegistrations.tsx": {
       "bytes": 9852,
-      "gzipBytes": 4722
+      "gzipBytes": 4708
     },
     "src/pages/AdminTeams.tsx": {
       "bytes": 7368,
-      "gzipBytes": 3569
+      "gzipBytes": 3560
     },
     "src/pages/AuthLogin.tsx": {
-      "bytes": 28515,
-      "gzipBytes": 9805
+      "bytes": 37428,
+      "gzipBytes": 13070
     },
     "src/pages/BatchDetail.tsx": {
-      "bytes": 92266,
-      "gzipBytes": 33302
+      "bytes": 102266,
+      "gzipBytes": 36934
     },
     "src/pages/Benchmarks.tsx": {
-      "bytes": 28905,
-      "gzipBytes": 10736
+      "bytes": 37845,
+      "gzipBytes": 14009
     },
     "src/pages/GettingStarted.tsx": {
-      "bytes": 24613,
-      "gzipBytes": 9728
+      "bytes": 24600,
+      "gzipBytes": 9665
     },
     "src/pages/Home.tsx": {
-      "bytes": 15869,
-      "gzipBytes": 6089
+      "bytes": 24759,
+      "gzipBytes": 9355
     },
     "src/pages/InviteAccept.tsx": {
-      "bytes": 28782,
-      "gzipBytes": 10565
+      "bytes": 37696,
+      "gzipBytes": 13819
     },
     "src/pages/ManagedLogin.tsx": {
-      "bytes": 1931,
-      "gzipBytes": 1076
+      "bytes": 1876,
+      "gzipBytes": 1035
     },
     "src/pages/Monitor.tsx": {
-      "bytes": 43267,
-      "gzipBytes": 16082
+      "bytes": 52299,
+      "gzipBytes": 19376
     },
     "src/pages/MonitorBatches.tsx": {
-      "bytes": 34090,
-      "gzipBytes": 13691
+      "bytes": 43024,
+      "gzipBytes": 16966
     },
     "src/pages/MonitorCapacityDetails.tsx": {
-      "bytes": 38080,
-      "gzipBytes": 12832
+      "bytes": 49723,
+      "gzipBytes": 16873
     },
     "src/pages/MonitorTrials.tsx": {
-      "bytes": 41288,
-      "gzipBytes": 16338
+      "bytes": 50222,
+      "gzipBytes": 19604
     },
     "src/pages/NewBatch.tsx": {
-      "bytes": 99466,
-      "gzipBytes": 32120
+      "bytes": 108517,
+      "gzipBytes": 36274
     },
     "src/pages/NewBatchAdvancedFields.tsx": {
-      "bytes": 16797,
-      "gzipBytes": 4731
+      "bytes": 16515,
+      "gzipBytes": 4787
     },
     "src/pages/NotFound.tsx": {
       "bytes": 548,
-      "gzipBytes": 340
+      "gzipBytes": 339
     },
     "src/pages/PasswordAction.tsx": {
-      "bytes": 25779,
-      "gzipBytes": 9267
+      "bytes": 34692,
+      "gzipBytes": 12544
     },
     "src/pages/PipelineArtifactDetail.tsx": {
-      "bytes": 25944,
-      "gzipBytes": 8347
+      "bytes": 34916,
+      "gzipBytes": 11617
     },
     "src/pages/PipelineRunDetail.tsx": {
-      "bytes": 57225,
-      "gzipBytes": 20809
+      "bytes": 70043,
+      "gzipBytes": 24997
     },
     "src/pages/PipelineRuns.tsx": {
-      "bytes": 32959,
-      "gzipBytes": 12391
+      "bytes": 41900,
+      "gzipBytes": 15657
     },
     "src/pages/ProviderCreate.tsx": {
-      "bytes": 37798,
-      "gzipBytes": 12635
+      "bytes": 38519,
+      "gzipBytes": 12986
     },
     "src/pages/ProviderDetail.tsx": {
-      "bytes": 39374,
-      "gzipBytes": 14060
+      "bytes": 48933,
+      "gzipBytes": 17607
     },
     "src/pages/ProvidersList.tsx": {
-      "bytes": 24065,
-      "gzipBytes": 8421
+      "bytes": 33011,
+      "gzipBytes": 11690
     },
     "src/pages/RateCardsAdmin.tsx": {
-      "bytes": 42730,
-      "gzipBytes": 16641
+      "bytes": 51620,
+      "gzipBytes": 19913
     },
     "src/pages/RunLibrary.tsx": {
-      "bytes": 49493,
-      "gzipBytes": 17839
+      "bytes": 58431,
+      "gzipBytes": 21118
     },
     "src/pages/RunLibraryBatchDetail.tsx": {
-      "bytes": 69169,
-      "gzipBytes": 25453
+      "bytes": 82851,
+      "gzipBytes": 30310
     },
     "src/pages/Settings.tsx": {
-      "bytes": 42355,
-      "gzipBytes": 15680
+      "bytes": 51215,
+      "gzipBytes": 18924
     },
     "src/pages/TaskSetDetail.tsx": {
-      "bytes": 45852,
-      "gzipBytes": 17345
+      "bytes": 55367,
+      "gzipBytes": 20703
     },
     "src/pages/TaskSetSubmit.tsx": {
-      "bytes": 28102,
-      "gzipBytes": 9405
+      "bytes": 28144,
+      "gzipBytes": 9358
     },
     "src/pages/TaskSetsList.tsx": {
-      "bytes": 24399,
-      "gzipBytes": 8731
+      "bytes": 33341,
+      "gzipBytes": 12004
     },
     "src/pages/Tasks.tsx": {
-      "bytes": 61940,
-      "gzipBytes": 21539
+      "bytes": 66786,
+      "gzipBytes": 24063
     },
     "src/pages/TrialCompare.tsx": {
-      "bytes": 37966,
-      "gzipBytes": 14576
+      "bytes": 47042,
+      "gzipBytes": 17970
     },
     "src/pages/TrialDetail.tsx": {
-      "bytes": 74854,
-      "gzipBytes": 27744
+      "bytes": 90372,
+      "gzipBytes": 33071
     },
     "src/pages/UsageDashboard.tsx": {
-      "bytes": 42403,
-      "gzipBytes": 15546
+      "bytes": 51320,
+      "gzipBytes": 18808
     },
     "src/pages/newBatch/BatchExportDialog.tsx": {
-      "bytes": 12350,
-      "gzipBytes": 5783
+      "bytes": 12324,
+      "gzipBytes": 5768
     },
     "src/pages/newBatch/ExecutionSelectionEditor.tsx": {
       "bytes": 10104,
-      "gzipBytes": 3852,
-      "files": [
-        "assets/BTPdeK-M.js",
-        "assets/CFz1KnPa.js",
-        "assets/CPziM_ZQ2.js"
-      ]
+      "gzipBytes": 3837
     }
   }
 }

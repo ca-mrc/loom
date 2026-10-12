@@ -44,7 +44,7 @@ it.each([
   });
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(<StrictMode><QueryClientProvider client={queryClient}><MemoryRouter initialEntries={["/auth/managed"]}
-    future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+   >
     <AuthProvider><App /></AuthProvider>
   </MemoryRouter></QueryClientProvider></StrictMode>);
   const button = await screen.findByRole("button", { name: "Sign into this environment" });

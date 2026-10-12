@@ -98,7 +98,7 @@ ReactDOM.createRoot(rootElement).render(
         <FrontendBootstrap>
           {(config) => (
             <QueryClientProvider client={queryClient}>
-              <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} basename={config.routePath || undefined}>
+              <BrowserRouter basename={config.routePath || undefined}>
                 <AuthProvider>
                   <MountedApp rootElement={rootElement} />
                 </AuthProvider>

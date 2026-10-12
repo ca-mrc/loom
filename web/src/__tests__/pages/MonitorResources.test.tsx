@@ -35,7 +35,7 @@ function target(id: string, executionClass = "linux-amd64-cpu-web-pod-v1", owner
 }
 
 function show(targets: Target[]): void {
-  render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+  render(<MemoryRouter><QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
     <NebiusExecutionBreakdown serviceExecution={{ targets, activity: { lease_count: 0, execution_states: {}, lifecycle_stages: {},
       source_cleanup_states: {}, materialization: { states: {}, backlog: 0, retry_attempts: 0,
         oldest_next_attempt_at: null, oldest_pending_at: null, oldest_pending_age_seconds: null,

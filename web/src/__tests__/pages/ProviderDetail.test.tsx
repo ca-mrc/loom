@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { setFrontendConfigForTests } from "../../lib/frontendConfig";
 import ProviderDetail from "../../pages/ProviderDetail";
 
 const CONN = {
@@ -24,7 +25,7 @@ const CONN = {
   legacy_pricing: null,
 };
 
-function renderPage(conn: unknown, initialPath = "/providers/abc") {
+function renderPage(conn: unknown, initialPath = "/providers/abc", basename = "") {
   vi.stubGlobal(
     "fetch",
     vi.fn().mockResolvedValue(
@@ -34,7 +35,7 @@ function renderPage(conn: unknown, initialPath = "/providers/abc") {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={[initialPath]}>
+      <MemoryRouter basename={basename} initialEntries={[initialPath]}>
         <Routes>
           <Route path="/providers/:id" element={<ProviderDetail />} />
           <Route path="/providers" element={<div>providers-list</div>} />
@@ -47,7 +48,32 @@ function renderPage(conn: unknown, initialPath = "/providers/abc") {
 
 describe("ProviderDetail", () => {
   beforeEach(() => window.localStorage.setItem("loom_token", "t"));
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(() => {
+    setFrontendConfigForTests(null);
+    vi.restoreAllMocks();
+  });
+
+  it.each(["/\\attacker.example", "//attacker.example", "/%5cattacker.example", "/%0a/attacker.example", "/\n/attacker.example", "/safe/..//attacker.example"])(
+    "does not offer an unsafe return link for %j", async (returnTo) => {
+      renderPage(CONN, `/providers/abc?tab=models&returnTo=${encodeURIComponent(returnTo)}`);
+      await screen.findByRole("heading", { name: CONN.name });
+      expect(screen.queryByRole("link", { name: "Back to New Batch" })).not.toBeInTheDocument();
+    },
+  );
+
+  it.each(["/batches/new?taskSet=example#review", "/dev/batches/new?taskSet=example#review"])(
+    "keeps return links within the router basename for %s", async (returnTo) => {
+      setFrontendConfigForTests({ environment: "development", environmentLabel: "Development", routePath: "/dev", apiBase: "/dev", apiRouteBase: `${window.location.origin}/dev/api` });
+      renderPage(CONN, `/dev/providers/abc?tab=models&returnTo=${encodeURIComponent(returnTo)}`, "/dev");
+      const link = await screen.findByRole("link", { name: "Back to New Batch" });
+      expect(link).toHaveAttribute("href", "/dev/batches/new?taskSet=example#review");
+    },
+  );
+
+  it("normalizes a valid return query without dropping its search text", async () => {
+    renderPage(CONN, `/providers/abc?tab=models&returnTo=${encodeURIComponent("/batches/new?q=hello world")}`);
+    expect(await screen.findByRole("link", { name: "Back to New Batch" })).toHaveAttribute("href", "/batches/new?q=hello%20world");
+  });
 
   it("Overview tab is shown by default with connection name", async () => {
     renderPage(CONN);
@@ -102,7 +128,7 @@ describe("ProviderDetail", () => {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={qc}>
-        <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={["/providers/abc"]}>
+        <MemoryRouter initialEntries={["/providers/abc"]}>
           <Routes>
             <Route path="/providers/:id" element={<ProviderDetail />} />
           </Routes>
@@ -131,7 +157,7 @@ describe("ProviderDetail", () => {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={qc}>
-        <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={["/providers/abc?tab=models"]}>
+        <MemoryRouter initialEntries={["/providers/abc?tab=models"]}>
           <Routes>
             <Route path="/providers/:id" element={<ProviderDetail />} />
           </Routes>
@@ -164,7 +190,7 @@ describe("ProviderDetail", () => {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={qc}>
-        <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={["/providers/abc?tab=models&returnTo=/batches/new"]}>
+        <MemoryRouter initialEntries={["/providers/abc?tab=models&returnTo=/batches/new"]}>
           <Routes>
             <Route path="/providers/:id" element={<ProviderDetail />} />
             <Route path="/batches/new" element={<div>new-batch-page</div>} />
@@ -195,7 +221,7 @@ describe("ProviderDetail", () => {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={qc}>
-        <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={["/providers/missing"]}>
+        <MemoryRouter initialEntries={["/providers/missing"]}>
           <Routes>
             <Route path="/providers/:id" element={<ProviderDetail />} />
           </Routes>
@@ -221,7 +247,7 @@ describe("ProviderDetail", () => {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={qc}>
-        <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={["/providers/abc"]}>
+        <MemoryRouter initialEntries={["/providers/abc"]}>
           <Routes>
             <Route path="/providers/:id" element={<ProviderDetail />} />
           </Routes>
@@ -255,7 +281,7 @@ describe("ProviderDetail", () => {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={qc}>
-        <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={["/providers/abc"]}>
+        <MemoryRouter initialEntries={["/providers/abc"]}>
           <Routes>
             <Route path="/providers/:id" element={<ProviderDetail />} />
           </Routes>
@@ -290,7 +316,7 @@ it("edits initialized model prices through PATCH without resetting connection re
   }));
   const user = userEvent.setup();
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(<QueryClientProvider client={qc}><MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={["/providers/abc?tab=settings"]}>
+  render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/providers/abc?tab=settings"]}>
     <Routes><Route path="/providers/:id" element={<ProviderDetail />} /></Routes>
   </MemoryRouter></QueryClientProvider>);
   const input = await screen.findByLabelText("claude-3-opus input_usd_per_1m");

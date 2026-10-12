@@ -127,7 +127,7 @@ function renderOpenPage() {
     defaultOptions: { queries: { retry: false } },
   });
   return render(
-    <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><QueryClientProvider client={queryClient}>
+    <MemoryRouter><QueryClientProvider client={queryClient}>
       <label>
         Draft
         <input aria-label="Draft" />

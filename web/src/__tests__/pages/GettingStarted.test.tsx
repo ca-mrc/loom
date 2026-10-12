@@ -19,7 +19,7 @@ describe("Getting started", () => {
   });
   it.each(["/dev", "/prod", "/staging/rehearsal/0123456789abcdef01234567"])("retains the deployment prefix %s in CLI and API commands", async (routePath) => {
     setFrontendConfigForTests({ environment: "development", environmentLabel: "Test environment", routePath, apiBase: routePath, apiRouteBase: `${window.location.origin}${routePath}/api` });
-    render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={["/getting-started?channel=cli"]}><GettingStarted /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/getting-started?channel=cli"]}><GettingStarted /></MemoryRouter>);
     expect(screen.getByText(/loom auth login --server/)).toHaveTextContent(`${window.location.origin}${routePath}`);
     const user = userEvent.setup();
     await user.click(screen.getByRole("tab", { name: "API" }));
@@ -28,13 +28,13 @@ describe("Getting started", () => {
     expect(screen.queryByText(/smoke-openai|gpt-4o-mini/)).not.toBeInTheDocument();
   });
   it("normalizes unknown query values and opens topic references", async () => {
-    render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={["/getting-started?topic=invalid&channel=invalid"]}><GettingStarted /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/getting-started?topic=invalid&channel=invalid"]}><GettingStarted /></MemoryRouter>);
     expect(screen.getByRole("tab", { name: "Web" })).toHaveAttribute("aria-selected", "true");
     await userEvent.setup().click(screen.getByRole("button", { name: "Providers and models" }));
     expect(screen.getByRole("link", { name: /Provider onboarding/ })).toHaveAttribute("href", expect.stringContaining("provider-onboarding.md#hosted-third-party-api"));
   });
   it("does not offer platform admin topics through public query parameters", () => {
-    render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={["/getting-started?topic=rates"]}><GettingStarted /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/getting-started?topic=rates"]}><GettingStarted /></MemoryRouter>);
     expect(screen.queryByRole("button", { name: "Rate cards" })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Open Rate cards" })).not.toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Web" })).toBeInTheDocument();
