@@ -51,10 +51,12 @@ def observer(retained, resources, *, after_read=None):
             result = {'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': 'kube-system',
                 'uid': retained.release.migration.registration.binding.kube_system_uid}}
         else:
-            rows = {_key(row): copy.deepcopy(row) for row in (*retained.inputs.current,
-                retained.inputs.manager, retained.inputs.catalog)}
+            # Snapshot matching fallbacks before either callback. Keep the other
+            # keys so resource overrides retain their original insertion order.
+            rows = {_key(row): copy.deepcopy(row) if _resource_path(row) == request.url.path else None
+                for row in (*retained.inputs.current, retained.inputs.manager, retained.inputs.catalog)}
             rows.update(resources())
-            result = next((row for row in rows.values() if _resource_path(row) == request.url.path), None)
+            result = next((row for row in rows.values() if row is not None and _resource_path(row) == request.url.path), None)
         if after_read is not None:
             after_read(request.url.path)
         return httpx.Response(404) if result is None else httpx.Response(200, json=result)
