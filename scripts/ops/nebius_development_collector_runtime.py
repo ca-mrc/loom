@@ -16,6 +16,7 @@ from scripts.ops.nebius_development_collector_cloud import (
     DevelopmentCollectorCloudScope,
     collector_public_key,
 )
+from scripts.ops.nebius_development_pool_registration import retained_development_participant
 from scripts.ops.nebius_development_runtime_setup import DevelopmentDatabaseRuntime
 from scripts.ops.nebius_development_shared_runtime import prepare_shared_runtime
 from scripts.ops.nebius_pool_runtime import _RetainedPoolCollectorSettings
@@ -59,7 +60,7 @@ def prepare_collector_runtime(request: DevelopmentDatabaseRuntime) -> Developmen
         prepare_shared_runtime(request)
         spec = request.manager.retained.request.registration.spec
         config = request.foundation.inputs.config
-        participant, = spec.participants
+        participant = retained_development_participant(request.manager.retained.request)
         observer, = (row for row in spec.machines if row.role == 'observer')
         scopes = {tuple(identity[:3]) for identity in spec.quota_identities.values()}
         if len(scopes) != 1:

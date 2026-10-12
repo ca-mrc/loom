@@ -105,14 +105,19 @@ async def prepare_startup_capacity(sessions, tmp_path, damage=None, *, executabl
     return spec, tokens, environment, token, nonce, signature, gateway
 
 
-@pytest.mark.parametrize('operation', ['probe', 'activate'])
+@pytest.mark.parametrize('operation', ['probe', 'activate', 'active-probe'])
 @pytest.mark.parametrize('damage', [None, 'missing', 'stale', 'participant', 'mode', 'quota', 'token_revoked',
     'token_expired', 'wrong_machine', 'wrong_token', 'challenge', 'revision_exhausted'])
 async def test_startup_capacity_probe_requires_fresh_exact_scope_and_current_gateway_authority(sessions, tmp_path, damage, operation):
     from scripts.ops import nebius_pool_startup_capacity as commands
 
-    command = commands.BOUND_POOL_CAPACITY_COMMAND if operation == 'probe' else commands.BOUND_POOL_ACTIVATION_COMMAND
+    command = (commands.BOUND_POOL_ACTIVE_CAPACITY_COMMAND if operation == 'active-probe' else
+        commands.BOUND_POOL_CAPACITY_COMMAND if operation == 'probe' else commands.BOUND_POOL_ACTIVATION_COMMAND)
     spec, tokens, environment, token, nonce, signature, gateway = await prepare_startup_capacity(sessions, tmp_path, damage)
+    if operation == 'active-probe':
+        async with sessions.begin() as session:
+            await session.execute(update(NebiusPoolBinding).where(NebiusPoolBinding.pool_id == spec.pool_id).values(
+                mode='closed' if damage == 'mode' else 'global'))
 
     async def retained_state():
         async with sessions() as session:
@@ -125,19 +130,63 @@ async def test_startup_capacity_probe_requires_fresh_exact_scope_and_current_gat
     before = await retained_state()
     result = await asyncio.to_thread(subprocess.run, [sys.executable, '-c', command, nonce, signature],
         env=environment, cwd=tmp_path, capture_output=True, timeout=35, check=False)
-    success = damage is None or (damage == 'revision_exhausted' and operation == 'probe')
+    success = damage is None or (damage == 'revision_exhausted' and operation != 'activate')
     if not success:
-        error = b'Pool startup capacity unqualified\n' if operation == 'probe' else b'Pool activation unconfirmed; preserve recovery evidence\n'
+        error = (b'Pool active capacity unqualified\n' if operation == 'active-probe' else
+            b'Pool startup capacity unqualified\n' if operation == 'probe' else b'Pool activation unconfirmed; preserve recovery evidence\n')
         assert result.returncode == 1 and result.stdout == b'' and result.stderr == error
     else:
-        report = b'{"status": "qualified"}\n' if operation == 'probe' else b'{"status": "global"}\n'
+        report = b'{"status": "global"}\n' if operation == 'activate' else b'{"status": "qualified"}\n'
         assert (result.returncode, result.stdout, result.stderr) == (0, report, b'')
-        assert before[0] == 'closed' and before[-1] == 0
+        assert before[0] == ('global' if operation == 'active-probe' else 'closed') and before[-1] == 0
     assert all(raw not in (result.stdout + result.stderr).decode() for raw in tokens.values())
     assert 'private-' not in (result.stdout + result.stderr).decode()
     assert await retained_state() == (('global', *before[1:]) if success and operation == 'activate' else before)
     assert hashlib.sha256(token.read_bytes()).hexdigest() == (
         hashlib.sha256(b'private-wrong-machine-token').hexdigest() if damage == 'wrong_token' else gateway.token_sha256)
+
+
+async def test_active_capacity_probe_preserves_real_charged_work(sessions, tmp_path):
+    from scripts.ops import nebius_pool_startup_capacity as commands
+
+    from loom.nebius_pool_workload import PoolExecutionPrepareV1
+    from loom_execution_capacity_collector.contracts import CapacityPlacement
+    from tests.execution_placement_fixtures import placement_fixture
+    from tests.integration.test_nebius_pool_activation_fence import open_pool
+    from tests.integration.test_nebius_pool_registry import prepare, publish_placement
+    from tests.unit.test_nebius_pool_execution_render import inputs
+
+    assert hasattr(commands, 'BOUND_POOL_ACTIVE_CAPACITY_COMMAND'), 'read-only active capacity challenge is missing'
+    prepared = await prepare_startup_capacity(sessions, tmp_path, executable=True)
+    spec, tokens, environment, _, nonce, signature, _ = prepared
+    assert (await open_pool(prepared, tmp_path)).returncode == 0
+    participant = spec.participants[0]
+    owner_machine, = (row for row in spec.machines if row.participant_id == participant.participant_id)
+    observer_machine, = (row for row in spec.machines if row.role == 'observer')
+    async with sessions() as session:
+        owner = await resolve_pool_machine(session, 'Bearer ' + tokens[owner_machine.machine_id])
+        observer = await resolve_pool_machine(session, 'Bearer ' + tokens[observer_machine.machine_id])
+    placement = placement_fixture(target_id=spec.node_group_id, parent_id='parent', quota_nodes=2,
+        node_cpu=4000, node_memory=8192, node_storage=32768)
+    del placement['quota_resources']['memory']
+    await publish_placement(sessions, observer, CapacityPlacement.model_validate(placement))
+    _, body = inputs()
+    body.update(pool_id=spec.pool_id, key=body['key'] | {'participant_id': participant.participant_id},
+        origin=body['origin'] | {'data_environment_id': participant.environment_id})
+    grant = await prepare(sessions, owner, PoolExecutionPrepareV1.model_validate(body), spec.profiles.profiles())
+    assert grant.phase == 'reserved'
+
+    async def retained_state():
+        async with sessions() as session:
+            row = await session.get(NebiusPoolRequest, grant.reservation_id)
+            pool = await session.get(NebiusPoolBinding, spec.pool_id)
+            return pool.mode, pool.admission_epoch, pool.policy_revision, row.phase, row.renewed_at
+
+    before = await retained_state()
+    result = await asyncio.to_thread(subprocess.run, [sys.executable, '-c', commands.BOUND_POOL_ACTIVE_CAPACITY_COMMAND, nonce, signature],
+        env=environment, cwd=tmp_path, capture_output=True, timeout=35, check=False)
+    assert (result.returncode, result.stdout, result.stderr) == (0, b'{"status": "qualified"}\n', b'')
+    assert await retained_state() == before and before[0] == 'global' and before[3] == 'reserved'
 
 
 @pytest.mark.parametrize('expires', ['token', 'observation'])

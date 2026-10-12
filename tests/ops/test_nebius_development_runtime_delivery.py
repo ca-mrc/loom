@@ -1,13 +1,13 @@
 """Dedicated pool tooling/key must never inherit install/staging commands."""
 from __future__ import annotations
 
-import ast
 import base64
 import hashlib
 import importlib
 import io
 import json
 import os
+import shutil
 import struct
 import subprocess
 import sys
@@ -82,24 +82,63 @@ def report(tmp_path, status='development_runtime_installed_closed', **extra):
             'status': status, 'pool_id': 'a8c04f77-bdc6-4343-85e4-c6717bc6fed9', 'admission_open': False, 'writer_migration_complete': False} | extra
 
 
-def test_bundle_is_closed_over_all_transitive_runtime_imports(tmp_path):
-    files, selected = module().unpack_bundle(archive(members(tmp_path)))
-    assert selected == operation(tmp_path)
+def test_bundle_runs_actual_closed_entry_without_participant_or_workspace_modules(tmp_path):
+    from scripts.ops.nebius_ingress_rollout import build_wheels
+
     root = Path(__file__).resolve().parents[2]
-    pending, seen = ['scripts.ops.nebius_development_runtime_entry'], set()
-    while pending:
-        name = pending.pop()
-        if name in seen:
-            continue
-        seen.add(name)
-        path = name.replace('.', '/') + '.py'
-        assert path in files, 'Missing runtime import: ' + path
-        for node in ast.walk(ast.parse((root / path).read_text())):
-            if isinstance(node, ast.ImportFrom) and node.module:
-                if node.module.startswith('scripts.ops.'):
-                    pending.append(node.module)
-                elif node.module == 'scripts.ops':
-                    pending.extend('scripts.ops.' + alias.name for alias in node.names)
+    build = tmp_path / 'wheel-build'
+    build.mkdir()
+    uv = shutil.which('uv')
+    assert uv is not None
+    wheels = build_wheels(build, uv=Path(uv))
+    content = {name: value for name, value in members(tmp_path).items() if not name.startswith('wheels/')}
+    content.update({name: (root / name).read_bytes() for name in module().SOURCES})
+    content.update({'wheels/' + wheel.name: wheel.read_bytes() for wheel in wheels.iterdir()})
+    bundle = archive(content)
+    files, selected = module().unpack_bundle(bundle)
+    assert selected == operation(tmp_path)
+    release, site = tmp_path / 'isolated', tmp_path / 'wheel-site'
+    for name, raw in files.items():
+        if name.startswith('wheels/'):
+            with zipfile.ZipFile(io.BytesIO(raw)) as wheel:
+                wheel.extractall(site)
+        else:
+            path = release / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(raw)
+            path.chmod(0o600)
+    bootstrap = subprocess.run([sys.executable, '-I', '-S', '-c',
+        "import sys,json;sys.path.insert(0,sys.argv[1]);"
+        "from scripts.ops.nebius_development_runtime_gateway import unpack_bundle;"
+        "print(json.dumps(unpack_bundle(sys.stdin.buffer.read())[1],sort_keys=True))", str(release)],
+        input=bundle, capture_output=True, cwd=tmp_path, timeout=20)
+    assert bootstrap.returncode == 0, bootstrap.stderr.decode()
+    assert json.loads(bootstrap.stdout) == selected
+
+    # An AST walk incorrectly included TYPE_CHECKING and optional participant
+    # rollout bodies in the generic deploy module. Test the real closed-runtime
+    # entry with only its actual bundle instead of enlarging the old grant.
+    command = [sys.executable, '-I', '-c',
+        "import sys,pathlib;root=pathlib.Path(sys.argv[1]);site=pathlib.Path(sys.argv[2]);"
+        "sys.path[:0]=[str(root),str(site)];"
+        "from scripts.ops.nebius_development_runtime_entry import main;"
+        "assert all(pathlib.Path(m.__file__).is_relative_to(root) for n,m in sys.modules.items() "
+        "if n.startswith('scripts.ops.') and getattr(m,'__file__',None));"
+        "assert all(pathlib.Path(m.__file__).is_relative_to(site) for n,m in sys.modules.items() "
+        "if n.split('.')[0] in ('loom','loom_service') and getattr(m,'__file__',None));"
+        "assert not any(n.startswith('scripts.ops.nebius_pool_participant') for n in sys.modules);"
+        "raise SystemExit(main(str(root/'operation.json'),sys.argv[3]))", str(release), str(site)]
+    for action in ('qualify', 'preflight', 'install'):
+        result = subprocess.run([*command, action], capture_output=True, cwd=tmp_path, timeout=30)
+        assert result.returncode == (0 if action == 'qualify' else 1), result.stderr.decode()
+        assert json.loads(result.stdout) == ({'status': 'tooling_qualified'} if action == 'qualify'
+            else {'status': 'blocked', 'stage': 'inputs'})
+    # A genuinely missing runtime dependency must still be detected; it cannot
+    # fall back to the checkout or be mistaken for a controlled private-input stop.
+    (release / 'scripts/ops/nebius_development_runtime_api.py').unlink()
+    broken = subprocess.run([*command, 'qualify'], capture_output=True, cwd=tmp_path, timeout=30)
+    assert broken.returncode != 0 and not broken.stdout
+    assert b'nebius_development_runtime_api' in broken.stderr
 
 
 @pytest.mark.parametrize('damage', ['namespace', 'schema', 'source', 'traversal', 'duplicate', 'symlink', 'initial-input', 'nil-operation'])

@@ -121,6 +121,31 @@ def test_automatic_run_rechecks_decision_before_any_mutation(monkeypatch):
     assert module.rollout(SimpleNamespace(automatic=True)) == decision
 
 
+def test_automatic_protected_check_reuses_exact_connection_and_ancestry(monkeypatch, tmp_path):
+    calls = []
+    args = SimpleNamespace(automatic=True, github=False, kubeconfig=tmp_path / 'private-config',
+        namespace='platform', expected_cluster_id='cluster', candidate='b' * 40)
+    def run(*command):
+        calls.append(command)
+        return json.dumps({'locked': False, 'active': {'trials': 1, 'executions': 0, 'builds': 0, 'build_cleanup': 0}})
+    kube = SimpleNamespace(kubeconfig=args.kubeconfig, run=run,
+        get=lambda *_: {'data': {'environment.json': json.dumps(CONFIG),
+            'profile.json': json.dumps({'candidate_sha': SHA})}})
+    monkeypatch.setattr(module, 'Kubectl', lambda *_: pytest.fail('must not replace the authenticated local connection'))
+    monkeypatch.setattr(module, 'candidate_follows', lambda *_: pytest.fail('protected check must not require Git'))
+    compared = []
+    def follows(current, candidate):
+        compared.append((current, candidate))
+        return True
+    result = module.check_rollout(args, kube=kube, candidate_ancestry=follows)
+    assert result['status'] == 'skipped_busy' and result['guard']['active']['trials'] == 1
+    assert compared == [(SHA, 'b' * 40)] and calls[0][0] == 'exec'
+    args.kubeconfig = tmp_path / 'foreign-config'
+    with pytest.raises(module.DeploymentError, match='connection'):
+        module.check_rollout(args, kube=kube, candidate_ancestry=follows)
+    assert len(calls) == 1
+
+
 def test_failed_check_cli_reports_failed_without_leaking_exception(monkeypatch, tmp_path, capsys):
     import sys
     monkeypatch.setenv('GITHUB_STEP_SUMMARY', str(tmp_path / 'summary'))

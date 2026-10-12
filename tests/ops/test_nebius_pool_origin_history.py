@@ -280,7 +280,25 @@ def test_pool_opening_uses_qualified_gateway_once(management_history, projected_
     _gateway_runtime_case(management_history, projected_gateway, monkeypatch, damage, action='open')
 
 
-def _gateway_runtime_case(management_history, projected_gateway, monkeypatch, damage, *, action):
+@pytest.mark.parametrize('damage', [None, 'template', 'unrecorded_metadata'])
+def test_gateway_runtime_accepts_journal_metadata_but_not_template_or_live_metadata_drift(
+        management_history, projected_gateway, monkeypatch, damage):
+    _gateway_runtime_case(management_history, projected_gateway, monkeypatch, damage,
+        action='probe', journal_metadata=True)
+
+
+@pytest.mark.parametrize('damage', [None, 'capacity', 'late_capacity_secret', 'late_capacity_backend'])
+def test_gateway_active_probe_uses_read_only_global_capacity_qualification(management_history, projected_gateway, monkeypatch, damage):
+    _gateway_runtime_case(management_history, projected_gateway, monkeypatch, damage, action='active-probe')
+
+
+@pytest.mark.parametrize('damage', [None, 'db_settings', 'token', 'unready', 'secret', 'backend',
+    'history', 'authority', 'kubernetes', 'late_kubernetes_secret', 'late_kubernetes_backend', 'late_kubernetes_pod'])
+def test_gateway_process_probe_does_not_require_all_active_admission(management_history, projected_gateway, monkeypatch, damage):
+    _gateway_runtime_case(management_history, projected_gateway, monkeypatch, damage, action='process')
+
+
+def _gateway_runtime_case(management_history, projected_gateway, monkeypatch, damage, *, action, journal_metadata=False):
     """The new gateway has no running predecessor; only its scalar start is valid."""
     import hashlib
     import json
@@ -291,6 +309,7 @@ def _gateway_runtime_case(management_history, projected_gateway, monkeypatch, da
     from scripts.ops.nebius_pool_migration import PoolMigrationError
     from scripts.ops.nebius_pool_startup_capacity import (
         BOUND_POOL_ACTIVATION_COMMAND,
+        BOUND_POOL_ACTIVE_CAPACITY_COMMAND,
         BOUND_POOL_CAPACITY_COMMAND,
     )
 
@@ -321,6 +340,8 @@ def _gateway_runtime_case(management_history, projected_gateway, monkeypatch, da
     rows['LOOM_POOL_GATEWAY_KUBERNETES']['value'] = json.dumps(projected['kubernetes'])
     expected = copy.deepcopy(original)
     expected['spec']['replicas'] = 1
+    if journal_metadata:
+        expected['metadata'].setdefault('annotations', {})['loom.nebius/development-activation-operation'] = str(uuid4())
     current = copy.deepcopy(expected)
     current['status'] = {'observedGeneration': 1, 'replicas': 1, 'updatedReplicas': 1, 'availableReplicas': 1, 'readyReplicas': 1}
     replica = {'apiVersion': 'apps/v1', 'kind': 'ReplicaSet', 'metadata': {'name': name + '-abc', 'namespace': namespace,
@@ -349,6 +370,8 @@ def _gateway_runtime_case(management_history, projected_gateway, monkeypatch, da
         current['status']['readyReplicas'] = 0
     elif damage == 'uid':
         current['metadata']['uid'] = str(uuid4())
+    elif damage == 'unrecorded_metadata':
+        current['metadata']['annotations']['loom.nebius/development-activation-operation'] = str(uuid4())
     elif damage == 'replica_owner':
         replica['metadata']['ownerReferences'][0]['uid'] = str(uuid4())
     elif damage in {'template', 'account', 'name', 'registration', 'db_reference'}:
@@ -382,11 +405,15 @@ def _gateway_runtime_case(management_history, projected_gateway, monkeypatch, da
         if args[0] == 'exec':
             assert args[:9] == ['exec', '-n', namespace, 'pod/' + pod['metadata']['name'], '-c', 'gateway', '--', 'python', '-c']
             assert 'private-' not in repr(args)
-            if args[9] in {BOUND_POOL_CAPACITY_COMMAND, BOUND_POOL_ACTIVATION_COMMAND}:
+            if args[9] in {BOUND_POOL_CAPACITY_COMMAND, BOUND_POOL_ACTIVE_CAPACITY_COMMAND, BOUND_POOL_ACTIVATION_COMMAND}:
+                if action == 'process':
+                    pytest.fail('continuous process qualification must not lock or require an all-active registry')
                 # This fixture doubles the remote database only; owning
                 # integration tests execute the exact command against PostgreSQL.
                 assert len(args) == 12 and all(len(value) == 64 for value in args[10:])
                 opening = args[9] == BOUND_POOL_ACTIVATION_COMMAND
+                if not opening:
+                    assert args[9] == (BOUND_POOL_ACTIVE_CAPACITY_COMMAND if action == 'active-probe' else BOUND_POOL_CAPACITY_COMMAND)
                 # Bind the exact registration and a fresh challenge; a report
                 # from another installation cannot satisfy this exec contract.
                 import hmac
@@ -445,14 +472,17 @@ def _gateway_runtime_case(management_history, projected_gateway, monkeypatch, da
         return api._run(args)
 
     monkeypatch.setattr(selected, '_run', run)
-    invoke = selected.qualify_gateway_runtime if action == 'probe' else selected.open_pool
+    invoke = (selected.open_pool if action == 'open' else selected.qualify_gateway_process
+        if action == 'process' else selected.qualify_gateway_runtime)
+    options = {'active': True} if action == 'active-probe' else {}
     if damage:
         with pytest.raises(PoolMigrationError) as error:
-            invoke(original=original, expected=expected)
-        assert error.value.stage == ('gateway_runtime' if action == 'probe' else 'activation_open') and 'private-' not in str(error.value)
+            invoke(original=original, expected=expected, **options)
+        assert error.value.stage == ('activation_open' if action == 'open' else 'gateway_runtime') and 'private-' not in str(error.value)
     else:
-        assert invoke(original=original, expected=expected) is None
-        assert len(processes) == (4 if action == 'probe' else 5) and all(row.returncode == 0 for row in processes)
+        assert invoke(original=original, expected=expected, **options) is None
+        assert len(processes) == (5 if action == 'open' else 3 if action == 'process' else 4)
+        assert all(row.returncode == 0 for row in processes)
         assert {path for _, path, _ in wire['requests']} == {'/api/v1/namespaces/' + name for name in wire['namespaces']}
     assert sum(row[0] == 'exec' and row[9] == BOUND_POOL_ACTIVATION_COMMAND for row in calls) == (
         1 if action == 'open' and (damage is None or damage.startswith('open_')) else 0)

@@ -478,6 +478,38 @@ def test_runtime_parent_freezes_complete_fixed_inventory_before_writes(completed
 
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
 @pytest.mark.parametrize('retained', [False], indirect=True)
+@pytest.mark.parametrize('connected', [False, True], indirect=True, ids=['dev-first', 'staging-first'])
+def test_common_catalog_runtime_preparation_and_resume_leave_staging_untouched(completed_pool, publisher_cloud):
+    runtime, request, api, _, _ = parent_install_fixture(completed_pool, publisher_cloud)
+    spec = request.database.manager.retained.request.registration.spec
+    dev, = [row for row in spec.participants if row.environment_class == 'development']
+    staging, = [row for row in spec.participants if row.environment_class == 'staging']
+    plan = runtime.prepare_runtime_install(request)
+    documents = [doc for phase in plan.fixed.values() for doc in phase.values()] + list(plan.targets.values())
+    assert {doc['metadata'].get('namespace') for doc in documents} <= {
+        None, 'loom-dev', 'loom-nebius-management-dev', dev.execution_namespace.name, dev.build_namespace.name}
+    for doc in documents:
+        if doc['kind'] in {'RoleBinding', 'ClusterRoleBinding'}:
+            assert {row.get('namespace') for row in doc['subjects']} <= {
+                dev.execution_namespace.name, 'loom-nebius-management-dev'}
+    policy, = [doc for doc in documents if doc['kind'] == 'ValidatingAdmissionPolicy']
+    assert staging.build_namespace.name not in json.dumps(policy)
+    assert 'retained-staging-artifacts' not in json.dumps(policy)
+    assert runtime.install_development_runtime(request=request, api=api, execute=True)['status'] == 'pending_database'
+    api.database_complete = api.catalog_complete = True
+    result = runtime.install_development_runtime(request=request, api=api, execute=True)
+    assert result['status'] == 'development_runtime_installed_closed'
+    assert result['admission_open'] is False and result['writer_migration_complete'] is False
+    created, patches = list(api.store.creates), list(api.transition.patches)
+    assert runtime.install_development_runtime(request=request, api=api, execute=True) == result
+    assert api.store.creates == created and api.transition.patches == patches
+    assert all(doc['metadata'].get('namespace') not in {
+        staging.execution_namespace.name, staging.build_namespace.name, 'loom-nebius-platform'}
+        for doc in api.store.resources.values())
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
+@pytest.mark.parametrize('retained', [False], indirect=True)
 @pytest.mark.parametrize('damage', ['shared-account', 'shared-key', 'shared-group', 'shared-private-key', 'changed-database'])
 def test_runtime_parent_rejects_shared_cloud_authority_or_changed_predecessor(completed_pool, publisher_cloud, damage):
     from dataclasses import replace
@@ -926,15 +958,18 @@ def runtime_cloud_transport(request, publisher_cloud, monkeypatch, tmp_path):
         assert sdk.identity == scope.account_id and selection.parent_id == scope.tenant_id
         reads.append(('quotas', sdk.identity))
         amounts = {'nodes': 20, 'vcpu': 80, 'memory': 160 * 1024**3, 'storage': 2000 * 1024**3}
-        return SimpleNamespace(items=[_quota(identity[3], identity[4], amounts[name], 0, 1)
+        return SimpleNamespace(items=[_quota(identity[3], identity[4], amounts[name],
+            amounts[name] if mode['damage'] == 'exhausted' else 0, 1)
             for name, identity in spec.quota_identities.items()], next_page_token='')
     async def group(sdk, selection, **kwargs):
         assert sdk.identity == scope.account_id and selection.id == spec.node_group_id
         reads.append(('nodegroup', sdk.identity))
         return SimpleNamespace(metadata=SimpleNamespace(id=spec.node_group_id, resource_version=1,
             parent_id='foreign-cluster' if mode['damage'] == 'cluster' else config['cluster_id']),
-            spec=_node_group_spec(), status=SimpleNamespace(state=_enum('RUNNING'), node_count=0,
-                target_node_count=0, ready_node_count=0, reconciling=False, events=[]))
+            spec=_node_group_spec(), status=SimpleNamespace(
+                state=_enum('DELETING' if mode['damage'] == 'deleting' else 'RUNNING'), node_count=0,
+                target_node_count=1 if mode['damage'] == 'scaling' else 0, ready_node_count=0,
+                reconciling=mode['damage'] == 'scaling', events=[]))
     monkeypatch.setattr(quotas, 'QuotaAllowanceServiceClient',
         lambda sdk: SimpleNamespace(list=lambda *args, **kwargs: allowance(sdk, *args, **kwargs)))
     monkeypatch.setattr(mk8s, 'NodeGroupServiceClient',
@@ -945,6 +980,7 @@ def runtime_cloud_transport(request, publisher_cloud, monkeypatch, tmp_path):
 
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
 @pytest.mark.parametrize('retained', [False], indirect=True)
+@pytest.mark.parametrize('connected', [None, True], indirect=True, ids=['dev-only', 'common-catalog'])
 async def test_runtime_cloud_uses_observer_credentials_and_rejects_authority_or_pool_drift(
         completed_pool, publisher_cloud, monkeypatch, tmp_path):
     from scripts.ops import nebius_development_runtime_external as module
@@ -1239,6 +1275,7 @@ def test_runtime_private_input_rechecks_reject_drift(runtime_private_reader, tmp
 
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
 @pytest.mark.parametrize('retained', [False], indirect=True)
+@pytest.mark.parametrize('connected', [None, True], indirect=True, ids=['dev-only', 'common-catalog'])
 def test_runtime_observer_checks_retained_data_and_successors_without_replaying_originals(completed_pool, publisher_cloud, handoff, monkeypatch):
     runtime, request, parent, state, _ = parent_install_fixture(completed_pool, publisher_cloud)
     parent.database_complete = True
@@ -1473,6 +1510,7 @@ def populate_database_backends(documents):
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
 @pytest.mark.parametrize('retained', [False], indirect=True)
 @pytest.mark.parametrize('probe_kind', ['settings', 'database'])
+@pytest.mark.parametrize('connected', [None, True], indirect=True, ids=['dev-only', 'common-catalog'])
 def test_runtime_process_settings_challenge_uses_actual_owned_pod_and_rejects_drift(
         completed_pool, publisher_cloud, handoff, monkeypatch, probe_kind):
     import hmac
@@ -1503,7 +1541,7 @@ def test_runtime_process_settings_challenge_uses_actual_owned_pod_and_rejects_dr
             return httpx.Response(200, json=listing)
         return original_handle(message)
     spec = request.database.manager.retained.request.registration.spec
-    participant, = spec.participants
+    participant, = [row for row in spec.participants if row.environment_class == 'development']
     machine, = (row for row in spec.machines if row.participant_id == participant.participant_id and row.workload_scope == 'environment')
     roles = {(request.database.manager.retained.request.retained.binding.namespace, 'loom-service'): 'manager',
         ('loom-dev', 'loom-service'): 'service', ('loom-dev', 'loom-control-plane'): 'controller',

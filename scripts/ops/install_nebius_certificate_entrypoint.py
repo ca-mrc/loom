@@ -82,13 +82,14 @@ def _key(value: str) -> str:
     return "ssh-ed25519 " + base64.b64encode(raw).decode()
 
 
-def _entrypoint(source_digest: str, bundle_digest: str) -> bytes:
+def _entrypoint(source_digest: str, bundle_digest: str, *, management_only: bool = False) -> bytes:
     # Isolated Python and verified local source: SSH callers control neither
     # import search paths nor the expected bundle digest nor executable code.
+    command = "loom-nebius-development-management-certificate-v1" if management_only else COMMAND
     return f'''import hashlib, os, stat, sys
 from pathlib import Path
 try:
-    if os.environ.get("SSH_ORIGINAL_COMMAND") != {COMMAND!r}:
+    if os.environ.get("SSH_ORIGINAL_COMMAND") != {command!r}:
         raise ValueError()
     path = Path(__file__).resolve().parent / "gateway.py"
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -108,7 +109,8 @@ raise SystemExit(code)
 '''.encode()
 
 
-def install(content: bytes, *, expected_sha256: str, public_key: str, apply: bool = False) -> dict[str, Any]:
+def install(content: bytes, *, expected_sha256: str, public_key: str, apply: bool = False,
+            management_only: bool = False) -> dict[str, Any]:
     if (not re.fullmatch(r"[0-9a-f]{64}", expected_sha256) or not 0 < len(content) <= MAX_BUNDLE
             or hashlib.sha256(content).hexdigest() != expected_sha256):
         raise InstallError("bundle differs from approved digest")
@@ -118,17 +120,21 @@ def install(content: bytes, *, expected_sha256: str, public_key: str, apply: boo
             names = archive.namelist()
             if len(names) > 10 or len(set(names)) != len(names):
                 raise InstallError("invalid tooling archive")
-            for name, maximum in (("installation.json", 16384), ("scripts/ops/nebius_certificate_gateway.py", 262144)):
+            gateway = ("scripts/ops/nebius_development_management_certificate_gateway.py" if management_only
+                       else "scripts/ops/nebius_certificate_gateway.py")
+            for name, maximum in (("installation.json", 16384), (gateway, 262144)):
                 if archive.getinfo(name).file_size > maximum:
                     raise InstallError("tooling member exceeds bound")
             config = json.loads(archive.read("installation.json"))
-            source = archive.read("scripts/ops/nebius_certificate_gateway.py")
+            source = archive.read(gateway)
         identity = str(UUID(config["installation_id"]))
         if UUID(identity).int == 0:
             raise ValueError()
         state = Path(config["state_dir"])
         root = state.parent
-        if (state.name != "state" or root.name != "nebius-certificates" or root.parent.name != ".loom"
+        expected_root = "nebius-development-management-certificates" if management_only else "nebius-certificates"
+        if (state.name != "state" or root.name != expected_root or root.parent.name != ".loom"
+                or (management_only and config.get("schema") != "loom.nebius-management-certificate-installation.v1")
                 or not re.fullmatch(r"/[A-Za-z0-9_./-]+", str(root)) or root != root.resolve()):
             raise ValueError()
     except (ValueError, KeyError, TypeError, zipfile.BadZipFile):
@@ -139,8 +145,9 @@ def install(content: bytes, *, expected_sha256: str, public_key: str, apply: boo
     for parent in (home, root.parent, ssh):
         _directory(parent)
     destination = root / "authority" / expected_sha256
+    key_label = "loom-nebius-development-management-certificate" if management_only else "loom-nebius-certificate"
     line = (f'restrict,command="/usr/bin/python3 -I {destination}/entrypoint.py" '
-            f'{key} loom-nebius-certificate-{identity}\n').encode()
+            f'{key} {key_label}-{identity}\n').encode()
 
     def check_keys() -> bytes:
         previous = _read(keys, 1024 * 1024)
@@ -152,7 +159,8 @@ def install(content: bytes, *, expected_sha256: str, public_key: str, apply: boo
 
     check_keys()
     source_digest = hashlib.sha256(source).hexdigest()
-    report = {"schema": "loom.nebius-certificate-authority.v1", "status": "installed" if apply else "prepared",
+    schema = "loom.nebius-development-management-certificate-authority.v1" if management_only else "loom.nebius-certificate-authority.v1"
+    report = {"schema": schema, "status": "installed" if apply else "prepared",
               "installation_id": identity, "bundle_sha256": expected_sha256,
               "gateway_sha256": source_digest, "public_key_sha256": hashlib.sha256(key.encode()).hexdigest()}
     if not apply:
@@ -166,7 +174,7 @@ def install(content: bytes, *, expected_sha256: str, public_key: str, apply: boo
         for directory in (root, root / "authority", destination):
             _directory(directory, create=True)
             _sync(directory.parent)
-        files = {"gateway.py": source, "entrypoint.py": _entrypoint(source_digest, expected_sha256),
+        files = {"gateway.py": source, "entrypoint.py": _entrypoint(source_digest, expected_sha256, management_only=management_only),
                  "receipt.json": json.dumps(report, sort_keys=True).encode()}
         for name, value in files.items():
             path = destination / name
@@ -208,10 +216,13 @@ def main() -> int:
     parser.add_argument("--bundle-sha256", required=True)
     parser.add_argument("--public-key", type=Path, required=True)
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--management-only", action="store_true",
+                        help="Install separate exact-host dev-manager authority; never reuse the legacy key or state")
     args = parser.parse_args()
     try:
         result = install(_read(args.bundle, MAX_BUNDLE), expected_sha256=args.bundle_sha256,
-                         public_key=_read(args.public_key, 16384).decode(), apply=args.apply)
+                         public_key=_read(args.public_key, 16384).decode(), apply=args.apply,
+                         management_only=args.management_only)
     except Exception:
         print(json.dumps({"status": "blocked", "reason": "certificate authority installation requires reconciliation"}))
         return 1

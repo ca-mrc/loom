@@ -8,6 +8,7 @@ from typing import Any
 from uuid import UUID
 
 from scripts.ops import nebius_certificates as private_state
+from scripts.ops.nebius_development_pool_registration import retained_development_participant
 from scripts.ops.nebius_development_runtime_setup import DevelopmentDatabaseRuntime
 from scripts.ops.nebius_development_shared_runtime import prepare_shared_runtime
 from scripts.ops.nebius_ingress_stage import _key
@@ -40,7 +41,7 @@ def prepare_catalog_runtime(request: DevelopmentDatabaseRuntime) -> DevelopmentC
         prepare_shared_runtime(request)
         config = request.foundation.inputs.config
         spec = request.manager.retained.request.registration.spec
-        participant, = spec.participants
+        participant = retained_development_participant(request.manager.retained.request)
         selection = participant.target(config['target_id'], 'trial')
         execution, = (row for row in spec.profiles.execution if row.profile_id == selection.profile_id)
         target = ExecutionTargetV1(target_id=config['target_id'], logical_pool_id='nebius-cpu',

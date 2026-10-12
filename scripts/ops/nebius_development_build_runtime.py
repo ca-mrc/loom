@@ -13,6 +13,10 @@ from scripts.ops.nebius_development_build_cloud import (
     DevelopmentRegistryCloudScope,
     registry_public_key,
 )
+from scripts.ops.nebius_development_pool_registration import (
+    development_profile_catalog,
+    retained_development_participant,
+)
 from scripts.ops.nebius_development_runtime_setup import DevelopmentDatabaseRuntime
 
 from loom.nebius_platform_render import _obj, _task_image_builder_documents
@@ -39,10 +43,11 @@ def prepare_build_runtime(request: DevelopmentDatabaseRuntime, *, registry_scope
         prepare_actuator_runtime(request)
         spec = request.manager.retained.request.registration.spec
         config = request.foundation.inputs.config
-        participant, = spec.participants
+        participant = retained_development_participant(request.manager.retained.request)
+        profiles = development_profile_catalog(request.manager.retained.request)
         namespace = participant.build_namespace.name
-        builds = [(profile, 'task', 'artifacts', '') for profile in spec.profiles.task_images] + [
-            (profile, 'application', 'source', 'source-') for profile in spec.profiles.application_images]
+        builds = [(profile, 'task', 'artifacts', '') for profile in profiles.task_images] + [
+            (profile, 'application', 'source', 'source-') for profile in profiles.application_images]
         if not builds:
             raise ValueError
         registry_public_key(scope=registry_scope, config=config, credential=registry_credential,

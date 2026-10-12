@@ -100,6 +100,18 @@ def source_archive_digest(revision: str) -> str:
         raise ValueError('candidate source archive unavailable or checkout changed') from None
 
 
+def source_metadata(revision: str) -> dict[str, str]:
+    """Bind the schema graph to the same clean source as the published images."""
+    from loom.db.schema_startup import service_schema_head
+    from loom.nebius_candidate_contract import candidate_service_schema_head
+
+    before = source_archive_digest(revision)
+    head = candidate_service_schema_head({'service_schema_head': service_schema_head(ROOT / 'database/migrations/alembic.ini')})
+    if source_archive_digest(revision) != before:
+        raise ValueError('candidate schema source changed')
+    return {'source_archive_sha256': before, 'service_schema_head': head}
+
+
 def _unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
@@ -290,6 +302,10 @@ def create_candidate(
         if not isinstance(source_digest, str) or DIGEST.fullmatch(source_digest) is None:
             raise ValueError("invalid candidate source archive digest")
         result["source_archive_sha256"] = source_digest
+    if 'service_schema_head' in document:
+        from loom.nebius_candidate_contract import candidate_service_schema_head
+
+        result['service_schema_head'] = candidate_service_schema_head(document)
     provenance = sha256(encoded(result))
     admissions = [
         _sign_admission(document["images"][component], document["policy_sha256"], provenance,
@@ -549,7 +565,7 @@ def build(args: argparse.Namespace) -> None:
     version = version or "nebius-" + candidate
     if AGENT_VERSION.fullmatch(version) is None:
         raise ValueError("invalid agent version label")
-    source_digest = source_archive_digest(candidate) if mode != "harness-only" else None
+    source = source_metadata(candidate) if mode != "harness-only" else {}
     args.output.mkdir(parents=True, exist_ok=False)
     _diagnostic_dir = args.output
     component_manifest = load_manifest(ROOT / "config/component-ownership.toml")
@@ -565,8 +581,7 @@ def build(args: argparse.Namespace) -> None:
         "registry_prefix": args.registry_prefix,
         "images": {},
     }
-    if source_digest is not None:
-        document['source_archive_sha256'] = source_digest
+    document.update(source)
     with tempfile.TemporaryDirectory(prefix="loom-nebius-build-") as temporary:
         work = Path(temporary)
         scanner = install_trivy(work, architecture="amd64")

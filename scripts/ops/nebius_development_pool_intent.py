@@ -14,10 +14,15 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
-from scripts.ops.nebius_development_management_retained import RetainedManagementReference
+from scripts.ops.nebius_development_management_retained import (
+    RetainedManagementReference,
+    load_retained_management,
+)
 from scripts.ops.nebius_development_pool_registration import (
     DevelopmentPoolRegistrationRequest,
+    development_profile_catalog,
     prepare_registration,
+    retained_development_participant,
 )
 from scripts.ops.nebius_ingress_stage import _key
 from scripts.ops.nebius_pool_application_delivery import derive_application_build_deployment
@@ -37,9 +42,21 @@ class DevelopmentPoolIntent:
     tokens: dict[UUID, str]
 
 
-def _bound(catalog: dict[str, Any], uids: dict[str, str]) -> PoolInstallation:
+def _unbound_participant(reference: RetainedManagementReference, catalog: dict[str, Any]) -> dict[str, Any]:
+    applications = load_retained_management(reference).inputs.deployment.installation.applications
+    if applications is None:
+        raise ValueError()
+    participant, = (row for row in catalog['participants']
+        if UUID(str(row['environment_id'])) == applications.shared.data_environment_id)
+    if not isinstance(participant, dict):
+        raise ValueError()
+    return participant
+
+
+def _bound(reference: RetainedManagementReference, catalog: dict[str, Any],
+           uids: dict[str, str]) -> PoolInstallation:
     value = copy.deepcopy(catalog)
-    participant, = value['participants']
+    participant = _unbound_participant(reference, value)
     names = [participant[field]['name'] for field in _FIELDS]
     if set(uids) != set(names):
         raise ValueError()
@@ -52,9 +69,9 @@ def _bound(catalog: dict[str, Any], uids: dict[str, str]) -> PoolInstallation:
 
 def _preview(intent: DevelopmentPoolIntent) -> DevelopmentPoolRegistrationRequest:
     """Validation only; callers must never register or render this preview."""
-    participant, = intent.catalog['participants']
+    participant = _unbound_participant(intent.reference, intent.catalog)
     uids = {participant[field]['name']: str(uid) for field, uid in zip(_FIELDS, _PREVIEW, strict=True)}
-    return prepare_registration(reference=intent.reference, spec=_bound(intent.catalog, uids))
+    return prepare_registration(reference=intent.reference, spec=_bound(intent.reference, intent.catalog, uids))
 
 
 def prepare_intent(*, reference: RetainedManagementReference, catalog: dict[str, Any],
@@ -66,11 +83,12 @@ def prepare_intent(*, reference: RetainedManagementReference, catalog: dict[str,
         spec, before = request.registration.spec, request.retained.inputs.deployment
         config, candidate = before.installation.foundation.platform_config, request.registration.candidate
         derive_application_build_deployment(before, spec)
-        participant, = spec.participants
+        participant = retained_development_participant(request)
+        profiles = development_profile_catalog(request)
         capabilities = {kind for target in participant.targets for kind in target.workload_kinds}
         if not {'trial', 'task_image_build'} <= capabilities:
             raise ValueError()
-        for execution in spec.profiles.execution:
+        for execution in profiles.execution:
             if (execution.candidate_sha != candidate['candidate_sha']
                     or execution.runtime_image_ref != candidate['images']['execution_runtime']['image_ref']
                     or execution.runtime_binary_sha256 != request.retained.inputs.profile['runtime_binary_sha256']):
@@ -89,8 +107,14 @@ def prepare_intent(*, reference: RetainedManagementReference, catalog: dict[str,
             # selector; reject unusable immutable catalogs before any writes.
             if (selector.get('loom.nebius/node-os') != 'linux'
                     or selector.get('loom.nebius/node-arch') != {'x86_64': 'amd64', 'arm64': 'arm64'}[architecture]
-                    or {'kubernetes.io/os', 'kubernetes.io/arch'} & selector.keys()
-                    or settings.service_image != candidate['images']['service']['image_ref']
+                    or {'kubernetes.io/os', 'kubernetes.io/arch'} & selector.keys()):
+                raise ValueError()
+            # Other participants keep their own published runtime/storage. Their
+            # attachment must be qualified by the protected handoff, not rebound
+            # to the development candidate or buckets during preparation.
+            selected = profiles.task_images if bucket == 'artifacts' else profiles.application_images
+            if profile in selected and (
+                    settings.service_image != candidate['images']['service']['image_ref']
                     or (settings.storage_endpoint, settings.storage_region, settings.source_bucket) != (
                         config['storage_endpoint'], config['region'], config['buckets'][bucket])):
                 raise ValueError()
@@ -112,7 +136,7 @@ def bind_namespaces(intent: DevelopmentPoolIntent, uids: dict[str, str]) -> Deve
         intent = prepare_intent(reference=intent.reference, catalog=intent.catalog, tokens=intent.tokens)
         if any(UUID(value) in _PREVIEW or str(UUID(value)) != value for value in uids.values()):
             raise ValueError()
-        return prepare_registration(reference=intent.reference, spec=_bound(intent.catalog, uids))
+        return prepare_registration(reference=intent.reference, spec=_bound(intent.reference, intent.catalog, uids))
     except Exception:
         raise ValueError('development pool namespace receipt unqualified') from None
 
@@ -120,7 +144,7 @@ def bind_namespaces(intent: DevelopmentPoolIntent, uids: dict[str, str]) -> Deve
 def namespace_documents(intent: DevelopmentPoolIntent) -> dict[str, dict[str, Any]]:
     request = _preview(intent)
     spec = request.registration.spec
-    participant, = spec.participants
+    participant = retained_development_participant(request)
     result = {}
     for binding in (participant.execution_namespace, participant.build_namespace):
         document = _namespace(binding.name)
@@ -134,7 +158,7 @@ def delivery_documents(intent: DevelopmentPoolIntent, request: DevelopmentPoolRe
                        ) -> dict[str, dict[str, dict[str, Any]]]:
     """Fixed credentials/catalog and stopped gateway, deliberately excluding RBAC."""
     spec, binding = request.registration.spec, request.registration.binding
-    participant, = spec.participants
+    participant = retained_development_participant(request)
     if request != bind_namespaces(intent, {row.name: str(row.uid)
             for row in (participant.execution_namespace, participant.build_namespace)}):
         raise ValueError('development pool delivery differs from intent')
@@ -143,6 +167,8 @@ def delivery_documents(intent: DevelopmentPoolIntent, request: DevelopmentPoolRe
         kubernetes_endpoint=request.retained.inputs.deployment.installation.foundation.platform_config['kubernetes_api_server'])
     material = {}
     for machine in spec.machines:
+        if machine.role == 'participant' and machine.participant_id != participant.participant_id:
+            continue
         destinations = [binding.namespace]
         if machine.role == 'observer':
             destinations = [participant.execution_namespace.name]

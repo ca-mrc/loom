@@ -1,6 +1,8 @@
 """Startup observes exact current SQL authority; it never replays registration."""
 from __future__ import annotations
 
+import asyncio
+import copy
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -23,6 +25,85 @@ from loom_service.pool_management.installation import PoolInstallation, register
 from tests.integration.test_nebius_pool_installation import add_application_builder, installation
 from tests.integration.test_nebius_pool_registry import sessions as sessions
 from tests.unit.test_nebius_application_image_renderer import build_inputs as build_inputs
+
+
+async def test_participant_registry_reader_follows_real_refresh_without_writes_or_mutation_lock(sessions):
+    from scripts.ops import nebius_pool_startup_database as reader
+
+    from loom_service.pool_management.locks import acquire_pool_mutation_lock
+    from loom_service.pool_management.participant_refresh import refresh_participant
+    from tests.integration.test_nebius_pool_activation_fence import read_sql
+    from tests.integration.test_nebius_pool_participant_refresh import reserved, setup, snapshot
+
+    request, _ = await setup(sessions)
+    await reserved(sessions, request, request.before.participants[1])
+    url = sessions.kw['bind'].url.render_as_string(hide_password=False)
+    query = reader.pool_participant_authority_sql(request)
+    for action, state in ((None, 'ready'), ('fence', 'fenced'), ('stage', 'staged'), ('open', 'complete')):
+        if action is not None:
+            async with sessions.begin() as session:
+                assert (await refresh_participant(session, request, action=action))['status'] == state
+        before = await snapshot(sessions)
+        # Ordinary admission holds these locks. Observation must remain a
+        # READ ONLY snapshot, not call the refresh transaction's observe action.
+        async with sessions.begin() as session:
+            await acquire_pool_mutation_lock(session)
+            await session.get(NebiusPoolBinding, request.before.pool_id, with_for_update=True)
+            report = await asyncio.to_thread(read_sql, url, query)
+        assert report == {'schema': 'loom.pool-participant-authority.v1',
+            'operation_id': str(request.after.operation_id), 'pool_id': str(request.before.pool_id),
+            'before_sha256': digest(request.before.model_dump(mode='json')),
+            'after_sha256': digest(request.after.model_dump(mode='json')), 'read_only': True, 'state': state}
+        assert reader.qualify_participant_authority_report(request, report, states=frozenset({state})) == state
+        for damage in ('operation_id', 'before_sha256', 'after_sha256', 'pool_id', 'read_only', 'extra'):
+            changed = copy.deepcopy(report)
+            changed[damage] = 1 if damage == 'read_only' else 'foreign'
+            with pytest.raises(ValueError, match='participant_authority'):
+                reader.qualify_participant_authority_report(request, changed, states=frozenset({state}))
+        with pytest.raises(ValueError, match='participant_authority'):
+            reader.qualify_participant_authority_report(request, report,
+                states=frozenset({'fenced' if state != 'fenced' else 'ready'}))
+        assert await snapshot(sessions) == before
+
+
+@pytest.mark.parametrize('damage', ['neighbor-fenced', 'selected-binding', 'pool-closed', 'extra-machine',
+    'revoked-token', 'expired-token'])
+async def test_participant_registry_reader_rejects_drift_during_staged_release(sessions, damage):
+    from scripts.ops import nebius_pool_startup_database as reader
+
+    from loom_service.pool_management.participant_refresh import refresh_participant
+    from tests.integration.test_nebius_pool_activation_fence import read_sql
+    from tests.integration.test_nebius_pool_participant_refresh import setup, snapshot
+
+    request, _ = await setup(sessions)
+    for action in ('fence', 'stage'):
+        async with sessions.begin() as session:
+            await refresh_participant(session, request, action=action)
+    async with sessions.begin() as session:
+        if damage == 'neighbor-fenced':
+            await session.execute(update(NebiusPoolParticipant).where(
+                NebiusPoolParticipant.participant_id == request.before.participants[1].participant_id).values(phase='fenced'))
+        elif damage == 'selected-binding':
+            await session.execute(update(NebiusPoolParticipant).where(
+                NebiusPoolParticipant.participant_id == request.participant_id).values(binding_sha256='0' * 64,
+                    binding_revision=request.after.participants[0].binding_revision + 1))
+        elif damage == 'pool-closed':
+            await session.execute(update(NebiusPoolBinding).where(
+                NebiusPoolBinding.pool_id == request.before.pool_id).values(mode='closed'))
+        elif damage == 'extra-machine':
+            await session.execute(insert(NebiusPoolMachine).values(machine_id=uuid4(), pool_id=request.before.pool_id,
+                participant_id=None, role='gateway', credential_epoch=1, phase='active'))
+        else:
+            values = ({'revoked_at': datetime.now(UTC)} if damage == 'revoked-token' else
+                {'expires_at': datetime.now(UTC) - timedelta(seconds=1)})
+            await session.execute(update(Token).where(Token.token_hash == bytes.fromhex(request.before.machines[0].token_sha256)).values(**values))
+    before = await snapshot(sessions)
+    url = sessions.kw['bind'].url.render_as_string(hide_password=False)
+    report = await asyncio.to_thread(read_sql, url, reader.pool_participant_authority_sql(request))
+    assert report['state'] is None
+    with pytest.raises(ValueError, match='participant_authority'):
+        reader.qualify_participant_authority_report(request, report, states=frozenset({'ready', 'fenced', 'staged', 'complete'}))
+    assert await snapshot(sessions) == before
 
 
 def observe(url, spec, *, mode='closed'):

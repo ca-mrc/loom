@@ -32,7 +32,7 @@ from tests.integration.test_service_execution_leases import (
 from tests.support.execution_image_admission import IMAGE_ADMISSION_KEYRING
 
 
-async def setup(sessions, *, origin=True):
+async def setup(sessions, *, origin=True, legacy_catalog=False):
     from loom_execution_actuator.pool_execution_outbox import PoolExecutionOutbox
 
     environment_id = uuid4()
@@ -41,18 +41,20 @@ async def setup(sessions, *, origin=True):
     now = datetime.now(UTC)
     async with sessions.begin() as session:
         trial_id, target = await _seed_ready_trial(session, now=now,
-            pool_origin=source.model_dump(mode="json") if origin else None)
+            pool_origin=source.model_dump(mode="json") if origin else None,
+            catalog_environment="development" if legacy_catalog else "staging")
         await _configure_scheduler_trial(session, trial_id=trial_id, now=now)
         # A global grant replaces this physical allocator, not local cost/admission.
         await session.execute(update(ExecutionCapacityPolicy).values(enabled=False))
     participant = PoolParticipantV1(participant_id=uuid4(), installation_id=uuid4(),
         environment_id=environment_id, environment_class="staging", incarnation=uuid4(),
+        legacy_catalog_environment="development" if legacy_catalog else None,
         pool_id=uuid4(), binding_revision=1, admission_epoch=2,
         execution_namespace={"name": target.namespace_name, "uid": uuid4()},
         build_namespace={"name": "loom-build-staging", "uid": uuid4()},
         targets=[{"target_id": target.target_id, "profile_id": uuid4(), "workload_kinds": ["trial", "verifier"]}])
     journal = PoolExecutionOutbox(sessions=sessions, participant=participant,
-        environment="staging", logical_pool_id="nebius-cpu", image_admission_keyring=IMAGE_ADMISSION_KEYRING)
+        environment=participant.catalog_environment, logical_pool_id="nebius-cpu", image_admission_keyring=IMAGE_ADMISSION_KEYRING)
     return journal, trial_id, target
 
 
@@ -85,6 +87,33 @@ async def test_proposal_survives_restart_without_consuming_local_attempt_or_budg
     assert proposed.request.execution.runtime.main.argv == ("/bin/true",)
     assert proposed.request.execution.runtime.task_revision_sha256 == "sha256:" + "2" * 64
     await assert_unclaimed(sessions, trial_id)
+
+
+async def test_legacy_staging_catalog_proposes_and_attaches_without_rewriting_target(sessions):
+    from loom_service.pool_management.auth import resolve_pool_machine
+    from loom_service.pool_management.origin import qualify_pool_origin
+    from tests.integration.test_nebius_pool_auth import credential
+
+    journal, trial_id, target = await setup(sessions, legacy_catalog=True)
+    assert target.environment == "development"
+    proposed = await journal.propose(trial_id=trial_id, target_id=target.target_id)
+    await assert_unclaimed(sessions, trial_id)
+    raw, *_ = await credential(sessions, participant_config=journal.participant)
+    async with sessions.begin() as session:
+        principal = await resolve_pool_machine(session, "Bearer " + raw)
+        assert principal.participant_epoch == journal.participant.admission_epoch
+        assert await qualify_pool_origin(session, principal, proposed.request.origin,
+            target_id=target.target_id, workload_kind="trial") == 1
+    attached = await journal.accept_grant(proposed.request.key, grant(proposed))
+    assert attached.phase == "attached"
+    async with sessions() as session:
+        lease = await session.get(ServiceExecutionLease, attached.lease_id)
+        assert lease.target_id == target.target_id and lease.trial_id == trial_id
+        retained = await session.get(ServiceExecutionTarget, target.target_id)
+        assert retained.environment == "development"
+        assert retained.spec_json == target.model_dump(mode="json")
+        assert await session.scalar(select(func.count()).select_from(ServiceExecutionTarget)) == 1
+        assert (await session.get(Trial, trial_id)).state == "claimed"
 
 
 async def test_concurrent_grant_replay_attaches_once_with_final_immutable_job_identity(sessions):

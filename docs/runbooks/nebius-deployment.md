@@ -382,6 +382,56 @@ loss or an unknown create outcome requires reconciliation, not blind recreation.
 Both private-only and opted-in histories remain usable by manager-only TLS renewal;
 renewal does not modify the shared dev route or wildcard certificate.
 
+#### Issue the independent dev manager certificate
+
+Before installing the independent manager, issue its own exact-host certificate
+with the protected `development-management-certificate` operation. It uses the
+existing issuer's DNS-01 hooks, locked Certbot, watchdog and retained recovery
+journals, but has a separate forced command, key, configuration and state root.
+Its separately bundled gateway leaves the existing legacy certificate, ingress
+and management payloads byte-for-byte unchanged; installing dev-manager authority
+does not require widening or replacing their exact-bundle grants.
+It does not modify Kubernetes, the shared wildcard certificate, or the legacy
+management route. No policy-quota increase is needed for certificate issuance.
+
+Configure `NEBIUS_DEVELOPMENT_MANAGEMENT_CERTIFICATE_INSTALLATION_JSON` in the
+protected `nebius-integration` Environment. Use the certificate installation
+fields described below, with schema
+`loom.nebius-management-certificate-installation.v1`, **no `child_domain` field**,
+a new installation UUID and the independent manager's exact `management_host`.
+Its state path must be
+`<operator-home>/.loom/nebius-development-management-certificates/state`.
+Use a hostname outside the personal child zone which is not owned by an existing
+route, and the approved DNS credential file. Never repoint the legacy
+`NEBIUS_CERTIFICATE_INSTALLATION_JSON` or copy its retained issuer history.
+
+From exact integrated source, export the locked certificate requirements as in
+the protected certificate procedure below. Run its bundle preparation command
+with `--management-only`, using the dedicated configuration variable above.
+Preview and then apply `install_nebius_certificate_entrypoint.py` with the same
+`--management-only` flag, the reviewed bundle digest and a **new** Ed25519 public
+key. Omission of the flag or use of the legacy root/schema is rejected. Existing
+SSH grants are preserved; an already authorized key cannot gain this authority.
+Store the matching private key only as
+`NEBIUS_DEVELOPMENT_MANAGEMENT_CERTIFICATE_SSH_KEY` in that protected Environment.
+
+After verifying the exact-bundle grant and configuration, dispatch:
+
+```bash
+gh workflow run nebius-rollout.yml --repo ca-mrc/loom --ref dev \
+  -f operation=development-management-certificate
+```
+
+This manual action uses the common operation queue and cannot select application
+rollout. Neither the runner nor workflow falls back to a legacy certificate key
+or configuration. Its sanitized receipt must match the selected installation and
+single hostname. Supply the returned immutable generation and issuer configuration
+to the independent manager's initial installation; a certificate receipt alone
+does not establish DNS routing, manager readiness or multi-owner acceptance.
+For renewal, issue through this same retained issuer and then use the separate
+manager renewal operation below. Preserve ambiguous issuance/DNS journals and
+reconcile them before retrying; issuance has no automatic write retries.
+
 #### Renew the independent dev manager certificate
 
 Do not edit initial installation inputs or replay the initial installer to renew
@@ -525,7 +575,7 @@ cutover's inputs or manually patching its live workload.
 Do not hand-mount credentials or treat the renderer as installation authority.
 
 The internal independent-dev pool-registration stage can qualify a completed dev
-manager and register its shared-development participant in that manager's database
+manager and register the initial participant catalog in that manager's database
 with admission **closed**. It reuses retained installation history and the existing
 fixed registration Job, not legacy migration receipts. It is not exposed as a
 standalone operator command. A closed receipt does not authorize task/build
@@ -554,11 +604,18 @@ pin the selection. Inputs live at
 with owner-only permissions. The `loom.nebius-development-pool-inputs.v1` input
 contains `retained` original-management history, `operator_connection`, `catalog`
 and private `tokens` keyed by machine UUID. The catalog follows
-`loom.pool-installation.v1` but omits `uid` in both participant namespace bindings:
-only actual namespace-create receipts may supply those values. It must include
+`loom.pool-installation.v1` but omits `uid` in both **development** participant
+namespace bindings: only actual namespace-create receipts may supply those values.
+Dev is selected by its retained application data-environment ID, not list order.
+Other participants in the same initial catalog must retain their bound namespace
+UIDs; this preparation creates no namespaces or machine-token Secrets for them.
+Do not treat catalog inclusion as a qualified staging attachment: publication,
+live identities, writer fencing and recovery still need the protected handoff.
+The catalog is immutable after initial registration; do not install a dev-only
+catalog expecting a later replay to add staging. Dev profiles must include
 trial/task-image target capabilities and dedicated application-image-build profiles;
 published runtime binary/image identities and the original shared storage/schema
-must match. Task-image profiles read ordinary TaskSet bundles from
+must match the retained dev installation. Dev task-image profiles read ordinary TaskSet bundles from
 `buckets.artifacts`; application-image profiles read personal application archives
 from `buckets.source`. These are distinct intake paths even though both use the
 shared build pool. Do not point task-image profiles at the application-source
@@ -646,6 +703,61 @@ not zero usage and do not require a certificate-refresh project before execution
 API, identity and local trust-configuration failures remain blocking; TLS checks
 must not be disabled. This operation never clears staging
 guards or takes over another environment's capacity writer.
+
+The fresh activation preparation is currently an internal read-only projection,
+not an operator command. It requires the completed runtime anchor and child
+receipts, preserves their resource UIDs and rejects build-policy additions that
+could skip enforcement. Its generated gateway/namespace targets are not
+permission to apply them manually; the protected live activation and recovery
+composition must be connected and qualified first.
+
+### Shared-pool handoff delivery
+
+The separate `shared-pool-preflight`, `shared-pool-install` and
+`shared-pool-recover` actions use the protected `nebius-rollout` workflow,
+`NEBIUS_SHARED_POOL_SSH_KEY` and `NEBIUS_SHARED_POOL_OPERATION_JSON`. They do not
+extend the CLOSED-runtime key. They are source-implemented delivery routes, not
+evidence that a grant or multi-owner environment is installed. Complete ordinary
+rollout continuity and qualify all installation prerequisites before invoking a
+live handoff; do not acquire a staging guard while waiting for these prerequisites.
+
+The fixed operation schema is `loom.nebius-shared-pool-operation.v1`. It selects
+the exact integrated `source_sha`, management `installation_id`, registered pool
+`operation_id`, namespace `loom-nebius-management-dev`, and the SHA-256 of
+`OPERATOR_HOME/.loom/nebius-shared-pool/INSTALLATION_UUID/POOL_OPERATION_UUID/inputs.json`.
+The `loom.nebius-shared-pool-inputs.v1` private document contains:
+
+- `runtime`: the completed runtime operation path and SHA-256. Its archived source
+  and runtime material must match; retired operator CA/key files are not reopened.
+- `legacy`: the completed original pool/rollback selector.
+- `staging_observation_file` and `staging_observation_sha256`: the captured
+  current-source staging observation, not an arbitrary target manifest.
+- `development_guard`: the exact database-bound result of the read-only guard
+  observer. The parent reconstructs the plan and qualifies current live state;
+  this input cannot assert readiness or bypass the census.
+- `operator_connection`: a current, separately protected Kubernetes endpoint,
+  CA and credential file. Private bytes are rechecked around authentication and
+  throughout the operation.
+
+Prepare an immutable bundle from the exact clean integrated source with
+`scripts.ops.nebius_shared_pool_rollout --operation preflight --requirements
+LOCKED_REQUIREMENTS --evidence-dir PRIVATE_EVIDENCE --prepare-bundle PRIVATE_BUNDLE`.
+The operator grants only that bundle digest through
+`scripts.ops.install_nebius_shared_pool_entrypoint`. Existing SSH grants remain
+unchanged. The source-bound bootstrap imports only the standard library before
+installing locked dependencies and the exact-source wheels. Private inputs and
+credentials are not included in the bundle or public result.
+
+Preflight observes current authority without acquiring guards or creating handoff
+history. `pending` names the exact forward/recovery phase; it does not mean
+admission is open. Preserve every anchor and child receipt and repeat only the
+unchanged protected action after the pending condition progresses. A `blocked`
+result or lost reply requires inspection of retained evidence before another
+invocation; never delete uncertain intent to force a write retry. Recovery cannot
+start without an anchored handoff or replace a completed successful handoff.
+`shared_pool_handoff_complete` reports open admission only after current parent
+qualification; `staging_restored_dev_closed` reports terminal recovery with dev
+closed. Neither replaces actual owner build/deploy/task/result acceptance.
 
 Subsequent lifecycle changes use the same management context:
 
@@ -2599,6 +2711,106 @@ open the pool manually. Successful resource staging is not a successful database
 registration or permission to switch controllers. The ordinary management image
 refresh does not authorize this migration's credential, configuration or RBAC
 changes. The connected protected switchover remains required before deployment.
+The source-level participant-refresh transaction, candidate projection and retained
+normal-release input are not standalone operator commands. The internal ordinary
+rollout connection retains its original candidate/render, guard owner and exact
+publication run attempt/artifact reference in deployment intent and evidence.
+Recovery must load the same private input-digest anchor; it cannot recapture a
+partly updated cluster or choose another publication of the same commit. The
+internal host entry now composes the phase-aware pool adapter and completed-release
+predecessor promotion. Its new-release preparation resolves the exact publication,
+qualifies a complete source/receipt-bound live inventory, retains it once, and
+runs protected preflight without acquiring a guard. Retrying preparation reloads
+the original anchor; recovery never prepares again. The runner and normal workflow
+route are source-implemented; protected installation, route selection and live
+acceptance remain required. Local retained inputs are not installed readiness.
+
+The operator-only `scripts.ops.install_nebius_pool_participant_entrypoint`
+installer adds separate participant-release authority; do not invoke it with an
+existing rollout key or widen the exact-bundle shared-handoff grant. From reviewed
+integrated source, first build the tooling archive locally:
+
+```bash
+uv export --locked --no-default-groups --extra cluster --group nebius-certificates --no-emit-workspace \
+  --format requirements-txt --output-file PRIVATE_REQUIREMENTS
+uv run --no-sync python -m scripts.ops.nebius_pool_participant_rollout bundle \
+  --source-sha INTEGRATED_SOURCE_SHA --requirements PRIVATE_REQUIREMENTS \
+  --output PRIVATE_TOOLING_BUNDLE
+```
+
+Keep both outputs outside the repository. The builder uses the pinned uv version,
+committed source wheels and exact archive membership, refuses a dirty/unintegrated
+checkout, and prints the bundle digest. It does not contact the operator or cluster.
+Then preview the grant:
+
+```bash
+uv run --no-sync python -m scripts.ops.install_nebius_pool_participant_entrypoint \
+  --bundle PRIVATE_TOOLING_BUNDLE --bundle-sha256 REVIEWED_BUNDLE_SHA256 \
+  --public-key DEDICATED_PUBLIC_KEY \
+  --configuration PRIVATE_HOST_CONFIGURATION \
+  --configuration-sha256 REVIEWED_CONFIGURATION_SHA256
+```
+
+Use absolute private input paths. The hash-pinned host configuration uses schema
+`loom.nebius-participant-host.v1` and selects the original `shared_operation` and
+`shared_operation_sha256`, `operator_connection`, `executable`, `state_root` and
+`anchor_dir`. Keep it under the operator's `.loom` directory. State and anchor
+roots are respectively `.loom/nebius-participant-releases/INSTALLATION_UUID` and
+`.loom/nebius-participant-anchors/INSTALLATION_UUID`; the installer creates empty
+private roots, not completed history. Current operator CA and credential files
+must be distinct private files, not aliases of historical inputs.
+
+After reviewing the exact bundle and configuration, `--apply` prepares and
+qualifies tooling, then atomically appends a distinct restricted Ed25519 key while
+preserving other grants. Its only commands are
+`loom-nebius-participant-prepare-v1`, `loom-nebius-participant-execute-v1`, and
+`loom-nebius-participant-recover-v1`. Stdin carries command data, never replacement
+code, host paths or credentials. Tooling lives under
+`.loom/nebius-participant-delivery/INSTALLATION_UUID`. Partial or tampered releases
+and the eight-release retention bound stop installation for reconciliation;
+the installer does not delete old releases or reconstruct private history.
+Installation itself does not acquire a guard, deploy resources, or prove live
+readiness. Keep the guard unacquired during installation and workflow preparation.
+
+Store this dedicated key in the protected `nebius-integration` Environment as
+`NEBIUS_PARTICIPANT_SSH_KEY`. It uses the existing verified
+`NEBIUS_DEPLOY_SSH_TARGET` and `NEBIUS_DEPLOY_SSH_KNOWN_HOSTS`; confirm the target
+matches the host configuration before installation. The ordinary read-only check
+continues using its existing deploy key and kubeconfig.
+
+`NEBIUS_ROLLOUT_MODE=shared` explicitly selects the installed shared route for
+normal rollout/recovery. Leave it unset or `standalone` before the handoff; unknown
+values fail closed. Install and qualify the dedicated authority before the
+protected handoff, then select shared routing after completed handoff readback
+and before resuming normal rollout scheduling. Never use standalone routing as
+recovery for a shared-pool installation. Workflow serialization must exclude an
+ordinary rollout between handoff and this route change.
+
+Shared rollout sends only the exact publication selection for preparation. Before
+rendering, the installed reader obtains that approved commit's rendering source
+from GitHub, without a host Git checkout or runner-supplied source paths. Its
+existing repository-contents read access must cover the exact-commit archive API.
+An unavailable or invalid archive stops preparation before guard acquisition;
+never substitute the installed tooling's templates. Recovery and later baseline
+capture use the original retained rendering, not a new download.
+
+Before execute/recover, the runner persists one `deployment-RUN-ATTEMPT.json` record and a GitHub
+deployment intent with the original release reference and guard/platform binding.
+Lost transport responses stop without retry; use the existing protected `recover`
+operation with its original failed run ID. Recovery loads that original reference,
+not a new preparation or publication for the same SHA. Retain both GitHub and
+operator evidence. GitHub success requires a matching completed host report;
+busy/skipped outcomes remain inactive. Source tests do not establish installed
+handoff, resumed task execution or multi-owner acceptance.
+
+The shared rollout records the pre-upgrade backup Job name before creation and
+rechecks guard ownership before that write. A failed or unconfirmed backup keeps
+the shared release's pause for recovery, even before registry refresh starts.
+That dispatch record is not a UID-bound Job lineage receipt or permission to
+recreate an uncertain backup; those remain part of the protected parent connection.
+Do not invoke refresh directly against the live database,
+remove global settings to pass the standalone deployer, or release a local idle
+guard using a capacity sample taken before the participant was reopened.
 Its initial closure stage keeps the existing rollout guard in each idle data
 environment while waiting for the others. An interrupted attempt must resume with
 the same operation, candidate, parent journal and independent anchor. Do not clear

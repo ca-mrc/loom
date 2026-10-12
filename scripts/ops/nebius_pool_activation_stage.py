@@ -7,6 +7,7 @@ in place; it never grants permission to restore legacy writers.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -92,6 +93,90 @@ def _guard_choices(item: dict[str, str]) -> tuple[str, ...]:
     return (*original, 'fenced') if item['fence'] == 'intent' else original
 
 
+def advance_activation_record(*, api: PoolActivationAPI, record: dict[str, Any], participants: tuple[str, ...],
+        observe: Callable[[], tuple[str, dict[str, str]]], save: Callable[[], None], cancel: bool = False) -> dict[str, Any]:
+    """Shared one-dispatch mechanics; the owning parent qualifies/locks history.
+
+    Both parents provide their own validated record, retained-history checks and
+    bound transports. This helper neither invents predecessor evidence nor owns
+    recovery authorization. Unknown writes remain observation-only.
+    """
+    def result(status: str, mode: str) -> dict[str, Any]:
+        return {'status': status, 'operation_id': record['operation_id'],
+            'admission_open': mode == 'global', 'legacy_restore_allowed': False}
+
+    if not cancel and record['cancellation'] != 'prepared':
+        raise ValueError
+    if cancel:
+        if record['cancellation'] == 'prepared':
+            record['cancellation'] = 'intent'
+            save()
+            try:
+                api.fence_pool()
+            except Exception:
+                pass  # Intent is durable; only readback can settle it.
+        mode, _ = observe()
+        if mode != 'fenced':
+            return result('pending_pool_fence', mode)
+        if record['cancellation'] != 'fenced':
+            record['cancellation'] = 'fenced'
+            save()
+        for key in participants:
+            item = record['guards'][key]
+            if item['fence'] == 'fenced':
+                continue
+            observe()
+            if item['fence'] == 'prepared':
+                item['fence'] = 'intent'
+                save()
+                try:
+                    api.fence_guard(key)
+                except Exception:
+                    pass
+            _, states = observe()
+            if states[key] != 'fenced':
+                return result('pending_guard_fence', 'fenced')
+            item['fence'] = 'fenced'
+            save()
+        mode, _ = observe()
+        return result('pool_activation_cancelled', mode)
+
+    if record['opening'] == 'prepared':
+        api.qualify_runtime()
+        observe()
+        record['opening'] = 'intent'
+        save()
+        try:
+            api.open_pool()
+        except Exception:
+            pass
+    mode, _ = observe()
+    if mode != 'global':
+        return result('pending_pool_opening', mode)
+    if record['opening'] != 'opened':
+        record['opening'] = 'opened'
+        save()
+    for key in participants:
+        item = record['guards'][key]
+        if item['release'] == 'released':
+            continue
+        observe()
+        if item['release'] == 'prepared':
+            item['release'] = 'intent'
+            save()
+            try:
+                api.release_guard(key)
+            except Exception:
+                pass
+        _, states = observe()
+        if states[key] != 'open':
+            return result('pending_guard_release', 'global')
+        item['release'] = 'released'
+        save()
+    mode, _ = observe()
+    return result('pool_activation_complete', mode)
+
+
 def advance_pool_activation(*, request: PoolCutoverRequest, api: PoolActivationAPI,
                             state_dir: Path, anchor_dir: Path, cancel: bool = False) -> dict[str, Any]:
     """Advance fixed opening or cancellation; uncertain outcomes are readback-only."""
@@ -136,84 +221,12 @@ def advance_pool_activation(*, request: PoolCutoverRequest, api: PoolActivationA
             def save() -> None:
                 private_state._atomic_json(state / 'activation.json', record)
 
-            def result(status: str, mode: str) -> dict[str, Any]:
-                return {'status': status, 'operation_id': identity['operation_id'],
-                    'admission_open': mode == 'global', 'legacy_restore_allowed': False}
-
             observe()
             marker = anchor / (identity['operation_id'] + '-activation.json')
             if not marker.exists():
                 private_state._atomic_json(marker, identity)
                 save()
-            if not cancel and record['cancellation'] != 'prepared':
-                raise ValueError
-            if cancel:
-                if record['cancellation'] == 'prepared':
-                    record['cancellation'] = 'intent'
-                    save()
-                    try:
-                        api.fence_pool()
-                    except Exception:
-                        pass  # Intent is durable; only readback can settle it.
-                mode, _ = observe()
-                if mode != 'fenced':
-                    return result('pending_pool_fence', mode)
-                if record['cancellation'] != 'fenced':
-                    record['cancellation'] = 'fenced'
-                    save()
-                for key in participants:
-                    item = record['guards'][key]
-                    if item['fence'] == 'fenced':
-                        continue
-                    observe()
-                    if item['fence'] == 'prepared':
-                        item['fence'] = 'intent'
-                        save()
-                        try:
-                            api.fence_guard(key)
-                        except Exception:
-                            pass
-                    _, states = observe()
-                    if states[key] != 'fenced':
-                        return result('pending_guard_fence', 'fenced')
-                    item['fence'] = 'fenced'
-                    save()
-                mode, _ = observe()
-                return result('pool_activation_cancelled', mode)
-
-            if record['opening'] == 'prepared':
-                api.qualify_runtime()
-                observe()
-                record['opening'] = 'intent'
-                save()
-                try:
-                    api.open_pool()
-                except Exception:
-                    pass
-            mode, _ = observe()
-            if mode != 'global':
-                return result('pending_pool_opening', mode)
-            if record['opening'] != 'opened':
-                record['opening'] = 'opened'
-                save()
-            for key in participants:
-                item = record['guards'][key]
-                if item['release'] == 'released':
-                    continue
-                observe()
-                if item['release'] == 'prepared':
-                    item['release'] = 'intent'
-                    save()
-                    try:
-                        api.release_guard(key)
-                    except Exception:
-                        pass
-                _, states = observe()
-                if states[key] != 'open':
-                    return result('pending_guard_release', 'global')
-                item['release'] = 'released'
-                save()
-            mode, _ = observe()
-            return result('pool_activation_complete', mode)
+            return advance_activation_record(api=api, record=record, participants=participants,
+                observe=observe, save=save, cancel=cancel)
     except Exception:
         raise ValueError('pool_activation_unconfirmed_preserve_evidence') from None

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import copy
+import gzip
 import hashlib
 import io
 import json
+import tarfile
 import zipfile
 from uuid import UUID
 
@@ -99,6 +101,165 @@ async def test_protected_publication_resolves_actual_squash_not_nonexistent_dev_
     assert bundle.candidate_id == IDENTITY
     assert bundle.candidate["candidate_sha"] == SHA
     assert bundle.profile["candidate_sha"] == SHA
+
+
+@pytest.mark.parametrize('status,current,merge_base,ahead,behind,want', [
+    ('ahead', HEAD, HEAD, 12, 0, True),
+    ('identical', SHA, SHA, 0, 0, True),
+    ('behind', HEAD, SHA, 0, 3, False),
+    ('diverged', HEAD, 'c' * 40, 2, 3, False),
+    ('ahead', HEAD, 'c' * 40, 12, 0, None),
+    ('ahead', HEAD, HEAD, True, 0, None),
+    ('identical', HEAD, SHA, 0, 0, None),
+    ('unknown', HEAD, HEAD, 0, 0, None),
+])
+async def test_exact_candidate_ancestry_uses_scoped_github_reader(publication, status, current, merge_base, ahead, behind, want):
+    from loom.execution_image_admission import ImageAdmissionKeyring
+    from loom_service.environment_management.candidates import (
+        GitHubCandidateCatalog,
+        ProtectedPublication,
+    )
+
+    reference, responses, payload, keyring, candidate = publication
+    responses[f'compare/{current}...{SHA}'] = {'status': status,
+        'base_commit': {'sha': current}, 'merge_base_commit': {'sha': merge_base},
+        'ahead_by': ahead, 'behind_by': behind}
+    async with httpx.AsyncClient(transport=github_transport(responses, payload)) as http:
+        catalog = GitHubCandidateCatalog(http, token='test-github-secret',
+            publications=[ProtectedPublication.model_validate(reference)],
+            keyring=ImageAdmissionKeyring.from_json(keyring), registry_prefix=candidate['registry_prefix'])
+        assert callable(getattr(catalog, 'candidate_follows', None)), 'protected source comparison still requires Git'
+        if want is None:
+            with pytest.raises(ValueError):
+                await catalog.candidate_follows(candidate_id=IDENTITY, current_sha=current)
+        else:
+            assert await catalog.candidate_follows(candidate_id=IDENTITY, current_sha=current) is want
+
+
+@pytest.mark.parametrize('status', [401, 403, 404, 429, 500])
+async def test_unavailable_commit_comparison_never_authorizes_a_release(publication, status):
+    from loom.execution_image_admission import ImageAdmissionKeyring
+    from loom_service.environment_management.candidates import (
+        GitHubCandidateCatalog,
+        ProtectedPublication,
+    )
+
+    reference, _, _, keyring, candidate = publication
+
+    def respond(request):
+        assert request.url.path == f'/repositories/1281629473/compare/{HEAD}...{SHA}'
+        assert request.headers['Authorization'] == 'Bearer test-github-secret'
+        return httpx.Response(status)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        catalog = GitHubCandidateCatalog(http, token='test-github-secret',
+            publications=[ProtectedPublication.model_validate(reference)],
+            keyring=ImageAdmissionKeyring.from_json(keyring), registry_prefix=candidate['registry_prefix'])
+        with pytest.raises(httpx.HTTPStatusError):
+            await catalog.candidate_follows(candidate_id=IDENTITY, current_sha=HEAD)
+
+
+def rendering_archive(*, damage=None):
+    data = io.BytesIO()
+    prefix = 'ca-mrc-loom-' + SHA[:7]
+    selected = {'deploy/k8s/web.yaml': b'selected template',
+        'src/loom/__init__.py': b'',
+        'src/loom/nebius_platform_render.py': b'selected module',
+        'scripts/ops/render_nebius_platform.py': b'selected renderer'}
+    if damage == 'missing-package':
+        del selected['src/loom/__init__.py']
+    with tarfile.open(fileobj=data, mode='w', format=tarfile.PAX_FORMAT,
+            pax_headers={'comment': HEAD if damage == 'commit' else SHA}) as archive:
+        for name, raw in {**selected, 'README.md': b'not renderer input'}.items():
+            member = tarfile.TarInfo(prefix + '/' + name)
+            member.size = len(raw)
+            if damage == 'symlink' and name == 'deploy/k8s/web.yaml':
+                member.type, member.linkname, member.size = tarfile.SYMTYPE, '/etc/passwd', 0
+            if damage == 'hardlink' and name == 'deploy/k8s/web.yaml':
+                member.type, member.linkname, member.size = tarfile.LNKTYPE, prefix + '/README.md', 0
+            archive.addfile(member, io.BytesIO(raw))
+            if damage == 'duplicate':
+                archive.addfile(member, io.BytesIO(raw))
+        # The real repository has this non-rendering symlink. It must not be
+        # extracted, but must not make legitimate rendering source unavailable.
+        ignored = tarfile.TarInfo(prefix + '/deploy/.env')
+        ignored.type, ignored.linkname = tarfile.SYMTYPE, '../../private.env'
+        archive.addfile(ignored)
+        if damage in {'traversal', 'absolute', 'foreign-root'}:
+            name = {'traversal': prefix + '/src/loom/../../escape',
+                'absolute': '/tmp/escape', 'foreign-root': 'foreign/src/loom/extra.py'}[damage]
+            archive.addfile(tarfile.TarInfo(name))
+    return gzip.compress(data.getvalue()), selected
+
+
+@pytest.mark.parametrize('damage', [None, 'commit', 'symlink', 'hardlink', 'duplicate', 'traversal',
+    'absolute', 'foreign-root', 'download-size', 'expanded-size', 'missing-source', 'invalid-gzip', 'missing-package'])
+async def test_render_source_is_exact_bounded_and_never_extracts_unselected_files(publication, monkeypatch, damage):
+    from loom.execution_image_admission import ImageAdmissionKeyring
+    from loom_service.environment_management import candidates as module
+
+    reference, _, _, keyring, candidate = publication
+    payload, selected = rendering_archive(damage=damage)
+    if damage == 'download-size':
+        monkeypatch.setattr(module, '_MAX_SOURCE_DOWNLOAD', len(payload) - 1, raising=False)
+    elif damage == 'expanded-size':
+        monkeypatch.setattr(module, '_MAX_SOURCE_EXPANDED', 100, raising=False)
+    elif damage == 'missing-source':
+        payload = gzip.compress(b'\0' * 10240)
+    elif damage == 'invalid-gzip':
+        payload = b'invalid archive'
+
+    def respond(request):
+        if request.url.host == 'api.github.com':
+            assert request.url.path == f'/repositories/1281629473/tarball/{SHA}'
+            assert request.headers['Authorization'] == 'Bearer test-github-secret'
+            return httpx.Response(302, headers={'Location': f'https://codeload.github.com/ca-mrc/loom/legacy.tar.gz/{SHA}?token=private'})
+        assert request.url.host == 'codeload.github.com'
+        assert 'Authorization' not in request.headers and 'Cookie' not in request.headers
+        return httpx.Response(200, content=payload)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond), auth=('default', 'credential'),
+            headers={'Authorization': 'other-secret'}, cookies={'session': 'secret'}) as http:
+        catalog = module.GitHubCandidateCatalog(http, token='test-github-secret',
+            publications=[module.ProtectedPublication.model_validate(reference)],
+            keyring=ImageAdmissionKeyring.from_json(keyring), registry_prefix=candidate['registry_prefix'])
+        assert callable(getattr(catalog, 'render_source', None)), 'selected rendering source is not retrieved'
+        if damage is None:
+            assert await catalog.render_source(candidate_id=IDENTITY) == selected
+        else:
+            with pytest.raises(ValueError):
+                await catalog.render_source(candidate_id=IDENTITY)
+
+
+@pytest.mark.parametrize('location', [
+    f'http://codeload.github.com/ca-mrc/loom/legacy.tar.gz/{SHA}',
+    f'https://codeload.github.com.evil.test/ca-mrc/loom/legacy.tar.gz/{SHA}',
+    f'https://user:secret@codeload.github.com/ca-mrc/loom/legacy.tar.gz/{SHA}',
+    f'https://codeload.github.com:444/ca-mrc/loom/legacy.tar.gz/{SHA}',
+    f'https://codeload.github.com/fork/loom/legacy.tar.gz/{SHA}',
+    f'https://codeload.github.com/ca-mrc/loom/legacy.tar.gz/{HEAD}',
+    'https://codeload.github.com/ca-mrc/loom/legacy.tar.gz/dev',
+])
+async def test_render_source_refuses_redirect_outside_exact_repository_commit(publication, location):
+    from loom.execution_image_admission import ImageAdmissionKeyring
+    from loom_service.environment_management.candidates import (
+        GitHubCandidateCatalog,
+        ProtectedPublication,
+    )
+
+    reference, _, _, keyring, candidate = publication
+
+    def respond(request):
+        assert request.url.host == 'api.github.com', 'unqualified redirect must never be contacted'
+        return httpx.Response(302, headers={'Location': location})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        catalog = GitHubCandidateCatalog(http, token='test-github-secret',
+            publications=[ProtectedPublication.model_validate(reference)],
+            keyring=ImageAdmissionKeyring.from_json(keyring), registry_prefix=candidate['registry_prefix'])
+        assert callable(getattr(catalog, 'render_source', None)), 'source redirect validation is missing'
+        with pytest.raises(ValueError):
+            await catalog.render_source(candidate_id=IDENTITY)
 
 
 @pytest.mark.parametrize("candidate_repository", ["qianyi-sun/loom", "ca-mrc/loom"])

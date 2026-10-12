@@ -45,6 +45,41 @@ def test_published_source_digest_measures_archive_bytes_not_git_identity(source_
     assert result != 'sha256:' + hashlib.sha256(revision.encode()).hexdigest()
 
 
+def test_publication_schema_is_derived_from_the_same_clean_source(source_checkout):
+    root, _, _ = source_checkout
+    schema = root / 'database/migrations'
+    (schema / 'versions').mkdir(parents=True)
+    (schema / 'alembic.ini').write_text('[alembic]\n')
+    (schema / '.gitignore').write_text('__pycache__/\n')
+    (schema / 'versions/one.py').write_text("revision = 'fixture_1'\ndown_revision = None\n")
+    (schema / 'versions/two.py').write_text("revision = 'fixture_2'\ndown_revision = 'fixture_1'\n")
+    subprocess.run(['git', 'add', 'database'], cwd=root, check=True, capture_output=True)
+    subprocess.run(['git', 'commit', '-qm', 'candidate schema'], cwd=root, check=True, capture_output=True)
+    sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip()
+    archive = subprocess.check_output(['git', 'archive', '--format=tar', sha], cwd=root)
+    assert callable(getattr(candidate, 'source_metadata', None)), 'publication lacks source-bound schema metadata'
+    assert candidate.source_metadata(sha) == {
+        'source_archive_sha256': 'sha256:' + hashlib.sha256(archive).hexdigest(), 'service_schema_head': 'fixture_2'}
+    (schema / 'versions/two.py').write_text("revision = 'foreign'\ndown_revision = 'fixture_1'\n")
+    with pytest.raises(ValueError):
+        candidate.source_metadata(sha)
+
+
+@pytest.mark.parametrize('head', ['0175', '', None, True, 'head', 'heads', 'base', 'bad revision', '../foreign'])
+def test_candidate_schema_metadata_is_validated_and_bound_to_signed_provenance(tmp_path, head):
+    document, private, keyring = inputs(tmp_path)
+    document['service_schema_head'] = head
+    if head != '0175':
+        with pytest.raises(ValueError, match='schema'):
+            candidate.create_candidate(document, signing_key=private, signing_key_id='publisher', keyring_json=keyring)
+        return
+    manifest, profile = candidate.create_candidate(document,
+        signing_key=private, signing_key_id='publisher', keyring_json=keyring)
+    assert manifest['service_schema_head'] == '0175'
+    expected = candidate.sha256(candidate.encoded(manifest))
+    assert all(row['statement']['provenance_sha256'] == expected for row in profile['image_admission']['admissions'])
+
+
 @pytest.mark.parametrize('change', ['tracked', 'untracked', 'wrong_revision'])
 def test_source_proof_rejects_checkout_that_cannot_describe_published_images(source_checkout, change):
     root, revision, _ = source_checkout
@@ -574,6 +609,9 @@ def test_publication_builds_selected_images_and_reuses_platform_admission(
     else:
         manifest = json.loads((output / "candidate.json").read_text())
         assert manifest['source_archive_sha256'] == 'sha256:' + 'f' * 64
+        from loom.db.schema_startup import service_schema_head
+
+        assert manifest['service_schema_head'] == service_schema_head(candidate.ROOT / 'database/migrations/alembic.ini')
         assert manifest['repository'] == repository
         profile = json.loads((output / "runtime-profile.json").read_text())
         assert profile["execution_class_id"] == (

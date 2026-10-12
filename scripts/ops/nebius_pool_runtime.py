@@ -205,7 +205,7 @@ def wire_participant(*, request: PoolMigrationRequest, participant_id: UUID, man
         api_setting = "LOOM_SVC_POOL_SUBMISSION_SOURCE_JSON"
         if (cp_setting in cp_env or worker_setting in worker_env or api_setting in api_env
                 or api_env.get("LOOM_SVC_SERVICE_MODE", {"value": "full"}).get("value") != "full"
-                or cp_env["LOOM_CP_SERVICE_EXECUTION_SCHEDULER_ENVIRONMENT"].get("value") != participant.environment_class
+                or cp_env["LOOM_CP_SERVICE_EXECUTION_SCHEDULER_ENVIRONMENT"].get("value") != participant.catalog_environment
                 or worker_env["LOOM_EXECUTION_ACTUATOR_NAMESPACE"].get("value") != participant.execution_namespace.name):
             raise ValueError
         target_id = worker_env["LOOM_EXECUTION_ACTUATOR_TARGET_ID"]["value"]
@@ -241,7 +241,7 @@ def wire_participant(*, request: PoolMigrationRequest, participant_id: UUID, man
             raise ValueError
         token_path = mount_machine_token(cp_pod, machine_id=machine.machine_id, service_image=service_image)
         mount_machine_token(worker_pod, machine_id=machine.machine_id, service_image=service_image, default_uid=65532)
-        runtime = PoolRuntimeSettings(participant=participant, environment=participant.environment_class,
+        runtime = PoolRuntimeSettings(participant=participant, environment=participant.catalog_environment,
             logical_pool_id=profile.settings.pool_id, management_origin=management_origin, bearer_token_file=Path(token_path))
         cp_container["env"].append({"name": cp_setting, "value": runtime.model_dump_json()})
         worker_container["env"].append({"name": worker_setting, "value": runtime.model_dump_json()})

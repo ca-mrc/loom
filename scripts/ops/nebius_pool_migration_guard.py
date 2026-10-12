@@ -57,6 +57,7 @@ from scripts.ops.nebius_pool_runtime_settings import (
     PoolSettingsComponent,
     expected_pool_runtime_settings,
 )
+from scripts.ops.nebius_pool_startup_capacity import BOUND_TARGET_COLLECTOR_COMMAND
 from sqlalchemy.engine import make_url
 
 from loom.nebius_application_database import _MIGRATION_READY
@@ -619,12 +620,16 @@ class KubectlPoolGuardAPI:
         if original_replicas == 0:
             # Only the newly created closed gateway has no running predecessor.
             # Its journal-selected start may change replicas, never its template.
+            # The parent also journals Deployment metadata such as an activation
+            # annotation. Match that metadata against the actual workload below,
+            # not against the pre-start snapshot; it cannot change the Pod spec.
             started = copy.deepcopy(original)
             started['spec']['replicas'] = 1
             if (expected is None or isinstance(target, PoolGuardTarget)
                     or namespace != self.request.registration.binding.namespace or name != 'loom-pool-gateway'
                     or retained.get('serviceAccountName') != 'loom-pool-gateway'
-                    or retained['containers'][0]['name'] != 'gateway' or not _matches(workload, started, _uid(original))):
+                    or retained['containers'][0]['name'] != 'gateway'
+                    or _stable(workload)['spec'] != _stable(started)['spec']):
                 raise ValueError
         if (original.get("apiVersion") != "apps/v1" or original.get("kind") != "Deployment"
                 or set(selector) != {"matchLabels"} or len(selector["matchLabels"]) != 1
@@ -939,6 +944,53 @@ class KubectlPoolGuardAPI:
             'status': 'unavailable' if failures else 'available' if samples else 'not_observed',
             'checks': len(samples), 'unavailable': len(failures), 'reasons': sorted(set(failures)),
         })
+
+    def observe_collector_publication(self, target: PoolGuardTarget, *, expected: dict[str, Any],
+                                      publication: dict[str, Any]) -> bool:
+        """Read target-mode publication inside the restored original controller.
+
+        The protected recovery observer supplies source-qualified public scope
+        and the completed collector's receipt. No SQL writer, capacity admission
+        or alternate controller can be selected. Pending evidence still requires
+        all closing process, backend, credential and input checks.
+        """
+        try:
+            controller, wanted = copy.deepcopy(expected), copy.deepcopy(publication)
+
+            def scope() -> None:
+                if (target not in self.request.guards or target.database is None
+                        or digest(migration_contract(self.request)) != self.contract_sha256
+                        or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256
+                        or _stable(controller)['spec'] != _stable(target.controller)['spec']
+                        or expected != controller or publication != wanted):
+                    raise ValueError
+
+            def identity(pod: dict[str, Any]) -> tuple[Any, ...]:
+                return (_uid(pod), copy.deepcopy(pod['status']['containerStatuses']),
+                    copy.deepcopy(pod['status'].get('initContainerStatuses', [])))
+
+            scope()
+            before_database = identity(self._database(target))
+            before = self._runtime(target, expected=controller)
+            before_process = identity(before)
+            url = self._database_url(target)
+            nonce = secrets.token_hex(32)
+            response = hmac.new(bytes.fromhex(nonce), str(PostgresDsn(url)).encode(), 'sha256').hexdigest()
+            report = self._run(['exec', '-n', target.namespace, 'pod/' + before['metadata']['name'],
+                '-c', 'loom-control-plane', '--', 'python', '-c', BOUND_TARGET_COLLECTOR_COMMAND,
+                json.dumps(wanted, sort_keys=True, separators=(',', ':')), nonce, response])
+            if report != {'status': 'qualified'} and not (
+                    set(report) == {'status', 'reason'} and report['status'] == 'pending'
+                    and report['reason'] in {'missing', 'superseded', 'future', 'stale'}):
+                raise ValueError
+            if (identity(self._runtime(target, expected=controller)) != before_process
+                    or self._database_url(target) != url
+                    or identity(self._database(target)) != before_database):
+                raise ValueError
+            scope()
+            return bool(report['status'] == 'qualified')
+        except Exception:
+            raise PoolMigrationError('collector_publication') from None
 
     def _qualify_runtime_binding(self, target: PoolDatabaseReadTarget, *, original: dict[str, Any],
                                  component: str, url_variable: str, credential_uid: UUID,

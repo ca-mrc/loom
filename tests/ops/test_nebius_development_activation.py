@@ -1,0 +1,466 @@
+"""Fresh activation consumes genuine completed runtime history, never migration."""
+from __future__ import annotations
+
+import copy
+import hashlib
+import importlib
+import json
+import ssl
+from pathlib import Path
+from uuid import uuid4
+
+import httpx
+import pytest
+from httpx import Client
+from scripts.ops import nebius_certificates as private_state
+from scripts.ops.nebius_management_stage import _canonical_quantities
+from tests.ops.test_nebius_development_pool_retained import (
+    application_management_inputs as application_management_inputs,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    application_material as application_material,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    build_inputs as build_inputs,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    capacity_checks as capacity_checks,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    cloud as cloud,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    collector_cloud as collector_cloud,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    completed_pool as completed_pool,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    connected as connected,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    development_inputs as development_inputs,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    entry as entry,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    handoff as handoff,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    installation as installation,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    inventory as inventory,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    live as live,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    management_inputs as management_inputs,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    manager_entry as manager_entry,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    material as material,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    original_cloud as original_cloud,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    original_development_inputs as original_development_inputs,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    original_manager_entry as original_manager_entry,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    original_platform_inputs as original_platform_inputs,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    original_pool_inputs as original_pool_inputs,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    parent_install_fixture,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    platform_inputs as platform_inputs,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    pool_entry as pool_entry,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    pool_inputs as pool_inputs,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    preflight as preflight,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    provider_checks as provider_checks,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    publication as publication,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    published_source as published_source,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    publisher_cloud as publisher_cloud,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    retained as retained,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    route as route,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    source_checkout as source_checkout,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    tls_material as tls_material,
+)
+
+pytestmark = [
+    pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True),
+    pytest.mark.parametrize('retained', [False], indirect=True),
+]
+
+
+def loader():
+    name = 'scripts.ops.nebius_development_runtime_retained'
+    if importlib.util.find_spec(name) is None:
+        pytest.fail('completed fresh runtime predecessor is missing')
+    return importlib.import_module(name)
+
+
+@pytest.fixture
+def completed_runtime(completed_pool, publisher_cloud):
+    runtime, request, api, state, anchor = parent_install_fixture(completed_pool, publisher_cloud)
+    api.database_complete = api.catalog_complete = True
+    assert runtime.install_development_runtime(request=request, api=api, execute=True)['status'] == 'development_runtime_installed_closed'
+    return runtime, request, api, state, anchor
+
+
+def test_completed_runtime_load_is_readonly_and_keeps_real_successors(completed_runtime, monkeypatch):
+    runtime, request, api, state, anchor = completed_runtime
+    module = loader()
+
+    def no_write(*args, **kwargs):
+        pytest.fail('historical activation predecessor attempted a write')
+
+    monkeypatch.setattr(private_state, '_atomic_json', no_write)
+    monkeypatch.setattr(runtime, 'install_development_runtime', no_write)
+    result = module.load_completed_runtime(request)
+    assert result.request == request and result.request is not request
+    assert result.plan == api.plan
+    assert result.state_dir == state and result.anchor_dir == anchor.parent
+    assert {state / 'installation.json', anchor} <= result.files.keys()
+    assert all(path.read_bytes() == raw for path, raw in result.files.items())
+    for key, actual in api.store.resources.items():
+        expected = result.resources[key]
+        assert expected['metadata']['uid'] == actual['metadata']['uid']
+        if actual['kind'] in {'Deployment', 'CronJob'}:
+            assert _canonical_quantities(expected)['spec'] == _canonical_quantities(actual)['spec']
+    gateway = result.resources['Deployment:loom-nebius-management-dev:loom-pool-gateway']
+    assert gateway['spec']['replicas'] == 0
+    assert result.resources['Deployment:loom-dev:loom-service']['spec']['replicas'] == 1
+    assert result.resources['Deployment:loom-dev:loom-control-plane']['spec']['replicas'] == 1
+    assert result.history_sha256.startswith('sha256:')
+    # Returned mutable projections must not alias the caller's request or disk.
+    result.resources['Deployment:loom-dev:loom-service']['spec']['replicas'] = 99
+    assert module.load_completed_runtime(request).resources['Deployment:loom-dev:loom-service']['spec']['replicas'] == 1
+
+
+@pytest.mark.parametrize('damage', ['incomplete', 'lost-anchor', 'lost-parent', 'lost-child', 'changed-child', 'forged-proof', 'wrong-uid', 'wrong-observed'])
+def test_completed_runtime_rejects_incomplete_or_rewritten_history(completed_runtime, damage):
+    _, request, _, state, anchor = completed_runtime
+    module = loader()
+    parent = json.loads((state / 'installation.json').read_bytes())
+    child = state / 'material/stage.json'
+    if damage == 'incomplete':
+        parent['phases']['start'].update(status='started', sha256=None)
+    elif damage.startswith('lost-'):
+        {'lost-anchor': anchor, 'lost-parent': state / 'installation.json', 'lost-child': child}[damage].unlink()
+    elif damage == 'changed-child':
+        value = json.loads(child.read_bytes())
+        value['phase'] = 'foreign-phase'
+        private_state._atomic_json(child, value)
+    elif damage == 'forged-proof':
+        parent['phases']['database']['proof']['database']['role_oid'] = 0
+    elif damage in {'wrong-uid', 'wrong-observed'}:
+        value = json.loads(child.read_bytes())
+        item = next(iter(value['resources'].values()))
+        if damage == 'wrong-uid':
+            item['uid'] = 'not-a-uid'
+        else:
+            item['observed']['metadata']['name'] = 'foreign-resource'
+        private_state._atomic_json(child, value)
+        parent['phases']['material']['sha256'] = hashlib.sha256(child.read_bytes()).hexdigest()
+    if damage not in {'lost-parent', 'changed-child'}:
+        private_state._atomic_json(state / 'installation.json', parent)
+    with pytest.raises(ValueError, match='completed development runtime unqualified'):
+        module.load_completed_runtime(request)
+
+
+def test_completed_runtime_rejects_changed_qualified_request(completed_runtime):
+    _, request, _, _, _ = completed_runtime
+    module = loader()
+    changed = copy.deepcopy(request)
+    changed.database.database[0]['data']['setup.json'] = '{}'
+    with pytest.raises(ValueError, match='completed development runtime unqualified'):
+        module.load_completed_runtime(changed)
+
+
+def test_completed_runtime_rejects_history_changing_during_load(completed_runtime, monkeypatch):
+    _, request, _, state, _ = completed_runtime
+    module = loader()
+    read = private_state._private_read
+    target = state / 'start/transition.json'
+    original = target.read_bytes()
+    reads = 0
+
+    def changed(path, *args, **kwargs):
+        nonlocal reads
+        raw = read(path, *args, **kwargs)
+        if Path(path) == target:
+            reads += 1
+            if reads > 1:
+                return original + b'\n'
+        return raw
+
+    monkeypatch.setattr(private_state, '_private_read', changed)
+    with pytest.raises(ValueError, match='completed development runtime unqualified'):
+        module.load_completed_runtime(request)
+
+
+@pytest.mark.parametrize('connected', [None, True], indirect=True, ids=['dev-only', 'common-catalog'])
+def test_activation_preparation_limits_writes_to_retained_gateway_and_build_namespace(completed_runtime, monkeypatch):
+    _, request, _, _, _ = completed_runtime
+    name = 'scripts.ops.nebius_development_activation'
+    if importlib.util.find_spec(name) is None:
+        pytest.fail('fresh development activation preparation is missing')
+    module = importlib.import_module(name)
+
+    def no_write(*args, **kwargs):
+        pytest.fail('activation preparation attempted a write')
+
+    monkeypatch.setattr(private_state, '_atomic_json', no_write)
+    plan = module.prepare_development_activation(request)
+    spec = request.database.manager.retained.request.registration.spec
+    participant, = [row for row in spec.participants if row.environment_class == 'development']
+    namespaces = {namespace.name for row in spec.participants
+        for namespace in (row.execution_namespace, row.build_namespace)}
+    assert plan.runtime.request == request
+    assert plan.gateway_original['spec']['replicas'] == 0
+    assert plan.gateway_target['spec']['replicas'] == 1
+    assert plan.gateway_target['metadata']['namespace'] == 'loom-nebius-management-dev'
+    pod = plan.gateway_target['spec']['template']['spec']
+    assert pod['serviceAccountName'] == 'loom-pool-gateway'
+    assert pod['containers'][0]['image'] == request.database.manager.publication.bundle.candidate['images']['service']['image_ref']
+    assert {row['metadata']['namespace'] for row in plan.authority.values()
+        if row['kind'] in {'Role', 'RoleBinding'}} == namespaces
+    for row in plan.authority.values():
+        if row['kind'] == 'ClusterRole':
+            assert row['rules'] == [{'apiGroups': [''], 'resources': ['namespaces'], 'verbs': ['get'],
+                'resourceNames': sorted(namespaces)}]
+        for subject in row.get('subjects', []):
+            assert subject == {'kind': 'ServiceAccount', 'name': 'loom-pool-gateway', 'namespace': 'loom-nebius-management-dev'}
+    before, after = plan.build_namespace_original, plan.build_namespace_target
+    assert before['metadata']['name'] == after['metadata']['name'] == participant.build_namespace.name
+    assert before['metadata']['uid'] == str(participant.build_namespace.uid)
+    assert before['metadata']['labels']['pod-security.kubernetes.io/enforce'] == 'restricted'
+    assert after['metadata']['labels']['pod-security.kubernetes.io/enforce'] == 'privileged'
+    assert {row['kind'] for row in plan.build_policy.values()} == {
+        'ValidatingAdmissionPolicy', 'ValidatingAdmissionPolicyBinding'}
+    assert plan.input_digest.startswith('sha256:')
+    assert not any(key in plan.authority for key in plan.runtime.resources)
+
+
+@pytest.mark.parametrize('damage', ['skip-policy', 'skip-binding', 'unbound-parameters'])
+def test_activation_refuses_semantically_widened_build_policy_receipt(completed_runtime, damage):
+    _, request, _, state, _ = completed_runtime
+    from scripts.ops.nebius_development_activation import prepare_development_activation
+
+    path = state / 'isolation/stage.json'
+    child = json.loads(path.read_bytes())
+    kind = 'ValidatingAdmissionPolicyBinding' if damage == 'skip-binding' else 'ValidatingAdmissionPolicy'
+    item = next(row for row in child['resources'].values() if row['desired']['kind'] == kind)
+    for field in ('expected', 'observed'):
+        spec = item[field]['spec']
+        if damage == 'skip-policy':
+            spec['matchConditions'] = [{'name': 'skip-all-builds', 'expression': 'false'}]
+        elif damage == 'skip-binding':
+            spec['matchResources']['namespaceSelector']['matchExpressions'] = [
+                {'key': 'loom.nebius/never-present', 'operator': 'Exists'}]
+        else:
+            spec['paramKind'] = {'apiVersion': 'v1', 'kind': 'ConfigMap'}
+    private_state._atomic_json(path, child)
+    parent = json.loads((state / 'installation.json').read_bytes())
+    parent['phases']['isolation']['sha256'] = hashlib.sha256(path.read_bytes()).hexdigest()
+    private_state._atomic_json(state / 'installation.json', parent)
+    with pytest.raises(ValueError, match='development activation intent unqualified'):
+        prepare_development_activation(request)
+
+
+def test_activation_accepts_only_harmless_kubernetes_policy_defaults(completed_runtime):
+    _, request, _, state, _ = completed_runtime
+    from scripts.ops.nebius_development_activation import prepare_development_activation
+
+    path = state / 'isolation/stage.json'
+    child = json.loads(path.read_bytes())
+    for item in child['resources'].values():
+        kind = item['desired']['kind']
+        if kind not in {'ValidatingAdmissionPolicy', 'ValidatingAdmissionPolicyBinding'}:
+            continue
+        for field in ('expected', 'observed'):
+            # Kubernetes v1 SetDefaults_MatchResources, not arbitrary additions.
+            match = item[field]['spec']['matchConstraints' if kind == 'ValidatingAdmissionPolicy' else 'matchResources']
+            match.setdefault('namespaceSelector', {})
+            match.setdefault('objectSelector', {})
+            match.setdefault('matchPolicy', 'Equivalent')
+    private_state._atomic_json(path, child)
+    parent = json.loads((state / 'installation.json').read_bytes())
+    parent['phases']['isolation']['sha256'] = hashlib.sha256(path.read_bytes()).hexdigest()
+    private_state._atomic_json(state / 'installation.json', parent)
+    plan = prepare_development_activation(request)
+    assert len(plan.build_policy) == 2
+    assert plan.build_namespace_target['metadata']['labels']['pod-security.kubernetes.io/enforce'] == 'privileged'
+
+
+@pytest.fixture
+def gateway_permission_review(completed_runtime):
+    from scripts.ops import nebius_development_activation as activation
+    from scripts.ops.nebius_management_transport import ManagementKubernetesTransport
+
+    _, request, _, _, _ = completed_runtime
+    plan = activation.prepare_development_activation(request)
+    participant, = request.database.manager.retained.request.registration.spec.participants
+    manager = 'loom-nebius-management-dev'
+    pool_names = sorted([participant.execution_namespace.name, participant.build_namespace.name])
+    state = {'subject': {'kind': 'ServiceAccount', 'namespace': manager, 'name': 'loom-pool-gateway'},
+        'granted': False, 'damage': None, 'calls': [], 'binding_reads': 0, 'rules_changed': False}
+    binding_uid = str(uuid4())
+    role_uids = {kind: str(uuid4()) for kind in ('Role', 'ClusterRole')}
+
+    def respond(message):
+        state['calls'].append(message)
+        path = message.url.path
+        if message.method == 'GET':
+            assert 'Impersonate-User' not in message.headers
+            collection = path.rsplit('/', 1)[-1]
+            assert path == '/apis/rbac.authorization.k8s.io/v1/' + collection
+            kind = {'rolebindings': 'RoleBinding', 'clusterrolebindings': 'ClusterRoleBinding',
+                'roles': 'Role', 'clusterroles': 'ClusterRole'}[collection]
+            items, continuation = [], ''
+            if kind in role_uids:
+                changed = state['rules_changed'] and state['damage'] == kind + '-drift'
+                items = [{'apiVersion': 'rbac.authorization.k8s.io/v1', 'kind': kind,
+                    'metadata': {'name': 'foreign', 'uid': role_uids[kind], 'resourceVersion': '2' if changed else '1',
+                        **({'namespace': 'loom-nebius-platform-execution'} if kind == 'Role' else {})},
+                    'rules': [{'apiGroups': ['batch'], 'resources': ['jobs'],
+                        'verbs': ['get', 'delete'] if changed else ['get']}]}]
+            if kind == 'RoleBinding':
+                # Put the foreign grant on page two so incomplete discovery fails.
+                if message.url.params.get('continue') == 'next':
+                    items = [{'apiVersion': 'rbac.authorization.k8s.io/v1', 'kind': kind,
+                        'metadata': {'name': 'outside-dev', 'namespace': 'loom-nebius-platform-execution',
+                            'uid': binding_uid, 'resourceVersion': '1'},
+                        'roleRef': {'apiGroup': 'rbac.authorization.k8s.io',
+                            'kind': 'ClusterRole' if state['damage'] == 'ClusterRole-drift' else 'Role', 'name': 'foreign'},
+                        'subjects': [copy.deepcopy(state['subject'])]}]
+                    if state['damage'] == 'binding-drift' and state['binding_reads'] > 1:
+                        items[0]['metadata']['resourceVersion'] = '2'
+                else:
+                    state['binding_reads'] += 1
+                    continuation = 'next'
+            return httpx.Response(200, json={'apiVersion': 'rbac.authorization.k8s.io/v1',
+                'kind': kind + 'List', 'metadata': {'resourceVersion': '50', 'continue': continuation}, 'items': items})
+        # No persistent POST, PATCH, DELETE, token issue, or staging guard call.
+        assert message.method == 'POST'
+        assert path == '/apis/authorization.k8s.io/v1/selfsubjectrulesreviews'
+        assert message.headers['Impersonate-User'] == f'system:serviceaccount:{manager}:loom-pool-gateway'
+        assert message.headers.get_list('Impersonate-Group') == [
+            'system:serviceaccounts', 'system:serviceaccounts:' + manager, 'system:authenticated']
+        namespace = json.loads(message.content)['spec']['namespace']
+        rules = []
+        if state['granted']:
+            rules.append({'apiGroups': [''], 'resources': ['namespaces'], 'verbs': ['get'], 'resourceNames': pool_names})
+            if namespace in pool_names:
+                rules.extend([
+                    {'apiGroups': ['batch'], 'resources': ['jobs'], 'verbs': ['get', 'create', 'delete']},
+                    {'apiGroups': [''], 'resources': ['configmaps'], 'verbs': ['get', 'create', 'delete']},
+                    {'apiGroups': [''], 'resources': ['pods'], 'verbs': ['get', 'list', 'delete']},
+                ])
+        if state['damage'] == 'staging-write' and namespace == 'loom-nebius-platform-execution':
+            rules.append({'apiGroups': ['batch'], 'resources': ['jobs'], 'verbs': ['delete'], 'resourceNames': ['staging-task']})
+        # The response below describes the old permissions; rules change after
+        # this observation, without changing any binding identity or bytes.
+        if namespace == 'loom-nebius-platform-execution':
+            state['rules_changed'] = True
+        return httpx.Response(201, json={'apiVersion': 'authorization.k8s.io/v1', 'kind': 'SelfSubjectRulesReview',
+            'spec': {}, 'status': {'incomplete': state['damage'] == 'incomplete', 'resourceRules': rules,
+                'nonResourceRules': [], 'evaluationError': ''}})
+
+    transport = ManagementKubernetesTransport(api_server=request.database.foundation.inputs.config['kubernetes_api_server'],
+        ssl_context=ssl.create_default_context())
+    transport.client.close()
+    # The predecessor fixture replaces httpx.Client with its registration
+    # transport. Use the captured real class for this distinct permission API.
+    transport.client = Client(base_url=transport.api_server, transport=httpx.MockTransport(respond))
+    try:
+        yield activation, request, plan, transport, state
+    finally:
+        transport.client.close()
+
+
+def test_activation_gateway_review_detects_foreign_direct_and_inherited_write_grants(gateway_permission_review):
+    module, request, _, transport, state = gateway_permission_review
+    review = getattr(module, 'review_development_gateway_permissions', None)
+    assert callable(review), 'fresh activation must inspect effective gateway rights without a migration request'
+    subjects = [state['subject'],
+        {'kind': 'User', 'apiGroup': 'rbac.authorization.k8s.io',
+            'name': 'system:serviceaccount:loom-nebius-management-dev:loom-pool-gateway'},
+        *({'kind': 'Group', 'apiGroup': 'rbac.authorization.k8s.io', 'name': name} for name in (
+            'system:serviceaccounts:loom-nebius-management-dev', 'system:serviceaccounts', 'system:authenticated'))]
+    for granted in (False, True):
+        state['granted'] = granted
+        for subject in subjects:
+            state['subject'], state['damage'] = subject, None
+            observed = review(request, transport=transport, granted=granted)
+            assert 'loom-nebius-platform-execution' in observed
+            assert {'loom-dev', 'loom-nebius-management-dev'} <= set(observed)
+            state['damage'] = 'staging-write'
+            with pytest.raises(ValueError, match='development gateway permissions unqualified'):
+                review(request, transport=transport, granted=granted)
+
+
+def test_activation_gateway_review_fails_closed_on_uncertainty_or_changed_inputs(gateway_permission_review):
+    module, request, _, transport, state = gateway_permission_review
+    review = getattr(module, 'review_development_gateway_permissions', None)
+    assert callable(review), 'fresh activation effective gateway permission review is missing'
+    for damage in ('binding-drift', 'incomplete'):
+        state.update(damage=damage, binding_reads=0, calls=[])
+        with pytest.raises(ValueError, match='development gateway permissions unqualified'):
+            review(request, transport=transport, granted=False)
+        assert any(call.method == 'POST' for call in state['calls']), 'failure must reach the permission review'
+    state.update(damage=None, calls=[])
+    endpoint = transport.api_server
+    transport.api_server = 'https://different-cluster.example'
+    with pytest.raises(ValueError, match='development gateway permissions unqualified'):
+        review(request, transport=transport, granted=False)
+    assert not state['calls']
+    transport.api_server = endpoint
+    with pytest.raises(ValueError, match='development gateway permissions unqualified'):
+        review(request, transport=transport, granted='false')
+    assert not state['calls']
+
+
+@pytest.mark.parametrize('kind', ['Role', 'ClusterRole'])
+def test_activation_gateway_review_rejects_rules_drift_with_unchanged_bindings(gateway_permission_review, kind):
+    module, request, _, transport, state = gateway_permission_review
+    state.update(damage=kind + '-drift', rules_changed=False)
+    try:
+        with pytest.raises(ValueError, match='development gateway permissions unqualified'):
+            module.review_development_gateway_permissions(request, transport=transport, granted=False)
+    finally:
+        assert state['rules_changed'], 'the rules must change after their namespace permission review'

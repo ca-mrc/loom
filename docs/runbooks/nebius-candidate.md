@@ -126,6 +126,11 @@ digest, not a hash of the commit identifier or an arbitrary-local-source upload.
 The shared-data application upgrade requires this published value to match its
 application release; older records without it remain valid for existing legacy
 consumers, but cannot supply personal application provenance.
+New platform publications also include the concrete `service_schema_head`,
+derived from that same clean checkout and included in image-admission provenance.
+Protected shared-pool delivery uses this revision on the Git-less operator host;
+it refuses a missing or mutable schema alias before deployment. Historical
+standalone delivery retains its existing migration-source check.
 Renderer and deployer consume those fields without
 detached signatures, profile hashes or another reconstruction/verification layer.
 Optional format inspection is available with:

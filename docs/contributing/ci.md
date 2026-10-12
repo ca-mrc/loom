@@ -170,13 +170,38 @@ manual compatibility selection.
 
 ## Test shard balance
 
-The root Python lane uses eight complete, non-overlapping file shards with the
+The root Python lane uses twenty complete, non-overlapping file shards with the
 existing manifest-owned stable hash salt. Explicit pins distribute the slow
-connected recovery modules using the October 2026 duration sample. Connected
-transport tests use independent two-owner fixtures and share only immutable
+connected recovery modules using the October 2026 duration sample. The expanded
+shared-pool handoff and participant-delivery suites have dedicated placements;
+the eight- and twelve-shard layouts exhausted multiple jobs' 40-minute limits.
+Recovery stop, gateway, template, role, restart and reopening scenarios are
+separate files, as are participant host/dispatch/runner and completed-release
+history matrices. These files
+retain every parameterized scenario and independent fixture. Connected
+parent and process-preflight matrices also use separate shards after their
+combined duration exhausted a job's budget. Recovery census, recovery-process
+preflight and forward process-observation scenarios have separate wrappers that
+invoke their unchanged assertion bodies and complete independent fixtures. These
+long scenarios remain in the original collected coverage, without being stacked
+with every variant of their lifecycle matrix. Participant resource observation
+runs beside the measured lighter forward shard, separate from the image
+cancellation and transport matrices that previously crowded its job. Recovery
+census and completed recovery release also run on separate shards to retain
+headroom below the unchanged job deadline. Connected
+transport tests retain independent fixtures and share only immutable
 inputs; full roster tests retain all environments. Duplicate mode-independent
 qualification cases run once, while mode-specific grants and failure cases remain.
-The job and per-test limits remain unchanged. Each shard stops on its first failing test to
+The job limit remains 40 minutes. Connected participant lifecycle tests have
+explicit 120-second budgets (180 seconds for two successive releases). The
+participant pool-to-observer catalog/Job lifecycle also has a 180-second budget.
+The complete workflow-selector integration also has a 120-second budget. Exhaustive
+shared census uses 1200 seconds, with 1500 seconds for the independently scheduled
+recovery matrix; process-preflight matrices use 1200 seconds. Recovery reopening
+uses 900 seconds. Delayed-stop commit outcomes use 1800 seconds each and run in separate file
+shards. These test-only limits include retained-chain setup and fault/replay
+validation; production deadlines and fresh authority checks are unchanged.
+Each shard stops on its first failing test to
 retain the underlying failure report before its deadline; successful shards run
 every selected test. Other shards are not cancelled, and `repository-checks`
 still requires the aggregate result. This repartitions the expanded lane without

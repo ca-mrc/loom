@@ -26,6 +26,7 @@ from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_database_readiness import qualify_database_backend, qualify_database_pod
 from scripts.ops.nebius_development_bootstrap import _secret_documents
 from scripts.ops.nebius_development_install import DevelopmentInstallRequest, _storage_observation
+from scripts.ops.nebius_development_pool_registration import retained_development_participant
 from scripts.ops.nebius_development_runtime_install import DevelopmentRuntimeInstallRequest
 from scripts.ops.nebius_development_runtime_observation import HTTPSDevelopmentRuntimeObserver
 from scripts.ops.nebius_development_runtime_readiness import qualify_started_deployment
@@ -90,14 +91,18 @@ class HTTPSDevelopmentRuntimeProbes(HTTPSDevelopmentRuntimeObserver):
         finally:
             self.scratch.cleanup()
 
-    def _exec(self, pod: dict[str, Any], container: str, command: list[str]) -> dict[str, Any]:
+    def _exec(self, pod: dict[str, Any], container: str, command: list[str], *, max_output_bytes: int = 65536) -> dict[str, Any]:
         """Internal fixed-command transport; never accepts an operator command."""
+        # Full, bounded origin-history pages can be larger than scalar process
+        # challenges. The default cap remains unchanged for every existing probe.
+        if type(max_output_bytes) is not int or max_output_bytes not in {65536, 4 * 1024**2}:
+            raise ValueError
         self._private_inputs()
         value = subprocess.run([*self.prefix, 'exec', '-n', pod['metadata']['namespace'],
             'pod/' + pod['metadata']['name'], '-c', container, '--', *command],
             capture_output=True, timeout=40, check=False, env={'PATH': os.defpath, 'LANG': 'C.UTF-8'})
         self._private_inputs()
-        if value.returncode or value.stderr or len(value.stdout) > 65536:
+        if value.returncode or value.stderr or len(value.stdout) > max_output_bytes:
             raise ValueError
         return _json(value.stdout)
 
@@ -158,6 +163,9 @@ class HTTPSDevelopmentRuntimeProbes(HTTPSDevelopmentRuntimeObserver):
         except Exception:
             raise ValueError('development runtime closed database unqualified') from None
 
+    def _running_workload(self, key: str, state_dir: Path) -> dict[str, Any]:
+        return self.inspect(state_dir=state_dir)[key]
+
     def _running(self, key: str, state_dir: Path) -> tuple[PoolSettingsComponent, dict[str, Any], dict[str, Any]]:
         """Resolve only a regenerated started target through anchored live history."""
         desired = copy.deepcopy({**self.plan.targets, **self.plan.fixed['workloads']}[key])
@@ -170,13 +178,13 @@ class HTTPSDevelopmentRuntimeProbes(HTTPSDevelopmentRuntimeObserver):
         elif namespace == 'loom-dev' and name in {'loom-service', 'loom-control-plane'}:
             component = 'service' if name == 'loom-service' else 'controller'
         else:
-            participant, = self.request.database.manager.retained.request.registration.spec.participants
+            participant = retained_development_participant(self.request.database.manager.retained.request)
             if (namespace != participant.execution_namespace.name
                     or name != 'loom-execution-actuator'):
                 raise ValueError
             component = 'actuator'
         desired['spec']['replicas'] = 1
-        current = self.inspect(state_dir=state_dir)[key]
+        current = self._running_workload(key, state_dir)
         _qualified_defaulted(desired, current)
         children = self._read('/apis/apps/v1/namespaces/' + namespace + '/replicasets?limit=1000')
         pods = self._read('/api/v1/namespaces/' + namespace + '/pods?limit=1000')
@@ -200,7 +208,7 @@ class HTTPSDevelopmentRuntimeProbes(HTTPSDevelopmentRuntimeObserver):
         try:
             component, workload, before = self._running(key, state_dir)
             spec = self.request.database.manager.retained.request.registration.spec
-            participant, = spec.participants
+            participant = retained_development_participant(self.request.database.manager.retained.request)
             machine, = (row for row in spec.machines
                 if row.participant_id == participant.participant_id and row.workload_scope == 'environment')
             wanted = expected_pool_runtime_settings(component, workload,
