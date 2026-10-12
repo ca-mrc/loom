@@ -25,6 +25,7 @@ from tests.unit.test_execution_capacity_collector import (
     _Kubernetes,
     _node,
     _pod,
+    _pod_list,
     _Provider,
     _settings,
 )
@@ -42,7 +43,7 @@ def _scope():
 def _reader(pods):
     return InClusterKubernetesCapacityReader(core_api=SimpleNamespace(
         list_node=lambda **_: SimpleNamespace(items=[_node("node-1")], metadata=SimpleNamespace(resource_version="nodes-1")),
-        list_pod_for_all_namespaces=lambda **_: SimpleNamespace(items=pods, metadata=SimpleNamespace(resource_version="pods-1")),
+        list_pod_for_all_namespaces=lambda **kwargs: _pod_list(pods, resource_version="pods-1", **kwargs),
     ), apps_api=_apps())
 
 

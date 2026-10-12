@@ -35,6 +35,11 @@ capability that would be silently weakened fail admission.
 Configured slots, a registered worker, and Nebius quota are not equivalent to
 fresh executable capacity.
 
+Both target-scoped and shared-pool capacity collection preserve Pod-level
+resource requests and kubelet resize allocations from the raw Kubernetes
+response. A foreign Pod whose resize has not converged blocks a fresh capacity
+observation rather than making its still-allocated resources appear free.
+
 ## Verifier pods
 
 Shared grading stays in the agent pod's task sandbox. Separate grading does not reserve a verifier sandbox there. After the agent result and `artifacts/workspace.tar` are durable and the agent pod's cleanup is complete, a child lease starts a verifier pod with only `verifier-sandbox`. That pod restores the committed workspace archive before tests are injected. `node-share-v1` sizes the agent sandbox with the two-role share and does not add the deferred verifier share to the task. Live before/after reservation measurements are still pending a deployed run; CI does not record them.
@@ -943,6 +948,12 @@ binary digest, writes the plan and binary into a bounded `emptyDir`, and starts
 the task image with that runtime as PID 1 through a read-only runtime mount.
 Workspace, runtime, output, termination grace, log, artifact, and
 ephemeral-storage bounds are explicit.
+The output volume accommodates two log streams for every setup, main and
+resident verifier phase, the artifact budget, two 1 MiB result documents during
+atomic replacement, and a 4 KiB termination summary. These are independent
+volume ceilings within the frozen aggregate ephemeral-storage allocation;
+rendering does not increase admitted requests or limits, and simultaneous
+workspace, output and container usage must still fit that allocation.
 Declared sidecars render as ordered Kubernetes native sidecar init containers
 (`restartPolicy: Always`) with digest-pinned images, resources,
 startup/readiness probes, dropped capabilities, and no service-account token.
@@ -1157,6 +1168,10 @@ upload, and runtime failures, preserves signal/exit/timestamp/truncation
 evidence, and repeats the exact lease-bound runtime identity. A required output
 or valid reward missing from an otherwise successful execution changes the
 runtime result to failure before upload.
+
+Artifact collection rejects special files without waiting for a writer on a
+named pipe, so a task-created FIFO cannot stall result publication after the
+execution phases finish.
 
 The Gateway accepts the files as one `loom.trial-artifact-bundle.v1` Artifact,
 checks the result declarations against the frozen plan and the uploaded file

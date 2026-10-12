@@ -186,6 +186,61 @@ def test_job_renderer_is_deterministic_restricted_and_lease_scoped() -> None:
     assert "hostPath" not in str(pod)
 
 
+@pytest.mark.parametrize(("setup_count", "execution_role", "expected_mib"), [
+    (0, "attempt", 44), (2, "attempt", 84), (32, "attempt", 684), (0, "verifier", 24),
+])
+def test_output_volume_fits_every_phase_and_atomic_result_metadata(
+    setup_count: int, execution_role: str, expected_mib: int,
+) -> None:
+    lease = _lease()
+    assert lease.runtime_contract_json is not None
+    payload = {
+        **lease.runtime_contract_json,
+        "setup": [ProcessPhaseV1(role="setup", argv=("/bin/true",),
+            working_directory="/workspace", timeout_seconds=1)] * setup_count,
+        "max_artifact_bytes": 1024 * 1024,
+    }
+    if execution_role == "verifier":
+        lease.execution_role = "verifier"
+        payload.update(execution_role="verifier", main=payload["verifier"],
+            verifier=None, verifier_execution="skipped")
+    plan = ExecutionRuntimePlanV1.model_validate(payload)
+    lease.runtime_contract_json = plan.canonical_payload()
+    lease.runtime_contract_sha256 = canonical_digest(lease.runtime_contract_json)
+
+    pod = render_execution_job(lease, target=ExecutionTargetRuntime(
+        target_id=lease.target_id, namespace=lease.namespace_name,
+    ))["spec"]["template"]["spec"]
+
+    # Each phase can save two 10 MiB streams, in addition to the 1 MiB
+    # artifact bundle, two 1 MiB copies during result replacement and 4 KiB
+    # for the termination summary, rounded upward to whole MiB.
+    output = next(volume for volume in pod["volumes"] if volume["name"] == "output")
+    assert output["emptyDir"]["sizeLimit"] == f"{expected_mib}Mi"
+    assert pod["containers"][0]["resources"]["limits"]["ephemeral-storage"] == "4096Mi"
+
+
+def test_output_volume_preserves_independent_aggregate_storage_limit() -> None:
+    lease = _lease()
+    assert lease.runtime_contract_json is not None
+    plan = ExecutionRuntimePlanV1.model_validate({
+        **lease.runtime_contract_json, "max_artifact_bytes": 4096 * 1024 * 1024,
+    })
+    lease.runtime_contract_json = plan.canonical_payload()
+    lease.runtime_contract_sha256 = canonical_digest(lease.runtime_contract_json)
+
+    pod = render_execution_job(lease, target=ExecutionTargetRuntime(
+        target_id=lease.target_id, namespace=lease.namespace_name,
+    ))["spec"]["template"]["spec"]
+
+    # Existing plans may declare per-volume caps larger than their aggregate
+    # Pod budget. Correcting one cap must not change admitted resources.
+    output = next(volume for volume in pod["volumes"] if volume["name"] == "output")
+    assert output["emptyDir"]["sizeLimit"] == "4139Mi"
+    assert pod["containers"][0]["resources"]["limits"]["ephemeral-storage"] == "4096Mi"
+    assert pod["containers"][0]["resources"]["requests"]["ephemeral-storage"] == "4096Mi"
+
+
 def test_job_renderer_uses_default_runtime_when_no_runtime_class_is_configured() -> None:
     lease = _lease()
     target = ExecutionTargetRuntime(
