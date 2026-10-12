@@ -25,6 +25,7 @@ from uuid import UUID
 LIMITS = {"uv": 80 * 1024 * 1024, "requirements.txt": 262_144,
           "scripts/ops/nebius_certificates.py": 262_144,
           "scripts/ops/nebius_dns_challenge.py": 262_144,
+          "scripts/ops/nebius_certificate_gateway.py": 262_144,
           "scripts/ops/nebius_development_management_certificate_gateway.py": 262_144,
           "installation.json": 16_384, "manifest.json": 16_384}
 MAX_BUNDLE = 90 * 1024 * 1024
