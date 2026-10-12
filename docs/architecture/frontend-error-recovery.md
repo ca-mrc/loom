@@ -28,6 +28,7 @@ must provide and validate a separate safe transport.
 | Root render boundary | An unexpected render failure outside the routed-content boundary | Replaces the document content with `Loom could not display this page` and offers Retry, Reload, and Home. |
 | Auth-session bootstrap | `/api/v1/auth/me` cannot produce a trustworthy current session | Shows `Loom could not verify your session`; it does not render a sign-in screen for an ambiguous failure. |
 | Route render boundary | A routed page or its descendants throw while the Layout shell remains healthy | Replaces only the routed content with `Loom could not display this section`; navigation to another location resets the boundary. |
+| Authenticated sidebar import | The deferred navigation module is pending or rejects | Announces loading while the route stays usable; a rejection shows `Loom could not load navigation` with Reload and Home, retaining the route and its single main landmark. |
 | Global browser bridge | An uncaught runtime error or unhandled rejection escapes React | Redacts browser and console surfaces before emitting a bounded local report and safe browser signal. It is a diagnostic backstop, not a replacement UI. |
 
 The root boundary wraps runtime-config bootstrap, the query client, router,
