@@ -15,16 +15,23 @@ import httpx
 import pytest
 from botocore.response import StreamingBody
 from botocore.stub import Stubber
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
+from loom.application_source_archive import write_application_source_archive
 from loom.db.nebius_application_build_schema import NebiusApplicationBuildAttempt
-from loom.db.nebius_pool_schema import NebiusPoolCancellation, NebiusPoolRequest
+from loom.db.nebius_application_operation_schema import NebiusApplicationOperation
+from loom.db.nebius_pool_schema import NebiusPoolBinding, NebiusPoolCancellation, NebiusPoolRequest
 from loom.db.schema import Team, TeamMembership, User
+from loom.nebius_pool_application_image import PoolApplicationImagePrepareV1
+from loom_execution_actuator.task_image_controller import NativeBuildKubernetesApi
+from loom_execution_capacity_collector.contracts import CapacityPlacement
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 from loom_service.environment_management.installation import ManagementInstallation
 from loom_service.password_auth import hash_password
 from loom_service.pool_management.installation import PoolInstallation, register_installation
+from tests.execution_placement_fixtures import placement_fixture
+from tests.integration.test_nebius_application_build_worker import cleanup, finish, observed_build
 from tests.integration.test_nebius_application_source_runtime import (
     application_installation as application_installation,
 )
@@ -41,7 +48,9 @@ from tests.integration.test_nebius_application_source_runtime import (
     source_installation as source_installation,
 )
 from tests.integration.test_nebius_pool_installation import add_application_builder, installation
+from tests.integration.test_nebius_pool_registry import machine, publish_placement
 from tests.integration.test_nebius_pool_registry import sessions as sessions
+from tests.unit.test_application_source import entry, manifest
 from tests.unit.test_application_source_archive import archive_bytes
 from tests.unit.test_application_source_archive import source as source
 from tests.unit.test_nebius_application_image_renderer import build_inputs as build_inputs
@@ -357,3 +366,174 @@ async def test_configured_two_owner_upload_build_and_cancel_reaches_real_closed_
             assert await session.scalar(select(func.count()).select_from(NebiusPoolCancellation)) == 2
     assert len(stubs) == 1
     stubs[0].assert_no_pending_responses()
+
+
+async def test_configured_two_owner_ready_builds_feed_authenticated_deployment_requests(
+        build_installation, sessions, isolated_migration_postgres_url, tmp_path, monkeypatch):
+    """Catch lost runtime release wiring; external Jobs are fixtures, not deployed apps."""
+    import nebius.sdk
+
+    path, data, profiles, spec, _ = build_installation
+    async with sessions.begin() as session:
+        await register_installation(session, spec)
+        # Disposable test DB only: the protected live handoff is not exercised here.
+        await session.execute(update(NebiusPoolBinding).where(NebiusPoolBinding.pool_id == spec.pool_id)
+            .values(mode="global"))
+    observer = await machine(sessions, spec.pool_id)
+    placement = CapacityPlacement.model_validate(placement_fixture(target_id=spec.node_group_id, parent_id="parent"))
+    placement = placement.model_copy(update={"quota_resources": {
+        name: quota for name, quota in placement.quota_resources.items() if name in spec.quota_identities}})
+    await publish_placement(sessions, observer, placement)
+    monkeypatch.setattr(nebius.sdk, "SDK", lambda **kwargs: FakeSDK())
+
+    sources = []
+    for name in ("alice", "bob"):
+        root = tmp_path / name
+        root.mkdir(mode=0o700)
+        content = (name + " feature\n").encode()
+        (root / "app.py").write_bytes(content)
+        captured = manifest(entry("app.py", content))
+        output = io.BytesIO()
+        write_application_source_archive(root, captured, output)
+        body = output.getvalue()
+        sources.append((captured.digest, hashlib.sha256(body).hexdigest(), body))
+    assert sources[0][0] != sources[1][0]
+    bucket = data["applications"]["runtime"]["build"]["binding"]["source"]["source_bucket"]
+    real_client, stubs = boto3.client, []
+
+    def object_client(**kwargs):
+        client = real_client(**kwargs)
+        stub = Stubber(client)
+        for _, checksum, body in sources:
+            key = f"application-sources/v1/sha256/{checksum}.tar"
+            stub.add_response("put_object", {}, {"Bucket": bucket, "Key": key,
+                "Body": body, "ChecksumAlgorithm": "SHA256"})
+            stub.add_response("get_object", {"Body": StreamingBody(io.BytesIO(body), len(body))},
+                {"Bucket": bucket, "Key": key})
+        stub.activate()
+        stubs.append(stub)
+        return client
+
+    monkeypatch.setattr(boto3, "client", object_client)
+    jobs = {}
+
+    async def observe_job(self, runtime, *, capture_logs=False):
+        return copy.deepcopy(jobs[runtime.receipt.reservation_id])
+
+    monkeypatch.setattr(NativeBuildKubernetesApi, "observe_pool", observe_job)
+    app = app_for(path, profiles, isolated_migration_postgres_url)
+    pending_kubernetes = asyncio.Event()
+
+    async def transport(self, request):
+        if request.url.host == "management.example.com":
+            return await httpx.ASGITransport(app=app).handle_async_request(request)
+        # Keep real lifecycle processing at its external read boundary. Only
+        # deployment intents are in scope, not cloud writes or deployed readiness.
+        assert request.url.host == "regional-api.example" and request.method == "GET"
+        await pending_kubernetes.wait()
+        raise AssertionError("fixture Kubernetes read must stay pending")
+
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", transport)
+    async with app.router.lifespan_context(app), AsyncExitStack() as clients:
+        owners, uploads = [], []
+        team = uuid4()
+        async with sessions.begin() as session:
+            session.add(Team(id=team, name="success-path-team"))
+        for name, (digest, checksum, body) in zip(("alice", "bob"), sources, strict=True):
+            owner = uuid4()
+            async with sessions.begin() as session:
+                session.add(User(id=owner, username=name, username_normalized=name, status="active",
+                    password_hash=hash_password("fixture-success-passphrase")))
+                await session.flush()
+                session.add(TeamMembership(team_id=team, user_id=owner, role="member"))
+            client = await clients.enter_async_context(httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                base_url="https://management.example.com"))
+            login = await client.post("/api/v1/auth/login", json={"username": name, "password": "fixture-success-passphrase"})
+            assert login.status_code == 200, login.text
+            client.headers["X-Loom-CSRF"] = login.json()["csrf_token"]
+            intent = await client.post("/api/v1/application-sources", headers={"Idempotency-Key": "same-upload-key"},
+                json={"source_digest": digest, "archive_sha256": checksum, "archive_size_bytes": len(body)})
+            assert intent.status_code == 201, intent.text
+            upload = intent.json()["upload_id"]
+            response = await client.put(f"/api/v1/application-sources/{upload}/content", content=body,
+                headers={"Content-Type": "application/octet-stream"})
+            assert response.status_code == 200 and response.json()["phase"] == "source_verified", response.text
+            owners.append(client)
+            uploads.append(upload)
+        created = await asyncio.gather(*(client.post("/api/v1/application-builds", json={"upload_id": upload},
+            headers={"Idempotency-Key": "same-build-key"}) for client, upload in zip(owners, uploads, strict=True)))
+        assert all(reply.status_code == 201 for reply in created), [reply.text for reply in created]
+        builds = [UUID(reply.json()["build_id"]) for reply in created]
+        assert len(set(builds)) == 2
+        publications, cleaned = {}, set()
+        async with asyncio.timeout(30):
+            while True:
+                for index, identity in enumerate(builds):
+                    async with sessions() as session:
+                        row = await session.get(NebiusApplicationBuildAttempt, (identity, 1))
+                    if row.activated_json is not None and identity not in publications:
+                        request = PoolApplicationImagePrepareV1.model_validate(row.pool_request_json)
+                        job = await observed_build(sessions, request)
+                        publication = finish(job, request)
+                        publication["registry_images"] = {
+                            name: request.build.registry_repository + "@sha256:" + digit * 64
+                            for name, digit in zip(("service", "web"), (("a", "b"), ("c", "d"))[index], strict=True)}
+                        job["pods"][0]["status"]["containerStatuses"][0]["state"]["terminated"]["message"] = json.dumps(publication)
+                        jobs[UUID(row.grant_json["reservation_id"])] = job
+                        publications[identity] = publication
+                    if row.phase == "settling" and identity not in cleaned:
+                        # Settlement precedes the worker's HTTP stop/drain calls.
+                        # External cleanup can only be observed after both commit.
+                        async with sessions() as session:
+                            pool = await session.get(NebiusPoolRequest, UUID(row.grant_json["reservation_id"]))
+                        if pool.phase == "cleanup_intent" and pool.stop_json is not None and pool.drain_json is not None:
+                            await cleanup(sessions, PoolApplicationImagePrepareV1.model_validate(row.pool_request_json))
+                            cleaned.add(identity)
+                reports = await asyncio.gather(*(client.get(f"/api/v1/application-builds/{identity}")
+                    for client, identity in zip(owners, builds, strict=True)))
+                assert all(reply.status_code == 200 for reply in reports), [reply.text for reply in reports]
+                if all(reply.json()["phase"] == "ready" for reply in reports):
+                    break
+                assert all(reply.json()["phase"] not in {"failed", "cancelled"} for reply in reports), [reply.text for reply in reports]
+                await asyncio.sleep(0.05)
+        assert cleaned == set(builds)
+        releases = [reply.json()["release"] for reply in reports]
+        for index, (client, release, identity) in enumerate(zip(owners, releases, builds, strict=True)):
+            assert release["release_id"] == str(identity)
+            assert release["source_digest"] == sources[index][0]
+            for name in ("service", "web"):
+                assert release[name + "_image_ref"] == publications[identity]["registry_images"][name]
+            compatibility = await client.get(f'/api/v1/application-releases/{release["release_id"]}/compatibility')
+            assert compatibility.status_code == 200 and compatibility.json()["compatibility"] == "compatible", compatibility.text
+            foreign = await owners[1 - index].post("/api/v1/applications",
+                json={"slug": "stolen", "release_id": release["release_id"]}, headers={"Idempotency-Key": "steal-release"})
+            assert foreign.status_code == 403, foreign.text
+        requested = await asyncio.gather(*(client.post("/api/v1/applications",
+            json={"slug": name, "release_id": release["release_id"]}, headers={"Idempotency-Key": "same-create-key"})
+            for client, name, release in zip(owners, ("alice", "bob"), releases, strict=True)))
+        assert all(reply.status_code == 202 for reply in requested), [reply.text for reply in requested]
+        assert len({reply.json()["application_id"] for reply in requested}) == 2
+        for index, (client, reply, release) in enumerate(zip(owners, requested, releases, strict=True)):
+            operation = reply.json()
+            async with sessions() as session:
+                saved = await session.get(NebiusApplicationOperation, UUID(operation["operation_id"]))
+                assert saved.plan_json["release"] == release
+                rendered = {doc["metadata"]["name"]: doc for group in saved.plan_json["files"].values()
+                    for doc in group if doc["kind"] == "Deployment"}
+                for name in ("service", "web"):
+                    assert rendered["loom-" + name]["spec"]["template"]["spec"]["containers"][0]["image"] == release[name + "_image_ref"]
+            # Creation is still waiting for Kubernetes: a ready image is not a
+            # ready application, and an update must not supersede pending creation.
+            updated = await client.post(f'/api/v1/applications/{operation["application_id"]}/operations',
+                json={"action": "update", "expected_generation": 1, "release_id": release["release_id"]},
+                headers={"Idempotency-Key": "same-update-key"})
+            assert updated.status_code == 409, updated.text
+            assert updated.json()["detail"]["code"] == "application_transition_not_ready"
+            foreign_update = await owners[1 - index].post(
+                f'/api/v1/applications/{operation["application_id"]}/operations',
+                json={"action": "update", "expected_generation": 1, "release_id": releases[1 - index]["release_id"]},
+                headers={"Idempotency-Key": "foreign-update"})
+            assert foreign_update.status_code == 403, foreign_update.text
+            assert (await owners[1 - index].get(f'/api/v1/applications/{operation["application_id"]}')).status_code == 403
+    for stub in stubs:
+        stub.assert_no_pending_responses()
