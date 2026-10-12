@@ -3,9 +3,12 @@ from __future__ import annotations
 
 import copy
 import importlib
+import json
 import os
 import time
 from dataclasses import asdict
+from types import SimpleNamespace
+from unittest.mock import Mock, call
 
 import pytest
 
@@ -17,8 +20,111 @@ from tests.unit.test_nebius_pool_application_image_render import render as rende
 from tests.unit.test_nebius_pool_task_image_render import build_inputs as task_inputs
 from tests.unit.test_nebius_pool_task_image_render import render as render_task
 
-pytestmark = pytest.mark.skipif(os.environ.get('LOOM_RUN_DISPOSABLE_K3S') != '1',
-    reason='requires explicitly disposable Kubernetes')
+
+def wait_for_namespace_admission(core, namespace, pod, *, deadline, policy_name=None):
+    """Wait for admission's namespace informer after a restricted-to-privileged patch."""
+    from kubernetes.client.exceptions import ApiException
+
+    forbidden = f'pods "{pod["metadata"]["name"]}" is forbidden: '
+    while True:
+        try:
+            core.create_namespaced_pod(namespace, pod, dry_run='All')
+        except ApiException as exc:
+            try:
+                message = json.loads(exc.body)['message']
+            except (KeyError, TypeError, ValueError):
+                message = ''
+            if not isinstance(message, str):
+                message = ''
+            # The API patch can precede PSA's informer update. This old denial
+            # is pending, never evidence that our own policy is enforced.
+            stale_psa = exc.status == 403 and message.startswith(
+                forbidden + 'violates PodSecurity "restricted:latest":')
+            if not stale_psa:
+                if policy_name is None:
+                    raise
+                assert exc.status == 403 and message.startswith(
+                    forbidden + f"ValidatingAdmissionPolicy '{policy_name}' "), exc.body
+                return
+        else:
+            if policy_name is None:
+                return
+        assert time.monotonic() < deadline, 'namespace admission did not converge'
+        time.sleep(0.1)
+
+
+def admission_error(message, *, status=403):
+    from kubernetes.client.exceptions import ApiException
+
+    error = ApiException(status=status)
+    error.body = json.dumps({'kind': 'Status', 'status': 'Failure', 'reason': 'Forbidden',
+        'code': status, 'message': f'pods "build-probe" is forbidden: {message}'})
+    return error
+
+
+@pytest.fixture
+def namespace_admission(monkeypatch):
+    clock = SimpleNamespace(now=0.0)
+    monkeypatch.setattr(time, 'monotonic', lambda: clock.now)
+    monkeypatch.setattr(time, 'sleep', lambda seconds: setattr(clock, 'now', clock.now + seconds))
+    return SimpleNamespace(core=Mock(), pod={'metadata': {'name': 'build-probe'}}, clock=clock,
+        stale=lambda: admission_error('violates PodSecurity "restricted:latest": privileged'),
+        policy_name='loom-build-dev-native-build-v1')
+
+
+def test_namespace_admission_waits_for_named_policy_after_stale_psa(namespace_admission):
+    case = namespace_admission
+    case.core.create_namespaced_pod.side_effect = [case.stale(), case.stale(),
+        admission_error(f"ValidatingAdmissionPolicy '{case.policy_name}' with binding 'build' denied request: privileged")]
+    wait_for_namespace_admission(case.core, 'builds', case.pod, deadline=1, policy_name=case.policy_name)
+    assert case.core.create_namespaced_pod.call_args_list == [call('builds', case.pod, dry_run='All')] * 3
+
+
+def test_namespace_admission_waits_for_foreign_acceptance_after_stale_psa(namespace_admission):
+    case = namespace_admission
+    case.core.create_namespaced_pod.side_effect = [case.stale(), case.stale(), object()]
+    wait_for_namespace_admission(case.core, 'unrelated-builds', case.pod, deadline=1)
+    assert case.core.create_namespaced_pod.call_args_list == [call('unrelated-builds', case.pod, dry_run='All')] * 3
+
+
+@pytest.mark.parametrize('policy_name', ['loom-build-dev-native-build-v1', None])
+@pytest.mark.parametrize(('status', 'message'), [
+    (403, "ValidatingAdmissionPolicy 'unrelated-policy' denied request: privileged"),
+    (403, "ValidatingAdmissionPolicy 'loom-build-dev-native-build-v1-other' denied request: privileged"),
+    (403, 'violates PodSecurity "baseline:latest": privileged'),
+    (403, 'violates PodSecurity "restricted:v1.36": privileged'),
+    (403, 'webhook denied request mentioning PodSecurity "restricted:latest"'),
+    (401, 'violates PodSecurity "restricted:latest": privileged'),
+    (500, 'violates PodSecurity "restricted:latest": privileged'),
+])
+def test_namespace_admission_rejects_unexpected_errors(namespace_admission, policy_name, status, message):
+    from kubernetes.client.exceptions import ApiException
+
+    case = namespace_admission
+    error = admission_error(message, status=status)
+    case.core.create_namespaced_pod.side_effect = error
+    with pytest.raises((ApiException, AssertionError)):
+        wait_for_namespace_admission(case.core, 'builds', case.pod, deadline=1, policy_name=policy_name)
+    assert case.core.create_namespaced_pod.call_count == 1
+    assert case.clock.now == 0
+
+
+@pytest.mark.parametrize('policy_name', ['loom-build-dev-native-build-v1', None])
+def test_namespace_admission_bounds_stale_psa_wait(namespace_admission, policy_name):
+    case = namespace_admission
+    case.core.create_namespaced_pod.side_effect = case.stale()
+    with pytest.raises(AssertionError, match='namespace admission did not converge'):
+        wait_for_namespace_admission(case.core, 'builds', case.pod, deadline=0.2, policy_name=policy_name)
+    assert case.core.create_namespaced_pod.call_count == 3
+    assert case.clock.now == pytest.approx(0.2)
+
+
+def test_namespace_admission_requires_policy_rejection(namespace_admission):
+    case = namespace_admission
+    case.core.create_namespaced_pod.return_value = object()
+    with pytest.raises(AssertionError, match='namespace admission did not converge'):
+        wait_for_namespace_admission(case.core, 'builds', case.pod, deadline=0.2, policy_name=case.policy_name)
+    assert case.core.create_namespaced_pod.call_count == 3
 
 
 def policy_inputs(build_inputs):
@@ -43,6 +149,8 @@ def documents(namespace, catalog):
 
 
 @pytest.mark.timeout(180)
+@pytest.mark.skipif(os.environ.get('LOOM_RUN_DISPOSABLE_K3S') != '1',
+    reason='requires explicitly disposable Kubernetes')
 @pytest.mark.parametrize('runtime_overhead', [None, 50, 500])
 def test_pooled_build_policy_compiles_and_constrains_both_native_workloads(build_inputs, runtime_overhead):
     from kubernetes import client, utils
@@ -107,14 +215,8 @@ def test_pooled_build_policy_compiles_and_constrains_both_native_workloads(build
         core.patch_namespace(namespace, {'metadata': {'labels': {'pod-security.kubernetes.io/enforce': 'privileged'}}})
         invalid = copy.deepcopy(pods[0])
         invalid['spec']['initContainers'][1]['securityContext']['privileged'] = True
-        while True:
-            try:
-                core.create_namespaced_pod(namespace, invalid, dry_run='All')
-            except ApiException as exc:
-                assert exc.status == 403 and policies[0]['metadata']['name'] in exc.body, exc.body
-                break
-            assert time.monotonic() < deadline, 'build policy was not enforced'
-            time.sleep(0.1)
+        wait_for_namespace_admission(core, namespace, invalid, deadline=deadline,
+            policy_name=policies[0]['metadata']['name'])
         for pod in pods:
             if runtime_overhead == 500:
                 with pytest.raises(ApiException) as denied:
@@ -182,7 +284,7 @@ def test_pooled_build_policy_compiles_and_constrains_both_native_workloads(build
         # This namespace-scoped policy must not govern a foreign/staging namespace.
         core.patch_namespace('unrelated-builds', {'metadata': {'labels': {'pod-security.kubernetes.io/enforce': 'privileged'}}})
         invalid['metadata']['namespace'] = 'unrelated-builds'
-        core.create_namespaced_pod('unrelated-builds', invalid, dry_run='All')
+        wait_for_namespace_admission(core, 'unrelated-builds', invalid, deadline=time.monotonic() + 25)
         assert core.list_namespaced_pod(namespace).items == []
         # One deliberately unschedulable fixture Pod exercises update-only API
         # routes. No build runs: this disposable node has no matching group label.
