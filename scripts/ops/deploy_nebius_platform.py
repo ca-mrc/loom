@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import re
@@ -14,9 +15,10 @@ import tempfile
 import time
 import urllib.request
 import uuid
-from datetime import UTC, datetime
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import yaml  # type: ignore[import-untyped]
 
@@ -27,6 +29,13 @@ if __package__ in {None, ""}:
 
 from loom.nebius_platform_render import canonical, validate_environment  # noqa: E402
 from loom.nebius_task_identity_policy import identity_policy_documents  # noqa: E402
+
+if TYPE_CHECKING:
+    from scripts.ops.nebius_pool_participant_operation import ParticipantRolloutReference
+    from scripts.ops.nebius_pool_participant_release import PreparedParticipantRelease
+    from scripts.ops.nebius_pool_participant_resource import RetainedCandidateFileWriter
+
+    from loom_service.pool_management.participant_refresh import ParticipantCapacityReceipt
 
 PHASE_FILES = (
     "00-namespaces.yaml",
@@ -51,6 +60,106 @@ class TaskIdentityPolicyDeniedError(DeploymentError):
         super().__init__("task identity policy rejected the admission probe")
 
 
+class ParticipantRolloutAPI(Protocol):
+    """Protected pool I/O owned by a source/history-bound release operation.
+
+    This internal interface does not authorize a caller or expose a CLI bypass.
+    The concrete adapter must retain child intent before writes and reconcile
+    uncertain outcomes without replaying mutations. Every method must qualify
+    the exact supplied release, not reinterpret current resources as its source.
+    """
+
+    def preflight(self, kube: Kubectl, release: PreparedParticipantRelease) -> None:
+        """Qualify publication/history, full live inventory and manager compatibility."""
+        ...
+
+    def under_guard(self, kube: Kubectl, release: PreparedParticipantRelease) -> None:
+        """Fresh phase-aware qualification; no effects or historical read reuse."""
+        ...
+
+    def activate(self, kube: Kubectl, release: PreparedParticipantRelease) -> Literal["ready", "busy"]:
+        """Fence only this participant, stage registry/catalog and ready the manager.
+
+        Busy requires positive proof that fence changed nothing and no subsequent
+        phase was dispatched. Unknown/pending effects must raise, never return busy.
+        Recovery reads retained child outcomes before any permitted next effect.
+        """
+        ...
+
+    def finish(self, kube: Kubectl, release: PreparedParticipantRelease) -> None:
+        """Qualify current shared workloads and reopen the selected participant."""
+        ...
+
+    def read_capacity(self, kube: Kubectl, release: PreparedParticipantRelease, *,
+            observation_id: uuid.UUID) -> ParticipantCapacityReceipt:
+        """Return this new post-open read's capacity receipt.
+
+        Retain observation_id before creating its fixed capacity Job. Never
+        substitute a previous read, including during original-candidate recovery.
+        The deploy parent checks expiry again immediately before guard release.
+        """
+        ...
+
+    def qualify_completion(self, kube: Kubectl, release: PreparedParticipantRelease, *, released: bool) -> None:
+        """Fresh complete runtime/registry qualification with held or open intake."""
+        ...
+
+
+def _participant_capacity_before_release(proof: ParticipantCapacityReceipt | None, *,
+        started_at: datetime, started_clock: float, max_age_seconds: int) -> dict[str, Any]:
+    """Enforce the bounded proof at dispatch, not merely inside pool I/O.
+
+    The monotonic interval starts before the new read, conservatively charging
+    Job/startup/readback time against its remaining database-clock lifetime.
+    Wall-clock checks also reject stale/future receipts and clock reversal.
+    """
+    from loom_service.pool_management.participant_refresh import ParticipantCapacityReceipt
+
+    try:
+        if not isinstance(proof, ParticipantCapacityReceipt):
+            raise ValueError
+        proof = ParticipantCapacityReceipt.model_validate_json(proof.model_dump_json())
+        now = datetime.now(UTC)
+        elapsed = time.monotonic() - started_clock
+        if (now < started_at or proof.checked_at < started_at - timedelta(seconds=60)
+                or proof.checked_at > now + timedelta(seconds=60) or now >= proof.valid_until
+                or proof.valid_until > proof.selected_observed_at + timedelta(seconds=max_age_seconds)
+                or not 0 <= elapsed < (proof.valid_until - proof.checked_at).total_seconds()):
+            raise ValueError
+        return proof.model_dump(mode='json')
+    except Exception:
+        raise DeploymentError('shared capacity proof unavailable or expired; preserve the original guard') from None
+
+
+def _participant_release_binding(release: PreparedParticipantRelease, manifest: dict[str, Any],
+        config: dict[str, Any], files: dict[str, list[dict[str, Any]]]) -> bytes:
+    """Bind this parent to exactly the source-derived shared candidate files."""
+    from scripts.ops.nebius_ingress_stage import _key
+    from scripts.ops.nebius_pool_migration import migration_contract
+    from scripts.ops.nebius_pool_participant_release import PreparedParticipantRelease
+
+    from loom_service.pool_management.participant_refresh import PoolParticipantRefresh
+
+    try:
+        if not isinstance(release, PreparedParticipantRelease):
+            raise ValueError
+        refresh = PoolParticipantRefresh.model_validate(release.refresh.model_dump())
+        migration = migration_contract(release.migration)
+        participant, = (row for row in refresh.after.participants if row.participant_id == refresh.participant_id)
+        guard, = (row for row in release.migration.guards if row.participant_id == refresh.participant_id)
+        if (release.migration.registration.spec != refresh.after or files != release.files
+                or manifest['candidate_sha'] != release.migration.registration.candidate['candidate_sha']
+                or (config['namespace'], config['execution_namespace'], config['cluster_id']) != (
+                    guard.namespace, participant.execution_namespace.name, refresh.after.cluster_id)
+                or participant.environment_class != 'staging'
+                or release.preserved.keys() & {_key(row) for group in files.values() for row in group}):
+            raise ValueError
+        return canonical({'refresh': refresh.model_dump(mode='json'), 'migration': migration,
+            'files': release.files, 'preserved': release.preserved})
+    except Exception:
+        raise DeploymentError('shared candidate does not match its protected release') from None
+
+
 def load_render(
     render_dir: Path,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, list[dict[str, Any]]]]:
@@ -59,6 +168,26 @@ def load_render(
         filename: list(yaml.safe_load_all((render_dir / filename).read_text()))
         for filename in PHASE_FILES
     }
+    policy_file = render_dir / "00-task-identity-policy.yaml"
+    if policy_file.exists():
+        files[policy_file.name] = list(yaml.safe_load_all(policy_file.read_text()))
+    return validate_render(files)
+
+
+def validate_render(
+    files: dict[str, list[dict[str, Any]]],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, list[dict[str, Any]]]]:
+    """Validate in-memory candidate files without re-rendering or changing them.
+
+    This establishes render scope, not source/publication or deployment authority.
+    Both disk loading and shared-release projection use the same boundaries.
+    """
+    if not set(PHASE_FILES) <= files.keys() <= set(PHASE_FILES) | {"00-task-identity-policy.yaml"}:
+        raise DeploymentError("candidate render has unexpected or missing phases")
+    identities = [(row["kind"], row["metadata"].get("namespace"), row["metadata"]["name"])
+                  for rows in files.values() for row in rows]
+    if len(identities) != len(set(identities)):
+        raise DeploymentError("candidate resource identity is ambiguous")
     configs = [
         row
         for row in files["10-config-network.yaml"]
@@ -68,18 +197,15 @@ def load_render(
         raise DeploymentError("platform configuration identity is ambiguous")
     config = json.loads(configs[0]["data"]["environment.json"])
     validate_environment(config)
-    policy_file = render_dir / "00-task-identity-policy.yaml"
     if config.get("task_identity_policy") is not None:
-        try:
-            policy_docs = list(yaml.safe_load_all(policy_file.read_text()))
-        except OSError as exc:
-            raise DeploymentError("task identity policy artifact is missing") from exc
+        policy_docs = files.get("00-task-identity-policy.yaml")
+        if policy_docs is None:
+            raise DeploymentError("task identity policy artifact is missing")
         if policy_docs != identity_policy_documents(config["execution_namespace"], config["target_id"],
                 guest_target_id=config.get("guest_execution_target", {}).get("target_id"),
                 emulated_auth_target_id=config.get("emulated_auth_execution_target", {}).get("target_id")):
             raise DeploymentError("task identity policy differs from the target-bound contract")
-        files[policy_file.name] = policy_docs
-    elif policy_file.exists():
+    elif "00-task-identity-policy.yaml" in files:
         raise DeploymentError("task identity policy requires an explicit target configuration")
     execution_namespaces = [row for row in files["00-namespaces.yaml"]
                             if row["kind"] == "Namespace" and row["metadata"]["name"] == config["execution_namespace"]]
@@ -172,15 +298,28 @@ def secret_requirements(
 
 
 class Kubectl:
-    def __init__(self, kubeconfig: Path, *, context: str | None = None):
+    def __init__(self, kubeconfig: Path, *, context: str | None = None,
+                 local_executable: Path | None = None):
+        if local_executable is not None and (not local_executable.is_absolute()
+                or local_executable != local_executable.resolve() or not local_executable.is_file()
+                or not os.access(local_executable, os.X_OK)
+                or not kubeconfig.is_absolute() or kubeconfig != kubeconfig.resolve() or context is not None):
+            raise DeploymentError('protected local Kubernetes connection differs')
         self.kubeconfig = kubeconfig
         self.context = context
+        self.local_executable = local_executable
 
     def run(self, *args: str, timeout: int = 90, preserve_output: bool = False) -> str:
+        # The protected operator entry supplies a private, plugin-free config.
+        # Its exact local route must never become a nested SSH or ambient proxy
+        # route. Existing runner/standalone behavior is unchanged by default.
+        if self.local_executable is not None and os.environ.get('LOOM_DEPLOY_SSH_TARGET'):
+            raise DeploymentError('protected local Kubernetes connection cannot use SSH')
         command = [
-                "kubectl",
+                str(self.local_executable) if self.local_executable is not None else "kubectl",
                 "--kubeconfig",
                 str(self.kubeconfig),
+                *(["--cache-dir", str(self.kubeconfig.parent / 'cache')] if self.local_executable is not None else []),
                 *(["--context", self.context] if self.context else []),
                 *([] if args[0] in {"wait", "rollout"} else ["--request-timeout=30s"]),
                 *args,
@@ -206,6 +345,7 @@ class Kubectl:
             text=True,
             timeout=timeout,
             check=False,
+            env={'PATH': os.defpath, 'LANG': 'C.UTF-8'} if self.local_executable is not None else None,
         )
         if result.returncode:
             denied = re.search(
@@ -263,25 +403,31 @@ class Kubectl:
 
 def install_task_identity_policy(
     kube: Kubectl, config: dict[str, Any], snapshot_root: Path,
+    *, qualify_installed: Callable[[], None] | None = None,
 ) -> None:
     """Prove policy enforcement before the caller may relax namespace PSS.
 
-    The deployment guard has already drained active work. Every failure leaves
-    restricted PSS enforced. Neither probe creates a workload or pulls an image.
+    The deployment guard has already drained active work. Bootstrap failures
+    leave restricted PSS enforced. The retained code-only route first proves an
+    unchanged installed policy and performs no bootstrap writes. Neither probe
+    creates a workload or pulls an image.
     """
     namespace = config["execution_namespace"]
     name = namespace + "-private-root-v1"
-    bootstrap = snapshot_root / "identity-policy-bootstrap.yaml"
-    bootstrap.write_text(yaml.safe_dump_all([
-        {"apiVersion": "v1", "kind": "Namespace", "metadata": {
-            "name": namespace, "labels": {"pod-security.kubernetes.io/enforce": "restricted"},
-        }},
-        {"apiVersion": "v1", "kind": "ServiceAccount", "metadata": {
-            "name": "loom-execution-policy-probe", "namespace": namespace,
-        }, "automountServiceAccountToken": False},
-    ]))
-    kube.run("apply", "-f", str(bootstrap))
-    kube.run("apply", "-f", str(snapshot_root / "00-task-identity-policy.yaml"))
+    if qualify_installed is None:
+        bootstrap = snapshot_root / "identity-policy-bootstrap.yaml"
+        bootstrap.write_text(yaml.safe_dump_all([
+            {"apiVersion": "v1", "kind": "Namespace", "metadata": {
+                "name": namespace, "labels": {"pod-security.kubernetes.io/enforce": "restricted"},
+            }},
+            {"apiVersion": "v1", "kind": "ServiceAccount", "metadata": {
+                "name": "loom-execution-policy-probe", "namespace": namespace,
+            }, "automountServiceAccountToken": False},
+        ]))
+        kube.run("apply", "-f", str(bootstrap))
+        kube.run("apply", "-f", str(snapshot_root / "00-task-identity-policy.yaml"))
+    else:
+        qualify_installed()
     deadline = time.monotonic() + 30
     while True:
         policy = kube.get("validatingadmissionpolicy", name, namespace)
@@ -300,7 +446,8 @@ def install_task_identity_policy(
     pod: dict[str, Any] = {"apiVersion": "v1", "kind": "Pod", "metadata": {
         "name": "loom-execution-policy-probe", "namespace": namespace,
     }, "spec": {
-        "automountServiceAccountToken": False, "serviceAccountName": "loom-execution-policy-probe",
+        "automountServiceAccountToken": False,
+        "serviceAccountName": "loom-execution-policy-probe" if qualify_installed is None else "loom-execution-attempt",
         "restartPolicy": "Never", "securityContext": {
             "runAsNonRoot": True, "runAsUser": 65532, "runAsGroup": 65532,
             "seccompProfile": {"type": "RuntimeDefault"},
@@ -338,6 +485,8 @@ def install_task_identity_policy(
         except TaskIdentityPolicyDeniedError as exc:
             if exc.policy_name != name:
                 raise DeploymentError("another policy rejected the identity probe") from exc
+            if qualify_installed is not None:
+                qualify_installed()
             return
         if time.monotonic() >= deadline:
             raise DeploymentError("task identity admission policy did not reject the negative probe")
@@ -527,6 +676,12 @@ def preflight(
     verify_cluster_identity(kube, config, expected_cluster_id)
     verify_ingress_mode(kube, config)
     verify_standalone_pool_boundary(kube, config, completions=pool_completions)
+    return _platform_prerequisites(kube, manifest, config, files)
+
+
+def _platform_prerequisites(kube: Kubectl, manifest: dict[str, Any], config: dict[str, Any],
+        files: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+    """Common checks only; the caller must qualify its standalone/shared mode."""
     for (namespace, secret), required in sorted(secret_requirements(files, config).items()):
         # Return only names of populated keys, never secret values.
         observed = kube.run(
@@ -768,7 +923,101 @@ def verify_deployed_images(kube: Kubectl, files: dict[str, list[dict[str, Any]]]
                 raise DeploymentError("candidate workload readback failed: " + metadata["name"])
 
 
-def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str, Any]:
+def _rollout_candidate_files(*, kube: Kubectl, manifest: dict[str, Any], config: dict[str, Any],
+        files: dict[str, list[dict[str, Any]]], snapshot_root: Path, retry_failed_jobs: bool,
+        phase: Callable[[str], None], before_write: Callable[[], None],
+        write_candidate_file: Callable[[str], None] | None = None,
+        run_candidate_job: Callable[[str, bool], None] | None = None) -> None:
+    """Common workload sequence after the caller's qualified, guarded preflight.
+
+    This is not an entry point or a guard bypass. The parent owns source/namespace
+    qualification, backup, pool registration and recovery, and must retain write
+    intent before each effect. Neither success nor failure releases its guard.
+    The exact supplied files may be standalone or shared-wired; never re-render
+    them here, since that could restore a retired collector or local writers.
+    """
+    ns = config["namespace"]
+
+    def apply_file(filename: str) -> None:
+        before_write()
+        phase(filename.removesuffix(".yaml"))
+        if write_candidate_file is not None and filename not in {'30-migrate.yaml', '50-configure.yaml'}:
+            write_candidate_file(filename)
+        else:
+            kube.run("apply", "-f", str(snapshot_root / filename))
+
+    def run_job(filename: str) -> None:
+        if run_candidate_job is not None:
+            before_write()
+            phase(filename.removesuffix('.yaml'))
+            try:
+                run_candidate_job(filename, retry_failed_jobs)
+            except Exception:
+                raise DeploymentError('candidate Job execution unconfirmed; preserve recovery evidence') from None
+            return
+        name = files[filename][0]["metadata"]["name"]
+        existing = kube.get("job", name, ns)
+        if job_complete(existing):
+            phase(filename.removesuffix(".yaml") + "-already-complete")
+            return
+        if job_failed(existing):
+            if not retry_failed_jobs:
+                raise DeploymentError(
+                    "candidate job previously failed; fix the cause and explicitly retry failed jobs"
+                )
+            before_write()
+            phase("retry-failed-job-" + name)
+            kube.run("delete", "job", name, "-n", ns, "--cascade=foreground", "--wait=true")
+        if not existing or job_failed(existing):
+            apply_file(filename)
+        wait_for_job(kube, name, ns, 660)
+
+    for filename in ("00-namespaces.yaml", "10-config-network.yaml", "20-database.yaml"):
+        apply_file(filename)
+    phase("database-ready")
+    kube.run("rollout", "status", "statefulset/loom-postgres", "-n", ns, "--timeout=600s", timeout=640)
+    apply_file("80-backup.yaml")
+    run_job("30-migrate.yaml")
+    apply_file("40-services.yaml")
+    for name in ("loom-service", "loom-control-plane", "loom-llm-gateway", "loom-web"):
+        kube.run("rollout", "status", f"deployment/{name}", "-n", ns, "--timeout=300s", timeout=340)
+    run_job("50-configure.yaml")
+    apply_file("60-execution.yaml")
+    for actuator in [row["metadata"]["name"] for row in files["60-execution.yaml"] if row["kind"] == "Deployment"]:
+        kube.run("rollout", "status", "deployment/" + actuator, "-n", config["execution_namespace"],
+            "--timeout=300s", timeout=340)
+    apply_file("70-public.yaml")
+    phase("public-load-balancer-ready")
+    kube.run("wait", "--for=jsonpath={.status.loadBalancer.ingress}", "service/loom-web", "-n", ns,
+        "--timeout=300s", timeout=340)
+    phase("public-https-smoke")
+    public_smoke(manifest["public_origin"], config["environment"])
+    phase("candidate-readback")
+    verify_deployed_images(kube, files)
+
+
+def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None,
+        participant_release: PreparedParticipantRelease | None = None,
+        pool: ParticipantRolloutAPI | None = None,
+        participant_reference: ParticipantRolloutReference | None = None,
+        candidate_writer: RetainedCandidateFileWriter | None = None,
+        participant_finalize: Callable[[], None] | None = None) -> dict[str, Any]:
+    if (participant_release is None) != (pool is None):
+        raise DeploymentError('shared release and protected adapter must be supplied together')
+    if participant_finalize is not None and (candidate_writer is None or not callable(participant_finalize)):
+        raise DeploymentError('shared finalization requires its retained candidate writer')
+    if candidate_writer is not None:
+        candidate_writer.validate()
+        if (participant_release is None or candidate_writer.retained.release != participant_release
+                or candidate_writer.retained.reference != participant_reference):
+            raise DeploymentError('candidate writer differs from retained shared release')
+    participant_release = copy.deepcopy(participant_release)
+    completion = None
+    if candidate_writer is not None:
+        from scripts.ops.nebius_pool_participant_completion import RetainedParticipantCompletion
+
+        assert pool is not None
+        completion = RetainedParticipantCompletion(candidate_writer, pool)
     snapshot = tempfile.TemporaryDirectory(prefix="loom-nebius-deploy-")
     snapshot_root = Path(snapshot.name)
     args.evidence_dir.mkdir(parents=True, exist_ok=True)
@@ -779,6 +1028,17 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
         "status": "running",
         "phases": [],
     }
+    if participant_reference is not None:
+        from scripts.ops.nebius_pool_participant_operation import ParticipantRolloutReference
+
+        try:
+            reference = ParticipantRolloutReference.model_validate(participant_reference.model_dump())
+            if (participant_release is None or reference.operation_id != participant_release.refresh.after.operation_id
+                    or reference.publication.source_sha != participant_release.migration.registration.candidate['candidate_sha']):
+                raise ValueError
+            evidence['shared_pool_release'] = reference.model_dump(mode='json')
+        except Exception:
+            raise DeploymentError('shared release reference differs from deployment') from None
 
     resume_owner = getattr(args, "resume_guard_owner", None)
     if resume_owner is not None and re.fullmatch(r"rollout-[0-9a-f]{32}", resume_owner) is None:
@@ -788,8 +1048,16 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
         raise DeploymentError("invalid rollout guard owner")
     if resume_owner:
         evidence["guard_owner"] = guard_owner
+    if participant_release is not None:
+        shared_owner = 'rollout-' + participant_release.refresh.after.operation_id.hex
+        if ((resume_owner is not None and resume_owner != shared_owner)
+                or (getattr(args, 'guard_owner', None) is not None and args.guard_owner != shared_owner)
+                or getattr(args, 'retire_target', None) is not None):
+            raise DeploymentError('shared release differs from its guard or target scope')
+        guard_owner = shared_owner
     guard_acquired = False
     mutation_started = False
+    capacity_proof: ParticipantCapacityReceipt | None = None
 
     def phase(name: str) -> None:
         evidence["phases"].append({"name": name, "started_at": datetime.now(UTC).isoformat()})
@@ -817,7 +1085,43 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
         kube = kube or Kubectl(args.kubeconfig)
         phase("preflight")
         pool_completions: dict[str, dict[str, Any]] = {}
-        state = preflight(kube, manifest, config, files, args.expected_cluster_id, pool_completions=pool_completions)
+        release_binding: bytes | None = None
+
+        def check_release() -> None:
+            if participant_release is not None and _participant_release_binding(participant_release, manifest, config, files) != release_binding:
+                raise DeploymentError('shared release changed during rollout')
+            if candidate_writer is not None:
+                candidate_writer.validate()
+                if (candidate_writer.retained.release != participant_release
+                        or candidate_writer.retained.reference != participant_reference):
+                    raise DeploymentError('candidate writer changed during rollout')
+
+        if pool is None:
+            state = preflight(kube, manifest, config, files, args.expected_cluster_id, pool_completions=pool_completions)
+        else:
+            assert participant_release is not None
+            release_binding = _participant_release_binding(participant_release, manifest, config, files)
+            verify_cluster_identity(kube, config, args.expected_cluster_id)
+            verify_ingress_mode(kube, config)
+            pool.preflight(kube, copy.deepcopy(participant_release))
+            check_release()
+            state = _platform_prerequisites(kube, manifest, config, files)
+            if not state['database_exists']:
+                raise DeploymentError('shared release requires its existing participant database')
+            evidence['pool_refresh'] = {'operation_id': str(participant_release.refresh.after.operation_id),
+                'participant_id': str(participant_release.refresh.participant_id),
+                'pool_id': str(participant_release.refresh.after.pool_id)}
+            if args.apply and completion is not None:
+                completed = completion.reconcile(kube)
+                if completed is not None:
+                    evidence['pool_refresh'].update(completed)
+                    evidence.update(guard_owner=guard_owner, completion_reconciled=True)
+                    if participant_finalize is not None:
+                        phase('shared-pool-promote-history')
+                        check_release()
+                        participant_finalize()
+                    evidence['status'] = 'complete'
+                    return evidence
         evidence["preflight"] = state
         retire_target = getattr(args, "retire_target", None)
         current = kube.get("configmap", "loom-platform-config", config["namespace"])
@@ -864,7 +1168,13 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
             # A same-candidate ingress cutover may have finished after preflight
             # but before we acquired the shared rollout guard.
             verify_ingress_mode(kube, config)
-            verify_standalone_pool_boundary(kube, config, completions=pool_completions, allow_load=False)
+            if pool is None:
+                verify_standalone_pool_boundary(kube, config, completions=pool_completions, allow_load=False)
+            else:
+                assert participant_release is not None
+                check_release()
+                pool.under_guard(kube, copy.deepcopy(participant_release))
+                check_release()
             current = kube.get("configmap", "loom-platform-config", ns)
             validate_target_replacement(current, config, retire_target)
             if retire_target is not None and canonical(current.get("data", {})) != replacement_source:
@@ -885,40 +1195,33 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
                 phase("validate-fresh-target")
                 execution_target_action(kube, ns, "validate", retire_target, config["target_id"])
 
-        def apply_file(filename: str) -> None:
+        def before_write() -> None:
             nonlocal mutation_started
+            if pool is not None and observe_rollout_guard(kube, ns, guard_owner, manifest['candidate_sha'])['status'] != 'held':
+                raise DeploymentError('shared release no longer owns its idle guard')
             mutation_started = True
-            phase(filename.removesuffix(".yaml"))
-            kube.run("apply", "-f", str(snapshot_root / filename))
-
-        def wait_job(name: str, seconds: int = 660) -> None:
-            wait_for_job(kube, name, ns, seconds)
-
-        def run_job(filename: str) -> None:
-            name = files[filename][0]["metadata"]["name"]
-            existing = kube.get("job", name, ns)
-            if job_complete(existing):
-                phase(filename.removesuffix(".yaml") + "-already-complete")
-                return
-            if job_failed(existing):
-                if not args.retry_failed_jobs:
-                    raise DeploymentError(
-                        "candidate job previously failed; fix the cause and explicitly retry failed jobs"
-                    )
-                phase("retry-failed-job-" + name)
-                kube.run("delete", "job", name, "-n", ns, "--cascade=foreground", "--wait=true")
-            if not existing or job_failed(existing):
-                apply_file(filename)
-            wait_job(name)
 
         if state["backup_required"]:
-            phase("pre-upgrade-backup")
             backup_name = (
+                candidate_writer.job_name('pre-upgrade-backup') if candidate_writer is not None else
                 "loom-predeploy-" + manifest["candidate_sha"][:12] + "-" + uuid.uuid4().hex[:8]
             )
             evidence["backup_job"] = backup_name
-            kube.run("create", "job", backup_name, "--from=cronjob/loom-platform-backup", "-n", ns)
-            wait_job(backup_name, 1860)
+            if pool is not None:
+                # Backup creation can commit before its response is lost. The
+                # shared release must retain its pause even before pool refresh,
+                # and must still own that pause immediately before dispatch.
+                before_write()
+            phase("pre-upgrade-backup")
+            if candidate_writer is None:
+                kube.run("create", "job", backup_name, "--from=cronjob/loom-platform-backup", "-n", ns)
+                wait_for_job(kube, backup_name, ns, 1860)
+            else:
+                try:
+                    evidence['backup_result'] = candidate_writer.run_job('pre-upgrade-backup',
+                        retry_failed_jobs=args.retry_failed_jobs)
+                except Exception:
+                    raise DeploymentError('backup Job execution unconfirmed; preserve recovery evidence') from None
         if retire_target is not None:
             # A lost response can follow a committed state change. From this
             # point every failure must retain the durable operator-owned pause.
@@ -926,66 +1229,77 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
             phase("retire-previous-target")
             execution_target_action(kube, ns, "retire", retire_target, config["target_id"])
             evidence["target_replacement"]["previous_target_retired"] = True
+        if pool is not None:
+            assert participant_release is not None and guard_acquired
+            check_release()
+            # Any lost pool-write response must retain the original idle guard.
+            before_write()
+            phase('shared-pool-refresh')
+            readiness = pool.activate(kube, copy.deepcopy(participant_release))
+            check_release()
+            if readiness == 'busy':
+                pool.under_guard(kube, copy.deepcopy(participant_release))
+                check_release()
+                rollout_guard(kube, ns, 'release', guard_owner, manifest['candidate_sha'])
+                guard_acquired = False
+                evidence['status'] = 'skipped_busy'
+                return evidence
+            if readiness != 'ready':
+                raise DeploymentError('shared pool refresh outcome unconfirmed')
         if config.get("task_identity_policy") is not None:
-            mutation_started = True
+            before_write()
             phase("install-and-verify-task-identity-policy")
-            install_task_identity_policy(kube, config, snapshot_root)
-        for filename in ("00-namespaces.yaml", "10-config-network.yaml", "20-database.yaml"):
-            apply_file(filename)
-        phase("database-ready")
-        kube.run(
-            "rollout",
-            "status",
-            "statefulset/loom-postgres",
-            "-n",
-            ns,
-            "--timeout=600s",
-            timeout=640,
-        )
-        apply_file("80-backup.yaml")
-        run_job("30-migrate.yaml")
-        apply_file("40-services.yaml")
-        for name in ("loom-service", "loom-control-plane", "loom-llm-gateway", "loom-web"):
-            kube.run(
-                "rollout", "status", f"deployment/{name}", "-n", ns, "--timeout=300s", timeout=340
-            )
-        run_job("50-configure.yaml")
-        apply_file("60-execution.yaml")
-        for actuator in [
-            row["metadata"]["name"] for row in files["60-execution.yaml"]
-            if row["kind"] == "Deployment"
-        ]:
-            kube.run(
-                "rollout",
-                "status",
-                "deployment/" + actuator,
-                "-n",
-                config["execution_namespace"],
-                "--timeout=300s",
-                timeout=340,
-            )
-        apply_file("70-public.yaml")
-        phase("public-load-balancer-ready")
-        kube.run(
-            "wait",
-            "--for=jsonpath={.status.loadBalancer.ingress}",
-            "service/loom-web",
-            "-n",
-            ns,
-            "--timeout=300s",
-            timeout=340,
-        )
-        phase("public-https-smoke")
-        public_smoke(manifest["public_origin"], config["environment"])
-        phase("candidate-readback")
-        verify_deployed_images(kube, files)
+            install_task_identity_policy(kube, config, snapshot_root,
+                qualify_installed=candidate_writer.qualify_identity_policy if candidate_writer is not None else None)
+
+        def retained_job(filename: str, retry: bool) -> None:
+            assert candidate_writer is not None
+            candidate_writer.run_job(filename, retry_failed_jobs=retry)
+
+        _rollout_candidate_files(kube=kube, manifest=manifest, config=config, files=files,
+            snapshot_root=snapshot_root, retry_failed_jobs=args.retry_failed_jobs,
+            phase=phase, before_write=before_write,
+            write_candidate_file=candidate_writer.apply_file if candidate_writer is not None else None,
+            run_candidate_job=retained_job if candidate_writer is not None else None)
+        if pool is not None:
+            assert participant_release is not None and guard_acquired
+            check_release()
+            before_write()
+            phase('shared-pool-reopen-and-capacity')
+            pool.finish(kube, copy.deepcopy(participant_release))
+            check_release()
+            observation_id = uuid.uuid4()
+            evidence['pool_refresh']['capacity_observation_id'] = str(observation_id)
+            phase('shared-pool-capacity-read')
+            capacity_started_at, capacity_started_clock = datetime.now(UTC), time.monotonic()
+            capacity_proof = pool.read_capacity(kube, copy.deepcopy(participant_release), observation_id=observation_id)
+            check_release()
         if retire_target is not None:
             phase("target-replacement-readback")
             execution_target_action(kube, ns, "verify", retire_target, config["target_id"])
             evidence["target_replacement"]["active_target_verified"] = True
         if guard_acquired:
+            if pool is not None:
+                assert participant_release is not None
+                # A rejected proof must not create release authority. Check
+                # again after retaining the intent to charge preparation time.
+                _participant_capacity_before_release(capacity_proof,
+                    started_at=capacity_started_at, started_clock=capacity_started_clock,
+                    max_age_seconds=participant_release.refresh.after.admission.observation_max_age_seconds)
+                if completion is not None:
+                    assert capacity_proof is not None
+                    completion.prepare(kube, observation_id=observation_id, capacity=capacity_proof)
+                evidence['pool_refresh']['capacity'] = _participant_capacity_before_release(capacity_proof,
+                    started_at=capacity_started_at, started_clock=capacity_started_clock,
+                    max_age_seconds=participant_release.refresh.after.admission.observation_max_age_seconds)
             rollout_guard(kube, ns, "release", guard_owner, manifest["candidate_sha"])
             guard_acquired = False
+            if completion is not None and completion.reconcile(kube) is None:
+                raise DeploymentError('shared release completion unconfirmed; preserve evidence')
+        if participant_finalize is not None:
+            phase('shared-pool-promote-history')
+            check_release()
+            participant_finalize()
         evidence["status"] = "complete"
         return evidence
     except Exception as exc:

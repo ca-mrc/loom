@@ -3,6 +3,7 @@ install identity, verified end to end, and only ever an optimization."""
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from collections.abc import AsyncIterator
@@ -28,6 +29,7 @@ from loom.trajectory.storage import ObjectReadback
 from loom_llm_gateway.harness_cache import (
     HarnessCacheError,
     harness_cache_entry,
+    read_entry,
     read_entry_digest,
     store_entry,
 )
@@ -128,7 +130,7 @@ def test_entries_never_cross_teams_images_or_installs() -> None:
     team = uuid4()
     entry = harness_cache_entry(team_id=team, plan=plan)
 
-    assert entry.archive_key.startswith(f"harness-cache/v1/{team}/")
+    assert entry.archive_key.startswith(f"harness-cache/v2/{team}/")
     assert entry != harness_cache_entry(team_id=uuid4(), plan=plan)
     other_image = plan.model_copy(update={"task_image_ref": _TASK_IMAGE.replace("a" * 64, "b" * 64)})
     assert entry != harness_cache_entry(team_id=team, plan=other_image)
@@ -158,10 +160,97 @@ async def test_store_publishes_only_verified_archives_once() -> None:
     assert await store_entry(store, bucket="b", entry=entry, body=_chunks(b"install-", b"archive"),
                              declared_size=len(archive), declared_digest=_digest(archive))
     assert await read_entry_digest(store, bucket="b", entry=entry) == _digest(archive)
-    # Write-once: a later archive for the same key is ignored.
+    # An upload begun after publication reuses the existing entry.
     assert not await store_entry(store, bucket="b", entry=entry, body=_chunks(b"replacement-xx"),
                                  declared_size=14, declared_digest=_digest(b"replacement-xx"))
-    assert store.objects[entry.archive_key] == archive
+    published = await read_entry(store, bucket="b", entry=entry)
+    assert published is not None and store.objects[published.archive_key] == archive
+
+
+@pytest.mark.usefixtures("_registered")
+async def test_concurrent_first_uploads_publish_consistent_immutable_archives() -> None:
+    store, entry = _MemoryStore(), harness_cache_entry(team_id=uuid4(), plan=_plan())
+    ready = asyncio.Event()
+    arrivals = 0
+
+    async def concurrent_body(payload: bytes) -> AsyncIterator[bytes]:
+        nonlocal arrivals
+        arrivals += 1
+        if arrivals == 2:
+            ready.set()
+        await asyncio.wait_for(ready.wait(), timeout=2)
+        yield payload
+
+    archives = [b"first-install", b"other-install"]
+    accepted = await asyncio.gather(*[
+        store_entry(store, bucket="b", entry=entry, body=concurrent_body(archive),
+                    declared_size=len(archive), declared_digest=_digest(archive))
+        for archive in archives
+    ])
+    assert all(accepted)
+    published = await read_entry(store, bucket="b", entry=entry)
+    assert published is not None
+    winner = store.objects[published.archive_key]
+    assert winner in archives
+    assert published.digest == _digest(winner)
+    # Both uploads remain immutable, including for readers of an older reference.
+    assert sorted(v for k, v in store.objects.items() if k != entry.digest_key) == sorted(archives)
+
+
+@pytest.mark.usefixtures("_registered")
+async def test_failed_concurrent_upload_cannot_replace_published_archive() -> None:
+    store, entry = _MemoryStore(), harness_cache_entry(team_id=uuid4(), plan=_plan())
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def invalid_body() -> AsyncIterator[bytes]:
+        started.set()
+        await asyncio.wait_for(release.wait(), timeout=2)
+        yield b"wrong"
+
+    pending = asyncio.create_task(store_entry(
+        store, bucket="b", entry=entry, body=invalid_body(),
+        declared_size=5, declared_digest=_digest(b"right")))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=2)
+        assert await store_entry(store, bucket="b", entry=entry, body=_chunks(b"valid"),
+                                 declared_size=5, declared_digest=_digest(b"valid"))
+    finally:
+        release.set()
+    with pytest.raises(HarnessCacheError, match="digest_mismatch"):
+        await pending
+    assert await read_entry_digest(store, bucket="b", entry=entry) == _digest(b"valid")
+    published = await read_entry(store, bucket="b", entry=entry)
+    assert published is not None and store.objects[published.archive_key] == b"valid"
+
+
+@pytest.mark.usefixtures("_registered")
+async def test_ambiguous_publication_retains_readable_verified_archive() -> None:
+    class AmbiguousStore(_MemoryStore):
+        async def put_object(self, *, bucket: str, key: str, body: bytes) -> str:
+            await super().put_object(bucket=bucket, key=key, body=body)
+            raise TimeoutError("response lost after publication")
+
+    store, entry = AmbiguousStore(), harness_cache_entry(team_id=uuid4(), plan=_plan())
+    with pytest.raises(TimeoutError):
+        await store_entry(store, bucket="b", entry=entry, body=_chunks(b"valid"),
+                          declared_size=5, declared_digest=_digest(b"valid"))
+    published = await read_entry(store, bucket="b", entry=entry)
+    assert published is not None
+    assert store.objects[published.archive_key] == b"valid"
+    assert published.digest == _digest(b"valid")
+
+
+@pytest.mark.usefixtures("_registered")
+@pytest.mark.parametrize("reference", [
+    b"not json", b"[]", b"x" * 4097,
+    json.dumps({"upload_id": "../other", "digest": _digest(b"archive")}).encode(),
+    json.dumps({"upload_id": "a" * 32, "digest": "invalid"}).encode(),
+    json.dumps({"upload_id": "a" * 32, "digest": _digest(b"archive"), "key": "other"}).encode(),
+])
+async def test_malformed_reference_is_a_cache_miss(reference: bytes) -> None:
+    store, entry = _MemoryStore(), harness_cache_entry(team_id=uuid4(), plan=_plan())
+    store.objects[entry.digest_key] = reference
+    assert await read_entry(store, bucket="b", entry=entry) is None
 
 
 @pytest.mark.usefixtures("_registered")

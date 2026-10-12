@@ -4,19 +4,24 @@
  * they are on a public onboarding route such as password setup/reset
  * or invite acceptance. Legacy signed-out /settings also redirects.
  */
+import { Suspense } from "react";
 import { Navigate, useLocation } from "react-router-dom";
 
 import { useAuth } from "../auth/useAuth";
 import { cn } from "../lib/cn";
 import { frontendHomePath } from "../lib/frontendConfig";
 import { RouteContext } from "./RouteContext";
-import NavBar from "./NavBar";
+import { lazyRoute } from "../lib/lazyRoute";
+import { BrowserErrorBoundary } from "./BrowserErrorBoundary";
 import { RecoveryPanel } from "./RecoveryPanel";
 import { RouteRecoveryBoundary } from "./RouteRecoveryBoundary";
 import { SkipLink } from "./SkipLink";
 import { HelpProvider } from "./HelpProvider";
 import { HelpButton } from "./HelpButton";
 import { helpTopicForPath } from "../lib/helpTopicForPath";
+
+// Signed-out and managed-login pages do not need the authenticated sidebar.
+const NavBar = lazyRoute(() => import("./NavBar"));
 
 const SESSION_FAILURE_COPY = {
   network: "Loom could not reach the browser session service.",
@@ -116,12 +121,34 @@ function LayoutContent(): JSX.Element {
   return (
     <div className="flex min-h-screen flex-col bg-slate-50 lg:h-screen lg:flex-row">
       <SkipLink />
-      <NavBar
-        isAdmin={isAdmin}
-        currentUsername={me?.user.username ?? null}
-        currentTeamName={me?.current_team?.name ?? null}
-        currentTeamRole={me?.current_team?.role ?? null}
-      />
+      <BrowserErrorBoundary
+        resetKey={loc.key}
+        pathname={window.location.pathname}
+        renderFallback={({ referenceId }) => (
+          <RecoveryPanel
+            scope="route"
+            title="Loom could not load navigation"
+            message="Reload Loom to restore navigation. Your current page is still available."
+            referenceId={referenceId}
+            onReload={() => window.location.reload()}
+            homeHref={frontendHomePath()}
+          />
+        )}
+      >
+        <Suspense fallback={
+          <div role="status" aria-live="polite" aria-busy="true"
+            className="shrink-0 border-b border-slate-200 bg-white p-6 lg:w-56 lg:border-b-0 lg:border-r">
+            Loading navigation…
+          </div>
+        }>
+          <NavBar
+            isAdmin={isAdmin}
+            currentUsername={me?.user.username ?? null}
+            currentTeamName={me?.current_team?.name ?? null}
+            currentTeamRole={me?.current_team?.role ?? null}
+          />
+        </Suspense>
+      </BrowserErrorBoundary>
       <main id="main-content" tabIndex={-1} className="min-w-0 flex-1 overflow-y-auto">
         <div className="mx-auto max-w-7xl animate-fade-in px-4 py-5 sm:px-6 lg:px-8 lg:py-8">
           <div className="mb-3 flex justify-end"><HelpButton topic={helpTopicForPath(loc.pathname)} /></div>

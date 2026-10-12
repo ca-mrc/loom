@@ -35,7 +35,7 @@ function renderPage(): void {
   render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter
-        future={{ v7_startTransition: true, v7_relativeSplatPath: true }}
+
         initialEntries={["/task-sets/new"]}
       >
         <Routes>

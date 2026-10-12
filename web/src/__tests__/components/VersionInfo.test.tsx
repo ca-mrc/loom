@@ -49,7 +49,7 @@ function renderVersionInfo() {
     defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false } },
   });
   return render(
-    <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><QueryClientProvider client={queryClient}>
+    <MemoryRouter><QueryClientProvider client={queryClient}>
       <VersionInfo environmentLabel="Development" />
     </QueryClientProvider></MemoryRouter>,
   );
@@ -80,7 +80,7 @@ describe("VersionInfo (#2009)", () => {
       defaultOptions: { queries: { retry: false } },
     });
     render(
-      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><QueryClientProvider client={queryClient}>
+      <MemoryRouter><QueryClientProvider client={queryClient}>
         <VersionInfo environmentLabel="Nebius integration with a very long source ref label" />
       </QueryClientProvider></MemoryRouter>,
     );

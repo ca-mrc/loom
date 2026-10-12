@@ -9,12 +9,15 @@ evidence is checked against current installation trust, without an evidence TTL.
 from __future__ import annotations
 
 import asyncio
+import gzip
 import hashlib
 import io
 import json
 import re
 import stat
+import tarfile
 import zipfile
+from pathlib import PurePosixPath
 from typing import Any
 from uuid import UUID
 
@@ -32,6 +35,8 @@ _API = GITHUB_API_ROOT
 _GATES = frozenset(("repository-checks", "images-gate", "cluster-smoke-gate", "staging-smoke-gate"))
 _MAX_ARTIFACT = 64 * 1024 * 1024
 _MAX_DOCUMENT = 1024 * 1024
+_MAX_SOURCE_DOWNLOAD = 32 * 1024 * 1024
+_MAX_SOURCE_EXPANDED = 128 * 1024 * 1024
 
 
 class ProtectedPublication(BaseModel):
@@ -94,7 +99,8 @@ class GitHubCandidateCatalog:
         })
         response = await self.http.send(request, stream=True, auth=None, follow_redirects=False)
         try:
-            if response.status_code == 302 and api and url.endswith("/zip"):
+            if response.status_code == 302 and api and (url.endswith("/zip")
+                    or re.fullmatch(re.escape(_API) + r'tarball/[0-9a-f]{40}', url)):
                 return b"", response.headers["Location"]
             response.raise_for_status()
             _require(response.status_code == 200)
@@ -112,6 +118,96 @@ class GitHubCandidateCatalog:
         payload, redirect = await self._read(_API + path, api=True, limit=2 * _MAX_DOCUMENT)
         _require(redirect is None)
         return _json(payload)
+
+    async def candidate_follows(self, *, candidate_id: UUID, current_sha: str) -> bool:
+        """Compare exact commits using the scoped reader, without a local checkout.
+
+        This is source ancestry only. The caller must independently resolve the
+        protected publication and validate its candidate/profile bytes.
+        """
+        reference = self.publications.get(candidate_id)
+        if reference is None:
+            raise ManagementError('candidate_not_available', 404)
+        _require(isinstance(current_sha, str) and re.fullmatch(r'[0-9a-f]{40}', current_sha) is not None)
+        candidate = reference.source_sha
+        value = await self._api(f'compare/{current_sha}...{candidate}?per_page=1')
+        _require(value['base_commit']['sha'] == current_sha)
+        base, ahead, behind, status = value['merge_base_commit']['sha'], value['ahead_by'], value['behind_by'], value['status']
+        _require(isinstance(base, str) and re.fullmatch(r'[0-9a-f]{40}', base) is not None
+            and type(ahead) is int and ahead >= 0 and type(behind) is int and behind >= 0)
+        if status == 'identical':
+            _require(current_sha == candidate == base and ahead == behind == 0)
+            return True
+        _require(current_sha != candidate)
+        if status == 'ahead':
+            _require(base == current_sha and ahead > 0 and behind == 0)
+            return True
+        if status == 'behind':
+            _require(base == candidate and ahead == 0 and behind > 0)
+            return False
+        _require(status == 'diverged' and base not in {current_sha, candidate} and ahead > 0 and behind > 0)
+        return False
+
+    async def render_source(self, *, candidate_id: UUID) -> dict[str, bytes]:
+        """Read rendering inputs at the pinned commit, never a caller-supplied URL.
+
+        Like ancestry, this is not publication approval: the protected caller
+        must first resolve the publication. GitHub's archive has a prefix and
+        compression, so its digest is not the published local git-archive digest.
+        The authenticated immutable-commit API and archive PAX comment bind it.
+        """
+        reference = self.publications.get(candidate_id)
+        if reference is None:
+            raise ManagementError('candidate_not_available', 404)
+        try:
+            async with self._concurrency, asyncio.timeout(120):
+                payload, redirect = await self._read(_API + 'tarball/' + reference.source_sha,
+                    api=True, limit=_MAX_SOURCE_DOWNLOAD)
+                if redirect is not None:
+                    url = httpx.URL(redirect)
+                    parts = url.path.split('/')
+                    _require(url.scheme == 'https' and url.host == 'codeload.github.com'
+                        and not url.userinfo and url.port in {None, 443} and not url.fragment
+                        and len(parts) == 5 and is_repository_name('/'.join(parts[1:3]))
+                        and parts[3:] == ['legacy.tar.gz', reference.source_sha])
+                    payload, second = await self._read(str(url), api=False, limit=_MAX_SOURCE_DOWNLOAD)
+                    _require(second is None)
+                with gzip.GzipFile(fileobj=io.BytesIO(payload)) as compressed:
+                    expanded = compressed.read(_MAX_SOURCE_EXPANDED + 1)
+                _require(len(expanded) <= _MAX_SOURCE_EXPANDED)
+                files: dict[str, bytes] = {}
+                seen: set[str] = set()
+                root = None
+                with tarfile.open(fileobj=io.BytesIO(expanded), mode='r:') as archive:
+                    _require(archive.pax_headers.get('comment') == reference.source_sha)
+                    for count, member in enumerate(archive):
+                        name = member.name.rstrip('/') if member.isdir() else member.name
+                        path = PurePosixPath(name)
+                        _require(count < 32768 and bool(name) and not path.is_absolute()
+                            and '..' not in path.parts and path.as_posix() == name
+                            and '\\' not in name and name not in seen)
+                        seen.add(name)
+                        if root is None:
+                            root = path.parts[0]
+                            match = re.fullmatch(r'(?:ca-mrc|qianyi-sun)-loom-([0-9a-f]{7,40})', root)
+                            _require(match is not None and reference.source_sha.startswith(match[1]))
+                        _require(path.parts[0] == root)
+                        relative = '/'.join(path.parts[1:])
+                        if member.isdir() or not (relative.startswith(('deploy/k8s/', 'src/loom/'))
+                                or relative == 'scripts/ops/render_nebius_platform.py'):
+                            continue
+                        _require(member.isfile() and not member.issparse() and 0 <= member.size <= 4 * _MAX_DOCUMENT)
+                        source = archive.extractfile(member)
+                        _require(source is not None)
+                        assert source is not None
+                        files[relative] = source.read()
+                _require({'scripts/ops/render_nebius_platform.py', 'src/loom/__init__.py',
+                    'src/loom/nebius_platform_render.py'} <= files.keys()
+                    and any(name.startswith('deploy/k8s/') for name in files)
+                    and sum(map(len, files.values())) <= _MAX_SOURCE_DOWNLOAD)
+                return files
+        except Exception:
+            raise ValueError('candidate rendering source unavailable or invalid') from None
 
     async def _checks(self, head_sha: str) -> None:
         _require(re.fullmatch(r"[0-9a-f]{40}", head_sha) is not None)

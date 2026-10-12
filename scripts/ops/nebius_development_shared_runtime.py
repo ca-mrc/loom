@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from scripts.ops.nebius_development_pool_registration import retained_development_participant
 from scripts.ops.nebius_development_runtime_setup import (
     DevelopmentDatabaseRuntime,
     database_runtime_documents,
@@ -44,7 +45,7 @@ def prepare_shared_runtime(request: DevelopmentDatabaseRuntime) -> DevelopmentSh
         database_runtime_documents(request)
         manager = request.manager
         spec = manager.retained.request.registration.spec
-        participant, = spec.participants
+        participant = retained_development_participant(manager.retained.request)
         machine, = (row for row in spec.machines
             if row.participant_id == participant.participant_id and row.workload_scope == 'environment')
         retained = manager.retained.request.retained.inputs

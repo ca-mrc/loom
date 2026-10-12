@@ -10,6 +10,7 @@ from typing import Any
 
 import yaml  # type: ignore[import-untyped]
 from scripts.ops.nebius_development_actuator_runtime import prepare_actuator_runtime
+from scripts.ops.nebius_development_pool_registration import retained_development_participant
 from scripts.ops.nebius_development_runtime_setup import DevelopmentDatabaseRuntime
 
 from loom.nebius_platform_render import _network_policy
@@ -28,7 +29,7 @@ def prepare_network_runtime(request: DevelopmentDatabaseRuntime) -> tuple[dict[s
     try:
         prepare_actuator_runtime(request)
         spec = request.manager.retained.request.registration.spec
-        participant, = spec.participants
+        participant = retained_development_participant(request.manager.retained.request)
         namespace = participant.execution_namespace.name
         documents = [document for document in yaml.safe_load_all(
             (_ROOT / 'deploy/k8s/nebius-execution-actuator.yaml').read_text())

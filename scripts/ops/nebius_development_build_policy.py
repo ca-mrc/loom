@@ -10,6 +10,10 @@ import re
 from typing import Any
 
 from scripts.ops.nebius_development_actuator_runtime import prepare_actuator_runtime
+from scripts.ops.nebius_development_pool_registration import (
+    development_profile_catalog,
+    retained_development_participant,
+)
 from scripts.ops.nebius_development_runtime_setup import DevelopmentDatabaseRuntime
 
 from loom_service.pool_management.profiles import PoolProfileCatalog
@@ -194,8 +198,9 @@ def prepare_build_policy(request: DevelopmentDatabaseRuntime) -> tuple[dict[str,
     try:
         prepare_actuator_runtime(request)
         spec = request.manager.retained.request.registration.spec
-        participant, = spec.participants
-        documents = build_policy_documents(participant.build_namespace.name, spec.profiles)
+        participant = retained_development_participant(request.manager.retained.request)
+        documents = build_policy_documents(participant.build_namespace.name,
+            development_profile_catalog(request.manager.retained.request))
         for document in documents:
             document['metadata']['labels'] = {
                 'loom.nebius/management-installation': str(spec.installation_id),

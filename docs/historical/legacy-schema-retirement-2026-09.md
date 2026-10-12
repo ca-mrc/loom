@@ -65,7 +65,13 @@ unknown dependent SQL routines or objects.
 Published migrations remain intact. In particular, the independent
 `capacity_build_guard_migrations` chain references personal-development tables.
 It cannot be silently removed or treated as compatible with the new schema.
-Migration 0171 aborts if such dependent routines are installed.
+Migration 0171 aborts if such dependent routines are installed. The same rule
+applies to retained `capacity_guard_migrations` routines: the frozen
+`0134/guard_0030` reference includes three routines that read the retired
+`slurm_worker_jobs` or `worker_pool_autoscaler_policies` tables. Its separate
+application-migrator qualification ends at 0170; it does not assert compatibility
+with the current application head. See the
+[historical application upgrade boundary](../../database/README.md#historical-application-upgrade-boundary).
 
 `src/loom/application_schema_provisioning.py`,
 `src/loom/application_schema_readonly.py`, and
@@ -136,13 +142,19 @@ An old standalone code image must not be run against 0171.
 
 ## Verification and acceptance boundary
 
-Focused disposable PostgreSQL 16 / MinIO coverage verifies:
+Focused disposable PostgreSQL / MinIO coverage verifies:
 
 - Fresh head contains only the five retained candidates; upgrade with populated
   current team/task/trial data preserves records; repeated downgrade/upgrade
   works. Nonempty old tables, an external view and a dependent SQL routine abort
   transactionally. Downgrade matches PostgreSQL's own dump/restore catalog,
   including constraints, indexes, triggers, functions and default permissions.
+- PostgreSQL 16 and 17 historical application-migrator cases qualify the
+  `0134/guard_0030` upgrade through 0170. Attempts to cross retirement from 0134
+  or 0170 fail transactionally and preserve schema, roles, installed routines,
+  current records and migration versions. Independent guard-free 0170 databases
+  reach the current head with current records preserved. These cases do not
+  change the separate capacity-guard fixture pinned at 0166.
 - Historical image publication, grants and projection events remain readable.
   Frozen historical migration tests retain their data instead of deleting it to
   satisfy 0171. Current API/readiness and secret-GC tests use the new head.

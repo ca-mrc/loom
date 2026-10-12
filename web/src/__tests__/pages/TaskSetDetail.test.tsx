@@ -47,7 +47,7 @@ function renderPage(
   });
   render(
     <QueryClientProvider client={queryClient}>
-      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={[initialPath]}>
+      <MemoryRouter initialEntries={[initialPath]}>
         <Routes>
           <Route path="/task-sets/detail" element={<TaskSetDetail />} />
           <Route path="/task-sets/:id" element={<TaskSetDetail />} />

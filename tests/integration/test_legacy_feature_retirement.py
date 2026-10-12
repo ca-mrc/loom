@@ -58,6 +58,51 @@ def test_published_retirement_preserves_rows_and_reverses_empty_retirement(
         engine.dispose()
 
 
+@pytest.mark.parametrize("postgres_major", [16, 17])
+def test_guard_free_pre_retirement_database_upgrades_to_current_head(postgres_major: int) -> None:
+    from testcontainers.postgres import PostgresContainer
+
+    from loom.db.schema_startup import service_schema_head
+
+    # Independent forward provisioning distinguishes the current application
+    # profile from the retained application+capacity-guard reference.
+    with PostgresContainer(f"postgres:{postgres_major}", driver="psycopg") as pg:
+        url = pg.get_connection_url()
+        cfg = _config(url)
+        engine = create_engine(url)
+        try:
+            command.upgrade(cfg, "0170")
+            with engine.begin() as connection:
+                assert connection.execute(text("SELECT to_regnamespace('loom_capacity_guard')")).scalar_one() is None
+                team, trial = uuid4(), uuid4()
+                connection.execute(text("INSERT INTO teams (id, name) VALUES (:id, 'current-profile-history')"), {"id": team})
+                connection.execute(text("INSERT INTO tasks (id, checksum, config) VALUES ('current-profile-task', :checksum, '{}')"),
+                    {"checksum": "b" * 64})
+                connection.execute(text("""
+                    INSERT INTO trials (id, team_id, task_id, config, requires_caps, state, result)
+                    VALUES (:id, :team, 'current-profile-task', '{}', '{}', 'succeeded', CAST(:result AS jsonb))
+                """), {"id": trial, "team": team, "result": '{"aggregate_reward":1.0}'})
+                before = {
+                    table: connection.execute(text(f"SELECT to_jsonb(t) FROM {table} t ORDER BY id")).scalars().all()
+                    for table in ("teams", "tasks", "trials")
+                }
+                roles = connection.execute(text("SELECT to_jsonb(r) FROM pg_authid r ORDER BY oid")).scalars().all()
+            command.upgrade(cfg, "head")
+            with engine.connect() as connection:
+                assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == service_schema_head()
+                assert connection.execute(text("SELECT to_jsonb(r) FROM pg_authid r ORDER BY oid")).scalars().all() == roles
+                for table, rows in before.items():
+                    after = connection.execute(text(f"SELECT to_jsonb(t) FROM {table} t ORDER BY id")).scalars().all()
+                    # A later head may add columns; every original field and row
+                    # must survive this current-profile upgrade unchanged.
+                    assert len(after) == len(rows)
+                    for original, current in zip(rows, after, strict=True):
+                        assert {key: current[key] for key in original} == original
+            assert set(inspect(engine).get_table_names()) & set(CANDIDATES) == RETAINED
+        finally:
+            engine.dispose()
+
+
 def test_retirement_refuses_rows_and_preserves_the_entire_old_schema(
     isolated_migration_postgres_url: str,
 ) -> None:

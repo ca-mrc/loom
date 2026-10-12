@@ -1129,6 +1129,46 @@ def test_remote_apply_streams_manifest_and_keeps_ssh_host_verification(tmp_path,
     assert kwargs["input"] == manifest.read_text()
 
 
+@pytest.mark.parametrize('verb', ['get', 'wait', 'rollout'])
+def test_protected_local_kubectl_uses_exact_binary_and_no_ambient_credentials(tmp_path, monkeypatch, verb):
+    import os
+
+    monkeypatch.delenv('LOOM_DEPLOY_SSH_TARGET', raising=False)
+    monkeypatch.setenv('KUBECONFIG', '/foreign/credentials')
+    monkeypatch.setenv('HTTPS_PROXY', 'https://foreign-proxy.invalid')
+    monkeypatch.setenv('PATH', '/foreign/bin')
+    executable = tmp_path / 'kubectl'
+    executable.write_text('#!/bin/sh\nexit 0\n')
+    executable.chmod(0o700)
+    config = tmp_path / 'connection.json'
+    calls = []
+
+    def command(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return SimpleNamespace(returncode=0, stdout='verified\n', stderr='')
+
+    monkeypatch.setattr(deploy.subprocess, 'run', command)
+    kube = deploy.Kubectl(config, local_executable=executable)
+    assert kube.run(verb, 'pods', timeout=17, preserve_output=True) == 'verified\n'
+    argv, kwargs = calls[0]
+    assert argv[:5] == [str(executable), '--kubeconfig', str(config), '--cache-dir', str(tmp_path / 'cache')]
+    assert argv[-2:] == [verb, 'pods']
+    assert ('--request-timeout=30s' in argv) == (verb == 'get')
+    assert kwargs['env'] == {'PATH': os.defpath, 'LANG': 'C.UTF-8'}
+    assert kwargs['timeout'] == 17
+
+
+def test_protected_local_kubectl_refuses_nested_ssh_before_dispatch(tmp_path, monkeypatch):
+    executable = tmp_path / 'kubectl'
+    executable.write_text('#!/bin/sh\nexit 0\n')
+    executable.chmod(0o700)
+    kube = deploy.Kubectl(tmp_path / 'connection.json', local_executable=executable)
+    monkeypatch.setenv('LOOM_DEPLOY_SSH_TARGET', 'foreign@host.invalid')
+    monkeypatch.setattr(deploy.subprocess, 'run', lambda *_args, **_kwargs: pytest.fail('must not dispatch'))
+    with pytest.raises(deploy.DeploymentError, match='local'):
+        kube.run('get', 'pods')
+
+
 def test_active_application_access_blocks_before_backup_or_apply(rendered):
     args, config, _, files = rendered
     args.apply = True

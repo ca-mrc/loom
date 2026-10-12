@@ -11,7 +11,7 @@ function LocationProbe(): JSX.Element {
   return <><output aria-label="Current URL">{location.search}</output><button onClick={() => navigate(-1)}>Back</button></>;
 }
 function mount(route = "/library?scope=all&team_id=team-1&agent=legacy") {
-  render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={[route]}><RunLibraryFilters teamOptions={[{ id: "team-1", name: "Research" }]} /><LocationProbe /></MemoryRouter>);
+  render(<MemoryRouter initialEntries={[route]}><RunLibraryFilters teamOptions={[{ id: "team-1", name: "Research" }]} /><LocationProbe /></MemoryRouter>);
 }
 
 describe("Run Library filters", () => {

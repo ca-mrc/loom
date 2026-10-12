@@ -114,8 +114,8 @@ export const runsApi = {
       method: "POST",
       body: JSON.stringify(body),
     }),
-  getTrajectoryPage: (id: string, cursor?: number, limit = 200) =>
-    apiFetch<TrajectoryPage>(`/api/v1/trials/${id}/trajectory${qs({ cursor, limit })}`),
+  getTrajectoryPage: (id: string, cursor?: number, limit = 200, signal?: AbortSignal) =>
+    apiFetch<TrajectoryPage>(`/api/v1/trials/${id}/trajectory${qs({ cursor, limit })}`, { signal }),
   downloadATIF: (id: string) => apiDownload(`/api/v1/trials/${id}/atif`, `${id}-atif.json`),
   downloadTrajectory: (id: string) =>
     apiDownload(`/api/v1/trials/${id}/trajectory/download`, `${id}-events.jsonl`),

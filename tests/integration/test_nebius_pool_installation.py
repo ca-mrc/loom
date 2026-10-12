@@ -108,6 +108,52 @@ async def test_complete_builder_installation_retains_distinct_scopes_and_replays
         assert (await session.get(NebiusPoolMachine, builder_id)).workload_scope == "application_builder"
 
 
+async def test_legacy_staging_catalog_is_bound_in_closed_registration_and_exact_replay(sessions):
+    from loom.nebius_pool_contract import PoolParticipantV1
+    from loom_service.pool_management.installation import PoolInstallation, register_installation
+
+    config, raw = installation(("staging", "development"))
+    config["participants"][0]["legacy_catalog_environment"] = "development"
+    spec = PoolInstallation.model_validate(config)
+    async with sessions.begin() as session:
+        receipt = await register_installation(session, spec)
+    async with sessions.begin() as session:
+        assert await register_installation(session, spec) == receipt
+        row = await session.get(NebiusPoolParticipant, spec.participants[0].participant_id)
+        assert PoolParticipantV1.model_validate(row.binding_json) == spec.participants[0]
+        assert row.binding_json["environment_class"] == "staging"
+        assert row.binding_json["legacy_catalog_environment"] == "development"
+        machine, = [item for item in spec.machines if item.participant_id == row.participant_id]
+        principal = await resolve_pool_machine(session, "Bearer " + raw[machine.machine_id])
+        assert principal.participant_binding_sha256 == row.binding_sha256
+        assert principal.pool_mode == "closed"
+    del config["participants"][0]["legacy_catalog_environment"]
+    with pytest.raises(ValueError):
+        async with sessions.begin() as session:
+            await register_installation(session, PoolInstallation.model_validate(config))
+
+
+async def test_registered_legacy_staging_origin_keeps_priority_for_tasks_and_builds(sessions):
+    from loom.nebius_pool_contract import PoolParticipantV1
+    from loom.nebius_pool_priority import PoolWorkOriginV1
+    from loom_service.pool_management.origin import PoolOriginError, qualify_pool_origin
+    from tests.integration.test_nebius_pool_auth import credential
+    from tests.unit.test_nebius_pool_contract import participant
+    from tests.unit.test_nebius_pool_priority import origin
+
+    binding = PoolParticipantV1.model_validate(participant(
+        environment_class="staging", legacy_catalog_environment="development"))
+    raw, *_ = await credential(sessions, participant_config=binding)
+    async with sessions.begin() as session:
+        principal = await resolve_pool_machine(session, "Bearer " + raw)
+        for workload in ("trial", "verifier", "task_image_build"):
+            assert await qualify_pool_origin(session, principal, PoolWorkOriginV1.model_validate(origin()),
+                target_id="nebius-default", workload_kind=workload) == 1
+        with pytest.raises(PoolOriginError):
+            await qualify_pool_origin(session, principal, PoolWorkOriginV1.model_validate(origin("application")),
+                target_id="nebius-default", workload_kind="trial")
+
+
 @pytest.mark.parametrize("damage", ["missing-builder", "duplicate-builder", "missing-environment", "duplicate-environment",
     "foreign-builder", "observer-builder", "gateway-builder", "wrong-class", "missing-profile", "orphan-profile",
     "orphan-builder", "foreign-namespace", "foreign-node-group", "mixed-target"])

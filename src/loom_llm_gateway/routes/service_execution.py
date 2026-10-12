@@ -32,7 +32,7 @@ from loom_llm_gateway.harness_cache import (
     HarnessCacheEntry,
     HarnessCacheError,
     harness_cache_entry,
-    read_entry_digest,
+    read_entry,
     store_entry,
 )
 
@@ -458,19 +458,19 @@ async def get_harness_cache(
 ) -> StreamingResponse:
     entry = await _harness_cache_entry(request, _peer(lease_id, generation, role))
     store, bucket = request.app.state.artifact_store, request.app.state.settings.artifacts_bucket
-    digest = await read_entry_digest(store, bucket=bucket, entry=entry)
-    if digest is None:
+    published = await read_entry(store, bucket=bucket, entry=entry)
+    if published is None:
         raise HTTPException(status_code=404, detail="harness_cache_miss")
     try:
-        facts = await store.stat_object(bucket=bucket, key=entry.archive_key)
+        facts = await store.stat_object(bucket=bucket, key=published.archive_key)
     except Exception as exc:
         raise HTTPException(status_code=404, detail="harness_cache_miss") from exc
     if not 0 < facts.content_length <= entry.max_bytes:
         raise HTTPException(status_code=404, detail="harness_cache_miss")
     return StreamingResponse(
-        store.stream_object(bucket=bucket, key=entry.archive_key, chunk_size=1024 * 1024),
+        store.stream_object(bucket=bucket, key=published.archive_key, chunk_size=1024 * 1024),
         media_type="application/gzip",
-        headers={"Content-Length": str(facts.content_length), "X-Loom-Content-SHA256": digest},
+        headers={"Content-Length": str(facts.content_length), "X-Loom-Content-SHA256": published.digest},
     )
 
 

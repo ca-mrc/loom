@@ -23,7 +23,7 @@ from tests.ops.test_nebius_development_pool_registration import (
 )
 from tests.ops.test_nebius_development_pool_registration import capacity_checks as capacity_checks
 from tests.ops.test_nebius_development_pool_registration import cloud as cloud
-from tests.ops.test_nebius_development_pool_registration import configured
+from tests.ops.test_nebius_development_pool_registration import configured, with_staging
 from tests.ops.test_nebius_development_pool_registration import installation as installation
 from tests.ops.test_nebius_development_pool_registration import inventory as inventory
 from tests.ops.test_nebius_development_pool_registration import (
@@ -93,6 +93,88 @@ def pool_inputs(retained, build_inputs):
 def prepare(pool_inputs):
     reference, catalog, tokens = pool_inputs
     return module().prepare_intent(reference=reference, catalog=catalog, tokens=tokens)
+
+
+def common_catalog_inputs(pool_inputs, staging_first):
+    from loom_service.pool_management.installation import PoolInstallation
+
+    reference, catalog, tokens = pool_inputs
+    for field in ('execution_namespace', 'build_namespace'):
+        catalog['participants'][0][field]['uid'] = str(uuid4())
+    combined = with_staging(PoolInstallation.model_validate(catalog)).model_dump(mode='json')
+    dev, staging = combined['participants']
+    for field in ('execution_namespace', 'build_namespace'):
+        dev[field].pop('uid')
+    staging_machine, = [row for row in combined['machines'] if row['participant_id'] == staging['participant_id']]
+    tokens[UUID(staging_machine['machine_id'])] = 'staging-test-only-token'
+    staging_profile_ids = {row['profile_id'] for row in staging['targets']}
+    for profile in combined['profiles']['task_images']:
+        if profile['profile_id'] in staging_profile_ids:
+            profile['settings']['source_bucket'] = 'retained-staging-artifacts'
+            profile['settings']['registry_repository'] = 'cr.eu-north1.nebius.cloud/staging/task-images'
+    for profile in combined['profiles']['execution']:
+        if profile['profile_id'] in staging_profile_ids:
+            profile['candidate_sha'] = 'd' * 40
+    if staging_first:
+        combined['participants'].reverse()
+    return reference, combined, tokens
+
+
+@pytest.mark.parametrize('staging_first', [False, True])
+def test_common_catalog_preparation_preserves_staging_without_delivering_its_authority(pool_inputs, staging_first):
+    reference, combined, tokens = common_catalog_inputs(pool_inputs, staging_first)
+    dev, = [row for row in combined['participants'] if row['environment_class'] == 'development']
+    staging, = [row for row in combined['participants'] if row['environment_class'] == 'staging']
+    staging_machine, = [row for row in combined['machines'] if row['participant_id'] == staging['participant_id']]
+    intent = module().prepare_intent(reference=reference, catalog=combined, tokens=tokens)
+    assert intent.catalog == combined
+    namespaces = module().namespace_documents(intent)
+    assert {row['metadata']['name'] for row in namespaces.values()} == {
+        dev['execution_namespace']['name'], dev['build_namespace']['name']}
+    uids = {row['metadata']['name']: str(uuid4()) for row in namespaces.values()}
+    request = module().bind_namespaces(intent, uids)
+    retained_staging, = [row for row in request.registration.spec.participants if row.environment_class == 'staging']
+    assert retained_staging.model_dump(mode='json') == staging
+    documents = module().delivery_documents(intent, request)
+    assert {doc['metadata']['namespace'] for phase in documents.values() for doc in phase.values()} <= {
+        'loom-nebius-management-dev', 'loom-dev', dev['execution_namespace']['name'], dev['build_namespace']['name']}
+    assert not any(doc['metadata']['labels'].get('loom.nebius/pool-machine') == staging_machine['machine_id']
+        for doc in documents['material'].values())
+    gateway, = documents['workload'].values()
+    assert gateway['spec']['replicas'] == 0 and 'authority' not in documents
+    assert not any(token in repr(intent) for token in tokens.values())
+
+
+def test_common_catalog_profile_ids_are_scoped_by_workload_kind(pool_inputs):
+    from scripts.ops.nebius_development_pool_registration import development_profile_catalog
+
+    reference, combined, tokens = common_catalog_inputs(pool_inputs, True)
+    dev, = [row for row in combined['participants'] if row['environment_class'] == 'development']
+    staging, = [row for row in combined['participants'] if row['environment_class'] == 'staging']
+    dev_application, = [row for row in dev['targets'] if 'application_image_build' in row['workload_kinds']]
+    staging_build, = [row for row in staging['targets'] if 'task_image_build' in row['workload_kinds']]
+    profile, = [row for row in combined['profiles']['task_images'] if row['profile_id'] == staging_build['profile_id']]
+    separate_build = {**staging_build, 'target_id': 'staging-task-builder', 'workload_kinds': ['task_image_build']}
+    staging_build['workload_kinds'] = [kind for kind in staging_build['workload_kinds'] if kind != 'task_image_build']
+    staging['targets'].append(separate_build)
+    staging_build = separate_build
+    profile['target']['target_id'] = staging_build['target_id']
+    profile['profile_id'] = staging_build['profile_id'] = dev_application['profile_id']
+    # Assert this really is a valid catalog: the regression must not succeed by
+    # testing rejection of a missing execution profile or a duplicate target.
+    from loom_service.pool_management.installation import PoolInstallation
+    validation = copy.deepcopy(combined)
+    validation_dev, = [row for row in validation['participants'] if row['environment_class'] == 'development']
+    for field in ('execution_namespace', 'build_namespace'):
+        validation_dev[field]['uid'] = str(uuid4())
+    PoolInstallation.model_validate(validation)
+    intent = module().prepare_intent(reference=reference, catalog=combined, tokens=tokens)
+    request = module().bind_namespaces(intent,
+        {dev[field]['name']: str(uuid4()) for field in ('execution_namespace', 'build_namespace')})
+    selected = development_profile_catalog(request)
+    assert len(selected.execution) == len(selected.task_images) == len(selected.application_images) == 1
+    assert {row.target.namespace for row in selected.task_images} == {dev['build_namespace']['name']}
+    assert len(request.registration.spec.profiles.task_images) == 2
 
 
 @pytest.mark.parametrize('damage', ['missing', 'architecture', 'os', 'reserved'])
@@ -309,16 +391,13 @@ class PoolServer(RegistrationServer):
             self.calls.append(message)
             value = self.delivered.get(path)
             return httpx.Response(404) if value is None else httpx.Response(200, json=value)
-        response = super().handle(message)
-        if path.endswith('/log') and response.status_code == 200:
-            value = response.json()
-            value['machines'] = 4
-            return httpx.Response(200, json=value)
-        return response
+        return super().handle(message)
 
 
 @pytest.fixture
-def connected(pool_inputs, retained, monkeypatch):
+def connected(pool_inputs, retained, monkeypatch, request):
+    if getattr(request, 'param', None) is not None:
+        pool_inputs = common_catalog_inputs(pool_inputs, request.param)
     intent = prepare(pool_inputs)
     name = 'scripts.ops.nebius_development_pool_live'
     if importlib.util.find_spec(name) is None:
@@ -411,6 +490,32 @@ def test_connected_install_waits_for_commit_then_delivers_only_disabled_runtime(
     deployment, = [row for row in connected.server.delivered.values() if row['kind'] == 'Deployment']
     assert deployment['spec']['replicas'] == 0
     assert {row['kind'] for row in connected.server.delivered.values()} == {'Secret', 'ConfigMap', 'ServiceAccount', 'Deployment'}
+
+
+@pytest.mark.parametrize('connected', [False, True], indirect=True, ids=['dev-first', 'staging-first'])
+def test_common_catalog_connected_install_never_writes_staging_or_delivers_its_token(connected):
+    assert install(connected)['status'] == 'pending_registration'
+    connected.server.complete = True
+    result = install(connected)
+    assert result['status'] == 'development_pool_installed_closed'
+    assert result['admission_open'] is False and result['writer_migration_complete'] is False
+    spec = connected.server.request.registration.spec
+    dev, = [row for row in spec.participants if row.environment_class == 'development']
+    staging, = [row for row in spec.participants if row.environment_class == 'staging']
+    assert set(connected.server.namespaces) == {dev.execution_namespace.name, dev.build_namespace.name}
+    posted = [json.loads(call.content) for call in connected.server.calls if call.method == 'POST']
+    assert {doc['metadata'].get('namespace') for doc in posted} <= {
+        None, 'loom-dev', 'loom-nebius-management-dev', dev.execution_namespace.name, dev.build_namespace.name}
+    staging_machine, = [row for row in spec.machines if row.participant_id == staging.participant_id]
+    assert not any(doc['metadata'].get('labels', {}).get('loom.nebius/pool-machine') == str(staging_machine.machine_id)
+        for doc in posted)
+    registration, = [doc for doc in connected.server.store.resources.values()
+        if doc['kind'] == 'ConfigMap' and doc['metadata']['name'].startswith('loom-pool-registration-')]
+    assert len(json.loads(registration['data']['installation.json'])['participants']) == 2
+    creates = list(connected.server.created)
+    assert install(connected) == result
+    assert connected.server.created == creates
+    assert len(connected.server.store.creates) == 2
 
 
 @pytest.mark.parametrize('outcome', ['before', 'after'])

@@ -12,7 +12,7 @@ on:
       operation:
         description: Idle rollout, inventory, certificates, ingress, or protected management installation
         type: choice
-        options: [rollout, recover, inspect, certificate, ingress, ingress-rollback, ingress-dns, management-preflight, management-install, management-diagnostic-preflight, management-diagnostic-install, management-recovery-preflight, management-recovery-install, management-refresh-preflight, management-refresh-install, management-pool-preflight, management-pool-install, management-pool-rollback, management-pool-repair-preflight, management-pool-repair-install, management-pool-repair-rollback, development-preflight, development-install, development-management-preflight, development-management-install, development-management-renewal-preflight, development-management-renewal-renew, development-pool-preflight, development-pool-install, development-runtime-preflight, development-runtime-install]
+        options: [rollout, recover, inspect, certificate, development-management-certificate, ingress, ingress-rollback, ingress-dns, management-preflight, management-install, management-diagnostic-preflight, management-diagnostic-install, management-recovery-preflight, management-recovery-install, management-refresh-preflight, management-refresh-install, management-pool-preflight, management-pool-install, management-pool-rollback, management-pool-repair-preflight, management-pool-repair-install, management-pool-repair-rollback, development-preflight, development-install, development-management-preflight, development-management-install, development-management-renewal-preflight, development-management-renewal-renew, development-pool-preflight, development-pool-install, development-runtime-preflight, development-runtime-install, shared-pool-preflight, shared-pool-install, shared-pool-recover]
         default: rollout
       recovery_run_id:
         description: With recover only, terminal failed rollout whose immutable candidate and guard are resumed
@@ -72,6 +72,7 @@ jobs:
       candidate_sha: ${{ steps.publication.outputs.sha }}
       run_id: ${{ steps.publication.outputs.run_id }}
       artifact: ${{ steps.publication.outputs.artifact }}
+      mode: ${{ steps.route.outputs.mode }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment:
@@ -94,6 +95,18 @@ jobs:
           cache-dependency-glob: uv.lock
       - name: Install deployment tooling
         run: uv sync --locked --no-dev --extra cluster
+      - name: Select installed rollout route
+        id: route
+        env:
+          ROLLOUT_MODE: ${{ vars.NEBIUS_ROLLOUT_MODE }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$ROLLOUT_MODE" in
+            ''|standalone) printf 'mode=standalone\n' >> "$GITHUB_OUTPUT" ;;
+            shared) printf 'mode=shared\n' >> "$GITHUB_OUTPUT" ;;
+            *) echo 'Unknown protected rollout mode' >&2; exit 1 ;;
+          esac
       - name: Select successful platform publication
         id: publication
         env:
@@ -147,6 +160,11 @@ jobs:
   rollout:
     name: Deploy selected candidate
     needs: check
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      deployments: write
     if: >-
       needs.check.outputs.status == 'ready' &&
       github.repository_id == '1281629473' &&
@@ -193,6 +211,7 @@ jobs:
           fi
           uv run --no-sync python scripts/ops/nebius_idle_rollout.py select "${args[@]}"
       - name: Download selected candidate
+        if: needs.check.outputs.mode == 'standalone'
         env:
           PUBLICATION_RUN_ID: ${{ needs.check.outputs.run_id }}
           ARTIFACT_NAME: ${{ needs.check.outputs.artifact }}
@@ -200,6 +219,7 @@ jobs:
           gh run download "$PUBLICATION_RUN_ID" --repo "$GITHUB_REPOSITORY"
           --name "$ARTIFACT_NAME" --dir "$RUNNER_TEMP/publication"
       - name: Deploy once if idle
+        if: needs.check.outputs.mode == 'standalone'
         env:
           DEPLOY_SSH_KEY: ${{ secrets.NEBIUS_DEPLOY_SSH_KEY }}
           DEPLOY_KNOWN_HOSTS: ${{ vars.NEBIUS_DEPLOY_SSH_KNOWN_HOSTS }}
@@ -232,6 +252,36 @@ jobs:
             --candidate "$CANDIDATE_SHA" --kubeconfig "$REMOTE_KUBECONFIG" \
             --expected-cluster-id "$CLUSTER_ID" \
             --evidence-dir "$RUNNER_TEMP/nebius-rollout" --github "${extra_args[@]}"
+      - name: Deploy retained shared participant
+        if: needs.check.outputs.mode == 'shared'
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.NEBIUS_PARTICIPANT_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ vars.NEBIUS_DEPLOY_SSH_KNOWN_HOSTS }}
+          LOOM_DEPLOY_SSH_TARGET: ${{ vars.NEBIUS_DEPLOY_SSH_TARGET }}
+          CANDIDATE_SHA: ${{ needs.check.outputs.candidate_sha }}
+          PUBLICATION_RUN_ID: ${{ needs.check.outputs.run_id }}
+          ARTIFACT_NAME: ${{ needs.check.outputs.artifact }}
+          AUTOMATIC: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_run' }}
+          RECOVERY_EVIDENCE: ${{ steps.recovery.outputs.recovery_evidence }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          export LOOM_DEPLOY_SSH_KEY_FILE="$RUNNER_TEMP/nebius-participant-key"
+          export LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE="$RUNNER_TEMP/nebius-participant-known-hosts"
+          trap 'rm -f -- "$LOOM_DEPLOY_SSH_KEY_FILE" "$LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE"' EXIT
+          test -n "$DEPLOY_SSH_KEY"
+          test -n "$DEPLOY_KNOWN_HOSTS"
+          test -n "$LOOM_DEPLOY_SSH_TARGET"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$LOOM_DEPLOY_SSH_KEY_FILE"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE"
+          unset DEPLOY_SSH_KEY DEPLOY_KNOWN_HOSTS
+          extra_args=()
+          if [[ "$AUTOMATIC" == 'true' ]]; then extra_args+=(--automatic); fi
+          if [[ -n "$RECOVERY_EVIDENCE" ]]; then extra_args+=(--recovery-evidence "$RECOVERY_EVIDENCE"); fi
+          uv run --no-sync python -m scripts.ops.nebius_pool_participant_rollout run \
+            --publication-run-id "$PUBLICATION_RUN_ID" --candidate "$CANDIDATE_SHA" \
+            --artifact "$ARTIFACT_NAME" --evidence-dir "$RUNNER_TEMP/nebius-rollout" "${extra_args[@]}"
       - name: Preserve sanitized deployment evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -299,6 +349,67 @@ jobs:
         with:
           name: nebius-certificate-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/nebius-certificate/certificate-result.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+  development-management-certificate:
+    if: >-
+      github.repository_id == '1281629473' &&
+      github.ref == 'refs/heads/dev' &&
+      github.event_name == 'workflow_dispatch' &&
+      inputs.operation == 'development-management-certificate'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    environment:
+      name: nebius-integration
+      deployment: false
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: "0.11.26"
+          checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
+          enable-cache: true
+          save-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install isolated locked certificate tooling
+        run: |
+          uv sync --locked --only-group nebius-certificates --no-install-project --no-install-workspace
+          uv export --locked --only-group nebius-certificates --no-emit-project --no-emit-workspace \
+            --format requirements-txt --no-header --quiet --output-file "$RUNNER_TEMP/dev-management-certificate-requirements.txt"
+      - name: Qualify dev-manager certificate on the private gateway
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.NEBIUS_DEVELOPMENT_MANAGEMENT_CERTIFICATE_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ vars.NEBIUS_DEPLOY_SSH_KNOWN_HOSTS }}
+          LOOM_DEPLOY_SSH_TARGET: ${{ vars.NEBIUS_DEPLOY_SSH_TARGET }}
+          NEBIUS_DEVELOPMENT_MANAGEMENT_CERTIFICATE_INSTALLATION_JSON: ${{ vars.NEBIUS_DEVELOPMENT_MANAGEMENT_CERTIFICATE_INSTALLATION_JSON }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          export LOOM_DEPLOY_SSH_KEY_FILE="$RUNNER_TEMP/nebius-dev-management-certificate-key"
+          export LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE="$RUNNER_TEMP/nebius-dev-management-certificate-known-hosts"
+          trap 'rm -f -- "$LOOM_DEPLOY_SSH_KEY_FILE" "$LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE"' EXIT
+          test -n "$DEPLOY_SSH_KEY"
+          test -n "$DEPLOY_KNOWN_HOSTS"
+          test -n "$LOOM_DEPLOY_SSH_TARGET"
+          test -n "$NEBIUS_DEVELOPMENT_MANAGEMENT_CERTIFICATE_INSTALLATION_JSON"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$LOOM_DEPLOY_SSH_KEY_FILE"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE"
+          unset DEPLOY_SSH_KEY DEPLOY_KNOWN_HOSTS
+          uv run --no-sync python scripts/ops/nebius_certificate_rollout.py --management-only \
+            --requirements "$RUNNER_TEMP/dev-management-certificate-requirements.txt" \
+            --evidence-dir "$RUNNER_TEMP/nebius-dev-management-certificate"
+      - name: Preserve sanitized dev-manager certificate evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nebius-dev-management-certificate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/nebius-dev-management-certificate/certificate-result.json
           if-no-files-found: ignore
           retention-days: 30
 
@@ -1031,6 +1142,100 @@ jobs:
         with:
           name: nebius-development-runtime-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/nebius-development-runtime/development-runtime-result.json
+          if-no-files-found: ignore
+
+  shared-pool:
+    if: >-
+      github.repository_id == '1281629473' &&
+      github.ref == 'refs/heads/dev' &&
+      github.event_name == 'workflow_dispatch' &&
+      (inputs.operation == 'shared-pool-preflight' || inputs.operation == 'shared-pool-install' || inputs.operation == 'shared-pool-recover')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    permissions:
+      contents: read
+    environment:
+      name: nebius-integration
+      deployment: false
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: dev
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Select exact integrated shared pool authority source
+        id: tooling
+        env:
+          SHARED_POOL_OPERATION: ${{ inputs.operation }}
+          NEBIUS_SHARED_POOL_OPERATION_JSON: ${{ vars.NEBIUS_SHARED_POOL_OPERATION_JSON }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, subprocess
+          if os.environ['SHARED_POOL_OPERATION'] not in {'shared-pool-preflight', 'shared-pool-install', 'shared-pool-recover'}:
+              raise SystemExit('Fixed shared pool operation required')
+          value = json.loads(os.environ['NEBIUS_SHARED_POOL_OPERATION_JSON'])
+          sha = value['source_sha']
+          if (value['schema'] != 'loom.nebius-shared-pool-operation.v1' or value['namespace'] != 'loom-nebius-management-dev' or
+              not isinstance(sha, str) or not re.fullmatch(r'[0-9a-f]{40}', sha)):
+              raise SystemExit('Exact shared pool source and namespace required')
+          subprocess.run(['git', 'merge-base', '--is-ancestor', sha, 'refs/remotes/origin/dev'], check=True)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
+              stream.write('sha=' + sha + '\n')
+          PY
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ steps.tooling.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: "0.11.26"
+          checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
+          enable-cache: true
+          save-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Prepare locked shared pool tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv sync --locked --no-default-groups --extra cluster --group nebius-certificates
+          uv export --locked --no-default-groups --extra cluster --group nebius-certificates --no-emit-workspace \
+            --format requirements-txt --no-header --quiet --output-file "$RUNNER_TEMP/shared-pool-requirements.txt"
+      - name: Run fixed shared pool operation
+        env:
+          SHARED_POOL_OPERATION: ${{ inputs.operation }}
+          DEPLOY_SSH_KEY: ${{ secrets.NEBIUS_SHARED_POOL_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ vars.NEBIUS_DEPLOY_SSH_KNOWN_HOSTS }}
+          LOOM_DEPLOY_SSH_TARGET: ${{ vars.NEBIUS_DEPLOY_SSH_TARGET }}
+          NEBIUS_SHARED_POOL_OPERATION_JSON: ${{ vars.NEBIUS_SHARED_POOL_OPERATION_JSON }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          case "$SHARED_POOL_OPERATION" in
+            shared-pool-preflight) operation=preflight ;;
+            shared-pool-install) operation=install ;;
+            shared-pool-recover) operation=recover ;;
+            *) exit 1 ;;
+          esac
+          export LOOM_DEPLOY_SSH_KEY_FILE="$RUNNER_TEMP/nebius-shared-pool-key"
+          export LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE="$RUNNER_TEMP/nebius-shared-pool-known-hosts"
+          trap 'rm -f -- "$LOOM_DEPLOY_SSH_KEY_FILE" "$LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE"' EXIT
+          test -n "$DEPLOY_SSH_KEY"
+          test -n "$DEPLOY_KNOWN_HOSTS"
+          test -n "$LOOM_DEPLOY_SSH_TARGET"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$LOOM_DEPLOY_SSH_KEY_FILE"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE"
+          unset DEPLOY_SSH_KEY DEPLOY_KNOWN_HOSTS
+          uv run --no-sync python -m scripts.ops.nebius_shared_pool_rollout \
+            --operation "$operation" --requirements "$RUNNER_TEMP/shared-pool-requirements.txt" \
+            --evidence-dir "$RUNNER_TEMP/nebius-shared-pool"
+      - name: Preserve bounded shared pool evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nebius-shared-pool-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/nebius-shared-pool/shared-pool-result.json
           if-no-files-found: ignore
 
   inspect:

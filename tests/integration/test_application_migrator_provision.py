@@ -8,7 +8,6 @@ import pytest
 from psycopg import sql
 
 from loom.application_handoff_completion import complete_application_handoff_database
-from loom.db.schema_startup import service_schema_head
 from tests.integration.test_application_handoff_completion import _closed
 from tests.integration.test_application_ownership_transfer import (
     transfer_database,  # noqa: F401
@@ -135,9 +134,11 @@ async def test_migrator_creation_never_adopts_ambient_role_or_outlives_failed_jo
             peer.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(name)))
 
 
+# Keep this historical guard profile below the retirement boundary; the refusal
+# regression below separately verifies that it cannot silently advance to head.
 @pytest.mark.asyncio
 @pytest.mark.parametrize("transfer_database", ["baseline"], indirect=True)
-@pytest.mark.parametrize("target_revision", ["0142", "0146", "0147", "0148", "0149", "0150", "0151", "0156", service_schema_head()])
+@pytest.mark.parametrize("target_revision", ["0142", "0146", "0147", "0148", "0149", "0150", "0151", "0156", "0170"])
 async def test_actual_baseline_upgrade_preserves_separated_runtime_authority(transfer_database, monkeypatch, target_revision):  # noqa: F811
     from pathlib import Path
 
@@ -170,7 +171,7 @@ async def test_actual_baseline_upgrade_preserves_separated_runtime_authority(tra
         target = args["target"]
         authority = dict(target=target, coordination_guard=args["coordination_guard"],
             provisioner_role=next(n for n, a in args["role_bindings"].items() if a == "provisioner"))
-        if target_revision in {"0147", "0148", "0149", "0150", "0151", "0156", service_schema_head()}:
+        if target_revision in {"0147", "0148", "0149", "0150", "0151", "0156", "0170"}:
             from loom.application_guard_claim_compatibility import ensure_guard_claim_compatibility
             guard_owner = next(name for name, binding in args["role_bindings"].items() if binding == "guard-owner")
             metadata_query = """SELECT p.oid,p.proowner,p.proacl,p.prosecdef,p.proconfig,
@@ -201,9 +202,9 @@ async def test_actual_baseline_upgrade_preserves_separated_runtime_authority(tra
             command.upgrade(config, target_revision)
             assert peer.execute("SELECT version_num FROM public.alembic_version").fetchone() == (target_revision,)
             assert peer.execute("SELECT result->>'aggregate_reward' FROM trials WHERE id=%s", (trial,)).fetchone() == (
-                "1.0" if target_revision in {"0146", "0147", "0148", "0149", "0150", "0151", "0156", service_schema_head()} else None,)
+                "1.0" if target_revision in {"0146", "0147", "0148", "0149", "0150", "0151", "0156", "0170"} else None,)
             observe_completed_application_authority(peer, target=target, runtime_password=args["password"], successor=identity)
-            if target_revision in {"0156", service_schema_head()}:
+            if target_revision in {"0156", "0170"}:
                 # The reviewed trigger must be recognized after its introducing
                 # migration; a same-named body or execution-context change must not.
                 definition = peer.execute(
@@ -224,6 +225,117 @@ async def test_actual_baseline_upgrade_preserves_separated_runtime_authority(tra
                     finally:
                         peer.execute(definition)
                 observe_completed_application_authority(peer, target=target, runtime_password=args["password"], successor=identity)
+        finally:
+            seal_application_migrator(maintenance, **authority, identity=identity)
+            close_application_migrator_admission(maintenance, **authority, identity=identity)
+            retire_application_migrator(maintenance, **authority, migrator_role=identity.role_name, migrator_oid=identity.role_oid)
+            reopen_application_migrator_admission(maintenance, **authority, identity=identity, runtime_password=args["password"])
+        observe_completed_application_authority(peer, target=target, runtime_password=args["password"])
+
+
+def _retirement_boundary_state(peer, *, role_bindings, migrator):
+    """Observe the disposable target, including objects the failed DDL could lose."""
+    from loom.application_schema_inventory import read_application_schema_inventory
+
+    with peer.transaction():
+        public = read_application_schema_inventory(peer, role_bindings=role_bindings)
+    return {
+        "public_catalog": public,
+        "application_revision": peer.execute("SELECT version_num FROM public.alembic_version").fetchall(),
+        "guard_revision": peer.execute(
+            "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
+        ).fetchall(),
+        "guard_schema": peer.execute(
+            "SELECT oid,nspowner,nspacl FROM pg_namespace WHERE nspname='loom_capacity_guard'"
+        ).fetchall(),
+        "guard_relations": peer.execute("""
+            SELECT c.oid,c.relname,c.relowner,c.relacl FROM pg_class c
+            JOIN pg_namespace n ON n.oid=c.relnamespace
+            WHERE n.nspname='loom_capacity_guard' ORDER BY c.oid
+        """).fetchall(),
+        "guard_routines": peer.execute("""
+            SELECT p.oid, p.proowner, p.proacl, pg_get_functiondef(p.oid)
+            FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+            WHERE n.nspname='loom_capacity_guard' ORDER BY p.oid
+        """).fetchall(),
+        "roles": peer.execute(
+            "SELECT to_jsonb(r) FROM pg_authid r WHERE rolname=ANY(%s) ORDER BY oid",
+            ([*role_bindings, migrator.role_name],),
+        ).fetchall(),
+        "memberships": peer.execute("SELECT to_jsonb(m) FROM pg_auth_members m ORDER BY oid").fetchall(),
+        "records": {
+            table: peer.execute(sql.SQL("SELECT to_jsonb(t) FROM {} t ORDER BY id").format(sql.Identifier(table))).fetchall()
+            for table in ("teams", "tasks", "trials")
+        },
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transfer_database", ["baseline"], indirect=True)
+@pytest.mark.parametrize("start_revision", ["0134", "0170"])
+async def test_historical_guard_retirement_refusal_preserves_schema_data_and_authority(
+    transfer_database, monkeypatch, start_revision,  # noqa: F811
+):
+    from pathlib import Path
+
+    from alembic import command
+    from alembic.config import Config
+    from sqlalchemy.engine import make_url
+
+    from loom.application_completed_authority import observe_completed_application_authority
+    from loom.application_guard_claim_compatibility import ensure_guard_claim_compatibility
+    from loom.application_migrator_admission import (
+        close_application_migrator_admission,
+        reopen_application_migrator_admission,
+    )
+    from loom.application_migrator_provision import (
+        arm_application_migrator,
+        create_application_migrator,
+        seal_application_migrator,
+    )
+    from loom.application_migrator_retirement import retire_application_migrator
+
+    with _closed(transfer_database) as (peer, maintenance, guard, args):
+        args.update(schema_revision="0134/guard_0030", schema_acl_profile="cnpg-staging")
+        team, trial, task = uuid4(), uuid4(), "retirement-preserved-" + uuid4().hex
+        peer.execute("INSERT INTO teams(id,name) VALUES (%s,'retirement preserved')", (team,))
+        peer.execute("INSERT INTO tasks(id,config,checksum) VALUES (%s,'{}',%s)", (task, "a" * 64))
+        peer.execute("""INSERT INTO trials(id,team_id,task_id,config,requires_caps,state,result)
+            VALUES (%s,%s,%s,'{}','{}','succeeded',
+            '{"schema_version":"loom.service-execution-trial-result.v1","reward":{"passed":1.0},
+              "runtime_result":{"verifier_rewards":{"passed":1.0},"status":"succeeded"}}')""", (trial, team, task))
+        complete_application_handoff_database(peer, maintenance=maintenance, **args)
+        target = args["target"]
+        authority = dict(target=target, coordination_guard=args["coordination_guard"],
+            provisioner_role=next(n for n, a in args["role_bindings"].items() if a == "provisioner"))
+        ensure_guard_claim_compatibility(peer, **authority,
+            guard_owner=next(n for n, a in args["role_bindings"].items() if a == "guard-owner"),
+            retained=None, persist=lambda _: None)
+        identity = create_application_migrator(peer, **authority,
+            migrator_role="app_migrator_" + uuid4().hex, persist_identity=lambda _: None)
+        password = uuid4().hex
+        arm_application_migrator(peer, **authority, identity=identity, password=password,
+            expires_at=datetime.now(UTC) + timedelta(minutes=45))
+        root = Path(__file__).resolve().parents[2]
+        config = Config(str(root / "database/migrations/alembic.ini"))
+        url = make_url(transfer_database[0]).set(drivername="postgresql+psycopg", username=identity.role_name, password=password)
+        config.set_main_option("sqlalchemy.url", url.render_as_string(hide_password=False).replace("%", "%%"))
+        monkeypatch.setenv("LOOM_DB_OWNER_ROLE", target.successor_role)
+        try:
+            if start_revision == "0170":
+                command.upgrade(config, start_revision)
+            roles = {**args["role_bindings"], target.successor_role: "sealed-application-owner"}
+            before = _retirement_boundary_state(peer, role_bindings=roles, migrator=identity)
+            assert before["application_revision"] == [(start_revision,)]
+            assert before["guard_revision"] == [("guard_0030",)]
+            # Both a direct historical upgrade and a retry at the last compatible
+            # revision must retain installed authority instead of bypassing 0171.
+            for destination in ("0171", "head"):
+                with pytest.raises(RuntimeError, match="legacy retirement requires dependent SQL routine disposition"):
+                    command.upgrade(config, destination)
+                assert _retirement_boundary_state(peer, role_bindings=roles, migrator=identity) == before
+                observe_completed_application_authority(peer, target=target, runtime_password=args["password"], successor=identity)
+                assert guard.execute("SELECT 1").fetchone() == (1,)
         finally:
             seal_application_migrator(maintenance, **authority, identity=identity)
             close_application_migrator_admission(maintenance, **authority, identity=identity)

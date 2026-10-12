@@ -746,8 +746,11 @@ can be created; the transaction uses the manager's existing database.
 One anchored parent operation per manager retains the actual closed-registration
 receipt. Changed inputs, lost journals, replaced resources and uncertain creates
 cannot start another registration. TLS-only renewal does not change this database
-identity. This fresh composition accepts the one shared-development participant;
-it does not attach staging/production, create a physical worker pool, deliver
+identity. This fresh composition selects the shared-development participant by
+its retained application data-environment ID, not its position in the catalog.
+The initial closed catalog can retain other UID-bound participants in the same
+pool; their publication and live attachment require separate protected
+qualification. Registration does not activate staging/production, create a physical worker pool, deliver
 machine-token Secrets or grant Job-write roles. It is an internal protected stage,
 not a deployed CLI or a replacement for runtime delivery, sole-writer qualification
 and admission activation. Its completion explicitly reports admission closed and
@@ -755,7 +758,10 @@ writer migration incomplete.
 
 The protected independent-dev **pool installer** composes that internal stage
 without legacy cutover history. Its private intent contains a complete task and
-application-build catalog, but no operator-supplied execution namespace UIDs.
+application-build catalog, but no operator-supplied development execution/build
+namespace UIDs. Other participants retain their existing namespace bindings;
+the installer neither creates nor adopts their namespaces. The registration
+adapter reads every participant namespace UID before writing the closed catalog.
 Before writes it checks the original publication/runtime digest, shared source and
 schema bindings, trial/task-image target capabilities, dedicated builder support
 and all machine-token hashes. Initial namespace/registration writes require
@@ -766,7 +772,10 @@ UIDs into the frozen registration. Both namespaces remain restricted at this sta
 
 Only after the exact closed SQL commit receipt does it deliver immutable,
 scope-specific machine Secrets, the profile catalog, a gateway ServiceAccount and
-a zero-replica gateway Deployment. It grants no RBAC and does not modify the
+a zero-replica gateway Deployment. Only the selected dev participant's tokens
+are delivered, together with the common observer and gateway tokens; other
+participant credentials stay private for their separately qualified handoff.
+It grants no RBAC and does not modify the
 running manager, shared service/control plane, collector, physical pool or staging.
 One original-installation anchor and phase journal prevent changed inputs, lost
 state or uncertain creates from starting another installation. Earlier material
@@ -806,6 +815,14 @@ creates cloud grants. Each durable phase checks current publication/cloud
 authority; repeated resource observations reuse the frozen plan while rechecking
 private bytes and live identities.
 
+The manager retains the complete common profile catalog. Dev runtime preparation
+selects only profiles referenced by its retained data participant when deriving
+build credentials, registry scope and admission policy. Other participants retain
+their own published runtime and storage bindings. This allows one closed catalog
+without making staging a dev runtime resource or extending dev credentials to
+staging storage. It does not establish a completed staging handoff or sole-writer
+authority over the physical pool.
+
 SQL/catalog completion requires an exact owned successful Job/Pod and bounded
 receipt. Running manager, service, control-plane and actuator processes prove
 their typed settings and namespace-local database URLs through nonce-bound
@@ -822,6 +839,1095 @@ relaxes build-namespace PSA, starts the gateway or proves sole physical-writer
 authority. Those activation steps must not interfere with staging. The installed
 source-to-build-to-deploy-to-task/result and concurrent-owner acceptance tests
 remain the operational readiness criteria.
+
+Fresh activation preparation now consumes that completed runtime's own anchor,
+all child journals and exact SQL/catalog proofs. It preserves original resource
+UIDs while projecting the actual completed workload successors; it never
+replays installation or invents migration/retirement history. Build policy and
+binding semantics must equal the fixed renderer, allowing only Kubernetes'
+inert match defaults. An extra condition or selector that could skip enforcement
+is rejected even when recorded child checksums agree. This internal, read-only
+preparation derives gateway grants, its startup target and the build-namespace
+PSA successor. It is not a protected activation command: live sole-writer,
+effective-policy, opening/fencing and installed acceptance remain unconnected.
+
+Forward handoff preparation combines this completed dev runtime with the current
+source-qualified staging predecessor and its completed legacy history. The
+projection also derives only staging's new machine Secrets, exact current Roles
+and their read-only replacements, and the fixed namespace-reader grants. Existing
+RoleBindings retain their qualified subjects and metadata; unrelated dev/manager
+material is not delivered again. The original staging Role documents remain part
+of the recovery input. Derivation neither creates Secrets nor changes authority.
+The GET-only dev binding observation reuses the retained-runtime observer and pins
+the actual database, Service and both credential identities. Secret resource
+versions are captured before the observation and compared afterward; changed
+values, UIDs, versions or private history reject the binding. The resulting
+database-bound guard target uses the existing namespace-local guard reader,
+without falling back to an unbound controller command. Staging retains its
+separate captured database binding, which still needs live requalification.
+These observations neither acquire a guard nor prove writer fencing, provider
+authority, process readiness or an operational shared pool.
+
+The initial writer census reads all RBAC and built-in workload collections at one
+API-server revision, including terminal Pods. Its retained roots include current
+staging, completed dev, and the retired old manager/gateway. It rejects changed
+root identities/templates, detached processes using their ServiceAccounts,
+undeclared schedules in worker namespaces (even suspended schedules), and
+additional named, group, or cross-namespace writer grants. Old gateway Roles
+must still match their completed reduction, not their former write authority.
+Only renderer-qualified staging resources become approved roots; an extra entry
+in the captured inventory does not authorize that resource. Retained one-shot
+installation Jobs qualify by exact historical UID/template and terminal Job and
+associated-container state, not a management-account exception. Collected Jobs
+may be absent, but surviving orphan Pods do not qualify through missing parents.
+These completed Jobs are census evidence, never stop or restart targets.
+Native controllers and operator groups require the existing explicit, UID-bound
+platform trust. This does not prove external-credential/provider exclusivity,
+effective post-fencing permissions or process drain; it cannot be replayed
+unchanged after an intentional handoff transition.
+
+The shared preflight reuses the runtime's authenticated provider read with the
+installed collector identity, bracketed by current runtime/material and retained
+history checks. The returned node-group and quota identities must match the
+registered common pool, with an available provider and ready/scaling autoscaler.
+A zero-size group or exhausted quota is not rejected merely for lacking spare
+capacity. This read neither reserves capacity nor proves provider-writer
+exclusivity; opening still requires fresh aggregate admission evidence.
+
+The SQL/process preflight connects those bindings to the existing real probes.
+Both participant guards must be open; observation never acquires or releases them.
+The new manager must have its exact closed registration and active credentials.
+The historical manager instead must pass the read-only retirement check: its
+fenced revision, exact revoked credentials and empty charged/uncertain-work
+journal. It must not satisfy startup readiness or renew retired credentials.
+The new manager and dev consumers undergo actual settings/database challenges;
+current staging service, controller and every actuator are checked against their
+source-qualified current templates, not obsolete rollback templates. Database
+backends, credential identities, private history and guard states are rechecked
+around the observations. Actuator telemetry retains its optional-sampling rules.
+This is initial read-only preflight evidence, not guard, drain, mutation or
+recovery authority, and does not establish installed multi-owner acceptance.
+
+The internal shared-handoff phase controller freezes the source/history and
+database-bound participant identities in a separate anchor under the new manager.
+It requires the complete forward and recovery adapter set before starting. Each
+child first prepares local receipts while its parent phase still has no dispatch
+authority. Interruptions before, during directory creation, or after receipt
+publication can resume without repeating remote effects. The parent records the
+phase started only after validating that preparation. Missing or changed started
+history remains an error, never permission to recreate it. Each child then
+retains its own mutation intent and uncertain-result readback; completed
+children are validated and byte-pinned, never dispatched again. Initial preflight
+requires the untouched predecessor. Resumption instead uses phase-aware checks,
+including fresh drain and authority checks before dependent mutations.
+Its concrete guard child uses the existing database-bound command adapter and
+records acquisition intent before dispatch. Busy participants retain earlier
+guards; an uncertain acquisition is observed without issuing it again. This
+child does not replay registration or release either participant's guard.
+Both guard and workload children revalidate their active receipt before and
+after live qualification. Losing or changing that receipt cannot recreate a
+started operation or authorize another write.
+
+The drain child reads both participants' actual idle/schema/access checks and
+every page of queued origins through their retained database backends. It checks
+those origins against the distinct new management database's source history;
+qualified queued work is retained, not cancelled or required to disappear.
+Exact held guards and the new manager's CLOSED registration bracket the reads,
+and the management database process identity is rechecked for each history page.
+History responses have the existing bounded 4-MiB allowance; ordinary scalar
+probes retain their 64-KiB limit. The saved drain receipt records historical
+backlog counts, never ongoing permission to mutate. Later pre-opening barriers
+must call the fresh observer again and separately qualify current writers and
+processes.
+
+The current-staging workload child connects stop, wiring and restart through the
+existing HTTPS UID/resourceVersion/spec compare-and-swap engine. Each later step
+consumes the actual completed predecessor receipt, including server defaults and
+the original resource UIDs. The old collector is suspended once and remains
+suspended; only the captured Deployments are wired and restarted. Unknown PATCH
+outcomes are read back without reissuing the PATCH. Phase-aware observation accepts
+only the recorded original or intended successor while a write is uncertain.
+These transitions still require the connected parent's fresh process, database,
+drain and whole-pool authority checks; historical receipts alone are not runtime
+readiness or recovery authority.
+
+The forward writer observer reuses the complete revision-bound census
+but derives its permitted workloads and Roles from these child receipts. A
+planned successor is not accepted before dispatch intent; an uncertain PATCH
+admits only its recorded before/after states, and a completed transition admits
+only the successor. Staging's new reader grants and the new gateway's grants must
+be absent before their create intent, then match that exact operation-marked
+object, and finally retain their recorded created UID. Child receipt bytes and the parent phase are checked
+again after observation, including started children not yet covered by completed
+byte pins. Gateway startup likewise accepts only the recorded stopped or started
+workload while its PATCH is uncertain, then only its applied successor. This
+observer performs no mutations and rejects recovery. During opening, it also
+validates and pins the activation child's exact recorded authority alternatives.
+
+The pre-opening process observer likewise follows the actual guard, workload and
+database receipts. It keeps the old manager revoked and the new manager CLOSED,
+inspects installed runtime database grants, and rechecks pinned consumer
+credentials and real database backends. Staging observations use the existing
+participant-bound reader; the development-only reader gains no staging scope.
+Complete descendant lists establish current stopped-workload drain or started
+readiness before typed settings/database challenges. Only an in-flight stop or
+an actually starting Deployment can report pending readiness; a previously
+stopped resource cannot use another resource's startup to excuse lingering Pods.
+Pending identities are evidence for the child readiness engine, never permission
+to advance the parent. The observer rechecks dev and staging process identities,
+staging templates and completed drain/readiness after all other probes; a late
+restart or a newly appearing descendant invalidates the earlier challenge.
+Nested development process challenges and their final identity readbacks each
+use a read-only observation scope. Full inventory checks bracket each group;
+every nested challenge still reads the actual Deployment and descendants and
+rechecks the retained private inputs, anchor and receipt bytes. No live readiness
+is cached, no view survives the group, and an ordinary unscoped probe still
+performs its full inventory checks. The final inventory scan precedes the final
+staging, gateway, guard and database identity checks, so a backend restart during
+that scan cannot escape the closing checks.
+Gateway startup uses the same receipt-selected workload and descendant checks.
+Its settings, database correspondence, projected namespace access and fresh
+aggregate capacity are challenged in the actual gateway process. The database
+target comes from the new manager's completed installation, never the retired
+manager's upgrade history. Gateway/container and manager/database process
+identities, the manager credential and receipt bytes are checked again after the
+consumer and final pool/guard readbacks. A completed startup cannot excuse lost
+gateway readiness as an in-flight wait. During activation, this observer selects
+the exact CLOSED/GLOBAL and held/open alternatives from the opening receipt. A
+GLOBAL pool uses active-authority and read-only active-capacity challenges, not
+the startup idle-journal check: an already released participant may have charged
+work. Unrecorded opening, foreign guards and reactivated old authority fail.
+Writer census, fresh pre-opening queue drain, provider qualification, opening
+transactions and recovery remain separate required connections.
+
+The shared build-activation child changes only the recorded development build
+namespace's enforcement label and activation annotation. Before the UID and
+resourceVersion-tested PATCH, it checks the installed policy/binding UIDs, exact
+semantics and current compilation status, then requires that policy to deny a
+server-dry-run Pod that otherwise passes restricted Pod Security. A generic
+403 or denial by another policy is insufficient. An accepted probe means
+propagation is pending, not permission to relax the label. No Pod, policy or RBAC
+resource is created. Unknown PATCH outcomes are read back without redispatch;
+the exact successor and fresh policy enforcement are checked before completion.
+
+Shared runtime observations derive the permitted namespace and gateway workload
+successors from their children's intent and completion receipts, checking all
+receipt bytes and parent history again after remote reads. Only the completed
+installation's matching predecessor can be replaced in this inventory; unrelated
+resources retain their original identities. The ordinary CLOSED-runtime observer
+remains strict without this binding. The shared probe adapter carries the same
+binding through nested process checks; permitting a successor only in the outer
+inventory is not enough. Live gateway grants are checked separately by the writer
+census; the development inventory gains no staging read scope. During opening,
+both inventory and census also pin the activation child's receipt bytes. Its
+recorded intent selects CLOSED/GLOBAL and held/open alternatives; before that
+child exists, the acquisition receipts still own guard state. Recovery remains a
+separate direction and cannot reuse these forward-only views.
+
+The shared gateway child creates only its catalog-derived grants and starts the
+already-installed, stopped gateway through the existing create-only and workload
+compare-and-swap engines. Dispatch intent pins the grant operation and defaults
+before the first create; missing started receipts cannot be reconstructed.
+Effective permission reviews must pass before startup previews, the actual PATCH,
+and completion. Real Deployment/descendant readiness precedes the parent's runtime
+challenge. Lost create or PATCH replies are read back without redispatch. This
+child neither opens the capacity ledger nor releases participant guards; those
+steps still require fresh whole-pool capacity and runtime qualification.
+
+The shared opening child uses its own parent phase and preceding receipt hashes,
+not a fabricated legacy cutover/startup journal. It reuses the existing
+one-dispatch activation engine: persist opening intent, observe GLOBAL, then
+release each recorded participant's guard in roster order. Unknown transaction
+outcomes are observed without repeating writes. Interrupted local preparation
+can resume; missing or changed started receipts cannot be recreated. This
+controller requires the exact migration-bound transport and a separate current
+shared-runtime qualification barrier; retained history alone cannot release
+intake. Its fixed opening/release adapter uses the shared probes' private
+connection and the new manager's pinned database target. Each write requires
+current process/database/capacity checks as well as the protected parent's
+writer/provider qualification; neither a saved health result nor retained history
+can substitute. The adapter accepts no caller SQL and has no deployment entry
+point. The full protected parent must still connect both forward and recovery
+operations before installed opening is available. Recovery has separate terminal
+authority and never rewrites completed forward evidence.
+
+The shared recovery-fence child derives its initial CLOSED/GLOBAL and local-guard
+alternatives from those frozen forward receipts. Its separately anchored intents
+authorize fencing the new capacity epoch first, then each participant's intake in
+roster order. Unknown fence replies are observation-only, including delayed
+commits. The fixed adapter binds the new manager's database, each retained
+participant backend and the private connection, brackets observations with exact
+receipt bytes, and invokes the protected parent's retained-authority check. It
+uses the existing fixed fencing transactions without requiring a healthy gateway
+or idle journals. Fencing does not prove work has drained and does not authorize
+restoration or reopening; those remain separate required recovery phases.
+
+The recovery-drain child reads the new manager's capacity journal and every
+participant's activity, outbox and cleanup counts through the retained database
+transports. It requires the completed recovery fence and checks actual fenced
+admission on both sides of the reads. A busy ledger keeps recovery pending without
+stopping cleanup, and does not skip checking other participants. Its local receipt
+records only that an observation finished; later stop/revoke/restore boundaries
+must rerun the same read-only observer, never reuse a saved zero. Changed authority
+or receipt bytes reject the observation without changing any database. Final guard
+readbacks follow the last retained-authority check so a change during that check
+cannot pass unnoticed. Completed recovery keeps its historical drain receipt
+valid, but cannot resume this observer or dispatch the completed child again.
+
+The shared recovery-stop child selects only the captured staging roots and the
+new runtime's fixed consumers, collector, manager and gateway. Its predecessor
+choices come from frozen forward receipts, including both sides of an uncertain
+startup PATCH. PostgreSQL and unrelated backup workloads are outside this phase.
+Each fixed UID/resourceVersion/spec-tested PATCH both stops or suspends its root
+and adds a distinct shared-recovery marker. Even an already-stopped root therefore
+gets a real version barrier against delayed forward updates. The protected
+transport records the selected predecessor and stop intent after fresh authority,
+drain and dry-run checks, immediately before dispatch. Pre-dispatch busy checks
+leave the record prepared; unknown dispatched writes are read back without
+redispatch. An interruption after durable intent but before dispatch is also
+ambiguous; an exception alone cannot safely clear that intent. The child requires
+actual descendant-process drain and a fresh database drain before completion.
+Its read-only observer repeats both checks through the dependent revocation
+phase, rejecting reappearing descendants or new ledger activity without replaying
+completed stop writes. Observation ends when restoration starts or recovery is
+terminal. The child does not restore templates, grant rights or
+reopen intake; those remain dependent terminal recovery steps.
+
+Within shared recovery's revoke phase, the machine-retirement child binds the
+new manager's actual database transport and uses the existing exact-scope token
+revocation transaction. It requires the completed stop journal and fresh current
+workload/database drain. Intent is recorded only after the transport's final
+pre-dispatch checks; busy checks leave it prepared, while any uncertain persisted
+intent is observation-only. Unexplained preexisting revocation is not adopted.
+Machine readback also rechecks the terminal pool and participant fences after
+retained-runtime qualification. A successful machine receipt does not complete
+recovery's revoke phase: gateway RBAC retirement and effective permission checks
+must still finish before any current-staging template or Role restoration.
+
+The gateway-retirement half uses the frozen forward grant receipts, including
+partial creates. Existing gateway Roles are reduced in place with UID/version
+tests and a recovery marker; reader ClusterRoles and all bindings are preserved.
+For an uncertain, absent forward Role, one journaled same-name read-only create
+blocks a delayed writer create. If the original wins that race, recovery pins
+its UID and reduces it instead. Neither unknown create nor unknown PATCH is
+redispatched. Never-attempted grants stay absent. Fresh machine revocation and
+workload/database drain precede mutations, and busy dry-run checks do not consume
+the real dispatch intent.
+
+Effective permission review derives expected reader grants from the fixed
+bindings actually present, not every planned Role. It includes namespaces reached
+through foreign account/group bindings and rejects extra rights, including named
+writes. Exact inventory and receipt readbacks bracket the reviews. A delayed
+fixed binding can then grant only the already-pinned reader rights. This
+read-only verification remains available during subsequent pending recovery;
+completed revoke writes cannot replay. The protected parent still needs its
+fresh whole-pool writer census before restoring current staging authority.
+
+Current-staging template restoration consumes the completed stop and revocation
+receipts, not the historical manager's rollback templates. It restores only the
+captured staging roots, with zero replicas or suspended schedules and the
+recovery marker retained. New dev, manager and gateway roots stay stopped and
+unchanged. Fresh namespace descendant collections and the existing closed-workload
+qualifier prove process drain alongside the protected parent's current SQL and
+authority checks. The transport seals semantically validated predecessor inputs
+to their exact completed receipt hashes. Every boundary rereads the parent and
+private-input bytes and rejects changed receipts or targets; it does not recursively
+rederive all completed predecessors for each individual read. Live drain and
+authority observations are never cached. Busy observations after a preview leave dispatch unconsumed.
+Each changed template uses a UID/resourceVersion/metadata/spec-tested PATCH with
+late intent recording; lost replies are observation-only. An unchanged stopped
+template needs no write. Completed restoration can still be observed while Roles
+are restored, but cannot replay writes or observe across the subsequent restart.
+This phase grants no Role and does not start workloads or reopen intake.
+
+The following Role-restoration child restores only the two captured current
+staging Roles. It preserves their UIDs, labels and annotations, adding the
+distinct recovery marker in a UID/version/rules/metadata-tested PATCH. This is
+also required when an uncertain forward reduction still looks uncommitted:
+the version change invalidates that delayed reduction before staging can reopen.
+Completed stopped-template and revocation receipts bind the child, while fresh
+process/SQL drain, effective gateway denial and the protected parent's current
+writer qualification remain preconditions for dispatch. Unknown PATCH replies
+are observed without redispatch; a busy preview leaves intent unconsumed.
+
+Restoration never creates or changes bindings. It rejects foreign inbound
+bindings to the fixed writer Roles before granting rights. Bounded impersonated
+reviews qualify each retained staging ServiceAccount against its own fixed
+bindings, not the union of every writer's rights; foreign account/group bindings
+expand the reviewed namespaces, and extra named writes or incomplete reviews
+fail closed. Partially installed forward namespace-reader material contributes
+only when actually present and justified by its frozen creation receipt. Exact
+Role/binding/namespace and receipt readbacks bracket qualification. Completed
+rights remain observable through subsequent pending recovery, but restoration
+writes cannot replay. This child does not restart workloads or reopen either
+staging or the cancelled dev/global ledger.
+
+A fresh protected process can reconstruct completed gateway and Role permission
+readers without recreating the earlier machine-retirement or stopped-template
+write adapters. Omitting those dependencies is accepted only with the respective
+phase complete and its receipts validated. Current identity, inventory and
+effective-rights checks remain mandatory; mutation methods still require their
+original active phase and concrete write dependencies.
+
+Current-staging restart consumes the completed template and Role restoration
+receipts. Its targets are the captured current specs with the recovery marker
+retained, dispatched in reverse stop order: service, controller, actuators, then
+collector. An originally dormant root remains dormant and needs no write. Every
+new dev, manager and gateway root remains pinned to its stopped recovery spec.
+Actual Deployment/ReplicaSet/Pod checks prove running readiness or stopped drain;
+the protected parent additionally supplies current runtime/database challenges,
+including any restored active collector. Fresh complete namespace collections
+bracket those challenges, pinning each fixed root's related child/Pod identities,
+templates and status. A replacement or late loss of readiness causes a wait;
+unrelated namespace Pod activity does not invalidate that fixed-root evidence.
+Captured Roles and effective gateway
+denial are rechecked, and current recovery SQL drain is required before mutations.
+Busy previews leave intent unconsumed. UID/version/metadata/spec-tested updates
+use late intent; unknown results are read back without another dispatch. A pending
+Pod prevents starting the next root. Read-only readiness remains available during
+subsequent reopening and does not incorrectly require reopened staging work to
+stay idle. This child cannot release either participant guard or reopen the
+cancelled global ledger.
+
+The shared reopening child releases only the source-qualified staging guard,
+using the fixed recovery-owner transaction rather than the forward activation
+release. The new manager's cancelled epoch remains fenced, its machine tokens
+revoked, and the dev participant closed. Completed restart receipts bind this
+child, but current restored-runtime readiness, effective rights, successor
+process drain, writer/provider qualification and SQL readbacks still precede
+dispatch. Busy final checks leave the receipt prepared. One durable intent
+permits one release; lost replies and interruptions after intent are resolved
+only by observation. An already-open staging guard without that intent is
+rejected. The transaction rechecks exact recovery ownership and local drain
+under the admission lock.
+
+After staging opens, its newly admitted work does not have to drain again.
+Cancelled global/dev ledgers and their stopped processes still must remain idle.
+A separate read-only terminal phase requires fresh runtime and authority evidence,
+even when a previous verification observation was saved. These children remain
+internal to the shared parent: they provide no standalone release command or
+permission to skip full protected-parent composition and installed acceptance.
+
+The shared Role child reduces only the two source-qualified staging worker/build
+Roles, preserving their UIDs and existing bindings. Each rules-and-annotations
+PATCH tests the current UID, resourceVersion and rules. Mutation intent precedes
+dispatch; an unknown response can only be resolved by reading the exact target.
+Only a complete definite rejection permits another attempt. Lost child history,
+changed namespace identity or a changed original Role fails closed.
+Completion additionally reviews every captured staging ServiceAccount's effective
+permissions, including namespaces reached through foreign account/group bindings.
+Exact Role, binding and child-receipt readbacks bracket these bounded, nonpersisted
+reviews. Additional named write grants, incomplete resolution or concurrent binding
+changes reject completion. This child grants no gateway rights and does not replace
+the parent's fresh whole-pool writer census and process-drain checks.
+
+The database child selects only the captured staging participant and invokes the
+existing database-bound runtime-role transaction. Dev's completed SQL setup is
+not replayed. The transaction independently requires the exact held idle guard,
+schema and restricted actuator identity; it grants no management-ledger access.
+The child retains intent before staging and qualifies any uncertain commit by
+read-only observation, never by repeating the transaction. It works through the
+qualified database Pod and Service backend after staging's controller stops,
+without requiring a controller exec or a direct database connection. Receipt
+loss during requalification blocks dispatch or completion.
+
+The material child delivers only staging's two immutable machine Secrets and its
+fixed namespace-reader ClusterRole and binding. It reuses the create-only staging
+engine; existing dev/manager material is neither read nor delivered again by this
+child. Local preparation performs no API call. After parent start, exact dry-run
+previews prepare the real stage receipt; an interrupted preview may resume because
+it has no persisted remote effect. Before the first create, a separate dispatch
+marker pins that receipt's operation and defaults, and the preparation receipt
+records that dispatch is enabled. From that point all receipts are mandatory.
+Unknown create outcomes permit exact readback only, never another POST; existing
+objects without this retained create intent cannot be adopted. Receipt checks
+bracket both live qualification and HTTPS requests. This does not grant gateway
+write authority or replace the parent's whole-pool admission checks.
+
+Recovery is a separately anchored, terminal direction. Its marker freezes both
+the forward journal and all existing child receipts, including prepared or
+unfinished children. It cannot erase completed success or resume forward work
+afterward.
+Recovery completion means staging restored and new shared admission closed, not
+that the cancelled ledger can be installed or opened again. A later attempt needs
+a separately qualified successor. This controller is not a protected deployment
+entry point: concrete live forward/recovery adapters, rollout continuity and
+installed multi-owner acceptance are still required.
+
+The recovery writer census starts with the frozen forward workload and grant
+choices, then applies only the alternatives authorized by actual recovery child
+receipts. A planned stop, restriction, restoration or restart is not accepted
+before its intent; uncertain writes permit only their recorded before/after
+states, and completed effects permit only the successor. Created grants retain
+their recorded UIDs, and an uncertain same-name read-only create preserves the
+possibility that it is still absent. Current staging templates and Roles may be
+restored while the cancelled development and gateway workloads stay stopped.
+The same complete revision-bound workload/RBAC census still rejects unrelated
+writers. Parent history and every existing forward and recovery child's receipt
+bytes are rechecked around the observation, including reopening receipts. These
+historical projections confer no forward mutation authority and do not substitute
+for current process, database, effective-permission or provider checks.
+Each observation derives its semantic projections once from a copied binding,
+then freshly verifies that the caller's binding, parent/private history and
+complete receipt set are unchanged. The latest present recovery phase validates
+its completed dependency chain; the two independent revocation children are both
+validated when that phase is latest. Projections then reuse the children's pure
+target builders without revalidating that chain for each earlier phase. There is
+no history reconstruction after remote reads or observation cache between calls.
+
+Retained development inventory selects recovery only through the verified
+recovery anchor. Its permitted workloads come from those same recovery receipts;
+the build namespace retains its frozen forward-policy choice. Only roots already
+owned by the completed development installation enter this reader, never staging
+resources. The binding also reaches nested runtime probes, so an authorized stop
+of one development component does not invalidate observation of another still
+running component. Ordinary unbound installation reads and explicit forward-only
+views remain strict. Missing intent, changed root identity or receipt changes
+during a read reject the observation; accepting a recorded template is not proof
+that its processes are drained or ready.
+
+The recovery database observer separately derives pool, participant-guard and
+machine-state alternatives from those validated receipts. It uses the actual
+retained old/new management and participant PostgreSQL backends, not a running
+application or gateway. The old manager stays revoked. Fencing and revocation
+require their own local intents; staging alone may reopen under its reopening
+receipt. A busy fenced ledger is observable while drain is pending, but a saved
+drain observation cannot replace current empty cancelled-dev/global ledgers.
+Once staging is actually open, new staging work is permitted and its database is
+no longer queried as if it retained a recovery fence. Current backend process
+identities, credentials, guard/authority states and all receipt bytes bracket
+the reads, including terminal recovery replay. This observation performs no
+write and proves neither restored runtime health nor whole-pool writer/provider
+qualification; those remain separate protected-parent requirements.
+
+Restored target-mode collector publication has a separate read-only controller
+probe. Its input is public source-qualified target specifications, physical
+node-group/quota identities and the completed collector's publication receipt.
+A fresh nonce/HMAC binds the controller's actual effective database URL without
+putting credentials in arguments or output. The fixed command uses the existing
+target-family resolver and latest-observation ordering in a bounded, PostgreSQL
+read-only repeatable-read transaction. The immutable row, receipt, payload hash,
+indexed columns and complete target family must agree. Freshness uses the current
+capacity policy and database clock, including the existing 60-second future
+allowance; no new capacity limit or recovery-specific freshness policy is added.
+Missing, superseded, future or stale publication is pending, while mismatched identity
+or contents rejects qualification. A valid observation of exhausted quota or
+zero workers remains a successful collection, not an admission decision.
+Controller and database process identities, pinned credentials and input scope
+are checked on both sides of the probe, including pending results.
+
+The source-qualified recovery readiness callback connects that probe to actual
+completed collection. It reads complete namespace Job/Pod collections, binds
+CronJob → Job → Pod ownership and the current executable template, and selects
+the latest matching completed singleton Job with a successful, fully terminated
+collector Pod. Scheduled-node placement and standard Kubernetes Pod defaults are
+qualified without accepting another image, sidecar or ServiceAccount. Failed or
+old-template history does not become successful collection. The sole JSON log
+receipt must identify the configured target and collector source before the
+database publication challenge. Current catalog/collector ConfigMaps, referenced
+Secret identities/versions and nonempty mounted keys, workload generation and
+selected descendant snapshots are checked again; unrelated namespace work is
+not pinned as collector state.
+Missing completion or stale publication remains pending.
+
+For restored Deployments, the same callback challenges current-source legacy
+settings and the exact retained database, plus existing optional actuator
+telemetry. It accepts only the fixed captured staging roster, source templates
+and this recovery operation's marker. A closing controller/database process
+barrier follows collector and configuration reads, including pending outcomes.
+Dormant originals remain dormant; their descendant drain is checked by the
+restart child. This read-only callback does not acquire guards or replace the
+parent's phase/receipt validation, whole-pool census, current provider checks or
+installed acceptance. Those protected-parent connections remain required.
+
+The recovery process observer binds that callback to the same validated recovery
+receipts used by the writer census. Before a root's stop begins, crashed
+applications do not block fencing or cancellation. Only that root's unresolved
+stop or restart intent permits pending readiness; it cannot borrow another
+root's wait. Completed stops require actual descendant drain, and restored
+staging requires current Pod readiness and the runtime challenges above before
+reopening. Cancelled development and gateway roots remain stopped. Complete
+namespace collections and selected process snapshots, root identity/generation,
+the final database process identity, and all private receipt bytes bracket each
+observation. Terminal recovery uses the same current reads without constructing
+active mutation adapters. SQL authority/drain, whole-cluster writer and provider
+qualification remain independent mandatory observations for the protected parent.
+
+The internal concrete shared-pool API composes those observations with the
+anchored forward and recovery phase engines. It pins private connection inputs,
+checks publication and provider scope, reviews effective permissions, and
+qualifies the current writer inventory before database/process checks. Recovery
+database observations bracket the later process checks across every retained
+backend, including stopped development and management databases. Terminal replay
+uses current read-only qualification without constructing active child adapters;
+the forward completion receipt requires an open global pool, open participant
+guards and no pending workload readiness. This internal connection is not a
+protected deployment entrypoint or installed multi-owner acceptance. Protected
+delivery and ordinary rollout continuity must be connected before live handoff.
+
+The shared-pool private entry reconstructs the completed development runtime and
+legacy pool from exact retained input/source/history bytes. It uses a separately
+protected current operator connection, without reopening retired operator keys.
+The captured staging snapshot and development guard are requalified by the real
+parent; private inputs cannot assert readiness. Its fixed preflight, install and
+recover actions preserve unknown-write intent across invocations and emit only
+bounded status and identity fields. Dedicated source-bound delivery packages the
+entry, both phase directions and exact-source Loom wheels; its bootstrap imports
+only the standard library before dependencies are installed. This does not widen
+the existing CLOSED-runtime key. Source packaging and local command tests do not
+establish an installed grant, protected workflow execution or live readiness.
+
+Normal releases can load the original shared input/source record from its prepared
+root or immutable tooling release without reading its retired operator CA/key.
+The operation hash, captured input bytes and completed runtime/legacy histories
+remain mandatory. This history-only context does not expose an active operator
+connection and is not evidence that the shared handoff itself completed. The new
+candidate's source record cannot substitute for the original installation source.
+
+The completed shared-handoff reader reuses the parent journal's child validators
+and binds the anchor, terminal journal, child receipts and inherited installation
+history. Missing, unfinished or recovery histories cannot qualify a normal shared
+release. Loading this historical predecessor does not replay effects or establish
+current runtime readiness; the release parent must obtain a new live inventory.
+The protected input reader composes this check with `SharedPoolPhaseEvidence`,
+which uses the live parent's actual child validators but has no credential,
+transport, live qualification or dispatch interface. Historical loading therefore
+does not need a token exchange. A terminal parent with matching child file hashes
+but invalid child semantics is rejected; no missing evidence is recreated.
+
+The protected participant-refresh transaction supports release-only updates to
+one idle execution/task-image participant. It preserves physical capacity,
+admission policy and epoch, credentials, trust keys, namespace/incarnation
+identities and every other participant's profiles and requests. Only the selected
+participant is fenced; a successor catalog uses fresh profile IDs and increments
+its binding revision and the pool policy revision once. Waiting or charged work
+blocks transition rather than being cancelled. Exact completed replay neither
+requires idleness nor fences work accepted after the update. Caller rollback
+undoes the transaction; there is no public refresh API or implicit commit.
+
+The normal-release projection derives the successor catalog from actual candidate
+platform templates, using the same catalog derivation as initial staging
+attachment. It does not fabricate a live observation to qualify new templates.
+When normal delivery renders an isolated selected commit, projection accepts a
+copy of those exact files instead of re-rendering with the operator's source.
+The shared disk/in-memory validator checks phase names, unique resource identities,
+namespace scope and target-bound admission policy. Projection additionally binds
+the persisted environment, complete runtime profile and public keyring. These
+checks are not publication or deployment authorization; the protected parent must
+retain the source-qualified input together with its release history.
+The current namespace identities, global participant settings, management origin
+and persisted environment/keyring must match the retained registration. New
+CP/API/ordinary and guest actuator templates retain the shared machine identity,
+use Recreate and carry forward handoff ancestry. Local worker Roles stay
+read-only. The suspended old collector and cluster authority are retained as
+unchanged resources, outside candidate apply; unexpected RBAC drift is refused.
+Successive release projections produce fresh profile IDs/revisions without
+changing other participants. This source connection is tested through the SQL
+transaction, not an installed normal-rollout endpoint.
+
+The fixed internal refresh runner owns one schema-head-checked transaction and
+emits its receipt only after commit. Its Jobs use the retained manager image and
+namespace-local database Secret, with no automatic retry. Mutation Job identities
+stay fixed per release/action; each new observation requires a separately retained
+observation identity. A completed observation Job proves only that historical
+read, not current registry state. The catalog projection changes only the manager's
+catalog mount reference, preserving its executable, credentials and other settings;
+the parent still owns compatibility qualification and restart/readiness checks.
+
+The concrete refresh Job adapter retains the immutable request ConfigMap once
+and journals each action Job separately. It reuses the fixed HTTPS staging and
+Job/Pod lineage checks, verifies the action-specific committed receipt and rereads
+both recorded resources before returning evidence. Unknown creates are read back,
+never retried or adopted into fresh history. A successfully created Job is not a
+successful database action, and an old observation receipt is not current state.
+
+Its separately identified `capacity` read requires the completed participant
+refresh and uses the existing connected-pool capacity reader under the management
+mutation lock. It verifies post-open registration fingerprints and observation
+age across shared quota peers, without changing application rows. The bounded
+receipt includes the selected observation identity, check time, earliest expiry
+and a fingerprint of the connected observations. Full occupancy and scale-to-zero
+are not failures of this read; it does not reserve work or demand spare headroom.
+The Job adapter verifies historical receipt integrity. The protected parent must
+still require a new read and enforce its expiry before releasing the idle guard.
+
+The catalog/manager child stages only the immutable successor catalog and uses
+the existing journaled workload compare-and-swap engine for the projected manager
+update. Its image, credentials, other settings and Recreate strategy remain
+unchanged. The recorded catalog UID must still match before the manager update;
+lost responses are reconciled without repeating an uncertain patch. Readiness
+checks complete Pod/ReplicaSet observations, including init-container completion
+and absence of lingering old Pods, then rereads the manager and catalog. This
+child does not qualify publication or own the participant fence or idle guard.
+
+The retained pool-effect adapter connects those concrete children to ordinary
+deployment in fixed order: fence, stage, catalog creation, manager readiness,
+then reopening and a separately identified capacity read. Its independently
+anchored parent journal records each child's actual dispatch intent; missing
+started child evidence cannot reopen writes, while interrupted preparation
+without effects can resume. Source, endpoint and operation-directory bindings
+are rechecked throughout recovery. Only the fence's `pending_work` receipt,
+before any later phase, permits a busy exit. The adapter
+requires a protected, phase-aware live qualifier with no default success path.
+This composition does not itself supply that qualifier, completed/latest release
+history, or the protected operator entry, and is not installed acceptance.
+
+The existing deploy parent has an internal shared-release path paired with a
+protected pool I/O adapter. It binds the exact projected files and release/guard
+identity, retains the ordinary backup/schema/configuration/workload sequence,
+and checks current guard ownership before shared mutation phases and reopening.
+After reopening it assigns and records a new capacity-read identity, including
+on recovery. Reopening and capacity reading are separate adapter operations, so
+time spent reopening does not consume the new read's validity window. Immediately
+before dispatching guard release, the parent validates the returned receipt,
+the selected pool's maximum observation age, wall-clock expiry and elapsed
+monotonic read time. A missing, expired or implausibly future receipt cannot clear
+the guard merely because the adapter returned normally. Unknown
+pool effects or stale post-open capacity retain the guard for the original
+candidate's roll-forward recovery. A busy result may release it only when the
+adapter positively proves the fence changed nothing and no later phase began.
+No CLI mode disables the standalone boundary.
+
+The normal-release input record freezes the selected publication and isolated
+render, original participant inventory, manager/catalog and predecessor history.
+It is bounded private local state with a separate input-digest anchor. Recovery
+loads that original record without re-rendering or recapturing the cluster; lost
+or altered anchored input is not reconstructed. An identical, effect-free local
+preparation can resume before its anchor, but existing child dispatch evidence
+prevents recreating a missing anchor. Secret bodies are not part of this capture.
+
+The ordinary idle-rollout wrapper accepts this retained operation only paired
+with its protected pool adapter. It checks the retained binding before preparing
+output and again before invoking the full deployer, using the frozen shared files
+and operation-derived guard owner. Both GitHub deployment intent and deployment
+evidence carry the same non-secret recovery reference. Shared recovery selects
+the exact publication run attempt and artifact ID/digest, not another successful
+publication of the same commit or the latest attempt. A missing shared operation
+cannot fall back to standalone rendering. These internal connections do not
+provide a public document-input deployment command.
+
+The internal existing-resource update child selects an object from the anchored
+candidate and original inventory, not caller-supplied replacement documents. It
+reuses the fixed transition journal with server dry-run, atomic UID/resourceVersion
+preconditions, and readback-only handling of an uncertain write. Namespace
+finalizers and existing Service allocations are preserved, including the public
+LoadBalancer; management's private-Service-only defaulting rule is not reused for
+that public endpoint. A release marker distinguishes the target from an unchanged
+original. This child proves only the recorded resource update, not descendants or
+runtime readiness.
+
+The retained file writer connects those update and create engines to the actual
+idle-rollout/deployer resource phases, preserving renderer order. A private
+dispatch journal and separate start anchor prevent a missing parent or child
+journal from reopening writes. Existing storage claims and ResourceQuotas are
+qualified read-only before the file's application writes; code rollout does not
+resize/rebind storage or change infrastructure quotas. Equivalent Kubernetes
+quantity spellings compare by exact amount while the retained allocation stays
+unchanged. Source/reference mismatch is rejected before this writer can be
+supplied to the deployer.
+
+For an unchanged installed task-identity policy, the writer qualifies the exact
+original policy UID/body and verifies server-dry-run equivalence, then the deployer
+runs its positive/negative admission probes using the existing execution account.
+It does not bootstrap a temporary namespace policy or create a probe account.
+Policy changes are refused by this route and still require a separately retained
+bootstrap transition. Standalone policy installation retains its existing
+bootstrap behavior. The file-writer connection is internal; the protected entry
+must still supply concrete source/guard-qualified API factories.
+
+The paired create-only child selects a new resource from the same retained
+candidate, or derives the pre-upgrade backup Job from the original captured
+CronJob. The backup has an operation-stable name and records its source CronJob
+UID; recovery never derives a replacement backup from an already updated CronJob.
+The existing fixed-create journal preserves dry-run defaults, dispatch intent and
+the observed resource UID. Unknown creates are only read back, existing names
+are not adopted, and missing/replaced created resources are not recreated. These
+receipts prove creation, not successful Job execution. The separate read-only
+observer binds the retained Job UID/template to a complete Pod collection and
+terminal owned processes, then rechecks the Job and journal. Success requires a
+successful owned Pod with successful container exits; a failed outcome requires
+all owned processes to be inert. Running unrelated services are not confused with
+Job descendants. A native failed Job that timed out before any Pod was created
+can be qualified from the complete empty descendant inventory; success still
+requires a successful owned Pod. This observation grants no retry or deployment authority.
+
+The file writer also connects the original pre-upgrade backup and candidate
+migration/configuration Jobs to the deployer. Each returns only after the owned
+terminal-process proof above. Explicit recovery of an already failed Job records
+its stage hash, UID, resourceVersion and Pod identities before a foreground DELETE
+with both UID and resourceVersion preconditions. Cleanup observation never repeats
+that write. A new explicit recovery invocation may reissue the identical
+conditional DELETE only while the same failed Job version and inert processes
+remain qualified. Recreation waits for the old Job and all descendants to
+disappear from a complete inventory. Each attempt keeps its original stage journal;
+the same Job name receives a separately retained generation and operation marker.
+Unknown creates remain readback-only, including in a retry generation. Missing
+predecessor, successor or retry evidence cannot authorize a fresh create. A newly
+failed execution is not retried within the invocation that first ran it.
+
+Parent phase authority and full protected rollout integration remain required
+connections. The read-only unchanged-policy path does not cover upgrades that
+change admission policy; the candidate file loop alone does not cover every effect.
+
+The read-only participant resource observer derives live alternatives from these
+fixed journals. Before dispatch, only the original object or planned absence is
+allowed; an uncertain PATCH allows its recorded original and target, while a
+completed write requires the pinned successor UID. Creation intent uses the same
+server-defaulting checks as the writer, including Kubernetes-assigned Job labels.
+Failed-Job recovery preserves all previous attempts and selects only the current
+generation or explicitly recorded cleanup absence. An exact candidate factory
+may identify its currently preparing child before that child's journal exists;
+this is not permission to recreate missing recovery evidence.
+
+Both presence and absence are read back, and source/cluster identity plus bounded
+private receipt bytes bracket the observation. Foreign receipts, symlinked
+directories and changed records are refused without writing local or cluster
+state. Successful resource observation alone does not prove writer exclusivity
+or readiness.
+
+Its whole-pool observation composes those resources with the existing complete,
+revision-bound workload/RBAC census. The original shared handoff must be terminal,
+its receipt bytes must belong to the release's retained history, and pool,
+participant namespace and controller identities must agree. Only the selected
+participant's recorded resource transitions and the manager catalog transition
+replace roots; other participants and the retired collectors/gateway remain
+pinned to their retained state. A fresh source capture cannot replace an already
+retained writer UID. Original captured Jobs must remain terminal;
+only fixed new Jobs selected by the release journals can be active roots.
+Candidate Role annotations do not authorize changed grants or binding subjects.
+
+Current effective rules are also reviewed per retained account and namespace,
+including namespaces reached through foreign/group bindings. Reviews are
+nonpersisted authorization queries, not grants or token issuance. Binding
+readbacks bracket these checks, and the complete writer census runs again before
+final source/resource readback. This observation still does not prove semantic
+latest-release completion, process/database readiness, publication/provider scope
+or guard ownership; the protected caller must establish those independently.
+
+The selected participant's idle-guard observation uses the current source/receipt-
+qualified PostgreSQL StatefulSet and Service with the retained namespace and
+credential UID/version. It proves the actual ready database Pod and Service
+backend before running the existing read-only owner/candidate query. Repeated
+guard, process-identity, source and connection reads reject a changed backend,
+restart, credential, release or guard while observing. Preflight accepts open or
+this release's held guard; guarded/ready phases require that exact held owner.
+The released-state check requires open intake, but does not establish completed
+release history. None of these observations acquires/releases a guard, qualifies
+application processes or replaces the other protected release checks.
+
+The selected participant's process observation challenges its current control
+plane, API and every ordinary/guest actuator. It selects original or candidate
+registration from each receipt-qualified workload, preserves retained controller,
+database, Service and credential identities, and checks complete Deployment/
+ReplicaSet/Pod readiness before the existing effective-settings and database-URL
+probes. Process identities (including restart counts), database backends, every
+consumer's credential, source, receipts and connection are rechecked before
+returning. No credential value is reported.
+
+Only a recorded Pod-template transition may return pending workloads during
+preflight or guarded observation. An unready original is rejected, and ready/
+released phases require every selected process ready. A pending result is not
+write permission: the protected parent must wait and observe again before its
+next effect. This check does not replace manager/gateway/other-participant process
+checks, actuator telemetry or the full-pool registry and writer observations.
+
+The peer process observation uses the current source-qualified whole-pool census
+for every other participant's control plane, API and ordinary/guest actuators.
+It challenges their effective settings and pinned database credentials, checks
+complete descendant readiness, and rechecks processes, backends and all consumer
+credentials after the closing census. It does not query task activity or require
+other participants to become idle. The selected participant's process check must
+finish any known transition before this observation; peers receive no pending
+exemption from another participant's release.
+
+The same observation runs the existing direct-kubelet probe inside every current
+actuator, including the selected participant. Each registered trial target must
+have its actuator; each probe checks the complete pool Node roster and actuator
+host, including at scale-zero. Process restarts and binding errors fail the check.
+Optional kubelet sampling failures remain explicitly `unavailable`, not healthy
+or zero usage. Telemetry is diagnostic and never substitutes for registry,
+capacity or provider authority. None of these checks writes or drains workloads.
+
+The manager process observation uses its separately retained management database
+and original workload identity. The live manager must match either the recorded
+original or catalog-only successor; its real settings loader must read that
+version's exact profile-catalog hash, and its effective database URL must match
+its qualified backend. Full descendant readiness and process, database,
+credential, source and connection readbacks bracket these probes. Only the
+recorded catalog restart may be pending, and ready/released checks reject it
+until complete. This observation neither changes the manager nor opens admission.
+
+Gateway process qualification is separate from the startup capacity/admission
+probe. A normal participant refresh deliberately has a fenced registration while
+the shared gateway must remain running. The continuous probe therefore checks
+the retained gateway's actual database URL, loaded settings and token, and its
+projected Kubernetes namespace access without an all-active capacity transaction.
+It does not prove capacity or grant admission. Startup/opening still execute
+both checks, and the ordinary release still requires exact phase-aware registry
+qualification and fresh post-open capacity evidence before releasing intake.
+
+The normal-release gateway observer selects the unchanged running gateway from
+the completed handoff and current whole-pool writer/permission census. It checks
+complete Deployment/ReplicaSet/Pod readiness and brackets the continuous probe
+with another census plus process, backend, credential and private-history reads.
+An unready gateway or a restart during observation is a failure, not a candidate-update wait.
+
+The participant registry observation reads the retained manager's database through
+its pinned credential, namespace, StatefulSet, Service and actual backend process.
+A fixed repeatable-read, read-only SQL snapshot checks the exact pool, participant,
+machine and token authority against the original or candidate registration. It
+acquires no mutation advisory lock or row lock and executes no refresh Job.
+Other participants must remain active with their unchanged bindings.
+
+The current release's actual Job dispatch journals determine which registry state
+is admissible: original active, original fenced, candidate fenced, or candidate
+active. An unfinished dispatched Job permits only its two adjacent states; an
+input ConfigMap or prepared Job does not authorize a transition. A completed
+`pending_work` report preserves the prior state and cannot justify later catalog,
+manager, opening or capacity steps. Repeated SQL/backend/credential and private
+history reads reject drift. These reads compose with the full resource/writer and
+runtime checks; they neither establish completed release history nor grant writes.
+
+The external-authority observation resolves the selected release's exact protected
+publication, not the original manager's publication. It verifies the publication
+attempt, merged commit, required CI checks, artifact digest and signed images
+against the retained pool trust. The installed publication-reader Secret,
+collector configuration/credential and registry credentials retain their recorded
+identities. Read-only IAM and provider checks use the existing cloud verifier;
+the result must describe the registered cluster, node group and quota identities.
+An empty, busy, quota-exhausted or scaling pool is valid; spare capacity is not
+required. Current writer census, resource identities, private history, operator
+credential bytes and connection checks bracket the external reads. This neither
+replays installation nor publishes capacity or authorizes admission.
+
+The retained deployer records a final-release boundary after application checks
+and the fresh post-open capacity query. It validates completed candidate resource
+receipts, pool transitions and actual terminal backup/schema/configure Job
+outcomes, including their recorded Job and Pod identities. An independent private
+anchor binds the fixed effects and Job outcomes. Effect-free preparation is
+distinct from an anchored release intent; interrupted preparation can resume
+under the original held guard, but cannot justify already-open intake.
+
+After a lost release response or completion acknowledgement, recovery checks this
+private record before another deployment. Open intake requires fresh released-
+state runtime/registry qualification, HTTPS and deployed-image checks, plus the
+unchanged effect history. It can then finish the same release without reacquiring
+the guard or replaying workload, backup, schema, configuration or pool mutations.
+Held intake continues through the existing journal-aware guarded recovery and a
+new capacity query. Missing/altered completion evidence or failed current checks
+refuse reconciliation. A historical capacity receipt is not fresh write authority;
+the deployer still enforces its wall-clock and monotonic expiry immediately before
+any guard release. This final-release record alone is not latest-predecessor
+promotion or a connected protected operator entry.
+
+The pure completed-release loader shares those semantic child validators without
+constructing a transport or providing a default-success qualifier. It requires
+released completion, its independent anchor and terminal candidate/pool receipts.
+It derives the successor controller and database/Service from the exact
+receipt-selected resources, including wired settings, server defaults, operation
+annotations and original UIDs. Desired migration projections are not substituted
+for these recorded outcomes. Other participants and credential identities remain
+unchanged; the successor also carries the recorded manager and immutable catalog.
+Its history pins original inputs, anchors, completion, all child receipts and
+ancestor bytes, with readback before return. Loading performs no cluster operation
+or history repair and establishes no current runtime readiness.
+
+Private latest-head selection is separately initialized from the qualified shared
+handoff. An independent initialization anchor prevents a lost pointer from being
+reset to that original handoff. Promotion semantically loads the completed release
+and compares its exact retained predecessor against the current head under the
+private state lock. A competing release from an older predecessor cannot replace
+an advanced head. A committed update whose acknowledgement is lost can be retried
+without another update. Pointer and initialization-anchor bytes are deliberately
+excluded from immutable release ancestry, so normal head advancement does not
+invalidate earlier receipts. These local selection functions are not deployment,
+publication or guard authority; protected entry still must connect them to the
+normal workflow and freshly qualify the selected historical identities.
+
+`ParticipantReleaseQualifier` composes the actual normal-release observers for
+one protected operator connection. It checks the retained input and latest
+predecessor, private connection bytes, endpoint/client identity and selected
+guard; then publication/provider authority with writer/permission census, selected
+and manager processes, peers and optional actuator telemetry, gateway continuity,
+and live registry state. Guard ownership and receipt bytes are rechecked before
+return. Only a recognized selected/manager rollout transition may wait, with a
+bounded read-only retry; failed authority, identity, evidence or transport checks
+are not retried. Optional telemetry unavailability remains diagnostic. A promoted
+release can requalify final completion but cannot regain mutation authority.
+The qualifier is for the already-authenticated protected entry, not a public
+credential or document intake route.
+
+`connected_participant_release` constructs the resource-update, creation and pool
+APIs from one explicit operator TLS/token connection. Each candidate API uses the
+same qualifier with its exact child key; no resource or Job access bypasses the
+guard checks. Child clients close with their operation, and the observer closes
+with the connection. Its rollout connection uses the existing idle/deploy path,
+retained writer and concrete pool adapter, then promotes the original semantic
+predecessor through the completion hook. A changed predecessor or lost latest-head
+record refuses before deployment starts. An already-promoted release can finish
+lost-acknowledgement recovery without substituting a new predecessor.
+The rollout reloads its original predecessor from either the qualified initial
+handoff or a completed release's independent anchor under the same private roots.
+It checks the exact migration/history and initial installation ancestry, even if
+the latest pointer already advanced. Lost predecessor evidence is never repaired
+from the current cluster or replaced with the latest head.
+
+Protected delivery does not require a Git checkout on the operator host. New
+platform publications bind the concrete `service_schema_head` to the clean
+candidate source and signed provenance; shared delivery requires that revision
+instead of inspecting a local migration tree. The installed publication reader
+validates the exact retained candidate/profile and compares exact commits through
+GitHub. Diverged or superseded candidates cannot start a new release, and malformed
+comparison responses fail closed. The reader must be able to read commit
+comparisons (repository contents read) as well as publication artifacts and checks;
+denied, unavailable or rate-limited comparisons never authorize deployment.
+Reader Secret identity, retained history and the
+explicit connection are checked around the read; credentials are never exported
+to the runner or artifact host. Automatic idle checks reuse the same authenticated
+Kubernetes connection and ancestry reader. Historical standalone candidates keep
+their existing Git-based path, not a fallback for protected shared delivery.
+
+The internal connection's `execute` method reconstructs candidate/profile files
+from its retained operation in a private temporary directory on the operator
+host. It selects the authenticated host kubeconfig and retains deployment evidence
+under that operation, without accepting runner paths or calling GitHub deployment
+APIs. Recovery must name the same reference, candidate, original previous
+candidate, guard owner and platform binding; automatic recovery is rejected.
+Temporary publication files are removed on success or failure. Its return value
+is private evidence, not a public gateway response. Runner-owned deployment intent
+and allowlisted reporting still require the protected workflow connection.
+
+`authenticated_participant_release` exchanges the explicitly selected Nebius
+operator credential using the existing authenticated transport. It pins private
+CA/credential bytes around that exchange and rejects an endpoint mismatch or
+nested SSH route. Its temporary, mode-0600 kubeconfig uses the retained Nebius
+cluster ID and only the selected endpoint, CA and bearer; it has no credential
+plugins. Protected local kubectl uses an exact executable, an isolated discovery
+cache and a minimal environment without ambient credentials/proxies. The temporary
+configuration and cache are removed on success or failure, without hiding an
+original deployment error. `execute_retained_participant_release` first loads the
+original shared handoff through its semantic completion reader, then loads the
+exact retained reference and its original predecessor. It reads the separately
+selected current operator material, rejects aliases to historical input files,
+and checks those bytes around authenticated execution. Recovery does not reconstruct
+retained input or initialize head records, and never captures a replacement live baseline. All paths
+and the connection come from the protected installed caller, not runner data.
+This is an internal connection, not an installed authority or public CLI.
+
+`prepare_retained_participant_release` connects new-release preparation on that
+host. It resolves the exact protected publication and authenticated commit
+ancestry using the installed reader, requires a concrete published service schema
+revision, and captures the selected environment's complete current render. The
+initial handoff's resource inventory is intentionally narrower than a platform
+release: receipt-selected workload/RBAC successors qualify changed objects,
+while unchanged ServiceAccounts, NetworkPolicies, PVCs and admission resources
+must match the original source render. All identities are read from the API;
+preparation never manufactures missing UIDs. A later release uses its completed
+predecessor's resources, manager and catalog. A second observation checks that
+the cluster, objects, private inputs and handoff receipts stayed unchanged.
+This capture does not replace the qualifier's whole-pool writer census.
+
+Preparation obtains the exact candidate commit's `deploy/k8s`, `src/loom` and
+renderer entrypoint through the installed GitHub reader. The numeric repository
+API, exact-commit codeload redirect and archive commit identity must agree.
+Downloads and expanded archives are bounded; unsafe paths, duplicate members and
+links in rendering inputs are rejected. Unselected repository content is never
+extracted. This source archive is not byte-identical to the publication's local
+`git archive`, so its compressed digest is not substituted for that source digest.
+The selected renderer and imports run in a separate Python process with the
+existing bounded private watchdog and no inherited operator credentials or Python
+paths. Installed operator templates never stand in for a new candidate's source.
+A completed predecessor's retained rendering defines the next capture's inventory,
+even if the installed tooling's templates have changed.
+
+Preparation retains the qualified successor rendering, then runs the same
+protected preflight without acquiring a guard. Repeating an operation uses its
+original anchored inputs; it cannot recapture a newer baseline or rebuild lost
+evidence under the same UUID. Recovery never calls preparation. Publication
+resolution and normal observation share the installed-reader implementation,
+which checks the reader Secret identity before and after both resolution and
+ancestry and selected-source reads. Installed protected transport, explicitly selected workflow routing
+and live acceptance remain required before treating this as operational readiness.
+
+The fixed host dispatcher accepts only bounded, direction-specific JSON commands:
+prepare selects a publication and operation UUID; execute selects the retained
+reference and automatic-check mode; recover selects that reference and the
+original bounded recovery record. Unknown fields, duplicate JSON keys, coerced
+booleans and cross-direction inputs are rejected before private intake. Host
+history, state roots, trust files and kubectl come from a private, hash-pinned
+installed configuration, not the command. The tooling root comes from the installed
+module itself. Preparation and execution use the existing host functions above.
+Reports expose only the original reference, platform/guard binding, public URL
+and a recognized outcome; private exceptions, diagnostics and paths are omitted.
+A bare success status without the matching deployment binding is rejected.
+Its process entry suppresses private process output and checks the configuration
+again before acknowledging the outcome. This dispatcher does not itself install
+an SSH grant. The separate operator-only participant installer binds a dedicated
+key to exact tooling and private host configuration. The separate runner persists
+deployment intent and uses that installed authority; the exact-bundle shared
+handoff grant cannot authorize this new command surface.
+
+Participant tooling has a separate archive allowlist containing the complete
+host dispatcher and release dependencies. The archive includes pinned wheels,
+hash-locked dependency input, rendering assets and a tooling source record; it
+does not contain private host configuration or retained deployment history.
+The existing handoff archive's sources and commands are unchanged. Isolated
+import coverage loads the actual archive's scripts and wheels without falling
+back to workspace Loom modules. Its fixed process command selects the installed
+interpreter and entry, while the public-report validator rejects extra fields,
+foreign release references and candidate/guard mismatches. Packaging and report
+validation alone do not install a grant or connect the normal rollout workflow.
+The installer qualifies the isolated tooling and private host selection before
+appending the separate forced-command key. It preserves existing keys, refuses
+key reuse with different authority, and rechecks installation inputs before the
+atomic key update. First installation creates empty private state/anchor roots,
+not deployment history. Dependencies are prepared outside the shared key-file
+lock. At most eight tooling releases are retained; partial or changed releases
+require operator reconciliation, never automatic rebuilding or deletion.
+The installed launcher accepts only the three fixed prepare/execute/recover
+commands with bounded data on stdin, verifies retained source hashes before and
+after dispatch, and uses the existing private-process watchdog. Installing it
+performs no cluster operation and does not establish live handoff acceptance.
+
+The protected workflow explicitly selects `standalone` or `shared` routing using
+`NEBIUS_ROLLOUT_MODE`; an unset value preserves the existing standalone route, and
+unknown values fail before deployment. The selected route is pinned in the check
+job's output. Shared mode uses `NEBIUS_PARTICIPANT_SSH_KEY` with fixed commands,
+strict host authentication and bounded data; it cannot fall back to standalone.
+The runner pins the selected publication's run attempt, artifact ID/digest and
+merged-dev PR; the host independently validates CI, signatures, ancestry and source.
+The runner saves the exact reference, original previous candidate and platform/
+guard binding locally and in GitHub deployment intent before requesting execution.
+An uncertain SSH or GitHub response is not retried. Explicit recovery keeps the
+original reference and never prepares another release. A public completion must
+match that entire binding before GitHub success is reported. Busy/skipped outcomes
+are inactive, not successful deployments. Host history and private diagnostics do
+not leave the operator. The tooling builder is a separate local command requiring
+clean integrated source, not part of remote rollout requests.
+
+The deployer has an internal finalization hook inside its existing error/evidence
+boundary, after verified guard release and before reporting success. Protected
+composition uses that hook for latest-head promotion. It also runs after successful
+lost-release reconciliation. A failed promotion, including a committed pointer
+update whose acknowledgement was lost, therefore leaves a failed, recoverable
+deployment record with the observed guard state rather than reporting premature
+success. Recovery requalifies completion and finishes promotion without replaying
+candidate/pool mutations. The hook requires a retained candidate writer and is
+not available as a CLI flag; standalone behavior remains unchanged.
+
+The transaction, pool-effect adapter and parent interface do not establish
+publication, history, full runtime readiness or recovery authority on their own.
+The protected entry and phase-aware live qualifier connect the normal workflow
+to these child operations, but installed qualification and live acceptance remain
+required. They invoke latest-head promotion only after verified
+guard release, so later releases use the latest predecessor rather than the
+original handoff. Retained inputs and a deployer result alone are not that proof.
+Fence, catalog staging and reopening each invalidate prior capacity captures;
+the parent must wait for a fresh capture after reopening before releasing the
+local idle guard. Other participants retain their grants/activation plans, and
+new admission resumes when current capacity is observed. The standalone deployer
+continues to reject global wiring; bypassing that check is not a refresh.
+
 Authenticated Kubernetes/worker identity and capacity observations remain
 mandatory. Detailed kubelet samples retain the existing optional-telemetry
 contract; unavailable samples are not zero usage or evidence of certificate trust.
@@ -1239,6 +2345,12 @@ which is always rolled back; this is non-mutating qualification, not a SQL
 `READ ONLY` transaction. Pod/backend/credential identity and closed authority are
 rechecked afterward. The result is not a saved capacity grant: admission opening
 must requalify current evidence under its own locked transition.
+The shared handoff also has a fixed read-only active-capacity challenge. It uses
+the same authenticated registration/freshness checks but requires GLOBAL, does
+not require an empty work journal and always rolls back. This lets qualification
+continue after one participant resumes and obtains a reservation. The closed
+probe still rejects GLOBAL, the active probe rejects CLOSED, and only the
+separate opening command may commit the CLOSED-to-GLOBAL transition.
 The internal fixed opening primitive repeats that qualification and changes only
 the exact `closed/R` registration to `global/R` in the same transaction. Token
 expiry and every connected observation's freshness are checked again at the SQL
@@ -1280,6 +2392,14 @@ running application/gateway nor its runtime token. A separate read-only runtime
 ACL inspection accepts active work and absent/recovery guards while preserving
 the same schema and least-privilege checks; the initial role stage/observation
 still requires the original idle guard. Inspection never repairs grants or work.
+A separate read-only recovery machine-state query identifies the exact original
+participants, machine scopes and credentials with the original closed/global or
+terminally fenced binding. It permits unfinished work and expired original
+credentials, because neither prevents identifying and fencing that authority.
+It does not renew credentials, prove drain or authorize retirement. The existing
+machine-retirement reader and writer still require the exact terminal fence and
+fresh empty journal. The anchored parent must separately constrain the observed
+pool and active/revoked state to its recorded recovery intents and outcomes.
 Opening uses the exact gateway Pod from fresh settings, database, projected-API
 and capacity qualification. A separate fresh challenge invokes only the fixed
 opening command, once. Its result and the retained Pod/backend/operator scope are

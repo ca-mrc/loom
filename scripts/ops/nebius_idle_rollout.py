@@ -12,9 +12,10 @@ import sys
 import tarfile
 import tempfile
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 ROOT = Path(__file__).resolve().parents[2]
 if __package__ in {None, ""}:
@@ -29,6 +30,13 @@ from loom.repository_identity import (  # noqa: E402
     REPOSITORY_NAMES,
     is_loom_repository,
 )
+
+if TYPE_CHECKING:
+    from scripts.ops.deploy_nebius_platform import ParticipantRolloutAPI
+    from scripts.ops.nebius_pool_participant_operation import RetainedParticipantRollout
+    from scripts.ops.nebius_pool_participant_resource import RetainedCandidateFileWriter
+
+    from loom_service.environment_management.candidates import ProtectedPublication
 
 REPOSITORY = "qianyi-sun/loom"
 
@@ -76,10 +84,23 @@ def recovery_record(value: dict) -> dict:
     previous = value.get("previous_candidate_sha")
     if previous is not None and (not isinstance(previous, str) or not re.fullmatch(r"[0-9a-f]{40}", previous)):
         raise DeploymentError("invalid persisted previous candidate")
-    return {key: value[key] for key in (
+    result = {key: value[key] for key in (
         "schema_version", "status", "mode", "guard_owner", "candidate_sha", "cluster_id", "namespace",
         "execution_namespace", "previous_candidate_sha", "run_id", "run_attempt",
     ) if key in value}
+    if 'shared_pool_release' in value:
+        from scripts.ops.nebius_pool_participant_operation import ParticipantRolloutReference
+
+        try:
+            reference = ParticipantRolloutReference.model_validate(value['shared_pool_release'])
+            if (reference.model_dump(mode='json') != value['shared_pool_release']
+                    or reference.publication.source_sha != value['candidate_sha']
+                    or 'rollout-' + reference.operation_id.hex != value['guard_owner']):
+                raise ValueError
+            result['shared_pool_release'] = reference.model_dump(mode='json')
+        except Exception:
+            raise DeploymentError('invalid shared release recovery reference') from None
+    return result
 
 
 def persisted_recovery_intent(run_id: str, attempt: int) -> dict:
@@ -164,8 +185,11 @@ def idle_snapshot(kube: Kubectl, namespace: str) -> dict:
     return result
 
 
-def check_rollout(args: argparse.Namespace) -> dict:
-    kube = Kubectl(args.kubeconfig)
+def check_rollout(args: argparse.Namespace, *, kube: Kubectl | None = None,
+        candidate_ancestry: Callable[[str, str], bool] | None = None) -> dict:
+    if kube is not None and kube.kubeconfig != args.kubeconfig:
+        raise DeploymentError('protected rollout check connection differs')
+    kube = kube or Kubectl(args.kubeconfig)
     data = kube.get("configmap", "loom-platform-config", args.namespace)["data"]
     config = json.loads(data["environment.json"])
     if (config["namespace"] != args.namespace or config["cluster_id"] != args.expected_cluster_id
@@ -184,19 +208,24 @@ def check_rollout(args: argparse.Namespace) -> dict:
         if decision["status"] == "skipped_already_deployed" or (
                 getattr(args, "automatic", False) and decision["status"] == "blocked_recovery"):
             return {**result, **decision}
-    if current != candidate and not candidate_follows(current, candidate):
+    if current != candidate and not (candidate_ancestry or candidate_follows)(current, candidate):
         return {**result, "status": "skipped_superseded"}
     if any(snapshot["active"].values()):
         return {**result, "status": "skipped_busy", "guard": {"active": snapshot["active"]}}
     return result
 
 
-def select_publication(run_id: str | None) -> dict:
+def select_publication(run_id: str | None, *, pinned: ProtectedPublication | None = None) -> dict:
+    if pinned is not None and run_id != str(pinned.run_id):
+        raise DeploymentError('shared publication run differs from its retained selection')
     if run_id is None:
         return latest_publication()
     if not run_id.isdigit():
         raise DeploymentError("publication run ID must be numeric")
-    run = github(f"actions/runs/{run_id}")
+    path = f"actions/runs/{run_id}"
+    if pinned is not None:
+        path += f'/attempts/{pinned.run_attempt}'
+    run = github(path)
     if (run["conclusion"] != "success" or run["head_branch"] != "dev"
         or not is_loom_repository(run["head_repository"])
         or run["path"] != ".github/workflows/nebius-candidate.yml"
@@ -205,8 +234,21 @@ def select_publication(run_id: str | None) -> dict:
     sha = run["head_sha"]
     if not re.fullmatch(r"[0-9a-f]{40}", sha):
         raise DeploymentError("invalid publication commit")
+    if pinned is not None and (sha != pinned.source_sha or run['run_attempt'] != pinned.run_attempt):
+        raise DeploymentError('shared publication attempt differs from its retained selection')
     artifact = f"nebius-candidate-{sha}-{run_id}-{run['run_attempt']}"
-    artifacts = github(f"actions/runs/{run_id}/artifacts?per_page=100")["artifacts"]
+    if pinned is not None:
+        selected_artifact = github(f'actions/artifacts/{pinned.artifact_id}')
+        if (not isinstance(selected_artifact, dict) or type(selected_artifact.get('id')) is not int
+                or selected_artifact['id'] != pinned.artifact_id or selected_artifact.get('name') != artifact
+                or selected_artifact.get('expired') is not False or selected_artifact.get('digest') != pinned.artifact_sha256
+                or not isinstance(selected_artifact.get('workflow_run'), dict)
+                or selected_artifact['workflow_run'].get('id') != pinned.run_id
+                or selected_artifact['workflow_run'].get('head_sha') != sha):
+            raise DeploymentError('shared publication artifact differs from its retained selection')
+        artifacts = [selected_artifact]
+    else:
+        artifacts = github(f"actions/runs/{run_id}/artifacts?per_page=100")["artifacts"]
     if not any(row["name"] == artifact and not row["expired"] for row in artifacts):
         # harness-only publications are intentionally not platform deployments.
         return {"status": "skipped_no_platform_candidate", "sha": sha, "run_id": run_id}
@@ -241,6 +283,18 @@ def select_recovery(run_id: str, directory: Path) -> dict:
         record_path = directory / "deployment-intent.json"
         record_path.write_text(json.dumps(record, sort_keys=True) + "\n")
     sha = record["candidate_sha"]
+    if 'shared_pool_release' in record:
+        # A shared operation owns one exact publication attempt. Another ready
+        # artifact for the same SHA cannot replace its retained release inputs.
+        from loom_service.environment_management.candidates import ProtectedPublication
+
+        pinned = ProtectedPublication.model_validate(record['shared_pool_release']['publication'])
+        selected = select_publication(str(pinned.run_id), pinned=pinned)
+        artifact = f"nebius-candidate-{sha}-{pinned.run_id}-{pinned.run_attempt}"
+        if selected.get('status') != 'ready' or selected.get('sha') != sha or selected.get('artifact') != artifact:
+            raise DeploymentError('original shared release publication is not recoverable')
+        selected['recovery_evidence'] = str(record_path)
+        return selected
     runs = github("actions/workflows/nebius-candidate.yml/runs?branch=dev&status=success&head_sha=" + sha + "&per_page=100")
     matches = [row for row in runs["workflow_runs"] if row.get("head_sha") == sha]
     if not matches:
@@ -319,12 +373,49 @@ def candidate_follows(current: str, candidate: str) -> bool:
     return result.returncode == 0
 
 
-def rollout(args: argparse.Namespace) -> dict:
+def rollout(args: argparse.Namespace, *, participant_rollout: RetainedParticipantRollout | None = None,
+        pool: ParticipantRolloutAPI | None = None,
+        candidate_writer: RetainedCandidateFileWriter | None = None,
+        participant_finalize: Callable[[], None] | None = None,
+        kube: Kubectl | None = None,
+        candidate_ancestry: Callable[[str, str], bool] | None = None) -> dict:
+    """Ordinary lifecycle, optionally bound by the protected shared delivery.
+
+    No CLI flag accepts shared files or an operation as deployment authority.
+    The protected entry must load completed/latest history, retain its original
+    selected render and provide the concrete phase-aware pool adapter together.
+    """
+    if (participant_rollout is None) != (pool is None):
+        raise DeploymentError('shared operation and protected adapter must be supplied together')
+    if candidate_writer is not None and candidate_writer.retained != participant_rollout:
+        raise DeploymentError('candidate writer differs from shared operation')
+    if participant_finalize is not None and (candidate_writer is None or not callable(participant_finalize)):
+        raise DeploymentError('shared finalization requires its retained candidate writer')
+    if candidate_ancestry is not None and (participant_rollout is None or not callable(candidate_ancestry)):
+        raise DeploymentError('protected source ancestry requires its retained shared operation')
+    if kube is not None and kube.kubeconfig != args.kubeconfig:
+        raise DeploymentError('protected rollout connection differs')
+
+    def check_retained() -> None:
+        if candidate_writer is not None:
+            candidate_writer.validate()
+            if candidate_writer.retained != participant_rollout:
+                raise DeploymentError('candidate writer changed during rollout')
+        if participant_rollout is not None:
+            from scripts.ops.nebius_pool_participant_operation import load_participant_rollout
+
+            if load_participant_rollout(reference=participant_rollout.reference,
+                    state_root=participant_rollout.state_dir.parent,
+                    anchor_dir=participant_rollout.anchor_dir) != participant_rollout:
+                raise DeploymentError('shared retained release changed')
+
+    check_retained()
     if getattr(args, "automatic", False):
-        decision = check_rollout(args)
+        decision = (check_rollout(args) if kube is None and candidate_ancestry is None
+            else check_rollout(args, kube=kube, candidate_ancestry=candidate_ancestry))
         if decision["status"] != "ready":
             return decision
-    kube = Kubectl(args.kubeconfig)
+    kube = kube or Kubectl(args.kubeconfig)
     data = kube.get("configmap", "loom-platform-config", args.namespace)["data"]
     config = json.loads(data["environment.json"])
     if config["namespace"] != args.namespace or config.get("regional_execution_targets"):
@@ -341,15 +432,38 @@ def rollout(args: argparse.Namespace) -> dict:
         if (record["candidate_sha"] != sha or current not in {sha, record.get("previous_candidate_sha", sha)}
                 or any(record[key] != config[key] for key in ("cluster_id", "namespace", "execution_namespace"))):
             raise DeploymentError("recovery binding differs from the failed candidate and live platform")
-    elif current != sha and not candidate_follows(current, sha):
+    elif current != sha and not (candidate_ancestry or candidate_follows)(current, sha):
         return {"status": "skipped_superseded", "candidate_sha": sha}
+    shared_reference = None
+    if participant_rollout is not None:
+        from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1
+
+        inputs = participant_rollout.inputs
+        shared_reference = participant_rollout.reference.model_dump(mode='json')
+        if (candidate != inputs.candidate or config != inputs.config
+                or ServiceExecutionRuntimeProfileV1.model_validate_json(
+                    (args.publication_dir / 'runtime-profile.json').read_text()) != inputs.runtime_profile
+                or (record is not None and record.get('shared_pool_release') != shared_reference)):
+            raise DeploymentError('shared release differs from its retained candidate or recovery intent')
+    elif record is not None and 'shared_pool_release' in record:
+        raise DeploymentError('shared recovery requires its retained operation and protected adapter')
     args.render_dir = args.evidence_dir / "rendered"
-    render_candidate(args, config, data["keyring.json"])
-    args.migration_schema_head = candidate_schema_head(sha)
+    if participant_rollout is None:
+        render_candidate(args, config, data["keyring.json"])
+    else:
+        from loom.nebius_platform_render import write_platform
+
+        write_platform(participant_rollout.release.files, config, candidate, args.render_dir)
+    if participant_rollout is None:
+        args.migration_schema_head = candidate_schema_head(sha)
+    else:
+        from loom.nebius_candidate_contract import candidate_service_schema_head
+
+        args.migration_schema_head = candidate_service_schema_head(participant_rollout.inputs.candidate)
     args.apply = True
     args.retry_failed_jobs = False
     args.expected_current_candidate = current
-    args.guard_owner = "rollout-" + uuid.uuid4().hex
+    args.guard_owner = participant_rollout.guard_owner if participant_rollout is not None else "rollout-" + uuid.uuid4().hex
     if record is not None:
         args.resume_guard_owner = record["guard_owner"]
         args.guard_owner = record["guard_owner"]
@@ -365,6 +479,8 @@ def rollout(args: argparse.Namespace) -> dict:
                   **{key: config[key] for key in ("cluster_id", "namespace", "execution_namespace")}}
         if run_id:
             intent.update(run_id=int(run_id), run_attempt=int(attempt))
+        if shared_reference is not None:
+            intent['shared_pool_release'] = shared_reference
         deployment_id = github("deployments", {
             "ref": sha, "environment": "nebius-integration", "auto_merge": False,
             "required_contexts": [], "transient_environment": False, "production_environment": False,
@@ -383,7 +499,13 @@ def rollout(args: argparse.Namespace) -> dict:
 
     try:
         report("in_progress", "Check idle, then backup and rollout; busy environments are skipped")
-        result = deploy(args, kube=kube)
+        check_retained()
+        if participant_rollout is None:
+            result = deploy(args, kube=kube)
+        else:
+            result = deploy(args, kube=kube, participant_release=participant_rollout.release, pool=pool,
+                participant_reference=participant_rollout.reference, candidate_writer=candidate_writer,
+                participant_finalize=participant_finalize)
     except Exception:
         report("failure", "Rollout failed; inspect phase evidence and dispatch pause before recovery")
         raise

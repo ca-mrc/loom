@@ -24,7 +24,8 @@ def publisher_cloud(collector_cloud):
     cloud.scope.update(registry_id='registry-builds', registry_fqdn='cr.eu-north1.nebius.cloud/builds')
     cloud.rows['registry-builds'] = (registry.Registry, {'metadata': {
         'id': 'registry-builds', 'parent_id': 'project-children'},
-        'status': {'state': 'ACTIVE', 'registry_fqdn': 'cr.eu-north1.nebius.cloud/builds'}})
+        # Registry.Get reports the regional host, not the Docker image prefix.
+        'status': {'state': 'ACTIVE', 'registry_fqdn': 'cr.eu-north1.nebius.cloud'}})
     cloud.permits['group-manager'][0]['spec'] = {'resource_id': 'registry-builds', 'role': 'editor'}
     cloud.clients['registries'] = cloud.clients['accounts']
     cloud.repositories = ('cr.eu-north1.nebius.cloud/builds/task-images',
@@ -40,7 +41,7 @@ async def qualify(cloud):
         now=datetime(2026, 10, 8, 12, tzinfo=UTC))
 
 
-async def test_registry_editor_is_bound_to_both_catalog_repositories_without_project_writes(publisher_cloud):
+async def test_registry_editor_binds_provider_host_and_id_to_both_catalog_repositories(publisher_cloud):
     cloud = publisher_cloud
     proof = await qualify(cloud)
     assert proof == {'account_id': 'serviceaccount-manager', 'key_id': 'authpublickey-manager',
@@ -50,7 +51,7 @@ async def test_registry_editor_is_bound_to_both_catalog_repositories_without_pro
 
 @pytest.mark.parametrize('damage', ['project-editor', 'registry-admin', 'extra-membership',
     'foreign-project', 'foreign-registry', 'foreign-region', 'prefix-confusion', 'traversal',
-    'empty-repositories', 'suspended', 'wrong-fqdn', 'wrong-key'])
+    'empty-repositories', 'suspended', 'wrong-fqdn', 'provider-path', 'scope-registry-mismatch', 'wrong-key'])
 async def test_native_publisher_rejects_operator_scope_or_unbound_repository(publisher_cloud, damage):
     cloud = publisher_cloud
     permit = cloud.permits['group-manager'][0]['spec']
@@ -76,7 +77,13 @@ async def test_native_publisher_rejects_operator_scope_or_unbound_repository(pub
     elif damage == 'suspended':
         row['status']['state'] = 'SUSPENDED'
     elif damage == 'wrong-fqdn':
-        row['status']['registry_fqdn'] = 'cr.eu-north1.nebius.cloud/foreign'
+        row['status']['registry_fqdn'] = 'cr.us-central1.nebius.cloud'
+    elif damage == 'provider-path':
+        row['status']['registry_fqdn'] = 'cr.eu-north1.nebius.cloud/builds'
+    elif damage == 'scope-registry-mismatch':
+        cloud.scope['registry_fqdn'] = 'cr.eu-north1.nebius.cloud/foreign'
+        cloud.repositories = ('cr.eu-north1.nebius.cloud/foreign/task-images',
+            'cr.eu-north1.nebius.cloud/foreign/application-images')
     else:
         cloud.rows['authpublickey-manager'][1]['spec']['account']['service_account']['id'] = 'serviceaccount-backup'
     with pytest.raises(ValueError, match='development build registry unqualified') as error:

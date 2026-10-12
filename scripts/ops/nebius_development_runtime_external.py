@@ -12,10 +12,12 @@ from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_development_build_cloud import qualify_registry_cloud
 from scripts.ops.nebius_development_collector_cloud import qualify_collector_cloud
 from scripts.ops.nebius_development_collector_runtime import prepare_collector_runtime
+from scripts.ops.nebius_development_pool_registration import development_profile_catalog
 from scripts.ops.nebius_development_runtime_install import DevelopmentRuntimeInstallRequest
 from scripts.ops.nebius_pool_runtime import _RetainedPoolCollectorSettings
 
 from loom.execution_image_admission import ImageAdmissionKeyring
+from loom_execution_capacity_collector.contracts import ProviderCapacitySnapshot
 from loom_execution_capacity_collector.nebius import NebiusCapacityReader
 from loom_service.environment_management.candidates import GitHubCandidateCatalog, _json
 
@@ -41,7 +43,7 @@ async def qualify_runtime_publication(*, request: DevelopmentRuntimeInstallReque
 
 
 async def qualify_runtime_cloud(*, request: DevelopmentRuntimeInstallRequest,
-                                operator_credentials: Path) -> None:
+                                operator_credentials: Path) -> ProviderCapacitySnapshot:
     """Read IAM with the operator, then read the pool with its observer key.
 
     No observation is published, image pushed, permit changed or capacity
@@ -53,9 +55,9 @@ async def qualify_runtime_cloud(*, request: DevelopmentRuntimeInstallRequest,
     try:
         original = private_state._private_read(operator_credentials, limit=1024**2)
         config = request.database.foundation.inputs.config
-        spec = request.database.manager.retained.request.registration.spec
-        repositories = tuple(sorted({row.settings.registry_repository for row in spec.profiles.task_images}
-            | {row.settings.registry_repository for row in spec.profiles.application_images}))
+        profiles = development_profile_catalog(request.database.manager.retained.request)
+        repositories = tuple(sorted({row.settings.registry_repository for row in profiles.task_images}
+            | {row.settings.registry_repository for row in profiles.application_images}))
         async with asyncio.timeout(180):
             sdk = SDK(credentials_file_name=str(operator_credentials), user_agent_prefix='loom-dev-runtime/1.0')
             try:
@@ -77,12 +79,13 @@ async def qualify_runtime_cloud(*, request: DevelopmentRuntimeInstallRequest,
                 settings = _RetainedPoolCollectorSettings(_env_file=None, **values)
                 reader = NebiusCapacityReader(settings)
                 try:
-                    await reader.capture_pool(expected_cluster_id=config['cluster_id'])
+                    snapshot = await reader.capture_pool(expected_cluster_id=config['cluster_id'])
                 finally:
                     await reader.close()
                 if private_state._private_read(credential, limit=1024**2) != request.collector_credential:
                     raise ValueError
         if private_state._private_read(operator_credentials, limit=1024**2) != original:
             raise ValueError
+        return snapshot
     except Exception:
         raise ValueError('development runtime cloud unqualified') from None

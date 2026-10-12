@@ -62,6 +62,11 @@ class PoolParticipantV1(_PoolContract):
     installation_id: UUID
     environment_id: UUID
     environment_class: PoolEnvironmentClass
+    # Protected compatibility for the historical staging catalog only. Its
+    # immutable target environment is not its current global scheduling class.
+    # Omission preserves existing installation hashes and retained receipts.
+    legacy_catalog_environment: Literal["development"] | None = Field(
+        default=None, exclude_if=lambda value: value is None)
     incarnation: UUID
     pool_id: UUID
     binding_revision: _Generation
@@ -73,12 +78,19 @@ class PoolParticipantV1(_PoolContract):
     @model_validator(mode="after")
     def unambiguous_identity(self) -> PoolParticipantV1:
         _non_nil(self.participant_id, self.installation_id, self.environment_id, self.incarnation, self.pool_id)
+        if self.legacy_catalog_environment is not None and self.environment_class != "staging":
+            raise ValueError("legacy_catalog_requires_staging_participant")
         if (self.execution_namespace.name == self.build_namespace.name
                 or self.execution_namespace.uid == self.build_namespace.uid):
             raise ValueError("duplicate_pool_namespace")
         if len({target.target_id for target in self.targets}) != len(self.targets):
             raise ValueError("duplicate_pool_target")
         return self
+
+    @property
+    def catalog_environment(self) -> PoolEnvironmentClass:
+        """Local immutable target partition; never used for global priority."""
+        return self.legacy_catalog_environment or self.environment_class
 
     def target(self, target_id: str, workload_kind: PoolWorkloadKind) -> PoolTargetBindingV1:
         for target in self.targets:

@@ -28,7 +28,7 @@ it("does not save a shorter destination's clamped scroll against the departed ro
       <button onClick={() => navigate(-1)}>Back</button>
     </main>;
   }
-  render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={["/guide"]}><Routes /></MemoryRouter>);
+  render(<MemoryRouter initialEntries={["/guide"]}><Routes /></MemoryRouter>);
   act(() => {
     scrollY = 1178;
     window.dispatchEvent(new Event("scroll"));

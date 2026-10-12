@@ -11,7 +11,7 @@ function renderPage(initialPath = "/providers/new") {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={[initialPath]}>
+      <MemoryRouter initialEntries={[initialPath]}>
         <Routes>
           <Route path="/providers/new" element={<ProviderCreate />} />
           <Route path="/providers/:id" element={<div>detail-page</div>} />
@@ -73,6 +73,19 @@ describe("ProviderCreate", () => {
       expect(screen.getByText(/new-batch-page/i)).toBeInTheDocument();
     });
   });
+
+  it.each(["//attacker.example", "/\\attacker.example", "/\n/attacker.example", "/safe/..//attacker.example"])(
+    "falls back to the new provider for an unsafe returnTo %j", async (returnTo) => {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ id: "new-id" }), { status: 201 })));
+      const user = userEvent.setup();
+      renderPage(`/providers/new?returnTo=${encodeURIComponent(returnTo)}`);
+      await user.type(screen.getByLabelText(/name/i), "smoke");
+      await user.type(screen.getByLabelText(/base url/i), "https://example.test/v1");
+      await user.type(screen.getByLabelText(/api key/i), "test-key");
+      await user.click(screen.getByRole("button", { name: /create/i }));
+      expect(await screen.findByText("detail-page")).toBeInTheDocument();
+    },
+  );
 
   it("400 from backend shows inline error banner; form not cleared", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(

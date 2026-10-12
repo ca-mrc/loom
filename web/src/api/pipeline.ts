@@ -1,5 +1,5 @@
 import { getApiBase } from "../lib/frontendConfig";
-import { _onUnauthorized, apiBase, apiFetch, throwIfApiError } from "./core";
+import { captureUnauthorizedHandler, apiBase, apiFetch, throwIfApiError } from "./core";
 import type { paths } from "./schema";
 
 export type PipelineRunListResponse =
@@ -223,6 +223,7 @@ export async function getPipelineLivePreviewFrame(
   previousEtag: string | null,
   signal?: AbortSignal,
 ): Promise<PipelineLivePreviewFrame> {
+  const onUnauthorized = captureUnauthorizedHandler();
   const headers: Record<string, string> = { Accept: "image/jpeg" };
   if (previousEtag) headers["If-None-Match"] = previousEtag;
   const response = await fetch(
@@ -236,7 +237,7 @@ export async function getPipelineLivePreviewFrame(
     !response.redirected
   )
     return { status: "not_modified" };
-  await throwIfApiError(response, _onUnauthorized);
+  await throwIfApiError(response, onUnauthorized);
   if (
     response.redirected ||
     response.headers.get("Content-Type") !== "image/jpeg" ||

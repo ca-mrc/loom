@@ -253,9 +253,15 @@ limit.
   `GET`/`PUT /internal/service-execution/harness-cache` with the Pod identity.
   It fetches into `.loom/harness-cache/restore.tar.gz` before the setup phase
   and stores `.loom/harness-cache/store.tar.gz` after the run. Size and
-  SHA-256 are verified on both sides. Entries are write-once, and published
-  only after their digest is verified. Nothing is exposed on the shared
-  loopback.
+  SHA-256 are verified on both sides. Existing entries are reused, and new
+  archives are published only after their digest is verified. Each upload has
+  a unique immutable archive; one atomic object write publishes a reference
+  containing its upload identity and digest. Concurrent valid writers may
+  replace that reference, but readers always use one immutable archive and
+  its matching digest. Failed uploads cannot replace a published archive. The `harness-cache/v2` namespace ignores earlier non-atomic entries,
+  so the first run after upgrade performs a fresh install. Unreferenced
+  uploads are retained for storage lifecycle cleanup, including after an
+  ambiguous publication response. Nothing is exposed on the shared loopback.
 - **Setup phase.** On a fetched entry it restores into `install_root` and runs
   `check`. On a miss, or a rejected entry (which is wiped first), it installs,
   runs `check` (a failure is a setup failure) and archives the root. Every

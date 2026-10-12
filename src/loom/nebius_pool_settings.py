@@ -22,7 +22,7 @@ class PoolRuntimeSettings(BaseModel):
     @model_validator(mode="after")
     def identity(self) -> PoolRuntimeSettings:
         url = urlsplit(self.management_origin)
-        if (self.environment != self.participant.environment_class or not self.bearer_token_file.is_absolute()
+        if (self.environment != self.participant.catalog_environment or not self.bearer_token_file.is_absolute()
                 or url.scheme != "https" or not url.hostname or url.username is not None or url.password is not None
                 or url.path not in {"", "/"} or url.query or url.fragment):
             raise ValueError("global pool runtime binding is invalid")

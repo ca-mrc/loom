@@ -98,6 +98,64 @@ candidate.
 See [frontend domain boundaries](frontend-domain-boundaries.md) for code generation,
 ownership, aggregate catalog discovery and the local/manual acceptance boundary.
 
+## Development dependencies and lint compatibility (#2456)
+
+The frontend uses ESLint 10 with the flat configuration in
+`web/eslint.config.js`, TypeScript ESLint 8 and the React Hooks 7 plugin. The
+toolchain requires Node 20.19 or newer within the supported Node 20 line, as
+Vite 8 already does. The frozen lockfile remains the dependency authority for
+local, CI and image builds.
+
+Lint still covers TypeScript and TSX application, test, generated declaration
+and build-config files with zero warnings allowed. The two Hooks checks remain
+`rules-of-hooks` and `exhaustive-deps`; the newer plugin's React Compiler preset
+is not enabled. The removed core formatting checks are supplied by
+`@stylistic/eslint-plugin`, and the split TypeScript type-ban rules, core numeric
+precision check and replacement require-import rule preserve the prior checks.
+Existing inner-declaration and constant-loop checks are explicit because their
+recommended defaults changed. The newly recommended `no-useless-assignment`
+rule is disabled to retain the existing lint contract. Playwright fixture
+callbacks use `provideFixture` to distinguish them from React's `use` hook.
+
+Audit both the complete build graph (`npm audit`) and the production graph
+(`npm audit --omit=dev`). Tailwind 3 still uses `braces` 3.0.3 through Chokidar
+and Micromatch/Fast-glob, and `postcss-selector-parser` 6.1.4 directly and through
+PostCSS Nested. The [nested-brace stack-exhaustion advisory](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm)
+has no patched `braces` release. The [flat-selector CPU-exhaustion advisory](https://github.com/advisories/GHSA-rj75-hqrm-r3gf)
+is fixed in selector-parser 7.1.6, outside Tailwind 3's declared dependency range.
+These paths process checked-in content globs and CSS during development/builds;
+they do not parse API data or browser-supplied selectors at runtime. Untrusted
+build inputs remain a risk. Clearing them requires an upstream compatible fix
+or a separately validated Tailwind/CSS migration; do not force dependency majors
+or suppress the audit findings to obtain a zero count.
+
+## Routing dependency and return paths (#2445)
+
+Loom uses React Router 7 in Declarative Mode (`BrowserRouter`, `Routes` and
+`Route`) with React 18.3.1. The lockfile pins `react-router-dom` and
+`react-router` to 7.18.4; upstream requires Node 20 or newer and React/React DOM
+18 or newer. The existing Node 20 CI/image toolchain satisfies that floor.
+The v6 `v7_startTransition` and `v7_relativeSplatPath` flags are removed because
+their behavior is standard in v7. This does not introduce Framework Mode,
+server rendering, router loaders/actions, or a React upgrade.
+
+The first patched release for
+[backslash navigation redirects](https://github.com/advisories/GHSA-wrjc-x8rr-h8h6)
+and [SSR error constructor injection](https://github.com/advisories/GHSA-337j-9hxr-rhxg)
+is 7.18.0. Loom's Declarative Mode does not use the affected SSR hydration path.
+The selected [7.18.4 release](https://github.com/remix-run/react-router/releases/tag/react-router%407.18.4)
+also includes subsequent upstream navigation validation fixes.
+
+Provider creation and detail pages additionally validate untrusted `returnTo`
+values before passing them to navigation or links. Only local absolute paths
+are accepted; scheme-relative URLs, backslashes, control characters and encoded
+path separators are rejected, including paths that normalize to an unsafe
+form. Valid query strings and fragments survive, and a current deployment
+prefix is removed before the router adds its basename exactly once. Invalid
+creation returns fall back to the created provider; invalid detail returns do
+not render a return link. Browser coverage verifies navigation history and
+root, `/dev` and `/prod` authentication/routing behavior.
+
 ## JavaScript loading and bundle budgets (#212)
 
 `App.tsx` lazy-loads routed pages. The managed-login route stays outside Layout
@@ -217,3 +275,36 @@ to repair optional bindings: that silently upgraded Vite 8.0.16 to 8.3.1 and
 baseline. Fix missing binding declarations/lockfile entries instead. Browser
 handoff tests wait for the destination viewer's content, not just its route
 header, because those now load at different times.
+
+### Router 7 startup budget
+
+Router 7.18.4 increases the mandatory routing code. A direct upgrade measured
+267.73 kB / 86.48 kB gzip for startup, exceeding the unchanged 260/85 limits.
+`Layout` now imports the authenticated `NavBar` only after the session settles
+as authenticated. Signed-out onboarding and managed login do not download this
+sidebar. An accessible loading status occupies its space while the route stays
+usable; a rejected sidebar import offers Reload and Home without replacing the
+routed content. Version polling begins when the authenticated sidebar mounts,
+and retains its existing focus, visibility, and ten-minute checks.
+
+The explicit baseline refresh records this loading boundary: shared query
+observer dependencies move from startup into route closures, so several
+individual route measurements rise. Hard caps and the 10% regression rule stay
+unchanged. The table compares builds from the same checkout baseline and
+Node 24 toolchain, with decimal kB and per-file gzip sums. Authenticated totals
+include the sidebar's dynamic closure with shared files deduplicated.
+
+| Production module union | Router 6.30.4 | Router 7.18.4 |
+| --- | --- | --- |
+| Static startup | 249.05 / 80.39 | 253.09 / 81.50 |
+| Signed-out login | 277.64 / 90.20 | 290.52 / 94.57 |
+| Authenticated Home including sidebar | 264.93 / 86.47 | 284.88 / 93.71 |
+| Authenticated New batch including sidebar | 348.69 / 113.41 | 368.64 / 120.62 |
+
+The security update increases complete-route download cost; the sidebar
+boundary keeps mandatory startup within its existing budget. These measurements
+do not claim faster authenticated loading. Browser route evidence also records
+actual requested files, including children that mount dynamically. Sidebar
+absence, delayed loading and rejection/reload behavior have dedicated browser
+regressions; the existing responsive navigation and version-update tests remain
+required.

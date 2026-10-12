@@ -10,6 +10,7 @@ import hashlib
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Protocol
+from uuid import UUID
 
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_development_management_retained import (
@@ -26,8 +27,10 @@ from scripts.ops.nebius_pool_registration import (
 )
 
 from loom.nebius_platform_render import digest
+from loom.nebius_pool_contract import PoolParticipantV1
 from loom_service.environment_management.candidates import _json
 from loom_service.pool_management.installation import PoolInstallation
+from loom_service.pool_management.profiles import PoolProfileCatalog
 
 
 @dataclass(frozen=True, repr=False)
@@ -35,6 +38,46 @@ class DevelopmentPoolRegistrationRequest:
     reference: RetainedManagementReference
     retained: RetainedManagementState
     registration: PoolRegistrationRequest
+
+
+def development_participant(spec: PoolInstallation, *, environment_id: UUID,
+                            execution_namespace: str) -> PoolParticipantV1:
+    """Select the retained dev data identity in a complete common-pool roster.
+
+    A staging/prod row is metadata, not permission to alter its namespace or
+    activate its consumers. The protected handoff must qualify those separately.
+    Callers validate the complete PoolInstallation before selecting its dev row.
+    """
+    participant, = (row for row in spec.participants if row.environment_id == environment_id)
+    if (participant.environment_class != 'development'
+            or participant.execution_namespace.name != execution_namespace
+            or participant.build_namespace.name != execution_namespace + '-build'):
+        raise ValueError('development pool participant differs from retained data')
+    return participant
+
+
+def retained_development_participant(request: DevelopmentPoolRegistrationRequest) -> PoolParticipantV1:
+    """Select the dev participant using the retained application data binding."""
+    installation = request.retained.inputs.deployment.installation
+    if installation.applications is None:
+        raise ValueError('development application binding missing')
+    return development_participant(request.registration.spec,
+        environment_id=installation.applications.shared.data_environment_id,
+        execution_namespace=installation.foundation.platform_config['execution_namespace'])
+
+
+def development_profile_catalog(request: DevelopmentPoolRegistrationRequest) -> PoolProfileCatalog:
+    """Dev-only material/policy view; never replace the common registration catalog."""
+    participant = retained_development_participant(request)
+    execution_ids = {target.profile_id for target in participant.targets
+        if {'trial', 'verifier'} & set(target.workload_kinds)}
+    task_ids = {target.profile_id for target in participant.targets if 'task_image_build' in target.workload_kinds}
+    application_ids = {target.profile_id for target in participant.targets if 'application_image_build' in target.workload_kinds}
+    profiles = request.registration.spec.profiles
+    return profiles.model_copy(update={
+        'execution': tuple(row for row in profiles.execution if row.profile_id in execution_ids),
+        'task_images': tuple(row for row in profiles.task_images if row.profile_id in task_ids),
+        'application_images': tuple(row for row in profiles.application_images if row.profile_id in application_ids)})
 
 
 def prepare_registration(*, reference: RetainedManagementReference,
@@ -46,17 +89,14 @@ def prepare_registration(*, reference: RetainedManagementReference,
         spec = PoolInstallation.model_validate(spec.model_dump())
         config = retained.inputs.deployment.installation.foundation.platform_config
         applications = retained.inputs.deployment.installation.applications
-        participant, = spec.participants
         if (retained.binding.namespace != 'loom-nebius-management-dev'
                 or str(spec.installation_id) != retained.binding.installation_id
                 or spec.cluster_id != config['cluster_id']
                 or spec.node_group_id != config['execution_node_group_id']
-                or applications is None
-                or participant.environment_class != 'development'
-                or participant.environment_id != applications.shared.data_environment_id
-                or participant.execution_namespace.name != config['execution_namespace']
-                or participant.build_namespace.name != config['execution_namespace'] + '-build'):
+                or applications is None):
             raise ValueError()
+        development_participant(spec, environment_id=applications.shared.data_environment_id,
+            execution_namespace=config['execution_namespace'])
         registration = PoolRegistrationRequest(spec=spec, binding=retained.binding, candidate=retained.inputs.candidate)
         registration_documents(registration)
         return DevelopmentPoolRegistrationRequest(reference, retained, registration)

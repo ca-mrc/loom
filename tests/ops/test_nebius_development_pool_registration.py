@@ -68,6 +68,42 @@ def configured(retained):
     return RetainedManagementReference.model_validate(retained[0]), PoolInstallation.model_validate(config)
 
 
+def with_staging(spec):
+    """A second data identity in the same pool, not another capacity ledger."""
+    from loom_service.pool_management.installation import PoolInstallation
+
+    value = spec.model_dump(mode='json')
+    participant = copy.deepcopy(value['participants'][0])
+    original_id = participant['participant_id']
+    participant.update(participant_id=str(uuid4()), environment_id=str(uuid4()),
+        incarnation=str(uuid4()), environment_class='staging')
+    participant['execution_namespace'] = {'name': 'loom-nebius-platform-execution', 'uid': str(uuid4())}
+    participant['build_namespace'] = {'name': 'loom-nebius-platform-execution-build', 'uid': str(uuid4())}
+    participant['targets'] = [target for target in participant['targets']
+        if target['workload_kinds'] != ['application_image_build']]
+    profile_ids = {target['profile_id']: str(uuid4()) for target in participant['targets']}
+    for target in participant['targets']:
+        target['profile_id'] = profile_ids[target['profile_id']]
+    for kind in ('execution', 'task_images'):
+        for original in tuple(value['profiles'][kind]):
+            if original['profile_id'] not in profile_ids:
+                continue
+            profile = copy.deepcopy(original)
+            profile['profile_id'] = profile_ids[original['profile_id']]
+            if kind == 'execution':
+                profile['runtime']['namespace'] = 'loom-nebius-platform-execution'
+            else:
+                profile['target']['namespace'] = profile['settings']['namespace'] = 'loom-nebius-platform-execution-build'
+            value['profiles'][kind].append(profile)
+    machine = copy.deepcopy(next(row for row in value['machines']
+        if row['participant_id'] == original_id and row.get('workload_scope', 'environment') == 'environment'))
+    machine.update(machine_id=str(uuid4()), participant_id=participant['participant_id'],
+        token_sha256=hashlib.sha256(b'staging-test-only-token').hexdigest())
+    value['participants'].append(participant)
+    value['machines'].append(machine)
+    return PoolInstallation.model_validate(value)
+
+
 class Server:
     """External Kubernetes transport only; parent, journals and verifier are real."""
 
@@ -82,6 +118,7 @@ class Server:
         self.pod = None
         self.damage_report = False
         self.drift_on_log = False
+        self.namespace_uid_overrides = {}
 
     def handle(self, message):
         self.calls.append(message)
@@ -96,6 +133,7 @@ class Server:
             for row in registration.spec.participants:
                 for item in (row.execution_namespace, row.build_namespace):
                     identities[item.name] = str(item.uid)
+            identities.update(self.namespace_uid_overrides)
             return httpx.Response(200, json={'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {
                 'name': name, 'uid': identities[name], 'labels': {
                     'loom.nebius/management-installation': binding.installation_id,
@@ -141,7 +179,8 @@ class Server:
                 report = {'schema_version': 'loom.pool-installation-receipt.v1', 'operation_id': str(spec.operation_id),
                     'pool_id': str(spec.pool_id), 'installation_sha256': hashlib.sha256(
                         rfc8785.dumps(spec.model_dump(mode='json')) + b'\n').hexdigest(),
-                    'mode': 'global' if self.damage_report else 'closed', 'participants': 1, 'machines': 3}
+                    'mode': 'global' if self.damage_report else 'closed',
+                    'participants': len(spec.participants), 'machines': len(spec.machines)}
                 return httpx.Response(200, content=json.dumps(report).encode())
             assert name == self.pod['metadata']['name']
             return httpx.Response(200, json=self.pod)
@@ -158,8 +197,10 @@ class Server:
 
 
 @pytest.fixture
-def registered(retained):
+def registered(retained, request):
     reference, spec = configured(retained)
+    if getattr(request, 'param', None) == 'with-staging':
+        spec = with_staging(spec)
     request = module().prepare_registration(reference=reference, spec=spec)
     live = importlib.import_module('scripts.ops.nebius_development_pool_registration_live')
     resources = {**retained[4].store.resources,
@@ -183,6 +224,53 @@ def test_fresh_registration_requires_no_legacy_predecessor(retained):
     assert request.registration.binding.namespace == 'loom-nebius-management-dev'
     assert request.registration.candidate == retained[3].candidate
     assert request.registration.spec.installation_id == spec.installation_id
+
+
+@pytest.mark.parametrize('staging_first', [False, True])
+def test_complete_catalog_selects_dev_by_data_identity_not_roster_position(retained, staging_first):
+    reference, initial = configured(retained)
+    spec = with_staging(initial)
+    if staging_first:
+        spec = spec.model_copy(update={'participants': tuple(reversed(spec.participants))})
+    prepared = module().prepare_registration(reference=reference, spec=spec)
+    assert prepared.registration.spec == spec
+    assert prepared.registration.binding.namespace == 'loom-nebius-management-dev'
+    assert {row.environment_class for row in prepared.registration.spec.participants} == {'development', 'staging'}
+    assert prepared.registration.spec.pool_id == initial.pool_id
+
+
+@pytest.mark.parametrize('registered', ['with-staging'], indirect=True)
+def test_complete_catalog_registers_closed_without_writing_staging(registered):
+    assert run(registered)['status'] == 'pending_registration'
+    registered.server.complete = True
+    result = run(registered)
+    assert result['status'] == 'development_pool_registered_closed'
+    assert result['admission_open'] is False and result['writer_migration_complete'] is False
+    posted = [json.loads(call.content) for call in registered.server.calls if call.method == 'POST']
+    assert posted and {row['kind'] for row in posted} == {'ConfigMap', 'Job'}
+    assert {row['metadata']['namespace'] for row in posted} == {'loom-nebius-management-dev'}
+    catalog, = [row for row in registered.server.store.resources.values()
+        if row['kind'] == 'ConfigMap' and row['metadata']['name'].startswith('loom-pool-registration-')]
+    assert {row['environment_class'] for row in json.loads(catalog['data']['installation.json'])['participants']} == {
+        'development', 'staging'}
+    assert {'/api/v1/namespaces/loom-nebius-platform-execution',
+        '/api/v1/namespaces/loom-nebius-platform-execution-build'} <= {
+            call.url.path for call in registered.server.calls if call.method == 'GET'}
+    writes = len(posted)
+    assert run(registered) == result
+    assert len([call for call in registered.server.calls if call.method == 'POST']) == writes
+
+
+@pytest.mark.parametrize('registered', ['with-staging'], indirect=True)
+@pytest.mark.parametrize('namespace', ['loom-nebius-platform-execution', 'loom-nebius-platform-execution-build'])
+def test_complete_catalog_rechecks_staging_namespace_uid_before_registration(registered, namespace):
+    registered.server.namespace_uid_overrides[namespace] = str(uuid4())
+    with pytest.raises(ValueError, match='development pool registration'):
+        run(registered)
+    assert any(call.method == 'GET' and call.url.path == '/api/v1/namespaces/' + namespace
+        for call in registered.server.calls)
+    assert all(call.method == 'GET' for call in registered.server.calls)
+    assert not registered.server.store.creates
 
 
 def test_registration_preview_is_read_only_and_uses_independent_management(registered):

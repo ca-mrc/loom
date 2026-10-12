@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -29,7 +30,8 @@ class DevelopmentRuntimeWorkloadAPI(Protocol):
 
 
 def validate_runtime_transition(record: dict[str, Any], *, originals: dict[str, dict[str, Any]],
-                                targets: dict[str, dict[str, Any]], input_digest: str, phase: str) -> None:
+                                targets: dict[str, dict[str, Any]], input_digest: str, phase: str,
+                                qualify_defaulted: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]] = _qualified_defaulted) -> None:
     identity = {'schema': 'loom.nebius-development-runtime-transition.v1', 'input_digest': input_digest,
         'phase': phase, 'originals_digest': digest(originals), 'targets_digest': digest(targets)}
     if (set(record) != {*identity, 'resources'} or any(record[key] != value for key, value in identity.items())
@@ -39,29 +41,41 @@ def validate_runtime_transition(record: dict[str, Any], *, originals: dict[str, 
         item = record['resources'][key]
         if (set(item) != {'status', 'expected'} or item['status'] not in {'prepared', 'intent', 'applied'}
                 or (item['expected'] is None and item['status'] != 'prepared')
-                or (item['expected'] is not None and _qualified_defaulted(desired, item['expected']) != item['expected'])):
+                or (item['expected'] is not None and qualify_defaulted(desired, item['expected']) != item['expected'])):
             raise ValueError
 
 
 def advance_runtime_workloads(*, originals: dict[str, dict[str, Any]], targets: dict[str, dict[str, Any]],
                                input_digest: str, phase: str, api: DevelopmentRuntimeWorkloadAPI,
                                state_dir: Path) -> bool:
+    """Keep the runtime installer's original Deployment/CronJob phase boundary."""
+    return _advance_fixed_resources(originals=originals, targets=targets, input_digest=input_digest,
+        phase=phase, api=api, state_dir=state_dir, phases=frozenset({'stop', 'replace', 'control', 'start'}),
+        kinds=frozenset({'Deployment', 'CronJob'}), qualify_defaulted=_qualified_defaulted)
+
+
+def _advance_fixed_resources(*, originals: dict[str, dict[str, Any]], targets: dict[str, dict[str, Any]],
+        input_digest: str, phase: str, api: DevelopmentRuntimeWorkloadAPI, state_dir: Path,
+        phases: frozenset[str], kinds: frozenset[str],
+        qualify_defaulted: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]]) -> bool:
     """Retain exact UID, preview and CAS; return False only for a known wait.
 
-The transport must compare UID AND resourceVersion atomically, return False only
-for an explicit server rejection and prove old Pods drained / target Pods ready.
+The transport must compare UID AND resourceVersion atomically and return False
+only for an explicit server rejection. Its readiness callback owns the selected
+phase's condition: runtime transitions prove drain/startup, while candidate-write
+children prove resource readback and leave runtime readiness to their full parent.
 Completed child phases are read as history by the parent, never replayed after a
 subsequent phase intentionally changed their live workload specifications.
 """
     try:
         originals, targets = copy.deepcopy(originals), copy.deepcopy(targets)
-        if (phase not in {'stop', 'replace', 'control', 'start'}
+        if (phase not in phases
                 or re.fullmatch(r'sha256:[0-9a-f]{64}', input_digest) is None
                 or not originals or originals.keys() != targets.keys()):
             raise ValueError
         for key, desired in targets.items():
             original = originals[key]
-            if key != _key(original) or key != _key(desired) or desired['kind'] not in {'Deployment', 'CronJob'}:
+            if key != _key(original) or key != _key(desired) or desired['kind'] not in kinds:
                 raise ValueError
             _uid(original)
         identity = {'schema': 'loom.nebius-development-runtime-transition.v1', 'input_digest': input_digest,
@@ -80,7 +94,7 @@ subsequent phase intentionally changed their live workload specifications.
                 record = {**identity, 'resources': {key: {'status': 'prepared', 'expected': None} for key in originals}}
                 private_state._atomic_json(path, record)
             validate_runtime_transition(record, originals=originals, targets=targets,
-                input_digest=input_digest, phase=phase)
+                input_digest=input_digest, phase=phase, qualify_defaulted=qualify_defaulted)
             # Reject a late changed resource before mutating even the first one.
             for key, original in originals.items():
                 api.qualify()
@@ -100,7 +114,7 @@ subsequent phase intentionally changed their live workload specifications.
                     preview = api.preview_workload(key, actual, targets[key])
                     if preview is None:
                         return False
-                    item['expected'] = _qualified_defaulted(targets[key], preview)
+                    item['expected'] = qualify_defaulted(targets[key], preview)
                     private_state._atomic_json(path, record)
             for key, original in originals.items():
                 api.qualify()
@@ -112,7 +126,7 @@ subsequent phase intentionally changed their live workload specifications.
                     preview = api.preview_workload(key, actual, targets[key])
                     if preview is None:
                         return False
-                    if _qualified_defaulted(targets[key], preview) != item['expected']:
+                    if qualify_defaulted(targets[key], preview) != item['expected']:
                         raise ValueError
                     item['status'] = 'intent'
                     private_state._atomic_json(path, record)
