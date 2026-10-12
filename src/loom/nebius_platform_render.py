@@ -243,11 +243,12 @@ def validate_environment(config: dict[str, Any]) -> None:
     buckets = config.get("buckets", {})
     if set(buckets) != {"artifacts", "trajectories", "source", "backup"}:
         raise NebiusPlatformError(
-            "four independent canonical, source and backup buckets are required"
+            "artifacts, trajectories, source and backup bucket bindings are required"
         )
     for value in buckets.values():
         _name(value, "bucket")
-    if len(set(buckets.values())) != 4:
+    data_buckets = {buckets["artifacts"], buckets["trajectories"]}
+    if len(data_buckets | {buckets["source"], buckets["backup"]}) != len(data_buckets) + 2:
         raise NebiusPlatformError("canonical, source and backup buckets must be distinct")
     if not isinstance(config.get("postgres_storage_gi"), int) or config["postgres_storage_gi"] < 10:
         raise NebiusPlatformError("postgres_storage_gi must be at least 10")

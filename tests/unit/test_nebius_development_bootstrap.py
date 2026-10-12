@@ -27,6 +27,48 @@ def named(result, kind, name):
                 if doc["kind"] == kind and doc["metadata"]["name"] == name)
 
 
+@pytest.mark.parametrize("mode", ["private", "standalone", "personal"])
+def test_shared_data_bucket_reaches_rendered_services(development_inputs, mode):
+    from loom.nebius_application_render import render_application
+    from loom.nebius_platform_render import build_platform
+    from tests.unit.test_nebius_application_render import inputs
+
+    config, candidate, profile = development_inputs
+    config["buckets"].update(artifacts="loom-dev-data", trajectories="loom-dev-data")
+    before = copy.deepcopy(development_inputs)
+    if mode == "private":
+        files = render(development_inputs).files
+    elif mode == "standalone":
+        files = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    else:
+        result = render_application(*inputs(development_inputs))
+        assert result.platform_envelope.storage_mib == 0
+        files = result.files
+    service = next(doc for docs in files.values() for doc in docs
+                   if doc["kind"] == "Deployment" and doc["metadata"]["name"] == "loom-service")
+    env = {item["name"]: item.get("value")
+           for item in service["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert env["LOOM_SVC_ARTIFACTS_BUCKET"] == "loom-dev-data"
+    assert env["LOOM_SVC_TRAJECTORIES_BUCKET"] == "loom-dev-data"
+    assert config["buckets"]["source"] == "loom-dev-source"
+    assert config["buckets"]["backup"] == "loom-dev-backup"
+    assert development_inputs == before
+
+
+@pytest.mark.parametrize("shared_data", [False, True])
+@pytest.mark.parametrize("purpose,other", [
+    ("source", "artifacts"), ("source", "trajectories"),
+    ("backup", "artifacts"), ("backup", "trajectories"), ("backup", "source"),
+])
+def test_shared_data_does_not_alias_source_or_recovery_authority(development_inputs, shared_data, purpose, other):
+    buckets = development_inputs[0]["buckets"]
+    if shared_data:
+        buckets.update(artifacts="loom-dev-data", trajectories="loom-dev-data")
+    buckets[purpose] = buckets[other]
+    with pytest.raises(NebiusPlatformError, match="buckets must be distinct"):
+        render(development_inputs)
+
+
 @pytest.mark.parametrize("storage_gi", [10, 50])
 def test_private_bootstrap_has_only_dev_system_objects(development_inputs, storage_gi):
     development_inputs[0]["postgres_storage_gi"] = storage_gi
