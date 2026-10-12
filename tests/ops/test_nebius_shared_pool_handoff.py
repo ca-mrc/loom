@@ -494,6 +494,9 @@ def test_shared_history_loads_original_source_without_retired_operator_credentia
     assert all(not item.exists() for item in retired)
 
 
+# Real retained-history setup plus semantic refusal checks reached 59.32s in
+# CI (#2470). Keep the full lifecycle bounded while allowing runner variance.
+@pytest.mark.timeout(120)
 def test_shared_history_refuses_synthetic_completion_without_opening_a_connection(shared_operation, monkeypatch):
     """A completed parent/checksums cannot replace its actual child contracts."""
     from scripts.ops import nebius_pool_participant_entry as participant_entry
