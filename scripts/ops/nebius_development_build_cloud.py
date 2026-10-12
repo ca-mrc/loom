@@ -33,6 +33,7 @@ def registry_public_key(*, scope: DevelopmentRegistryCloudScope, config: dict[st
         prefix = scope.registry_fqdn + '/'
         component = r'[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*'
         _require(scope.registry_fqdn.startswith('cr.' + scope.region + '.nebius.cloud/')
+            and scope.registry_id == 'registry-' + scope.registry_fqdn.partition('/')[2]
             and isinstance(repositories, tuple) and bool(repositories)
             and all(isinstance(repository, str) and len(repository) <= 200 and repository.startswith(prefix)
                 and re.fullmatch(component + '(?:/' + component + ')*', repository[len(prefix):]) is not None
@@ -61,8 +62,10 @@ async def qualify_registry_cloud(*, sdk: Any, scope: DevelopmentRegistryCloudSco
             api = clients['registries'] if clients is not None else v1.RegistryServiceClient(sdk)
             registry = await _read(api.get, v1.GetRegistryRequest(id=scope.registry_id))
             _resource(registry, scope.registry_id, scope.project_id)
+            # Registry.Get returns the regional host; the Docker prefix also
+            # includes the ID already bound by registry_public_key above.
             _require(registry['status']['state'] == 'ACTIVE'
-                and registry['status']['registry_fqdn'] == scope.registry_fqdn)
+                and registry['status']['registry_fqdn'] == scope.registry_fqdn.partition('/')[0])
         return {**proof, 'registry_id': scope.registry_id}
     except Exception:
         raise ValueError('development build registry unqualified') from None
