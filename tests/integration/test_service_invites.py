@@ -362,6 +362,7 @@ async def test_existing_invitee_requires_own_authenticated_session(
         denied = await recipient.post("/api/v1/invites/accept",
                                       json={"code": code, "email": "existing@example.com"})
         assert denied.status_code == 403, denied.text
+        assert denied.headers.get("x-loom-invite-rejection") == "sign-in-required"
         assert not denied.headers.get("set-cookie")
         async with app.state.session_factory() as session:
             invite = await session.get(TeamInvite, invite_id)
@@ -428,9 +429,11 @@ async def test_invite_acceptance_denies_expired_and_wrong_email_without_leaks(
         )
 
     assert wrong_email.status_code == 403, wrong_email.text
+    assert wrong_email.headers.get("x-loom-invite-rejection") == "email-mismatch"
     assert "Invite Alpha" not in wrong_email.text
     assert str(team_a) not in wrong_email.text
     assert expired.status_code == 410, expired.text
+    assert expired.headers.get("x-loom-invite-rejection") == "expired"
     assert "Invite Alpha" not in expired.text
     assert str(team_a) not in expired.text
 
