@@ -64,6 +64,118 @@ def observer(retained, resources, *, after_read=None):
     return instance, requests
 
 
+@pytest.fixture
+def observer_fallbacks(monkeypatch):
+    """Exercise the mock HTTP responses independently of live qualification."""
+    rows = [{'apiVersion': 'v1', 'kind': 'ConfigMap', 'metadata': {'namespace': 'fixture', 'name': name},
+        'data': {'value': name}} for name in ('first', 'second', 'manager', 'catalog')]
+    retained = SimpleNamespace(inputs=SimpleNamespace(current=tuple(rows[:2]), manager=rows[2], catalog=rows[3],
+        config={'kubernetes_api_server': 'https://kubernetes.invalid'}))
+    monkeypatch.setattr(module(), 'HTTPSParticipantResourceObserver',
+        lambda **kwargs: SimpleNamespace(client=httpx.Client()))
+    return retained, rows
+
+
+@pytest.mark.parametrize('name', ['first', 'manager', 'catalog', 'absent'])
+def test_observer_http_copies_only_requested_fallback(observer_fallbacks, monkeypatch, name):
+    retained, rows = observer_fallbacks
+    live, requests = observer(retained, lambda: {})
+    copied = []
+    original = copy.deepcopy
+
+    def tracked(value, *args, **kwargs):
+        if any(value is row for row in rows):
+            copied.append(value['metadata']['name'])
+        return original(value, *args, **kwargs)
+
+    monkeypatch.setattr(copy, 'deepcopy', tracked)
+    path = '/api/v1/namespaces/fixture/configmaps/' + name
+    with live.client:
+        response = live.client.get(path)
+    assert response.status_code == (404 if name == 'absent' else 200)
+    if name != 'absent':
+        assert response.json() == next(row for row in rows if row['metadata']['name'] == name)
+    assert requests == [path]
+    assert copied == ([] if name == 'absent' else [name])
+
+
+def test_observer_http_snapshots_fallback_before_callbacks_and_reads_again(observer_fallbacks):
+    retained, rows = observer_fallbacks
+    selected = rows[0]
+    events = []
+
+    def resources():
+        events.append('resources')
+        selected['data']['value'] = 'resources'
+        return {}
+
+    def after_read(path):
+        events.append('after_read')
+        selected['data']['value'] = 'after_read'
+
+    live, _ = observer(retained, resources, after_read=after_read)
+    with live.client:
+        first = live.client.get(_resource_path(selected))
+        second = live.client.get(_resource_path(selected))
+    assert first.json()['data']['value'] == 'first'
+    assert second.json()['data']['value'] == 'after_read'
+    assert events == ['resources', 'after_read', 'resources', 'after_read']
+
+
+def test_observer_http_preserves_absence_before_resources_mutates_fallback(observer_fallbacks):
+    retained, rows = observer_fallbacks
+    path = '/api/v1/namespaces/fixture/configmaps/renamed'
+
+    def resources():
+        rows[0]['metadata']['name'] = 'renamed'
+        return {}
+
+    live, _ = observer(retained, resources)
+    with live.client:
+        assert live.client.get(path).status_code == 404
+        assert live.client.get(path).json() == rows[0]
+
+
+def test_observer_http_reads_overrides_each_time_and_preserves_after_read_alias(observer_fallbacks):
+    retained, rows = observer_fallbacks
+    override = copy.deepcopy(rows[0])
+    state = {'current': override}
+
+    def resources():
+        return {_key(rows[0]): state['current']}
+
+    def after_read(path):
+        state['current']['data']['value'] += '-after'
+
+    live, _ = observer(retained, resources, after_read=after_read)
+    with live.client:
+        first = live.client.get(_resource_path(rows[0]))
+        state['current'] = copy.deepcopy(rows[0])
+        state['current']['data']['value'] = 'replacement'
+        second = live.client.get(_resource_path(rows[0]))
+    assert first.json()['data']['value'] == 'first-after'
+    assert second.json()['data']['value'] == 'replacement-after'
+    assert rows[0]['data']['value'] == 'first'
+
+
+def test_observer_http_keeps_fallback_key_order_for_overrides(observer_fallbacks):
+    retained, rows = observer_fallbacks
+    first, second = (copy.deepcopy(row) for row in rows[:2])
+    first['metadata']['name'] = second['metadata']['name'] = 'shared-path'
+    # An override retains its fallback key's position even when the fallback
+    # itself does not match this GET. Reversed callback order must not win.
+    live, _ = observer(retained, lambda: {_key(rows[1]): second, _key(rows[0]): first})
+    with live.client:
+        assert live.client.get(_resource_path(first)).json()['data']['value'] == 'first'
+
+
+def test_observer_http_override_can_hide_matching_fallback(observer_fallbacks):
+    retained, rows = observer_fallbacks
+    live, _ = observer(retained, lambda: {_key(rows[0]): rows[1]})
+    with live.client:
+        assert live.client.get(_resource_path(rows[0])).status_code == 404
+
+
 def evidence(retained):
     return {path: path.read_bytes() for root in (retained.state_dir, retained.anchor_dir)
         for path in root.rglob('*') if path.is_file()}
