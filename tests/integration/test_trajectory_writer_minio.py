@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,6 +18,7 @@ from loom.models.trajectory import StepStartEvent
 from loom.trajectory.storage import MinioObjectStore
 from loom.trajectory.writer import TrajectoryWriter
 from loom_benchmark_tool.upload import upload_task_dir
+from loom_llm_gateway.harness_cache import HarnessCacheEntry, read_entry, store_entry
 from tests.integration.minio_test_images import MINIO_TEST_IMAGE
 from tests.support.minio_images import prepare_test_image
 
@@ -110,6 +113,38 @@ async def test_minio_object_store_ensure_bucket_creates_missing_bucket(
     await store.ensure_bucket(bucket_name)
 
     assert client.bucket_exists(bucket_name)
+
+
+async def test_concurrent_cache_publication_keeps_immutable_archive_and_digest(store: MinioObjectStore) -> None:
+    bucket = f"reference-{uuid4().hex}"
+    await store.ensure_bucket(bucket)
+    entry = HarnessCacheEntry(archive_key="cache/archive", digest_key="cache/reference", max_bytes=1024)
+    payloads = [b"first", b"second"]
+    ready = asyncio.Event()
+    arrivals = 0
+
+    async def body(payload):
+        nonlocal arrivals
+        arrivals += 1
+        if arrivals == 2:
+            ready.set()
+        await asyncio.wait_for(ready.wait(), timeout=5)
+        yield payload
+
+    accepted = await asyncio.gather(*[
+        store_entry(store, bucket=bucket, entry=entry, body=body(payload), declared_size=len(payload),
+                    declared_digest="sha256:" + hashlib.sha256(payload).hexdigest())
+        for payload in payloads
+    ])
+    assert all(accepted)
+    published = await read_entry(store, bucket=bucket, entry=entry)
+    assert published is not None
+    archive = await store.get_object(bucket=bucket, key=published.archive_key)
+    assert archive in payloads
+    assert published.digest == "sha256:" + hashlib.sha256(archive).hexdigest()
+    assert not await store_entry(store, bucket=bucket, entry=entry, body=body(b"later"), declared_size=5,
+                                 declared_digest="sha256:" + hashlib.sha256(b"later").hexdigest())
+    assert await read_entry(store, bucket=bucket, entry=entry) == published
 
 
 async def test_minio_bundle_roundtrip_restores_executable_mode(
