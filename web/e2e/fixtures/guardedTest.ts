@@ -219,12 +219,12 @@ export async function waitForReady(
 }
 
 export const test = base.extend<GuardedFixtures>({
-  browserHarness: async ({ page }, use) => {
+  browserHarness: async ({ page }, provideFixture) => {
     // Binding to the page keeps the validated config in the same test scope.
     page.url();
-    await use(readBrowserHarnessConfig());
+    await provideFixture(readBrowserHarnessConfig());
   },
-  failureSink: async ({ page, browserHarness }, use) => {
+  failureSink: async ({ page, browserHarness }, provideFixture) => {
     const failures: string[] = [];
     const diagnostics: TrackedDiagnostic[] = [];
     const sink: FailureSink = {
@@ -239,7 +239,7 @@ export const test = base.extend<GuardedFixtures>({
       },
     };
     installGuards(page, browserHarness, failures, diagnostics);
-    await use(sink);
+    await provideFixture(sink);
     for (const diagnostic of diagnostics) {
       if (diagnostic.remaining !== 0) {
         failures.push(
@@ -249,9 +249,9 @@ export const test = base.extend<GuardedFixtures>({
     }
     expect(failures, failures.join("\n")).toEqual([]);
   },
-  apiHarness: async ({ page, browserHarness }, use) => {
+  apiHarness: async ({ page, browserHarness }, provideFixture) => {
     const installed: ApiFixture[] = [];
-    await use({
+    await provideFixture({
       async install(options) {
         if (installed.length > 0) {
           throw new Error("API fixture may be installed only once per page");
