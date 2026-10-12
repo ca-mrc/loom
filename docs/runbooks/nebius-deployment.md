@@ -676,6 +676,10 @@ The `loom.nebius-development-runtime-inputs.v1` document contains:
   collector identity. The provider probe uses this identity, not the operator.
 - `registry_scope` and `registry_credential_file`: a separate registry-only editor
   identity whose registry contains both immutable build-profile repositories.
+  `registry_fqdn` is the full Docker prefix (`cr.REGION.nebius.cloud/ID`),
+  bound to provider ID `registry-ID`. The provider's `Registry.Get` response
+  reports only the regional hostname in `status.registry_fqdn`; both that
+  hostname and the registry identity must match, not the mutable registry name.
 - `actuator_password_file` and `batch_runner_token_file`: privately retained fresh
   runtime material. Existing database-role passwords are not rotated.
 - `operator_connection`: explicit Kubernetes endpoint, CA and operator credential
