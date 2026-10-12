@@ -98,6 +98,37 @@ candidate.
 See [frontend domain boundaries](frontend-domain-boundaries.md) for code generation,
 ownership, aggregate catalog discovery and the local/manual acceptance boundary.
 
+## Development dependencies and lint compatibility (#2456)
+
+The frontend uses ESLint 10 with the flat configuration in
+`web/eslint.config.js`, TypeScript ESLint 8 and the React Hooks 7 plugin. The
+toolchain requires Node 20.19 or newer within the supported Node 20 line, as
+Vite 8 already does. The frozen lockfile remains the dependency authority for
+local, CI and image builds.
+
+Lint still covers TypeScript and TSX application, test, generated declaration
+and build-config files with zero warnings allowed. The two Hooks checks remain
+`rules-of-hooks` and `exhaustive-deps`; the newer plugin's React Compiler preset
+is not enabled. The removed core formatting checks are supplied by
+`@stylistic/eslint-plugin`, and the split TypeScript type-ban rules, core numeric
+precision check and replacement require-import rule preserve the prior checks.
+Existing inner-declaration and constant-loop checks are explicit because their
+recommended defaults changed. The newly recommended `no-useless-assignment`
+rule is disabled to retain the existing lint contract. Playwright fixture
+callbacks use `provideFixture` to distinguish them from React's `use` hook.
+
+Audit both the complete build graph (`npm audit`) and the production graph
+(`npm audit --omit=dev`). Tailwind 3 still uses `braces` 3.0.3 through Chokidar
+and Micromatch/Fast-glob, and `postcss-selector-parser` 6.1.4 directly and through
+PostCSS Nested. The [nested-brace stack-exhaustion advisory](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm)
+has no patched `braces` release. The [flat-selector CPU-exhaustion advisory](https://github.com/advisories/GHSA-rj75-hqrm-r3gf)
+is fixed in selector-parser 7.1.6, outside Tailwind 3's declared dependency range.
+These paths process checked-in content globs and CSS during development/builds;
+they do not parse API data or browser-supplied selectors at runtime. Untrusted
+build inputs remain a risk. Clearing them requires an upstream compatible fix
+or a separately validated Tailwind/CSS migration; do not force dependency majors
+or suppress the audit findings to obtain a zero count.
+
 ## Routing dependency and return paths (#2445)
 
 Loom uses React Router 7 in Declarative Mode (`BrowserRouter`, `Routes` and
