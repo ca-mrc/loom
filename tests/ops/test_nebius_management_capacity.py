@@ -46,6 +46,28 @@ def test_fit_reserves_unstarted_backup_and_deployment_surge(platform):
     assert result["node_uid"] == platform["nodes"][0]["metadata"]["uid"]
 
 
+@pytest.mark.parametrize("field", ["allocatedResources", "resources"])
+def test_platform_fit_preserves_foreign_pod_requests_and_resize_state(platform, field):
+    from scripts.ops.nebius_management_capacity import ManagementCapacityError
+
+    pod = copy.deepcopy(platform["controllers"][0]["spec"]["template"])
+    pod.update(apiVersion="v1", kind="Pod", status={"phase": "Running"})
+    pod["metadata"].update(name="foreign", namespace="foreign", uid=str(uuid4()))
+    pod["spec"]["nodeName"] = "computeinstance-test"
+    pod["spec"]["resources"] = {"requests": {"cpu": "500m"}}
+    allocation = {"cpu": "500m"}
+    pod["status"][field] = allocation if field == "allocatedResources" else {"requests": allocation}
+    platform["pods"].append(pod)
+
+    # The foreign Pod's 500m envelope supersedes its container's 100m request.
+    result = qualify(platform)
+    assert result["required"]["cpu_millis"] == 1300
+    assert result["required"]["pods"] == 8
+    allocation["cpu"] = "501m"
+    with pytest.raises(ManagementCapacityError, match="inventory unqualified"):
+        qualify(platform)
+
+
 def test_running_owned_pod_is_not_charged_twice_with_its_controller(platform):
     dep = platform["controllers"][0]
     rs = workload("ReplicaSet", "api-hash")
