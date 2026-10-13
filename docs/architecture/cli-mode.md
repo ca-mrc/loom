@@ -154,7 +154,7 @@ src/loom_cli/run_cmd.run() → _run_async()       async dispatch
           ├─► gateway = UpstreamDirectGatewayClient(...)
           ├─► agent_factory(task_config.agent.name, model, gateway)
           ├─► driver = driver_factory()
-          ├─► verifier = PytestVerifier()
+          ├─► verifier = task_verifier_factory(task_config)()
           │
           └─► Trial(ctx=TrialContext(
                   trial_id, team_id, task_config, task_dir,
@@ -172,6 +172,11 @@ Each trial gets its own `trial_id` (fresh UUID4). Per-trial outputs
 land at `<output_dir>/<trial_id>/{events.jsonl,atif.json}` plus an
 internal MinIO-shaped tree under `<output_dir>/_store/` that
 LocalDiskObjectStore writes through to.
+
+Local trials use the task's `[verifier].name` (`pytest` or `script`) and
+`[verifier.args]`, including custom test directories or script paths. The CLI
+and local worker share this constructor selection. Unknown verifier names or
+invalid constructor arguments fail before the CLI starts the trial sandbox.
 
 ## The four dependency wirings
 
