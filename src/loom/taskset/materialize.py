@@ -17,6 +17,7 @@ import tomli_w
 from pydantic import ValidationError
 
 from loom.execution_architecture import execution_cpu_arch
+from loom.harbor_bundle import prepare_harbor_bundle
 from loom.models.task import TaskConfig, normalize_steps
 from loom.models.task_checksum import task_checksum
 from loom.models.taskset import (
@@ -42,7 +43,11 @@ from loom.taskset.transform_sandbox import (
     TransformSandboxError,
 )
 from loom.taskset.upstream_rows import UpstreamFetchError, iter_upstream_rows
-from loom.terminal_bench_normalize import normalize_terminal_bench_task_toml
+from loom.terminal_bench_normalize import (
+    DEFAULT_VERIFIER_SCRIPT_PATH,
+    is_terminal_bench_shape,
+    normalize_terminal_bench_task_toml,
+)
 from loom.trajectory.storage import discard_staged_bundle_file_metadata
 
 _NOOP_VERIFIER = b"#!/bin/sh\nexit 0\n"
@@ -440,7 +445,14 @@ def _materialize_bundle_upload(
                         raw_cfg: dict[str, Any] = tomllib.load(f)
                     relative = bundle_dir.relative_to(task_root)
                     contextual_id = slug if relative == Path(".") else relative.as_posix()
+                    harbor_source = is_terminal_bench_shape(raw_cfg)
                     raw_cfg = normalize_terminal_bench_task_toml(raw_cfg, task_id=contextual_id)
+                    if (
+                        harbor_source
+                        and raw_cfg["verifier"].get("args", {}).get("script_path")
+                        == DEFAULT_VERIFIER_SCRIPT_PATH
+                    ):
+                        prepare_harbor_bundle(bundle_dir, raw_cfg)
                     task_config = normalize_steps(TaskConfig.model_validate(raw_cfg))
                     execution_cpu_arch(task_config.environment.cpu_arch)
                     rendered_task_id = task_config.task.id
