@@ -10,7 +10,7 @@ from unittest.mock import Mock
 import pytest
 from botocore.exceptions import ConnectionClosedError
 
-from loom.trajectory.storage import MinioObjectStore
+from loom.trajectory.storage import MinioObjectStore, MultipartUpload
 
 
 class StreamS3:
@@ -93,6 +93,46 @@ class StreamS3:
 def make_store(monkeypatch, client):
     monkeypatch.setattr("loom.trajectory.storage.boto3.client", lambda **kwargs: client)
     return MinioObjectStore(endpoint_url="http://test-s3", access_key="test", secret_key="test")
+
+
+async def test_native_part_retry_restarts_at_zero(monkeypatch):
+    backend = StreamS3(fail_first=True)
+    store = make_store(monkeypatch, backend)
+    upload = MultipartUpload(bucket="b", key="k", upload_id="owned")
+    payload = b"complete native output"
+    try:
+        await store.upload_part_stream(upload, part_number=1, body=chunks(payload))
+        assert backend.parts["owned", 1] == payload
+        assert upload.parts == [(1, "1")]
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("cancel", [False, True], ids=["timeout-retry", "cancellation"])
+async def test_native_part_keeps_late_reader_alive_and_independent(monkeypatch, cancel):
+    backend = StreamS3(block_first=True)
+    store = make_store(monkeypatch, backend)
+    store._operation_timeout = 0.05 if not cancel else 5
+    upload = MultipartUpload(bucket="b", key="k", upload_id="owned")
+    payload = b"complete native output after cancellation"
+    task = asyncio.create_task(store.upload_part_stream(upload, part_number=1, body=chunks(payload)))
+    try:
+        assert await asyncio.to_thread(backend.entered.wait, 2)
+        if cancel:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert upload.parts == []
+        else:
+            await task
+            assert backend.parts["owned", 1] == payload
+        backend.release.set()
+        assert await asyncio.to_thread(backend.finished.wait, 2)
+        assert backend.late_body == payload
+    finally:
+        backend.release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        store.close()
 
 
 class VersionlessCompletionS3(StreamS3):
