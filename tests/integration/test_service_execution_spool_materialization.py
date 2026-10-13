@@ -77,7 +77,26 @@ from tests.integration.test_service_execution_leases import (
 from tests.support.minio_images import prepare_test_image
 
 
-class _HistoricalSnapshotSession(AsyncSession):
+class _HistoricalLedgerSession(AsyncSession):
+    """Keep recovery reads on the ledger projection preceding schema 0176."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        event.listen(self.sync_session, "do_orm_execute", self._historical_ledger_projection)
+
+    @staticmethod
+    def _historical_ledger_projection(state: ORMExecuteState) -> None:
+        if not state.is_select:
+            return
+        whole = {item.get("entity") for item in state.statement.column_descriptions
+                 if item.get("expr") is item.get("entity")}
+        if LlmCall in whole:
+            # Recovery must not read or lazy-load later baseline attribution.
+            state.statement = state.statement.options(
+                defer(LlmCall.baseline_session_id, raiseload=True))
+
+
+class _HistoricalSnapshotSession(_HistoricalLedgerSession):
     """Read the real Task/Trial snapshots available in schema 0157."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -237,7 +256,11 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
 
         monkeypatch.setattr(MinioObjectStore, "_run_client_call", missing_receipt)
     engine = create_async_engine(isolated_migration_postgres_url)
-    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    historical_ledger = bool(oracle_recovery_failure and oracle_recovery_failure.startswith("scope-retry"))
+    sessions = async_sessionmaker(
+        engine, class_=_HistoricalLedgerSession if historical_ledger else AsyncSession,
+        expire_on_commit=False,
+    )
     now = datetime.now(UTC)
     plan = _complete_output_contract(now=now)
     exception = {"exception_type": "ContextLengthExceededError",

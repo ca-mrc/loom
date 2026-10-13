@@ -23,6 +23,7 @@ from loom.db.schema import (
     TeamQuota,
     Trial,
 )
+from loom.db.schema_startup import service_schema_head
 from loom.execution_runtime_contract import ExecutionRuntimeResultV1
 from loom_control_plane.execution_admission import upsert_execution_admission_policy
 from loom_control_plane.service_execution import (
@@ -225,7 +226,7 @@ async def test_global_handoff_runs_as_restricted_actuator_after_guarded_role_sta
                 with pytest.raises(psycopg.errors.RaiseException, match="not closed and idle"):
                     db.execute(migration.pool_runtime_role_sql(owner=owner, candidate=candidate, action="stage"), prepare=False)
                 db.rollback()
-                db.execute("INSERT INTO alembic_version(version_num) VALUES('0175')")
+                db.execute("INSERT INTO alembic_version(version_num) VALUES(%s)", (service_schema_head(),))
             with db.cursor() as cursor:
                 cursor.execute(migration.pool_runtime_role_sql(owner=owner, candidate=candidate, action="stage"), prepare=False)
                 reports = []

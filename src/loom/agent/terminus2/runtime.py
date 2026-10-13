@@ -629,12 +629,17 @@ class LoomTerminus2Runtime:
             step_id=step_id,
         )
 
+        generation_params = sanitize_request_extras(self.request_params)
+        # Harbor binds reasoning_effort explicitly while expanding llm_kwargs.
+        # Passing it in both places raises before the first model call.
+        reasoning_effort = generation_params.pop("reasoning_effort", None)
         agent = terminus2_cls(
             logs_dir=logs_root,
             model_name=_harbor_model_name(self.model),
             api_base=api_base,
             session_id=str(self.trial_id),
-            llm_kwargs={**sanitize_request_extras(self.request_params), "api_key": step_token},
+            reasoning_effort=reasoning_effort,
+            llm_kwargs={**generation_params, "api_key": step_token},
             **harbor_options,
         )
         if self.continue_until_timeout:

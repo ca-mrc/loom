@@ -24,6 +24,8 @@ from tests.ops.test_nebius_management_gateway import (
 )
 from tests.ops.test_nebius_pool_repair_authority import repair_operation
 
+from loom.db.schema_startup import service_schema_head
+
 
 def module():
     return importlib.import_module("scripts.ops.nebius_management_rollout")
@@ -114,7 +116,7 @@ def test_image_repair_bundle_binds_schema_head_from_source_and_rejects_wrong_sou
     files, selected = unpack_bundle(content)
     assert selected == operation
     assert json.loads(files['manager-schema.json']) == {
-        'schema': 'loom.nebius-manager-schema.v1', 'source_sha': operation['source_sha'], 'revision': '0175'}
+        'schema': 'loom.nebius-manager-schema.v1', 'source_sha': operation['source_sha'], 'revision': service_schema_head()}
     proof = json.loads(files['manager-schema.json'])
     proof['source_sha'] = 'f' * 40
     files['manager-schema.json'] = json.dumps(proof, sort_keys=True).encode()

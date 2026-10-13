@@ -212,3 +212,38 @@ def test_unterminated_heredoc_reports_parse_boundary(tmp_path: Path) -> None:
     issues = collect_task_dir_compatibility_issues(task_dir)
     assert [(issue.code, issue.line) for issue in issues] == [("TASK_COMPAT_DOCKERFILE_PARSE", 2)]
     assert "unterminated heredoc" in issues[0].message
+
+
+@pytest.mark.parametrize("build_declaration", ["", "dockerfile = 'environment/Dockerfile'\n"])
+def test_prebuilt_recipe_diagnostic_depends_on_actual_build(
+    tmp_path: Path, build_declaration: str,
+) -> None:
+    task_dir = _write_task_dir(
+        tmp_path, "FROM ubuntu:24.04\nRUN apt-get update && apt-get purge -y povray* || true\n",
+    )
+    (task_dir / "task.toml").write_text(
+        "[environment]\ndocker_image = 'example/task:release'\n" + build_declaration,
+    )
+    issues = collect_task_dir_compatibility_issues(task_dir)
+    assert len(issues) == 1
+    assert issues[0].code == "TASK_COMPAT_BROAD_TRAILING_TRUE"
+    if build_declaration:
+        assert issues[0].severity == CompatibilitySeverity.ERROR
+        with pytest.raises(ValueError, match="TASK_COMPAT_BROAD_TRAILING_TRUE"):
+            validate_task_dir_compatibility(task_dir)
+    else:
+        assert issues[0].severity == CompatibilitySeverity.WARNING
+        assert issues[0].evidence["build_usage"] == "unused_prebuilt_recipe"
+        validate_task_dir_compatibility(task_dir)
+
+
+def test_prebuilt_task_still_checks_verifier_dockerfile(tmp_path: Path) -> None:
+    task_dir = _write_task_dir(tmp_path, "FROM ubuntu:24.04\n")
+    (task_dir / "task.toml").write_text("[environment]\ndocker_image = 'example/task:release'\n")
+    tests = task_dir / "tests"
+    tests.mkdir()
+    (tests / "Dockerfile").write_text(
+        "FROM ubuntu:24.04\nRUN apt-get update && apt-get purge -y povray* || true\n",
+    )
+    with pytest.raises(ValueError, match="TASK_COMPAT_BROAD_TRAILING_TRUE"):
+        validate_task_dir_compatibility(task_dir)

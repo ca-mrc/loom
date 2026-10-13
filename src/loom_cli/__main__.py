@@ -231,6 +231,11 @@ def _build_parser() -> argparse.ArgumentParser:
         add_help=False,
     )
     sub.add_parser(
+        "harbor-baselines",
+        help="Manage restricted external Harbor baselines",
+        add_help=False,
+    )
+    sub.add_parser(
         "tasksets",
         help="Manage team TaskSets (submit/status/rebuild/delete/list)",
         add_help=False,
@@ -382,6 +387,9 @@ def _dispatch(raw: list[str]) -> int:
     if raw and raw[0] == "providers":
         from loom_cli.providers_cmd import dispatch as providers_dispatch
         return providers_dispatch(raw[1:])
+    if raw and raw[0] == "harbor-baselines":
+        from loom_cli.harbor_baselines_cmd import dispatch as baseline_dispatch
+        return baseline_dispatch(raw[1:])
     if raw and raw[0] == "tasksets":
         from loom_cli.tasksets_cmd import dispatch as tasksets_dispatch
         return tasksets_dispatch(raw[1:])

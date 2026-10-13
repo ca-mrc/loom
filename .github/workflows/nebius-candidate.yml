@@ -14,6 +14,10 @@ on:
         description: Runtime version label (required for harness-only; immutable after registration)
         type: string
         required: false
+      qualify_tb21_images:
+        description: Resolve and qualify all reviewed TB2.1 rev6 prebuilt images (platform only)
+        type: boolean
+        default: false
   push:
     branches: [dev]
 
@@ -34,7 +38,7 @@ jobs:
     environment:
       name: nebius-integration
       deployment: false
-    timeout-minutes: 180
+    timeout-minutes: ${{ inputs.qualify_tb21_images && 360 || 180 }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
@@ -99,6 +103,7 @@ jobs:
           NEBIUS_GUEST_MAX_ARTIFACT_BYTES: ${{ vars.NEBIUS_GUEST_MAX_ARTIFACT_BYTES }}
           PUBLICATION_MODE: ${{ inputs.mode || 'platform' }}
           AGENT_VERSION: ${{ inputs.agent_version }}
+          QUALIFY_TB21_IMAGES: ${{ inputs.qualify_tb21_images || false }}
         shell: bash
         run: |
           set -euo pipefail
@@ -132,6 +137,17 @@ jobs:
             --auth-file "$REGISTRY_AUTH_FILE"
           publication_args=(--mode "$PUBLICATION_MODE")
           if [[ -n "$AGENT_VERSION" ]]; then publication_args+=(--agent-version "$AGENT_VERSION"); fi
+          if [[ "${QUALIFY_TB21_IMAGES:-false}" == true ]]; then
+            test "$PUBLICATION_MODE" == platform
+            # Reuse the established pinned registry reader; no image is rebuilt or mirrored.
+            read -r crane_version crane_sha < <(uv run --no-sync python -c 'from scripts.ops.mirror_nebius_release_via_gateway import CRANE_VERSION, CRANE_LINUX_X86_64_SHA256; print(CRANE_VERSION, CRANE_LINUX_X86_64_SHA256)')
+            curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 \
+              -o "$work/crane.tar.gz" "https://github.com/google/go-containerregistry/releases/download/v$crane_version/go-containerregistry_Linux_x86_64.tar.gz"
+            printf '%s  %s\n' "$crane_sha" "$work/crane.tar.gz" | sha256sum -c - >/dev/null
+            tar -xzf "$work/crane.tar.gz" -C "$work" crane
+            chmod 500 "$work/crane"
+            publication_args+=(--prebuilt-images-json deploy/catalog/tb21-r6-prebuilt-images.json --prebuilt-crane "$work/crane")
+          fi
           if [[ "$PUBLICATION_MODE" == platform ]]; then
             : "${NEBIUS_EMULATED_PKCS11_READY:=false}"
             for setting in NEBIUS_TASK_WEB_EGRESS_READY NEBIUS_SERVICE_LIFECYCLE_READY NEBIUS_TASK_IDENTITY_READY NEBIUS_GUEST_RUNTIME_READY NEBIUS_EMULATED_PKCS11_READY; do
@@ -207,5 +223,13 @@ jobs:
         with:
           name: ${{ inputs.mode == 'harness-only' && 'nebius-agent-runtime' || 'nebius-candidate' }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/nebius-candidate/
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Preserve upstream task-image qualification evidence
+        if: ${{ always() && inputs.qualify_tb21_images }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nebius-tb21-images-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/nebius-prebuilt-task-images/
           if-no-files-found: warn
           retention-days: 30
