@@ -1788,15 +1788,6 @@ async def test_run_library_batch_detail_default_uses_bounded_artifact_preview(
         raising=False,
     )
 
-    async def fail_if_full_artifacts_are_loaded(*_args: object, **_kwargs: object) -> dict:
-        raise AssertionError("default Run Library detail should not load all typed artifacts")
-
-    monkeypatch.setattr(
-        run_library_routes,
-        "_typed_artifacts_for_trials",
-        fail_if_full_artifacts_are_loaded,
-    )
-
     transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
     async with httpx.AsyncClient(
         transport=transport,

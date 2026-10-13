@@ -743,54 +743,6 @@ class HttpControlPlaneClient:
             if owned:
                 await client.aclose()
 
-    async def get_acceptance_fault_arm(
-        self,
-        *,
-        attempt_id: UUID,
-        seam: str,
-        claim: ExecutionAttemptClaimHeaders,
-    ) -> dict[str, Any] | None:
-        client, owned = self._http()
-        try:
-            r = await client.get(
-                f"/api/v1/internal/pipeline-acceptance/fault-arms/by-attempt/{attempt_id}",
-                headers={**self._headers, **claim.as_headers()},
-                params={"seam": seam},
-            )
-            if r.status_code == 404:
-                return None
-            r.raise_for_status()
-            return self._response_json(r)
-        finally:
-            if owned:
-                await client.aclose()
-
-    async def fire_acceptance_fault_arm(
-        self,
-        *,
-        arm_id: UUID,
-        claim: ExecutionAttemptClaimHeaders,
-        payload: Mapping[str, Any],
-    ) -> dict[str, Any]:
-        return await self._post_internal_claim_bound(
-            path=f"/api/v1/internal/pipeline-acceptance/fault-arms/{arm_id}/fire",
-            claim=claim,
-            payload=payload,
-        )
-
-    async def acknowledge_acceptance_fault_arm(
-        self,
-        *,
-        arm_id: UUID,
-        claim: ExecutionAttemptClaimHeaders,
-        payload: Mapping[str, Any],
-    ) -> dict[str, Any]:
-        return await self._post_internal_claim_bound(
-            path=f"/api/v1/internal/pipeline-acceptance/fault-arms/{arm_id}/ack",
-            claim=claim,
-            payload=payload,
-        )
-
     async def prepare_final_output(
         self,
         *,

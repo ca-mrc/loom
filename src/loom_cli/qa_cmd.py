@@ -1369,8 +1369,3 @@ def dispatch(argv: list[str]) -> int:
 
     args = parser.parse_args(argv)
     return int(args.handler(args))
-
-
-def _iter_agents_for_test(items: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Test hook — not part of the public CLI."""
-    return list(items)

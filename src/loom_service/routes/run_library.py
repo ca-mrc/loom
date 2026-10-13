@@ -488,31 +488,6 @@ def _blocked_reason(item: dict[str, Any]) -> str:
     return "blocked by artifact sharing policy"
 
 
-async def _typed_artifacts_for_trials(
-    session: Any,
-    trials: Sequence[Any],
-) -> dict[UUID, list[Artifact]]:
-    trial_ids = [trial.id for trial in trials]
-    if not trial_ids:
-        return {}
-    rows = list(
-        (
-            await session.execute(
-                select(Artifact)
-                .where(Artifact.trial_id.in_(trial_ids))
-                .order_by(Artifact.created_at.asc(), Artifact.id.asc()),
-            )
-        )
-        .scalars()
-        .all()
-    )
-    out: dict[UUID, list[Artifact]] = {trial.id: [] for trial in trials}
-    for artifact in rows:
-        if artifact.trial_id is not None:
-            out.setdefault(artifact.trial_id, []).append(artifact)
-    return out
-
-
 async def _parents_for_artifacts(
     session: Any,
     artifacts: Sequence[Artifact],

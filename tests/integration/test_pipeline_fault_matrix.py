@@ -20,9 +20,9 @@ from loom.pipeline.state import PipelineRunResult, PipelineStageRunState
 
 def test_required_fault_matrix_is_closed_complete_and_digestible() -> None:
     assert [item.row for item in PIPELINE_CORE_FAULT_MATRIX] == [
-        row for row in range(1, 45) if row not in {39, 42}
+        row for row in range(1, 45) if row not in {39, 41, 42}
     ]
-    assert len({item.scenario for item in PIPELINE_CORE_FAULT_MATRIX}) == 42
+    assert len({item.scenario for item in PIPELINE_CORE_FAULT_MATRIX}) == 41
     assert all(len(item.pytest_nodeids) >= 2 for item in PIPELINE_CORE_FAULT_MATRIX)
     assert {item.execution_tier for item in PIPELINE_CORE_FAULT_MATRIX} == {"typed_model"}
     assert all(item.supporting_tiers[0] == "typed_model" for item in PIPELINE_CORE_FAULT_MATRIX)
@@ -69,6 +69,14 @@ def test_controller_boundary_crashes_converge_to_one_projection() -> None:
     )
     assert len(actual.event_sequence) == len(set(actual.event_sequence))
     assert len(actual.committed_artifacts) == len(set(actual.committed_artifacts))
+
+
+def test_output_and_worker_loss_rows_preserve_commit_and_cleanup_expectations() -> None:
+    scenarios = {row.scenario: row for row in PIPELINE_CORE_FAULT_MATRIX}
+    assert scenarios["final_output_commit_races"].expected.committed_artifacts
+    assert scenarios["worker_lost_before_start"].expected.cleanup == (
+        "cleanup_pending_then_clean"
+    )
 
 
 def test_rc_zero_domain_failure_keeps_platform_success_and_routes_gate_only() -> None:
