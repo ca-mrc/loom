@@ -153,7 +153,11 @@ async def baseline_chat(
                 session,
                 provider,
                 grant.model,
-                TokenUsage(context, output, {"_loom_cache_usage_known": True}),
+                TokenUsage(
+                    context,
+                    output,
+                    {"_loom_cache_usage_known": True, "_loom_input_includes_cache": True},
+                ),
             )
             if (
                 estimate.currency == "USD"

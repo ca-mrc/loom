@@ -72,7 +72,9 @@ Before provider I/O, a database row lock reserves one call, the entire declared
 model context plus the requested output ceiling, and its conservative price
 under the current configured rate card. A successful response with complete,
 bounded usage releases unused token/cost reservation; the call remains counted.
-The price basis, including catalog revision, is retained with each call. An
+The price basis, including catalog revision and whether input tokens include
+cache reads, is retained with each call so cached-response costs can be
+recomputed from the recorded usage. An
 insufficient remaining balance rejects the next request before provider I/O,
 even if its likely prompt would be smaller. The legacy `max_tokens` field is
 normalized to `max_completion_tokens`; supplying both is rejected.

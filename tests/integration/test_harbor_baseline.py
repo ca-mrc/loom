@@ -26,6 +26,7 @@ from loom.db.schema import (
     ProviderConnection,
     ProviderModelCache,
 )
+from loom.provider_pricing import ModelPrice, calculate_price
 from loom_service.dependencies import authed_session
 from loom_service.routes import harbor_baselines
 from tests.integration.test_gateway_facade_openai import facade_setup  # noqa: F401
@@ -160,6 +161,32 @@ async def test_create_call_accounting_and_quota(baseline_setup):
         status = await client.get("/api/v1/harbor-baselines/" + info["id"])
         assert "token" not in status.json()
         assert status.json()["tokens_reserved"] == 300
+
+
+async def test_cached_call_price_basis_reproduces_settled_cost(baseline_setup):
+    gateway, service, create, captures, _ = baseline_setup
+    info = await grant(service, create)
+    body = captures["response"].json()
+    body["usage"]["prompt_tokens_details"] = {"cached_tokens": 20}
+    captures["response"] = httpx.Response(200, json=body)
+
+    assert (await call(gateway, info["token"])).status_code == 200
+    async with gateway.state.session_factory() as session:
+        recorded = await session.scalar(
+            select(LlmCall).where(LlmCall.baseline_session_id == info["id"])
+        )
+        baseline = await session.get(HarborBaselineSession, info["id"])
+        assert recorded.cost_usd == baseline.cost_reserved_usd == Decimal("0.001190")
+        basis = recorded.provider_extras["_loom_price_basis"]
+        reproduced = calculate_price(
+            ModelPrice.model_validate(basis["prices"]),
+            input_tokens=recorded.input_tokens,
+            output_tokens=recorded.output_tokens,
+            cache_read_tokens=recorded.provider_extras["cache_read_input_tokens"],
+            input_includes_cache=basis["input_includes_cache"],
+        )
+        assert Decimal(str(reproduced)) == recorded.cost_usd
+        assert basis["input_includes_cache"] is True
 
 
 async def test_model_tenant_and_expiry_boundaries(baseline_setup):
