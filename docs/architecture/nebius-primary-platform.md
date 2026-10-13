@@ -439,6 +439,9 @@ upgrade switch; manager-only TLS renewal accepts either original phase history.
 Only one management Service Deployment, PostgreSQL StatefulSet/PVC, migration Job,
 backup CronJob and shared Ingress are emitted. No Control Plane, Gateway, actuator,
 execution namespace, cloud resource, public LoadBalancer or Secret is emitted.
+An approved image's task-web-egress capability does not require task execution
+configuration on this non-executing manager. The original publication remains
+part of its revision; previously valid migration Pod identities remain unchanged.
 `management-database` reuses the existing migration chain but creates only the
 ordinary `loom_service` database role, without collector/batch-runner tokens.
 The Service mounts its own database CA/admin/master-key material, a read-only
