@@ -13,11 +13,11 @@ import re
 import stat
 import tempfile
 import threading
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Protocol, TypeVar, cast
+from typing import Any, BinaryIO, Protocol, TypeVar, cast
 from uuid import uuid4
 
 import boto3
@@ -683,6 +683,61 @@ class FakeObjectStore:
         return count
 
 
+class _UploadSpool:
+    """Keep disk bytes until the last actual reader/writer finishes.
+
+    Each SDK attempt opens an independent file description: dup() would share
+    its offset. An abandoned, not-yet-started thread may not reopen the spool.
+    """
+
+    def __init__(self) -> None:
+        self._file = tempfile.NamedTemporaryFile()
+        self._lock = threading.Lock()
+        self._users = 1
+        self._closed = False
+
+    @contextlib.contextmanager
+    def _use(self) -> Iterator[None]:
+        with self._lock:
+            if self._closed:
+                raise ValueError("upload spool is closed")
+            self._users += 1
+        try:
+            yield
+        finally:
+            self._release()
+
+    def _release(self) -> None:
+        with self._lock:
+            self._users -= 1
+            if self._users == 0:
+                self._file.close()
+
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+        self._release()
+
+    def write(self, chunk: bytes) -> int:
+        with self._use():
+            return self._file.write(chunk)
+
+    def flush(self) -> None:
+        with self._use():
+            self._file.flush()
+
+    def seek(self, offset: int) -> int:
+        with self._use():
+            return self._file.seek(offset)
+
+    @contextlib.contextmanager
+    def reader(self) -> Iterator[BinaryIO]:
+        with self._use(), open(self._file.name, "rb") as reader:
+            yield reader
+
+
 class MinioObjectStore:
     """boto3-backed ObjectStore against a MinIO endpoint.
 
@@ -1022,20 +1077,21 @@ class MinioObjectStore:
         part_number: int,
         body: AsyncIterator[bytes],
     ) -> None:
-        # Bridge the async request body into boto3 with an anonymous disk file,
-        # keeping the complete part out of Python memory and deleting it on exit.
-        with tempfile.TemporaryFile() as source:
+        # Separate readers preserve retry offsets and survive waiter cancellation.
+        # The private spool is removed after its final actual user exits.
+        with contextlib.closing(_UploadSpool()) as source:
             await self._copy_async_body_to_file(body, source)
 
             def _do(client: Any) -> str:
-                response = client.upload_part(
-                    Bucket=upload.bucket,
-                    Key=upload.key,
-                    PartNumber=part_number,
-                    UploadId=upload.upload_id,
-                    Body=source,
-                    ChecksumAlgorithm="SHA256",
-                )
+                with source.reader() as reader:
+                    response = client.upload_part(
+                        Bucket=upload.bucket,
+                        Key=upload.key,
+                        PartNumber=part_number,
+                        UploadId=upload.upload_id,
+                        Body=reader,
+                        ChecksumAlgorithm="SHA256",
+                    )
                 return cast(str, response["ETag"])
 
             etag = await self._run_client_call("upload_part_stream", _do)
