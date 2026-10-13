@@ -17,6 +17,27 @@ from loom_llm_gateway.dialect import TokenUsage
 from loom_llm_gateway.metrics import COST_USD_TOTAL, LLM_CALLS_TOTAL
 
 
+def _service_execution_binding(
+    auth_context: AuthContext | None, *, team_id: UUID, trial_id: UUID | None,
+) -> dict[str, Any] | None:
+    """The lease/generation a service-execution call is attributed to.
+
+    Dispatch already fenced this context before the upstream request. Retain
+    that identity even if the request finishes after revocation; never infer
+    a newer generation from current lease state or client-supplied fields.
+    """
+    if auth_context is None or auth_context.service_execution_lease_id is None:
+        return None
+    if auth_context.service_execution_generation is None:
+        raise ValueError("service execution call lacks its generation")
+    if auth_context.trial_id != trial_id or auth_context.team_id != team_id:
+        raise ValueError("service execution call subject differs from authenticated context")
+    return {
+        "lease_id": str(auth_context.service_execution_lease_id),
+        "generation": auth_context.service_execution_generation,
+    }
+
+
 async def record_call(
     session: AsyncSession,
     *,
@@ -42,6 +63,7 @@ async def record_call(
     response_model: str | None = None,
     role: str | None = None,
     correlation_status: str = "legacy_uncorrelated",
+    auth_context: AuthContext | None = None,
 ) -> None:
     """Insert one row into `llm_calls`. Called by every dialect endpoint
     (chat / messages / responses / gemini) AFTER the upstream provider
@@ -90,6 +112,12 @@ async def record_call(
             ),
             "step_id": step_id,
             "ref": f"llm_calls/{llm_call_id}/provider_extras/_loom_raw_provider_log",
+        }
+    # Every dialect, not only routes that keep a raw provider log: the lease
+    # ledger reads only bound rows (#2054).
+    if (binding := _service_execution_binding(auth_context, team_id=team_id, trial_id=trial_id)) is not None:
+        provider_extras["_loom_raw_provider_log"] = {
+            **provider_extras.get("_loom_raw_provider_log", {}), "service_execution": binding,
         }
 
     lifecycle_authority_id = None
@@ -204,18 +232,8 @@ async def record_failed_call(
     if failure_error_type:
         provider_extras["_loom_failure_error_type"] = failure_error_type
 
-    # Dispatch already fenced this context before the upstream request. Retain
-    # that identity even if the request finishes after revocation; never infer
-    # a newer generation from current lease state or client-supplied fields.
-    if auth_context is not None and auth_context.service_execution_lease_id is not None:
-        if auth_context.service_execution_generation is None:
-            raise ValueError("service execution call lacks its generation")
-        if auth_context.trial_id != trial_id or auth_context.team_id != team_id:
-            raise ValueError("service execution call subject differs from authenticated context")
-        provider_extras["_loom_raw_provider_log"] = {"service_execution": {
-            "lease_id": str(auth_context.service_execution_lease_id),
-            "generation": auth_context.service_execution_generation,
-        }}
+    if (binding := _service_execution_binding(auth_context, team_id=team_id, trial_id=trial_id)) is not None:
+        provider_extras["_loom_raw_provider_log"] = {"service_execution": binding}
 
     lifecycle_authority_id = None
     if trial_id is not None:
