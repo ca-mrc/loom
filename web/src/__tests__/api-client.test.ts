@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { api, apiFetch, setCsrfToken, setUnauthorizedHandler } from "../api";
+import { api, apiFetch, loadAuthSession, setCsrfToken, setUnauthorizedHandler } from "../api";
 import { setFrontendConfigForTests } from "../lib/frontendConfig";
 
 function validAuthSessionPayload() {
@@ -241,7 +241,7 @@ describe("auth session loader", () => {
       ),
     );
 
-    const session = await api.authMe();
+    const session = await loadAuthSession();
 
     expect(session).toEqual({
       user: {
@@ -269,7 +269,7 @@ describe("auth session loader", () => {
     const response = new Response("raw upstream token=secret", { status });
     vi.spyOn(globalThis, "fetch").mockResolvedValue(response);
 
-    await expect(api.authMe()).rejects.toMatchObject({
+    await expect(loadAuthSession()).rejects.toMatchObject({
       kind,
       message: expect.not.stringContaining("raw upstream"),
     });
@@ -281,7 +281,7 @@ describe("auth session loader", () => {
       new Error("raw network token=secret"),
     );
 
-    await expect(api.authMe()).rejects.toMatchObject({
+    await expect(loadAuthSession()).rejects.toMatchObject({
       kind: "network",
       message: "browser session request failed",
     });
@@ -300,7 +300,7 @@ describe("auth session loader", () => {
   ])("rejects an %s session response as invalid", async (_label, response) => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(response());
 
-    await expect(api.authMe()).rejects.toMatchObject({
+    await expect(loadAuthSession()).rejects.toMatchObject({
       kind: "invalid",
       message: "browser session response is invalid",
     });
@@ -354,7 +354,7 @@ describe("auth session loader", () => {
       new Response(JSON.stringify(payload()), { status: 200 }),
     );
 
-    await expect(api.authMe()).rejects.toMatchObject({
+    await expect(loadAuthSession()).rejects.toMatchObject({
       kind: "invalid",
       message: "browser session response is invalid",
     });
