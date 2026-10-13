@@ -68,25 +68,25 @@ type terminusReclaimRequest struct {
 }
 
 type terminusCheckpointBody struct {
-	ExecutionID      string  `json:"execution_id"`
-	RunAttemptID     string  `json:"run_attempt_id"`
-	Episode          int     `json:"episode"`
-	ActiveRole       string  `json:"active_role"`
-	LastCallOrdinal  int     `json:"last_call_ordinal"`
-	LastSeq          int     `json:"last_seq"`
-	TmuxSessionID    *string `json:"tmux_session_id"`
+	ExecutionID     string  `json:"execution_id"`
+	RunAttemptID    string  `json:"run_attempt_id"`
+	Episode         int     `json:"episode"`
+	ActiveRole      string  `json:"active_role"`
+	LastCallOrdinal int     `json:"last_call_ordinal"`
+	LastSeq         int     `json:"last_seq"`
+	TmuxSessionID   *string `json:"tmux_session_id"`
 }
 
 type terminusCheckpointRequest struct {
 	workloadIdentity
-	SchemaVersion           string  `json:"schema_version"`
-	ExecutionID             string  `json:"execution_id"`
-	RunAttemptID            string  `json:"run_attempt_id"`
-	Episode                 int     `json:"episode"`
-	ActiveRole              string  `json:"active_role"`
-	LastCallOrdinal         int     `json:"last_call_ordinal"`
-	LastSeq                 int     `json:"last_seq"`
-	TmuxSessionID           *string `json:"tmux_session_id"`
+	SchemaVersion            string    `json:"schema_version"`
+	ExecutionID              string    `json:"execution_id"`
+	RunAttemptID             string    `json:"run_attempt_id"`
+	Episode                  int       `json:"episode"`
+	ActiveRole               string    `json:"active_role"`
+	LastCallOrdinal          int       `json:"last_call_ordinal"`
+	LastSeq                  int       `json:"last_seq"`
+	TmuxSessionID            *string   `json:"tmux_session_id"`
 	AttemptDeadlineWallClock time.Time `json:"attempt_deadline_wall_clock"`
 }
 
