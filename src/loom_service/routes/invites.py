@@ -34,6 +34,18 @@ router = APIRouter(prefix="/invites", tags=["invites"])
 
 _INVITE_ROLES = Literal["owner", "member", "viewer"]
 _INVITE_STATUSES = Literal["pending", "accepted", "revoked", "expired"]
+_INVITE_REJECTION = Literal[
+    "sign-in-required", "email-mismatch", "email-required", "invalid",
+    "already-used", "expired", "unavailable",
+]
+
+
+def _reject_acceptance(status: int, detail: str, reason: _INVITE_REJECTION) -> HTTPException:
+    # Only definitive rejections before session creation carry this marker.
+    # The browser can preserve its session without consuming an error body.
+    return HTTPException(
+        status_code=status, detail=detail, headers={"X-Loom-Invite-Rejection": reason},
+    )
 
 
 class _CreateInviteReq(BaseModel):
@@ -388,20 +400,20 @@ async def accept_invite(
             .with_for_update(),
         )).first()
         if row is None:
-            raise HTTPException(status_code=400, detail="invalid invite")
+            raise _reject_acceptance(400, "invalid invite", "invalid")
         invite, _team = row
 
         now = datetime.now(UTC)
         if invite.status == "revoked":
-            raise HTTPException(status_code=410, detail="invite unavailable")
+            raise _reject_acceptance(410, "invite unavailable", "unavailable")
         if invite.status == "accepted" or (
             invite.max_uses is not None and invite.accepted_uses >= invite.max_uses
         ):
-            raise HTTPException(status_code=409, detail="invite already accepted")
+            raise _reject_acceptance(409, "invite already accepted", "already-used")
         if invite.expires_at < now:
             invite.status = "expired"
             await session.commit()
-            raise HTTPException(status_code=410, detail="invite expired")
+            raise _reject_acceptance(410, "invite expired", "expired")
 
         session_email = (
             normalize_email(session_user.email)
@@ -410,20 +422,18 @@ async def accept_invite(
         )
         accepted_email = session_email if session_user is not None else payload.email
         if accepted_email is None:
-            raise HTTPException(status_code=400, detail="email required")
+            raise _reject_acceptance(400, "email required", "email-required")
         if session_user is not None and payload.email is not None:
             if session_email is None or normalize_email(payload.email) != session_email:
-                raise HTTPException(
-                    status_code=403,
-                    detail="invite is not valid for this user",
-                )
+                raise _reject_acceptance(403, "invite is not valid for this user", "email-mismatch")
         if not _email_matches_invite(invite, accepted_email):
-            raise HTTPException(
-                status_code=403,
-                detail="invite is not valid for this user",
-            )
+            raise _reject_acceptance(403, "invite is not valid for this user", "email-mismatch")
 
         user = session_user or await _find_user_by_email(session, accepted_email)
+        if session_user is None and user is not None:
+            # Invite issuers know the code. It authorizes team membership,
+            # never authentication as an existing recipient account.
+            raise _reject_acceptance(403, "sign in before accepting this invite", "sign-in-required")
         if user is None:
             username = await _unique_legacy_username(session, accepted_email)
             user = User(

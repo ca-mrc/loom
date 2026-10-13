@@ -41,7 +41,28 @@ the one-time reset link. Completing a reset revokes the user's active browser
 sessions, user-owned API tokens, and other unconsumed password-reset links.
 
 Invite-code routes remain available for compatibility. New onboarding should
-use registration requests and setup links.
+use registration requests and setup links. An invite can bootstrap a new
+identity, but an existing email-backed recipient must sign in before accepting
+it. The invite issuer's knowledge of the code does not prove the recipient's
+identity. A sign-in-required rejection leaves the invite and memberships unchanged.
+
+Definitive invite-acceptance refusals carry `X-Loom-Invite-Rejection` before
+session creation: `sign-in-required`/`email-mismatch` use HTTP 403;
+`email-required`/`invalid` use 400; `already-used` uses 409; and
+`expired`/`unavailable` use 410. These responses do not replace browser cookies
+or session authority. The browser accepts only these exact status/marker pairs,
+shows fixed local copy without consuming error bodies, and preserves the
+current session, CSRF token, and query cache. Unmarked refusals, unknown or
+mismatched markers, network failures, server failures, and malformed successful
+session responses retain the existing unavailable/reconciliation behavior.
+
+An existing recipient can sign in from the invite page and return to the same
+unconsumed invite. The browser carries only the invite code in router state
+while on the login page and reconstructs the fixed `/invites/accept` route with
+an encoded `code` parameter after login; it accepts no arbitrary return URL.
+A signed-in account that does not match can sign out and follow the same flow.
+Invalid or expired links and mismatched email addresses remain on the invite
+page with safe guidance to correct the email or request a new invite.
 
 ## Roles and teams
 
@@ -52,6 +73,10 @@ Membership roles are enforced by service authorization checks:
 | `viewer` | Read the current team's permitted resources |
 | `member` | Viewer access plus submission |
 | `owner` | Member access plus team, provider-connection, and API-token management |
+
+API-token creation and rotation enforce the same scope ceiling: non-admin
+callers cannot grant scopes they do not hold or internal worker scopes.
+Rejected rotation leaves the existing token valid and creates no replacement.
 
 Changing the current team requires a membership unless the user is a platform
 administrator. A team can be disabled, have new submissions paused, or have

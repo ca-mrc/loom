@@ -81,7 +81,7 @@ async def gemini_generate_content(
         )
     model_name, action = model_path.split(":", 1)
     await authorize_trial_model(request, ctx, provider="google", model=model_name)
-    if settings.google_api_key is None:
+    if settings.google_api_key is None or not settings.google_api_key.get_secret_value():
         raise HTTPException(
             status_code=503,
             detail="google_api_key not configured on Gateway",

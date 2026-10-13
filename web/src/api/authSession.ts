@@ -9,6 +9,31 @@ export class TeamSwitchRejectedError extends Error {
   }
 }
 
+const INVITE_REJECTIONS = {
+  "sign-in-required": { status: 403, message: "Sign in with the account that received this invite, then accept it." },
+  "email-mismatch": { status: 403, message: "This invite does not match your account or the email entered." },
+  "email-required": { status: 400, message: "Enter the email address this invite was sent to." },
+  invalid: { status: 400, message: "This invite is not valid. Ask a team owner for a new invite." },
+  "already-used": { status: 409, message: "This invite has already been used. Ask a team owner for a new invite." },
+  expired: { status: 410, message: "This invite has expired. Ask a team owner for a new invite." },
+  unavailable: { status: 410, message: "This invite is no longer available. Ask a team owner for a new invite." },
+} as const;
+
+export class InviteRejectedError extends Error {
+  constructor(readonly reason: keyof typeof INVITE_REJECTIONS) {
+    super(INVITE_REJECTIONS[reason].message);
+    this.name = "InviteRejectedError";
+  }
+}
+
+export function inviteRejection(response: Response): InviteRejectedError | null {
+  const reason = response.headers.get("X-Loom-Invite-Rejection");
+  if (!reason || !Object.hasOwn(INVITE_REJECTIONS, reason)) return null;
+  const knownReason = reason as keyof typeof INVITE_REJECTIONS;
+  return response.status === INVITE_REJECTIONS[knownReason].status
+    ? new InviteRejectedError(knownReason) : null;
+}
+
 export interface AuthTeam {
   id: string;
   name: string;

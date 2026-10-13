@@ -118,8 +118,9 @@ async def test_two_trials_share_one_node_without_losing_storage_limits(postgres_
             assert volumes["workspace"] == "10240Mi"
             assert volumes["runtime"] == f"{plan.runtime_volume_mib}Mi"
             assert volumes["task-sandbox-socket"] == volumes["verifier-sandbox-socket"] == "1Mi"
-            expected_output = max(1, (plan.max_artifact_bytes + 2 * plan.max_log_bytes_per_stream + 1048575) // 1048576)
-            assert volumes["output"] == f"{expected_output}Mi"
+            # 1024 MiB artifacts + four 10 MiB phase streams + 2 MiB for
+            # atomic result replacement + a 4 KiB termination summary.
+            assert volumes["output"] == "1067Mi"
             async with sessions() as session:
                 cost = await session.scalar(select(ExecutionCostReservation).where(
                     ExecutionCostReservation.lease_id == lease.id,

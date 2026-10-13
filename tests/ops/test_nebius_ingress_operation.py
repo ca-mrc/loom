@@ -33,6 +33,17 @@ def test_exact_two_pod_ingress_envelope_fits_after_foreign_load(inventory):
                       "cpu_millis": 200, "memory_mib": 256, "storage_mib": 128}
 
 
+@pytest.mark.parametrize("observed", [{}, {"requests": {"memory": "768Mi"}}])
+def test_partial_kubelet_summary_keeps_declared_ingress_load(inventory, observed):
+    # Live kubelets can omit a zero/rounded CPU value from status.resources.
+    # The shared raw decoder must still charge the full declared requests.
+    inventory["pods"][0]["status"]["resources"] = observed
+    assert module().qualify_capacity(**inventory)["reserved_pods"] == 2
+    inventory["nodes"][0]["status"]["allocatable"]["cpu"] = "999m"
+    with pytest.raises(module().OperationError, match="cannot fit the ingress envelope"):
+        module().qualify_capacity(**inventory)
+
+
 @pytest.mark.parametrize("field", ["allocatedResources", "resources"])
 @pytest.mark.parametrize("excess", [False, True])
 def test_pod_level_observed_allocation_is_compared_with_container_requests(inventory, field, excess):

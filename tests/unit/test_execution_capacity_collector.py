@@ -256,6 +256,7 @@ def _resource_container(
     *, cpu: str, memory: str = "0", storage: str = "0", restart_policy: str | None = None
 ) -> Any:
     return SimpleNamespace(
+        name="container",
         resources=SimpleNamespace(
             requests={"cpu": cpu, "memory": memory, "ephemeral-storage": storage}
         ),
@@ -351,14 +352,44 @@ def _pod(
     )
 
 
+def _pod_list(
+    pods: list[Any], *, resource_version: str, _preload_content: bool = True, **_kwargs: Any,
+) -> Any:
+    """Model the SDK's actual raw/preloaded Pod list boundary."""
+    from kubernetes import client
+
+    def wire(value: Any) -> Any:
+        if isinstance(value, SimpleNamespace):
+            return {
+                key.split("_")[0] + "".join(part.title() for part in key.split("_")[1:]): wire(item)
+                for key, item in vars(value).items()
+            }
+        if isinstance(value, dict):
+            return {key: wire(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [wire(item) for item in value]
+        if isinstance(value, datetime):
+            return value.isoformat()
+        return value
+
+    response = SimpleNamespace(data=json.dumps({
+        "apiVersion": "v1", "kind": "PodList",
+        "metadata": {"resourceVersion": resource_version}, "items": wire(pods),
+    }).encode())
+    if not _preload_content:
+        return response
+    with client.ApiClient() as api:
+        return api.deserialize(response, "V1PodList")
+
+
 @pytest.mark.asyncio
 async def test_kubernetes_capture_counts_selected_node_load_and_target_pending_demand() -> None:
     core = SimpleNamespace(
         list_node=lambda **_: SimpleNamespace(
             items=[_node("node-1")], metadata=SimpleNamespace(resource_version="nodes-7")
         ),
-        list_pod_for_all_namespaces=lambda **_: SimpleNamespace(
-            items=[
+        list_pod_for_all_namespaces=lambda **kwargs: _pod_list(
+            [
                 _pod(
                     name="system",
                     namespace="kube-system",
@@ -373,7 +404,7 @@ async def test_kubernetes_capture_counts_selected_node_load_and_target_pending_d
                     pending=True,
                 ),
             ],
-            metadata=SimpleNamespace(resource_version="pods-9"),
+            resource_version="pods-9", **kwargs,
         ),
     )
     snapshot = await InClusterKubernetesCapacityReader(core_api=core, apps_api=_apps()).capture(
@@ -395,8 +426,8 @@ async def test_kubernetes_capture_accepts_scale_to_zero_inventory() -> None:
         list_node=lambda **_: SimpleNamespace(
             items=[], metadata=SimpleNamespace(resource_version="nodes-8")
         ),
-        list_pod_for_all_namespaces=lambda **_: SimpleNamespace(
-            items=[], metadata=SimpleNamespace(resource_version="pods-10")
+        list_pod_for_all_namespaces=lambda **kwargs: _pod_list(
+            [], resource_version="pods-10", **kwargs,
         ),
     )
 
@@ -427,8 +458,8 @@ async def test_kubernetes_capture_keeps_terminating_nonterminal_requests() -> No
         list_node=lambda **_: SimpleNamespace(
             items=[_node("node-1")], metadata=SimpleNamespace(resource_version="nodes-7")
         ),
-        list_pod_for_all_namespaces=lambda **_: SimpleNamespace(
-            items=[pod], metadata=SimpleNamespace(resource_version="pods-9")
+        list_pod_for_all_namespaces=lambda **kwargs: _pod_list(
+            [pod], resource_version="pods-9", **kwargs,
         ),
     )
     snapshot = await InClusterKubernetesCapacityReader(core_api=core, apps_api=_apps()).capture(
@@ -459,8 +490,8 @@ async def test_kubernetes_capture_rejects_target_pod_outside_bound_node_group() 
         list_node=lambda **_: SimpleNamespace(
             items=[_node("node-1")], metadata=SimpleNamespace(resource_version="nodes-7")
         ),
-        list_pod_for_all_namespaces=lambda **_: SimpleNamespace(
-            items=[
+        list_pod_for_all_namespaces=lambda **kwargs: _pod_list(
+            [
                 _pod(
                     name="drift",
                     namespace="loom-nebius-staging",
@@ -468,7 +499,7 @@ async def test_kubernetes_capture_rejects_target_pod_outside_bound_node_group() 
                     target=True,
                 )
             ],
-            metadata=SimpleNamespace(resource_version="pods-9"),
+            resource_version="pods-9", **kwargs,
         ),
     )
     with pytest.raises(KubernetesObservationError, match="outside the selected node group"):
@@ -947,8 +978,8 @@ async def _capture_nodes(
         list_node=lambda **_: SimpleNamespace(
             items=nodes, metadata=SimpleNamespace(resource_version="n1")
         ),
-        list_pod_for_all_namespaces=lambda **_: SimpleNamespace(
-            items=pods, metadata=SimpleNamespace(resource_version="p1")
+        list_pod_for_all_namespaces=lambda **kwargs: _pod_list(
+            pods, resource_version="p1", **kwargs,
         ),
     )
     return await InClusterKubernetesCapacityReader(core_api=core, apps_api=_apps(*daemons)).capture(
@@ -956,6 +987,33 @@ async def _capture_nodes(
         target_id="nebius-eu-north1-staging",
         node_label_selector="target=staging",
     )
+
+
+@pytest.mark.asyncio
+async def test_target_capture_preserves_foreign_pod_level_requests() -> None:
+    pod = _pod(name="foreign", namespace="other", node_name="node-1", target=False)
+    pod.spec.resources = {"requests": {"cpu": "2", "memory": "2Gi"}}
+
+    snapshot = await _capture_nodes([_node("node-1")], [pod])
+
+    assert snapshot.requested.cpu_millis == 2000
+    assert snapshot.requested.memory_mib == 2048
+    assert snapshot.nodes[0].requested == snapshot.requested
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [
+    {"resources": {"requests": {"cpu": "2", "memory": "2Gi"}}},
+    {"allocated_resources": {"cpu": "2", "memory": "2Gi"}},
+    {"conditions": [SimpleNamespace(type="PodResizeInProgress", status="True")]},
+])
+async def test_target_capture_rejects_unconverged_foreign_resize(status: dict[str, Any]) -> None:
+    pod = _pod(name="resizing", namespace="other", node_name="node-1", target=False)
+    for key, value in status.items():
+        setattr(pod.status, key, value)
+
+    with pytest.raises(KubernetesObservationError, match="resize accounting is unqualified"):
+        await _capture_nodes([_node("node-1")], [pod])
 
 
 @pytest.mark.asyncio
@@ -1030,7 +1088,9 @@ async def test_observed_cold_sample_uses_allocatable_and_matching_daemonset_gene
     }
     daemon = _daemon(uid="cpu-daemon")
     pod = _pod(name="system", namespace="kube-system", node_name="node-1", target=False)
-    pod.metadata.owner_references = [SimpleNamespace(kind="DaemonSet", uid="cpu-daemon")]
+    pod.metadata.owner_references = [
+        SimpleNamespace(api_version="apps/v1", kind="DaemonSet", name="cpu-daemon", uid="cpu-daemon")
+    ]
     pod.spec.containers = daemon.spec.template.spec.containers
     snapshot = await _capture_nodes([node], [pod], daemon, _daemon(uid="gpu-daemon", gpu=True))
     sample = snapshot.template_samples[0]
@@ -1056,7 +1116,9 @@ async def test_observed_cold_sample_uses_allocatable_and_matching_daemonset_gene
 async def test_incomplete_or_changing_daemonset_never_becomes_a_cold_template(changed: str) -> None:
     daemon = _daemon(uid="daemon")
     pod = _pod(name="system", namespace="kube-system", node_name="node-1", target=False)
-    pod.metadata.owner_references = [SimpleNamespace(kind="DaemonSet", uid="daemon")]
+    pod.metadata.owner_references = [
+        SimpleNamespace(api_version="apps/v1", kind="DaemonSet", name="daemon", uid="daemon")
+    ]
     pod.spec.containers = daemon.spec.template.spec.containers
     pods = [pod]
     if changed == "missing_pod":
@@ -1278,8 +1340,8 @@ async def test_kubernetes_drain_observation_does_not_infer_drain_from_cordon() -
         list_node=lambda **_: SimpleNamespace(
             items=[cordoned, draining, deleting], metadata=SimpleNamespace(resource_version="nodes-9")
         ),
-        list_pod_for_all_namespaces=lambda **_: SimpleNamespace(
-            items=[], metadata=SimpleNamespace(resource_version="pods-11")
+        list_pod_for_all_namespaces=lambda **kwargs: _pod_list(
+            [], resource_version="pods-11", **kwargs,
         ),
     )
     snapshot = await InClusterKubernetesCapacityReader(core_api=core, apps_api=_apps()).capture(

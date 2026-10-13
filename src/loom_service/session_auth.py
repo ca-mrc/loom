@@ -351,9 +351,9 @@ async def create_session_for_user(
 ) -> CreatedSession:
     """Create a browser session after a trusted onboarding action.
 
-    Invite acceptance uses the invite secret as the bootstrap proof. It creates
-    or finds the user, creates the membership, then calls this helper so the
-    user lands in the invited team without receiving a raw team token.
+    Invite acceptance can bootstrap a new identity. An existing recipient
+    must authenticate independently before the invite creates a membership
+    and this helper issues a session for the invited team.
     """
     now = datetime.now(UTC)
     role = "platform_admin" if user.is_platform_admin else None

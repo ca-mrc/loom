@@ -96,8 +96,8 @@ def _container_request(container: Any) -> ResourceTotals:
 def _pod_request(pod: Any) -> ResourceTotals:
     """Conservative scheduler accounting, including native init sidecars."""
 
-    if getattr(pod.spec, "_loom_pool_resize_unqualified", False):
-        raise KubernetesObservationError("Kubernetes pool Pod resize accounting is unqualified")
+    if getattr(pod.spec, "_loom_resize_unqualified", False):
+        raise KubernetesObservationError("Kubernetes Pod resize accounting is unqualified")
     regular = _add(*[_container_request(row) for row in list(pod.spec.containers or [])])
     restartable = ResourceTotals(cpu_millis=0, memory_mib=0, storage_mib=0)
     init_peaks: list[ResourceTotals] = []
@@ -142,11 +142,11 @@ def rendered_pod_resources(spec: dict[str, Any]) -> ResourceTotals:
     )))
 
 
-def _pool_resize_unqualified(raw: dict[str, Any], pod_request: ResourceTotals) -> bool:
+def _resize_unqualified(raw: dict[str, Any], pod_request: ResourceTotals) -> bool:
     """Do not admit against freed spec resources while kubelet still holds them.
 
-    Only used by pool capture. Immutable gateway Jobs do not resize; legitimate
-    foreign resizing remains a fail-closed inventory blocker until converged.
+    Immutable gateway Jobs do not resize; legitimate foreign resizing remains
+    a fail-closed inventory blocker until converged in every capture mode.
     Retain both older and newer API fields before the pinned SDK drops them.
     """
     status = raw.get("status") or {}
@@ -184,7 +184,7 @@ def _pool_resize_unqualified(raw: dict[str, Any], pod_request: ResourceTotals) -
     return False
 
 
-def _decode_pool_pods(response: Any) -> Any:
+def _decode_pods(response: Any) -> Any:
     """Preserve PodLevelResources omitted by the pinned Kubernetes SDK model."""
     from kubernetes import client
 
@@ -204,12 +204,12 @@ def _decode_pool_pods(response: Any) -> Any:
                 if not isinstance(resources, dict) or not isinstance(resources.get("requests", {}), dict):
                     raise ValueError("invalid Pod resource requests")
                 pod.spec.resources = resources
-            pod.spec._loom_pool_resize_unqualified = _pool_resize_unqualified(raw, _pod_request(pod))
+            pod.spec._loom_resize_unqualified = _resize_unqualified(raw, _pod_request(pod))
         return result
     except Exception:
         # Neither the HTTP body nor deserializer diagnostics are evidence: Pod
         # payloads may contain credentials, commands or private source URLs.
-        raise KubernetesObservationError("Kubernetes pool Pod page is invalid") from None
+        raise KubernetesObservationError("Kubernetes Pod page is invalid") from None
     finally:
         # _preload_content=False transfers ownership of the HTTP response.
         release = getattr(response, "release_conn", None)
@@ -587,8 +587,8 @@ class InClusterKubernetesCapacityReader:
                 maximum_items=200_000,
                 page_size=1000,
                 watch=False,
-                decode=_decode_pool_pods if pool is not None else None,
-                **({"_preload_content": False} if pool is not None else {}),
+                decode=_decode_pods,
+                _preload_content=False,
             )
             daemons, daemon_version = self._list_all(
                 self._apps.list_daemon_set_for_all_namespaces,

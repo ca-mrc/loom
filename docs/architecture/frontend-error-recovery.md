@@ -150,6 +150,15 @@ data, then enters `unavailable`. Retry calls `/api/v1/auth/me` to reconstruct
 the authoritative state. An exact `401` instead enters `signed-out`. These
 mutation loaders also classify without reading non-success response bodies.
 
+Definitive invite refusals are an explicit exception to ambiguous mutation
+failure: the invite endpoint marks them before creating a session, and the
+client requires an allowlisted `X-Loom-Invite-Rejection` value paired with its
+exact HTTP status. These refusals preserve the current identity, CSRF token,
+and cached data and show fixed invite-page guidance. Their bodies are never
+read. An absent, unknown, or status-mismatched marker retains the unavailable
+path. The owning rejection codes and sign-in return contract are documented in
+[Authentication and Teams](auth-and-teams.md).
+
 The application mount marker maps these states to browser-smoke evidence:
 `authenticated` becomes `data-loom-auth-state="authenticated"`, `signed-out`
 becomes `anonymous`, and `unavailable` becomes `error`. Loading remains

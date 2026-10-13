@@ -116,7 +116,7 @@ def _pod(row: dict[str, Any]) -> Any:
         spec = row["spec"]["jobTemplate"]["spec"] if row["kind"] == "CronJob" else row["spec"]
         row = {"apiVersion": "v1", "kind": "Pod", **copy.deepcopy(spec["template"])}
     response = SimpleNamespace(data=json.dumps({"apiVersion": "v1", "kind": "PodList", "items": [row]}).encode())
-    return accounting._decode_pool_pods(response).items[0]
+    return accounting._decode_pods(response).items[0]
 
 
 def _matches(pod: Any, node: Any) -> bool:

@@ -10,12 +10,14 @@ export type FixtureResponse =
       kind: "json";
       status: number;
       body: unknown;
+      headers?: Record<string, string>;
       delayMs?: number;
     }
   | {
       kind: "text";
       status: number;
       body: string;
+      headers?: Record<string, string>;
       contentType: string;
       delayMs?: number;
     }
@@ -275,6 +277,7 @@ async function fulfill(route: Route, response: FixtureResponse): Promise<Fixture
   }
   if (response.kind === "json") {
     await route.fulfill({
+      headers: response.headers,
       status: response.status,
       contentType: "application/json",
       body: JSON.stringify(response.body),
@@ -282,6 +285,7 @@ async function fulfill(route: Route, response: FixtureResponse): Promise<Fixture
     return response.status;
   }
   await route.fulfill({
+    headers: response.headers,
     status: response.status,
     contentType: response.contentType,
     body: response.body,
