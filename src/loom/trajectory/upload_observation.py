@@ -89,6 +89,7 @@ class UploadSpan:
         self.declared_bytes = declared_bytes
         self.observed_bytes: int | None = None
         self.status_code: int | None = None
+        self.response_body_mode: Literal["streamed", "buffered"] | None = None
         self.outcome = "success"
         self._lock = threading.Lock()
         self._started: int | None = None
@@ -111,6 +112,8 @@ class UploadSpan:
                 record[key] = value
         if self.status_code is not None and 100 <= self.status_code <= 599:
             record["status_code"] = self.status_code
+        if self.response_body_mode is not None:
+            record["response_body_mode"] = self.response_body_mode
         # Telemetry must not alter output publication on a broken logging sink.
         with contextlib.suppress(Exception):
             logger.info(json.dumps(record, separators=(",", ":")))
@@ -145,8 +148,9 @@ class UploadSpan:
 def configure_s3_transport(client: Any) -> None:
     """Observe each real botocore HTTP send, including SDK-internal retries.
 
-    Send returns at response headers; provider completion/accepted bytes are
-    unknown. The encompassing SDK worker also includes response parsing/backoff.
+    Send consumes nonstreaming response bodies (including upload responses),
+    but returns at headers for streaming responses. Provider completion/accepted
+    bytes remain unknown. The SDK worker also includes parsing/retry backoff.
     This deliberately does not time before-send/after-call events as transport.
     """
     def operation_name(model: Any, **_kwargs: Any) -> None:
@@ -169,8 +173,10 @@ def configure_s3_transport(client: Any) -> None:
             size = int(raw_size) if raw_size is not None else None
         except (ValueError, TypeError):
             size = None
-        with UploadSpan("s3_transport", _S3_OPERATION.get(), attempt=parent._transports,
-                        declared_bytes=size) as span:
+        span = UploadSpan("s3_transport", _S3_OPERATION.get(), attempt=parent._transports,
+                          declared_bytes=size)
+        span.response_body_mode = "streamed" if request.stream_output else "buffered"
+        with span:
             response = original_send(request)
             span.status_code = response.status_code
             if response.status_code >= 400:

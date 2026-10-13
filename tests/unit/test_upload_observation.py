@@ -24,7 +24,7 @@ def capture_observations(monkeypatch):
 
 
 @contextmanager
-def s3_transport(statuses=(), block=False):
+def s3_transport(statuses=(), block=False, block_response=False):
     """Independent fixture intervals/bytes, without stubbing the SDK's hooks."""
     replies = deque(statuses)
     entered = threading.Event()
@@ -41,14 +41,21 @@ def s3_transport(statuses=(), block=False):
             with lock:
                 bodies.append(body)
                 status = replies.popleft() if replies else 200
-            entered.set()
+            if not block_response:
+                entered.set()
             if block:
                 assert release.wait(5)
             payload = b"<Error><Code>SlowDown</Code></Error>" if status == 503 else b""
+            if block_response:
+                payload = b"<PutObjectResult/>"
             self.send_response(status)
             self.send_header("Content-Length", str(len(payload)))
             self.send_header("ETag", '"owned-etag"')
             self.end_headers()
+            self.wfile.flush()
+            if block_response:
+                entered.set()
+                assert release.wait(5)
             self.wfile.write(payload)
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -208,3 +215,18 @@ async def test_application_retry_can_overlap_the_abandoned_transport(caplog):
         assert len(records(caplog, "sdk_worker", "finished")) == 2
         assert len({e["span_id"] for e in records(caplog, "sdk_worker", "finished")}) == 2
         assert all(len(json.dumps(e)) < 2048 for e in records(caplog))
+
+
+async def test_upload_transport_remains_active_until_response_body_is_consumed(caplog):
+    caplog.set_level(logging.INFO, logger="loom.upload_observation")
+    with s3_transport(block_response=True) as (store, _, headers_sent, release):
+        task = asyncio.create_task(upload(store))
+        try:
+            assert await asyncio.to_thread(headers_sent.wait, 2)
+            assert not records(caplog, "s3_transport", "finished")
+            start, = records(caplog, "s3_transport", "started")
+            assert start["response_body_mode"] == "buffered"
+        finally:
+            release.set()
+            await task
+        assert len(records(caplog, "s3_transport", "finished")) == 1
