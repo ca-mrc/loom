@@ -9,7 +9,7 @@
     "build:browser-test": "node scripts/build-browser-test.mjs",
     "preview": "vite preview",
     "lint": "eslint \"**/*.{ts,tsx}\" --max-warnings=0",
-    "typecheck": "tsc --noEmit --pretty false && tsc --noEmit --pretty false -p tsconfig.e2e.json",
+    "typecheck": "tsc --noEmit --pretty false && tsc --noEmit --pretty false -p tsconfig.node.json && tsc --noEmit --pretty false -p tsconfig.e2e.json",
     "gen-api": "node scripts/generate-api.mjs",
     "smoke:tasksets": "node scripts/taskset-nginx-smoke.mjs",
     "smoke:routes": "node scripts/frontend-route-browser-smoke.mjs",
