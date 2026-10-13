@@ -12,6 +12,7 @@ import {
   setCsrfToken,
   setUnauthorizedHandler,
 } from "../api";
+import { _csrfToken } from "../api/core";
 import { AuthProvider } from "../auth/AuthContext";
 import { useAuth } from "../auth/useAuth";
 import {
@@ -50,6 +51,7 @@ function Display(): JSX.Element {
     loginStart,
     loginComplete,
     loginPassword,
+    acceptInvite,
     switchTeam,
     logout,
     refreshMe,
@@ -71,6 +73,7 @@ function Display(): JSX.Element {
       <button onClick={() => void loginStart("owner@example.com")}>start</button>
       <button onClick={() => void loginComplete("login-token").catch(() => undefined)}>complete</button>
       <button onClick={() => void loginPassword("Owner", "long-passphrase-1").catch(() => undefined)}>password</button>
+      <button onClick={() => void acceptInvite("loom_invite_recipient", "owner@example.com").catch(() => undefined)}>accept invite</button>
       <button onClick={() => void switchTeam("team-b").catch(() => undefined)}>switch</button>
       <button onClick={() => void logout()}>logout</button>
       <button onClick={() => void refreshMe()}>refresh</button>
@@ -912,5 +915,26 @@ describe("AuthContext", () => {
     expect((logoutInit.headers as Record<string, string>)["X-Loom-CSRF"]).toBe(
       "csrf-initial",
     );
+  });
+
+  it("preserves a replacement session and its cache after a definitive invite refusal", async () => {
+    const replacement = { ...memberMe, user: { ...memberMe.user, id: "new-user", username: "New session" }, csrf_token: "new-csrf" };
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(memberMe), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(replacement), { status: 200 }))
+      .mockResolvedValueOnce(new Response("untrusted-response-body", { status: 403, headers: { "X-Loom-Invite-Rejection": "email-mismatch" } }));
+    vi.stubGlobal("fetch", fetch);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(withQueryClient(<AuthProvider><Display /></AuthProvider>, client));
+    await waitFor(() => expect(screen.getByTestId("username")).toHaveTextContent("Owner"));
+    await userEvent.click(screen.getByText("password"));
+    await waitFor(() => expect(screen.getByTestId("username")).toHaveTextContent("New session"));
+    client.setQueryData(["replacement-session-data"], "retained");
+    await act(async () => { await userEvent.click(screen.getByText("accept invite")); });
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(screen.getByTestId("status")).toHaveTextContent("authenticated");
+    expect(screen.getByTestId("username")).toHaveTextContent("New session");
+    expect(_csrfToken).toBe("new-csrf");
+    expect(client.getQueryData(["replacement-session-data"])).toBe("retained");
   });
 });

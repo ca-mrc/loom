@@ -21,7 +21,7 @@ import {
   createBrowserFailureId,
   reportBrowserFailure,
 } from "../lib/errorReporting";
-import { loadAuthSession, TeamSwitchRejectedError, type AuthMe } from "../api/authSession";
+import { InviteRejectedError, loadAuthSession, TeamSwitchRejectedError, type AuthMe } from "../api/authSession";
 import {
   AuthContext,
   type AuthCtx,
@@ -109,7 +109,7 @@ function mutateAuthoritativeSession(
       }
       return next;
     } catch (error) {
-      if (error instanceof TeamSwitchRejectedError) throw error;
+      if (error instanceof TeamSwitchRejectedError || error instanceof InviteRejectedError) throw error;
       // A failed response may still follow a committed cookie/team change.
       // Withhold unsafe requests until a subsequent /me reconciles authority.
       setCsrfToken(null);
@@ -318,7 +318,7 @@ export function AuthProvider({ children }: { children: ReactNode }): JSX.Element
         installSession(next, true);
         return next;
       } catch (error) {
-        if (error instanceof TeamSwitchRejectedError) throw error;
+        if (error instanceof TeamSwitchRejectedError || error instanceof InviteRejectedError) throw error;
         const safeError =
           error instanceof AuthSessionLoadError
             ? error

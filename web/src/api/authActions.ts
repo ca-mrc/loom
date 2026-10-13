@@ -1,5 +1,5 @@
 import { AuthSessionLoadError, apiBase, apiFetch, authHeaders } from "./core";
-import { parseAuthSessionResponse, TeamSwitchRejectedError, type AuthMe } from "./authSession";
+import { inviteRejection, parseAuthSessionResponse, TeamSwitchRejectedError, type AuthMe } from "./authSession";
 
 export async function mutateAuthSession(path: string, body: unknown): Promise<AuthMe> {
   let response: Response;
@@ -23,6 +23,12 @@ export async function mutateAuthSession(path: string, body: unknown): Promise<Au
 
   if (path === "/api/v1/auth/team" && (response.status === 403 || response.status === 404)) {
     throw new TeamSwitchRejectedError(response.status);
+  }
+  if (path === "/api/v1/invites/accept") {
+    // Only the server's pre-session rejection contract proves no identity or
+    // cookie change occurred. Never read or render a non-success body.
+    const rejection = inviteRejection(response);
+    if (rejection) throw rejection;
   }
   return parseAuthSessionResponse(response);
 }

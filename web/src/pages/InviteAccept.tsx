@@ -2,9 +2,10 @@ import { HelpButton } from "../components/HelpButton";
 import { queryKeys } from "../api/queryKeys";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 
 import { api, type InviteLookup, type InviteStatus } from "../api";
+import { InviteRejectedError } from "../api/authSession";
 import { useAuth } from "../auth/useAuth";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
@@ -16,6 +17,9 @@ import { cn } from "../lib/cn";
 
 const LINK_BUTTON =
   "inline-flex items-center justify-center rounded-lg border px-3.5 py-2 text-sm font-medium";
+const LOOKUP_FAILURE = new Error("Could not check this invite. Check the link or ask a team owner for a new invite.");
+const ACCEPT_FAILURE = new Error("Could not accept this invite. Try again or ask a team owner for help.");
+const SIGN_OUT_FAILURE = new Error("Could not finish signing out. Try signing in again before accepting the invite.");
 
 function statusLabel(status: InviteStatus): string {
   switch (status) {
@@ -65,8 +69,9 @@ function InviteSummary({ invite }: { invite: InviteLookup }): JSX.Element {
 export default function InviteAccept(): JSX.Element {
   const [params] = useSearchParams();
   const code = params.get("code")?.trim() ?? "";
-  const { acceptInvite } = useAuth();
-  const [email, setEmail] = useState("");
+  const { acceptInvite, isAuthenticated, me, logout } = useAuth();
+  const navigate = useNavigate();
+  const [email, setEmail] = useState(me?.user.email ?? "");
   const [joinedTeam, setJoinedTeam] = useState<string | null>(null);
 
   const invite = useQuery({
@@ -81,6 +86,10 @@ export default function InviteAccept(): JSX.Element {
     onSuccess: (me) => {
       setJoinedTeam(me.current_team?.name ?? invite.data?.team_name ?? "team");
     },
+  });
+  const changeAccount = useMutation({
+    mutationFn: logout,
+    onSuccess: () => navigate("/auth/login", { state: { inviteCode: code } }),
   });
 
   const status = invite.data?.status ?? null;
@@ -132,7 +141,7 @@ export default function InviteAccept(): JSX.Element {
           ) : null}
 
           {invite.isPending ? <LoadingState label="Checking invite..." /> : null}
-          {invite.isError ? <ErrorState error={invite.error} /> : null}
+          {invite.isError ? <ErrorState error={LOOKUP_FAILURE} /> : null}
           {invite.data ? <InviteSummary invite={invite.data} /> : null}
 
           {canAccept && !joinedTeam ? (
@@ -157,6 +166,7 @@ export default function InviteAccept(): JSX.Element {
               >
                 Accept invite
               </Button>
+              {!isAuthenticated ? <p className="text-sm text-slate-600">Already have an account? <Link to="/auth/login" state={{ inviteCode: code }} className="text-accent underline">Sign in to accept invite</Link></p> : null}
             </div>
           ) : null}
 
@@ -205,7 +215,11 @@ export default function InviteAccept(): JSX.Element {
             </div>
           ) : null}
 
-          {accept.isError ? <ErrorState error={accept.error} /> : null}
+          {accept.isError ? <ErrorState error={accept.error instanceof InviteRejectedError ? accept.error : ACCEPT_FAILURE} /> : null}
+          {isAuthenticated && accept.error instanceof InviteRejectedError && accept.error.reason === "email-mismatch" ? (
+            <Button onClick={() => changeAccount.mutate()} disabled={changeAccount.isPending}>Use another account</Button>
+          ) : null}
+          {changeAccount.isError ? <ErrorState error={SIGN_OUT_FAILURE} /> : null}
         </Card.Body>
       </Card>
     </div>

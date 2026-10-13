@@ -502,6 +502,34 @@ async def test_plain_submit_token_cannot_manage_tokens(
     assert "tokens:manage" in revoke.json()["detail"]
 
 
+@pytest.mark.parametrize("target_scopes", [["submit"], ["providers:manage"], ["worker:claim"]])
+async def test_rotation_cannot_grant_scopes_absent_from_caller(
+    svc_setup: tuple[FastAPI, str, UUID], target_scopes: list[str],
+) -> None:
+    app, _raw, team_id = svc_setup
+    manager_raw, target_raw = f"loom_api_{uuid4().hex}", f"loom_api_{uuid4().hex}"
+    manager_hash = hashlib.sha256(manager_raw.encode()).digest()
+    target_hash = hashlib.sha256(target_raw.encode()).digest()
+    async with app.state.session_factory() as session:
+        session.add_all([
+            Token(token_hash=manager_hash, type="team", name="manager", team_id=team_id,
+                  scopes=["read:own", "tokens:manage"], issued_at=datetime.now(UTC)),
+            Token(token_hash=target_hash, type="team", name="target", team_id=team_id,
+                  scopes=target_scopes, issued_at=datetime.now(UTC)),
+        ])
+        await session.commit()
+        before = len((await session.execute(select(Token))).scalars().all())
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://svc") as client:
+        response = await client.post(f"/api/v1/tokens/{target_hash.hex()[:8]}/rotate",
+                                     headers={"Authorization": f"Bearer {manager_raw}"})
+    assert response.status_code == 403, response.text
+    assert "token" not in response.json()
+    async with app.state.session_factory() as session:
+        assert (await session.get(Token, target_hash)).revoked_at is None
+        assert len((await session.execute(select(Token))).scalars().all()) == before
+
+
 async def test_expired_api_token_fails_whoami(
     svc_setup: tuple[FastAPI, str, UUID],
     postgres_url: str,
