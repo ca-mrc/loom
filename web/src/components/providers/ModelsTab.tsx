@@ -30,7 +30,7 @@ export type ModelsTabProps = { id: string; connectionName?: string };
 function PreflightStatus({ model }: { model: ProviderConnectionModelEntry }): JSX.Element {
   if (model.last_preflight_status === "valid") {
     return (
-      <div className="space-y-1">
+      <div className="stack-y-1">
         <span
           className="rounded bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-700"
           title="The latest preflight call succeeded for this connection and model. This is historical verification, not a current availability guarantee."
@@ -51,7 +51,7 @@ function PreflightStatus({ model }: { model: ProviderConnectionModelEntry }): JS
     model.last_preflight_failure_kind === "inconclusive"
   ) {
     return (
-      <div className="max-w-sm space-y-1">
+      <div className="max-w-sm stack-y-1">
         <span
           className="rounded bg-amber-50 px-2 py-1 text-xs font-medium text-amber-800"
           title="The latest preflight timed out or hit a temporary upstream error. It did not confirm the model is callable, and it does not block new batches."
@@ -74,7 +74,7 @@ function PreflightStatus({ model }: { model: ProviderConnectionModelEntry }): JS
   }
   if (model.last_preflight_status === "failed") {
     return (
-      <div className="max-w-sm space-y-1">
+      <div className="max-w-sm stack-y-1">
         <span
           className="rounded bg-red-50 px-2 py-1 text-xs font-medium text-red-700"
           title="The latest preflight call failed. New batches using this known-failed model are blocked until it passes."
@@ -144,7 +144,7 @@ export default function ModelsTab({ id, connectionName }: ModelsTabProps): JSX.E
   };
 
   return (
-    <div className="space-y-4">
+    <div className="stack-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <Input placeholder="Filter models…" value={filter}
           onChange={(e) => setFilter(e.target.value)} className="w-full sm:w-72" />

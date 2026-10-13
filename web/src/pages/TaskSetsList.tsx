@@ -66,7 +66,7 @@ export default function TaskSetsList(): JSX.Element {
   const items = allItems.filter((item) => `${item.display_name} ${item.task_set_id}`.toLowerCase().includes(search.toLowerCase()));
 
   return (
-    <div className="space-y-4">
+    <div className="stack-y-4">
       <header className="flex items-center justify-between">
         <div>
           <h1
@@ -99,7 +99,7 @@ export default function TaskSetsList(): JSX.Element {
       ) : (
         <Card>
           <Card.Body className="overflow-x-auto p-0">
-            <table aria-label="Task sets" className="min-w-full divide-y divide-slate-200 text-sm">
+            <table aria-label="Task sets" className="min-w-full stack-divide-y stack-divide-slate-200 text-sm">
               <thead>
                 <tr className="bg-slate-50/50">
                   {["Name", "Status", "Capability", "Tasks", "Created"].map(
@@ -114,7 +114,7 @@ export default function TaskSetsList(): JSX.Element {
                   )}
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-100">
+              <tbody className="stack-divide-y stack-divide-slate-100">
                 {items.map((ts) => (
                   <tr key={ts.task_set_id} className="hover:bg-slate-50/50">
                     <td className="px-4 py-3">

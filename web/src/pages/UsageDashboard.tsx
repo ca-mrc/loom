@@ -71,7 +71,7 @@ export default function UsageDashboard(): JSX.Element {
   });
 
   return (
-    <div className="space-y-6">
+    <div className="stack-y-6">
       <header>
         <h1 className="text-2xl font-bold text-slate-900">Usage</h1>
         <p className="mt-1 text-sm text-slate-500">
@@ -207,7 +207,7 @@ function UsageContent({ buckets }: { buckets: Bucket[] }): JSX.Element {
   const hasBatchBreakdown = buckets.some((b) => (b.batches ?? []).length > 0);
 
   return (
-    <div className="space-y-6">
+    <div className="stack-y-6">
       <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
         <StatCard label="Trials" value={totals.trial_count.toLocaleString()} />
         <StatCard
@@ -251,7 +251,7 @@ function UsageContent({ buckets }: { buckets: Bucket[] }): JSX.Element {
         <Card.Header title="Breakdown" />
         <Card.Body className="p-0">
           <div className="overflow-x-auto" tabIndex={0} role="region" aria-label="Usage breakdown scroll area">
-            <table aria-label="Usage breakdown" className="min-w-full divide-y divide-slate-200 text-sm">
+            <table aria-label="Usage breakdown" className="min-w-full stack-divide-y stack-divide-slate-200 text-sm">
               <thead>
                 <tr className="bg-slate-50/50">
                   {[
@@ -274,7 +274,7 @@ function UsageContent({ buckets }: { buckets: Bucket[] }): JSX.Element {
                   ))}
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-100">
+              <tbody className="stack-divide-y stack-divide-slate-100">
                 {buckets.map((b) => (
                   <UsageBucketRows
                     key={b.start_at}

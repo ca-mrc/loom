@@ -29,7 +29,7 @@ export default function ExecutionSelectionEditor({ advanced, setAdv, onClose }: 
   };
 
   return (
-    <div className="max-w-lg space-y-2">
+    <div className="max-w-lg stack-y-2">
       <label className="block">
         <span className="text-sm font-medium text-slate-700">Execution config (loom.execution-selection.v1)</span>
         <textarea

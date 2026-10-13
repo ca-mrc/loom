@@ -23,7 +23,7 @@ export function SegmentedToggle({
             }
             className={
               "rounded-md px-3 py-1 text-sm font-medium transition-colors " +
-              (active ? "bg-white text-slate-900 shadow-sm" : "text-slate-600 hover:text-slate-900")
+              (active ? "bg-white text-slate-900 shadow-xs" : "text-slate-600 hover:text-slate-900")
             }
           >
             {v === "batches" ? "Batches" : v === "trials" ? "Trials" : "Capacity"}

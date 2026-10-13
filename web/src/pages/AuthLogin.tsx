@@ -76,7 +76,7 @@ export default function AuthLogin(): JSX.Element {
   const hasPublicTeams = publicTeamItems.length > 0;
 
   return (
-    <div className="space-y-8">
+    <div className="stack-y-8">
       <header className="max-w-3xl">
         <p className="text-xs font-semibold uppercase tracking-wider text-slate-600">
           Loom staging
@@ -93,7 +93,7 @@ export default function AuthLogin(): JSX.Element {
 
       <div className="grid items-start gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(22rem,26rem)]">
         <Card>
-          <Card.Body className="space-y-5 p-6 sm:p-7">
+          <Card.Body className="stack-y-5 p-6 sm:p-7">
             <div>
               <h2 className="text-xl font-semibold text-slate-900">Sign in</h2>
               {inviteReturn ? <p className="mt-2 text-sm text-slate-600">Sign in with the account that received the invite. You will return to it after signing in.</p> : null}
@@ -157,7 +157,7 @@ export default function AuthLogin(): JSX.Element {
         </Card>
 
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-1">
-          <div className="space-y-2 text-sm text-slate-600 md:col-span-2 lg:col-span-1">
+          <div className="stack-y-2 text-sm text-slate-600 md:col-span-2 lg:col-span-1">
             <p>New to Loom? Request a team account, set your password after approval, then choose an available provider to run your first task.</p>
             <HelpButton topic="access">Account setup guide</HelpButton>
           </div>
@@ -167,14 +167,14 @@ export default function AuthLogin(): JSX.Element {
               title="Request account"
               description="Choose a team that allows public registration. Ask an admin if your team is missing."
             />
-            <Card.Body className="space-y-3">
+            <Card.Body className="stack-y-3">
               {publicTeams.isFetching ? (
                 <p role="status" className="text-sm text-slate-600">
                   Loading registration teams…
                 </p>
               ) : null}
               {publicTeams.isError ? (
-                <div className="space-y-2">
+                <div className="stack-y-2">
                   <ErrorState error={PUBLIC_TEAMS_FAILURE} />
                   <Button
                     type="button"
@@ -189,7 +189,7 @@ export default function AuthLogin(): JSX.Element {
                 <EmptyState label="No teams are currently open for public registration." />
               ) : null}
               <form
-                className="space-y-3"
+                className="stack-y-3"
                 onSubmit={(event) => {
                   event.preventDefault();
                   if (requestAccess.isPending || !registerTeamId) return;
@@ -258,9 +258,9 @@ export default function AuthLogin(): JSX.Element {
               title="Forgot password"
               description="Submit a reset request for admin approval."
             />
-            <Card.Body className="space-y-3">
+            <Card.Body className="stack-y-3">
               <form
-                className="space-y-3"
+                className="stack-y-3"
                 onSubmit={(event) => {
                   event.preventDefault();
                   if (requestReset.isPending) return;

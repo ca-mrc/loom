@@ -118,16 +118,55 @@ rule is disabled to retain the existing lint contract. Playwright fixture
 callbacks use `provideFixture` to distinguish them from React's `use` hook.
 
 Audit both the complete build graph (`npm audit`) and the production graph
-(`npm audit --omit=dev`). Tailwind 3 still uses `braces` 3.0.3 through Chokidar
-and Micromatch/Fast-glob, and `postcss-selector-parser` 6.1.4 directly and through
-PostCSS Nested. The [nested-brace stack-exhaustion advisory](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm)
-has no patched `braces` release. The [flat-selector CPU-exhaustion advisory](https://github.com/advisories/GHSA-rj75-hqrm-r3gf)
-is fixed in selector-parser 7.1.6, outside Tailwind 3's declared dependency range.
-These paths process checked-in content globs and CSS during development/builds;
-they do not parse API data or browser-supplied selectors at runtime. Untrusted
-build inputs remain a risk. Clearing them requires an upstream compatible fix
-or a separately validated Tailwind/CSS migration; do not force dependency majors
-or suppress the audit findings to obtain a zero count.
+(`npm audit --omit=dev`). The Tailwind 4 migration below removes the Tailwind 3
+paths through Chokidar, Micromatch/Fast-glob, PostCSS Nested and selector-parser
+6 that retained the [nested-brace stack-exhaustion](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm)
+and [flat-selector CPU-exhaustion](https://github.com/advisories/GHSA-rj75-hqrm-r3gf)
+advisories. Do not force dependency majors or suppress findings to obtain a
+zero count. Audit results are time-dependent and must be recorded per candidate.
+
+## CSS toolchain and compatibility (#2462)
+
+Tailwind CSS and `@tailwindcss/postcss` are pinned together at 4.3.3. The PostCSS
+plugin handles imports and vendor prefixes; a separate Autoprefixer plugin is
+unnecessary. The existing Node 20.19+ and React 18 contracts are unchanged.
+Frozen installs include Tailwind's Oxide native scanner as well as Vite's
+existing native dependencies; image builds must exercise the target platform's
+installation and production build.
+
+`src/index.css` explicitly loads `tailwind.config.js` with `@config`. Automatic
+source discovery is disabled: the existing index HTML and JS/TS/JSX/TSX sources
+remain the only class sources. The JavaScript config still owns Loom's fonts,
+accent, card radius and entrance animations. `src/theme.css` preserves the
+existing sRGB values for the color shades used by Loom instead of adopting
+Tailwind 4's revised palette. Shadows, backdrop blur and hidden outlines use
+their renamed v4 utilities.
+
+`src/layout-utilities.css` owns `stack-y-*` and `stack-divide-*`. These preserve
+leading sibling margins and borders for the existing inline fields, hidden
+children and table sections. Tailwind 4's standard `space-y-*` and `divide-*`
+use trailing-child selectors and are not interchangeable with those layouts.
+Preflight compatibility rules preserve native control backgrounds, disabled
+opacity, placeholder colors, table-cell padding and date-input height. Layered
+select/textarea defaults allow explicit utility borders to take precedence.
+Application overrides share the utilities layer so selector specificity keeps
+explicit focus rings, hover states and recovery controls' 44-pixel minimum
+height ahead of less specific global defaults.
+
+The [upstream browser requirements](https://tailwindcss.com/docs/upgrade-guide#browser-requirements)
+are Safari 16.4+, Chrome 111+ and Firefox 128+ because the generated CSS relies
+on modern features including `@property` and `color-mix()`. Older browsers are
+outside this toolchain's support boundary. The required browser gate exercises
+Chromium at four viewports; it does not establish Safari/VoiceOver or Firefox
+qualification. Hover variants apply only when the primary input supports hover;
+essential actions must remain available without hovering.
+
+`e2e/style-contract.test.ts` guards the provider form's palette, spacing, shadow
+and keyboard outline, Monitor table separators, dialog surface/blur/focus,
+forced-color skip navigation and upload-button borders. Route/role/viewport,
+axe, reduced-motion and interaction checks remain required, with unchanged
+bundle and coverage limits. Local qualification does not constitute deployed
+acceptance for parent #781.
 
 ## Routing dependency and return paths (#2445)
 

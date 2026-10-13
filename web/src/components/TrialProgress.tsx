@@ -19,7 +19,7 @@ const details: Record<string, string> = {
 };
 
 export function TrialProgressPill({ progress, state }: { progress?: Progress; state: string }): JSX.Element {
-  return <div className="max-w-xs space-y-1">
+  return <div className="max-w-xs stack-y-1">
     <StatusPill variant={trialStateVariant(progress?.stage ?? state)}>
       {progress?.label ?? state}
     </StatusPill>
@@ -41,7 +41,7 @@ export function ProgressSummary({ progress, batchId }: { progress?: Summary; bat
     if (batchId) params.set("batch_id", batchId);
     return `/monitor?${params}`;
   }
-  return <section aria-label="Task progress" className="space-y-3">
+  return <section aria-label="Task progress" className="stack-y-3">
     <div className="flex flex-wrap items-baseline justify-between gap-2">
       <h3 className="font-semibold text-slate-900">Task progress</h3>
       <p className="text-xs text-slate-500">{progress.trial_count} trials · latest attempt per trial</p>

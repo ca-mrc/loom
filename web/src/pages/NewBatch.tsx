@@ -130,7 +130,7 @@ export default function NewBatch(): JSX.Element {
   } = state;
   const submissionRejection = create.isError ? parseSubmissionRejection(create.error) : null;
   return (
-    <div className="space-y-6">
+    <div className="stack-y-6">
       <header>
         <h1 className="text-2xl font-bold text-slate-900">New batch</h1>
         <p className="mt-1 text-sm text-slate-500">
@@ -144,14 +144,14 @@ export default function NewBatch(): JSX.Element {
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)]">
         {/* LEFT column */}
-        <div className="min-w-0 space-y-6">
+        <div className="min-w-0 stack-y-6">
           <section id="batch-task-selection" tabIndex={-1} aria-label="Task selection"><NewBatchTaskSelection {...state} /></section>
 
           <section id="batch-advanced" tabIndex={-1} aria-label="Advanced settings"><NewBatchAdvancedSettings {...state} /></section>
         </div>
 
         {/* RIGHT column */}
-        <div className="space-y-6">
+        <div className="stack-y-6">
           <div className="rounded-2xl bg-slate-50 p-5">
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
               <div>
@@ -171,9 +171,9 @@ export default function NewBatch(): JSX.Element {
                 + Add combination
               </Button>
             </div>
-            <div className="space-y-4">
+            <div className="stack-y-4">
               {rows.map((r, i) => (
-                <div key={r.id} id={`batch-combination-${i + 1}`} tabIndex={-1} className="space-y-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+                <div key={r.id} id={`batch-combination-${i + 1}`} tabIndex={-1} className="stack-y-3 rounded-xl border border-slate-200 bg-white p-4 shadow-xs">
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">
                       Combination {i + 1}
@@ -243,11 +243,11 @@ export default function NewBatch(): JSX.Element {
               description="Check the planned task slate and execution readiness before submitting."
               actions={<Button variant="secondary" size="sm" onClick={exportConfiguration}>Export CLI / API</Button>}
             />
-            <Card.Body className="space-y-2 text-sm text-slate-700">
+            <Card.Body className="stack-y-2 text-sm text-slate-700">
               <p>{releaseScopeText}</p>
               <p>{releaseTrialText}</p>
               <p>{releaseBackendText}</p>
-              <ul className="space-y-1">
+              <ul className="stack-y-1">
                 {releaseCombinationLines.map((line, i) => (
                   <li key={rows[i]?.id ?? i}>{line}</li>
                 ))}
@@ -256,7 +256,7 @@ export default function NewBatch(): JSX.Element {
           </Card>
           <Card>
             <Card.Header title="Batch budget" description="Set a provider spend limit for this batch." />
-            <Card.Body className="space-y-3">
+            <Card.Body className="stack-y-3">
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <label className="block">
                   <FieldLabel hint="optional">Budget USD</FieldLabel>
@@ -305,7 +305,7 @@ export default function NewBatch(): JSX.Element {
               title="Generated identity"
               description="The API stores this name and description when the batch is submitted."
             />
-            <Card.Body className="space-y-4">
+            <Card.Body className="stack-y-4">
               <label className="block">
                 <FieldLabel hint="optional">Name suffix</FieldLabel>
                 <Input

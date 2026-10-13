@@ -52,7 +52,7 @@ export default function ProvidersList(): JSX.Element {
   if (items.length === 0) {
     return (
       <Card>
-        <Card.Body className="space-y-4">
+        <Card.Body className="stack-y-4">
           <h1
             ref={headingRef}
             tabIndex={-1}
@@ -77,7 +77,7 @@ export default function ProvidersList(): JSX.Element {
   }
 
   return (
-    <div className="space-y-4">
+    <div className="stack-y-4">
       <header className="flex items-center justify-between">
         <h1
           ref={headingRef}

@@ -178,14 +178,14 @@ function ExecutionPhases({
   phases: components["schemas"]["TrialExecutionPhases"];
 }): JSX.Element {
   return (
-    <section aria-label="Execution phases" className="space-y-2">
+    <section aria-label="Execution phases" className="stack-y-2">
       <h3 className="font-semibold">Execution phases</h3>
       <p className="text-sm text-slate-600">
         {phases.verifier_execution === "separate_execution"
           ? "The agent's sandbox is released before grading; a separate verifier execution restores its workspace."
           : "The agent and verifier run in one execution."}
       </p>
-      <ol className="space-y-1 text-sm">
+      <ol className="stack-y-1 text-sm">
         {phases.phases.map((phase) => (
           <li key={`${phase.phase}-${phase.retry}`}>
             <strong>{PHASE_LABELS[phase.phase]}</strong>
@@ -233,7 +233,7 @@ function MaterializationCard({
           </StatusPill>
         }
       />
-      <Card.Body className="space-y-4">
+      <Card.Body className="stack-y-4">
         {trial.execution_selection ? (
           <ExecutionSelectionSection
             requested={trial.execution_selection.requested}
@@ -241,7 +241,7 @@ function MaterializationCard({
           />
         ) : null}
         {materialization.network_policy ? (
-          <section aria-label="Task network policy" className="space-y-2">
+          <section aria-label="Task network policy" className="stack-y-2">
             <h3 className="font-semibold">Task network access</h3>
             <dl className="grid gap-2 text-sm md:grid-cols-3">
               <div><dt className="text-slate-500">Task default</dt><dd>{networkPolicyLabel(materialization.network_policy.task_default)}</dd></div>
@@ -251,13 +251,13 @@ function MaterializationCard({
           </section>
         ) : null}
         {materialization.resource_allocation ? (
-          <section aria-label="Execution resource allocation" className="space-y-2">
+          <section aria-label="Execution resource allocation" className="stack-y-2">
             <h3 className="font-semibold">Reserved execution resources</h3>
             <p className="text-sm text-slate-600">
               Task requirements are minimums. Memory reservations equal container limits;
               the controller and both sandboxes share the node budget.
             </p>
-            <ul className="space-y-1 text-sm">
+            <ul className="stack-y-1 text-sm">
               {materialization.resource_allocation.containers.map((container) => (
                 <li key={container.role}>
                   <strong>{container.role}</strong>: {container.requests.cpu_millis / 1000} CPU reserved,
@@ -377,7 +377,7 @@ function TrialHeader({
 
   return (
     <Card>
-      <Card.Body className="space-y-5">
+      <Card.Body className="stack-y-5">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
             <p className="text-xs uppercase tracking-wider text-slate-600">
@@ -498,7 +498,7 @@ function TrialHeader({
         {provenance.length > 0 ? (
           <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
             <div className="font-semibold text-slate-900">Provenance</div>
-            <ul className="mt-1 space-y-1 text-xs text-slate-600">
+            <ul className="mt-1 stack-y-1 text-xs text-slate-600">
               {provenance.map((item, index) => (
                 <li key={index}>{provenanceLabel(item)}</li>
               ))}
@@ -513,7 +513,7 @@ function TrialHeader({
 
 function TrialArtifacts({ trial }: { trial: components["schemas"]["TrialDetail"] }): JSX.Element {
   const firstArtifactKey = trial.artifacts[0]?.key ?? null;
-  return <Card><Card.Header title="Artifacts" description="Complete bundle is the primary delivery. Individual files and reports are available below." /><Card.Body className="space-y-4">
+  return <Card><Card.Header title="Artifacts" description="Complete bundle is the primary delivery. Individual files and reports are available below." /><Card.Body className="stack-y-4">
         <div className="flex flex-wrap gap-2">
           {trial.atif_ready ? (
             <Button
@@ -555,11 +555,11 @@ function TrialArtifacts({ trial }: { trial: components["schemas"]["TrialDetail"]
 
         <p className="text-xs text-slate-600">Sharing review controls reuse outside the owning team. Available downloads follow your current access; a pending sharing scan does not mean the file is missing.</p>
         {trial.artifacts.length > 0 ? (
-          <div className="space-y-2 rounded-lg border border-slate-200 bg-slate-50/60 p-3">
+          <div className="stack-y-2 rounded-lg border border-slate-200 bg-slate-50/60 p-3">
             <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
               Artifacts
             </p>
-            <div className="space-y-2">
+            <div className="stack-y-2">
               {trial.artifacts.map((artifact, index) => {
                 const label = artifactLabel(artifact);
                 const share = artifactShareLabel(artifact);
@@ -675,7 +675,7 @@ function Trajectory({ trialId, terminal, trajectoryReady }: { trialId: string; t
         title="Trajectory"
         description={`${renderedEvents.length} events · ${liveBadge}`}
       />
-      <Card.Body className="space-y-3">
+      <Card.Body className="stack-y-3">
         {!useFallback && stream.status === "connecting" && events.length === 0 ? (
           <LoadingState />
         ) : null}
@@ -753,7 +753,7 @@ export default function TrialDetail(): JSX.Element {
   if (!trial.data) return <ErrorState error={new Error("no data")} />;
 
   return (
-    <div className="space-y-6">
+    <div className="stack-y-6">
       <div className="flex items-center justify-between gap-4">
         <Link
           to={monitorReturn}
@@ -782,7 +782,7 @@ export default function TrialDetail(): JSX.Element {
       <section id="overview"><TrialHeader trial={trial.data} /></section>
       <section id="trajectory"><Trajectory key={trialId} trialId={trialId} terminal={!ACTIVE_TRIAL_STATES.has(trial.data.state)} trajectoryReady={trial.data.trajectory_ready} /></section>
       <section id="artifacts"><TrialArtifacts trial={trial.data} /></section>
-      <section id="diagnostics" className="space-y-4"><h2 className="text-lg font-semibold">Diagnostics</h2>
+      <section id="diagnostics" className="stack-y-4"><h2 className="text-lg font-semibold">Diagnostics</h2>
       <TrialProgressTimeline progress={trial.data.progress} />
       <TaskImagePreparationCard preparations={trial.data.task_environment_preparation} />
       <MaterializationCard trial={trial.data} />

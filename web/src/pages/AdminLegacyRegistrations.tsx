@@ -38,7 +38,7 @@ export function AdminLegacyRegistrations({
             <div className="overflow-x-auto">
               <table
                 aria-label="Legacy team registrations"
-                className="min-w-full divide-y divide-slate-200 text-sm"
+                className="min-w-full stack-divide-y stack-divide-slate-200 text-sm"
               >
                 <thead className="bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
                   <tr>
@@ -62,7 +62,7 @@ export function AdminLegacyRegistrations({
                     </th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100 bg-white">
+                <tbody className="stack-divide-y stack-divide-slate-100 bg-white">
                   {registrations.data.items.map((item) => {
                     const selectedTeamId = approvalTeamIds[item.id] ?? adminTeams.data?.items[0]?.id ?? "";
                     const selectedRole = approvalRoles[item.id] ?? "member";
