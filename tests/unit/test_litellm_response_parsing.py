@@ -1,3 +1,7 @@
+from copy import deepcopy
+
+import pytest
+
 from loom_llm_gateway.litellm_wrapper import ParsedResponse, parse_litellm_response
 
 _FAKE_LITELLM_RESPONSE = {
@@ -73,6 +77,37 @@ def test_collapses_multimodal_content():
     }]
     parsed = parse_litellm_response(resp, provider="anthropic")
     assert parsed.response_content == "hello world"
+
+
+@pytest.mark.parametrize("include_content", [True, False], ids=["null", "missing"])
+def test_tool_only_response_preserves_raw_message_and_usage(include_content: bool) -> None:
+    response = deepcopy(_FAKE_LITELLM_RESPONSE)
+    message = response["choices"][0]["message"]
+    if include_content:
+        message["content"] = None
+    else:
+        del message["content"]
+    message["tool_calls"] = [{
+        "id": "call_1",
+        "type": "function",
+        "function": {"name": "lookup", "arguments": '{"key":"value"}'},
+    }]
+    response["choices"][0]["finish_reason"] = "tool_calls"
+    original = deepcopy(response)
+
+    parsed = parse_litellm_response(response, provider="openai")
+
+    assert parsed.response_content == ""
+    assert parsed.finish_reason == "tool_calls"
+    assert parsed.raw_response == original
+    assert parsed.input_tokens == 10
+    assert parsed.output_tokens == 5
+    assert parsed.cached_input_tokens == 50
+    assert parsed.cache_write_tokens == 100
+    assert parsed.provider_extras == {
+        "cache_creation_input_tokens": 100,
+        "cache_read_input_tokens": 50,
+    }
 
 
 def test_unknown_provider_counters_land_in_extras():
