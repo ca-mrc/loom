@@ -169,10 +169,11 @@ loom service down      # preserve volumes
 loom service down -v   # remove Postgres + MinIO volumes
 ```
 
-Local compose is for development, not public hosting. Production or shared
-deployments use `loom cluster` with Kubernetes, TLS Ingress, protected
-environment secrets, and release-promotion evidence. See
-[`operator-runbook.md`](runbooks/operator-runbook.md).
+Local Compose and `loom cluster` lifecycle commands are for disposable local
+development. Protected hosted deployments use the
+[Nebius deployment procedure](runbooks/nebius-deployment.md), with reviewed
+environment inputs, protected secrets and release-promotion evidence. See the
+[operator runbook](runbooks/operator-runbook.md) for environment boundaries.
 
 Running the local service stack requires Docker CLI with the Compose
 plugin; on macOS, install and start Docker Desktop, then verify
@@ -872,7 +873,8 @@ that page to return to the batch form after the model catalog is ready.
 ### Supported agents and model access
 
 Hosted submissions (New Batch, `POST /api/v1/batches`, `POST /api/v1/trials`
-and the hosted `loom eval` commands) accept five agents:
+and the hosted `loom eval` commands) expose these product agent entries; actual
+admission also depends on the deployment's execution support described below:
 
 | Agent | Model | Protocol |
 | --- | --- | --- |
@@ -887,11 +889,13 @@ Gemini CLI, Kimi CLI, Qwen CLI) stay listed so historical runs remain readable,
 but new submissions are rejected with the reason.
 
 On hosted (Nebius) deployments, native execution currently runs
-`direct-completion` (and its `litellm` alias), `terminus-2` and `oracle`.
-OpenHands and Codex are supported product entries but are not yet connected to
-native execution: `/api/v1/agents` reports them as `unavailable` with that
-reason, and hosted submissions naming them are rejected before admission. Local
-Docker execution is unaffected. Tracking: #2054.
+`direct-completion` (and its `litellm` alias), `terminus-2`, `oracle` and `codex`.
+Codex uses the [installed-harness contract](architecture/hosted-agent-harness.md#installed-harnesses).
+OpenHands is a product entry that is not yet connected to native execution:
+`/api/v1/agents` reports it as `unavailable`, and hosted submissions naming it
+are rejected before admission. Source support does not establish that a selected
+deployment, provider and task combination has passed live qualification. Local
+Docker execution has its own runtime requirements. Tracking: #2054 and #2297.
 
 Hosted Oracle runs in the same private task sandbox as Terminus-2, so it needs a
 task image (or a Dockerfile the platform prepares), and the task must have a
@@ -2034,13 +2038,16 @@ errors such as an unknown agent name. A passing audit proves dependency
 presence; close the loop with `smoke-runtime` or a normal trial/batch
 smoke before treating the agent as fully supported.
 
-In service mode, workers install the chosen adapter's CLI into the
-trial sandbox at spawn time on top of the benchmark's `task_image`.
-The first trial of a new `(task_image, agent)` combination takes a
-few extra minutes (package installs); subsequent trials hit the
-content-addressed cache and start instantly. See
+In local worker execution, adapter installation uses a cached derivative of the
+benchmark's `task_image`. A cache miss includes the package installation cost;
+a hit reuses that image. See
 [per-trial agent installation](architecture/agent-adapter.md#per-trial-agent-installation)
 for cache keys, sharing, registry configuration, and eviction settings.
+Hosted native installed harnesses instead use the declared setup phase and a
+team-scoped archive cache bound to the exact image and installation identity;
+see [installed harnesses](architecture/hosted-agent-harness.md#installed-harnesses).
+Terminus-2 runs its model loop in the controller and does not use this adapter
+installation path.
 
 ### `loom config` reference
 
@@ -2090,8 +2097,13 @@ for suppliers, permissions, cache semantics, migration and rollback.
 ## Official Recipe Pipelines
 
 `loom pipeline` is the authenticated, server-backed interface for immutable
-official Recipes. It does not accept raw graphs, images, pools, networks,
-providers, secrets, or object-store locations. A typical submission is:
+official Recipes. Hosted deployments retain historical run inspection,
+cancellation and artifact downloads, but do not accept new Pipeline runs or
+stage retries. Import/materialization APIs are separate contracts.
+
+Creation and retry require a server with explicitly enabled local development
+execution. On that local server, a submission looks like this; it does not accept
+raw graphs, images, pools, networks, providers, secrets, or object-store locations:
 
 ```bash
 loom pipeline run \
@@ -2103,8 +2115,8 @@ loom pipeline run \
 ```
 
 Use `loom pipeline list`, `show`, and `watch` to inspect it. `watch` only polls
-events; Ctrl-C stops watching and never cancels the run. `retry-stage` creates
-a new full replay PipelineRun from the original immutable inputs and snapshots;
+events; Ctrl-C stops watching and never cancels the run. In local execution,
+`retry-stage` creates a new full replay PipelineRun from the original immutable inputs and snapshots;
 it never reopens a StageRun or reuses a checkpoint. Artifact downloads use the
 same-origin authorized Loom route and never reveal an internal object-store URL.
 

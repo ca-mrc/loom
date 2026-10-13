@@ -138,8 +138,8 @@ and unknown non-document paths do not take the fast path; unknown runtime paths
 select all heavy lanes until they gain an explicit owner.
 
 Rollout and production-release authority paths are fail-closed owners: changes
-under `src/loom_cli/rollout/` and their tests, installed staging-rollout assets,
-deployment/release workflows, or release evidence verification select every
+to native rollout operations and their tests, deployment/release workflows,
+or release evidence verification select every
 heavy lane. The selected `cluster-smoke-gate` validates Nebius/common Kubernetes
 contracts. Historical staging/production profile rendering and environment
 isolation commands run only in main or manual compatibility scope. These checks
@@ -295,9 +295,9 @@ each test keeps its own data and runs any requested upgrade/downgrade operations
 in its clone. Neither the shared suite database nor another test's data is used
 as the template. Clones and the template are removed during fixture teardown.
 
-Every relevant non-draft PR runs its path-selected validation plan and emits
-the four protected contexts. Drafts and unrelated metadata events use only a
-`*-filtered` context. No label, author, reviewer, or merge coordinator grants
+Every non-draft PR event, including unrelated metadata changes, runs its
+path-selected validation plan and emits the four protected contexts. Draft
+events use only a `*-filtered` context. No label, author, reviewer, or merge coordinator grants
 gate authority; validation labels only add work to the path-inferred plan.
 
 Each protected name is the final aggregate job emitted directly by its source
@@ -351,11 +351,11 @@ the payload case's minimal synthetic passing-workspace fixtures. The immutable
 image is pulled once, then every case runs with further pulls disabled. This
 proves verifier conformance only; it is not proof that a real task or trial
 succeeded. Planner, staging-start, and release consumers use manifest-derived
-inputs. Rollout build, registry publication, and expected-image evidence use one ten-image
-matrix generated from the fixed candidate worktree's eight
-`rollout_role = "primary"` and two `rollout_role = "auxiliary"` components, then
-persisted by the build step. The two sandbox conformance images are intentionally
-excluded. Every change under `tests/integration/`
+inputs. Native candidate publication and expected-image evidence use the
+candidate's `NEBIUS_PLATFORM_IMAGES` inventory through
+`scripts/ops/nebius_candidate.py`; PR image selection uses the component ownership
+manifest. See the [current workflow inventory](ci.md#workflow-inventory) rather
+than assuming a fixed image count. Every change under `tests/integration/`
 continues to select the Docker tier;
 relevant runtime paths do too. `ci:integration` and `ci:integration-docker`
 add those tiers when paths do not already require them. The selected smoke

@@ -11,7 +11,11 @@ Keep each environment's Kubernetes credentials, databases, object buckets,
 SecretStore keys, worker tokens, provider connections, deploy credentials, and
 GitHub Environment secrets separate.
 
-| Environment | Source | Namespace | Public route | API base |
+The following names and routes describe the earlier installation. Read the
+selected deployment's reviewed environment inputs and verify its actual hostname,
+namespace and API base before operations; these examples establish no live identity.
+
+| Environment | Source | Earlier namespace | Earlier public route | Earlier API base |
 | --- | --- | --- | --- | --- |
 | development | `dev` | `loom-dev` | `https://yylx.world/dev` | `https://yylx.world/dev/api` |
 | staging | pinned `dev` SHA | `loom-staging` | `https://yylx.world/staging` | `https://yylx.world/staging/api` |
