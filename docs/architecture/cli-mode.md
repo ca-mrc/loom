@@ -226,8 +226,8 @@ against provider SDKs directly:
 client = UpstreamDirectGatewayClient(
     anthropic_client=anthropic.AsyncAnthropic(api_key=...),
     openai_client=openai.AsyncOpenAI(api_key=...),
-    google_client=genai,  # google.generativeai module
-    tokens={"anthropic": "sk-ant-...", "openai": "sk-...", "google": "g-..."},
+    google_client=None,
+    tokens={"anthropic": "sk-ant-...", "openai": "sk-..."},
 )
 resp = await client.call(GatewayCallRequest(
     model=ModelSpec(provider="anthropic", name="claude-opus-4-7"),
@@ -240,7 +240,10 @@ resp = await client.call(GatewayCallRequest(
 Dispatches on `request.model.provider`:
 - `anthropic` → `messages.create(...)`
 - `openai` → `chat.completions.create(...)`
-- `google` → `generate_content_async(...)`
+- `google` → currently broken: the CLI supplies the deprecated
+  `google.generativeai` module but calls a method absent from that module.
+  Supported SDK migration and interface qualification are tracked in
+  [#2486](https://github.com/ca-mrc/loom/issues/2486).
 - `local` → OpenAI-compatible HTTP against
   `cfg.local_providers[server].base_url` (used for user-registered
   servers AND for the transient `_auto_vllm` provider the launcher
@@ -257,9 +260,12 @@ with a hint to add one.
 `loom_worker.main_loop._default_agent_factory` but:
 
 - Takes no Control Plane client
-- For `SubprocessAgent`, substitutes a `_NoopCPClient` (the launched
-  CLI talks to the upstream provider via env-var API key in the
-  sandbox; nothing reports back to a Loom Gateway)
+- For `SubprocessAgent`, substitutes a `_NoopCPClient`. Its placeholder token
+  and empty Gateway URL do not wire the configured direct provider credentials
+  into the launched adapter. Local Terminus also has a hardcoded localhost
+  Gateway URL. These local paths require the repair in
+  [#2489](https://github.com/ca-mrc/loom/issues/2489); constructing an adapter
+  does not establish a working provider connection.
 - Routes `oracle` → `OracleAgent(task_dir, trial_id)` directly
 
 ## Concurrency
