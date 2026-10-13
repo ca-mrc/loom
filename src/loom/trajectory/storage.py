@@ -25,6 +25,8 @@ import botocore.handlers
 from botocore.config import Config
 from botocore.exceptions import ClientError, ConnectionError, HTTPClientError
 
+from loom.trajectory.upload_observation import UploadSpan, configure_s3_transport
+
 _DEFAULT_S3_MAX_POOL_CONNECTIONS = 64
 _DEFAULT_S3_CONNECT_TIMEOUT_SECONDS = 5.0
 _DEFAULT_S3_READ_TIMEOUT_SECONDS = 30.0
@@ -804,6 +806,7 @@ class MinioObjectStore:
             botocore.handlers.add_expect_header,
         )
         client.meta.events.register_last("before-call.s3", _remove_expect_header)
+        configure_s3_transport(client)
 
     def _replace_client(self, stale_client: Any) -> None:
         with self._client_lock:
@@ -825,12 +828,24 @@ class MinioObjectStore:
                 if self._closed:
                     raise RuntimeError("object store is closed")
                 client = self._client
+            observation = UploadSpan("sdk_worker", operation, attempt=attempt + 1)
+
+            def invoke(current: Any = client, span: UploadSpan = observation) -> _T:
+                # Freeze both bindings: a timed-out thread may outlive this loop
+                # iteration and its waiter. Only this thread finishes its span.
+                with span:
+                    return call(current)
+
             try:
                 return await asyncio.wait_for(
-                    asyncio.to_thread(call, client),
+                    asyncio.to_thread(invoke),
                     timeout=self._operation_timeout,
                 )
+            except asyncio.CancelledError:
+                observation.abandon_wait("cancelled")
+                raise
             except TimeoutError as exc:
+                observation.abandon_wait("timeout")
                 last_retryable = exc
                 self._replace_client(client)
                 if attempt + 1 == self._operation_attempts:
@@ -1063,12 +1078,15 @@ class MinioObjectStore:
 
     @staticmethod
     async def _copy_async_body_to_file(body: AsyncIterator[bytes], target: Any) -> None:
-        async for chunk in body:
-            if not isinstance(chunk, bytes | bytearray | memoryview):
-                raise TypeError("object stream chunks must be bytes-like")
-            await asyncio.to_thread(target.write, chunk)
-        await asyncio.to_thread(target.flush)
-        await asyncio.to_thread(target.seek, 0)
+        with UploadSpan("spool", "copy") as span:
+            span.observed_bytes = 0
+            async for chunk in body:
+                if not isinstance(chunk, bytes | bytearray | memoryview):
+                    raise TypeError("object stream chunks must be bytes-like")
+                await asyncio.to_thread(target.write, chunk)
+                span.observed_bytes += len(chunk)
+            await asyncio.to_thread(target.flush)
+            await asyncio.to_thread(target.seek, 0)
 
     async def upload_part_stream(
         self,
