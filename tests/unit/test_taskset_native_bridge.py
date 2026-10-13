@@ -134,6 +134,16 @@ def test_custom_verifier_is_not_replaced(tmp_path):
     assert not any(key.endswith("verifier/run.sh") for key in store.objects)
 
 
+def test_explicit_pytest_verifier_is_not_treated_as_native_script(tmp_path):
+    result, store, files = materialize(tmp_path, verifier='name = "pytest"')
+    assert result.status == "ready", result.error_summary
+    row = result.task_rows[0]
+    assert row.config["verifier"]["name"] == "pytest"
+    prefix = row.source.removeprefix("s3://artifacts/")
+    assert store.objects[prefix + "task.toml"] == files["task.toml"]
+    assert not any(key.endswith("verifier/run.sh") for key in store.objects)
+
+
 def test_compose_requirement_is_not_silently_discarded(tmp_path):
     result, _, _ = materialize(
         tmp_path, extra_files={"environment/compose.yaml": b"services: {}\n"},

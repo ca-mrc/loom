@@ -38,6 +38,8 @@ validated execution config also stored in the task row, so the executor reads
 the same contract as admission. Published bundles, checksums and execution input
 manifests include both configs and the generated private bridge. Missing test entrypoints or
 collisions at `verifier/run.sh` fail materialization with a diagnostic.
+An explicitly selected non-script verifier (such as `pytest`) or a custom
+script path keeps its existing intake behavior and does not receive this bridge.
 
 The projected verifier defaults to `shared`; explicit modes are preserved.
 An independent verifier environment or `tests/Dockerfile` defaults to

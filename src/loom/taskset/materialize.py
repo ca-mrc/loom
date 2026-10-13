@@ -450,6 +450,7 @@ def _materialize_bundle_upload(
                     native_bridge = False
                     if (
                         harbor_source
+                        and raw_cfg["verifier"].get("name") == "script"
                         and raw_cfg["verifier"].get("args", {}).get("script_path")
                         == DEFAULT_VERIFIER_SCRIPT_PATH
                     ):
