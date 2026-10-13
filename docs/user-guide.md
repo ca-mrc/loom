@@ -2102,19 +2102,12 @@ cancellation and artifact downloads, but do not accept new Pipeline runs or
 stage retries. Import/materialization APIs are separate contracts.
 
 Creation and retry require a server with explicitly enabled local development
-execution. On that local server, a submission looks like this; it does not accept
-raw graphs, images, pools, networks, providers, secrets, or object-store locations:
+execution and an installed recipe in that server's registry. Enabling local
+execution does not restore retired recipes such as `behavior-recovery@1`.
+Submissions do not accept raw graphs, images, pools, networks, providers, secrets,
+or object-store locations.
 
-```bash
-loom pipeline run \
-  --recipe behavior-recovery@1 \
-  --input task_set=00000000-0000-4000-8000-000000000001 \
-  --params @params.json \
-  --budget @budget.json \
-  --idempotency-key my-run-001
-```
-
-Use `loom pipeline list`, `show`, and `watch` to inspect it. `watch` only polls
+Use `loom pipeline list`, `show`, and `watch` to inspect retained runs. `watch` only polls
 events; Ctrl-C stops watching and never cancels the run. In local execution,
 `retry-stage` creates a new full replay PipelineRun from the original immutable inputs and snapshots;
 it never reopens a StageRun or reuses a checkpoint. Artifact downloads use the
