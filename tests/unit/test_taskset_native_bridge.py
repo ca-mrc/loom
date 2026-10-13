@@ -190,3 +190,60 @@ storage_mb = 6144
     prefix = row.source.removeprefix("s3://artifacts/")
     assert store.objects[prefix + "upstream-task.toml"] == original
     assert TaskConfig.model_validate(tomllib.loads(store.objects[prefix + "task.toml"].decode())) == task
+
+
+@pytest.mark.parametrize("privileged", [False, True])
+def test_single_service_compose_preserves_source_and_requires_guest_for_privilege(tmp_path, privileged):
+    from loom.execution_requirements import GUEST_EXECUTION_CAPABILITIES
+
+    compose = ("services:\n  app:\n    build: .\n    privileged: "
+               + str(privileged).lower() + "\n    stdin_open: true\n    tty: true\n").encode()
+    result, store, _ = materialize(tmp_path, extra_files={"environment/compose.yaml": compose})
+    assert result.status == "ready", result.error_summary
+    row = result.task_rows[0]
+    task = TaskConfig.model_validate(row.config)
+    projection = task.environment.single_service_compose
+    assert projection.privileged == privileged
+    assert projection.stdin_open and projection.tty
+    prefix = row.source.removeprefix("s3://artifacts/")
+    assert store.objects[prefix + "environment/compose.yaml"] == compose
+    options = dict(source_provenance=row.source_provenance, allow_task_image_preparation=True,
+                   supported_capabilities=GUEST_EXECUTION_CAPABILITIES)
+    trial = TrialConfig(agent_name="oracle", agent_model=None)
+    reasons = automatic_service_execution_rejections(task, trial, **options)
+    if privileged:
+        assert task.environment.user == task.verifier.user == "root"
+        assert "isolation_guest_shared_unsupported" in reasons
+        assert "isolation_container_unsatisfiable" in automatic_service_execution_rejections(
+            task, trial.model_copy(update={"isolation": "container"}), **options,
+            supports_shared_guest=True)
+    else:
+        assert reasons == ()
+    assert automatic_service_execution_rejections(task, trial, **options, supports_shared_guest=True) == ()
+
+
+@pytest.mark.parametrize("extra", ["volumes: ['/etc:/host']", "network_mode: host",
+                                    "devices: ['/dev/kvm']", "command: echo changed"])
+def test_unsupported_compose_semantics_remain_blocked(tmp_path, extra):
+    result, _, _ = materialize(tmp_path, extra_files={
+        "environment/compose.yaml": f"services:\n  app:\n    build: .\n    {extra}\n".encode(),
+    })
+    assert result.status == "ready", result.error_summary
+    row = result.task_rows[0]
+    assert "environment.compose_files: native_compose_runtime_unavailable" in automatic_service_execution_rejections(
+        TaskConfig.model_validate(row.config), TrialConfig(agent_name="oracle", agent_model=None),
+        source_provenance=row.source_provenance, allow_task_image_preparation=True,
+        supports_shared_guest=True)
+
+
+def test_compose_build_path_overrides_only_inferred_harbor_defaults(tmp_path):
+    extra = {
+        "environment/compose.yaml": b"services:\n  app:\n    build:\n      context: custom\n      dockerfile: Containerfile\n",
+        "environment/custom/Containerfile": b"FROM ubuntu:22.04\n",
+    }
+    result, _, _ = materialize(tmp_path, extra_files=extra)
+    assert result.status == "ready", result.error_summary
+    assert result.task_rows[0].config["environment"]["dockerfile"] == "environment/custom/Containerfile"
+    conflicting, _, _ = materialize(tmp_path, extra_files=extra, environment='dockerfile = "environment/Dockerfile"')
+    assert conflicting.status == "failed"
+    assert "conflict with Compose" in str(conflicting.error_summary)

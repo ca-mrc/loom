@@ -55,26 +55,36 @@ set +e
 rc=$?
 set -e
 if [ "$rc" -eq 124 ]; then exit 1; fi
-python3 - "$logs" "$LOOM_VERIFIER_OUTPUT" "$rc" <<'REWARD_PY'
+python_bin=$(command -v python3 || command -v python)
+"$python_bin" - "$logs" "$LOOM_VERIFIER_OUTPUT" "$rc" <<'REWARD_PY'
+from __future__ import print_function
 import json
 import math
+import numbers
+import os
 import sys
-from pathlib import Path
-logs, output = Path(sys.argv[1]), Path(sys.argv[2])
+logs, output = sys.argv[1], sys.argv[2]
 try:
-    if (logs / "reward.txt").exists():
-        rewards = {"resolved": float((logs / "reward.txt").read_text().strip())}
+    string_types = (basestring,)
+except NameError:
+    string_types = (str,)
+try:
+    if os.path.exists(os.path.join(logs, "reward.txt")):
+        with open(os.path.join(logs, "reward.txt")) as source:
+            rewards = {"resolved": float(source.read().strip())}
     else:
-        rewards = json.loads((logs / "reward.json").read_text())
+        with open(os.path.join(logs, "reward.json")) as source:
+            rewards = json.load(source)
     if not isinstance(rewards, dict) or not rewards:
         raise ValueError("required numeric reward is missing")
-    if any(not isinstance(k, str) or isinstance(v, bool) or not isinstance(v, (int, float))
-           or not math.isfinite(v) for k, v in rewards.items()):
+    if any(not isinstance(k, string_types) or isinstance(v, bool) or not isinstance(v, numbers.Real)
+           or math.isnan(v) or math.isinf(v) for k, v in rewards.items()):
         raise ValueError("required reward is malformed or non-finite")
-except (OSError, ValueError) as exc:
+except (IOError, OSError, ValueError, OverflowError) as exc:
     print("harbor_reward_error=" + str(exc), file=sys.stderr)
     raise SystemExit(1)
-output.write_text(json.dumps({"rewards": rewards, "structured": {"test_sh_returncode": int(sys.argv[3])}}) + "\\n")
+with open(output, "w") as target:
+    target.write(json.dumps({"rewards": rewards, "structured": {"test_sh_returncode": int(sys.argv[3])}}) + "\\n")
 REWARD_PY
 """
 

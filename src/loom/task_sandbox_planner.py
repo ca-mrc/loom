@@ -115,6 +115,7 @@ class _Topology:
     guest_execution: GuestExecutionV1 | None
     shared: bool
     retained_services: bool
+    shared_guest: bool = False
 
     @property
     def colocated_verifier(self) -> bool:
@@ -126,11 +127,11 @@ class _Topology:
 
     @property
     def in_place_verifier(self) -> bool:
-        return self.shared and self.guest_execution is None
+        return self.shared and (self.guest_execution is None or self.shared_guest)
 
     @property
     def sandbox_roles(self) -> tuple[str, ...]:
-        fresh_verifier = self.guest_execution is not None or (self.colocated_verifier and not self.shared)
+        fresh_verifier = (self.guest_execution is not None and not self.in_place_verifier) or (self.colocated_verifier and not self.shared)
         return (TASK_SANDBOX, VERIFIER_SANDBOX) if fresh_verifier else (TASK_SANDBOX,)
 
     @property
@@ -138,13 +139,14 @@ class _Topology:
         return self.shared or (self.colocated_verifier and self.guest_execution is None)
 
 
-def _topology(task: TaskConfig, trial: TrialConfig) -> _Topology:
+def _topology(task: TaskConfig, trial: TrialConfig, *, shared_guest: bool = False) -> _Topology:
     capabilities = effective_guest_capabilities(task, trial)
     return _Topology(
         guest_execution=(GuestExecutionV1(capabilities=tuple(sorted(capabilities)))
                          if capabilities is not None else None),
         shared=resolve_verifier_env_mode(task, trial) == "shared",
         retained_services=task.environment.service_lifecycle is not None,
+        shared_guest=shared_guest,
     )
 
 
@@ -286,7 +288,7 @@ def compile_task_sandbox_plan(request: TaskSandboxPlanRequest) -> ExecutionRunti
     env = task.environment
     assert spec.workspace, "response-only harnesses never receive a task sandbox"
     assert env.docker_image and env.cpus and env.memory_mb and env.storage_mb
-    topology = _topology(task, trial)
+    topology = _topology(task, trial, shared_guest=profile.supports_shared_guest)
     guest = topology.guest_execution
     resources = ContainerResourcesV1(
         cpu_millis=round(env.cpus * 1000), memory_mib=env.memory_mb, ephemeral_storage_mib=env.storage_mb,

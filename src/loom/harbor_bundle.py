@@ -3,6 +3,7 @@
 from pathlib import Path
 from typing import Any
 
+from loom.harbor_compose import project_single_service_compose
 from loom.harbor_verifier_script import VERIFIER_SCRIPT_PATH, native_verifier_run_sh_bytes
 
 
@@ -36,16 +37,20 @@ def prepare_harbor_bundle(bundle: Path, config: dict[str, Any]) -> None:
     ]
     if compose:
         environment["compose_files"] = compose
+        project_single_service_compose(bundle, environment)
     if (bundle / "tests/Dockerfile").is_file():
         env = dict(verifier.get("environment") or environment)
         env.pop("docker_image", None)
         env.pop("compose_files", None)
+        env.pop("single_service_compose", None)
         env.update(dockerfile="tests/Dockerfile", docker_build_context="tests")
         verifier["environment"] = env
         verifier.setdefault("env_mode", "separate")
     if verifier.get("environment") is not None:
         verifier.setdefault("env_mode", "separate")
     verifier.setdefault("env_mode", "shared")
+    if environment.get("single_service_compose", {}).get("privileged"):
+        verifier.setdefault("user", "root")
     bridge.parent.mkdir(exist_ok=True)
     bridge.write_bytes(native_verifier_run_sh_bytes())
     bridge.chmod(0o755)

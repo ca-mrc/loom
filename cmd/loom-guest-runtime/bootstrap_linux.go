@@ -233,7 +233,9 @@ func guestEnvironment(original []string) []string {
 	if path == "" {
 		path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 	}
-	values["PATH"] = "/loom/guest-wrappers:" + guestPayload + "/docker:" + guestPayload + "/bin:" + path
+	// Preserve image-authored tools, including task mocks. Payload tools are
+	// fallbacks; the trusted daemon selects its own dependency path below.
+	values["PATH"] = path + ":/loom/guest-wrappers:" + guestPayload + "/docker:" + guestPayload + "/bin"
 	keys := make([]string, 0, len(values))
 	for key := range values {
 		keys = append(keys, key)
@@ -251,7 +253,13 @@ func startDocker(environment []string) error {
 		return err
 	}
 	daemon := exec.Command(guestPayload+"/docker/dockerd", "--host=unix:///var/run/docker.sock", "--data-root=/var/lib/docker", "--exec-root=/run/docker", "--storage-driver=overlay2", "--pidfile=/run/docker.pid")
-	daemon.Env = append(append([]string(nil), environment...),
+	daemonEnvironment := guestEnvironment(environment)
+	for i, entry := range daemonEnvironment {
+		if strings.HasPrefix(entry, "PATH=") {
+			daemonEnvironment[i] = "PATH=/loom/guest-wrappers:" + guestPayload + "/docker:" + guestPayload + "/bin:" + strings.TrimPrefix(entry, "PATH=")
+		}
+	}
+	daemon.Env = append(daemonEnvironment,
 		"HTTP_PROXY=http://10.0.2.2:18791", "HTTPS_PROXY=http://10.0.2.2:18791",
 		"NO_PROXY=localhost,127.0.0.1,::1")
 	daemon.Stdout, daemon.Stderr = os.Stdout, os.Stderr

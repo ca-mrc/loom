@@ -42,7 +42,11 @@ collisions at `verifier/run.sh` fail materialization with a diagnostic.
 The projected verifier defaults to `shared`; explicit modes are preserved.
 An independent verifier environment or `tests/Dockerfile` defaults to
 `separate` and remains an explicit runtime requirement. Compose files are
-likewise retained as requirements, not silently flattened into one container.
+retained byte-for-byte. A bounded single-service local-build workbench is
+projected to native execution; `privileged` requires a private root guest and
+shared-guest deployment readiness. Mounts, devices, networking overrides, custom
+service commands and multiple services remain explicit admission blockers. See
+[guest execution](guest-execution.md) for the supported contract.
 When no network policy is declared, Harbor internet access is projected to
 `public-web` (HTTP/HTTPS through the hosted gateway). This does not provide
 unrestricted TCP access. Explicit offline policies and allowlists are preserved;
@@ -51,6 +55,8 @@ is retained; conflicting task/environment declarations fail import. Offline
 tasks remain `no-network` through native admission, plan and sandbox policy.
 Only authored artifact paths are projected. Verifier reward and optional CTRF
 are collected by the verifier runtime, not by an injected agent-artifact glob.
+The numeric reward bridge supports either Python 3 or legacy Python 2.7 in the
+task image, without installing dependencies or changing original tests.
 
 Already materialized TaskSets need an ordinary `loom tasksets rebuild ID_OR_SLUG`
 after deploying this change. Rebuild uses the retained archive and publishes a

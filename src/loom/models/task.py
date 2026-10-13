@@ -20,7 +20,13 @@ from pydantic import (
 )
 
 from loom.execution_requirements import TaskExecutionRequirementsV1
-from loom.models.harbor import ArtifactSource, HarborConversion, UpstreamOrigin, VerifierCollect
+from loom.models.harbor import (
+    ArtifactSource,
+    HarborConversion,
+    SingleServiceCompose,
+    UpstreamOrigin,
+    VerifierCollect,
+)
 from loom.models.healthcheck import HealthcheckSpec
 from loom.models.mcp import MCPConnection
 from loom.models.networking import NetworkPolicy, Public
@@ -154,6 +160,7 @@ class EnvironmentConfig(BaseModel):
     gpus: int = Field(default=0, ge=0)
     gpu_types: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
     compose_files: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
+    single_service_compose: SingleServiceCompose | None = Field(default=None, exclude_if=lambda value: value is None)
     sidecars: list[TaskSidecarConfig] = []
 
     @model_validator(mode="after")
@@ -164,6 +171,16 @@ class EnvironmentConfig(BaseModel):
             path = PurePosixPath(value)
             if not value or path.is_absolute() or ".." in path.parts or "\\" in value or "\x00" in value:
                 raise ValueError("compose_files must reference paths inside the task bundle")
+        if self.single_service_compose is not None:
+            compose = self.single_service_compose
+            if self.compose_files != (compose.source,):
+                raise ValueError("single-service Compose must cover exactly its retained source")
+            if compose.privileged and (
+                self.execution_requirements is None
+                or "isolated_kernel_settings" not in self.execution_requirements.capabilities
+                or self.user not in {"root", "0", "0:0"}
+            ):
+                raise ValueError("privileged Compose requires a root sandbox with an isolated guest kernel")
         return self
 
     @model_serializer(mode="wrap")

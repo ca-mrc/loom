@@ -397,3 +397,29 @@ async def test_service_admission_uses_deployment_opt_in(monkeypatch, ready):
     else:
         with pytest.raises(HTTPException, match="nested_docker_unqualified"):
             await admit_execution_backend(session, **args)
+
+
+def test_shared_guest_keeps_one_live_sandbox_and_requires_deployment_readiness():
+    from loom.service_execution_materialization import execution_selection_rejections
+
+    task, trial, old = _guest_inputs("isolated_kernel_settings")
+    task = task.model_copy(update={"verifier": task.verifier.model_copy(update={"env_mode": "shared"})})
+    trial = trial.model_copy(update={"verifier_env_mode": "shared"})
+    assert "isolation_guest_shared_unsupported" in execution_selection_rejections(
+        task, trial, old, source_provenance=_provenance())
+    profile = ServiceExecutionRuntimeProfileV1.model_validate({
+        **old.model_dump(mode="json"), "supports_shared_guest": True,
+    })
+    assert execution_selection_rejections(task, trial, profile, source_provenance=_provenance()) == ()
+    plan = _compile(task, trial, profile)
+    assert plan.in_place_verifier
+    assert [s.role_name for s in plan.sidecars] == ["task-sandbox"]
+    assert plan.sidecars[0].guest_execution.capabilities == ("isolated_kernel_settings",)
+    assert plan.verifier is not None
+    assert plan.verifier_execution == "in_attempt"
+    assert ExecutionRuntimePlanV1.model_validate(plan.canonical_payload()) == plan
+    validate_runtime_plan_requirements(plan, workload_requirements_from_task(task, trial))
+    raw = plan.canonical_payload()
+    raw["sidecars"][0]["role_name"] = "verifier-sandbox"
+    with pytest.raises(ValueError):
+        ExecutionRuntimePlanV1.model_validate(raw)
