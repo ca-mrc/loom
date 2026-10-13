@@ -516,7 +516,7 @@ def automatic_service_execution_rejections(
                 resolve_sandbox_identity(task.verifier.user, env.environment.get("HOME"))
         except ValueError:
             reasons.append("unsupported_task_identity")
-    if effective_network_policy.kind not in {"gateway-only", "web-allowlist", "public-web"}:
+    if effective_network_policy.kind not in {"no-network", "gateway-only", "web-allowlist", "public-web"}:
         reasons.append("gateway_only_network_required")
     if (
         hosted_http_egress(effective_network_policy) is not None

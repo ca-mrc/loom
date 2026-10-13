@@ -3,11 +3,13 @@
 import io
 import json
 import tarfile
+import tomllib
 from uuid import uuid4
 
 import pytest
 
 from loom.harbor_verifier_script import native_verifier_run_sh_bytes
+from loom.models.task import TaskConfig
 from loom.models.task_checksum import task_checksum
 from loom.models.taskset import UserTaskSetManifest
 from loom.taskset.materialize import materialize_task_set
@@ -54,11 +56,6 @@ def test_taskset_intake_uses_stable_source_identity_and_preserves_authored_bytes
         path = authored_dir / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
-    # Publication retains every authored byte and adds the shared native bridge.
-    published_files = {**files, "verifier/run.sh": native_verifier_run_sh_bytes()}
-    (authored_dir / "verifier").mkdir()
-    (authored_dir / "verifier/run.sh").write_bytes(published_files["verifier/run.sh"])
-    expected_checksum = task_checksum(authored_dir)
     archive_files = dict(files)
     if include_transport_metadata:
         archive_files[".loom-bundle-files.v1.json"] = b'{"files":{},"schema_version":1}'
@@ -91,7 +88,16 @@ def test_taskset_intake_uses_stable_source_identity_and_preserves_authored_bytes
     assert task.config["environment"]["memory_mb"] == 2048
     assert task.config["environment"]["cpus"] == 2
     stored_key = task.source.removeprefix("s3://artifacts/") + "task.toml"
-    assert store.objects[stored_key] == authored
+    assert TaskConfig.model_validate(tomllib.loads(store.objects[stored_key].decode())).model_dump(mode="json") == task.config
+    published_files = {
+        **files, "upstream-task.toml": authored, "task.toml": store.objects[stored_key],
+        "verifier/run.sh": native_verifier_run_sh_bytes(),
+    }
+    for name, content in published_files.items():
+        path = authored_dir / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+    expected_checksum = task_checksum(authored_dir)
     binding = task.source_provenance["service_execution_input"]
     manifest = json.loads(store.objects[binding["manifest_uri"].removeprefix("s3://artifacts/")])
     assert [item["relative_path"] for item in manifest["files"]] == sorted(published_files)

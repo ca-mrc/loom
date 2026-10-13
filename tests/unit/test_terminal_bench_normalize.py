@@ -124,7 +124,7 @@ class TestNormalizeMapping:
         }
         assert cfg.required_agent_capabilities == frozenset()
         assert "required_agent_capabilities" not in normalized
-        assert cfg.steps[0].artifacts == ["logs/verifier/**"]
+        assert cfg.steps[0].artifacts == []
         assert raw["schema_version"] == "1.1"
         assert raw["environment"]["architecture"] == "x86_64"
 
@@ -174,7 +174,7 @@ class TestNormalizeMapping:
         assert cfg.agent.timeout_sec == 18000.0
         assert cfg.verifier.env_mode == "separate"
         assert cfg.verifier.timeout_sec == 600.0
-        assert cfg.steps[0].artifacts == ["logs/verifier/**"]
+        assert cfg.steps[0].artifacts == []
         assert "authors" not in normalized["task"]
         assert "metadata" not in normalized
 
@@ -212,7 +212,6 @@ class TestNormalizeMapping:
         assert cfg.verifier.env_mode == "separate"
         assert cfg.steps[0].artifacts == [
             "relative-output.json",
-            "logs/verifier/**",
         ]
         assert cfg.verifier.environment is not None
         assert cfg.verifier.environment.memory_mb == 4096
@@ -262,7 +261,7 @@ class TestNormalizeMapping:
         cfg = TaskConfig.model_validate(normalize_terminal_bench_task_toml(raw))
         assert cfg.environment.baseline_network_policy.kind == "web-allowlist"
 
-    def test_native_tb21_appends_verifier_artifact_glob_without_replacing_source_patterns(
+    def test_native_tb21_preserves_only_authored_artifact_patterns(
         self,
     ) -> None:
         raw = {
@@ -275,8 +274,21 @@ class TestNormalizeMapping:
         normalized = normalize_terminal_bench_task_toml(raw)
         cfg = TaskConfig.model_validate(normalized)
 
-        assert cfg.steps[0].artifacts == ["result.json", "logs/verifier/**"]
+        assert cfg.steps[0].artifacts == ["result.json"]
         assert raw["artifacts"] == ["result.json"]
+
+    def test_explicit_artifact_glob_is_preserved(self) -> None:
+        raw = {"task": {"name": "authored-artifacts"}, "artifacts": ["logs/verifier/**"]}
+        cfg = TaskConfig.model_validate(normalize_terminal_bench_task_toml(raw))
+        assert cfg.steps[0].artifacts == ["logs/verifier/**"]
+
+    def test_conflicting_legacy_network_declarations_fail(self) -> None:
+        raw = {
+            "task": {"name": "conflicting-network", "allow_internet": False},
+            "environment": {"allow_internet": True},
+        }
+        with pytest.raises(ValueError, match=r"task\.allow_internet conflicts"):
+            normalize_terminal_bench_task_toml(raw)
 
     def test_produces_valid_loom_taskconfig(self) -> None:
         normalized = normalize_terminal_bench_task_toml(_tb_raw())

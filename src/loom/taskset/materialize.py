@@ -447,13 +447,21 @@ def _materialize_bundle_upload(
                     contextual_id = slug if relative == Path(".") else relative.as_posix()
                     harbor_source = is_terminal_bench_shape(raw_cfg)
                     raw_cfg = normalize_terminal_bench_task_toml(raw_cfg, task_id=contextual_id)
+                    native_bridge = False
                     if (
                         harbor_source
                         and raw_cfg["verifier"].get("args", {}).get("script_path")
                         == DEFAULT_VERIFIER_SCRIPT_PATH
                     ):
                         prepare_harbor_bundle(bundle_dir, raw_cfg)
+                        native_bridge = True
                     task_config = normalize_steps(TaskConfig.model_validate(raw_cfg))
+                    if native_bridge:
+                        original_config = bundle_dir / "upstream-task.toml"
+                        if original_config.exists() or original_config.is_symlink():
+                            raise ValueError("native package collides with reserved upstream-task.toml")
+                        original_config.write_bytes(task_toml.read_bytes())
+                        task_toml.write_text(tomli_w.dumps(task_config.model_dump(mode="json", exclude_none=True)))
                     execution_cpu_arch(task_config.environment.cpu_arch)
                     rendered_task_id = task_config.task.id
                     short_id = _safe_task_segment(rendered_task_id)

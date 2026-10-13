@@ -32,9 +32,11 @@ IDs. A TaskSet must be `ready` or `partial` before its tasks can run.
 Harbor-shaped uploads using the default script verifier share the native
 catalog bundle adapter. It adds `verifier/run.sh`, which executes the original
 `tests/test.sh` and converts its numeric reward into Loom's verifier result.
-The original archive and every authored file, including `task.toml`, tests and
-solution, remain unchanged. Published bundles, checksums and execution input
-manifests include the generated private bridge. Missing test entrypoints or
+The original archive, tests and solution remain unchanged. The original config
+is preserved byte-for-byte in `upstream-task.toml`; `task.toml` contains the
+validated execution config also stored in the task row, so the executor reads
+the same contract as admission. Published bundles, checksums and execution input
+manifests include both configs and the generated private bridge. Missing test entrypoints or
 collisions at `verifier/run.sh` fail materialization with a diagnostic.
 
 The projected verifier defaults to `shared`; explicit modes are preserved.
@@ -44,7 +46,11 @@ likewise retained as requirements, not silently flattened into one container.
 When no network policy is declared, Harbor internet access is projected to
 `public-web` (HTTP/HTTPS through the hosted gateway). This does not provide
 unrestricted TCP access. Explicit offline policies and allowlists are preserved;
-unsupported runtime combinations still fail admission.
+unsupported runtime combinations still fail admission. Legacy `[task].allow_internet`
+is retained; conflicting task/environment declarations fail import. Offline
+tasks remain `no-network` through native admission, plan and sandbox policy.
+Only authored artifact paths are projected. Verifier reward and optional CTRF
+are collected by the verifier runtime, not by an injected agent-artifact glob.
 
 Already materialized TaskSets need an ordinary `loom tasksets rebuild ID_OR_SLUG`
 after deploying this change. Rebuild uses the retained archive and publishes a

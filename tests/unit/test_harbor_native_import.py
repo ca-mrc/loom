@@ -107,7 +107,7 @@ def test_projection_is_pure_and_preserves_independent_requirements():
     assert task.verifier.collect[0].service == "db"
     assert task.steps[0].artifact_sources[0].source == "/app/output"
     assert task.steps[0].artifact_sources[1].destination == "db"
-    assert task.steps[0].artifacts == ["result.txt", "logs/verifier/**"]
+    assert task.steps[0].artifacts == ["result.txt"]
     restored = TaskConfig.model_validate_json(task.model_dump_json())
     assert restored == task
     assert (
