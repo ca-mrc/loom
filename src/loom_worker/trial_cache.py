@@ -195,7 +195,7 @@ def _build_layered_image_sync(
             # RUN command — useless for diagnosing WHY the install
             # script failed. Walk build_log and surface the trailing
             # 40 lines so operators see pip's / apt's actual error.
-            # Same shape as task_image._format_build_log_tail (#350).
+            # Preserve the full log separately for diagnostic downloads.
             tail, full_log = _format_build_log_sections(exc.build_log)
             diagnostic_detail = f"failed to build layered image {tag!r}: {exc}" + (
                 f"\nbuild log (full):\n{full_log}" if full_log else ""
@@ -212,31 +212,6 @@ def _build_layered_image_sync(
 
 
 _BUILD_LOG_TAIL_LINES = 40
-
-
-def _format_build_log_tail(build_log: Any) -> str:
-    """Same shape as task_image._format_build_log_tail (#350) but
-    locally implemented to avoid a cross-module import."""
-    if build_log is None:
-        return ""
-    lines: list[str] = []
-    try:
-        for chunk in build_log:
-            if isinstance(chunk, dict):
-                text = chunk.get("stream") or chunk.get("error") or ""
-            else:
-                text = str(chunk)
-            if not text:
-                continue
-            for line in text.splitlines():
-                stripped = line.rstrip()
-                if stripped:
-                    lines.append(stripped)
-    except Exception:
-        pass
-    if not lines:
-        return ""
-    return "\n".join(lines[-_BUILD_LOG_TAIL_LINES:])
 
 
 def _format_build_log_sections(build_log: Any) -> tuple[str, str]:

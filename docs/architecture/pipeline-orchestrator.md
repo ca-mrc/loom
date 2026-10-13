@@ -56,6 +56,11 @@ GPU selections and execution snapshots remain readable, but are not eligible for
 new claims. Pipeline classes awaiting native conversion are documented in the
 [compatibility report](../evidence/service-workload-compatibility-v2.json).
 
+The worker client has no distributed acceptance fault-arm API. The repository
+fault matrix omits its retired scenario (row 41) while preserving the remaining
+row identities. Artifact multipart fault injection remains a local test hook;
+its test proves abort-after-persist cleanup, not distributed fault-arm execution.
+
 ## BEHAVIOR rollout stage
 
 The repository includes one executable BEHAVIOR stage adapter under

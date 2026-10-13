@@ -545,41 +545,6 @@ def _ensure_dockerfile_image(
             client.close()
 
 
-def _format_build_log_tail(build_log: Any) -> str:
-    """Walk docker-py's build_log iterator and return the last
-    `_BUILD_LOG_TAIL_LINES` lines of stdout/stderr from the build,
-    joined with newlines. Returns empty string if the log is missing
-    or empty (e.g. the build never started — caller's outer message
-    is enough on its own)."""
-    if build_log is None:
-        return ""
-    lines: list[str] = []
-    try:
-        for chunk in build_log:
-            # Each chunk is a dict like {"stream": "Step 2/4 : RUN ...\n"}
-            # or {"error": "..."} or {"errorDetail": {...}}.
-            if isinstance(chunk, dict):
-                text = chunk.get("stream") or chunk.get("error") or ""
-            else:
-                text = str(chunk)
-            if not text:
-                continue
-            # Split multi-line chunks so the tail-N is line-accurate,
-            # not chunk-accurate.
-            for line in text.splitlines():
-                stripped = line.rstrip()
-                if stripped:
-                    lines.append(stripped)
-    except Exception:
-        # build_log iteration is best-effort. If iterating itself
-        # raises (rare — docker-py may surface a partial stream), we
-        # still want the outer error message to surface.
-        pass
-    if not lines:
-        return ""
-    return "\n".join(lines[-_BUILD_LOG_TAIL_LINES:])
-
-
 def _format_build_log_sections(build_log: Any) -> tuple[str, str]:
     """Return ``(tail, full)`` build-log strings from docker-py's iterator."""
     if build_log is None:
