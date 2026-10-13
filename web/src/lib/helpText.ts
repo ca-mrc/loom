@@ -31,35 +31,3 @@ export function helpForState(value: unknown): string | undefined {
   const key = String(value).trim().toLowerCase().replace(/\s+/g, "_");
   return STATUS_HELP_TEXT[key];
 }
-
-export type HumanizedStateKind =
-  | "batch"
-  | "provider"
-  | "token"
-  | "trial"
-  | "generic";
-
-export interface HumanizedState {
-  state: string;
-  label: string;
-  description: string | undefined;
-}
-
-export function humanizeState(
-  kind: HumanizedStateKind,
-  value: unknown,
-): HumanizedState {
-  const state = String(value ?? "unknown");
-  return {
-    state,
-    label: labelForState(kind, state),
-    description: helpForState(state),
-  };
-}
-
-function labelForState(kind: HumanizedStateKind, state: string): string {
-  if (kind === "provider" && state === "valid") return "Ready";
-  if (kind === "provider" && state === "invalid") return "Needs attention";
-  if (kind === "provider" && state === "untested") return "Untested";
-  return state.replaceAll("_", " ");
-}
