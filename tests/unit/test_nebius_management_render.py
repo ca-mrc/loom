@@ -181,6 +181,9 @@ def test_manager_accepts_current_publication_without_inheriting_standalone_task_
 def test_manager_task_egress_capability_does_not_require_execution_configuration(
     request, configured, capable, application_only,
 ):
+    from loom.nebius_platform_render import digest
+    from loom_service.environment_management.deployment import ManagementDeployment
+
     selected = request.getfixturevalue('application_management_inputs' if application_only else 'management_inputs')
     deployment, _, profile = selected
     foundation = deployment['installation']['foundation']
@@ -193,6 +196,10 @@ def test_manager_task_egress_capability_does_not_require_execution_configuration
     before = copy.deepcopy(selected)
     result = render(selected)
     assert selected == before
+    assert result.revision == digest({
+        'deployment': ManagementDeployment.model_validate(deployment).model_dump(mode='json'),
+        'candidate': selected[1], 'profile': profile,
+    })
     assert 'task_egress' not in result.config
     docs = documents(result)
     assert [(doc['kind'], doc['metadata']['name']) for doc in docs
@@ -203,6 +210,40 @@ def test_manager_task_egress_capability_does_not_require_execution_configuration
     assert env['LOOM_SVC_SERVICE_MODE']['value'] == 'management'
     assert not any('TASK_EGRESS' in name for name in env)
     assert all('task-egress.json' not in doc.get('data', {}) for doc in docs if doc['kind'] == 'ConfigMap')
+
+
+@pytest.mark.parametrize('application_only', [False, True])
+@pytest.mark.parametrize(('capable', 'legacy_name'), [
+    (None, 'loom-platform-migrate-97ac8ac0d212'),
+    (False, 'loom-platform-migrate-b9873b43a1b0'),
+    (True, 'loom-platform-migrate-d58f4669f232'),
+])
+def test_manager_keeps_existing_migration_pod_identity(request, application_only, capable, legacy_name):
+    # Existing Jobs have immutable Pod templates. These identities are from the
+    # pre-fix renderer, not computed by the implementation under test.
+    selected = request.getfixturevalue('application_management_inputs' if application_only else 'management_inputs')
+    deployment, _, profile = selected
+    foundation = deployment['installation']['foundation']
+    config = json.loads(foundation['platform_config_json'])
+    if capable:
+        config['task_egress'] = {'protected_cidrs': ['198.51.100.0/24']}
+    foundation['platform_config_json'] = json.dumps(config)
+    if capable is not None:
+        profile['supports_task_web_egress'] = capable
+        profile['execution_class_id'] = 'linux-amd64-cpu-web-pod-v1' if capable else 'linux-amd64-cpu-pod-v1'
+    result = render(selected)
+    migration, = result.files['30-migrate.yaml']
+    assert migration['spec']['template']['metadata']['labels']['app'] == legacy_name
+    assert pod(migration)['containers'][0]['name'] == legacy_name
+
+
+@pytest.mark.parametrize('capable', [0, 1, 'true', None])
+def test_manager_still_rejects_nonboolean_task_egress_capability(management_inputs, capable):
+    from loom.nebius_platform_render import NebiusPlatformError
+
+    management_inputs[2]['supports_task_web_egress'] = capable
+    with pytest.raises(NebiusPlatformError, match='supports_task_web_egress must be a boolean'):
+        render(management_inputs)
 
 
 def test_runtime_mounts_only_explicit_separate_authorities(management_inputs):
