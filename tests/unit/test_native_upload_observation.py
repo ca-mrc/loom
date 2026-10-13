@@ -17,7 +17,8 @@ from loom_llm_gateway.routes import service_execution
 
 
 @pytest.mark.parametrize("failure", [None, "authorization", "integrity"])
-async def test_native_part_observes_authorization_and_processing_without_secrets(monkeypatch, caplog, failure):
+@pytest.mark.parametrize("valid_trace", [True, False])
+async def test_native_part_observes_authorization_and_processing_without_secrets(monkeypatch, caplog, failure, valid_trace):
     monkeypatch.setattr(logging.getLogger("loom.upload_observation"), "propagate", True)
     caplog.set_level(logging.INFO, logger="loom.upload_observation")
     lease_id, session_id, broker_id = uuid4(), uuid4(), uuid4()
@@ -47,7 +48,8 @@ async def test_native_part_observes_authorization_and_processing_without_secrets
             headers={
                 "X-Loom-Execution-Lease-Id": str(lease_id), "X-Loom-Execution-Generation": "3",
                 "X-Loom-Execution-Role": "attempt", "X-Loom-Upload-Token": "secret-upload-token" * 4,
-                "X-Loom-Upload-Request-Id": str(broker_id), "X-Loom-Content-SHA256": digest,
+                "X-Loom-Upload-Request-Id": str(broker_id) if valid_trace else "secret-invalid-trace",
+                "X-Loom-Content-SHA256": digest,
                 "Authorization": "Bearer secret-credential", "Cookie": "secret-cookie",
             },
         )
@@ -58,7 +60,7 @@ async def test_native_part_observes_authorization_and_processing_without_secrets
     assert events
     assert {e["stage"] for e in events} == ({"gateway", "authorization"} if failure == "authorization" else {"gateway", "authorization", "processing"})
     assert len({e["request_id"] for e in events}) == 1
-    assert all(e["broker_request_id"] == str(broker_id) and e["lease_id"] == str(lease_id)
+    assert all(e.get("broker_request_id") == (str(broker_id) if valid_trace else None) and e["lease_id"] == str(lease_id)
                and e["session_id"] == str(session_id) and e["generation"] == 3 for e in events)
     end, = [e for e in events if e["stage"] == "gateway" and e["event"] == "finished"]
     assert end["status_code"] == response.status_code
@@ -110,3 +112,35 @@ async def test_canonical_stage_reports_persisted_commit_outcome(monkeypatch, cap
     end, = [e for e in events if e["stage"] == "materialization" and e["event"] == "finished"]
     assert end["outcome"] == result
     assert all(e["phase"] == "canonical" and e["lease_id"] == str(claim.lease_id) for e in events)
+
+
+def test_configured_sink_emits_once_without_root_logging(monkeypatch, capsys):
+    from loom.trajectory import upload_observation as module
+
+    monkeypatch.setattr(module.logger, "handlers", [])
+    monkeypatch.setattr(module.logger, "propagate", True)
+    monkeypatch.setattr(module.logger, "level", logging.WARNING)
+    module.configure_upload_observations()
+    module.configure_upload_observations()
+    try:
+        with module.observe_upload("source", lease_id=uuid4()), module.UploadSpan("gateway", "part"):
+            pass
+        lines = capsys.readouterr().err.splitlines()
+        assert [json.loads(line)["event"] for line in lines] == ["started", "finished"]
+    finally:
+        for handler in module.logger.handlers:
+            handler.close()
+
+
+def test_failed_log_sink_does_not_change_publication(monkeypatch):
+    from loom.trajectory import upload_observation as module
+
+    def broken_sink(*_args, **_kwargs):
+        raise OSError("private sink failure")
+
+    monkeypatch.setattr(module.logger, "info", broken_sink)
+    with module.observe_upload("source", lease_id=uuid4()), module.UploadSpan("gateway", "part"):
+        pass
+    with pytest.raises(ValueError, match="original failure"):
+        with module.observe_upload("source", lease_id=uuid4()), module.UploadSpan("gateway", "part"):
+            raise ValueError("original failure")
