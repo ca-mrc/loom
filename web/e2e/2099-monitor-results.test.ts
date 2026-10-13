@@ -68,6 +68,11 @@ test("member returns from Trial to the filtered Monitor page and reading positio
   await expect(page.getByText("Page 2, end of results.")).toBeVisible();
   await expect(page.getByLabel("filter by team")).toHaveCount(0);
   const row = page.locator(`a[href="${browserHarness.routePrefix}/trials/target-29"]`);
+  // The entrance animation changes scrollHeight even while the row appears stable.
+  // Measure after it settles, so the saved position matches the one we leave from.
+  await page.locator("#main-content > div").evaluate(async (content) => {
+    await Promise.all(content.getAnimations().map((animation) => animation.finished));
+  });
   await row.scrollIntoViewIfNeeded();
   const position = () => page.evaluate(() => (document.getElementById("main-content")?.scrollTop ?? 0) + window.scrollY);
   await expect.poll(position).toBeGreaterThan(100);
