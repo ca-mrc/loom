@@ -382,9 +382,12 @@ Internals:
   invocations, run them inside one `loom run --concurrency N`
   (single-process Semaphore-bounded), not as many separate
   processes.
-- **`--server-url` is best-effort POST**, never gates exit. If you
-  need guaranteed delivery, use service mode (`POST /api/v1/trials`
-  with idempotency_key).
+- **Local result upload is unsupported**. `--server-url` attempts a
+  best-effort POST to `/api/v1/cli/results`, but the service has no such
+  intake route and HTTP failures do not affect CLI exit. Keep the local
+  output files; repair is tracked in
+  [#2490](https://github.com/ca-mrc/loom/issues/2490). Use service mode
+  (`POST /api/v1/trials` with `idempotency_key`) to submit a hosted trial.
 
 ## See also
 
