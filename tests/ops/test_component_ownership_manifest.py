@@ -1399,7 +1399,7 @@ def test_root_shards_distribute_shared_handoff_phases_and_observation() -> None:
         # Run 38181207030 reached 38m41s with observation still unfinished.
         # Keep its retained-resource matrix away from these measured heavy
         # image lifecycle predecessors rather than increasing the job limit.
-        ("pool_participant_observation", "pool_image_cancellation_gateway"),
+        ("pool_participant_observation", "pool_image_cancellation"),
         ("pool_participant_observation", "pool_image_transport"),
         # Both matrices passed in 38181207030, but together left only 94s
         # of job headroom. Keep their measured long bodies on separate jobs.

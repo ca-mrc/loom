@@ -403,6 +403,26 @@ def _build_image(*, tag: str, dockerfile: str, platform: str) -> None:
     )
 
 
+@pytest.fixture(scope="module")
+def built_images() -> object:
+    """Build each disposable-cluster image once per module; every case imports its own copy."""
+    suffix = uuid4().hex[:10]
+    platform = _docker_platform()
+    images = SimpleNamespace(
+        platform=platform,
+        runtime=f"docker.io/library/loom-runtime-e2e:{suffix}",
+        fixture=f"docker.io/library/loom-runtime-fixture:{suffix}",
+    )
+    try:
+        _build_image(tag=images.runtime, dockerfile="deploy/Dockerfile.execution-runtime", platform=platform)
+        _build_image(tag=images.fixture, dockerfile="tests/fixtures/execution_runtime_fixture/Dockerfile",
+                     platform=platform)
+        yield images
+    finally:
+        for tag in (images.runtime, images.fixture):
+            subprocess.run(["docker", "image", "rm", "--force", tag], check=False, capture_output=True)
+
+
 def _runtime_binary_digest(tag: str, root: Path, platform: str) -> str:
     container_id = _docker("create", "--platform", platform, tag)
     destination = root / "loom-execution-runtime"
@@ -725,20 +745,12 @@ async def test_actuator_api_converges_against_disposable_k3s() -> None:
 
 
 @pytest.mark.timeout(180)
-async def test_attempt_network_policy_allows_only_dns_and_gateway() -> None:
+async def test_attempt_network_policy_allows_only_dns_and_gateway(built_images: SimpleNamespace) -> None:
     from kubernetes import client, utils
 
-    suffix = uuid4().hex[:10]
-    fixture_tag = f"docker.io/library/loom-network-fixture:{suffix}"
+    fixture_tag = built_images.fixture
     container = None
     try:
-        platform = await asyncio.to_thread(_docker_platform)
-        await asyncio.to_thread(
-            _build_image,
-            tag=fixture_tag,
-            dockerfile="tests/fixtures/execution_runtime_fixture/Dockerfile",
-            platform=platform,
-        )
         with tempfile.TemporaryDirectory(prefix="loom-network-k3s-") as temporary:
             root = Path(temporary)
             container = await asyncio.to_thread(_start_k3s)
@@ -970,40 +982,20 @@ async def test_attempt_network_policy_allows_only_dns_and_gateway() -> None:
     finally:
         if container is not None:
             await asyncio.to_thread(container.stop)
-        await asyncio.to_thread(
-            subprocess.run,
-            ["docker", "image", "rm", "--force", fixture_tag],
-            capture_output=True,
-            check=False,
-        )
 
 
 @pytest.mark.timeout(360)
 @pytest.mark.parametrize("prepared_fixture,termination", [(False, None), (True, "deadline"), (True, "fixture_exit")],
                          ids=["trusted-sidecar", "prepared-fixture-deadline", "prepared-fixture-exit"])
 async def test_runtime_executes_task_native_sidecar_and_verifier_without_docker_socket(
-    prepared_fixture: bool, termination: str | None,
+    prepared_fixture: bool, termination: str | None, built_images: SimpleNamespace,
 ) -> None:
     from kubernetes import client
 
     suffix = uuid4().hex[:10]
-    runtime_tag = f"docker.io/library/loom-runtime-e2e:{suffix}"
-    fixture_tag = f"docker.io/library/loom-runtime-fixture:{suffix}"
+    runtime_tag, fixture_tag, platform = built_images.runtime, built_images.fixture, built_images.platform
     container = None
     try:
-        platform = await asyncio.to_thread(_docker_platform)
-        await asyncio.to_thread(
-            _build_image,
-            tag=runtime_tag,
-            dockerfile="deploy/Dockerfile.execution-runtime",
-            platform=platform,
-        )
-        await asyncio.to_thread(
-            _build_image,
-            tag=fixture_tag,
-            dockerfile="tests/fixtures/execution_runtime_fixture/Dockerfile",
-            platform=platform,
-        )
         with tempfile.TemporaryDirectory(prefix="loom-runtime-k3s-") as temporary:
             root = Path(temporary)
             runtime_binary_sha256 = await asyncio.to_thread(
@@ -1296,9 +1288,3 @@ async def test_runtime_executes_task_native_sidecar_and_verifier_without_docker_
     finally:
         if container is not None:
             await asyncio.to_thread(container.stop)
-        for tag in (runtime_tag, fixture_tag):
-            subprocess.run(
-                ["docker", "image", "rm", "--force", tag],
-                check=False,
-                capture_output=True,
-            )

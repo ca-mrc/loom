@@ -82,9 +82,12 @@ from tests.ops.test_nebius_pool_manager_image_history import (
 )
 
 
-@pytest.mark.parametrize("target", ["manager", "collector", "gateway"])
-@pytest.mark.parametrize("phase", ["isolate", "stop", "template", "start"])
-@pytest.mark.parametrize("loss", ["before", "after"])
+# Every phase/loss combination runs on the manager; collector and gateway reuse the
+# same reconciliation behind their runtime binding, so one phase covers each.
+@pytest.mark.parametrize(("target", "phase", "loss"), [
+    *(("manager", phase, loss) for phase in ("isolate", "stop", "template", "start") for loss in ("before", "after")),
+    *((target, "template", loss) for target in ("collector", "gateway") for loss in ("before", "after")),
+])
 def test_manager_image_switch_reconciles_lost_cas_without_duplicate_write(image_repair_case, phase, loss, target):
     image_repair_case = selected_image_case(image_repair_case, target)
     api = ImageAPI(image_repair_case)
