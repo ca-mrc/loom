@@ -22,16 +22,3 @@ export function ownershipLabel(row: OwnershipRow): string {
   if (username && team) return `${username} / ${team}`;
   return username || team || "-";
 }
-
-export function ownershipSearchText(row: OwnershipRow): string {
-  return [
-    row.submitted_by_user?.username,
-    row.submitted_by_user?.team_name,
-    row.owner_team?.name,
-    row.team_name,
-    row.team_id,
-  ]
-    .filter(Boolean)
-    .join(" ")
-    .toLowerCase();
-}

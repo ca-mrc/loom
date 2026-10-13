@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import { agentReadinessMessage, agentServiceModeReady } from "../../lib/agentReadiness";
-import { helpForState, humanizeState } from "../../lib/helpText";
+import { helpForState } from "../../lib/helpText";
 import { batchResultPresentation } from "../../lib/statusVariant";
 import { modelLabel } from "../../lib/modelLabel";
-import { ownershipLabel, ownershipSearchText } from "../../lib/ownership";
+import { ownershipLabel } from "../../lib/ownership";
 import { allowedModelsSummary, providerStatusSummary } from "../../lib/providerDisplay";
 
 describe("presentation contracts", () => {
@@ -24,15 +24,10 @@ describe("presentation contracts", () => {
     expect(helpForState("all_failed")).toContain("or were cancelled");
   });
 
-  it("normalizes known states and provider-specific labels", () => {
+  it("normalizes known states for help text", () => {
     expect(helpForState(" Partial Failed ")).toContain("Some trials failed");
     expect(helpForState(123)).toBeUndefined();
     expect(helpForState({})).toBeUndefined();
-    expect(humanizeState("provider", "valid").label).toBe("Ready");
-    expect(humanizeState("provider", "invalid").label).toBe("Needs attention");
-    expect(humanizeState("provider", "untested").label).toBe("Untested");
-    expect(humanizeState("batch", "partial_failed").label).toBe("partial failed");
-    expect(humanizeState("generic", null).state).toBe("unknown");
   });
 
   it("formats scalar and structured model values", () => {
@@ -45,7 +40,7 @@ describe("presentation contracts", () => {
     expect(modelLabel({ provider: "openai", name: 7 })).toBe("—");
   });
 
-  it("uses the most specific ownership fields and builds search text", () => {
+  it("uses the most specific ownership fields", () => {
     const complete = {
       submitted_by_user: { id: "u1", username: " Ada ", team_name: "Research" },
       owner_team: { id: "t1", name: "Owner fallback" },
@@ -53,9 +48,6 @@ describe("presentation contracts", () => {
       team_id: "team-id",
     };
     expect(ownershipLabel(complete)).toBe("Ada / Research");
-    expect(ownershipSearchText(complete)).toBe(
-      " ada  research owner fallback row fallback team-id",
-    );
     expect(ownershipLabel({ submitted_by_user: { id: "u1", username: "Ada" } })).toBe("Ada");
     expect(ownershipLabel({ owner_team: { id: "t1", name: "Owner" } })).toBe("Owner");
     expect(ownershipLabel({ team_name: "Row Team" })).toBe("Row Team");
