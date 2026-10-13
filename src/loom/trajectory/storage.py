@@ -1129,31 +1129,35 @@ class MinioObjectStore:
             client_kwargs = dict(self._client_kwargs)
         client_kwargs["config"] = self._client_config.merge(Config(retries={"max_attempts": 0}))
 
+        observation = UploadSpan("sdk_worker", "create_multipart_upload")
+
         def create() -> MultipartUpload:
             nonlocal allocated
-            client = boto3.client(**client_kwargs)
-            self._configure_client_events(client)
-            try:
-                upload = MultipartUpload(
-                    bucket=bucket, key=key,
-                    upload_id=client.create_multipart_upload(
-                        Bucket=bucket, Key=key, Metadata={"loom-write-id": write_identity},
-                    )["UploadId"],
-                    write_identity=write_identity,
-                )
-                with lock:
-                    if not abandoned:
-                        allocated = upload
-                        return upload
-                with contextlib.suppress(Exception):
-                    client.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload.upload_id)
-                return upload
-            finally:
-                client.close()
-
+            with observation:
+                client = boto3.client(**client_kwargs)
+                self._configure_client_events(client)
+                try:
+                    upload = MultipartUpload(
+                        bucket=bucket, key=key,
+                        upload_id=client.create_multipart_upload(
+                            Bucket=bucket, Key=key, Metadata={"loom-write-id": write_identity},
+                        )["UploadId"],
+                        write_identity=write_identity,
+                    )
+                    with lock:
+                        if not abandoned:
+                            allocated = upload
+                            return upload
+                    with contextlib.suppress(Exception):
+                        client.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload.upload_id)
+                    return upload
+                finally:
+                    client.close()
         try:
             return await asyncio.wait_for(asyncio.to_thread(create), timeout=self._operation_timeout)
-        except BaseException:
+        except BaseException as exc:
+            if isinstance(exc, (TimeoutError, asyncio.CancelledError)):
+                observation.abandon_wait("cancelled" if isinstance(exc, asyncio.CancelledError) else "timeout")
             with lock:
                 abandoned = True
                 owned = allocated

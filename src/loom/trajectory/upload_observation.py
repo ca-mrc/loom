@@ -70,8 +70,15 @@ def observe_upload(
         _CONTEXT.reset(token)
 
 
+def bind_upload_source(*, generation: int, session_id: UUID) -> None:
+    """Enrich the owned scope after the materializer loads its fenced lease."""
+    context = _CONTEXT.get()
+    if context is not None:
+        context.update(generation=generation, session_id=str(session_id))
+
+
 class UploadSpan:
-    def __init__(self, stage: Stage, operation: str, *, attempt: int = 1, declared_bytes: int | None = None):
+    def __init__(self, stage: Stage, operation: str, *, attempt: int = 1, declared_bytes: int | None = None) -> None:
         self.context = _CONTEXT.get()
         self.stage = stage
         self.operation = operation if operation in _OPERATIONS else "other"

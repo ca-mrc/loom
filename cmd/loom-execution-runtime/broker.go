@@ -163,7 +163,7 @@ func (b *workloadBroker) gatewayEndpoint(path string, query string) string {
 	return copyURL.String()
 }
 
-func (b *workloadBroker) doJSON(ctx context.Context, method, endpoint string, request any, headers map[string]string, response any) error {
+func (b *workloadBroker) doJSON(ctx context.Context, method, endpoint string, request any, headers map[string]string, response any) (resultErr error) {
 	payload, err := json.Marshal(request)
 	if err != nil {
 		return err
@@ -179,11 +179,16 @@ func (b *workloadBroker) doJSON(ctx context.Context, method, endpoint string, re
 	if err := b.authorizePodRequest(req); err != nil {
 		return err
 	}
+	observation := b.observeOutputHTTP(req)
+	defer func() { observation.finish(resultErr) }()
 	result, err := b.client.Do(req)
 	if err != nil {
 		return err
 	}
 	defer result.Body.Close()
+	if observation != nil {
+		observation.status = result.StatusCode
+	}
 	body, err := io.ReadAll(io.LimitReader(result.Body, 1024*1024))
 	if err != nil {
 		return err
@@ -540,7 +545,7 @@ func outputMediaType(path string) string {
 	}
 }
 
-func (b *workloadBroker) putPart(ctx context.Context, grant uploadGrant, fileIndex, partNumber int, payload []byte) (partReceipt, error) {
+func (b *workloadBroker) putPart(ctx context.Context, grant uploadGrant, fileIndex, partNumber int, payload []byte) (receipt partReceipt, resultErr error) {
 	digest := sha256.Sum256(payload)
 	sha := "sha256:" + hex.EncodeToString(digest[:])
 	endpoint := b.endpoint(fmt.Sprintf("/outputs/%s/files/%d/parts/%d", grant.UploadSessionID, fileIndex, partNumber))
@@ -557,11 +562,16 @@ func (b *workloadBroker) putPart(ctx context.Context, grant uploadGrant, fileInd
 	if err := b.authorizePodRequest(req); err != nil {
 		return partReceipt{}, err
 	}
+	observation := b.observeOutputHTTP(req)
+	defer func() { observation.finish(resultErr) }()
 	response, err := b.client.Do(req)
 	if err != nil {
 		return partReceipt{}, err
 	}
 	defer response.Body.Close()
+	if observation != nil {
+		observation.status = response.StatusCode
+	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, 1024*1024))
 	if err != nil {
 		return partReceipt{}, err
@@ -569,7 +579,6 @@ func (b *workloadBroker) putPart(ctx context.Context, grant uploadGrant, fileInd
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return partReceipt{}, fmt.Errorf("broker HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(body)))
 	}
-	var receipt partReceipt
 	if err := json.Unmarshal(body, &receipt); err != nil {
 		return partReceipt{}, err
 	}

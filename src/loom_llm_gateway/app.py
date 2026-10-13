@@ -27,6 +27,7 @@ from loom.security.secret_store import assert_existing_secrets_decryptable
 from loom.startup_retry import retry_startup_dependency
 from loom.trajectory.source_spool import ServiceExecutionSourceConfig
 from loom.trajectory.storage import MinioObjectStore
+from loom.trajectory.upload_observation import configure_upload_observations
 from loom_control_plane.artifact_commit_runtime import SqlArtifactCommitRepository
 from loom_control_plane.service_execution_output import ServiceExecutionOutputRouteService
 from loom_llm_gateway.config import GatewaySettings
@@ -108,6 +109,7 @@ async def _assert_schema_startup(engine: AsyncEngine) -> int:
 
 
 def create_app(settings: GatewaySettings) -> FastAPI:
+    configure_upload_observations()
     source_config = ServiceExecutionSourceConfig.from_settings(settings)
 
     @asynccontextmanager
