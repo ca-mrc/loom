@@ -932,7 +932,7 @@ describe("NewBatch", () => {
     );
   });
 
-  it("shows deployment-facing guidance instead of an operator import command when no benchmarks are provisioned", async () => {
+  it("shows guidance for the current environment when no benchmarks are provisioned", async () => {
     mockEndpoints({ noBenchmarks: true });
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
@@ -941,8 +941,9 @@ describe("NewBatch", () => {
       await screen.findByText(/No runnable benchmarks are provisioned/i),
     ).toBeInTheDocument();
     expect(
-      screen.getByText(/staging catalog provisioning/i),
+      screen.getByText(/catalog provisioning procedure for this environment/i),
     ).toBeInTheDocument();
+    expect(screen.queryByText(/staging catalog/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/loom_benchmark_tool import/i)).not.toBeInTheDocument();
     expect(
       screen.queryByText(/python -m loom_benchmark_tool/i),
