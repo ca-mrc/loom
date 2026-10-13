@@ -126,10 +126,6 @@ func secureInputDirectory(root, directory string) error {
 	return nil
 }
 
-func decodeTaskInputManifest(payload []byte, p plan) (taskInputManifest, error) {
-	return decodeInputManifest(payload, p, p.TaskInput, false)
-}
-
 // A handoff carries only the parent attempt's committed workspace evidence. It
 // is staged under the private controller directory and never joins the task
 // bundle digest.
