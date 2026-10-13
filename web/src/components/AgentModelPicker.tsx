@@ -62,7 +62,7 @@ export function AgentModelPicker(props: AgentModelPickerProps): JSX.Element {
   );
 
   const renderCatalogPanel = (): JSX.Element => (
-    <div className="space-y-3">
+    <div className="stack-y-3">
       <label className="block">
         <span className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
           Provider connection
@@ -184,7 +184,7 @@ export function AgentModelPicker(props: AgentModelPickerProps): JSX.Element {
         </select>
       </label>
       {customMode ? (
-        <div className="space-y-2">
+        <div className="stack-y-2">
           <label className="block">
             <span className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
               Ad-hoc model ID
@@ -338,7 +338,7 @@ export function AgentModelPicker(props: AgentModelPickerProps): JSX.Element {
   };
 
   return (
-    <div className="space-y-4">
+    <div className="stack-y-4">
       {specificAgentToggle ? (
         <label className="flex items-center gap-2 text-sm text-slate-700">
           <input
@@ -446,18 +446,18 @@ export function AgentModelPicker(props: AgentModelPickerProps): JSX.Element {
       ) : null}
 
       {!selectedAgentReady ? null : needsModel ? (
-        <div className="space-y-3">
+        <div className="stack-y-3">
           <Tabs
             items={sourceTabItems}
             value={activeSource}
             onValueChange={selectSource}
             ariaLabel="Model source"
             hideTabList={availableSources.length <= 1}
-            className="space-y-3"
+            className="stack-y-3"
             tabListClassName="inline-flex max-w-full flex-wrap gap-1 rounded-lg border border-slate-200 bg-slate-50 p-0.5"
             tabClassName={({ selected }) =>
               "shrink-0 whitespace-nowrap rounded-md px-3 py-1 text-xs font-medium transition-colors " +
-              (selected ? "bg-white text-slate-900 shadow-sm" : "text-slate-600 hover:text-slate-900")
+              (selected ? "bg-white text-slate-900 shadow-xs" : "text-slate-600 hover:text-slate-900")
             }
             renderPanel={renderSourcePanel}
           />

@@ -12,13 +12,13 @@ export function TaskImagePreparationCard({ preparations }: { preparations: Prepa
         description="Current shared image preparation. A later cache rebuild can change this view; the trial outcome above remains unchanged."
         headingLevel="h2"
       />
-      <Card.Body className="space-y-3">
+      <Card.Body className="stack-y-3">
         {preparations.map((item) => (
           <div key={item.cpu_arch} className="rounded border border-slate-200 p-3 text-sm">
             <p className="font-semibold">{item.cpu_arch} · {item.state} · {item.attempt_count} build attempts</p>
             {item.message ? <p className="mt-1">{item.message}</p> : null}
             {item.phases.length ? (
-              <ul className="mt-2 space-y-1">
+              <ul className="mt-2 stack-y-1">
                 {item.phases.map((phase) => (
                   <li key={phase.name}>
                     {phase.name === "build" ? "Build / scratch cleanup" : phase.name}: {phase.state}

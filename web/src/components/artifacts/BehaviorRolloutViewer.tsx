@@ -233,7 +233,7 @@ export default function BehaviorRolloutViewer({
   const hdf5Url = fileUrl(artifact, hdf5);
   const eventDownloadUrl = fileUrl(artifact, transition);
 
-  return <div className="space-y-6">
+  return <div className="stack-y-6">
     <section aria-labelledby="rollout-summary" className="rounded border p-4">
       <h2 id="rollout-summary" className="text-lg font-semibold">Behavior rollout</h2>
       <p>{document.payload.task_name} · {document.payload.demo_stem} · {document.payload.domain_outcome}</p>
@@ -260,7 +260,7 @@ export default function BehaviorRolloutViewer({
         </figure>)}
       </div>
     </section>
-    <section aria-labelledby="rollout-events" className="space-y-3">
+    <section aria-labelledby="rollout-events" className="stack-y-3">
       <h2 id="rollout-events" className="text-lg font-semibold">Events</h2>
       {transition && transition.size_bytes > JSON_LIMIT ? <p>
         Event JSON is larger than 16 MiB and is not parsed in the browser.{" "}
@@ -283,7 +283,7 @@ export default function BehaviorRolloutViewer({
         </div>
       </>}
     </section>
-    <section aria-labelledby="rollout-scene" className="space-y-3">
+    <section aria-labelledby="rollout-scene" className="stack-y-3">
       <h2 id="rollout-scene" className="text-lg font-semibold">Scene projection</h2>
       {sceneState.status === "loading" || sceneState.status === "idle" ? <LoadingState /> : sceneState.status === "error" ? <ErrorState error={sceneState.error} /> : !scene ? <ErrorState error={new Error("Scene projection contract is invalid")} /> : <>
         <p>Robot: <strong>{scene.robot}</strong></p>

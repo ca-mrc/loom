@@ -87,7 +87,7 @@ export default function AdminAccess(): JSX.Element {
         title="Account requests"
         description="Approve a username into its requested team, then share the one-time password setup link manually."
       />
-      <Card.Body className="space-y-3">
+      <Card.Body className="stack-y-3">
         {userRegistrationRequests.isPending ? <LoadingState /> : null}
         {userRegistrationRequests.isError ? <ErrorState error={userRegistrationRequests.error} /> : null}
         {userRegistrationRequests.data ? (
@@ -95,7 +95,7 @@ export default function AdminAccess(): JSX.Element {
             <EmptyState label="No pending account requests." />
           ) : (
             <div className="overflow-x-auto" tabIndex={0} role="region" aria-label="Account requests scroll area">
-              <table aria-label="Account requests" className="min-w-full divide-y divide-slate-200 text-sm">
+              <table aria-label="Account requests" className="min-w-full stack-divide-y stack-divide-slate-200 text-sm">
                 <thead className="bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
                   <tr>
                     <th scope="col" className="px-3 py-2 font-semibold">
@@ -115,7 +115,7 @@ export default function AdminAccess(): JSX.Element {
                     </th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100 bg-white">
+                <tbody className="stack-divide-y stack-divide-slate-100 bg-white">
                   {userRegistrationRequests.data.items.map((request) => {
                     const role = accountApprovalRoles[request.id] ?? request.role ?? "member";
                     return (
@@ -188,7 +188,7 @@ export default function AdminAccess(): JSX.Element {
   );
 
   return (
-    <div className="space-y-6">
+    <div className="stack-y-6">
       <header>
         <h1 className="text-2xl font-bold text-slate-900">Team access</h1>
         <p className="mt-1 text-sm text-slate-500">
@@ -229,11 +229,11 @@ export default function AdminAccess(): JSX.Element {
                 : "Copy these invite links and share them manually. Loom will not send them by email."
             }
           />
-          <Card.Body className="space-y-3">
+          <Card.Body className="stack-y-3">
             {revealedInvites.map((revealed) => (
               <div
                 key={revealed.invite.id}
-                className="space-y-2 rounded-lg border border-emerald-200 bg-emerald-50 p-3"
+                className="stack-y-2 rounded-lg border border-emerald-200 bg-emerald-50 p-3"
               >
                 {revealedInvites.length > 1 ? (
                   <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-emerald-900">
@@ -272,11 +272,11 @@ export default function AdminAccess(): JSX.Element {
             title="Account links"
             description="Copy these one-time password links and share them manually. Loom does not send email."
           />
-          <Card.Body className="space-y-3">
+          <Card.Body className="stack-y-3">
             {revealedAccountLinks.map((revealed) => (
               <div
                 key={revealed.id}
-                className="space-y-2 rounded-lg border border-emerald-200 bg-emerald-50 p-3"
+                className="stack-y-2 rounded-lg border border-emerald-200 bg-emerald-50 p-3"
               >
                 <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-emerald-900">
                   <span className="font-medium">{revealed.username}</span>
@@ -306,7 +306,7 @@ export default function AdminAccess(): JSX.Element {
             title="New API token"
             description="Shown once; store it in your password manager or CLI secret store before leaving this page."
           />
-          <Card.Body className="space-y-3">
+          <Card.Body className="stack-y-3">
             <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 font-mono text-sm text-emerald-900">
               {revealedToken.token}
             </div>
@@ -327,14 +327,14 @@ export default function AdminAccess(): JSX.Element {
         value={activeSection}
         onValueChange={setSection}
         ariaLabel="Team access sections"
-        className="space-y-6"
+        className="stack-y-6"
         tabListClassName="flex flex-wrap gap-2 rounded-lg border border-slate-200 bg-white p-1"
         tabClassName={({ selected }) =>
           `rounded-md px-3 py-2 text-sm font-medium ${
             selected ? "bg-accent text-white" : "text-slate-600 hover:bg-slate-50 hover:text-slate-900"
           }`
         }
-        panelClassName="space-y-6"
+        panelClassName="stack-y-6"
         renderPanel={() => (
           <Suspense fallback={<LoadingState label="Loading account section…" />}>
             {isAdmin && activeSection === "teams" ? <AdminTeams {...state} /> : null}
@@ -351,7 +351,7 @@ export default function AdminAccess(): JSX.Element {
                     title="Password resets"
                     description="Approve reset requests only after verifying the request out of band, then share the one-time reset link manually."
                   />
-                  <Card.Body className="space-y-3">
+                  <Card.Body className="stack-y-3">
                     {passwordResetRequests.isPending ? <LoadingState /> : null}
                     {passwordResetRequests.isError ? (
                       <ErrorState error={passwordResetRequests.error} />
@@ -363,7 +363,7 @@ export default function AdminAccess(): JSX.Element {
                         <div className="overflow-x-auto">
                           <table
                             aria-label="Password reset requests"
-                            className="min-w-full divide-y divide-slate-200 text-sm"
+                            className="min-w-full stack-divide-y stack-divide-slate-200 text-sm"
                           >
                             <thead className="bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
                               <tr>
@@ -378,7 +378,7 @@ export default function AdminAccess(): JSX.Element {
                                 </th>
                               </tr>
                             </thead>
-                            <tbody className="divide-y divide-slate-100 bg-white">
+                            <tbody className="stack-divide-y stack-divide-slate-100 bg-white">
                               {passwordResetRequests.data.items.map((request) => (
                                 <tr key={request.id}>
                                   <td className="whitespace-nowrap px-3 py-2 font-medium text-slate-900">
@@ -540,7 +540,7 @@ export default function AdminAccess(): JSX.Element {
                         <div className="overflow-x-auto">
                           <table
                             aria-label="Invitations"
-                            className="min-w-full divide-y divide-slate-200 text-sm"
+                            className="min-w-full stack-divide-y stack-divide-slate-200 text-sm"
                           >
                             <thead className="bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
                               <tr>
@@ -564,7 +564,7 @@ export default function AdminAccess(): JSX.Element {
                                 </th>
                               </tr>
                             </thead>
-                            <tbody className="divide-y divide-slate-100 bg-white">
+                            <tbody className="stack-divide-y stack-divide-slate-100 bg-white">
                               {invites.data.items.map((invite) => (
                                 <tr key={invite.id}>
                                   <td className="whitespace-nowrap px-3 py-2 text-slate-700">

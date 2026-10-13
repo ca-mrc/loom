@@ -251,7 +251,7 @@ export default function BatchDetail(): JSX.Element {
   const resultPresentation = c.result_status ? batchResultPresentation(c.result_status, c.trial_summary) : null;
 
   return (
-    <div className="space-y-6">
+    <div className="stack-y-6">
       <div>
         <Link
           to={monitorReturn}
@@ -263,7 +263,7 @@ export default function BatchDetail(): JSX.Element {
       </div>
 
       <Card>
-        <Card.Body className="space-y-5">
+        <Card.Body className="stack-y-5">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0">
               <h1 className="text-2xl font-bold text-slate-900">{c.name}</h1>
@@ -440,7 +440,7 @@ export default function BatchDetail(): JSX.Element {
           {provenance.length > 0 ? (
             <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
               <div className="font-semibold text-slate-900">Provenance</div>
-              <ul className="mt-1 space-y-1 text-xs text-slate-600">
+              <ul className="mt-1 stack-y-1 text-xs text-slate-600">
                 {provenance.map((item, index) => (
                   <li key={index}>{provenanceLabel(item)}</li>
                 ))}
@@ -453,7 +453,7 @@ export default function BatchDetail(): JSX.Element {
           <BatchDeliveryExport batchId={c.id} state={c.state} />
 
           {!hasDiagnostics ? (
-            <div className="space-y-2">
+            <div className="stack-y-2">
               <Button
                 variant="secondary"
                 onClick={() => void diagnosticsQuery.refetch()}
@@ -471,7 +471,7 @@ export default function BatchDetail(): JSX.Element {
           ) : null}
 
           {ACTIVE_STATES.has(c.state) ? (
-            <div className="space-y-2">
+            <div className="stack-y-2">
               <Button
                 variant="danger"
                 onClick={() => {
@@ -619,7 +619,7 @@ export default function BatchDetail(): JSX.Element {
           />
           <Card.Body className="p-0">
             <div className="overflow-x-auto" tabIndex={0} role="region" aria-label="Benchmark results scroll area">
-              <table aria-label="Benchmark results" className="min-w-full divide-y divide-slate-200 text-sm">
+              <table aria-label="Benchmark results" className="min-w-full stack-divide-y stack-divide-slate-200 text-sm">
                 <thead>
                   <tr className="bg-slate-50/50">
                     <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">
@@ -639,7 +639,7 @@ export default function BatchDetail(): JSX.Element {
                     </th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100">
+                <tbody className="stack-divide-y stack-divide-slate-100">
                   {benchmarkSummary.map((row) => {
                     const succeeded = row.trial_summary.succeeded ?? 0;
                     const running =
@@ -697,7 +697,7 @@ export default function BatchDetail(): JSX.Element {
             title="Nebius execution lifecycle"
             description="Durable execution, output commit, and canonical materialization state for this batch."
           />
-          <Card.Body className="space-y-3">
+          <Card.Body className="stack-y-3">
             <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
               <StatCard label="Latest execution attempts" value={c.service_execution_summary.lease_count} />
               <StatCard label="Canonical bundles ready" value={c.service_execution_summary.canonical_ready_count} />
@@ -736,7 +736,7 @@ export default function BatchDetail(): JSX.Element {
           </summary>
           <Card.Body className="p-0">
             <div className="overflow-x-auto" tabIndex={0} role="region" aria-label="Trial states scroll area">
-              <table aria-label="Trial states" className="min-w-full divide-y divide-slate-200 text-sm">
+              <table aria-label="Trial states" className="min-w-full stack-divide-y stack-divide-slate-200 text-sm">
                 <thead>
                   <tr className="bg-slate-50/50">
                     <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">
@@ -747,7 +747,7 @@ export default function BatchDetail(): JSX.Element {
                     </th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100">
+                <tbody className="stack-divide-y stack-divide-slate-100">
                   {Object.entries(c.trial_summary).map(([state, n]) => (
                     <tr key={state}>
                       <td className="px-4 py-3">
@@ -779,7 +779,7 @@ export default function BatchDetail(): JSX.Element {
           title="Run plan"
           description="What this batch will run, how often each task runs, and which shared settings apply to every trial."
         />
-        <Card.Body className="space-y-5">
+        <Card.Body className="stack-y-5">
           <p className="text-sm font-medium">Purpose: {c.purpose === "trajectory_generation" ? "Generate trajectories" : c.purpose === "evaluation" ? "Evaluate task performance" : "Not recorded for this batch"}</p>
           <div className="grid gap-4 md:grid-cols-2">
             <div>
@@ -790,7 +790,7 @@ export default function BatchDetail(): JSX.Element {
                 {taskSummary.primary}
               </p>
               {taskSummary.details.length > 0 ? (
-                <ul className="mt-2 space-y-1 text-xs text-slate-600">
+                <ul className="mt-2 stack-y-1 text-xs text-slate-600">
                   {taskSummary.details.map((detail) => (
                     <li key={detail}>{detail}</li>
                   ))}
@@ -803,7 +803,7 @@ export default function BatchDetail(): JSX.Element {
                 Agent/model combinations
               </p>
               {c.combinations && c.combinations.length > 0 ? (
-                <ul className="mt-1 space-y-1 text-sm font-semibold text-slate-900">
+                <ul className="mt-1 stack-y-1 text-sm font-semibold text-slate-900">
                   {c.combinations.map((combo, i) => (
                     <li key={`${combo.label ?? "combo"}-${i}`}>
                       {comboSummary(combo, i)}
@@ -825,7 +825,7 @@ export default function BatchDetail(): JSX.Element {
                 {trialConfigSummary.primary}
               </p>
               {trialConfigSummary.items.length > 0 ? (
-                <ul className="mt-2 space-y-1 text-xs text-slate-600">
+                <ul className="mt-2 stack-y-1 text-xs text-slate-600">
                   {trialConfigSummary.items.map((item) => (
                     <li key={item}>{item}</li>
                   ))}

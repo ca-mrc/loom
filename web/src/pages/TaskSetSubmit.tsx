@@ -79,7 +79,7 @@ export default function TaskSetSubmit(): JSX.Element {
   };
 
   return (
-    <div className="space-y-4">
+    <div className="stack-y-4">
       <header>
         <h1 className="text-2xl font-bold text-slate-900">Submit Task Set</h1>
         <p className="text-sm text-slate-500">
@@ -90,7 +90,7 @@ export default function TaskSetSubmit(): JSX.Element {
       <div className="rounded-lg border p-4 text-sm"><p className="mb-2">1. Prepare a YAML or JSON manifest, choosing the task source and trajectory purpose. Check the manifest schema and examples before selecting files. 2. Review the parsed manifest and selected files. Local checks cover syntax and required identity/source fields. The server validates the complete manifest and reports import errors after submission.</p><div className="flex flex-wrap items-center gap-4"><a className="text-accent underline" href={repositoryDocUrl("tasks")} target="_blank" rel="noreferrer">Manifest template and schema</a><HelpButton topic="tasks">Manifest format and task-set submission guide</HelpButton></div></div>
       <Card>
         <Card.Body>
-          <form onSubmit={handleSubmit} onChange={() => { inputRevision.current += 1; setReview(null); setManifestSummary(null); }} className="space-y-5">
+          <form onSubmit={handleSubmit} onChange={() => { inputRevision.current += 1; setReview(null); setManifestSummary(null); }} className="stack-y-5">
             <div>
               <label htmlFor="task-set-manifest" className="block text-sm font-medium text-slate-700">
                 Manifest (required)
@@ -100,7 +100,7 @@ export default function TaskSetSubmit(): JSX.Element {
                 id="task-set-manifest"
                 type="file"
                 accept=".yaml,.yml,.json"
-                className="mt-1 block w-full text-sm text-slate-600 file:mr-3 file:rounded-md file:border file:border-slate-200 file:bg-white file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-slate-700 hover:file:bg-slate-50"
+                className="mt-1 block w-full text-sm text-slate-600 file:mr-3 file:rounded-md file:border file:[border-style:outset] file:border-slate-200 file:bg-white file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-slate-700 hover:file:bg-slate-50"
               />
               <p className="mt-1 text-xs text-slate-500">
                 YAML or JSON manifest describing the task set.
@@ -116,7 +116,7 @@ export default function TaskSetSubmit(): JSX.Element {
                 id="task-set-bundle"
                 type="file"
                 accept=".tar,.tar.gz,.tgz"
-                className="mt-1 block w-full text-sm text-slate-600 file:mr-3 file:rounded-md file:border file:border-slate-200 file:bg-white file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-slate-700 hover:file:bg-slate-50"
+                className="mt-1 block w-full text-sm text-slate-600 file:mr-3 file:rounded-md file:border file:[border-style:outset] file:border-slate-200 file:bg-white file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-slate-700 hover:file:bg-slate-50"
               />
               <p className="mt-1 text-xs text-slate-500">
                 Upload the .tar, .tar.gz or .tgz archive specified by your manifest.
@@ -133,7 +133,7 @@ export default function TaskSetSubmit(): JSX.Element {
                 id="task-set-verifier"
                 type="file"
                 accept=".py"
-                className="mt-1 block w-full text-sm text-slate-600 file:mr-3 file:rounded-md file:border file:border-slate-200 file:bg-white file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-slate-700 hover:file:bg-slate-50"
+                className="mt-1 block w-full text-sm text-slate-600 file:mr-3 file:rounded-md file:border file:[border-style:outset] file:border-slate-200 file:bg-white file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-slate-700 hover:file:bg-slate-50"
               />
               <p className="mt-1 text-xs text-slate-500">
                 Python scoring script, if specified separately by your manifest.
@@ -149,7 +149,7 @@ export default function TaskSetSubmit(): JSX.Element {
                 id="task-set-transform"
                 type="file"
                 accept=".py"
-                className="mt-1 block w-full text-sm text-slate-600 file:mr-3 file:rounded-md file:border file:border-slate-200 file:bg-white file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-slate-700 hover:file:bg-slate-50"
+                className="mt-1 block w-full text-sm text-slate-600 file:mr-3 file:rounded-md file:border file:[border-style:outset] file:border-slate-200 file:bg-white file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-slate-700 hover:file:bg-slate-50"
               />
               <p className="mt-1 text-xs text-slate-500">
                 Optional script to transform upstream data rows before task rendering.

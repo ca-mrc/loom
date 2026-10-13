@@ -9,8 +9,8 @@ export default function NewBatchAdvancedFields({ advanced, setAdv, batchPurpose,
   const policyChoice = (kind: AdvancedState["networkPolicy"]) =>
     networkPolicyPreview?.data?.choices?.find((choice) => choice.kind === kind);
   return (
-    <div className="space-y-6 px-6 pb-6">
-      <fieldset className="space-y-3">
+    <div className="stack-y-6 px-6 pb-6">
+      <fieldset className="stack-y-3">
         <legend className="text-sm font-semibold text-slate-700">Environment</legend>
         <label className="flex items-start gap-2 text-sm text-slate-700">
           <input
@@ -136,7 +136,7 @@ export default function NewBatchAdvancedFields({ advanced, setAdv, batchPurpose,
         <ExecutionSelectionJson advanced={advanced} setAdv={setAdv} />
       </fieldset>
 
-      <fieldset className="space-y-3">
+      <fieldset className="stack-y-3">
         <legend className="text-sm font-semibold text-slate-700">Timeouts</legend>
         <p className="text-xs text-slate-500">
           Override = absolute seconds (blank = use task default). Multiplier scales it (1 = no change).
@@ -185,7 +185,7 @@ export default function NewBatchAdvancedFields({ advanced, setAdv, batchPurpose,
         ))}
       </fieldset>
 
-      <fieldset className="space-y-3">
+      <fieldset className="stack-y-3">
         <legend className="text-sm font-semibold text-slate-700">Retry on transient errors</legend>
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
           <label className="block">
@@ -226,7 +226,7 @@ export default function NewBatchAdvancedFields({ advanced, setAdv, batchPurpose,
                 </button>
               </div>
             </div>
-            <div className="space-y-1">
+            <div className="stack-y-1">
               {RETRY_REASONS.map((r) => (
                 <label key={r.value} className="flex items-center gap-2 text-sm text-slate-700">
                   <input
@@ -242,7 +242,7 @@ export default function NewBatchAdvancedFields({ advanced, setAdv, batchPurpose,
             <Help>No boxes ticked = no retry (even if max attempts &gt; 1).</Help>
           </div>
         </div>
-        <div className="space-y-2">
+        <div className="stack-y-2">
           <p className="text-xs text-slate-600">
             <span className="font-semibold text-slate-700">Backoff</span> is how long the runner waits
             before each retry. Sleep = min(base × multiplier<sup>attempt</sup>, max), then randomised by
@@ -295,7 +295,7 @@ export default function NewBatchAdvancedFields({ advanced, setAdv, batchPurpose,
         </div>
       </fieldset>
 
-      <fieldset className="space-y-3">
+      <fieldset className="stack-y-3">
         <legend className="text-sm font-semibold text-slate-700">Scheduling</legend>
         <label className="block max-w-xs">
           <FieldLabel hint="0 – 1000">Submit priority</FieldLabel>
@@ -311,7 +311,7 @@ export default function NewBatchAdvancedFields({ advanced, setAdv, batchPurpose,
           <Help>Higher = scheduled first. Default 100.</Help>
         </label>
       </fieldset>
-      <fieldset className="space-y-3">
+      <fieldset className="stack-y-3">
         <legend className="text-sm font-semibold text-slate-700">Multi-model (terminus-2)</legend>
         <label className="flex items-center gap-2 text-sm text-slate-700">
           <input
@@ -332,7 +332,7 @@ export default function NewBatchAdvancedFields({ advanced, setAdv, batchPurpose,
               />
               <Help>Secondary model on the same BYO connection. Combinations must use terminus-2.</Help>
             </label>
-            <fieldset className="space-y-2">
+            <fieldset className="stack-y-2">
               <legend className="text-sm text-slate-700">Mix policy</legend>
               <label className="flex items-center gap-2 text-sm text-slate-700">
                 <input

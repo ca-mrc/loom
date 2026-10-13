@@ -108,8 +108,8 @@ export function RunLibraryFilters({
 
   return (
     <Card>
-      <Card.Body className="space-y-3">
-        <label className="space-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
+      <Card.Body className="stack-y-3">
+        <label className="stack-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
           Search
           <Input
             disabled={pipelineOnly}
@@ -125,7 +125,7 @@ export function RunLibraryFilters({
           </p>
         )}
         <div className="grid gap-3 sm:grid-cols-2">
-            <label className="space-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
+            <label className="stack-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
               Team
               <select
                 value={teamId}
@@ -141,7 +141,7 @@ export function RunLibraryFilters({
                 ))}
               </select>
             </label>
-            <label className="space-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
+            <label className="stack-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
               State
               <select
                 disabled={pipelineOnly}
@@ -162,7 +162,7 @@ export function RunLibraryFilters({
             Advanced filters
           </summary>
           <div className="mt-3 grid min-w-0 gap-3 md:grid-cols-2 xl:grid-cols-4">
-            <label className="space-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
+            <label className="stack-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
               Pipeline Recipe
               <Input
                 disabled={!pipelineOnly}
@@ -172,7 +172,7 @@ export function RunLibraryFilters({
                 className="mt-1 normal-case tracking-normal"
               />
             </label>
-            <label className="space-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
+            <label className="stack-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
               Pipeline result
               <select
                 disabled={!pipelineOnly}
@@ -187,7 +187,7 @@ export function RunLibraryFilters({
               </select>
             </label>
 
-            <label className="space-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
+            <label className="stack-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
               Benchmark
               <Input
                 disabled={pipelineOnly}
@@ -197,7 +197,7 @@ export function RunLibraryFilters({
                 className="mt-1 normal-case tracking-normal"
               />
             </label>
-            <label className="space-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
+            <label className="stack-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
               Agent
               <Input
                 disabled={pipelineOnly}
@@ -207,7 +207,7 @@ export function RunLibraryFilters({
                 className="mt-1 normal-case tracking-normal"
               />
             </label>
-            <label className="space-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
+            <label className="stack-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
               Model provider
               <Input
                 disabled={pipelineOnly}
@@ -217,7 +217,7 @@ export function RunLibraryFilters({
                 className="mt-1 normal-case tracking-normal"
               />
             </label>
-            <label className="space-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
+            <label className="stack-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
               Model name
               <Input
                 disabled={pipelineOnly}
@@ -227,7 +227,7 @@ export function RunLibraryFilters({
                 className="mt-1 normal-case tracking-normal"
               />
             </label>
-            <label className="space-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
+            <label className="stack-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
               Provider connection
               <Input
                 disabled={pipelineOnly}
@@ -237,7 +237,7 @@ export function RunLibraryFilters({
                 className="mt-1 normal-case tracking-normal"
               />
             </label>
-            <label className="space-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
+            <label className="stack-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
               Provider model
               <Input
                 disabled={pipelineOnly}
@@ -247,7 +247,7 @@ export function RunLibraryFilters({
                 className="mt-1 normal-case tracking-normal"
               />
             </label>
-            <label className="space-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
+            <label className="stack-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
               Artifact type
               <select
                 value={artifactType}

@@ -57,7 +57,7 @@ export function TagFiltersCard({
           {anyActive ? "active" : "narrow the slate further"}
         </span>
       </summary>
-      <div className="space-y-3 px-3 py-2">
+      <div className="stack-y-3 px-3 py-2">
         {schema.map(({ key, values }) => {
           const active = value[key] ?? new Set<string>();
           return (

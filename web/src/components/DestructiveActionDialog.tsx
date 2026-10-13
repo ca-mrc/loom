@@ -119,13 +119,13 @@ export function DestructiveActionDialog({
     >
       <form
         id={formId}
-        className="space-y-4"
+        className="stack-y-4"
         onSubmit={(event) => {
           event.preventDefault();
           void handleConfirm();
         }}
       >
-        <div className="space-y-1 text-sm text-slate-700">
+        <div className="stack-y-1 text-sm text-slate-700">
           <p className="font-medium text-slate-900">{target}</p>
         </div>
 

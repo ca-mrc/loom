@@ -40,7 +40,7 @@ export default function ModelPriceEditor({
     setError("");
   };
   return (
-    <div className="space-y-3">
+    <div className="stack-y-3">
       <p className="text-sm">
         USD per 1M tokens. Input and output are required for each configured
         model. Blank cache prices are unknown; zero is an explicit free price.

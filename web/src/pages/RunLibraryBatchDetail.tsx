@@ -265,7 +265,7 @@ function CombinationSummarySection({
       <Card.Body>
         <div className="overflow-x-auto">
           <table
-            className="min-w-full divide-y divide-slate-200 text-left text-sm"
+            className="min-w-full stack-divide-y stack-divide-slate-200 text-left text-sm"
             aria-label="Combination results"
           >
             <thead className="text-xs uppercase tracking-wider text-slate-500">
@@ -287,7 +287,7 @@ function CombinationSummarySection({
                 </th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-100 text-slate-700">
+            <tbody className="stack-divide-y stack-divide-slate-100 text-slate-700">
               {rows.map((combo) => (
                 <tr key={combo.combination_idx}>
                   <td className="max-w-xs px-3 py-3 align-top">
@@ -398,7 +398,7 @@ export default function RunLibraryBatchDetail(): JSX.Element {
     (batch.result_status === "succeeded" || batch.state === "finished");
 
   return (
-    <div className="space-y-6">
+    <div className="stack-y-6">
       <Link
         to={back?.returnTo ?? "/library"}
         state={back?.returnState}
@@ -408,7 +408,7 @@ export default function RunLibraryBatchDetail(): JSX.Element {
       </Link>
 
       <Card>
-        <Card.Body className="space-y-5">
+        <Card.Body className="stack-y-5">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0">
               <h1 className="text-2xl font-bold text-slate-900">{batch.name}</h1>
@@ -485,7 +485,7 @@ export default function RunLibraryBatchDetail(): JSX.Element {
           </div>
 
           <div className="flex flex-wrap items-end gap-2">
-            <label className="space-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
+            <label className="stack-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
               Provider connection
               <select
                 value={providerConnectionId}
@@ -568,7 +568,7 @@ export default function RunLibraryBatchDetail(): JSX.Element {
       <CombinationSummarySection rows={combinationSummary} />
 
       {!hasDiagnostics ? (
-        <div className="space-y-2">
+        <div className="stack-y-2">
           <Button
             variant="secondary"
             onClick={() => void diagnosticsQuery.refetch()}
@@ -597,7 +597,7 @@ export default function RunLibraryBatchDetail(): JSX.Element {
           {batch.source_provenance.length === 0 ? (
             <p className="text-sm text-slate-500">No upstream source recorded.</p>
           ) : (
-            <ul className="space-y-1 text-sm text-slate-700">
+            <ul className="stack-y-1 text-sm text-slate-700">
               {batch.source_provenance.map((item, index) => (
                 <li key={index}>{provenanceLabel(item)}</li>
               ))}
@@ -611,9 +611,9 @@ export default function RunLibraryBatchDetail(): JSX.Element {
           title="Artifacts"
           description="Individual files are grouped by type and Trial. Scan status controls sharing; authorized team diagnostic downloads may be available while scanning is pending."
         />
-        <Card.Body className="space-y-5">
+        <Card.Body className="stack-y-5">
           {trialBundles.length > 0 ? (
-            <section className="space-y-2">
+            <section className="stack-y-2">
               <div>
                 <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-500">
                   Complete Trial bundles
@@ -682,9 +682,9 @@ export default function RunLibraryBatchDetail(): JSX.Element {
             const artifacts = all.filter((artifact) => group === "logs_diagnostics" ? isDiagnostic(artifact) && artifact.role !== "raw_diagnostics" : group === "reusable_outputs" ? artifact.role === group && !isDiagnostic(artifact) : artifact.role === group);
             if (artifacts.length === 0) return null;
             const trials = [...new Set(artifacts.map((artifact) => artifact.trial_id))];
-            return <section key={group} className="space-y-2"><h3 className="text-xs font-semibold uppercase tracking-wider text-slate-500">{GROUP_LABELS[group]}</h3>
+            return <section key={group} className="stack-y-2"><h3 className="text-xs font-semibold uppercase tracking-wider text-slate-500">{GROUP_LABELS[group]}</h3>
               {group === "logs_diagnostics" ? <p className="text-xs text-slate-600">Logs and empty process output support diagnosis; they are not reusable downstream inputs.</p> : null}
-              {trials.map((trial) => <div key={trial ?? "run"} className="space-y-2">{trial ? <Link to={`/trials/${trial}`} className="text-sm text-accent">Trial {trial}</Link> : null}{artifacts.filter((artifact) => artifact.trial_id === trial).map((artifact) => <ArtifactRow key={`${artifact.trial_id}-${artifact.key}`} artifact={artifact} onReuse={(item) => reuse.mutate(item)} />)}</div>)}
+              {trials.map((trial) => <div key={trial ?? "run"} className="stack-y-2">{trial ? <Link to={`/trials/${trial}`} className="text-sm text-accent">Trial {trial}</Link> : null}{artifacts.filter((artifact) => artifact.trial_id === trial).map((artifact) => <ArtifactRow key={`${artifact.trial_id}-${artifact.key}`} artifact={artifact} onReuse={(item) => reuse.mutate(item)} />)}</div>)}
             </section>;
           })}
           {reuse.data ? (

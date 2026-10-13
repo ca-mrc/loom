@@ -76,7 +76,7 @@ export default function PasswordAction({ mode }: { mode: Mode }): JSX.Element {
   const recovery = !token || rejectedLink;
 
   return (
-    <div className="mx-auto max-w-lg space-y-5">
+    <div className="mx-auto max-w-lg stack-y-5">
       <header>
         <h1 className="text-2xl font-bold text-slate-900">
           {isSetup ? "Set Password" : "Reset Password"}
@@ -86,8 +86,8 @@ export default function PasswordAction({ mode }: { mode: Mode }): JSX.Element {
         </p>
       </header>
       <Card>
-        <Card.Body className="space-y-4">
-          {recovery ? <div role="alert" className="space-y-3 text-sm text-slate-700">
+        <Card.Body className="stack-y-4">
+          {recovery ? <div role="alert" className="stack-y-3 text-sm text-slate-700">
             <h2 className="font-semibold text-slate-900">{!token ? "Your account link is missing" : "This account link is no longer available"}</h2>
             <p>{!token ? "Open the complete link provided by your team administrator."
               : "The link is invalid, expired, or already used. For privacy, Loom cannot distinguish these states here."}</p>
@@ -99,7 +99,7 @@ export default function PasswordAction({ mode }: { mode: Mode }): JSX.Element {
           {lookup.isError && !rejectedLink ? <ErrorState error={lookup.error} /> : null}
           {lookup.data && !complete.isSuccess && !recovery ? (
             <form
-              className="space-y-4"
+              className="stack-y-4"
               onSubmit={(event) => {
                 event.preventDefault();
                 if (complete.isPending || disabled) return;
@@ -152,7 +152,7 @@ export default function PasswordAction({ mode }: { mode: Mode }): JSX.Element {
           ) : null}
           {complete.isError && !rejectedLink ? <ErrorState error={complete.error} /> : null}
           {complete.isSuccess ? (
-            <div className="space-y-3">
+            <div className="stack-y-3">
               <p className="text-sm font-medium text-emerald-700">
                 Password updated for {complete.data.user.username}.
               </p>

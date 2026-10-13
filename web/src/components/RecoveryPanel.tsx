@@ -71,7 +71,7 @@ export function RecoveryPanel({
         role="alert"
         aria-labelledby={titleId}
         tabIndex={-1}
-        className="mx-auto max-w-xl rounded-xl border border-slate-200 bg-white p-6 shadow-sm"
+        className="mx-auto max-w-xl rounded-xl border border-slate-200 bg-white p-6 shadow-xs"
       >
         {content}
       </section>
@@ -85,7 +85,7 @@ export function RecoveryPanel({
         id="main-content"
         ref={panelRef}
         tabIndex={-1}
-        className="mx-auto mt-16 max-w-xl rounded-xl border border-slate-200 bg-white p-6 shadow-sm"
+        className="mx-auto mt-16 max-w-xl rounded-xl border border-slate-200 bg-white p-6 shadow-xs"
       >
         <div role="alert" aria-labelledby={titleId}>
           {content}
