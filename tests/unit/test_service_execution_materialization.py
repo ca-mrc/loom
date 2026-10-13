@@ -24,6 +24,7 @@ from loom.service_execution_materialization import (
 )
 from loom.trajectory.storage import FakeObjectStore, ObjectReadback
 from loom_control_plane.service_execution_materializer import (
+    MaterializationClaim,
     MaterializationIntegrityError,
     ServiceExecutionMaterializer,
     build_canonical_events,
@@ -865,8 +866,8 @@ async def test_materializer_run_does_not_retry_a_translated_cancellation(
     operation_started = asyncio.Event()
     retry_called = False
 
-    async def claim_one() -> object:
-        return object()
+    async def claim_one() -> MaterializationClaim:
+        return MaterializationClaim(lease_id=uuid4(), claim_id=uuid4())
 
     async def load_and_materialize(_claim: object) -> None:
         operation_started.set()

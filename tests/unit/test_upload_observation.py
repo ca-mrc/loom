@@ -18,6 +18,11 @@ LEASE = UUID("10000000-0000-0000-0000-000000000001")
 SESSION = UUID("20000000-0000-0000-0000-000000000002")
 
 
+@pytest.fixture(autouse=True)
+def capture_observations(monkeypatch):
+    monkeypatch.setattr(logging.getLogger("loom.upload_observation"), "propagate", True)
+
+
 @contextmanager
 def s3_transport(statuses=(), block=False):
     """Independent fixture intervals/bytes, without stubbing the SDK's hooks."""
@@ -31,7 +36,7 @@ def s3_transport(statuses=(), block=False):
         def log_message(self, *_args):
             pass
 
-        def do_PUT(self):  # noqa: N802
+        def do_PUT(self):
             body = self.rfile.read(int(self.headers["Content-Length"]))
             with lock:
                 bodies.append(body)
@@ -79,7 +84,7 @@ async def upload(store):
 @pytest.mark.parametrize("overlap", [True, False])
 async def test_transport_intervals_distinguish_overlap_and_preserve_bytes(caplog, overlap):
     caplog.set_level(logging.INFO, logger="loom.upload_observation")
-    with s3_transport(block=overlap) as (store, bodies, entered, release):
+    with s3_transport(block=overlap) as (store, bodies, _entered, release):
         if overlap:
             tasks = [asyncio.create_task(upload(store)) for _ in range(2)]
             try:
@@ -175,3 +180,31 @@ async def test_spooling_is_separate_and_observations_are_scoped(caplog):
     transport_start, = records(caplog, "s3_transport", "started")
     assert spool_end["observed_bytes"] == 11
     assert spool_end["monotonic_ns"] < transport_start["monotonic_ns"]
+
+
+async def test_application_retry_can_overlap_the_abandoned_transport(caplog):
+    caplog.set_level(logging.INFO, logger="loom.upload_observation")
+    with s3_transport(block=True) as (store, bodies, _, release):
+        store._operation_timeout = 0.2
+        task = asyncio.create_task(upload(store))
+        try:
+            for _ in range(300):
+                if len(bodies) == 2:
+                    break
+                await asyncio.sleep(0.005)
+            assert len(bodies) == 2
+            starts = records(caplog, "sdk_worker", "started")
+            assert [e["attempt"] for e in starts] == [1, 2]
+            assert not records(caplog, "sdk_worker", "finished")
+            assert len(records(caplog, "s3_transport", "started")) == 2
+            assert not records(caplog, "s3_transport", "finished")
+        finally:
+            release.set()
+            await task
+            for _ in range(200):
+                if len(records(caplog, "sdk_worker", "finished")) == 2:
+                    break
+                await asyncio.sleep(0.01)
+        assert len(records(caplog, "sdk_worker", "finished")) == 2
+        assert len({e["span_id"] for e in records(caplog, "sdk_worker", "finished")}) == 2
+        assert all(len(json.dumps(e)) < 2048 for e in records(caplog))

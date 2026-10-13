@@ -109,7 +109,8 @@ async def test_native_part_retry_restarts_at_zero(monkeypatch):
 
 
 @pytest.mark.parametrize("cancel", [False, True], ids=["timeout-retry", "cancellation"])
-async def test_native_part_keeps_late_reader_alive_and_independent(monkeypatch, cancel):
+async def test_native_part_keeps_late_reader_alive_and_independent(monkeypatch, tmp_path, cancel):
+    monkeypatch.setattr("tempfile.tempdir", str(tmp_path))
     backend = StreamS3(block_first=True)
     store = make_store(monkeypatch, backend)
     store._operation_timeout = 0.05 if not cancel else 5
@@ -129,6 +130,11 @@ async def test_native_part_keeps_late_reader_alive_and_independent(monkeypatch, 
         backend.release.set()
         assert await asyncio.to_thread(backend.finished.wait, 2)
         assert backend.late_body == payload
+        for _ in range(200):
+            if not list(tmp_path.iterdir()):
+                break
+            await asyncio.sleep(0.005)
+        assert not list(tmp_path.iterdir()), "late reader must release its private spool"
     finally:
         backend.release.set()
         await asyncio.gather(task, return_exceptions=True)
