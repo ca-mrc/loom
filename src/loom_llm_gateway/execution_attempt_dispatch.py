@@ -164,14 +164,47 @@ async def authorize_trial_execution_dispatch(
         raise HTTPException(status_code=403, detail="service execution dispatch forbidden")
 
 
-async def authorize_trial_model(request: Request, ctx: AuthContext, *, provider: str, model: str) -> None:
-    """A native service-execution call may name only its Trial's admitted model.
+def admitted_service_execution_models(config: object) -> tuple[tuple[str, str], ...]:
+    """Provider/name pairs a native Trial may name on a model route.
 
-    Native Trials have exactly one model (multi-model is not admitted), and
-    materialization fails a Trial whose ledger holds any other identity. This
-    applies the same rule before a provider is contacted, so an off-model call
-    is refused instead of incurring cost. `provider` is the provider the
-    route's ledger dialect records; `model` is the model name it records.
+    Ordinary hosted trials admit only ``agent_model``. Terminus-2
+    ``student_teacher_student`` also admits the materialized teacher so the
+    same-session role router can reach both delegates. Other policies stay
+    rejected at admission and are not opened here.
+    """
+
+    if not isinstance(config, dict):
+        return ()
+    allowed: list[tuple[str, str]] = []
+    agent = config.get("agent_model")
+    if isinstance(agent, dict) and agent.get("provider") and agent.get("name"):
+        allowed.append((str(agent["provider"]), str(agent["name"])))
+    multi = config.get("multi_model")
+    secondary = multi.get("secondary_model") if isinstance(multi, dict) else None
+    if (
+        isinstance(multi, dict)
+        and multi.get("enabled")
+        and multi.get("policy") == "student_teacher_student"
+        and isinstance(secondary, dict)
+        and secondary.get("provider")
+        and secondary.get("name")
+    ):
+        pair = (str(secondary["provider"]), str(secondary["name"]))
+        if pair not in allowed:
+            allowed.append(pair)
+    return tuple(allowed)
+
+
+async def authorize_trial_model(
+    request: Request, ctx: AuthContext, *, provider: str, model: str
+) -> None:
+    """A native service-execution call may name only its Trial's admitted models.
+
+    Single-model trials keep the historical one-name rule. Terminus-2 STS
+    also admits the teacher snapshot so role-routed calls are not 403'd
+    before correlation. Materialization still fails any other identity.
+    `provider` is the provider the route's ledger dialect records; `model`
+    is the model name it records.
     """
 
     if ctx.service_execution_lease_id is None or ctx.trial_id is None:
@@ -180,16 +213,12 @@ async def authorize_trial_model(request: Request, ctx: AuthContext, *, provider:
         config = (
             await session.execute(select(Trial.config).where(Trial.id == ctx.trial_id))
         ).scalar_one_or_none()
-    admitted = config.get("agent_model") if isinstance(config, dict) else None
-    if not (
-        isinstance(admitted, dict)
-        and admitted.get("provider") == provider
-        and admitted.get("name") == model
-    ):
+    if (provider, model) not in admitted_service_execution_models(config):
         raise HTTPException(status_code=403, detail="service execution model forbidden")
 
 
 __all__ = [
+    "admitted_service_execution_models",
     "authorize_execution_attempt_dispatch",
     "authorize_trial_execution_dispatch",
     "authorize_trial_model",

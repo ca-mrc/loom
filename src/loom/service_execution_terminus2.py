@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 from dataclasses import dataclass
 from datetime import datetime
@@ -25,13 +26,14 @@ from loom.driver.base import Driver
 from loom.errors import AgentError
 from loom.models.task import TaskConfig
 from loom.models.trajectory import TrajectoryEvent
-from loom.models.trial import TrialConfig
+from loom.models.trial import MultiModelSwitchSpec, TrialConfig
 
 if TYPE_CHECKING:
     from loom.trajectory.writer import TrajectoryWriter
 
 _PROXY_TOKEN = "loom_workload_proxy"
 _LEDGER_MAX_BYTES = 16 * 1024 * 1024
+_CONTROL_MAX_BYTES = 64 * 1024
 _NATIVE_ARTIFACTS = frozenset({"trajectory.json", "recording.cast"})
 TASK_IMAGE_TOOLS_REQUIRED = "task image must preinstall bash, tmux and asciinema"
 
@@ -49,7 +51,14 @@ class LeaseGatewayClient:
     trial_id, team_id, step_id='agent', and items in the CP llm-calls shape.
     """
 
-    def __init__(self, *, gateway_url: str, trial_id: UUID, team_id: UUID) -> None:
+    def __init__(
+        self,
+        *,
+        gateway_url: str,
+        trial_id: UUID,
+        team_id: UUID,
+        control_token: str | None = None,
+    ) -> None:
         url = urlsplit(gateway_url)
         if (
             url.scheme != "http"
@@ -64,29 +73,118 @@ class LeaseGatewayClient:
         self.gateway_url = gateway_url.rstrip("/")
         self.trial_id = trial_id
         self.team_id = team_id
+        self._control_token = control_token
 
     def _check_identity(self, *, team_id: UUID, trial_id: UUID, step_id: str) -> None:
         if (team_id, trial_id, step_id) != (self.team_id, self.trial_id, "agent"):
             raise AgentError("Terminus execution identity does not match its lease")
 
     async def mint_step_token(
-        self, *, team_id: UUID, trial_id: UUID, step_id: str, ttl_sec: int,
+        self,
+        *,
+        team_id: UUID,
+        trial_id: UUID,
+        step_id: str,
+        ttl_sec: int,
     ) -> str:
         del ttl_sec
         self._check_identity(team_id=team_id, trial_id=trial_id, step_id=step_id)
         return _PROXY_TOKEN
 
     async def mint_attempt_step_token(
-        self, *, team_id: UUID, trial_id: UUID, step_id: str, ttl_sec: int,
+        self,
+        *,
+        team_id: UUID,
+        trial_id: UUID,
+        step_id: str,
+        ttl_sec: int,
         attempt_deadline_wall_clock: datetime,
     ) -> _ProxyTokenGrant:
         # The trusted Go phase supervisor supplies and signs the tighter native
         # deadline through the broker; this loopback caller cannot extend it.
         del attempt_deadline_wall_clock
         await self.mint_step_token(
-            team_id=team_id, trial_id=trial_id, step_id=step_id, ttl_sec=ttl_sec,
+            team_id=team_id,
+            trial_id=trial_id,
+            step_id=step_id,
+            ttl_sec=ttl_sec,
         )
         return _ProxyTokenGrant()
+
+    async def _post_control(
+        self,
+        path: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not self._control_token:
+            raise AgentError("Terminus execution control identity is unavailable")
+        try:
+            async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
+                response = await client.post(
+                    self.gateway_url + path,
+                    json=payload,
+                    headers={"X-Loom-Terminus-Control": self._control_token},
+                )
+                response.raise_for_status()
+                body = response.content
+            if len(body) > _CONTROL_MAX_BYTES:
+                raise AgentError("Terminus execution control response exceeds output limit")
+            decoded = json.loads(body)
+        except (httpx.HTTPError, ValueError) as exc:
+            raise AgentError("Terminus execution control is unavailable") from exc
+        if not isinstance(decoded, dict):
+            raise AgentError("Terminus execution control response is invalid")
+        return cast(dict[str, Any], decoded)
+
+    async def reclaim_terminus_execution(
+        self,
+        *,
+        trial_id: UUID,
+        step_id: str,
+    ) -> dict[str, Any]:
+        self._check_identity(
+            team_id=self.team_id,
+            trial_id=trial_id,
+            step_id=step_id,
+        )
+        state = await self._post_control("/internal/loom/terminus/reclaim", {})
+        try:
+            UUID(str(state["agent_execution_id"]))
+            UUID(str(state["agent_run_attempt_id"]))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise AgentError("Terminus reclaim response is invalid") from exc
+        if state.get("recovery") not in {"fresh", "resumed", "recovery_failed"}:
+            raise AgentError("Terminus reclaim response is invalid")
+        return state
+
+    async def post_episode_checkpoint(
+        self,
+        *,
+        trial_id: UUID,
+        execution_id: UUID,
+        run_attempt_id: UUID,
+        episode: int,
+        active_role: str,
+        last_call_ordinal: int,
+        last_seq: int,
+        tmux_session_id: str | None = None,
+        attempt_deadline_wall_clock: datetime | None = None,
+    ) -> dict[str, Any]:
+        if trial_id != self.trial_id:
+            raise AgentError("Terminus cannot checkpoint another trial")
+        del attempt_deadline_wall_clock  # The trusted broker supplies its phase deadline.
+        return await self._post_control(
+            "/internal/loom/terminus/episode-checkpoints",
+            {
+                "execution_id": str(execution_id),
+                "run_attempt_id": str(run_attempt_id),
+                "episode": episode,
+                "active_role": active_role,
+                "last_call_ordinal": last_call_ordinal,
+                "last_seq": last_seq,
+                "tmux_session_id": tmux_session_id,
+            },
+        )
 
     async def get_trial_llm_calls(self, trial_id: UUID) -> list[dict[str, Any]]:
         if trial_id != self.trial_id:
@@ -94,7 +192,8 @@ class LeaseGatewayClient:
         try:
             async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
                 async with client.stream(
-                    "GET", self.gateway_url + "/internal/loom/llm-calls",
+                    "GET",
+                    self.gateway_url + "/internal/loom/llm-calls",
                 ) as response:
                     response.raise_for_status()
                     body = bytearray()
@@ -201,19 +300,39 @@ async def run_terminus2(
     """
     if trial_config.agent_name != "terminus-2" or trial_config.agent_model is None:
         raise AgentError("Terminus execution requires terminus-2 and an explicit model")
-    if trial_config.multi_model is not None and trial_config.multi_model.enabled:
-        raise AgentError("Nebius Terminus does not yet support multi-model sessions")
+    multi_model = trial_config.multi_model
+    if isinstance(multi_model, dict):
+        multi_model = MultiModelSwitchSpec.model_validate(multi_model)
+    model_switch_plan: dict[str, Any] | None = None
+    if multi_model is not None and multi_model.enabled:
+        if multi_model.policy != "student_teacher_student":
+            raise AgentError(
+                "Nebius Terminus supports only student_teacher_student multi-model sessions",
+            )
+        if multi_model.switch_episode is None or multi_model.return_switch_episode is None:
+            raise AgentError("Nebius Terminus requires materialized multi-model K1/K2")
+        model_switch_plan = {
+            "mix_mode": "student_teacher_student",
+            "k1": multi_model.switch_episode,
+            "k2": multi_model.return_switch_episode,
+        }
     if len(task_config.steps) != 1:
         raise AgentError("Nebius Terminus requires exactly one task step")
     if not instruction.strip() or max_turns < 1 or max_trajectory_bytes < 1:
         raise AgentError("Terminus instruction and runtime limits must be nonempty")
     cp_client = LeaseGatewayClient(
-        gateway_url=gateway_url, trial_id=trial_id, team_id=team_id,
+        gateway_url=gateway_url,
+        trial_id=trial_id,
+        team_id=team_id,
+        control_token=os.environ.pop("LOOM_TERMINUS_CONTROL_TOKEN", None),
     )
     workdir = sandbox_workdir or task_config.environment.workdir
-    timeout = timeout_sec if timeout_sec is not None else (
-        trial_config.override_agent_timeout_sec or task_config.agent.timeout_sec
-    ) * trial_config.agent_timeout_multiplier
+    timeout = (
+        timeout_sec
+        if timeout_sec is not None
+        else (trial_config.override_agent_timeout_sec or task_config.agent.timeout_sec)
+        * trial_config.agent_timeout_multiplier
+    )
     deadline = deadline or AttemptDeadline.after(timeout)
     workspace.mkdir(parents=True, exist_ok=True)
     events_path = workspace / "trajectory.jsonl"
@@ -223,6 +342,7 @@ async def run_terminus2(
     events_path.chmod(0o600)
     trajectory = _LocalTrajectory(events_path, deadline, max_trajectory_bytes)
     protected_driver = cast(Driver, _ArtifactDriver(driver, workspace, workdir))
+
     def retain_native_artifacts(logs_root: Path) -> None:
         for name in _NATIVE_ARTIFACTS:
             source = logs_root / name
@@ -242,6 +362,8 @@ async def run_terminus2(
         max_turns=max_turns,
         continue_until_timeout=task_config.agent.continue_until_timeout,
         request_params=dict(trial_config.request_params),
+        multi_model=multi_model,
+        model_switch_plan=model_switch_plan,
         local_artifact_sink=retain_native_artifacts,
     )
     runtime.begin_attempt(deadline)
