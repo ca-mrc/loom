@@ -175,6 +175,36 @@ def test_manager_accepts_current_publication_without_inheriting_standalone_task_
     assert namespace["metadata"]["labels"]["pod-security.kubernetes.io/enforce"] == "restricted"
 
 
+@pytest.mark.parametrize('configured', [False, True])
+@pytest.mark.parametrize('capable', [False, True])
+@pytest.mark.parametrize('application_only', [False, True])
+def test_manager_task_egress_capability_does_not_require_execution_configuration(
+    request, configured, capable, application_only,
+):
+    selected = request.getfixturevalue('application_management_inputs' if application_only else 'management_inputs')
+    deployment, _, profile = selected
+    foundation = deployment['installation']['foundation']
+    config = json.loads(foundation['platform_config_json'])
+    if configured:
+        config['task_egress'] = {'protected_cidrs': ['198.51.100.0/24']}
+    foundation['platform_config_json'] = json.dumps(config)
+    profile['supports_task_web_egress'] = capable
+    profile['execution_class_id'] = 'linux-amd64-cpu-web-pod-v1' if capable else 'linux-amd64-cpu-pod-v1'
+    before = copy.deepcopy(selected)
+    result = render(selected)
+    assert selected == before
+    assert 'task_egress' not in result.config
+    docs = documents(result)
+    assert [(doc['kind'], doc['metadata']['name']) for doc in docs
+            if doc['kind'] in {'Deployment', 'StatefulSet'}] == [
+        ('StatefulSet', 'loom-postgres'), ('Deployment', 'loom-service')]
+    service = next(doc for doc in docs if doc['kind'] == 'Deployment')
+    env = {entry['name']: entry for entry in pod(service)['containers'][0]['env']}
+    assert env['LOOM_SVC_SERVICE_MODE']['value'] == 'management'
+    assert not any('TASK_EGRESS' in name for name in env)
+    assert all('task-egress.json' not in doc.get('data', {}) for doc in docs if doc['kind'] == 'ConfigMap')
+
+
 def test_runtime_mounts_only_explicit_separate_authorities(management_inputs):
     docs = documents(render(management_inputs))
     service = next(d for d in docs if d["kind"] == "Deployment")
