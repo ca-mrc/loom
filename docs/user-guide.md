@@ -78,7 +78,14 @@ ls /tmp/loom-smoke/<trial-id>/
   atif.json          # ATIF v1.7 projection
 ```
 
-Real evaluation runs:
+The installed-agent commands below describe the CLI options, but their local
+provider wiring currently needs the repair in
+[#2489](https://github.com/ca-mrc/loom/issues/2489). Local Google SDK calls also
+need the migration in [#2486](https://github.com/ca-mrc/loom/issues/2486).
+Use the hosted submission workflow for supported, deployment-qualified agents;
+these local examples are not successful-run acceptance evidence.
+
+Installed-agent command shape:
 
 ```bash
 # Anthropic / OpenAI / Google API key
@@ -104,7 +111,7 @@ Per-trial outputs land at `./runs/<trial-id>/{events.jsonl,atif.json}`.
 With `--json`, each trial's result also prints as a JSON line on stdout
 for piping (e.g. `loom run ... --json | jq '.state'`).
 
-Model-backed local run against an already-running OpenAI-compatible server:
+Local-server command shape (subject to the installed-agent limitation above):
 
 ```bash
 loom run --task humaneval/HumanEval/0 \
@@ -1905,11 +1912,18 @@ loom run
   --concurrency N         # parallel trials (default 1)
   --output-dir DIR        # default ./runs
   --json                  # JSON-line output instead of text
-  --server-url URL        # also POST results to <url>/api/v1/cli/results
+  --server-url URL        # unsupported local-result upload; see limitation below
   --tb2-report PATH       # also write a TB2 report with profile provenance
 ```
 
 `--dataset` and `--task` are mutually exclusive (one required).
+
+Local result upload is currently ineffective: `--server-url` or `LOOM_SERVER_URL`
+triggers a best-effort POST to `/api/v1/cli/results`, but the service has no such
+intake route and the CLI ignores HTTP failures. Results remain in the local
+output directory. The compatibility disposition is tracked in
+[#2490](https://github.com/ca-mrc/loom/issues/2490); this does not affect the
+authenticated hosted commands or remote catalog lookup.
 
 `--agent`:
 - `oracle` — runs `solution/solve.sh` from the task bundle (reference
