@@ -147,8 +147,8 @@ export function NewBatchTaskSelection({
             />
             {!benchmarks.isPending && (benchmarks.data?.items.length ?? 0) === 0 ? (
               <Help>
-                Ask an admin or operator to run the staging catalog provisioning step from the deployment
-                runbook, then refresh this page.
+                Ask an admin or operator to follow the catalog provisioning procedure for this environment
+                in the deployment runbook, then refresh this page.
               </Help>
             ) : null}
           </div>
