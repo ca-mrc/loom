@@ -905,6 +905,99 @@ async def test_artifact_filtered_cursor_walk_is_complete_and_bounded(
     assert "exists (select artifacts.id" in candidate_queries[0]
 
 
+@pytest.mark.parametrize("artifact_source", ["typed-batch", "typed-trial", "legacy"])
+async def test_owner_only_filter_precedes_pagination_and_preserves_batch_team_scope(
+    run_library_setup: dict[str, object],
+    artifact_source: str,
+) -> None:
+    team_a = run_library_setup["team_a"]
+    team_b = run_library_setup["team_b"]
+    ordered_ids, private_id = _seed_cursor_batches(
+        postgres_url=str(run_library_setup["postgres_url"]),
+        team_id=team_a,
+        task_id=str(run_library_setup["task_id"]),
+        provider_connection_id=run_library_setup["conn_a"],
+    )
+    # Interleave owners across timestamp ties and page boundaries. The newest
+    # seeded batch has the other owner, so filtering after LIMIT loses matches.
+    other_owner_ids = ordered_ids[::2]
+    all_seeded_ids = [UUID(value) for value in [*ordered_ids, private_id]]
+    other_owner_uuids = [UUID(value) for value in other_owner_ids]
+    sync_engine = create_engine(str(run_library_setup["postgres_url"]))
+    try:
+        with sync_engine.begin() as conn:
+            if artifact_source == "legacy":
+                conn.execute(delete(Artifact).where(Artifact.batch_id.in_(all_seeded_ids)))
+                for trial_id in conn.execute(
+                    select(Trial.id).where(Trial.batch_id.in_(all_seeded_ids))
+                ).scalars().all():
+                    conn.execute(update(Trial).where(Trial.id == trial_id).values(
+                        trajectory_index={"artifacts": [{
+                            "key": f"owner-filter/{trial_id}/report.json",
+                            "bucket": "artifacts",
+                            "role": "report",
+                            "share_status": "shared",
+                        }]},
+                    ))
+                conn.execute(update(Trial).where(Trial.batch_id.in_(other_owner_uuids)).values(
+                    team_id=team_b,
+                ))
+                conn.execute(update(Batch).where(Batch.id.in_(other_owner_uuids)).values(
+                    team_id=team_b,
+                ))
+            else:
+                # Typed artifact ownership is independent of the producing
+                # batch's team; owner_team_id must not become a team_id alias.
+                conn.execute(update(Artifact).where(Artifact.batch_id.in_(other_owner_uuids)).values(
+                    team_id=team_b,
+                ))
+                if artifact_source == "typed-trial":
+                    conn.execute(update(Artifact).where(Artifact.batch_id.in_(all_seeded_ids)).values(
+                        batch_id=None,
+                    ))
+    finally:
+        sync_engine.dispose()
+
+    headers = {"Authorization": f"Bearer {run_library_setup['raw_b']}"}
+    transport = httpx.ASGITransport(app=run_library_setup["app"])
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as client:
+        ids, page_sizes, cursors = await _walk_run_library_pages(
+            client,
+            headers=headers,
+            params={"scope": "all", "owner_team_id": str(team_a), "limit": "17"},
+        )
+        assert ids == [str(run_library_setup["batch_shared"]), *ordered_ids[1::2]]
+        assert page_sizes == [17, 10]
+        assert cursors[-1] is None
+        assert private_id not in ids
+        assert str(run_library_setup["batch_private"]) not in ids
+
+        other_ids, _, _ = await _walk_run_library_pages(
+            client,
+            headers=headers,
+            params={"scope": "all", "owner_team_id": str(team_b), "limit": "17"},
+        )
+        assert other_ids == other_owner_ids
+
+        batch_team_ids, _, _ = await _walk_run_library_pages(
+            client,
+            headers=headers,
+            params={
+                "scope": "all", "owner_team_id": str(team_b),
+                "team_id": str(team_a), "limit": "17",
+            },
+        )
+        assert batch_team_ids == ([] if artifact_source == "legacy" else other_owner_ids)
+
+        missing = await client.get(
+            "/api/v1/run-library/batches",
+            headers=headers,
+            params={"scope": "all", "owner_team_id": str(uuid4()), "limit": "1"},
+        )
+        assert missing.status_code == 200, missing.text
+        assert missing.json() == {"items": [], "next_cursor": None}
+
+
 async def test_run_library_rejects_naive_timestamp_cursor(
     run_library_setup: dict[str, object],
 ) -> None:
