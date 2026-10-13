@@ -140,7 +140,6 @@ pins = [
   { path = "tests/ops/test_nebius_pool_restart_qualification_live.py", shard_index = 2 },
   { path = "tests/ops/test_nebius_pool_cutover_entry.py", shard_index = 3 },
   { path = "tests/ops/test_nebius_pool_gateway_retirement.py", shard_index = 3 },
-  { path = "tests/ops/test_nebius_pool_image_cancellation_collector.py", shard_index = 3 },
   { path = "tests/ops/test_nebius_pool_legacy_restart_live.py", shard_index = 3 },
   { path = "tests/ops/test_nebius_pool_template_restoration_live.py", shard_index = 3 },
   { path = "tests/ops/test_nebius_pool_origin_history.py", shard_index = 4 },
@@ -160,7 +159,6 @@ pins = [
   { path = "tests/ops/test_nebius_pool_activation_live.py", shard_index = 7 },
   { path = "tests/ops/test_nebius_pool_cutover.py", shard_index = 7 },
   { path = "tests/ops/test_nebius_pool_gateway_retirement_live.py", shard_index = 7 },
-  { path = "tests/ops/test_nebius_pool_image_cancellation_gateway.py", shard_index = 0 },
   # Observation was unfinished at 38m41s beside the image lifecycle matrices
   # in 38181207030. The forward shard completed in 12m49s and has room for it.
   { path = "tests/ops/test_nebius_pool_participant_observation.py", shard_index = 10 },

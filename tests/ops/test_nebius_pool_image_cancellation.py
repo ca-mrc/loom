@@ -1,4 +1,4 @@
-"""Image cancellation/fencing behavior; target fixtures split measured CI load."""
+"""Image cancellation/fencing behavior for the manager, collector and gateway image targets."""
 from __future__ import annotations
 
 import copy
@@ -82,13 +82,21 @@ from tests.ops.test_nebius_pool_manager_image_history import (
 )
 
 
-@pytest.fixture(params=["manager"])
+@pytest.fixture(params=["manager", "collector", "gateway"])
 def target(request):
     return request.param
 
 
-@pytest.mark.parametrize("phase", ["isolate", "stop", "template", "start"])
-@pytest.mark.parametrize("late_commit", [False, True])
+# Every phase/commit combination runs on the manager. Collector and gateway share
+# the same fencing path behind their own runtime binding, so one phase covers it.
+CANCELLATION_CASES = [
+    *(("manager", phase, late_commit) for phase in ("isolate", "stop", "template", "start")
+      for late_commit in (False, True)),
+    *((target, "template", late_commit) for target in ("collector", "gateway") for late_commit in (False, True)),
+]
+
+
+@pytest.mark.parametrize(("target", "phase", "late_commit"), CANCELLATION_CASES)
 # Targeted cases requalify two image entries through all successor shutdowns.
 @pytest.mark.timeout(180)
 def test_cancellation_fences_image_cas_before_successor_shutdown(image_repair_case, phase, late_commit, target):
