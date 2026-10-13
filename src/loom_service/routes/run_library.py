@@ -1862,6 +1862,7 @@ async def list_run_library_batches(
         stmt = stmt.where(_batch_after_cursor(cur))
     artifact_filters = {
         "artifact_type": artifact_type,
+        "owner_team_id": owner_team_id,
         "source_batch_id": source_batch_id,
         "source_trial_id": source_trial_id,
         "safety_state": safety_state,
