@@ -148,7 +148,7 @@ export default function Benchmarks(): JSX.Element {
     }
     return (
       <div className="overflow-x-auto" tabIndex={0} role="region" aria-label="Benchmarks scroll area">
-        <table aria-label="Benchmarks" className="min-w-full divide-y divide-slate-200 text-sm">
+        <table aria-label="Benchmarks" className="min-w-full stack-divide-y stack-divide-slate-200 text-sm">
           <thead>
             <tr className="bg-slate-50/50">
               {[
@@ -174,7 +174,7 @@ export default function Benchmarks(): JSX.Element {
             return (
               <tbody
                 key={seriesLabel}
-                className="divide-y divide-slate-100 border-t border-slate-200"
+                className="stack-divide-y stack-divide-slate-100 border-t border-slate-200"
               >
                 <tr className="bg-indigo-50/60">
                   <th scope="col"
@@ -205,7 +205,7 @@ export default function Benchmarks(): JSX.Element {
                       {b.task_count ?? <span className="text-slate-300">—</span>}
                     </td>
                     <td className="px-4 py-3 text-xs text-slate-500">
-                      <div className="max-w-xs space-y-1.5">
+                      <div className="max-w-xs stack-y-1.5">
                         <span
                           className={cn(
                             "inline-flex rounded-md border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider",
@@ -242,7 +242,7 @@ export default function Benchmarks(): JSX.Element {
   })();
 
   return (
-    <div className="space-y-6">
+    <div className="stack-y-6">
       <header>
         <h1 className="text-2xl font-bold text-slate-900">Benchmarks</h1>
         <p className="mt-1 text-sm text-slate-500">

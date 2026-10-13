@@ -13,7 +13,7 @@ function resources(value: Resources): string {
   return `${value.cpu_millis / 1000} CPU / ${(value.memory_mib / 1024).toFixed(1)} GiB RAM / ${(value.storage_mib / 1024).toFixed(1)} GiB disk`;
 }
 function Workloads({ items }: { items: Workload[] }): JSX.Element {
-  return <ul className="mt-2 space-y-2">
+  return <ul className="mt-2 stack-y-2">
     {items.map((item, i) => <li key={`${item.kind}-${item.trial_id}-${i}`} className="rounded bg-slate-50 p-2 text-xs">
       <span className={item.kind === "build" ? "font-semibold text-indigo-800" : "font-semibold text-sky-800"}>
         {item.kind === "build" ? "Image build" : "Execution"}
@@ -48,7 +48,7 @@ export function NebiusPlacement({ targetId }: { targetId?: string }): JSX.Elemen
     </p>
     {query.isError ? <ErrorState error={query.error} /> : query.isPending ? <p className="mt-2 text-sm">Loading placement…</p> : null}
     {data && !data.available ? <p className="mt-2 text-sm">Placement has not been observed yet.</p> : null}
-    {data?.available ? <div className="mt-3 space-y-3">
+    {data?.available ? <div className="mt-3 stack-y-3">
       <p className="text-xs text-slate-600">
         {data.is_fresh ? "Fresh observation" : "Stale observation — placement may have changed"}
         {data.observed_at ? ` · ${new Date(data.observed_at).toLocaleTimeString()}` : ""}

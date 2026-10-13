@@ -113,7 +113,7 @@ export default function ProviderDetail(): JSX.Element {
   };
 
   return (
-    <div className="space-y-4">
+    <div className="stack-y-4">
       <header>
         <h1 className="text-2xl font-bold text-slate-900">{conn.name}</h1>
         <p className="text-sm text-slate-500">{conn.type}</p>
@@ -123,7 +123,7 @@ export default function ProviderDetail(): JSX.Element {
         value={tab}
         onValueChange={setTab}
         ariaLabel="Provider sections"
-        className="space-y-4"
+        className="stack-y-4"
         tabListClassName="flex gap-2 border-b border-slate-200"
         tabClassName={({ selected }) =>
           selected
@@ -206,7 +206,7 @@ function OverviewTab({
 
   return (
     <Card>
-      <Card.Body className="space-y-4">
+      <Card.Body className="stack-y-4">
         <dl className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
           <dt className="font-medium text-slate-600">Base URL</dt>
           <dd>
@@ -257,7 +257,7 @@ function OverviewTab({
           </Button>
         </div>
         {testResult && (
-          <div className="space-y-2">
+          <div className="stack-y-2">
             {testStatus ? (
               <>
                 <StatusPill
@@ -353,9 +353,9 @@ function SettingsTab({
   };
 
   return (
-    <div className="space-y-6">
+    <div className="stack-y-6">
       <Card>
-        <Card.Body className="space-y-4">
+        <Card.Body className="stack-y-4">
           <h2 className="text-lg font-semibold">Edit</h2>
           {edit.isError && <p role="alert">{String((edit.error as {detail?: string})?.detail ?? "Could not save provider settings")}</p>}
           {edit.isSuccess && <p role="status">Provider settings saved.</p>}
@@ -381,7 +381,7 @@ function SettingsTab({
         </Card.Body>
       </Card>
       <Card>
-        <Card.Body className="space-y-3 border-l-4 border-red-500 pl-4">
+        <Card.Body className="stack-y-3 border-l-4 border-red-500 pl-4">
           <h2 className="text-lg font-semibold text-red-700">Danger zone</h2>
           <div className="flex items-center justify-between gap-4 border-t border-slate-200 pt-3">
             <p className="text-sm text-slate-700">

@@ -46,7 +46,7 @@ export default function AddManualModelModal({
         </>
       }
     >
-      <div className="space-y-4">
+      <div className="stack-y-4">
         <div>
           <label
             htmlFor={modelIdInputId}

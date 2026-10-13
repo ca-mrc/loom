@@ -85,7 +85,7 @@ export function FrontendBootstrap({
         <main
           id="main-content"
           tabIndex={-1}
-          className="mx-auto mt-16 max-w-xl rounded-xl border border-slate-200 bg-white p-6 shadow-sm"
+          className="mx-auto mt-16 max-w-xl rounded-xl border border-slate-200 bg-white p-6 shadow-xs"
         >
           <div role="status" aria-live="polite" aria-busy="true">
             <h1 className="text-xl font-semibold text-slate-900">Loom</h1>

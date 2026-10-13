@@ -89,11 +89,11 @@ export function BatchesView({
 
   const COLS = 6;
   return (
-    <div className="space-y-3">
+    <div className="stack-y-3">
       <Card>
         <Card.Body className="p-0">
           <div className="overflow-x-auto" role="region" aria-label="Monitored batches" tabIndex={0}>
-            <table aria-label="Batches" className="min-w-full divide-y divide-slate-200 text-sm">
+            <table aria-label="Batches" className="min-w-full stack-divide-y stack-divide-slate-200 text-sm">
               <thead>
                 <tr className="bg-slate-50/50">
                   {["Name", "Owner", "State", "Planned trials", "Created", "Created by"].map((h) => (
@@ -107,7 +107,7 @@ export function BatchesView({
                   ))}
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-100">
+              <tbody className="stack-divide-y stack-divide-slate-100">
                 {query.isPending ? (
                   <SkeletonRows cols={COLS} />
                 ) : query.isError ? (

@@ -147,7 +147,7 @@ export function SubmitTrialModal({
         </>
       }
     >
-      <div className="space-y-4">
+      <div className="stack-y-4">
         {error ? <ErrorState error={error} /> : null}
         <p className="text-sm text-slate-600">
           A new trial will be queued for{" "}

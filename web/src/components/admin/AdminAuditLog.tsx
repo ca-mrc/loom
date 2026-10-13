@@ -15,7 +15,7 @@ function AuditRows({ events }: { events: AdminAuditEvent[] }): JSX.Element {
   if (events.length === 0) return <EmptyState label="No admin audit events." />;
   return (
     <div className="overflow-x-auto" tabIndex={0} role="region" aria-label="Audit events scroll area">
-      <table aria-label="Audit events" className="min-w-full divide-y divide-slate-200 text-sm">
+      <table aria-label="Audit events" className="min-w-full stack-divide-y stack-divide-slate-200 text-sm">
         <thead className="bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
           <tr>
             <th scope="col" className="px-3 py-2 font-semibold">Time</th>
@@ -25,7 +25,7 @@ function AuditRows({ events }: { events: AdminAuditEvent[] }): JSX.Element {
             <th scope="col" className="px-3 py-2 font-semibold">Request ID</th>
           </tr>
         </thead>
-        <tbody className="divide-y divide-slate-100 bg-white">
+        <tbody className="stack-divide-y stack-divide-slate-100 bg-white">
           {events.map((event) => (
             <tr key={event.id}>
               <td className="whitespace-nowrap px-3 py-2 text-slate-600">

@@ -27,7 +27,7 @@ export function CommandActions({
         {label}
       </Button>
       <Modal open={open} onClose={() => setOpen(false)} title={title} description={description} size="lg">
-        <div className="space-y-4">
+        <div className="stack-y-4">
           {commands?.map((command, index) => (
             <CommandSnippet key={`${index}:${command}`} label={`${title} ${index + 1}`} command={command} />
           ))}

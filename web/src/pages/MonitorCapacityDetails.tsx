@@ -5,7 +5,7 @@ import { plural, stateCount } from "./monitorPresentation";
 export default function MonitorCapacityDetails({ data }: { data: MonitorSummary }): JSX.Element {
   const resources = data.resources?.aggregate;
   return (
-    <div className="mt-4 space-y-4">
+    <div className="mt-4 stack-y-4">
         {!(data.progress && data.service_execution?.targets.length) ? (
           <>
             <div className="grid gap-3 md:grid-cols-4">

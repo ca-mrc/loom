@@ -1,0 +1,24 @@
+/*
+ * Loom stacks retain leading sibling spacing, including inline children and
+ * hidden fields. Tailwind 4's trailing-child space/divide utilities change
+ * those layouts. Distinct names keep this contract separate from Tailwind's.
+ */
+@utility stack-y-* {
+  & > :not([hidden]) ~ :not([hidden]) {
+    margin-top: calc(--value(number) * 0.25rem);
+    margin-bottom: 0;
+  }
+}
+
+@utility stack-divide-y {
+  & > :not([hidden]) ~ :not([hidden]) {
+    border-top-width: 1px;
+    border-bottom-width: 0;
+  }
+}
+
+@utility stack-divide-* {
+  & > :not([hidden]) ~ :not([hidden]) {
+    border-color: --value(--color-*);
+  }
+}

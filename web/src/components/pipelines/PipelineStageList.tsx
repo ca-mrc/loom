@@ -84,7 +84,7 @@ export default function PipelineStageList({
       </div>
     ));
   return (
-    <div className="space-y-3">
+    <div className="stack-y-3">
       <div className="grid gap-2 md:grid-cols-3">
         <label className="text-xs">
           Node key

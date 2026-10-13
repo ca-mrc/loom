@@ -123,7 +123,7 @@ export function MonitorHealthSummary({
         headingLevel="h2"
         actions={<StatusPill variant={queueStatusVariant(data.queue.status)}>{data.queue.status}</StatusPill>}
       />
-      <Card.Body className="space-y-4">
+      <Card.Body className="stack-y-4">
         <ProgressSummary progress={data.progress} batchId={batchId} />
         <p className="text-sm text-slate-600">{queueStatusText(data)}</p>
         <details open={detailsOpen} onToggle={event => setDetailsOpen(event.currentTarget.open)}>

@@ -131,8 +131,8 @@ export default function ProviderForm({
   };
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-4" noValidate>
-      <div className="space-y-2">
+    <form onSubmit={handleSubmit} className="stack-y-4" noValidate>
+      <div className="stack-y-2">
         <label htmlFor="pf-supplier">Supplier</label>
         <select
           id="pf-supplier"
@@ -179,7 +179,7 @@ export default function ProviderForm({
           disabled={mode === "edit"}
           value={type}
           onChange={(e) => setType(e.target.value)}
-          className="mt-1 block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm"
+          className="mt-1 block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm shadow-xs"
         >
           {PROVIDER_TYPES.map((t) => (
             <option key={t} value={t}>
@@ -245,7 +245,7 @@ export default function ProviderForm({
           line to restrict the picker.
         </p>
       </div>
-      <section className="space-y-3 rounded-md border p-3">
+      <section className="stack-y-3 rounded-md border p-3">
         <h2 className="font-semibold">Model cost estimates</h2>
         {initial?.legacy_pricing && !pricingTouched && (
           <p role="status">

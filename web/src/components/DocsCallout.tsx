@@ -28,13 +28,13 @@ export default function DocsCallout({
   return (
     <section
       className={cn(
-        "space-y-2 rounded-lg border p-3 text-sm text-slate-700",
+        "stack-y-2 rounded-lg border p-3 text-sm text-slate-700",
         TONE_CLASSES[tone],
         className,
       )}
     >
       <Heading className="text-sm font-semibold text-slate-900">{title}</Heading>
-      <div className="space-y-2 text-sm leading-relaxed">{children}</div>
+      <div className="stack-y-2 text-sm leading-relaxed">{children}</div>
     </section>
   );
 }
