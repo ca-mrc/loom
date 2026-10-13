@@ -966,8 +966,13 @@ endpoint as an OpenAI-compatible Provider Connection instead. The standalone
 
 ### Local LLMs (vLLM, ollama, llama.cpp, lm-studio)
 
-Three paths for driving `loom run` against a local OpenAI-compatible server,
-ordered by what most users reach for first.
+The three paths below describe local-server selection for `loom run`.
+Subprocess adapters such as `claude-code` and local `terminus-2` currently
+do not receive working provider wiring; their repair is tracked in
+[#2489](https://github.com/ca-mrc/loom/issues/2489). This limitation applies
+to inline, auto-vLLM, and registered local-server examples below. Starting
+a server or registering its configuration does not establish a working
+agent connection.
 
 #### Path A: inline — your server is already running
 
@@ -1938,6 +1943,9 @@ authenticated hosted commands or remote catalog lookup.
   Loom's private sandbox driver. Requires a provider + model; does not use
   `loom-launcher` or per-trial `install_script`. See
   [`architecture/terminus2-runtime.md`](architecture/terminus2-runtime.md).
+  Local `loom run --agent terminus-2` has unresolved provider wiring tracked
+  in [#2489](https://github.com/ca-mrc/loom/issues/2489); this local path is
+  not a supported substitute for hosted execution.
 
   Optional student/teacher mix (#1380): default remains a **single-model**
   trial. Opt in on `loom eval batch create` with **one** of the two
