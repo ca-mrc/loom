@@ -4,13 +4,17 @@ Loom uses `development`, `staging`, and `production` as environment identities.
 Hosted environments use Nebius. Local development must explicitly opt in to local
 execution; an environment name alone does not enable a worker backend.
 
-| Environment identity | Public route convention |
+| Environment identity | Earlier-installation route |
 | --- | --- |
 | `development` | `/dev` |
 | `staging` | `/staging` |
 | `production` | `/prod` |
 
-Public routes follow `https://yylx.world/<short_name>` using the route suffixes above.
+The earlier installation used `https://yylx.world/<short_name>` with these
+suffixes. They are historical examples, not required identities or proof of live
+endpoints. Use the verified hostname for the selected deployment. The
+[managed environment contract](nebius-primary-platform.md#managed-environment-identity-and-rendering)
+declares distinct hostnames behind shared HTTPS ingress.
 
 Release evidence uses the full environment identity and records the exact public
 route and API base. A route abbreviation is not a cluster identity or deployment

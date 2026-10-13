@@ -222,10 +222,11 @@ aggregate is computed from the steps that completed.
   must be present at runtime — `pip install` happens inside the
   container per step.
 - **Custom image:** `dockerfile = "environment/Dockerfile"`. Loom
-  uploads the Dockerfile with the task bundle, then service-mode workers
-  build it from the materialized bundle before the first trial that needs
-  it. The built image is cached under a deterministic `loom-task:<hash>`
-  tag derived from the task id, checksum, Dockerfile path, and optional
+  uploads the Dockerfile with the task bundle. Hosted native execution prepares
+  the image through build Jobs; local Compose uses its task-image-builder
+  sidecar. Trial workers pull the prepared image. Standalone `loom run` builds
+  locally and caches the image under a deterministic `loom-task:<hash>` tag
+  derived from the task id, checksum, Dockerfile path, and optional
   `docker_build_context`. Use this when the runtime overhead of installing
   dependencies dominates trial duration, or when the env has system-level
   requirements. Keep paths relative to the task bundle; absolute paths and
@@ -289,14 +290,18 @@ aggregate is computed from the steps that completed.
 
 ## Network policy
 
+For local Docker execution:
+
 ```toml
-[environment.network_policy]
+[environment.baseline_network_policy]
 kind = "allowlist"  # or "public" (default) or "no-network"
-allowlist = ["pypi.org", "files.pythonhosted.org"]
+domains = ["pypi.org", "files.pythonhosted.org"]
 ```
 
-Workers enforce via iptables inside the sandbox netns. `dynamic_network_policy = true`
-in the worker's capabilities is required for allowlist mode.
+The Docker driver enforces this policy with iptables inside the sandbox network
+namespace. Hosted native HTTP egress uses the distinct `web-allowlist` and
+`public-web` contracts; a local Docker allowlist does not qualify a task for
+hosted execution. See [sandbox isolation](../architecture/sandbox-isolation.md).
 
 ## Healthcheck
 
@@ -307,8 +312,8 @@ retries = 10
 interval_sec = 2.0
 ```
 
-The driver polls until the healthcheck passes (with exponential
-backoff up to `retries`). Useful for tasks where the agent must wait
+The Docker driver polls at the fixed `interval_sec` between attempts, up to
+`retries`. Useful for tasks where the agent must wait
 for a service to be ready before solving.
 
 ## Per-step instructions
@@ -375,13 +380,13 @@ python scripts/seed_test_data.py \
 ```
 
 The script reads `tests/fixtures/tasks/my-task/task.toml`, computes a
-SHA-256 checksum of the TOML, and inserts the row. To register a task
+SHA-256 checksum of the task directory, and inserts the row. To register a task
 that lives somewhere else than `tests/fixtures/tasks/`, fork the
 script — the SQL is short and the schema is at
 `src/loom/db/schema.py:Task`.
 
 Stored task rows must keep `config` valid against `TaskConfig`.
-`POST /trials` and `POST /api/v1/batches` reject invalid task config
+`POST /api/v1/trials` and `POST /api/v1/batches` reject invalid task config
 with HTTP 400, and the batch runner excludes legacy invalid rows from
 older batches so they do not retry forever. Task ids may contain `/`
 segments, for example `humaneval/HumanEval/26`; workers fetch those
@@ -473,13 +478,20 @@ If a wrapper must pass sources explicitly, use safe references such as
 and `--minio-secret-key env:LOOM_MINIO_SECRET_KEY`; literal credential values
 are rejected because argv is visible in process listings.
 
-Once registered, submit a trial:
+Once registered, submit a compatible Oracle task through the public API with a
+user-owned token that has submission authority. Set `LOOM_SERVER_URL` to the
+verified service base URL and `LOOM_API_TOKEN` to that user's token:
 
 ```bash
-curl -X POST https://loom.example.com/trials \
-  -H "Authorization: Bearer $TEAM_TOKEN" \
-  -d '{"task_id": "my-task", "config": {}}'
+curl -X POST "$LOOM_SERVER_URL/api/v1/trials" \
+  -H "Authorization: Bearer $LOOM_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"task_id": "my-task", "config": {"agent_name": "oracle", "agent_model": null}}'
 ```
+
+The task must satisfy the selected deployment's admission requirements. A local
+pytest fixture alone is not a qualified native task; hosted Oracle requires a
+prepared task image and a supported script verifier.
 
 ## Gotchas
 
