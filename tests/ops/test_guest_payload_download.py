@@ -29,7 +29,7 @@ def locked_archive() -> dict[str, object]:
     return {"url": URL, "bytes": len(PAYLOAD), "sha256": hashlib.sha256(PAYLOAD).hexdigest()}
 
 
-@pytest.mark.parametrize("status", [502, 503, 504])
+@pytest.mark.parametrize("status", [500, 502, 503, 504])
 @pytest.mark.parametrize("failures", [1, 2])
 def test_transient_http_response_recovers_with_verified_bytes(
     payload_builder, locked_archive, tmp_path, monkeypatch, capsys, status, failures,
@@ -63,7 +63,7 @@ def test_transient_http_response_recovers_with_verified_bytes(
     assert "upstream error body" not in diagnostic
 
 
-@pytest.mark.parametrize("status", [502, 503, 504])
+@pytest.mark.parametrize("status", [500, 502, 503, 504])
 def test_transient_http_failures_stop_after_three_attempts(
     payload_builder, locked_archive, tmp_path, monkeypatch, capsys, status,
 ):
@@ -91,7 +91,30 @@ def test_transient_http_failures_stop_after_three_attempts(
     assert "3/3" in diagnostic and "do-not-log" not in diagnostic
 
 
-@pytest.mark.parametrize("status", [400, 401, 403, 404, 429, 500])
+def test_mixed_server_errors_use_one_bounded_attempt_budget(
+    payload_builder, locked_archive, tmp_path, monkeypatch,
+):
+    responses = iter([502, 500, PAYLOAD])
+    requests = []
+    sleeps = []
+
+    def open_archive(url, *, timeout):
+        requests.append((url, timeout))
+        response = next(responses)
+        if isinstance(response, int):
+            raise HTTPError(url, response, "upstream server error", {}, io.BytesIO())
+        return io.BytesIO(response)
+
+    monkeypatch.setattr(payload_builder, "urlopen", open_archive)
+    monkeypatch.setattr(time, "sleep", sleeps.append)
+    destination = payload_builder.download(locked_archive, tmp_path)
+    assert destination.read_bytes() == PAYLOAD
+    assert destination.name == locked_archive["sha256"]
+    assert requests == [(URL, 120)] * 3
+    assert sleeps == [1, 2]
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 429])
 def test_other_http_errors_fail_without_retry(
     payload_builder, locked_archive, tmp_path, monkeypatch, status,
 ):
@@ -114,8 +137,9 @@ def test_other_http_errors_fail_without_retry(
 
 
 @pytest.mark.parametrize("content", [b"short", b"x" * len(PAYLOAD)])
+@pytest.mark.parametrize("status", [500, 504])
 def test_content_mismatch_after_retry_is_not_retried_or_cached(
-    payload_builder, locked_archive, tmp_path, monkeypatch, content,
+    payload_builder, locked_archive, tmp_path, monkeypatch, content, status,
 ):
     requests = []
     sleeps = []
@@ -123,7 +147,7 @@ def test_content_mismatch_after_retry_is_not_retried_or_cached(
     def open_archive(url, *, timeout):
         requests.append((url, timeout))
         if len(requests) == 1:
-            raise HTTPError(url, 504, "gateway timeout", {}, io.BytesIO())
+            raise HTTPError(url, status, "upstream server error", {}, io.BytesIO())
         return io.BytesIO(content)
 
     monkeypatch.setattr(payload_builder, "urlopen", open_archive)
