@@ -146,7 +146,7 @@ def test_combined_validator_returns_every_reason_across_axes():
     reasons = _reasons(task, trial, profile)
     for expected in (
         "isolation_guest_shared_unsupported", "guest_root_identity_required",
-        "network_policy_override_not_supported", "guest_runtime_unavailable",
+        "guest_runtime_unavailable",
         "agent_version_not_in_runtime_profile",
     ):
         assert expected in reasons

@@ -388,7 +388,6 @@ async def _batch_network_policy_evidence(
         try:
             effective = resolve_effective_network_policy(
                 baseline=task.environment.baseline_network_policy,
-                supported=task.environment.network_policies_supported,
                 override=requested,
             )
         except UnsupportedNetworkPolicyOverrideError:
@@ -1758,13 +1757,8 @@ async def preview_batch_network_policy(
 
     choices: list[_NetworkPolicyPreviewChoice] = []
     for kind in ("gateway-only", "web-allowlist", "public-web"):
-        incompatible = [
-            task_id for task_id in task_ids
-            if kind not in tasks[task_id].environment.network_policies_supported
-        ]
+        incompatible: list[str] = []
         reasons: list[str] = []
-        if incompatible:
-            reasons.append("network_policy_override_not_supported")
         if kind in {"web-allowlist", "public-web"}:
             if profile is None or not profile.supports_task_web_egress:
                 reasons.append("task_egress_runtime_unavailable")
@@ -1787,7 +1781,6 @@ async def preview_batch_network_policy(
         try:
             effective = resolve_effective_network_policy(
                 baseline=task.environment.baseline_network_policy,
-                supported=task.environment.network_policies_supported,
                 override=payload.baseline_network_policy_override,
             )
         except ValueError:

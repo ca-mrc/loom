@@ -2004,7 +2004,8 @@ def dispatch(argv: list[str]) -> int:
         default=None,
         help=(
             "Override task network access for every selected task. Omit to use each "
-            "task default; the server rejects tasks that do not declare support."
+            "task default (baseline_network_policy). One of gateway-only, "
+            "web-allowlist, or public-web."
         ),
     )
     p_bc.add_argument(

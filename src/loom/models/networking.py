@@ -89,24 +89,35 @@ NetworkPolicy = Annotated[
 TaskHttpEgress = Annotated[WebAllowlist | PublicWeb, Field(discriminator="kind")]
 
 
+# Hosted batch/trial override. Baseline stays whatever the task authored
+# (including legacy Harbor ``public`` / ``no-network``). The override menu is
+# these three dialer policies, not ``network_policies_supported``.
+HOSTED_NETWORK_POLICY_OVERRIDE_KINDS: frozenset[NetworkPolicyKind] = frozenset(
+    {"gateway-only", "web-allowlist", "public-web"}
+)
+
+
 class UnsupportedNetworkPolicyOverrideError(ValueError):
-    """A trial requested a policy the task does not declare it can run with."""
+    """A trial requested a network override outside the hosted three kinds."""
 
 
 def resolve_effective_network_policy(
     *,
     baseline: NetworkPolicy,
-    supported: frozenset[NetworkPolicyKind],
     override: NetworkPolicy | None,
+    supported: frozenset[NetworkPolicyKind] | None = None,
 ) -> NetworkPolicy:
-    """Resolve and validate the policy that an execution must freeze.
+    """Resolve the policy an execution must freeze.
 
-    The task owns the set of policies its environment supports. A trial may
-    select one of those policies, but it cannot silently expand that contract.
+    ``baseline`` is the task default. A trial override may select any of the
+    three hosted kinds. ``supported`` is accepted for stored configs and is
+    not consulted.
     """
-    if override is not None and override.kind not in supported:
+    del supported
+    if override is not None and override.kind not in HOSTED_NETWORK_POLICY_OVERRIDE_KINDS:
         raise UnsupportedNetworkPolicyOverrideError(
-            f"network policy override {override.kind!r} is not supported by the task",
+            f"network policy override {override.kind!r} is not a hosted kind "
+            "(gateway-only, web-allowlist, public-web)",
         )
     return override or baseline
 

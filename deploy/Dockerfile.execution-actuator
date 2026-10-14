@@ -10,7 +10,8 @@ ENV PYTHONPATH=/app/src
 WORKDIR /app
 COPY deploy/execution-actuator-requirements.txt ./deploy/execution-actuator-requirements.txt
 RUN pip install --no-cache-dir --requirement deploy/execution-actuator-requirements.txt
-COPY src/loom/__init__.py src/loom/execution_contract.py src/loom/execution_architecture.py \
+COPY src/loom/__init__.py src/loom/dockerfile_instructions.py src/loom/nebius_terminus_image.py \
+    src/loom/execution_contract.py src/loom/execution_architecture.py \
     src/loom/execution_image_admission.py src/loom/execution_runtime_contract.py \
     src/loom/execution_diagnosis_store.py src/loom/execution_failure_diagnosis.py \
     src/loom/execution_requirements.py src/loom/mutable_paths.py src/loom/sandbox_identity.py src/loom/task_fixtures.py \

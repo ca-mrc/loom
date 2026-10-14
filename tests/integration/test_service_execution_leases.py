@@ -774,7 +774,6 @@ async def _task_effective_network_policy(
         return None
     return resolve_effective_network_policy(
         baseline=task_config.environment.baseline_network_policy,
-        supported=task_config.environment.network_policies_supported,
         override=trial_config.baseline_network_policy_override if trial_config else None,
     )
 

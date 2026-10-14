@@ -197,7 +197,6 @@ class Trial:
 
         baseline: NetworkPolicy = resolve_effective_network_policy(
             baseline=self.ctx.task_config.environment.baseline_network_policy,
-            supported=self.ctx.task_config.environment.network_policies_supported,
             override=self.ctx.trial_config.baseline_network_policy_override,
         )
 

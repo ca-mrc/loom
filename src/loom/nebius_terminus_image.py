@@ -18,6 +18,32 @@ from loom.mutable_paths import validate_task_workdir
 from loom.sandbox_identity import SandboxIdentityV1, resolve_sandbox_identity
 
 OFFLINE_SCRIPT = "verifier/harbor-offline.sh"
+# Shared with Harbor image prep. Task-image builds install this set and then
+# refuse an image whose sandbox user cannot see bash, tmux, and asciinema.
+_TERMINUS_APT_PACKAGES = frozenset({
+    "asciinema",
+    "bash",
+    "ca-certificates",
+    "curl",
+    "passwd",
+    "python3",
+    "tmux",
+})
+_TERMINUS_APK_PACKAGES = frozenset({
+    "asciinema",
+    "bash",
+    "ca-certificates",
+    "curl",
+    "python3",
+    "shadow",
+    "tar",
+    "tmux",
+})
+_TERMINUS_TOOL_PROBE = (
+    "if ! command -v bash >/dev/null || ! command -v tmux >/dev/null || "
+    "! command -v asciinema >/dev/null; then "
+    "echo 'task image must preinstall bash, tmux and asciinema' >&2; exit 1; fi"
+)
 _DOCKERFILE_SUFFIX = ".loom-nebius"
 _PACKAGE = re.compile(r"[a-z0-9][a-z0-9+.-]*(?:=[A-Za-z0-9.+:~_-]+)?\Z")
 _REQUIREMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*(?:==[A-Za-z0-9][A-Za-z0-9_.+!-]*)?\Z")
@@ -496,12 +522,10 @@ def _alpine_package_install(packages: tuple[str, ...]) -> str:
     rm -rf "$loom_prep_cache" && trap - EXIT"""
 
 
-def _preparation_dockerfile(
-    original: str, bootstrap: HarborOfflineBootstrap, workdir: str, identity: SandboxIdentityV1,
-) -> str:
+def _classify_terminus_base(original: str) -> tuple[str, bool, bool, tuple[Any, ...]]:
+    """Return the final base, whether it is Arch or Alpine, and its instructions."""
     try:
-        original = _without_packaged_openhands_runtime(original)
-        instructions = dockerfile_instructions(original)
+        instructions = tuple(dockerfile_instructions(original))
     except DockerfileParseError as exc:
         raise ValueError(f"nebius-terminus: {exc}") from exc
     stages: dict[str, str] = {}
@@ -537,13 +561,10 @@ def _preparation_dockerfile(
             "nebius-terminus: image preparation supports Debian/Ubuntu final base images "
             "and official versioned Alpine or Arch Linux latest/base/base-devel images only"
         )
-    if (arch or alpine) and (bootstrap.apt_packages or bootstrap.uses_apt):
-        raise ValueError(
-            f"nebius-terminus: {'Arch Linux' if arch else 'Alpine'} images cannot use a Debian package bootstrap; "
-            "provide an explicitly reviewed verifier dependency preparation"
-        )
-    if not alpine and bootstrap.apk_packages:
-        raise ValueError("nebius-terminus: APK bootstrap requires an official Alpine final image")
+    return final_base, arch, alpine, instructions
+
+
+def _dockerfile_custom_shell(instructions: tuple[Any, ...]) -> bool:
     custom_shell = False
     for instruction in instructions:
         if instruction.keyword != "SHELL":
@@ -557,25 +578,84 @@ def _preparation_dockerfile(
         ):
             raise ValueError("nebius-terminus: Dockerfile SHELL must contain command strings")
         custom_shell = True
+    return custom_shell
+
+
+def _run_instruction(command: str, *, custom_shell: bool) -> str:
+    if custom_shell:
+        # Override only our build-time command, leaving the authored
+        # image's SHELL configuration and preceding RUN behavior intact.
+        return "RUN " + json.dumps(["/bin/sh", "-c", command.replace("\\\n", "\n")]) + "\n"
+    return "RUN " + command + "\n"
+
+
+def _terminus_package_install(
+    *, arch: bool, alpine: bool, apt_packages: set[str], apk_packages: set[str],
+) -> str:
+    if arch:
+        return _arch_package_install()
+    if alpine:
+        return _alpine_package_install(tuple(sorted(apk_packages)))
+    return (
+        "apt-get update -qq && apt-get install -y --no-install-recommends "
+        + " ".join(sorted(apt_packages))
+    )
+
+
+def append_terminus_runtime_tools(dockerfile: str) -> str:
+    """Install the Harbor terminus package set onto an authored task Dockerfile.
+
+    The appended ``RUN`` fails the image build when bash, tmux, or asciinema
+    is still missing. Unsupported final bases fail before a build starts.
+    """
+    _final_base, arch, alpine, instructions = _classify_terminus_base(dockerfile)
+    custom_shell = _dockerfile_custom_shell(instructions)
+    install = _terminus_package_install(
+        arch=arch,
+        alpine=alpine,
+        apt_packages=set(_TERMINUS_APT_PACKAGES),
+        apk_packages=set(_TERMINUS_APK_PACKAGES),
+    )
+    cleanup = "true" if arch or alpine else "rm -rf /var/lib/apt/lists/*"
+    prepared = (
+        dockerfile.rstrip()
+        + "\n\n# Loom: terminus runtime tools; original task above.\n"
+        + "USER root\n"
+        + _run_instruction(
+            f"{install} && {cleanup} && {_TERMINUS_TOOL_PROBE}",
+            custom_shell=custom_shell,
+        )
+    )
+    last_user = next(
+        (
+            instruction.arguments.strip()
+            for instruction in reversed(instructions)
+            if instruction.keyword == "USER"
+        ),
+        "",
+    )
+    if last_user and last_user not in {"root", "0"}:
+        prepared += f"USER {last_user}\n"
+    return prepared
+
+
+def _preparation_dockerfile(
+    original: str, bootstrap: HarborOfflineBootstrap, workdir: str, identity: SandboxIdentityV1,
+) -> str:
+    original = _without_packaged_openhands_runtime(original)
+    _final_base, arch, alpine, instructions = _classify_terminus_base(original)
+    if (arch or alpine) and (bootstrap.apt_packages or bootstrap.uses_apt):
+        raise ValueError(
+            f"nebius-terminus: {'Arch Linux' if arch else 'Alpine'} images cannot use a Debian package bootstrap; "
+            "provide an explicitly reviewed verifier dependency preparation"
+        )
+    if not alpine and bootstrap.apk_packages:
+        raise ValueError("nebius-terminus: APK bootstrap requires an official Alpine final image")
+    custom_shell = _dockerfile_custom_shell(instructions)
 
     def run(command: str) -> str:
-        if custom_shell:
-            # Override only our build-time command, leaving the authored
-            # image's SHELL configuration and preceding RUN behavior intact.
-            return "RUN " + json.dumps(["/bin/sh", "-c", command.replace("\\\n", "\n")]) + "\n"
-        return "RUN " + command + "\n"
-    packages = sorted(
-        {
-            "ca-certificates",
-            "curl",
-            "bash",
-            "tmux",
-            "asciinema",
-            "passwd",
-            "python3",
-            *bootstrap.apt_packages,
-        }
-    )
+        return _run_instruction(command, custom_shell=custom_shell)
+    packages = sorted(_TERMINUS_APT_PACKAGES.union(bootstrap.apt_packages))
     requirements = shlex.join((*bootstrap.index_args, *bootstrap.requirements))
     unpinned_tool = bootstrap.python_version is None and not bootstrap.system_site_packages
     if unpinned_tool:
@@ -630,11 +710,13 @@ def _preparation_dockerfile(
         )
     # Authored caches may be offline task inputs (for example Poetry wheels).
     # Disable only our uv download cache; never delete the image's HOME cache.
-    alpine_packages = tuple(sorted({"bash", "ca-certificates", "curl", "tmux", "asciinema",
-                                    "shadow", "python3", "tar", *bootstrap.apk_packages}))
-    package_install = (_arch_package_install() if arch else
-                       _alpine_package_install(alpine_packages) if alpine else
-                       f"apt-get update -qq && apt-get install -y --no-install-recommends {' '.join(packages)}")
+    alpine_packages = _TERMINUS_APK_PACKAGES.union(bootstrap.apk_packages)
+    package_install = _terminus_package_install(
+        arch=arch,
+        alpine=alpine,
+        apt_packages=set(packages),
+        apk_packages=set(alpine_packages),
+    )
     package_cleanup = "true" if arch or alpine else "rm -rf /var/lib/apt/lists/*"
     preparation = run(f"""export UV_NO_CACHE=1 && {package_install} && \\
     {python_setup} && \\

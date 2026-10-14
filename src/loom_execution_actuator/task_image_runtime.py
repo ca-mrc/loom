@@ -35,7 +35,12 @@ from loom.service_execution_materialization import (
     ServiceExecutionInputManifestV1,
     service_execution_input_binding,
 )
+from loom.nebius_terminus_image import append_terminus_runtime_tools
 from loom.task_image_build_plan import derive_task_image_build_components
+
+# Cache tests replace the public name with a component-count stub. Tool
+# installation must keep reading the authored Dockerfiles.
+_derive_task_image_build_components = derive_task_image_build_components
 from loom.task_image_bundle_manifest import capture_task_image_bundle_manifest
 from loom.task_image_materialization import task_bundle_content_manifest_digest
 from loom.trajectory.storage import (
@@ -759,11 +764,29 @@ def _try_import_cache(
         shutil.rmtree(archive_parent, ignore_errors=True)
 
 
+def _install_terminus_runtime_tools(claim: dict[str, Any], context: Path) -> None:
+    """Prepare the primary task Dockerfile before buildkit reads it.
+
+    Sidecars stay as authored. An unsupported base fails this build instead of
+    the first trial.
+    """
+    for component in _derive_task_image_build_components(claim["task_config"]):
+        if component.name != "task":
+            continue
+        dockerfile = context / component.dockerfile_path
+        try:
+            rewritten = append_terminus_runtime_tools(dockerfile.read_text())
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise BuildPreparationError(str(exc)) from exc
+        dockerfile.write_text(rewritten)
+
+
 def prepare(claim: dict[str, Any], work: Path, secrets: Path) -> None:
     with stage_span("prepare"):
         source = _client(claim, secrets / "source")
         try:
             download_bundle(claim, source, work / "context")
+            _install_terminus_runtime_tools(claim, work / "context")
         finally:
             source.close()
         (work / "oci").mkdir(exist_ok=True)

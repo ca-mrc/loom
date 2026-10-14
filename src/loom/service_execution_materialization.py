@@ -447,7 +447,6 @@ def automatic_service_execution_rejections(
     try:
         effective_network_policy = resolve_effective_network_policy(
             baseline=env.baseline_network_policy,
-            supported=env.network_policies_supported,
             override=trial.baseline_network_policy_override,
         )
         network_override_supported = True
@@ -678,7 +677,6 @@ def compile_service_execution_plan(
     assert spec is not None  # admission rejected unknown harnesses above
     effective_network_policy = resolve_effective_network_policy(
         baseline=task.environment.baseline_network_policy,
-        supported=task.environment.network_policies_supported,
         override=trial.baseline_network_policy_override,
     )
     if hosted_http_egress(effective_network_policy) is not None and not profile.supports_task_web_egress:
@@ -940,7 +938,6 @@ def runtime_profile_rejections(
     try:
         effective_network_policy = resolve_effective_network_policy(
             baseline=task.environment.baseline_network_policy,
-            supported=task.environment.network_policies_supported,
             override=trial.baseline_network_policy_override,
         )
     except UnsupportedNetworkPolicyOverrideError:
