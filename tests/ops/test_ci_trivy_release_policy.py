@@ -140,6 +140,7 @@ def test_policy_writer_ignores_checkout_local_trivy_overrides(tmp_path: Path) ->
             str(config),
             "--ignore-file",
             str(ignore),
+            "--no-exceptions",
         ],
         cwd=checkout,
         text=True,
@@ -151,14 +152,21 @@ def test_policy_writer_ignores_checkout_local_trivy_overrides(tmp_path: Path) ->
     assert result.stdout == ""
     assert config.read_bytes() == CONFIG_BYTES
     assert hashlib.sha256(config.read_bytes()).hexdigest() == CONFIG_SHA256
-    assert ignore.read_bytes() == IGNORE_BYTES
-    assert hashlib.sha256(ignore.read_bytes()).hexdigest() == IGNORE_SHA256
+    assert ignore.read_bytes() == b"vulnerabilities: []\n"
     assert stat.S_ISREG(config.lstat().st_mode)
     assert stat.S_ISREG(ignore.lstat().st_mode)
     assert not config.is_symlink()
     assert not ignore.is_symlink()
     assert (checkout / "trivy.yaml").read_text(encoding="utf-8") == "exit-code: 0\n"
     assert (checkout / ".trivyignore").read_text(encoding="utf-8") == "CVE-ALL\n"
+
+
+def test_legacy_policy_writer_preserves_exact_reviewed_bytes(tmp_path: Path) -> None:
+    config, ignore = tmp_path / "trivy.yaml", tmp_path / "ignore.yaml"
+    policy.write_release_policy(config, ignore, today=date(2026, 9, 14))
+    assert config.read_bytes() == CONFIG_BYTES
+    assert ignore.read_bytes() == IGNORE_BYTES
+    assert hashlib.sha256(ignore.read_bytes()).hexdigest() == IGNORE_SHA256
 
 
 def test_policy_writer_rejects_expired_temporary_exceptions(tmp_path: Path) -> None:
@@ -202,6 +210,7 @@ def test_workflow_scans_only_the_controlled_absolute_policy_files() -> None:
         assert policy_step["name"] == "Generate controlled Trivy policy"
         assert policy_step["run"].strip() == (
             "python3 scripts/write_trivy_release_policy.py \\\n"
+            "  --no-exceptions \\\n"
             "  --config-file /tmp/loom-trivy-release.yaml \\\n"
             "  --ignore-file /tmp/loom-trivy-release.ignore.yaml"
         )
@@ -212,6 +221,7 @@ def test_workflow_scans_only_the_controlled_absolute_policy_files() -> None:
         assert "--show-suppressed" in scan["run"]
         validation = (
             "python3 scripts/validate_trivy_release_report.py \\\n"
+            "  --no-exceptions \\\n"
             '  --component "$IMAGE_NAME" \\\n'
             '  --architecture "$ARCHITECTURE" \\\n'
             '  --report "$REPORT" \\\n'

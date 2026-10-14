@@ -11,7 +11,21 @@ import pytest
 from scripts import write_trivy_release_policy as policy
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-VALIDATOR = REPO_ROOT / "scripts/validate_trivy_release_report.py"
+# Historical inventories must exercise report validation while their review is
+# valid, even after the real exception expires. Only this subprocess's module
+# clock is replaced; the production CLI has no clock override. Unpatched CLI
+# entrypoints are also exercised by test_nebius_trivy_policy.py.
+_REVIEWED_VALIDATOR = """
+import sys
+from datetime import datetime
+from unittest.mock import patch
+from scripts import validate_trivy_release_report as validator
+
+reviewed_at = datetime.fromisoformat(sys.argv.pop(1))
+with patch.object(validator, "datetime") as clock:
+    clock.now.return_value = reviewed_at
+    validator.main()
+"""
 _PERL_CVES = (
     "CVE-2026-13221",
     "CVE-2026-42496",
@@ -168,6 +182,7 @@ def _run_validator(
     component: str = "agent-sandbox",
     architecture: str = "amd64",
     ignore_file: Path | None = None,
+    reviewed_at: str = "2026-09-14T00:00:00+00:00",
 ) -> subprocess.CompletedProcess[str]:
     controlled_ignore = ignore_file or tmp_path / "loom-trivy-release.ignore.yaml"
     if ignore_file is None:
@@ -179,7 +194,9 @@ def _run_validator(
     return subprocess.run(
         [
             sys.executable,
-            str(VALIDATOR),
+            "-c",
+            _REVIEWED_VALIDATOR,
+            reviewed_at,
             "--component",
             component,
             "--architecture",
@@ -200,6 +217,26 @@ def _assert_rejected(result: subprocess.CompletedProcess[str]) -> None:
     assert result.returncode == 1
     assert result.stdout == ""
     assert result.stderr == "error: Trivy release report validation failed\n"
+
+
+@pytest.mark.parametrize(
+    ("reviewed_at", "accepted"),
+    (("2026-10-13T23:59:59+00:00", True),
+     ("2026-10-14T00:00:00+00:00", False),
+     ("2099-01-01T00:00:00+00:00", False)),
+)
+def test_legacy_cli_enforces_review_expiry(
+    tmp_path: Path, reviewed_at: str, accepted: bool,
+) -> None:
+    ignore_file = tmp_path / "loom-trivy-release.ignore.yaml"
+    result = _run_validator(
+        tmp_path, _report("agent-sandbox", ignore_file), reviewed_at=reviewed_at,
+    )
+    if accepted:
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == result.stderr == ""
+    else:
+        _assert_rejected(result)
 
 
 _SUPPORTED_COMPONENT_ARCHITECTURES = tuple(

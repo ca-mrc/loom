@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 import sys
 from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
+import yaml
 from scripts import validate_trivy_release_report as validator
 from scripts import write_trivy_release_policy as policy
 
@@ -14,19 +16,35 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.mark.parametrize("finding", [None, "critical", "suppressed"])
-def test_actual_zero_exception_cli_runs_after_expiry_and_rejects_findings(
-    tmp_path: Path, finding: str | None,
+@pytest.mark.parametrize("job", ["build", "nebius-harness-build"])
+def test_actual_workflow_policy_commands_reject_findings(
+    tmp_path: Path, finding: str | None, job: str,
 ) -> None:
     config, ignore, report = (tmp_path / name for name in ("trivy.yaml", "ignore.yaml", "report.json"))
+    workflow = yaml.safe_load((ROOT / ".github/workflows/images.yml").read_text())
+    steps = {step.get("name"): step for step in workflow["jobs"][job]["steps"]}
+    component = "harbor-runtime" if job == "nebius-harness-build" else "execution-runtime"
+
+    def command(script: str, source: str) -> list[str]:
+        # Run the real workflow's writer and final validator, substituting only
+        # runner paths and matrix variables. The real clock is unchanged.
+        arguments = shlex.split(source[source.index(f"python3 scripts/{script}"):].replace("\\\n", ""))
+        replacements = {
+            "/tmp/loom-trivy-release.yaml": str(config),
+            "/tmp/loom-trivy-release.ignore.yaml": str(ignore),
+            "$IMAGE_NAME": component, "$ARCHITECTURE": "amd64", "$REPORT": str(report),
+        }
+        return [sys.executable, str(ROOT / arguments[1]),
+                *(replacements.get(arg, arg) for arg in arguments[2:])]
+
     generate = subprocess.run(
-        [sys.executable, str(ROOT / "scripts/write_trivy_release_policy.py"),
-         "--config-file", str(config), "--ignore-file", str(ignore), "--no-exceptions"],
+        command("write_trivy_release_policy.py", steps["Generate controlled Trivy policy"]["run"]),
         cwd=tmp_path, capture_output=True, text=True,
     )
     assert generate.returncode == 0, generate.stderr
     assert config.read_bytes() == policy.TRIVY_CONFIG_BYTES
     assert ignore.read_bytes() == policy.TRIVY_NO_EXCEPTIONS_BYTES
-    payload = _report("execution-runtime")
+    payload = _report(component)
     if finding == "critical":
         payload["Results"][0]["Vulnerabilities"] = [
             {"VulnerabilityID": "CVE-2026-13221", "Severity": "CRITICAL"},
@@ -39,9 +57,7 @@ def test_actual_zero_exception_cli_runs_after_expiry_and_rejects_findings(
         ]
     report.write_text(json.dumps(payload))
     checked = subprocess.run(
-        [sys.executable, str(ROOT / "scripts/validate_trivy_release_report.py"),
-         "--component", "execution-runtime", "--architecture", "amd64",
-         "--report", str(report), "--ignore-file", str(ignore), "--no-exceptions"],
+        command("validate_trivy_release_report.py", steps["Scan native image archive"]["run"]),
         cwd=tmp_path, capture_output=True, text=True,
     )
     assert checked.returncode == (0 if finding is None else 1), checked.stderr
