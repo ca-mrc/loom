@@ -1264,7 +1264,12 @@ runtime places them under `.loom/` outside the task-bundle digest.
 
 The verifier lease's finalize sets the reward and moves the trial on; the
 materializer archives both bundles, with verifier files under
-`verifier-execution/`. Failure paths:
+`verifier-execution/`. The parent and verifier archive ACKs commit in one
+transaction. The deferred verifier records its materialization attempt and the
+same combined canonical events/ATIF identity as its parent before either ACK is
+published. Deleting execution pods does not finish archival: pending/running
+materialization continues to block the normal idle rollout until actual
+canonical publication completes. Failure paths:
 
 - Cancellation while waiting creates no child; an existing child is cancelled
   with the attempt.

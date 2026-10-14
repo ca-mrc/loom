@@ -810,6 +810,9 @@ class ServiceExecutionMaterializer:
             await session.commit()
             return True
 
+    async def _qualify_claim(self, session: AsyncSession, lease: ServiceExecutionLease) -> None:
+        """Allow a bounded recovery worker to qualify under the ordinary claim lock."""
+
     async def claim_one(
         self, *, now: datetime | None = None, lease_id: UUID | None = None,
     ) -> MaterializationClaim | None:
@@ -872,6 +875,7 @@ class ServiceExecutionMaterializer:
             ).scalar_one_or_none()
             if lease is None:
                 return None
+            await self._qualify_claim(session, lease)
             if lease.finalized_at is None:
                 await recover_deleted_committed_trial(session, lease=lease, observed_at=current)
                 if lease.finalized_at is not None:
@@ -1538,7 +1542,10 @@ class ServiceExecutionMaterializer:
                 trial.failure_message = (
                     f"{result.exception_info.exception_type}: {result.exception_info.exception_message}"
                 )[:2000]
-            await self._settle_verifier_source(session, lease=lease, trial=trial, now=now, committed=True)
+            await self._settle_verifier_source(
+                session, lease=lease, trial=trial, now=now, committed=True,
+                events_sha256=result.events_sha256, atif_sha256=result.atif_sha256,
+            )
             lease.materialization_state = "committed"
             lease.materialization_claim_id = None
             lease.materialization_claim_expires_at = None
@@ -1560,7 +1567,8 @@ class ServiceExecutionMaterializer:
 
     async def _settle_verifier_source(
         self, session: AsyncSession, *, lease: ServiceExecutionLease, trial: Trial, now: datetime,
-        committed: bool, error_code: str | None = None,
+        committed: bool, error_code: str | None = None, error_message: str | None = None,
+        events_sha256: str | None = None, atif_sha256: str | None = None,
     ) -> None:
         """Close the deferred verifier's spool together with its parent's archive."""
         handoff = (trial.result or {}).get("verifier_execution") if isinstance(trial.result, dict) else None
@@ -1570,6 +1578,10 @@ class ServiceExecutionMaterializer:
         if (
             child is None
             or child.parent_lease_id != lease.id
+            or child.execution_role != "verifier"
+            or child.team_id != lease.team_id
+            or child.trial_id != trial.id
+            or child.attempt != lease.attempt
             or child.output_commit_state != "committed"
             or child.materialization_state not in {"pending", "running"}
         ):
@@ -1579,8 +1591,19 @@ class ServiceExecutionMaterializer:
         child.materialization_next_attempt_at = None
         child.updated_at = now
         if committed:
+            if events_sha256 is None or atif_sha256 is None:
+                raise MaterializationIntegrityError("verifier_archive_identity_missing")
+            # The verifier is archived by this parent worker, never claimed on
+            # its own. Persist the complete ACK before the Artifact query can
+            # autoflush; both leases refer to the same combined canonical trace.
+            child.materialization_attempts += 1
+            child.materialization_started_at = now
             child.materialization_state = "committed"
             child.materialization_committed_at = now
+            child.materialization_error_code = None
+            child.materialization_error_message = None
+            child.canonical_trajectory_sha256 = events_sha256
+            child.canonical_atif_sha256 = atif_sha256
             child.source_cleanup_state = "retained"
             child.source_retain_until = now + self._source_retention
             artifact = await session.scalar(select(Artifact).where(
@@ -1597,6 +1620,9 @@ class ServiceExecutionMaterializer:
         else:
             child.materialization_state = "unavailable"
             child.materialization_error_code = (error_code or "parent_materialization_unavailable")[:120]
+            child.materialization_error_message = (
+                error_message or "parent canonical materialization unavailable"
+            )[:2000]
 
     async def _retry(self, claim: MaterializationClaim, exc: Exception) -> None:
         now = datetime.now(UTC)
@@ -1638,7 +1664,7 @@ class ServiceExecutionMaterializer:
             if trial is None:
                 return
             await self._settle_verifier_source(session, lease=lease, trial=trial, now=now, committed=False,
-                                               error_code=exc.code)
+                                               error_code=exc.code, error_message=str(exc))
             lease.materialization_state = "unavailable"
             lease.materialization_next_attempt_at = None
             lease.materialization_claim_id = None
@@ -1958,7 +1984,9 @@ class ServiceExecutionMaterializer:
                 raise
             except Exception as exc:  # object-store and database transport failures retry
                 _raise_if_cancellation_requested(exc)
-                logger.warning("service execution materialization retry: %s", exc)
+                # Transport/SQL exceptions may contain private source URLs or
+                # row payloads. Keep detail in the retained lease diagnostic.
+                logger.warning("service execution materialization retry (%s)", type(exc).__name__)
                 await self._retry(claim, exc)
                 span.outcome = "retry"
 
