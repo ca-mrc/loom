@@ -175,7 +175,7 @@ def test_terminus_rejects_missing_controller_and_disabled_private_isolation():
             source_provenance=_provenance(), task_revision_sha256=_REVISION)
     reasons = automatic_service_execution_rejections(task, trial.model_copy(
         update={"workspace_staging_policy_name": "none"}), source_provenance=_provenance())
-    assert "private_workspace_isolation_required" in reasons
+    assert "private_workspace_isolation_required" not in reasons
 
 
 def _events():

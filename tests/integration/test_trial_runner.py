@@ -454,7 +454,7 @@ async def test_runner_starts_sidecars_and_uses_returned_network(
         ),
         task_checksum="0" * 64,
         task_dir=hello_task,
-        trial_config=stub_trial_config(),
+        trial_config=stub_trial_config(verifier_env_mode="shared"),
         driver_factory=lambda: driver,
         agent_factory=lambda task_dir, _gw, _model, _name: OracleAgent(
             task_dir=task_dir, trial_id=trial_id
@@ -653,7 +653,7 @@ async def test_runner_marks_failed_when_artifact_upload_fails(  # type: ignore[n
         task_config=_task_config(artifacts=["result.txt"]),
         task_checksum="0" * 64,
         task_dir=hello_task,
-        trial_config=stub_trial_config(),
+        trial_config=stub_trial_config(verifier_env_mode="shared"),
         driver_factory=lambda: driver,
         agent_factory=lambda task_dir, _gw, _model, _name: OracleAgent(
             task_dir=task_dir, trial_id=trial_id
@@ -752,7 +752,7 @@ async def test_runner_projects_successful_trial_outputs(  # type: ignore[no-unty
         task_config=_task_config(artifacts=["result.txt"]),
         task_checksum="0" * 64,
         task_dir=hello_task,
-        trial_config=stub_trial_config(),
+        trial_config=stub_trial_config(verifier_env_mode="shared"),
         driver_factory=lambda: driver,
         agent_factory=lambda task_dir, _gw, _model, _name: OracleAgent(
             task_dir=task_dir, trial_id=trial_id
@@ -991,7 +991,7 @@ async def test_runner_does_not_report_success_when_output_projection_fails(  # t
         task_config=_task_config(artifacts=["result.txt"]),
         task_checksum="0" * 64,
         task_dir=hello_task,
-        trial_config=stub_trial_config(),
+        trial_config=stub_trial_config(verifier_env_mode="shared"),
         driver_factory=lambda: driver,
         agent_factory=lambda task_dir, _gw, _model, _name: OracleAgent(
             task_dir=task_dir, trial_id=trial_id

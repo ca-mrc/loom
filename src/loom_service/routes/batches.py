@@ -504,16 +504,19 @@ def _multi_model_episode_ceiling(trial_config: dict[str, Any] | None) -> int | N
 def _reject_invalid_workspace_staging_policy_name(
     trial_config: dict[str, Any],
 ) -> None:
-    """#1263: early reject unknown named staging policies at batch accept."""
-    policy_name = trial_config.get("workspace_staging_policy_name")
-    if policy_name is None:
+    """#2418: the named staging switch is retired. Historical rows may still
+    contain the field; new batch writes must not set it.
+    """
+    if "workspace_staging_policy_name" not in trial_config:
         return
-    if not isinstance(policy_name, str) or policy_name not in {"tb21", "none"}:
-        reject_submission(
-            reason="invalid_input",
-            status_code=400,
-            detail=("trial_config.workspace_staging_policy_name must be 'tb21' or 'none'"),
-        )
+    reject_submission(
+        reason="invalid_input",
+        status_code=400,
+        detail=(
+            "trial_config.workspace_staging_policy_name is retired; "
+            "private-path withholding is verification-lifecycle behavior"
+        ),
+    )
 
 
 def _extract_family_run_override(

@@ -6,8 +6,6 @@ Wraps the server-side routes:
 - GET  /api/v1/trials[/{id}]           → `loom eval trial {list, show}`
 - POST /api/v1/trials/{id}/cancel      → `loom eval trial cancel`
 - POST /api/v1/batches                 → `loom eval batch create`
-  (optional ``trial_config.workspace_staging_policy_name`` via
-  ``--workspace-staging-policy``; #1263)
   (optional terminus-2 ``trial_config.multi_model`` via ``--multi-model``;
   #1380 — default remains single-model)
 - GET  /api/v1/batches[/{id}]          → `loom eval batch {list, show}`
@@ -898,11 +896,6 @@ def _batch_create(args: argparse.Namespace) -> int:
                         args.model,
                         agent_provider_override=args.agent_provider,
                     )
-            if args.workspace_staging_policy is not None:
-                # #1263: shared batch knob (also applies with --combinations-json).
-                trial_config["workspace_staging_policy_name"] = (
-                    args.workspace_staging_policy
-                )
             if multi_model:
                 # #1380: K1/K2 blocks or beta_mixture (terminus-2 only).
                 assert conn is not None
@@ -2125,20 +2118,6 @@ def dispatch(argv: list[str]) -> int:
         dest="agent_provider",
         default=None,
         help="See `loom eval run --agent-provider`.",
-    )
-    p_bc.add_argument(
-        "--workspace-staging-policy",
-        dest="workspace_staging_policy",
-        choices=["tb21", "none"],
-        default=None,
-        help=(
-            "Named agent-workspace staging policy for every trial in the batch "
-            "`tb21` excludes solution/, tests/, verifier/, and "
-            "upstream-task.toml from the agent sandbox (Harbor-shaped packs). "
-            "`none` uses full-bundle upload. Omit to keep current "
-            "defaults (TB2.1-r6 tasks always enforce tb21). "
-            "terminal-bench-2@tb2.1-r6/* cannot select `none`."
-        ),
     )
     p_bc.add_argument(
         "--multi-model",

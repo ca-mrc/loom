@@ -585,49 +585,33 @@ def test_batch_create_with_benchmark_shortcut(
     assert body["provider_model_id"] == "gpt-4o"
 
 
-def test_batch_create_workspace_staging_policy_tb21(
-    mock_server: MockServer,
+def test_batch_create_rejects_retired_workspace_staging_policy(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """#1263: --workspace-staging-policy rides in trial_config for the batch."""
-    _stub_connection_lookup(mock_server)
-    mock_server.canned[("POST", "/api/v1/batches")] = httpx.Response(
-        201,
-        json={
-            "batch_id": _BATCH_ID,
-            "expected_trial_count": 1,
-            "n_per_task": 1,
-            "backend": "docker",
-            "combinations": [],
-            "state": "submitted",
-            "created_at": "2026-06-16T00:00:00Z",
-        },
-    )
-    rc = main(
-        [
-            "eval",
-            "batch",
-            "create",
-            "--purpose",
-            "evaluation",
-            "--provider",
-            "openai-prod",
-            "--model",
-            "gpt-4o",
-            "--agent",
-            "terminus-2",
-            "--benchmark",
-            "strict-pass-39",
-            "--workspace-staging-policy",
-            "tb21",
-            "--name",
-            "harbor-isolated",
-        ]
-    )
-    assert rc == 0
-    body = json.loads(mock_server[1].content)
-    assert body["trial_config"]["workspace_staging_policy_name"] == "tb21"
-    assert body["trial_config"]["agent_name"] == "terminus-2"
+    """#2418: the batch staging switch is no longer a CLI axis."""
+    with pytest.raises(SystemExit):
+        main(
+            [
+                "eval",
+                "batch",
+                "create",
+                "--purpose",
+                "evaluation",
+                "--provider",
+                "openai-prod",
+                "--model",
+                "gpt-4o",
+                "--agent",
+                "terminus-2",
+                "--benchmark",
+                "strict-pass-39",
+                "--workspace-staging-policy",
+                "tb21",
+                "--name",
+                "harbor-isolated",
+            ]
+        )
+    assert "unrecognized arguments" in capsys.readouterr().err
 
 
 def test_batch_create_multi_model_default_off_omits_block(

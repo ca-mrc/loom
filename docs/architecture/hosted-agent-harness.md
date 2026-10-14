@@ -508,8 +508,10 @@ tested:
    accounting are proven for the harness's actual wire format.
 7. Driver operations, deadlines, cancellation, process cleanup and output
    bounds are supported without local-worker assumptions.
-8. Public/private workspace staging and both applicable verifier modes pass
-   tests without harness-specific verifier branches.
+8. Public/private workspace withholding is verification-lifecycle behavior
+   (shared injects after the agent; separate uses verifier-sandbox), not a
+   batch staging switch. Both modes pass tests without harness-specific
+   verifier branches.
 9. Every required canonical and native artifact is declared, captured,
    materialized and downloadable from the complete Trial bundle.
 10. Unit tests cover admission rejection, plan shape, command dispatch,

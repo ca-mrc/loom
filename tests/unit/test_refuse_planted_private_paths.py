@@ -21,11 +21,12 @@ async def test_clean_workdir_allows_injection() -> None:
 
 
 @pytest.mark.asyncio
-async def test_existing_tests_path_fails_closed() -> None:
+@pytest.mark.parametrize("name", ["tests", "verifier", "solution", "upstream-task.toml"])
+async def test_existing_private_path_fails_closed(name: str) -> None:
     def handler(cmd, user, cwd, env):
-        return _result(42 if "tests" in cmd else 0)
+        return _result(42 if name in cmd else 0)
 
     driver = FakeDriver(exec_handler=handler)
     await driver.start()
-    with pytest.raises(RuntimeError, match="planted private path: tests"):
+    with pytest.raises(RuntimeError, match=f"planted private path: {name}"):
         await refuse_planted_private_paths(driver, PurePosixPath("/app"))
