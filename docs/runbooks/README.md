@@ -24,6 +24,7 @@ Begin with the [operator runbook](operator-runbook.md). Use the architecture
 - [Cold-start diagnosis](nebius-cold-start.md): capacity and scale-from-zero evidence.
 - [Execution security](nebius-execution-security.md): bounded isolation validation.
 - [Trial resource accounting](trial-resource-accounting.md): usage durability and capacity calibration.
+- [Native output observations](native-output-observations.md): upload timing, retry and cancellation boundaries.
 - [Deadline canary](isolated-deadline-canary.md): isolated timeout fixture and its acceptance boundary.
 
 ## Workload preparation

@@ -1239,6 +1239,17 @@ task container, mount another trial's volume, or receive agent/provider
 credentials. The trial becomes terminal only after Loom records both execution
 conditions and the verifier result under the same attempt generation.
 
+#### Output publication observations
+
+The broker, Gateway and object-store adapter emit bounded JSON observations for
+native source publication; the Control Plane identifies later canonical
+materialization separately. Actual SDK worker and HTTP transport lifetimes stay
+open after coroutine timeout/cancellation until the underlying call finishes.
+Missing finishes remain unknown. No observation changes lease authority, upload
+integrity, public API responses or commit fencing. See
+[native output observations](../runbooks/native-output-observations.md) for the
+timing, redaction, byte-accounting and installed qualification contracts.
+
 #### On-demand separate verifier
 
 A separate-mode attempt commits its outputs without rewards and leaves the

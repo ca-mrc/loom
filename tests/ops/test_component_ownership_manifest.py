@@ -1016,6 +1016,17 @@ def test_release_image_matrix_is_derived_from_all_release_components() -> None:
     assert all(entry["context"] == "." for entry in matrix)
 
 
+def test_shared_upload_observation_changes_select_actuator_image() -> None:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+    selected = component_ownership.select_release_image_matrix(
+        manifest,
+        changed_paths=("src/loom/trajectory/upload_observation.py",),
+        force_all=False,
+        image_set="nebius",
+    )
+    assert "execution-actuator" in {entry["image"] for entry in selected}
+
+
 def test_execution_actuator_image_owns_capacity_collector_source() -> None:
     manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
 

@@ -301,6 +301,45 @@ def test_report_validator_independently_rejects_expired_review(monkeypatch) -> N
         validator._policy_statements()
 
 
+@pytest.mark.parametrize(
+    ("reviewed_at", "accepted"),
+    (("2026-10-13T23:59:59+00:00", True),
+     ("2026-10-14T00:00:00+00:00", False),
+     ("2099-01-01T00:00:00+00:00", False)),
+)
+def test_legacy_cli_enforces_review_expiry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    reviewed_at: str, accepted: bool,
+) -> None:
+    from datetime import UTC, datetime
+
+    from scripts import validate_trivy_release_report as validator
+
+    class ReviewClock:
+        @staticmethod
+        def now(zone):
+            assert zone is UTC
+            return datetime.fromisoformat(reviewed_at)
+
+    ignore_file, report = tmp_path / "ignore.yaml", tmp_path / "report.json"
+    _write_ignore_file(ignore_file)
+    report.write_text(json.dumps(_report("agent-sandbox", ignore_file)))
+    monkeypatch.setattr(validator, "datetime", ReviewClock)
+    monkeypatch.setattr(sys, "argv", [
+        "validate_trivy_release_report.py", "--component", "agent-sandbox",
+        "--architecture", "amd64", "--report", str(report), "--ignore-file", str(ignore_file),
+    ])
+    if accepted:
+        validator.main()
+    else:
+        with pytest.raises(SystemExit) as error:
+            validator.main()
+        assert error.value.code == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err == ("" if accepted else "error: Trivy release report validation failed\n")
+
+
 def test_validator_rejects_a_missing_suppressed_finding(tmp_path: Path) -> None:
     ignore_file = tmp_path / "loom-trivy-release.ignore.yaml"
     payload = _report("agent-sandbox", ignore_file)

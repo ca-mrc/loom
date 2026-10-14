@@ -19,6 +19,7 @@ from loom.service_execution_backend import local_execution_enabled
 from loom.storage_credentials import build_s3_client
 from loom.trajectory.source_spool import ServiceExecutionSourceConfig
 from loom.trajectory.storage import MinioObjectStore
+from loom.trajectory.upload_observation import configure_upload_observations
 from loom_control_plane.artifact_commit_runtime import (
     CheckpointRouteService,
     ExecutionAttemptCompletionService,
@@ -91,6 +92,7 @@ def create_app(
     settings: ControlPlaneSettings, *,
     task_image_execution_factory: Callable[[AsyncEngine], TaskImageExecutionService] | None = None,
 ) -> FastAPI:
+    configure_upload_observations()
     execution_config_file = settings.task_image_execution_config_file
     if task_image_execution_factory is not None and execution_config_file is not None:
         raise ValueError("execution configuration conflicts with injected factory")

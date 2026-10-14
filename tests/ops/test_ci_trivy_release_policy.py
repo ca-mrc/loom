@@ -171,6 +171,14 @@ def test_policy_writer_ignores_checkout_local_trivy_overrides(tmp_path: Path) ->
     assert (checkout / ".trivyignore").read_text(encoding="utf-8") == "CVE-ALL\n"
 
 
+def test_legacy_policy_writer_preserves_exact_reviewed_bytes(tmp_path: Path) -> None:
+    config, ignore = tmp_path / "trivy.yaml", tmp_path / "ignore.yaml"
+    policy.write_release_policy(config, ignore, today=date(2026, 9, 14))
+    assert config.read_bytes() == CONFIG_BYTES
+    assert ignore.read_bytes() == IGNORE_BYTES
+    assert hashlib.sha256(ignore.read_bytes()).hexdigest() == IGNORE_SHA256
+
+
 def test_policy_writer_rejects_expired_temporary_exceptions(tmp_path: Path) -> None:
     with pytest.raises(policy.TrivyPolicyError, match="expired"):
         policy.write_release_policy(

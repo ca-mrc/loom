@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Annotated, Any, Literal, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from starlette.requests import HTTPConnection
@@ -14,6 +16,7 @@ from loom.db.schema import ServiceExecutionLease, ServiceExecutionTarget, Trial
 from loom.execution_runtime_contract import ExecutionRuntimePlanV1
 from loom.llm_call_ledger import read_service_execution_llm_calls as read_lease_calls
 from loom.pipeline.artifact_commit import ArtifactCommitError
+from loom.trajectory.upload_observation import UploadSpan, observe_upload
 from loom_control_plane.service_execution_output import (
     ResolvedServiceExecutionHandoff,
     ServiceExecutionBrokerError,
@@ -335,24 +338,51 @@ async def get_service_execution_handoff_file(
     )
 
 
+@asynccontextmanager
+async def _observed_output(
+    request: Request, identity: ServiceExecutionPeerV1, operation: str, *,
+    session_id: UUID | None = None, file_index: int | None = None, part_number: int | None = None,
+) -> AsyncIterator[ServiceExecutionLease]:
+    # A caller trace is correlation only; our own request ID is always fresh.
+    raw_id = request.headers.get("X-Loom-Upload-Request-Id", "")
+    try:
+        broker_id = UUID(raw_id) if len(raw_id) == 36 else None
+    except ValueError:
+        broker_id = None
+    with observe_upload(
+        "source", lease_id=identity.lease_id, generation=identity.generation,
+        session_id=session_id, request_id=uuid4(), broker_request_id=broker_id,
+        file_index=file_index, part_number=part_number,
+    ), UploadSpan("gateway", operation) as span:
+        try:
+            with UploadSpan("authorization", operation):
+                lease = await _authorize(request, identity)
+            with UploadSpan("processing", operation):
+                yield lease
+            span.status_code = 201 if operation == "prepare" else 200
+        except HTTPException as exc:
+            span.status_code = exc.status_code
+            raise
+
+
 @router.post("/outputs/prepare", status_code=201)
 async def prepare_service_execution_output(
     payload: ServiceExecutionOutputPrepareV1,
     request: Request,
 ) -> dict[str, Any]:
-    lease = await _authorize(request, payload)
-    try:
-        return cast(
-            dict[str, Any],
-            await request.app.state.service_execution_output_service.prepare(
-                lease=lease,
-                request=payload,
-            ),
-        )
-    except ServiceExecutionBrokerError as exc:
-        raise _broker_http(exc) from exc
-    except ArtifactCommitError as exc:
-        raise _artifact_http(exc) from exc
+    async with _observed_output(request, payload, "prepare") as lease:
+        try:
+            return cast(
+                dict[str, Any],
+                await request.app.state.service_execution_output_service.prepare(
+                    lease=lease,
+                    request=payload,
+                ),
+            )
+        except ServiceExecutionBrokerError as exc:
+            raise _broker_http(exc) from exc
+        except ArtifactCommitError as exc:
+            raise _artifact_http(exc) from exc
 
 
 @router.put("/outputs/{session_id}/files/{file_index}/parts/{part_number}")
@@ -369,25 +399,25 @@ async def upload_service_execution_output_part(
     content_length: int = Header(alias="Content-Length", ge=0),
 ) -> dict[str, Any]:
     identity = _peer(lease_id, generation, role)
-    lease = await _authorize(request, identity)
-    try:
-        return cast(
-            dict[str, Any],
-            await request.app.state.service_execution_output_service.put_part(
-                lease=lease,
-                session_id=session_id,
-                file_index=file_index,
-                part_number=part_number,
-                content_length=content_length,
-                content_sha256=content_sha256,
-                upload_token=upload_token,
-                body=request.stream(),
-            ),
-        )
-    except ServiceExecutionBrokerError as exc:
-        raise _broker_http(exc) from exc
-    except ArtifactCommitError as exc:
-        raise _artifact_http(exc) from exc
+    async with _observed_output(request, identity, "part", session_id=session_id, file_index=file_index, part_number=part_number) as lease:
+        try:
+            return cast(
+                dict[str, Any],
+                await request.app.state.service_execution_output_service.put_part(
+                    lease=lease,
+                    session_id=session_id,
+                    file_index=file_index,
+                    part_number=part_number,
+                    content_length=content_length,
+                    content_sha256=content_sha256,
+                    upload_token=upload_token,
+                    body=request.stream(),
+                ),
+            )
+        except ServiceExecutionBrokerError as exc:
+            raise _broker_http(exc) from exc
+        except ArtifactCommitError as exc:
+            raise _artifact_http(exc) from exc
 
 
 @router.post("/outputs/{session_id}/files/{file_index}/complete")
@@ -398,22 +428,22 @@ async def complete_service_execution_output_file(
     request: Request,
     upload_token: UploadTokenHeader,
 ) -> dict[str, Any]:
-    lease = await _authorize(request, payload)
-    try:
-        return cast(
-            dict[str, Any],
-            await request.app.state.service_execution_output_service.complete_file(
-                lease=lease,
-                session_id=session_id,
-                file_index=file_index,
-                ordered_parts=payload.ordered_parts,
-                upload_token=upload_token,
-            ),
-        )
-    except ServiceExecutionBrokerError as exc:
-        raise _broker_http(exc) from exc
-    except ArtifactCommitError as exc:
-        raise _artifact_http(exc) from exc
+    async with _observed_output(request, payload, "complete", session_id=session_id, file_index=file_index) as lease:
+        try:
+            return cast(
+                dict[str, Any],
+                await request.app.state.service_execution_output_service.complete_file(
+                    lease=lease,
+                    session_id=session_id,
+                    file_index=file_index,
+                    ordered_parts=payload.ordered_parts,
+                    upload_token=upload_token,
+                ),
+            )
+        except ServiceExecutionBrokerError as exc:
+            raise _broker_http(exc) from exc
+        except ArtifactCommitError as exc:
+            raise _artifact_http(exc) from exc
 
 
 @router.post("/outputs/{session_id}/commit")
@@ -423,20 +453,20 @@ async def commit_service_execution_output(
     request: Request,
     upload_token: UploadTokenHeader,
 ) -> dict[str, Any]:
-    lease = await _authorize(request, payload)
-    try:
-        return cast(
-            dict[str, Any],
-            await request.app.state.service_execution_output_service.commit(
-                lease=lease,
-                session_id=session_id,
-                upload_token=upload_token,
-            ),
-        )
-    except ServiceExecutionBrokerError as exc:
-        raise _broker_http(exc) from exc
-    except ArtifactCommitError as exc:
-        raise _artifact_http(exc) from exc
+    async with _observed_output(request, payload, "commit", session_id=session_id) as lease:
+        try:
+            return cast(
+                dict[str, Any],
+                await request.app.state.service_execution_output_service.commit(
+                    lease=lease,
+                    session_id=session_id,
+                    upload_token=upload_token,
+                ),
+            )
+        except ServiceExecutionBrokerError as exc:
+            raise _broker_http(exc) from exc
+        except ArtifactCommitError as exc:
+            raise _artifact_http(exc) from exc
 
 
 __all__ = ["router"]

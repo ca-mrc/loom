@@ -13,17 +13,19 @@ import re
 import stat
 import tempfile
 import threading
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Protocol, TypeVar, cast
+from typing import Any, BinaryIO, Protocol, TypeVar, cast
 from uuid import uuid4
 
 import boto3
 import botocore.handlers
 from botocore.config import Config
 from botocore.exceptions import ClientError, ConnectionError, HTTPClientError
+
+from loom.trajectory.upload_observation import UploadSpan, configure_s3_transport
 
 _DEFAULT_S3_MAX_POOL_CONNECTIONS = 64
 _DEFAULT_S3_CONNECT_TIMEOUT_SECONDS = 5.0
@@ -683,6 +685,61 @@ class FakeObjectStore:
         return count
 
 
+class _UploadSpool:
+    """Keep disk bytes until the last actual reader/writer finishes.
+
+    Each SDK attempt opens an independent file description: dup() would share
+    its offset. An abandoned, not-yet-started thread may not reopen the spool.
+    """
+
+    def __init__(self) -> None:
+        self._file = tempfile.NamedTemporaryFile()
+        self._lock = threading.Lock()
+        self._users = 1
+        self._closed = False
+
+    @contextlib.contextmanager
+    def _use(self) -> Iterator[None]:
+        with self._lock:
+            if self._closed:
+                raise ValueError("upload spool is closed")
+            self._users += 1
+        try:
+            yield
+        finally:
+            self._release()
+
+    def _release(self) -> None:
+        with self._lock:
+            self._users -= 1
+            if self._users == 0:
+                self._file.close()
+
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+        self._release()
+
+    def write(self, chunk: bytes) -> int:
+        with self._use():
+            return self._file.write(chunk)
+
+    def flush(self) -> None:
+        with self._use():
+            self._file.flush()
+
+    def seek(self, offset: int) -> int:
+        with self._use():
+            return self._file.seek(offset)
+
+    @contextlib.contextmanager
+    def reader(self) -> Iterator[BinaryIO]:
+        with self._use(), open(self._file.name, "rb") as reader:
+            yield reader
+
+
 class MinioObjectStore:
     """boto3-backed ObjectStore against a MinIO endpoint.
 
@@ -749,6 +806,7 @@ class MinioObjectStore:
             botocore.handlers.add_expect_header,
         )
         client.meta.events.register_last("before-call.s3", _remove_expect_header)
+        configure_s3_transport(client)
 
     def _replace_client(self, stale_client: Any) -> None:
         with self._client_lock:
@@ -770,12 +828,24 @@ class MinioObjectStore:
                 if self._closed:
                     raise RuntimeError("object store is closed")
                 client = self._client
+            observation = UploadSpan("sdk_worker", operation, attempt=attempt + 1)
+
+            def invoke(current: Any = client, span: UploadSpan = observation) -> _T:
+                # Freeze both bindings: a timed-out thread may outlive this loop
+                # iteration and its waiter. Only this thread finishes its span.
+                with span:
+                    return call(current)
+
             try:
                 return await asyncio.wait_for(
-                    asyncio.to_thread(call, client),
+                    asyncio.to_thread(invoke),
                     timeout=self._operation_timeout,
                 )
+            except asyncio.CancelledError:
+                observation.abandon_wait("cancelled")
+                raise
             except TimeoutError as exc:
+                observation.abandon_wait("timeout")
                 last_retryable = exc
                 self._replace_client(client)
                 if attempt + 1 == self._operation_attempts:
@@ -1008,12 +1078,15 @@ class MinioObjectStore:
 
     @staticmethod
     async def _copy_async_body_to_file(body: AsyncIterator[bytes], target: Any) -> None:
-        async for chunk in body:
-            if not isinstance(chunk, bytes | bytearray | memoryview):
-                raise TypeError("object stream chunks must be bytes-like")
-            await asyncio.to_thread(target.write, chunk)
-        await asyncio.to_thread(target.flush)
-        await asyncio.to_thread(target.seek, 0)
+        with UploadSpan("spool", "copy") as span:
+            span.observed_bytes = 0
+            async for chunk in body:
+                if not isinstance(chunk, bytes | bytearray | memoryview):
+                    raise TypeError("object stream chunks must be bytes-like")
+                await asyncio.to_thread(target.write, chunk)
+                span.observed_bytes += len(chunk)
+            await asyncio.to_thread(target.flush)
+            await asyncio.to_thread(target.seek, 0)
 
     async def upload_part_stream(
         self,
@@ -1022,20 +1095,21 @@ class MinioObjectStore:
         part_number: int,
         body: AsyncIterator[bytes],
     ) -> None:
-        # Bridge the async request body into boto3 with an anonymous disk file,
-        # keeping the complete part out of Python memory and deleting it on exit.
-        with tempfile.TemporaryFile() as source:
+        # Separate readers preserve retry offsets and survive waiter cancellation.
+        # The private spool is removed after its final actual user exits.
+        with contextlib.closing(_UploadSpool()) as source:
             await self._copy_async_body_to_file(body, source)
 
             def _do(client: Any) -> str:
-                response = client.upload_part(
-                    Bucket=upload.bucket,
-                    Key=upload.key,
-                    PartNumber=part_number,
-                    UploadId=upload.upload_id,
-                    Body=source,
-                    ChecksumAlgorithm="SHA256",
-                )
+                with source.reader() as reader:
+                    response = client.upload_part(
+                        Bucket=upload.bucket,
+                        Key=upload.key,
+                        PartNumber=part_number,
+                        UploadId=upload.upload_id,
+                        Body=reader,
+                        ChecksumAlgorithm="SHA256",
+                    )
                 return cast(str, response["ETag"])
 
             etag = await self._run_client_call("upload_part_stream", _do)
@@ -1055,31 +1129,35 @@ class MinioObjectStore:
             client_kwargs = dict(self._client_kwargs)
         client_kwargs["config"] = self._client_config.merge(Config(retries={"max_attempts": 0}))
 
+        observation = UploadSpan("sdk_worker", "create_multipart_upload")
+
         def create() -> MultipartUpload:
             nonlocal allocated
-            client = boto3.client(**client_kwargs)
-            self._configure_client_events(client)
-            try:
-                upload = MultipartUpload(
-                    bucket=bucket, key=key,
-                    upload_id=client.create_multipart_upload(
-                        Bucket=bucket, Key=key, Metadata={"loom-write-id": write_identity},
-                    )["UploadId"],
-                    write_identity=write_identity,
-                )
-                with lock:
-                    if not abandoned:
-                        allocated = upload
-                        return upload
-                with contextlib.suppress(Exception):
-                    client.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload.upload_id)
-                return upload
-            finally:
-                client.close()
-
+            with observation:
+                client = boto3.client(**client_kwargs)
+                self._configure_client_events(client)
+                try:
+                    upload = MultipartUpload(
+                        bucket=bucket, key=key,
+                        upload_id=client.create_multipart_upload(
+                            Bucket=bucket, Key=key, Metadata={"loom-write-id": write_identity},
+                        )["UploadId"],
+                        write_identity=write_identity,
+                    )
+                    with lock:
+                        if not abandoned:
+                            allocated = upload
+                            return upload
+                    with contextlib.suppress(Exception):
+                        client.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload.upload_id)
+                    return upload
+                finally:
+                    client.close()
         try:
             return await asyncio.wait_for(asyncio.to_thread(create), timeout=self._operation_timeout)
-        except BaseException:
+        except BaseException as exc:
+            if isinstance(exc, (TimeoutError, asyncio.CancelledError)):
+                observation.abandon_wait("cancelled" if isinstance(exc, asyncio.CancelledError) else "timeout")
             with lock:
                 abandoned = True
                 owned = allocated
