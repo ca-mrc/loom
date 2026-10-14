@@ -40,7 +40,7 @@ export default function VersionDetails({ onClose, hasNewerBuild }: {
         title="Deployed version"
         size="sm"
       >
-        <div className="space-y-4 text-sm">
+        <div className="stack-y-4 text-sm">
           {hasNewerBuild ? (
             <div
               role="status"
@@ -68,7 +68,7 @@ export default function VersionDetails({ onClose, hasNewerBuild }: {
             <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-600">
               Frontend (this page)
             </h3>
-            <dl className="mt-1 space-y-1">
+            <dl className="mt-1 stack-y-1">
               {LOADED_BUILD_INFO.kind === "personal" ? <PersonalSource digest={LOADED_BUILD_INFO.sourceDigest} base={LOADED_BUILD_INFO.baseCommit} /> : <div className="flex items-center justify-between gap-2">
                 <dt className="text-slate-500">Commit</dt>
                 <dd className="flex items-center gap-2">
@@ -116,7 +116,7 @@ export default function VersionDetails({ onClose, hasNewerBuild }: {
               One reply is evidence for that instance only, not proof every
               replica has finished rolling out.
             </p>
-            <dl className="mt-1 space-y-1">
+            <dl className="mt-1 stack-y-1">
               {backend.data?.buildKind === "personal" ? <PersonalSource digest={backend.data.sourceDigest ?? null} base={backend.data.sourceBaseCommit ?? null} /> : <div className="flex items-center justify-between gap-2">
                 <dt className="text-slate-500">Commit</dt>
                 <dd>

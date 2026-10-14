@@ -7,9 +7,9 @@ export function CliSetupCommands({ token }: { token: string }): JSX.Element {
     "loom auth whoami",
   ];
   return (
-    <div className="space-y-2">
+    <div className="stack-y-2">
       <p className="text-sm font-medium text-emerald-950">CLI setup commands</p>
-      <div className="space-y-1 rounded-lg border border-emerald-200 bg-white p-3">
+      <div className="stack-y-1 rounded-lg border border-emerald-200 bg-white p-3">
         {commands.map((command) => (
           <code
             key={command}

@@ -162,12 +162,6 @@ def _redacted_profile(snapshot: JudgeExecutionProfileV1) -> dict[str, Any]:
     }
 
 
-def _redacted_binding(snapshot: RecipeProviderBindingSnapshot) -> dict[str, Any]:
-    value = snapshot.model_dump(mode="json", exclude={"provider_connection_id"})
-    value["snapshot_sha256"] = control_snapshot_digest(snapshot)
-    return value
-
-
 def _admin_profile(snapshot: JudgeExecutionProfileV1) -> dict[str, Any]:
     value = snapshot.model_dump(mode="json")
     value["snapshot_sha256"] = control_snapshot_digest(snapshot)

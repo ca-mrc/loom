@@ -88,7 +88,7 @@ function ScopeButton({
       className={
         "rounded-md px-3 py-1 text-sm font-medium transition-colors " +
         (active
-          ? "bg-white text-slate-900 shadow-sm"
+          ? "bg-white text-slate-900 shadow-xs"
           : "text-slate-600 hover:text-slate-900")
       }
     >
@@ -162,7 +162,7 @@ export default function RunLibrary(): JSX.Element {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="stack-y-6">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-slate-900">Run Library</h1>
@@ -199,7 +199,7 @@ export default function RunLibrary(): JSX.Element {
         ariaLabel="Library mode"
         tabListClassName="mb-4 flex gap-2"
         tabClassName={({ selected }) => `rounded border px-3 py-2 text-sm ${selected ? "border-accent bg-accent text-white" : "border-slate-300 text-slate-700"}`}
-        panelClassName="space-y-6"
+        panelClassName="stack-y-6"
         renderPanel={() => <>
           <RunLibraryFilters teamOptions={teamOptions} />
 
@@ -249,7 +249,7 @@ export default function RunLibrary(): JSX.Element {
                 />
               ) : (
                 <div className="overflow-x-auto" tabIndex={0} role="region" aria-label="Runs scroll area">
-                  <table aria-label="Runs" className="min-w-full divide-y divide-slate-200 text-sm">
+                  <table aria-label="Runs" className="min-w-full stack-divide-y stack-divide-slate-200 text-sm">
                     <thead>
                       <tr className="bg-slate-50/50">
                         {[
@@ -270,7 +270,7 @@ export default function RunLibrary(): JSX.Element {
                         ))}
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-slate-100">
+                    <tbody className="stack-divide-y stack-divide-slate-100">
                       {query.data.items.map((batch) => {
                         const task = humanizeTaskFilter(batch.task_filter, {
                           matchedTaskCount: batch.expected_trial_count,

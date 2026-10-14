@@ -179,6 +179,15 @@ def render_management(
     template_profile = {key: value for key, value in profile.items() if key not in {
         "guest_runtime", "guest_runtime_volume_mib", "guest_max_artifact_bytes", "supports_emulated_pkcs11",
     }}
+    # Management emits no task-egress configuration or execution workloads.
+    # Normalize only previously rejected mismatches: changing valid template
+    # inputs would rename fields inside existing immutable migration Job Pods.
+    task_web_egress = template_profile.get("supports_task_web_egress", False)
+    if task_web_egress is True and "task_egress" not in config:
+        template_profile.pop("supports_task_web_egress")
+        template_profile.pop("execution_class_id", None)
+    elif task_web_egress is False:
+        config.pop("task_egress", None)
     templates = _build_platform(config, candidate, template_profile, deployment.installation.keyring,
                                 repo_root=repo_root, execution_enabled=False)
     # The shared bootstrap/backup commands consume only these fields. Do not

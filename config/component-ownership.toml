@@ -140,7 +140,6 @@ pins = [
   { path = "tests/ops/test_nebius_pool_restart_qualification_live.py", shard_index = 2 },
   { path = "tests/ops/test_nebius_pool_cutover_entry.py", shard_index = 3 },
   { path = "tests/ops/test_nebius_pool_gateway_retirement.py", shard_index = 3 },
-  { path = "tests/ops/test_nebius_pool_image_cancellation_collector.py", shard_index = 3 },
   { path = "tests/ops/test_nebius_pool_legacy_restart_live.py", shard_index = 3 },
   { path = "tests/ops/test_nebius_pool_template_restoration_live.py", shard_index = 3 },
   { path = "tests/ops/test_nebius_pool_origin_history.py", shard_index = 4 },
@@ -160,7 +159,6 @@ pins = [
   { path = "tests/ops/test_nebius_pool_activation_live.py", shard_index = 7 },
   { path = "tests/ops/test_nebius_pool_cutover.py", shard_index = 7 },
   { path = "tests/ops/test_nebius_pool_gateway_retirement_live.py", shard_index = 7 },
-  { path = "tests/ops/test_nebius_pool_image_cancellation_gateway.py", shard_index = 0 },
   # Observation was unfinished at 38m41s beside the image lifecycle matrices
   # in 38181207030. The forward shard completed in 12m49s and has room for it.
   { path = "tests/ops/test_nebius_pool_participant_observation.py", shard_index = 10 },
@@ -400,6 +398,7 @@ source_paths = [
   "src/loom/execution_image_admission.py",
   "src/loom/execution_requirements.py",
   "src/loom/execution_runtime_contract.py",
+  "src/loom/prebuilt_task_images.py",
   "src/loom/family_run/__init__.py",
   "src/loom/family_run/spec.py",
   "src/loom/models/__init__.py",
@@ -455,6 +454,7 @@ source_paths = [
   "src/loom/terminal_result_semantics.py",
   "src/loom/trajectory/__init__.py",
   "src/loom/trajectory/storage.py",
+  "src/loom/trajectory/upload_observation.py",
   "src/loom/verifier_runtime.py",
   "src/loom_control_plane/__init__.py",
   "src/loom_control_plane/execution_admission.py",

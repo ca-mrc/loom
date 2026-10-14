@@ -236,8 +236,3 @@ def test_root_workflow_runs_complete_disjoint_fail_fast_shards(tmp_path: Path, s
         "tests/ops/test_nebius_pool_predecessor.py", "tests/ops/test_nebius_pool_predecessor_live.py",
         "tests/ops/test_nebius_pool_refresh_connected.py")]
     assert len(set(predecessor_groups)) == 3
-    cancellation_groups = [next(index for index, shard in enumerate(shards) if path in shard) for path in (
-        "tests/ops/test_nebius_pool_image_cancellation.py",
-        "tests/ops/test_nebius_pool_image_cancellation_collector.py",
-        "tests/ops/test_nebius_pool_image_cancellation_gateway.py")]
-    assert len(set(cancellation_groups)) == 3

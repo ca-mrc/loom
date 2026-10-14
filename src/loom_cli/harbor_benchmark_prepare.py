@@ -13,8 +13,8 @@ import tomli_w
 from loom_benchmarks.base import BenchmarkInstance, ConvertedTask, UpstreamSource
 from pydantic import BaseModel, ConfigDict, Field
 
+from loom.harbor_bundle import prepare_harbor_bundle
 from loom.harbor_task_import import project_harbor_task
-from loom.harbor_verifier_script import native_verifier_run_sh_bytes
 from loom.models.harbor import UpstreamOrigin
 from loom.models.task import TaskConfig
 from loom.models.task_checksum import task_checksum
@@ -125,43 +125,8 @@ class HarborNativeAdapter:
         if "package_digest" in instance.raw:
             config["upstream_package_digest"] = instance.raw["package_digest"]
         config["task"]["id"] = f"{self.name}/{instance.instance_id}"
-        compose = [
-            f"environment/{name}"
-            for name in (
-                "compose.yaml",
-                "compose.yml",
-                "docker-compose.yaml",
-                "docker-compose.yml",
-            )
-            if (out_dir / "environment" / name).exists()
-        ]
-        if compose:
-            config["environment"]["compose_files"] = compose
-        verifier = config["verifier"]
-        if verifier["name"] != "script":
-            raise ValueError(
-                "unsupported Harbor requirement: verifier.name requires the native script verifier"
-            )
-        # Harbor's native verifier build directory is independent of the agent image.
-        if (out_dir / "tests/Dockerfile").is_file():
-            env = dict(verifier.get("environment") or config["environment"])
-            env.pop("docker_image", None)
-            env.pop("compose_files", None)
-            env.update(dockerfile="tests/Dockerfile", docker_build_context="tests")
-            verifier["environment"] = env
-            verifier.setdefault("env_mode", "separate")
-        verifier.setdefault("env_mode", "shared")
-        if not (out_dir / "instruction.md").is_file() or not (out_dir / "tests/test.sh").is_file():
-            raise ValueError(
-                f"native Harbor package requires instruction.md and tests/test.sh: {instance.instance_id}"
-            )
-        bridge = out_dir / "verifier/run.sh"
-        if bridge.exists() or bridge.is_symlink():
-            raise ValueError("native package collides with reserved verifier/run.sh")
-        bridge.parent.mkdir(exist_ok=True)
-        bridge.write_bytes(native_verifier_run_sh_bytes())
-        bridge.chmod(0o755)
-        verifier["args"]["script_path"] = "verifier/run.sh"
+        prepare_harbor_bundle(out_dir, config)
+        compose = config["environment"].get("compose_files", [])
         config["upstream_conversion"] = {
             "changes": [
                 "Harbor-native schema -> Loom TaskConfig v1",

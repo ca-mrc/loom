@@ -30,7 +30,7 @@ export function BatchExportDialog({ result, onClose }: {
   return (
     <Modal open onClose={onClose} title="Export CLI / API" size="lg"
       description="A snapshot of your validated form. Exporting does not submit a batch.">
-      <div className="max-h-[65vh] space-y-4 overflow-y-auto">
+      <div className="max-h-[65vh] stack-y-4 overflow-y-auto">
         {"error" in result ? <p role="alert" className="text-sm text-red-700">{result.error}</p> : null}
         {commands ? <>
           <div className="flex gap-2" aria-label="Export format">

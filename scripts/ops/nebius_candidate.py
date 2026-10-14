@@ -276,6 +276,7 @@ def create_candidate(
     supports_task_identity: bool = False,
     guest_runtime: Literal["qemu-tcg-v1"] | None = None,
     supports_emulated_pkcs11: bool = False,
+    supports_shared_guest: bool = False,
     guest_runtime_volume_mib: int | None = None,
     guest_max_artifact_bytes: int | None = None,
     node_share_resources: bool = False,
@@ -325,6 +326,7 @@ def create_candidate(
         supports_task_identity=supports_task_identity,
         guest_runtime=guest_runtime,
         supports_emulated_pkcs11=supports_emulated_pkcs11,
+        supports_shared_guest=supports_shared_guest,
         guest_runtime_volume_mib=guest_runtime_volume_mib,
         guest_max_artifact_bytes=guest_max_artifact_bytes,
         resource_allocation_policy="node-share-v1" if node_share_resources else None,
@@ -334,6 +336,27 @@ def create_candidate(
         ),
     ).model_dump(mode="json")
     return result, profile
+
+
+def prepare_prebuilt_profile(profile: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    """Optional reviewed upstream images enter the original protected artifact."""
+    images = getattr(args, "prebuilt_images_json", None)
+    if images is None:
+        return profile
+    if (images.resolve() != ROOT / "deploy/catalog/tb21-r6-prebuilt-images.json"
+            or os.environ.get("GITHUB_EVENT_NAME") != "workflow_dispatch"
+            or getattr(args, "mode", "platform") != "platform"):
+        raise ValueError("prebuilt task qualification requires explicit protected TB2.1 publication")
+    from scripts.ops.prepare_prebuilt_task_images import prepare
+
+    with tempfile.TemporaryDirectory(prefix="loom-prebuilt-profile-") as temporary:
+        original = Path(temporary) / "runtime-profile.json"
+        write_json(original, profile)
+        output = args.output.parent / "nebius-prebuilt-task-images"
+        prepare(argparse.Namespace(profile=original, images_json=images,
+            output=output, crane=args.prebuilt_crane, signing_key=args.signing_key,
+            signing_key_id=args.signing_key_id, trusted_keyring=args.trusted_keyring))
+        return read_json(output / "runtime-profile.json")
 
 
 def sanitize_diagnostic(text: str) -> str:
@@ -726,10 +749,12 @@ def build(args: argparse.Namespace) -> None:
                 supports_task_identity=getattr(args, "supports_task_identity", False),
                 guest_runtime=getattr(args, "guest_runtime", None),
                 supports_emulated_pkcs11=getattr(args, "supports_emulated_pkcs11", False),
+                supports_shared_guest=getattr(args, "supports_shared_guest", False),
                 guest_runtime_volume_mib=getattr(args, "guest_runtime_volume_mib", None),
                 guest_max_artifact_bytes=getattr(args, "guest_max_artifact_bytes", None),
                 node_share_resources=True,
             )
+            profile = prepare_prebuilt_profile(profile, args)
             write_json(args.output / "candidate.json", manifest)
             write_json(args.output / "runtime-profile.json", profile)
             release = _runtime_release_payload({
@@ -754,6 +779,8 @@ def main() -> int:
     builder = commands.add_parser("build")
     builder.add_argument("--mode", choices=("platform", "harness-only"), default="platform")
     builder.add_argument("--agent-version")
+    builder.add_argument("--prebuilt-images-json", type=Path)
+    builder.add_argument("--prebuilt-crane", type=Path, default=Path("crane"))
     builder.add_argument("--registry-prefix", required=True)
     builder.add_argument("--upload-timeout-seconds", type=int, default=900,
                          help="Total per-image upload budget, including one transient-network retry (default: 900)")
@@ -769,6 +796,7 @@ def main() -> int:
         command.add_argument("--supports-task-identity", action="store_true")
         command.add_argument("--guest-runtime", choices=("qemu-tcg-v1",))
         command.add_argument("--supports-emulated-pkcs11", action="store_true")
+        command.add_argument("--supports-shared-guest", action="store_true")
         command.add_argument("--guest-runtime-volume-mib", type=int)
         command.add_argument("--guest-max-artifact-bytes", type=int)
     create.add_argument("--node-share-resources", action="store_true",
@@ -795,6 +823,7 @@ def main() -> int:
                 supports_task_identity=args.supports_task_identity,
                 guest_runtime=args.guest_runtime,
                 supports_emulated_pkcs11=args.supports_emulated_pkcs11,
+                supports_shared_guest=args.supports_shared_guest,
                 guest_runtime_volume_mib=args.guest_runtime_volume_mib,
                 guest_max_artifact_bytes=args.guest_max_artifact_bytes,
                 node_share_resources=args.node_share_resources,

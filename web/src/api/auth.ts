@@ -1,14 +1,13 @@
 import { type InviteLookup, type UserRegistrationEntry } from "./admin";
 import { apiFetch, qs } from "./core";
 import { type Team } from "./runs";
-import { loadAuthSession, type PublicTeam } from "./authSession";
+import { type PublicTeam } from "./authSession";
 import { sessionActions } from "./authActions";
 
 export * from "./authSession";
 export { mutateAuthSession } from "./authActions";
 
 export const authApi = {
-  authMe: loadAuthSession,
   ...sessionActions,
   publicTeams: () => apiFetch<{ items: PublicTeam[] }>("/api/v1/auth/public-teams"),
   requestRegistration: (body: { username: string; team_id: string }) =>

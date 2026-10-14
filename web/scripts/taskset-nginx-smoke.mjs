@@ -3,7 +3,7 @@
 // Only the API is stubbed; no cloud resources or model calls are used.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { cpSync, mkdtempSync, copyFileSync, rmSync } from "node:fs";
+import { chmodSync, cpSync, mkdtempSync, copyFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { chromium } from "@playwright/test";
@@ -23,6 +23,8 @@ let container;
 let browser;
 try {
   cpSync(resolve(root, "web/dist"), temp, { recursive: true });
+  // mkdtemp creates mode 0700; nginx runs as uid 101 and needs to read this public build.
+  chmodSync(temp, 0o755);
   copyFileSync(resolve(temp, "index.html"), resolve(temp, "index.html.template"));
   container = docker("run", "--rm", "-d", "-p", "127.0.0.1::8080",
     "-v", `${temp}:/usr/share/nginx/html:ro`,
@@ -65,16 +67,16 @@ try {
     assert.equal(redirect.status, 308, "old encoded link must migrate instead of nginx 404");
     for (const url of [canonical, legacy]) {
       assert.equal((await page.goto(url)).status(), 200);
-      await page.getByRole("heading", { name: id, exact: true }).waitFor();
+      await page.getByRole("heading", { name: task.display_name, exact: true }).waitFor();
       assert.equal(await page.locator("#root").getAttribute("data-loom-mounted"), "true");
       assert.equal(new URL(page.url()).searchParams.get("id"), id);
       await page.reload();
-      await page.getByRole("heading", { name: id, exact: true }).waitFor();
+      await page.getByRole("heading", { name: task.display_name, exact: true }).waitFor();
     }
     assert.equal(new URL(page.url()).searchParams.get("tab"), "errors");
     await page.goto(`${origin}${prefix}/task-sets`);
     await page.getByRole("link", { name: "Routing fixture" }).click();
-    await page.getByRole("heading", { name: id, exact: true }).waitFor();
+    await page.getByRole("heading", { name: task.display_name, exact: true }).waitFor();
     assert.equal(page.url(), canonical);
     const beforeInvalid = requests.length;
     await page.goto(`${origin}${prefix}/task-sets/detail?id=ts%2F..%2Fx`);
@@ -82,7 +84,7 @@ try {
     assert.equal(requests.length, beforeInvalid);
     await page.goto(`${origin}${prefix}/task-sets/detail?id=ts%2Fother%2Fprivate`);
     await page.getByRole("alert").filter({ hasText: "unavailable to your team" }).waitFor();
-    assert.equal(await page.getByRole("heading", { name: id, exact: true }).count(), 0);
+    assert.equal(await page.getByRole("heading", { name: task.display_name, exact: true }).count(), 0);
     assert.deepEqual(errors, []);
     await context.close();
     console.log(`${prefix || "/"}: direct, refresh, legacy redirect, list, reserved IDs and unavailable-team UI passed`);

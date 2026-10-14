@@ -51,7 +51,7 @@ export function NewBatchTaskSelection({
           </Link>
         }
       />
-      <Card.Body className="min-w-0 space-y-5">
+      <Card.Body className="min-w-0 stack-y-5">
         <fieldset className="min-w-0">
           <legend className="mb-2 block text-xs font-medium uppercase tracking-wider text-slate-500">
             Purpose
@@ -64,7 +64,7 @@ export function NewBatchTaskSelection({
                   key={option.value}
                   className={
                     selected
-                      ? "flex min-w-0 cursor-pointer flex-col gap-0.5 rounded-lg border border-slate-800 bg-slate-50 px-3 py-3 shadow-sm"
+                      ? "flex min-w-0 cursor-pointer flex-col gap-0.5 rounded-lg border border-slate-800 bg-slate-50 px-3 py-3 shadow-xs"
                       : "flex min-w-0 cursor-pointer flex-col gap-0.5 rounded-lg border border-slate-200 bg-white px-3 py-3 hover:border-slate-300 hover:bg-slate-50/80"
                   }
                 >
@@ -89,7 +89,7 @@ export function NewBatchTaskSelection({
           </div>
         </fieldset>
         <fieldset
-          className="block min-w-0 space-y-5"
+          className="block min-w-0 stack-y-5"
           disabled={subsetKind === "explicit"}
           aria-label="Task sources"
         >
@@ -147,8 +147,8 @@ export function NewBatchTaskSelection({
             />
             {!benchmarks.isPending && (benchmarks.data?.items.length ?? 0) === 0 ? (
               <Help>
-                Ask an admin or operator to run the staging catalog provisioning step from the deployment
-                runbook, then refresh this page.
+                Ask an admin or operator to follow the catalog provisioning procedure for this environment
+                in the deployment runbook, then refresh this page.
               </Help>
             ) : null}
           </div>
@@ -166,7 +166,7 @@ export function NewBatchTaskSelection({
           </>
         ) : null}
 
-        <fieldset className="space-y-2">
+        <fieldset className="stack-y-2">
           <legend className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
             Subset
           </legend>
@@ -233,7 +233,7 @@ export function NewBatchTaskSelection({
         ) : null}
 
         {subsetKind === "explicit" ? (
-          <div className="space-y-2">
+          <div className="stack-y-2">
             <label className="block">
               <FieldLabel hint="one per line or any accepted format">Explicit task ids</FieldLabel>
               <Textarea
@@ -258,7 +258,7 @@ export function NewBatchTaskSelection({
             </p>
             <details className="text-xs text-slate-600">
               <summary className="cursor-pointer font-medium text-slate-700">Accepted formats</summary>
-              <ul className="ml-4 mt-2 list-disc space-y-0.5">
+              <ul className="ml-4 mt-2 list-disc stack-y-0.5">
                 <li>One id per line</li>
                 <li>Comma / semicolon / pipe / tab / 2+ space separated</li>
                 <li>JSON array (single or double quotes)</li>

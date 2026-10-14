@@ -1,6 +1,13 @@
 import { useSearchParams } from "react-router-dom";
 import { initialPage, nextPage, prevPage, type PageState } from "../components/paginationState";
-import type { CursorPageController } from "./useCursorPage";
+
+export interface CursorPageController {
+  state: PageState;
+  cursor: string | null;
+  next: (cursor: string) => void;
+  prev: () => void;
+  reset: () => void;
+}
 
 /** Remove page state whenever a list's effective filters change. */
 export function clearCursorParams(params: URLSearchParams): void {

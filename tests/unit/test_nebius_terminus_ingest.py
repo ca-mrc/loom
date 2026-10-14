@@ -201,7 +201,10 @@ def test_adapt_rejects_unknown_custom_verifier(tmp_path: Path) -> None:
     assert target.read_bytes() == original
 
 
-def test_adapt_after_normalize_fixes_absolute_verifier_path(tmp_path: Path) -> None:
+@pytest.mark.parametrize("legacy_generated_glob", [False, True])
+def test_adapt_after_normalize_fixes_absolute_verifier_path(
+    tmp_path: Path, legacy_generated_glob: bool,
+) -> None:
     staged = tmp_path / "bundle"
     staged.mkdir()
     _write_runtime_inputs(staged)
@@ -227,6 +230,10 @@ def test_adapt_after_normalize_fixes_absolute_verifier_path(tmp_path: Path) -> N
     normalized = normalize_terminal_bench_task_toml(raw)
     assert normalized["verifier"]["args"]["script_path"] == DEFAULT_VERIFIER_SCRIPT_PATH
     assert normalized["environment"]["cpu_arch"] == "any"
+    assert normalized["steps"][0]["artifacts"] == []
+    if legacy_generated_glob:
+        # Persisted configs from the old projector may still contain this glob.
+        normalized["steps"][0]["artifacts"] = ["logs/verifier/**", "answer.json"]
 
     adapted, stats = adapt_bundle_for_nebius_terminus(staged, normalized)
     assert adapted["verifier"]["args"]["script_path"] == VERIFIER_SCRIPT_PATH
@@ -238,8 +245,11 @@ def test_adapt_after_normalize_fixes_absolute_verifier_path(tmp_path: Path) -> N
     assert adapted["verifier"]["user"] == "root"
     assert stats.cpu_arch_forced
     assert stats.verifier_wrapper_installed
-    assert stats.artifact_globs_stripped
-    assert adapted.get("steps") == [{"name": "main"}]
+    assert stats.artifact_globs_stripped is legacy_generated_glob
+    assert adapted.get("steps") == [
+        {"name": "main", "artifacts": ["answer.json"]} if legacy_generated_glob
+        else {"name": "main"}
+    ]
     reasons = preflight_nebius_terminus_admission(adapted, _SEI)
     assert reasons == ()
 

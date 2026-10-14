@@ -66,7 +66,7 @@ function HealthCard({
   return (
     <Card>
       <Card.Header title={title} description={description} headingLevel="h2" />
-      <Card.Body className="space-y-3">{children}</Card.Body>
+      <Card.Body className="stack-y-3">{children}</Card.Body>
     </Card>
   );
 }
@@ -80,7 +80,7 @@ function ActionList({
 }): JSX.Element | null {
   if (actions.length === 0) return null;
   return (
-    <section className="space-y-2" aria-labelledby={`${title}-heading`}>
+    <section className="stack-y-2" aria-labelledby={`${title}-heading`}>
       <h2
         id={`${title}-heading`}
         className="text-sm font-semibold text-slate-800"
@@ -146,7 +146,7 @@ function OverviewContent({ data }: { data: OverviewSummary }): JSX.Element {
   const teamName = data.team_context.team_name ?? "All teams";
 
   return (
-    <div className="space-y-6">
+    <div className="stack-y-6">
       <header className="flex flex-wrap items-start justify-between gap-4">
         <div className="min-w-0">
           <h1 className="text-2xl font-bold text-slate-900">Team overview</h1>
@@ -199,7 +199,7 @@ function OverviewContent({ data }: { data: OverviewSummary }): JSX.Element {
           description="User actions are available to this signed-in role. Operator actions require platform setup."
           headingLevel="h2"
         />
-        <Card.Body className="space-y-5">
+        <Card.Body className="stack-y-5">
           <ActionList title="User actions" actions={userActions} />
           <ActionList title="Operator actions" actions={operatorActions} />
           {data.next_actions.length === 0 ? (
@@ -233,7 +233,7 @@ function OverviewContent({ data }: { data: OverviewSummary }): JSX.Element {
             />
           </div>
           {data.provider_health.latest.length > 0 ? (
-            <div className="space-y-2">
+            <div className="stack-y-2">
               {data.provider_health.latest.map((provider) => (
                 <Link
                   key={provider.id}
@@ -280,7 +280,7 @@ function OverviewContent({ data }: { data: OverviewSummary }): JSX.Element {
             />
           </div>
           {data.benchmark_readiness.blocked.length > 0 ? (
-            <ul className="space-y-2">
+            <ul className="stack-y-2">
               {data.benchmark_readiness.blocked.map((benchmark) => (
                 <li
                   key={benchmark.id}

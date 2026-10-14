@@ -186,7 +186,7 @@ export default function BehaviorRolloutLivePreview({
   const receivedAt = currentMetadata?.received_at ?? null;
   const stalled = currentMetadata?.state === "live" && receivedAt !== null &&
     now - Date.parse(receivedAt) > Math.max(MIN_STALLED_MS, currentMetadata.retry_after_ms * 3);
-  return <section aria-labelledby="behavior-live-preview-heading" className="space-y-3 rounded border p-3">
+  return <section aria-labelledby="behavior-live-preview-heading" className="stack-y-3 rounded border p-3">
     <div className="flex flex-wrap items-center justify-between gap-2">
       <h3 id="behavior-live-preview-heading" className="font-semibold">Behavior rollout live preview</h3>
       <strong className="rounded border-2 border-current px-2 py-1 text-xs">LIVE / UNVERIFIED</strong>

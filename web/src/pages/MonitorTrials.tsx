@@ -124,7 +124,7 @@ export function TrialsView({
       <Card>
         <Card.Body className="p-0">
           <div className="overflow-x-auto" role="region" aria-label="Monitored trials" tabIndex={0}>
-            <table aria-label="Trials" className="min-w-full divide-y divide-slate-200 text-sm">
+            <table aria-label="Trials" className="min-w-full stack-divide-y stack-divide-slate-200 text-sm">
               <thead>
                 <tr className="bg-slate-50/50">
                   {["ID", "Task", "Owner", "State", "Agent", "Evaluator score", "LLM usage", "Submitted"].map(
@@ -147,7 +147,7 @@ export function TrialsView({
                   )}
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-100">
+              <tbody className="stack-divide-y stack-divide-slate-100">
                 {query.isPending ? (
                   <SkeletonRows cols={COLS} />
                 ) : query.isError ? (
@@ -247,7 +247,7 @@ export function TrialsView({
             title="Failure diagnostics"
             description="Failed trials grouped by the platform diagnostic reason returned by the API."
           />
-          <Card.Body className="space-y-3">
+          <Card.Body className="stack-y-3">
             {failureGroups.map((group) => (
               <div
                 key={group.reason}
@@ -269,7 +269,7 @@ export function TrialsView({
                   </Link>
                 </div>
                 {group.messages.length > 0 ? (
-                  <ul className="mt-2 space-y-1 text-xs text-slate-600">
+                  <ul className="mt-2 stack-y-1 text-xs text-slate-600">
                     {group.messages.slice(0, 3).map((message) => (
                       <li key={message}>{message}</li>
                     ))}

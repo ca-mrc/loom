@@ -27,6 +27,7 @@ from loom.security.secret_store import assert_existing_secrets_decryptable
 from loom.startup_retry import retry_startup_dependency
 from loom.trajectory.source_spool import ServiceExecutionSourceConfig
 from loom.trajectory.storage import MinioObjectStore
+from loom.trajectory.upload_observation import configure_upload_observations
 from loom_control_plane.artifact_commit_runtime import SqlArtifactCommitRepository
 from loom_control_plane.service_execution_output import ServiceExecutionOutputRouteService
 from loom_llm_gateway.config import GatewaySettings
@@ -44,6 +45,7 @@ from loom_llm_gateway.routes import (
     facade_google,
     facade_openai,
     gemini,
+    harbor_baseline,
     health,
     messages,
     responses,
@@ -107,6 +109,7 @@ async def _assert_schema_startup(engine: AsyncEngine) -> int:
 
 
 def create_app(settings: GatewaySettings) -> FastAPI:
+    configure_upload_observations()
     source_config = ServiceExecutionSourceConfig.from_settings(settings)
 
     @asynccontextmanager
@@ -233,6 +236,7 @@ def create_app(settings: GatewaySettings) -> FastAPI:
     app.include_router(responses.router)
     app.include_router(gemini.router)
     app.include_router(facade_openai.router)
+    app.include_router(harbor_baseline.router)
     app.include_router(facade_anthropic.router)
     app.include_router(facade_google.router)
     app.include_router(admin.router)

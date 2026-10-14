@@ -147,3 +147,15 @@ def test_emulated_auth_readiness_requires_exact_distinct_target(platform_inputs,
         config["emulated_auth_execution_target"]["device"] = "/dev/card"
     with pytest.raises(NebiusPlatformError):
         build_platform(config, candidate, profile, {}, repo_root=ROOT)
+
+
+def test_shared_guest_readiness_requires_guest_runtime_and_is_published(platform_inputs):  # noqa: F811
+    config, candidate, profile = guest_inputs(platform_inputs)
+    profile["supports_shared_guest"] = True
+    files = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    cm = next(doc for doc in files["10-config-network.yaml"] if doc["kind"] == "ConfigMap"
+              and doc["metadata"]["name"] == "loom-platform-config")
+    assert json.loads(cm["data"]["profile.json"])["supports_shared_guest"]
+    del profile["guest_runtime"]
+    with pytest.raises(NebiusPlatformError, match="shared guest readiness"):
+        build_platform(config, candidate, profile, {}, repo_root=ROOT)

@@ -9,8 +9,6 @@ export type TaskRow = TaskList["items"][number];
 export type BenchmarkList =
   paths["/api/v1/benchmarks"]["get"]["responses"][200]["content"]["application/json"];
 
-export type BenchmarkTagsResponse = import("./schema").components["schemas"]["BenchmarkTagsResponse"];
-
 export type TaskSetWarning = import("./schema").components["schemas"]["TaskSetWarning"];
 
 export type TaskSetSubmitResponse = import("./schema").components["schemas"]["TaskSetSubmitResponse"];
@@ -38,8 +36,6 @@ export const catalogApi = {
         body: JSON.stringify({ benchmark_ids: benchmarkIds }),
       },
     ),
-  listBenchmarkTags: (id: string) =>
-    apiFetch<BenchmarkTagsResponse>(`/api/v1/benchmarks/${encodeURIComponent(id)}/tags`),
   listTaskSets: () =>
     apiFetch<TaskSetListResponse>("/api/v1/tasksets").then((data) => ({ ...data, items: data.items ?? [] })),
   getTaskSet: (id: string) =>

@@ -29,6 +29,10 @@ provide shared-environment identity or isolation. Other services retain required
 keys. Mode-specific validation belongs in the settings wrapper, not a generated
 file. An unknown service mode is rejected at startup.
 
+`LOOM_SVC_MINIO_PUBLIC_ENDPOINT` remains accepted for compatibility but is
+deprecated and has no effect. Loom Service proxies authenticated downloads
+through `LOOM_SVC_MINIO_ENDPOINT`; it does not issue public MinIO presigned URLs.
+
 `LOOM_SVC_AUTH_SESSION_AUDIENCE_JSON` is an optional, non-secret, protected
 application binding for services sharing a database. Its
 `loom.application-session-audience.v1` JSON contains `application_id` (UUID),

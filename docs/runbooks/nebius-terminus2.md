@@ -69,6 +69,59 @@ selected controller image. Deploy matching Python services, actuator and Go
 runtime before submitting plans with resource requests. Generic profiles without
 a request template and existing frozen plans retain their previous behavior.
 
+## Qualify official TB2.1 prebuilt images
+
+`deploy/catalog/tb21-r6-prebuilt-images.json` records all 89 source image references
+from the locked Harbor Hub `terminal-bench/terminal-bench-2-1` revision 6 packages.
+This list retains the upstream tags; publication freezes their actual AMD64
+digests without rebuilding the images or modifying task/verifier packages.
+
+After protected merge, explicitly opt in through the existing candidate workflow:
+
+```sh
+gh workflow run nebius-candidate.yml --repo qianyi-sun/loom --ref dev \
+  -f mode=platform -f qualify_tb21_images=true
+```
+
+Ordinary push publications and harness-only publications do not qualify task
+images. The optional path uses `prepare_prebuilt_task_images.py` inside the
+protected publisher, reuses its established signer and keyring, and publishes the
+prepared `runtime-profile.json` in the original candidate artifact. Normal
+candidate admission and rollout consume that profile. No separate gate or live
+profile editing is required. The optional scan has a six-hour workflow budget;
+normal candidate publication retains its three-hour budget.
+
+Lifecycle limitation: the default candidate still contains no upstream task-image
+pins. Rolling out a later default candidate removes these pins for new TB2.1
+submissions, although already frozen execution plans keep their selected images.
+For this acceptance campaign, every selected platform candidate must repeat the
+explicit opt-in. Persisting qualified dataset-image publications across unrelated
+default platform upgrades remains open lifecycle work; this path alone does not
+complete full product acceptance or justify closing that requirement. Do not copy
+a live/frozen profile into a new publication as a workaround.
+
+The separate `nebius-tb21-images-<sha>-<run>-<attempt>` evidence artifact contains
+`image-pins.json`, per-image vulnerability reports/SBOMs, an
+`image-qualification.json` result list, and native Harbor image overlays. CRITICAL
+findings, an incorrect architecture, or failed resolution/scanning block profile
+publication. Reports classify resolved images even when some scans fail; a missing
+ready profile is not a qualified catalog. Preserve the exact source image list and
+failed evidence when investigating, rather than rebuilding an official image or
+weakening the admission policy.
+Vulnerability and SBOM reports each have a 128 MiB read budget, covering observed
+canonical reports up to 86 MB while keeping report parsing bounded. A larger
+report remains an explicit preparation failure; increasing this data budget
+does not change the CRITICAL vulnerability policy.
+
+Native Harbor supports `environment.extra_docker_compose`. For each paired Trial,
+pass the corresponding `image-*/harbor-image.yaml` overlay listed in
+`harbor-overlays.json` (resolve its path in the extracted artifact directory). The
+overlay sets only `services.main.image` and `platform: linux/amd64`, leaving the
+original package intact. Use the same frozen digest map on both systems and verify
+the actual container image ID in run evidence. Model, agent version, task resource
+limits, timeouts and verifier contract must also agree before accuracy comparison.
+Do not treat image qualification alone as execution or score-parity acceptance.
+
 ## Persistent Nebius scheduling baseline
 
 Ordinary automatic native Terminus-2 submissions use a persistent baseline of

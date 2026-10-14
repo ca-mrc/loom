@@ -37,7 +37,7 @@ export function DebugEvidenceCard({
         title="Debug evidence"
         description="Structured failure evidence exposed by the API and CLI for this run."
       />
-      <Card.Body className="space-y-5">
+      <Card.Body className="stack-y-5">
         <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
           <StatCard label="Reason code" value={evidence.failure.reason_code} />
           <StatCard label="Category" value={evidence.failure.category} />
@@ -62,7 +62,7 @@ export function DebugEvidenceCard({
         {nextActions.length > 0 ? (
           <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
             <div className="font-semibold text-slate-900">Next actions</div>
-            <ul className="mt-1 space-y-1 text-xs text-slate-600">
+            <ul className="mt-1 stack-y-1 text-xs text-slate-600">
               {nextActions.map((action) => (
                 <li key={action}>{action}</li>
               ))}

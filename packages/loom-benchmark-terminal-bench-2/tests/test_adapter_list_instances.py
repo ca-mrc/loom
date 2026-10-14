@@ -147,10 +147,9 @@ def test_adapter_lists_all_locked_native_tasks_and_converts_one(
     cfg = TaskConfig.model_validate(tomllib.loads((bundle / "task.toml").read_text()))
     assert cfg.task.id == converted.task_id
     assert cfg.environment.docker_image == "example/tb21:rev6"
-    assert cfg.steps[0].artifacts == [
-        "logs/verifier/ctrf.json",
-        "logs/verifier/**",
-    ]
+    assert cfg.steps[0].artifacts == tomllib.loads(
+        (bundle / "upstream-task.toml").read_text()
+    )["artifacts"]
 
 
 def test_oracle_eligibility_requires_a_real_non_symlink_solution(

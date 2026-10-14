@@ -21,14 +21,14 @@ export default function PipelineArtifactDetail(): JSX.Element {
   });
   const returnTo = back?.returnTo ?? (runId ? `/pipelines/${runId}` : "/pipelines");
   const returnLink = <Link state={back?.returnState} to={returnTo} className="inline-block rounded px-1 py-1 text-sm text-accent">Back to results</Link>;
-  if (query.isPending) return <div className="space-y-4">{returnLink}<LoadingState /></div>;
+  if (query.isPending) return <div className="stack-y-4">{returnLink}<LoadingState /></div>;
   if (query.isError) {
     const status = query.error && typeof query.error === "object" && "status" in query.error ? query.error.status : null;
     const unavailable = status === 403 || status === 404;
-    return <div className="space-y-4">
+    return <div className="stack-y-4">
       {returnLink}
       <h1 className="text-2xl font-bold">{unavailable ? "Source details unavailable" : "Could not load artifact"}</h1>
-      {unavailable ? <section className="space-y-3 rounded border bg-white p-5">
+      {unavailable ? <section className="stack-y-3 rounded border bg-white p-5">
         <p>No readable Pipeline artifact detail is available for this source in your current team.</p>
         <p className="text-sm text-slate-600">This source may be restricted, belong to another team, no longer be available, or lack a committed source record. Return to the downstream result to inspect its recorded lineage.</p>
         <Link className="inline-block text-accent" to="/settings">Check your current team and access in Settings</Link>
@@ -36,7 +36,7 @@ export default function PipelineArtifactDetail(): JSX.Element {
     </div>;
   }
   const artifact = query.data;
-  if ("source_kind" in artifact) return <div className="space-y-6">
+  if ("source_kind" in artifact) return <div className="stack-y-6">
     {returnLink}
     <header><h1 className="text-2xl font-bold">{artifact.name}</h1><p>{artifact.source_kind === "input_import" ? "Imported input" : "Prepared recipe input"} · {artifact.artifact_type}</p></header>
     <p className="rounded border bg-white p-4 text-sm">This is source metadata for a committed input. It has no Pipeline Run or Stage of its own. Use Back to results to continue inspecting the downstream output.</p>
@@ -52,7 +52,7 @@ export default function PipelineArtifactDetail(): JSX.Element {
       <div><dt>Safety state</dt><dd>{artifact.safety_state}</dd></div>
     </dl></section>
   </div>;
-  return <div className="space-y-6">
+  return <div className="stack-y-6">
     <Link state={back?.returnState} to={back?.returnTo ?? `/pipelines/${artifact.pipeline_run_id}`} className="inline-block rounded px-1 py-1 text-sm text-accent">Back to results</Link>
     <header>
       <h1 className="text-2xl font-bold">{artifact.name}</h1>

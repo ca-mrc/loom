@@ -88,6 +88,17 @@ class VerifierCollect(BaseModel):
     user: str | int | None = None
 
 
+class SingleServiceCompose(BaseModel):
+    """A lowered, task-owned Compose workbench, not a host Docker deployment."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    source: str
+    service: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+    privileged: bool = False
+    stdin_open: bool = False
+    tty: bool = False
+
+
 class HarborConversion(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
     importer: Literal["loom.harbor-native.v1"] = "loom.harbor-native.v1"

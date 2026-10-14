@@ -1016,6 +1016,17 @@ def test_release_image_matrix_is_derived_from_all_release_components() -> None:
     assert all(entry["context"] == "." for entry in matrix)
 
 
+def test_shared_upload_observation_changes_select_actuator_image() -> None:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+    selected = component_ownership.select_release_image_matrix(
+        manifest,
+        changed_paths=("src/loom/trajectory/upload_observation.py",),
+        force_all=False,
+        image_set="nebius",
+    )
+    assert "execution-actuator" in {entry["image"] for entry in selected}
+
+
 def test_execution_actuator_image_owns_capacity_collector_source() -> None:
     manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
 
@@ -1399,7 +1410,7 @@ def test_root_shards_distribute_shared_handoff_phases_and_observation() -> None:
         # Run 38181207030 reached 38m41s with observation still unfinished.
         # Keep its retained-resource matrix away from these measured heavy
         # image lifecycle predecessors rather than increasing the job limit.
-        ("pool_participant_observation", "pool_image_cancellation_gateway"),
+        ("pool_participant_observation", "pool_image_cancellation"),
         ("pool_participant_observation", "pool_image_transport"),
         # Both matrices passed in 38181207030, but together left only 94s
         # of job headroom. Keep their measured long bodies on separate jobs.

@@ -27,7 +27,7 @@ export function ExecutionSelectionSection({
 }): JSX.Element {
   const effectiveItems = effective == null ? [] : Array.isArray(effective) ? effective : [effective];
   return (
-    <section aria-label="Execution selection" className="space-y-2">
+    <section aria-label="Execution selection" className="stack-y-2">
       <h3 className="text-sm font-semibold text-slate-900">Execution selection</h3>
       <dl className="grid gap-2 text-sm md:grid-cols-4">
         <div>

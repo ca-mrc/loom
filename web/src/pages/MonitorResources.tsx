@@ -22,7 +22,7 @@ export function ResourcePoolBreakdown({
   if (!resources?.pools.length) return null;
   return (
     <div className="overflow-x-auto" role="region" aria-label="Worker pool resources" tabIndex={0}>
-      <table aria-label="Resource pools" className="min-w-full divide-y divide-slate-200 text-sm">
+      <table aria-label="Resource pools" className="min-w-full stack-divide-y stack-divide-slate-200 text-sm">
         <thead>
           <tr className="bg-slate-50/50">
             {[
@@ -46,7 +46,7 @@ export function ResourcePoolBreakdown({
             ))}
           </tr>
         </thead>
-        <tbody className="divide-y divide-slate-100">
+        <tbody className="stack-divide-y stack-divide-slate-100">
           {resources.pools.map((pool) => {
             const activeSlots = pool.current_active_slots ?? pool.total_slots;
             return (
@@ -87,7 +87,7 @@ function RuntimeCapacity({ target }: { target: ExecutionTarget }): JSX.Element {
         {draining ? "Draining" : healthy ? "fresh" : "blocked/stale"}
       </StatusPill>
     </div>
-    <dl className="mt-3 space-y-2 text-xs">
+    <dl className="mt-3 stack-y-2 text-xs">
       {[
         { name: "Executable now", value: profile?.immediate_executable_slots },
         { name: "Scale headroom", value: profile?.configured_scale_headroom_slots },
@@ -126,7 +126,7 @@ export function NebiusExecutionBreakdown({ serviceExecution }: {
     groups.set(key, [...(groups.get(key) ?? []), target]);
   });
   return (
-    <div className="space-y-3 rounded-xl border border-sky-200 bg-sky-50/50 p-4">
+    <div className="stack-y-3 rounded-xl border border-sky-200 bg-sky-50/50 p-4">
       <div>
         <h3 className="text-sm font-semibold text-slate-900">Nebius service execution</h3>
         <p className="mt-1 text-xs text-slate-600">
@@ -190,7 +190,7 @@ export function NebiusExecutionBreakdown({ serviceExecution }: {
         <p className="mt-2 text-xs text-slate-600">Excluded from active execution. Historical observations do not indicate a current service fault.</p>
       </details> : null}
       {activity ? (
-        <div className="space-y-2">
+        <div className="stack-y-2">
           <div className="grid grid-cols-2 gap-2 md:grid-cols-6">
             <CountBox label="Latest execution attempts" value={`${activity.lease_count}`} />
             <CountBox label="Archiving output" value={`${activity.materialization.backlog}`} />

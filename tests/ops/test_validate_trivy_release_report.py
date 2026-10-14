@@ -11,7 +11,6 @@ import pytest
 from scripts import write_trivy_release_policy as policy
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-VALIDATOR = REPO_ROOT / "scripts/validate_trivy_release_report.py"
 _PERL_CVES = (
     "CVE-2026-13221",
     "CVE-2026-42496",
@@ -179,7 +178,15 @@ def _run_validator(
     return subprocess.run(
         [
             sys.executable,
-            str(VALIDATOR),
+            "-c",
+            # Exercise historical inventories before their review expires;
+            # the separate expiry tests still exercise the rejection boundary.
+            "from datetime import UTC, datetime\n"
+            "from unittest.mock import patch\n"
+            "from scripts import validate_trivy_release_report as validator\n"
+            "with patch.object(validator, 'datetime', wraps=datetime) as clock:\n"
+            "    clock.now.return_value = datetime(2026, 9, 14, tzinfo=UTC)\n"
+            "    validator.main()\n",
             "--component",
             component,
             "--architecture",
@@ -292,6 +299,45 @@ def test_report_validator_independently_rejects_expired_review(monkeypatch) -> N
     monkeypatch.setattr(validator, "datetime", ExpiredClock)
     with pytest.raises(validator.TrivyReportError, match="expired"):
         validator._policy_statements()
+
+
+@pytest.mark.parametrize(
+    ("reviewed_at", "accepted"),
+    (("2026-10-13T23:59:59+00:00", True),
+     ("2026-10-14T00:00:00+00:00", False),
+     ("2099-01-01T00:00:00+00:00", False)),
+)
+def test_legacy_cli_enforces_review_expiry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    reviewed_at: str, accepted: bool,
+) -> None:
+    from datetime import UTC, datetime
+
+    from scripts import validate_trivy_release_report as validator
+
+    class ReviewClock:
+        @staticmethod
+        def now(zone):
+            assert zone is UTC
+            return datetime.fromisoformat(reviewed_at)
+
+    ignore_file, report = tmp_path / "ignore.yaml", tmp_path / "report.json"
+    _write_ignore_file(ignore_file)
+    report.write_text(json.dumps(_report("agent-sandbox", ignore_file)))
+    monkeypatch.setattr(validator, "datetime", ReviewClock)
+    monkeypatch.setattr(sys, "argv", [
+        "validate_trivy_release_report.py", "--component", "agent-sandbox",
+        "--architecture", "amd64", "--report", str(report), "--ignore-file", str(ignore_file),
+    ])
+    if accepted:
+        validator.main()
+    else:
+        with pytest.raises(SystemExit) as error:
+            validator.main()
+        assert error.value.code == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err == ("" if accepted else "error: Trivy release report validation failed\n")
 
 
 def test_validator_rejects_a_missing_suppressed_finding(tmp_path: Path) -> None:
@@ -627,3 +673,25 @@ def test_validator_rejects_an_uncontrolled_ignore_file(tmp_path: Path) -> None:
     _assert_rejected(
         _run_validator(tmp_path, payload, ignore_file=ignore_file),
     )
+
+
+def test_legacy_validator_cli_rejects_expired_review(tmp_path: Path) -> None:
+    ignore_file, report = tmp_path / "ignore.yaml", tmp_path / "report.json"
+    _write_ignore_file(ignore_file)
+    report.write_text(json.dumps(_report("agent-sandbox", ignore_file)))
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from datetime import UTC, datetime\n"
+            "from unittest.mock import patch\n"
+            "from scripts import validate_trivy_release_report as validator\n"
+            "with patch.object(validator, 'datetime', wraps=datetime) as clock:\n"
+            "    clock.now.return_value = datetime(2026, 10, 14, tzinfo=UTC)\n"
+            "    validator.main()\n",
+            "--component", "agent-sandbox", "--architecture", "amd64",
+            "--report", str(report), "--ignore-file", str(ignore_file),
+        ],
+        cwd=REPO_ROOT, text=True, capture_output=True, check=False,
+    )
+    _assert_rejected(result)

@@ -1,90 +1,100 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss" source(none);
+@import "./theme.css";
+@import "./layout-utilities.css";
+@config "../tailwind.config.js";
 
-/*
- * Design tokens. Light theme by intent — borrowing the reference
- * design system shape: soft slate grays, indigo accent, rounded-xl
- * cards, generous whitespace. Dark theme is deliberately not shipped
- * yet; revisit when a user asks.
- */
-:root {
-  --bg-primary: #f8fafc;       /* slate-50 — app background */
-  --bg-secondary: #ffffff;      /* surfaces */
-  --bg-card: #ffffff;
-  --bg-card-hover: #f1f5f9;     /* slate-100 */
-  --border-subtle: #e2e8f0;     /* slate-200 */
-  --border-medium: #cbd5e1;     /* slate-300 */
-  --text-primary: #1e293b;      /* slate-800 */
-  --text-secondary: #475569;    /* slate-600 */
-  --text-muted: #64748b;        /* slate-500 */
-  --accent: #4f46e5;             /* indigo-600 */
-  --accent-hover: #4338ca;       /* indigo-700 */
-  --accent-glow: rgba(79, 70, 229, 0.15);
+/* Preserve the native control and table defaults used before Tailwind 4. */
+@layer base {
+  *, ::before, ::after, ::backdrop, ::file-selector-button {
+    border-color: var(--color-gray-200);
+  }
+  input::placeholder, textarea::placeholder {
+    color: var(--color-gray-400);
+  }
+  button, [role="button"] { cursor: pointer; }
+  :disabled { cursor: default; }
+  button, input, select, optgroup, textarea { opacity: revert; }
+  input, select, textarea { background-color: revert; }
+  select, textarea { border-color: var(--text-muted); }
+  th, td { padding: 1px; }
+  option { padding: revert; }
+  ::-webkit-datetime-edit { padding-block: 1px; }
 }
 
-* {
-  box-sizing: border-box;
-}
+/* Keep application overrides after utilities in the same cascade layer so
+ * explicit classes and state variants retain their original specificity. */
+@layer utilities {
+  /*
+   * Design tokens. Light theme by intent — borrowing the reference
+   * design system shape: soft slate grays, indigo accent, rounded-xl
+   * cards, generous whitespace. Dark theme is deliberately not shipped
+   * yet; revisit when a user asks.
+   */
+  :root {
+    --bg-primary: #f8fafc;       /* slate-50 — app background */
+    --text-primary: #1e293b;      /* slate-800 */
+    --text-muted: #64748b;        /* slate-500 */
+    --accent: #4f46e5;             /* indigo-600 */
+    --accent-glow: rgba(79, 70, 229, 0.15);
+  }
 
-html, body {
-  margin: 0;
-  padding: 0;
-  min-height: 100vh;
-}
+  * {
+    box-sizing: border-box;
+  }
 
-body {
-  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-    sans-serif;
-  font-size: 14px;
-  line-height: 1.5;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  background: var(--bg-primary);
-  color: var(--text-primary);
-}
+  html, body {
+    margin: 0;
+    padding: 0;
+    min-height: 100vh;
+  }
 
-.frontend-config-error {
-  padding: 24px;
-  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-    sans-serif;
-}
+  body {
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+      sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+  }
 
-/*
- * Subtle scrollbars. WebKit-flavoured; Firefox gets the standard
- * `scrollbar-width: thin` via the global rule below.
- */
-* {
-  scrollbar-width: thin;
-  scrollbar-color: rgba(0, 0, 0, 0.18) transparent;
-}
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-::-webkit-scrollbar-thumb {
-  background: rgba(0, 0, 0, 0.12);
-  border-radius: 3px;
-}
-::-webkit-scrollbar-thumb:hover {
-  background: rgba(0, 0, 0, 0.24);
-}
+  /*
+   * Subtle scrollbars. WebKit-flavoured; Firefox gets the standard
+   * `scrollbar-width: thin` via the global rule below.
+   */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(0, 0, 0, 0.18) transparent;
+  }
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(0, 0, 0, 0.12);
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(0, 0, 0, 0.24);
+  }
 
-/* Smooth interactive transitions across the surface. */
-button, a, input, select, textarea {
-  transition: border-color 0.15s ease, background-color 0.15s ease,
-    color 0.15s ease, box-shadow 0.15s ease;
-}
+  /* Smooth interactive transitions across the surface. */
+  button, a, input, select, textarea {
+    transition: border-color 0.15s ease, background-color 0.15s ease,
+      color 0.15s ease, box-shadow 0.15s ease;
+  }
 
-/* Accent focus ring across all interactive controls. */
-:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-glow);
+  /* Accent focus ring across all interactive controls. */
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-glow);
+  }
 }
 
 /*
@@ -99,35 +109,34 @@ button, a, input, select, textarea {
     @apply hover:border-slate-300 hover:bg-slate-50;
   }
   .modal-backdrop {
-    @apply bg-black/30 backdrop-blur-sm;
-  }
-  .accent-glow {
-    box-shadow: 0 0 20px var(--accent-glow);
+    @apply bg-black/30 backdrop-blur-xs;
   }
 }
 
-/* Honor the operating-system preference for every utility and loading state. */
-@media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after {
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
-    scroll-behavior: auto !important;
+@layer utilities {
+  /* Honor the operating-system preference for every utility and loading state. */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
   }
-}
 
-main { overflow-wrap: anywhere; }
-button, input:not([type="checkbox"]):not([type="radio"]), select, summary {
-  min-height: 24px;
-}
-:focus-visible { scroll-margin: 8px; }
+  main { overflow-wrap: anywhere; }
+  button, input:not([type="checkbox"]):not([type="radio"]), select, summary {
+    min-height: 24px;
+  }
+  :focus-visible { scroll-margin: 8px; }
 
-/* Visible field and secondary-action boundaries; card separators stay subtle. */
-input:not([type="checkbox"]):not([type="radio"]), select, textarea,
-button.bg-white {
-  border-color: var(--text-muted);
-}
+  /* Visible field and secondary-action boundaries; card separators stay subtle. */
+  input:not([type="checkbox"]):not([type="radio"]),
+  button.bg-white {
+    border-color: var(--text-muted);
+  }
 
-/* Dense tables scroll as a unit instead of squeezing labels into one-letter columns. */
-table { overflow-wrap: normal; }
-th { white-space: nowrap; }
+  /* Dense tables scroll as a unit instead of squeezing labels into one-letter columns. */
+  table { overflow-wrap: normal; }
+  th { white-space: nowrap; }
+}

@@ -17,7 +17,7 @@ def task_runtime_rejections(task: TaskConfig, *, agent_name: str | None = None) 
     for path, env in environments:
         if env.gpu_types:
             reasons.append(f"{path}.gpu_types: exact_gpu_model_runtime_unavailable")
-        if env.compose_files:
+        if env.compose_files and env.single_service_compose is None:
             reasons.append(f"{path}.compose_files: native_compose_runtime_unavailable")
         for index, sidecar in enumerate(env.sidecars):
             if sidecar.healthcheck and sidecar.healthcheck.start_interval_sec is not None:

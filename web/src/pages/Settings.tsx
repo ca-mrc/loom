@@ -63,7 +63,7 @@ function TeamMembers({
   }
   return (
     <div className="overflow-x-auto" tabIndex={0} role="region" aria-label="Team members scroll area">
-      <table aria-label="Team members" className="min-w-full divide-y divide-slate-200 text-sm">
+      <table aria-label="Team members" className="min-w-full stack-divide-y stack-divide-slate-200 text-sm">
         <thead className="bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
           <tr>
             <th scope="col" className="px-4 py-3 font-semibold">Member</th>
@@ -71,7 +71,7 @@ function TeamMembers({
             <th scope="col" className="px-4 py-3 font-semibold">Joined</th>
           </tr>
         </thead>
-        <tbody className="divide-y divide-slate-100 bg-white">
+        <tbody className="stack-divide-y stack-divide-slate-100 bg-white">
           {members.map((member) => (
             <tr key={member.user_id}>
               <td className="px-4 py-3">
@@ -153,7 +153,7 @@ export default function Settings(): JSX.Element {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="stack-y-6">
       <header>
         <h1 className="text-2xl font-bold text-slate-900">Team Settings</h1>
         <p className="mt-1 text-sm text-slate-500">
@@ -181,7 +181,7 @@ export default function Settings(): JSX.Element {
           }
         />
         <Card.Body className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_16rem]">
-          <div className="space-y-3">
+          <div className="stack-y-3">
             <div className="flex flex-wrap items-center gap-3">
               <StatusPill variant={isAdmin ? "info" : "success"}>
                 {isAdmin ? "Platform admin" : roleLabel(currentTeam?.role)}
@@ -338,7 +338,7 @@ export default function Settings(): JSX.Element {
                 <EmptyState label="No API tokens." />
               ) : (
                 <div className="overflow-x-auto" tabIndex={0} role="region" aria-label="API tokens scroll area">
-                  <table aria-label="API tokens" className="min-w-full divide-y divide-slate-200 text-sm">
+                  <table aria-label="API tokens" className="min-w-full stack-divide-y stack-divide-slate-200 text-sm">
                     <thead>
                       <tr className="bg-slate-50/50">
                         <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">Name</th>
@@ -350,7 +350,7 @@ export default function Settings(): JSX.Element {
                         <th scope="col" className="px-4 py-3" />
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-slate-100">
+                    <tbody className="stack-divide-y stack-divide-slate-100">
                       {tokens.data.items.map((token) => (
                         <tr key={token.token_hash_prefix} className="hover:bg-slate-50">
                           <td className="px-4 py-3 font-medium text-slate-900">

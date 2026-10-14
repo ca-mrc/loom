@@ -23,7 +23,7 @@ export default function ManagedLogin(): JSX.Element {
   }
 
   return (
-    <div className="mx-auto my-16 max-w-lg space-y-4 px-4">
+    <div className="mx-auto my-16 max-w-lg stack-y-4 px-4">
       <h1 className="text-2xl font-semibold">Personal environment login</h1>
       <p>This signs you into this environment only. Your management login stays separate.</p>
       {state === "ready" && (

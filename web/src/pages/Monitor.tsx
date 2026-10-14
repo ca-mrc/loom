@@ -93,7 +93,7 @@ export default function Monitor(): JSX.Element {
   const stateOptions = view === "batches" ? BATCH_STATE_OPTIONS : TRIAL_STATE_OPTIONS;
 
   return (
-    <div className="space-y-6">
+    <div className="stack-y-6">
       <header className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-slate-900">Monitor</h1>

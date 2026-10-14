@@ -1161,13 +1161,6 @@ def _add_tar_stream(
             close()
 
 
-def _payload_checksums_bytes(files: dict[str, bytes]) -> bytes:
-    lines = [
-        f"{hashlib.sha256(data).hexdigest()}  {name}\n" for name, data in sorted(files.items())
-    ]
-    return "".join(lines).encode()
-
-
 def _payload_checksums_from_entries(entries: list[tuple[str, str]]) -> bytes:
     return "".join(
         f"{digest}  {name}\n" for name, digest in sorted(entries, key=lambda item: item[0])

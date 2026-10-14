@@ -28,9 +28,6 @@ export type BatchCreate = paths["/api/v1/batches"]["post"]["responses"][201]["co
 export type BatchFailedRerun =
   paths["/api/v1/batches/{batch_id}/rerun-failed"]["post"]["responses"][201]["content"]["application/json"];
 
-export type RerunPlan =
-  paths["/api/v1/batches/{batch_id}/rerun-plan"]["get"]["responses"][200]["content"]["application/json"];
-
 export type DeliveryExport =
   paths["/api/v1/batches/{batch_id}/delivery-export"]["get"]["responses"][200]["content"]["application/json"];
 
@@ -102,8 +99,6 @@ export const runsApi = {
     }),
   listTrials: (q: Record<string, string | undefined> = {}) => apiFetch<TrialList>(`/api/v1/trials${qs(q)}`),
   getTrial: (id: string) => apiFetch<TrialDetail>(`/api/v1/trials/${id}`),
-  getTrialDebug: (id: string) => apiFetch<DebugEvidence>(`/api/v1/trials/${id}/debug`),
-  getTrialDiagnosis: (id: string) => apiFetch<DiagnosisReport>(`/api/v1/trials/${id}/diagnosis`),
   submitTrial: (body: {
     task_id: string;
     config: Record<string, unknown>;
@@ -150,15 +145,6 @@ export const runsApi = {
   }),
   cancelBatch: (id: string) =>
     apiFetch<{ batch_id: string; state: string }>(`/api/v1/batches/${id}/cancel`, { method: "POST" }),
-  getBatchRerunPlan: (id: string, q: { task_id?: string[]; include_operator_approval?: boolean } = {}) => {
-    const params = new URLSearchParams();
-    for (const taskId of q.task_id ?? []) params.append("task_id", taskId);
-    if (q.include_operator_approval !== undefined) {
-      params.set("include_operator_approval", String(q.include_operator_approval));
-    }
-    const suffix = params.toString() ? `?${params.toString()}` : "";
-    return apiFetch<RerunPlan>(`/api/v1/batches/${id}/rerun-plan${suffix}`);
-  },
   rerunFailedBatch: (id: string) =>
     apiFetch<BatchFailedRerun>(`/api/v1/batches/${id}/rerun-failed`, { method: "POST" }),
 };

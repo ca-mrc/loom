@@ -77,9 +77,7 @@ from loom.trial.workspace import (
     require_tb21_workspace_staging_policy,
     resolve_trial_workspace_staging_policy,
 )
-from loom.verifier.base import Verifier
-from loom.verifier.pytest_verifier import PytestVerifier
-from loom.verifier.script_verifier import ScriptVerifier
+from loom.verifier.factory import task_verifier_factory
 from loom_task_image_authority.execution_delivery import SignedWorkClaim, TaskImageExecutionDelivery
 from loom_task_image_authority.execution_grant import verify_execution_grant
 from loom_worker.artifact_input_journal import allocatable_capacity
@@ -136,11 +134,6 @@ _WORKER_SLICE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*\.slice$")
 _CANDIDATE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 logger = logging.getLogger(__name__)
-
-_VERIFIER_CTORS: dict[str, Callable[..., Verifier]] = {
-    "pytest": PytestVerifier,
-    "script": ScriptVerifier,
-}
 
 
 def _tb21_workspace_staging_policy_from_provenance(
@@ -1497,7 +1490,7 @@ async def _spawn_trial(
                 sandbox_gateway_url=subprocess_gateway_url_str,
                 provider_connection_id=payload.get("provider_connection_id"),
             ),
-            verifier_factory=_verifier_factory(task_config),
+            verifier_factory=task_verifier_factory(task_config),
             object_store=object_store,
             gateway_client=gateway_client,
             local_trajectory_root=settings.trajectory_cache_dir,
@@ -1647,15 +1640,6 @@ async def _run_pre_start_heartbeat(
                 )
                 return
         await asyncio.sleep(interval)
-
-
-def _verifier_factory(task_config: TaskConfig) -> Callable[[], Verifier]:
-    name = task_config.verifier.name
-    ctor = _VERIFIER_CTORS.get(name)
-    if ctor is None:
-        raise ValueError(f"unknown verifier: {name!r}")
-    args = dict(task_config.verifier.args)
-    return lambda: ctor(**args)
 
 
 def _build_mint_callback(

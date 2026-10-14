@@ -92,7 +92,7 @@ function DeliveryExportForm({ batchId, state }: { batchId: string; state: string
   return <section aria-label="Batch delivery export">
     <p className="mb-2 text-sm text-slate-600">Export final results for the whole batch family, or choose exact Trials from this batch. Selected results retain their original outcomes; the service checks eligibility and reports missing contents.</p>
 
-    {canPrepare ? <fieldset disabled={createDeliveryExport.isPending} className="mb-4 space-y-3">
+    {canPrepare ? <fieldset disabled={createDeliveryExport.isPending} className="mb-4 stack-y-3">
       <legend className="font-medium">Prepare a delivery bundle</legend>
       <label className="flex items-center gap-2 text-sm">Export format
         <select aria-label="Export format" value={mode} onChange={(event) => setMode(event.target.value as typeof mode)} className="rounded border p-2">
@@ -107,11 +107,11 @@ function DeliveryExportForm({ batchId, state }: { batchId: string; state: string
         <label><input type="radio" checked={scope === "family"} onChange={() => setScope("family")} /> Whole batch family</label>
         <label><input type="radio" checked={scope === "selected"} onChange={() => setScope("selected")} /> Selected Trials</label>
       </div>
-      {scope === "family" ? <p className="text-xs text-slate-600">Includes linked reruns using the existing final-attempt selection rules. Unresolved results remain visible as export errors.</p> : <div className="space-y-2">
+      {scope === "family" ? <p className="text-xs text-slate-600">Includes linked reruns using the existing final-attempt selection rules. Unresolved results remain visible as export errors.</p> : <div className="stack-y-2">
         <p className="text-sm">{selectedIds.length} Trials selected. Selection is preserved when more Trials are loaded.</p>
         {trials.isPending ? <p>Loading Trials…</p> : null}
         {trials.isError ? <ErrorState error={trials.error} /> : null}
-        <div className="max-h-80 space-y-1 overflow-auto rounded border p-2">
+        <div className="max-h-80 stack-y-1 overflow-auto rounded border p-2">
           {trials.data?.pages.flatMap((page) => page.items).map((trial) => <label key={trial.id} className="flex items-start gap-2 py-1 text-sm">
             <input type="checkbox" aria-label={`Select ${trial.id}`} checked={selectedIds.includes(trial.id)} onChange={(event) => setSelectedIds((ids) => event.target.checked ? [...ids, trial.id] : ids.filter((id) => id !== trial.id))} />
             <span className="min-w-0 break-all">{trial.task_id}<br /><span className="text-xs text-slate-600">{trial.id} · {trial.state}</span></span>

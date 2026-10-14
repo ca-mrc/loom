@@ -150,7 +150,7 @@ export default function TaskSetDetail(): JSX.Element {
   if (!ts) return <LoadingState />;
 
   return (
-    <div className="space-y-4">
+    <div className="stack-y-4">
       <Link
         to="/task-sets"
         className="text-sm text-accent hover:underline"
@@ -214,7 +214,7 @@ export default function TaskSetDetail(): JSX.Element {
         value={tab}
         onValueChange={setTab}
         ariaLabel="Task set sections"
-        className="space-y-4"
+        className="stack-y-4"
         tabListClassName="flex gap-2 border-b border-slate-200"
         tabClassName={({ selected }) =>
           selected
@@ -257,7 +257,7 @@ export default function TaskSetDetail(): JSX.Element {
 function OverviewPanel({ ts }: { ts: TaskSetDetailView }): JSX.Element {
   return (
     <Card>
-      <Card.Body className="space-y-4">
+      <Card.Body className="stack-y-4">
         <dl className="grid grid-cols-2 gap-4 text-sm">
           <div>
             <dt className="font-medium text-slate-500">Task Count</dt>
@@ -307,7 +307,7 @@ function OverviewPanel({ ts }: { ts: TaskSetDetailView }): JSX.Element {
             <p className="text-xs font-medium uppercase text-amber-800">
               Warnings
             </p>
-            <ul className="mt-1 space-y-1 text-sm text-amber-700">
+            <ul className="mt-1 stack-y-1 text-sm text-amber-700">
               {ts.warnings.map((w, i) => (
                 <li key={i}>
                   <span className="font-medium">{w.code}:</span> {w.message}
@@ -338,7 +338,7 @@ function ErrorsPanel({ ts }: { ts: TaskSetDetailView }): JSX.Element {
     <Card>
       <Card.Body className="overflow-x-auto p-0">
         <p className="p-4 text-sm text-slate-600">Showing {ts.error_summary.length} retained error samples, not a total error count. Only the first 50 samples are retained.{ts.error_summary.length >= 50 ? " The sample limit has been reached; additional errors may exist." : ""} Fix the reported manifest or task data, then rebuild. Share the task-set ID and status reason with an administrator if the import still fails.</p>
-        <table aria-label="Task import errors" className="min-w-full divide-y divide-slate-200 text-sm">
+        <table aria-label="Task import errors" className="min-w-full stack-divide-y stack-divide-slate-200 text-sm">
           <thead>
             <tr className="bg-slate-50/50">
               <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">
@@ -352,7 +352,7 @@ function ErrorsPanel({ ts }: { ts: TaskSetDetailView }): JSX.Element {
               </th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-slate-100">
+          <tbody className="stack-divide-y stack-divide-slate-100">
             {ts.error_summary.map((err, i) => (
               <tr key={i}>
                 <td className="px-4 py-2 text-slate-600">

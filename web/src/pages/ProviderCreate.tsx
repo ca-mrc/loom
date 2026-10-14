@@ -45,7 +45,7 @@ export default function ProviderCreate(): JSX.Element {
 
   return (
     <Card>
-      <Card.Body className="space-y-4">
+      <Card.Body className="stack-y-4">
         <header>
           <h1 className="text-2xl font-bold text-slate-900">
             New provider connection

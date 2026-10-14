@@ -181,13 +181,15 @@ runtime tools.
 
 ## Installed harnesses
 
-Installed harnesses (OpenHands SDK, Codex CLI) run their pinned agent process
+Installed harnesses run their pinned agent process
 and native tools inside the task sandbox, because their tools execute wherever
 the agent runs. The trusted controller supervises them and keeps private
 verifier and solution inputs, Gateway authorization, canonical evidence and
 durable outputs ([#2288](https://github.com/qianyi-sun/loom/issues/2288),
 [#2310](https://github.com/qianyi-sun/loom/issues/2310)). Terminus-2 keeps its
-controller-side model loop.
+controller-side model loop. Codex CLI is the currently admitted native installed
+harness. OpenHands SDK is a follow-up for this harness shape and remains
+unavailable for native admission pending its runtime integration and qualification.
 
 ### Native process interface
 

@@ -26,7 +26,7 @@ export function AdminTeams({
         title="Internal teams"
         description="Maintain fixed teams and which ones accept public account requests on /auth/login."
       />
-      <Card.Body className="space-y-5">
+      <Card.Body className="stack-y-5">
         <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_9rem]">
           <Input
             aria-label="New team name"
@@ -49,7 +49,7 @@ export function AdminTeams({
             <EmptyState label="No teams have been created yet." />
           ) : (
             <div className="overflow-x-auto" tabIndex={0} role="region" aria-label="Internal teams scroll area">
-              <table aria-label="Internal teams" className="min-w-full divide-y divide-slate-200 text-sm">
+              <table aria-label="Internal teams" className="min-w-full stack-divide-y stack-divide-slate-200 text-sm">
                 <thead className="bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
                   <tr>
                     <th scope="col" className="px-3 py-2 font-semibold">
@@ -69,7 +69,7 @@ export function AdminTeams({
                     </th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100 bg-white">
+                <tbody className="stack-divide-y stack-divide-slate-100 bg-white">
                   {adminTeams.data.items.map((team) => {
                     const editName = teamNameEdits[team.id] ?? team.name;
                     const unchanged = editName.trim() === team.name;

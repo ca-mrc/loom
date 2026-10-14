@@ -33,7 +33,7 @@ export default function CommandSnippet({
   };
 
   return (
-    <div className="space-y-2 rounded-lg border border-slate-200 bg-slate-50 p-3">
+    <div className="stack-y-2 rounded-lg border border-slate-200 bg-slate-50 p-3">
       <div className="flex items-center justify-between gap-3">
         <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
           {label}

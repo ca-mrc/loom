@@ -248,7 +248,6 @@ _PROGRAMS: tuple[_ScenarioProgram, ...] = (
     _program(37, "acceptance_evidence_state_machine", "tests/integration/test_pipeline_acceptance_evidence_commit.py::test_controller_authority_is_the_only_byte_source", supporting_tiers=("typed_model", "object_store")),
     _program(38, "internal_trusted_unknown_inputs", "tests/integration/test_pipeline_internal_trusted_inputs.py::test_internal_trusted_boundary_disables_untrusted_transforms"),
     _program(40, "concurrent_provider_attempt_slices", "tests/integration/test_pipeline_budget_reservations.py::test_attempt_local_provider_slice_serializes_concurrent_dispatches", supporting_tiers=("typed_model", "persisted_postgres")),
-    _program(41, "distributed_fault_arms", "tests/integration/test_pipeline_acceptance_worker_fault_arms.py::test_fault_arm_lookup_is_claim_bound_and_404_is_inert"),
     _program(43, "offline_codex_process_lifecycle", "tests/integration/test_pipeline_codex_subprocess.py::test_official_codex_process_has_closed_per_process_environments"),
     _program(44, "profile_calibration_evidence", "tests/integration/test_pipeline_profile_calibration_evidence_commit.py::test_catalog_finalization_consumes_one_authoritative_document", supporting_tiers=("typed_model", "object_store")),
 )
@@ -488,7 +487,7 @@ def run_fault_scenario(row: int) -> FaultMatrixSnapshot:
     _exercise_audit_gap(program)
     ledger = _EvidenceLedger(program)
     ledger.apply()
-    if row in {3, 5, 6, 7, 19, 20, 24, 28, 34, 37, 41, 44}:
+    if row in {3, 5, 6, 7, 19, 20, 24, 28, 34, 37, 44}:
         ledger.replay()
     return ledger.snapshot()
 

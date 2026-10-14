@@ -34,7 +34,7 @@ def _header(*, read_only: bool) -> str:
 SET LOCAL statement_timeout='10s'; SET LOCAL lock_timeout='2s'; SET LOCAL search_path=pg_catalog,public,pg_temp;
 DO $pool_activation_schema$
 BEGIN
-    IF (SELECT version_num FROM public.alembic_version) IS DISTINCT FROM '0175'
+    IF (SELECT version_num FROM public.alembic_version) IS DISTINCT FROM '0176'
     THEN RAISE EXCEPTION 'pool activation schema unqualified'; END IF;
 END $pool_activation_schema$;
 """

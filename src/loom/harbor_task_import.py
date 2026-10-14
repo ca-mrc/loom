@@ -14,7 +14,6 @@ DEFAULT_HARBOR_DOCKERFILE = "environment/Dockerfile"
 DEFAULT_HARBOR_DOCKER_BUILD_CONTEXT = "environment"
 DEFAULT_VERIFIER_SCRIPT_PATH = "/app/verifier/run.sh"
 _HARBOR_ENV_MODES = {"shared", "separate"}
-_HARBOR_VERIFIER_ARTIFACT_GLOB = "logs/verifier/**"
 _RESOURCE_SIZE = re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*([MGT])(?:I?B)?", re.IGNORECASE)
 
 
@@ -145,7 +144,15 @@ def project_harbor_task(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Harbor environment.env must be a table")
     if isinstance(source_env, dict):
         environment["environment"] = deepcopy(source_env)
-    allow_internet = source_environment.get("allow_internet")
+    # Older native packages place this execution requirement under [task].
+    # Never turn an explicit offline declaration into the hosted web default.
+    if (
+        "allow_internet" in source_task
+        and "allow_internet" in source_environment
+        and source_task["allow_internet"] != source_environment["allow_internet"]
+    ):
+        raise ValueError("task.allow_internet conflicts with environment.allow_internet")
+    allow_internet = source_environment.get("allow_internet", source_task.get("allow_internet"))
     _normalize_internet_declaration(
         environment,
         allow_internet,
@@ -224,8 +231,8 @@ def project_harbor_task(payload: dict[str, Any]) -> dict[str, Any]:
             artifact_sources.append(deepcopy(item))
         else:
             raise ValueError("artifacts require paths or structured source tables")
-    if _HARBOR_VERIFIER_ARTIFACT_GLOB not in relative_artifacts:
-        relative_artifacts.append(_HARBOR_VERIFIER_ARTIFACT_GLOB)
+    # Verifier feedback is collected by the verifier runtime. Injecting a log
+    # glob here invents an agent-output requirement that native admission rejects.
     steps: list[dict[str, Any]] = [{"name": "main", "artifacts": relative_artifacts}]
     if artifact_sources:
         steps[0]["artifact_sources"] = artifact_sources
