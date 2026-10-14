@@ -50,9 +50,11 @@ def resolve_agent_connection(
     key = gateway.tokens.get(model.provider)
     if not key:
         raise AgentError(f"no {model.provider} API key; configure token.{model.provider} or its API-key environment variable")
-    # Gemini CLI accepts a host root; LiteLLM instead treats an explicit base
-    # as already versioned. Let native Terminus select its own /v1beta default.
-    base_url = None if dialect is None and model.provider == "google" else _BASE_URLS[model.provider]
+    # Gemini CLI accepts a host root; LiteLLM requires a versioned base.
+    # Keep it explicit so ambient SDK settings cannot redirect the selected key.
+    base_url = _BASE_URLS[model.provider]
+    if dialect is None and model.provider == "google":
+        base_url += "/v1beta"
     return DirectProviderConnection(
         model=model, api_key=key, base_url=base_url,
         api_key_env="ANTHROPIC_API_KEY" if model.provider == "anthropic" else None,

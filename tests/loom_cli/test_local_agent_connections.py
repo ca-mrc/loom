@@ -135,7 +135,7 @@ def test_terminus_resolves_native_provider_without_placeholder_cp(
     assert agent.direct_ledger is not None
     assert KEY not in repr(agent)
     if provider == "google":
-        assert connection.base_url is None  # LiteLLM selects the native API version.
+        assert connection.base_url == "https://generativelanguage.googleapis.com/v1beta"
 
 
 @pytest.mark.asyncio
