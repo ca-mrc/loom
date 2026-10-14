@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 import sys
 from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
+import yaml
 from scripts import validate_trivy_release_report as validator
 from scripts import write_trivy_release_policy as policy
 from tests.ops.test_validate_trivy_release_report import _report as legacy_report
@@ -14,41 +16,52 @@ from tests.ops.test_validate_trivy_release_report import _report as legacy_repor
 ROOT = Path(__file__).resolve().parents[2]
 
 
-@pytest.mark.parametrize("component", [
-    "execution-runtime", "harbor-runtime", "pipeline-core-fixture", "rehearsal-postgres",
-])
-@pytest.mark.parametrize("finding", [None, "critical", "suppressed", "old-ignore"])
-def test_actual_zero_exception_cli_accepts_only_clean_reports(
-    tmp_path: Path, component: str, finding: str | None,
+@pytest.mark.parametrize("finding", [None, "critical", "suppressed"])
+@pytest.mark.parametrize("job", ["build", "nebius-harness-build"])
+def test_actual_workflow_policy_commands_reject_findings(
+    tmp_path: Path, finding: str | None, job: str,
 ) -> None:
     config, ignore, report = (tmp_path / name for name in ("trivy.yaml", "ignore.yaml", "report.json"))
+    workflow = yaml.safe_load((ROOT / ".github/workflows/images.yml").read_text())
+    steps = {step.get("name"): step for step in workflow["jobs"][job]["steps"]}
+    component = "harbor-runtime" if job == "nebius-harness-build" else "execution-runtime"
+
+    def command(script: str, source: str) -> list[str]:
+        # Run the real workflow's writer and final validator, substituting only
+        # runner paths and matrix variables. The real clock is unchanged.
+        arguments = shlex.split(source[source.index(f"python3 scripts/{script}"):].replace("\\\n", ""))
+        replacements = {
+            "/tmp/loom-trivy-release.yaml": str(config),
+            "/tmp/loom-trivy-release.ignore.yaml": str(ignore),
+            "$IMAGE_NAME": component, "$ARCHITECTURE": "amd64", "$REPORT": str(report),
+        }
+        return [sys.executable, str(ROOT / arguments[1]),
+                *(replacements.get(arg, arg) for arg in arguments[2:])]
+
     generate = subprocess.run(
-        [sys.executable, str(ROOT / "scripts/write_trivy_release_policy.py"),
-         "--config-file", str(config), "--ignore-file", str(ignore), "--no-exceptions"],
+        command("write_trivy_release_policy.py", steps["Generate controlled Trivy policy"]["run"]),
         cwd=tmp_path, capture_output=True, text=True,
     )
     assert generate.returncode == 0, generate.stderr
     assert config.read_bytes() == policy.TRIVY_CONFIG_BYTES
     assert ignore.read_bytes() == policy.TRIVY_NO_EXCEPTIONS_BYTES
     payload = _report(component)
-    legacy = legacy_report("agent-sandbox", ignore)
-    wrappers = legacy["Results"][0]["ExperimentalModifiedFindings"]
     if finding == "critical":
-        payload["Results"][0]["Vulnerabilities"] = [wrappers[0]["Finding"]]
+        payload["Results"][0]["Vulnerabilities"] = [
+            {"VulnerabilityID": "CVE-2026-13221", "Severity": "CRITICAL"},
+        ]
     elif finding == "suppressed":
-        payload["Results"][0]["ExperimentalModifiedFindings"] = wrappers
-    elif finding == "old-ignore":
-        ignore.write_bytes(policy.TRIVY_IGNORE_BYTES)
+        payload["Results"][0]["ExperimentalModifiedFindings"] = [
+            {"Type": "vulnerability", "Status": "ignored", "Source": str(ignore),
+             "Statement": "previous exception",
+             "Finding": {"VulnerabilityID": "CVE-2026-13221", "Severity": "CRITICAL"}},
+        ]
     report.write_text(json.dumps(payload))
     checked = subprocess.run(
-        [sys.executable, str(ROOT / "scripts/validate_trivy_release_report.py"),
-         "--component", component, "--architecture", "amd64",
-         "--report", str(report), "--ignore-file", str(ignore), "--no-exceptions"],
+        command("validate_trivy_release_report.py", steps["Scan native image archive"]["run"]),
         cwd=tmp_path, capture_output=True, text=True,
     )
     assert checked.returncode == (0 if finding is None else 1), checked.stderr
-    assert checked.stdout == ""
-    assert checked.stderr == ("" if finding is None else "error: Trivy release report validation failed\n")
 
 
 def _report(component: str = "control-plane") -> dict:
@@ -132,3 +145,40 @@ def test_legacy_report_preserves_dev_exception_expiration(
     report.write_text(json.dumps(_report()))
     with pytest.raises(validator.TrivyReportError, match="expired"):
         validator.validate_trivy_release_report("control-plane", "amd64", report, ignore)
+
+
+@pytest.mark.parametrize("component", [
+    "execution-runtime", "harbor-runtime", "pipeline-core-fixture", "rehearsal-postgres",
+])
+@pytest.mark.parametrize("finding", [None, "critical", "suppressed", "old-ignore"])
+def test_actual_zero_exception_cli_accepts_only_clean_reports(
+    tmp_path: Path, component: str, finding: str | None,
+) -> None:
+    config, ignore, report = (tmp_path / name for name in ("trivy.yaml", "ignore.yaml", "report.json"))
+    generate = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/write_trivy_release_policy.py"),
+         "--config-file", str(config), "--ignore-file", str(ignore), "--no-exceptions"],
+        cwd=tmp_path, capture_output=True, text=True,
+    )
+    assert generate.returncode == 0, generate.stderr
+    assert config.read_bytes() == policy.TRIVY_CONFIG_BYTES
+    assert ignore.read_bytes() == policy.TRIVY_NO_EXCEPTIONS_BYTES
+    payload = _report(component)
+    legacy = legacy_report("agent-sandbox", ignore)
+    wrappers = legacy["Results"][0]["ExperimentalModifiedFindings"]
+    if finding == "critical":
+        payload["Results"][0]["Vulnerabilities"] = [wrappers[0]["Finding"]]
+    elif finding == "suppressed":
+        payload["Results"][0]["ExperimentalModifiedFindings"] = wrappers
+    elif finding == "old-ignore":
+        ignore.write_bytes(policy.TRIVY_IGNORE_BYTES)
+    report.write_text(json.dumps(payload))
+    checked = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/validate_trivy_release_report.py"),
+         "--component", component, "--architecture", "amd64",
+         "--report", str(report), "--ignore-file", str(ignore), "--no-exceptions"],
+        cwd=tmp_path, capture_output=True, text=True,
+    )
+    assert checked.returncode == (0 if finding is None else 1), checked.stderr
+    assert checked.stdout == ""
+    assert checked.stderr == ("" if finding is None else "error: Trivy release report validation failed\n")
