@@ -284,6 +284,57 @@ def test_selected_guard_uses_release_owner_and_real_backend(guard_connection, ph
         assert state.writes == []
 
 
+@pytest.mark.parametrize('staging_attachment_inputs', [2], indirect=True)
+def test_guard_checks_receipts_without_reprojecting_each_sql_challenge(guard_connection, monkeypatch):
+    state, _, options = guard_connection
+    projections = []
+    original = module()._ResourceView._pool
+
+    def project(view):
+        projections.append(None)
+        return original(view)
+
+    with observer(state.retained, lambda: state.rows)[0] as live:
+        monkeypatch.setattr(module()._ResourceView, '_pool', project)
+        assert live.observe_guard(phase='guarded', **options) == 'held'
+    assert len(state.guard_queries) == 2
+    # Two complete live observations each project before/after reads; one
+    # additional projection pins receipts across the two SQL challenges.
+    assert len(projections) <= 5
+    assert state.writes == []
+
+
+@pytest.mark.parametrize('staging_attachment_inputs', [2], indirect=True)
+@pytest.mark.parametrize('damage', ['bytes', 'missing', 'extra', 'symlink', 'permissions', 'retained'])
+def test_guard_rechecks_receipts_and_inputs_before_next_sql_challenge(guard_connection, damage):
+    state, connect, options = guard_connection
+    file_writer(state, connect).apply_file('20-database.yaml')
+    path = state.retained.state_dir / 'candidate-file-writes/dispatch.json'
+    writes = list(state.writes)
+    with observer(state.retained, lambda: state.rows)[0] as live:
+        def changed():
+            if damage == 'bytes':
+                path.write_bytes(path.read_bytes() + b'\n')
+            elif damage == 'missing':
+                path.unlink()
+            elif damage == 'extra':
+                private_state._atomic_json(path.parent / 'unexpected.json', {})
+            elif damage == 'symlink':
+                moved = path.with_suffix('.held')
+                path.rename(moved)
+                path.symlink_to(moved)
+            elif damage == 'permissions':
+                path.chmod(0o644)
+            else:
+                live.retained.inputs.candidate['candidate_sha'] = 'e' * 40
+
+        state.guard_hook = changed
+        with pytest.raises(ValueError, match='preserve'):
+            live.observe_guard(phase='guarded', **options)
+    assert len(state.guard_queries) == 1
+    assert state.writes == writes
+
+
 @pytest.mark.parametrize('damage', ['backend', 'credential', 'pod-restart', 'guard-changed', 'extra-report'])
 def test_selected_guard_refuses_wrong_backend_and_late_changes(guard_connection, damage):
     state, _, options = guard_connection
