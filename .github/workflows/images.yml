@@ -459,9 +459,9 @@ jobs:
       - name: Generate controlled Trivy policy
         run: |
           python3 scripts/write_trivy_release_policy.py \
-            --no-exceptions \
             --config-file /tmp/loom-trivy-release.yaml \
-            --ignore-file /tmp/loom-trivy-release.ignore.yaml
+            --ignore-file /tmp/loom-trivy-release.ignore.yaml \
+            --no-exceptions
 
       - name: Scan native image archive
         shell: bash
@@ -488,11 +488,11 @@ jobs:
             exit "$scan_status"
           fi
           python3 scripts/validate_trivy_release_report.py \
-            --no-exceptions \
             --component "$IMAGE_NAME" \
             --architecture "$ARCHITECTURE" \
             --report "$REPORT" \
-            --ignore-file /tmp/loom-trivy-release.ignore.yaml
+            --ignore-file /tmp/loom-trivy-release.ignore.yaml \
+            --no-exceptions
 
   nebius-harness-build:
     name: Harbor runtime (linux/amd64)

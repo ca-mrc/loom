@@ -12,7 +12,6 @@ import yaml
 from scripts import write_trivy_release_policy as policy
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-POLICY_SCRIPT = REPO_ROOT / "scripts/write_trivy_release_policy.py"
 CONFIG_BYTES = (
     b"exit-code: 1\n"
     b"pkg:\n"
@@ -135,12 +134,22 @@ def test_policy_writer_ignores_checkout_local_trivy_overrides(tmp_path: Path) ->
     result = subprocess.run(
         [
             sys.executable,
-            str(POLICY_SCRIPT),
+            "-c",
+            # Keep the legacy CLI fixture at its review date without changing
+            # production expiry enforcement or adding a runtime clock override.
+            "import sys\n"
+            "sys.path.insert(0, sys.argv.pop(1))\n"
+            "from datetime import UTC, datetime\n"
+            "from unittest.mock import patch\n"
+            "from scripts import write_trivy_release_policy as policy\n"
+            "with patch.object(policy, 'datetime', wraps=datetime) as clock:\n"
+            "    clock.now.return_value = datetime(2026, 9, 14, tzinfo=UTC)\n"
+            "    policy.main()\n",
+            str(REPO_ROOT),
             "--config-file",
             str(config),
             "--ignore-file",
             str(ignore),
-            "--no-exceptions",
         ],
         cwd=checkout,
         text=True,
@@ -152,7 +161,8 @@ def test_policy_writer_ignores_checkout_local_trivy_overrides(tmp_path: Path) ->
     assert result.stdout == ""
     assert config.read_bytes() == CONFIG_BYTES
     assert hashlib.sha256(config.read_bytes()).hexdigest() == CONFIG_SHA256
-    assert ignore.read_bytes() == b"vulnerabilities: []\n"
+    assert ignore.read_bytes() == IGNORE_BYTES
+    assert hashlib.sha256(ignore.read_bytes()).hexdigest() == IGNORE_SHA256
     assert stat.S_ISREG(config.lstat().st_mode)
     assert stat.S_ISREG(ignore.lstat().st_mode)
     assert not config.is_symlink()
@@ -210,9 +220,9 @@ def test_workflow_scans_only_the_controlled_absolute_policy_files() -> None:
         assert policy_step["name"] == "Generate controlled Trivy policy"
         assert policy_step["run"].strip() == (
             "python3 scripts/write_trivy_release_policy.py \\\n"
-            "  --no-exceptions \\\n"
             "  --config-file /tmp/loom-trivy-release.yaml \\\n"
-            "  --ignore-file /tmp/loom-trivy-release.ignore.yaml"
+            "  --ignore-file /tmp/loom-trivy-release.ignore.yaml \\\n"
+            "  --no-exceptions"
         )
         assert "python3 scripts/install_trivy.py" not in scan["run"]
         assert "/tmp/loom-trivy-binaries/${ARCHITECTURE}/trivy" in scan["run"]
@@ -221,11 +231,11 @@ def test_workflow_scans_only_the_controlled_absolute_policy_files() -> None:
         assert "--show-suppressed" in scan["run"]
         validation = (
             "python3 scripts/validate_trivy_release_report.py \\\n"
-            "  --no-exceptions \\\n"
             '  --component "$IMAGE_NAME" \\\n'
             '  --architecture "$ARCHITECTURE" \\\n'
             '  --report "$REPORT" \\\n'
-            "  --ignore-file /tmp/loom-trivy-release.ignore.yaml"
+            "  --ignore-file /tmp/loom-trivy-release.ignore.yaml \\\n"
+            "  --no-exceptions"
         )
         assert scan["run"].rstrip().endswith(validation)
         assert scan["env"]["IMAGE_NAME"] == "${{ matrix.image }}"
