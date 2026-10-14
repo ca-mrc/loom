@@ -267,13 +267,43 @@ with a hint to add one.
 `loom_worker.main_loop._default_agent_factory` but:
 
 - Takes no Control Plane client
-- For `SubprocessAgent`, substitutes a `_NoopCPClient`. Its placeholder token
-  and empty Gateway URL do not wire the configured direct provider credentials
-  into the launched adapter. Local Terminus also has a hardcoded localhost
-  Gateway URL. These local paths require the repair in
-  [#2489](https://github.com/ca-mrc/loom/issues/2489); constructing an adapter
-  does not establish a working provider connection.
+- Resolves an explicit direct connection for installed agents and Terminus.
+  Only the selected provider key is supplied; no step-token placeholder or
+  hosted facade URL is used. Missing credentials and incompatible dialects fail
+  before agent execution. Original model identity remains in trial metadata;
+  `local/<server>/<model>` sends only `<model>` to the registered endpoint.
 - Routes `oracle` → `OracleAgent(task_dir, trial_id)` directly
+
+| Local runtime | Provider connection |
+| --- | --- |
+| Claude Code | Anthropic Messages, using `ANTHROPIC_API_KEY` |
+| Gemini CLI | Google Gemini, using `GEMINI_API_KEY` |
+| Codex | OpenAI or a registered local endpoint that supports Responses |
+| Other installed chat adapters | OpenAI or registered local Chat Completions |
+| Terminus-2 | OpenAI, Anthropic, Google or registered local Chat Completions |
+
+Installed agents run inside the task sandbox, which therefore receives the
+selected upstream key. Use this local mode only with trusted task images and
+agents. Captured output redacts that exact key; it does not make arbitrary task
+files safe to share. Qwen receives its key through the environment; OpenCode's
+configuration references the environment rather than embedding the key in argv.
+Hosted execution continues to use scoped Gateway tokens.
+
+Terminus uses pinned Harbor in the CLI process (Python >=3.12). Its native
+provider calls feed a trial-local ledger, retaining usage/cost and checkpoint
+joins without a hosted Control Plane. Local multi-model switching is rejected;
+hosted switching retains its existing contract. Installed subprocess agents
+retain native output, but do not provide authoritative local rate-card billing;
+their reported zero cost must not be interpreted as free inference.
+Terminus forwards configured request parameters to its native provider client.
+Installed local agents reject nonempty `request_params`; those controls require
+an agent-native configuration rather than Gateway query parameters.
+
+The endpoint must be reachable from the process making the call: `127.0.0.1`
+means the sandbox for installed agents and the CLI host for Terminus and direct
+completion. An OpenAI-compatible chat server does not necessarily support
+Responses. Credential-free interface tests do not establish live provider or
+agent-version acceptance.
 
 ## Concurrency
 

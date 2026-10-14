@@ -78,12 +78,12 @@ ls /tmp/loom-smoke/<trial-id>/
   atif.json          # ATIF v1.7 projection
 ```
 
-The installed-agent commands below describe the CLI options, but their local
-provider wiring currently needs the repair in
-[#2489](https://github.com/ca-mrc/loom/issues/2489). Local direct-completion Google
-calls use the supported `google-genai` SDK with a Gemini Developer API key.
-Use the hosted submission workflow for supported, deployment-qualified agents;
-these local examples are not successful-run acceptance evidence.
+Local agents connect directly to the selected configured provider. The task
+sandbox receives the selected key for installed agents, so use trusted task
+images and agents. See the [local connection matrix](architecture/cli-mode.md#stateless-agent-factory)
+for compatible providers and endpoint reachability. Direct-completion Google
+calls use `google-genai` with a Gemini Developer API key. These examples describe
+the interface; live provider/agent-version acceptance remains separate.
 
 Installed-agent command shape:
 
@@ -1962,9 +1962,10 @@ behavior. Use hosted commands to submit new hosted trials.
   Loom's private sandbox driver. Requires a provider + model; does not use
   `loom-launcher` or per-trial `install_script`. See
   [`architecture/terminus2-runtime.md`](architecture/terminus2-runtime.md).
-  Local `loom run --agent terminus-2` has unresolved provider wiring tracked
-  in [#2489](https://github.com/ca-mrc/loom/issues/2489); this local path is
-  not a supported substitute for hosted execution.
+  Local `loom run --agent terminus-2` requires Python >=3.12 and the pinned Harbor
+  runtime in the CLI environment. It supports a single direct provider/model
+  connection and records usage through a local ledger. Local student/teacher
+  switching is rejected; the options below apply to hosted batch submission.
 
   Optional student/teacher mix (#1380): default remains a **single-model**
   trial. Opt in on `loom eval batch create` with **one** of the two

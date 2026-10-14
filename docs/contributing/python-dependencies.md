@@ -26,6 +26,20 @@ OAuth authorization server; Loom uses the client path. OAuthlib is absent from
 the default root install but present in `cluster`, which the service image also
 selects. Treat image contents separately from default package contents.
 
+Pinned Harbor 0.18.0 needs Python >=3.12 and its Supabase/Realtime dependencies
+require websockets below 16. The root lock currently selects websockets 16.1,
+so it is not itself a complete Harbor runtime environment. Qualify Harbor in
+the worker image or a separate Python 3.12 environment with the pinned Harbor
+revision and a compatible websockets version. Record that dependency difference
+when reporting transport-test results; do not install Harbor with `--no-deps`
+and call the resulting environment qualified.
+
+`uv run --no-sync pytest tests/integration/test_terminus2_direct_provider_docker.py`
+runs the native provider, usage, retry and cancellation regressions in a
+disposable Python 3.12 image. It preserves the root's provider SDK pins, permits
+Harbor's websockets constraint, checks installed dependencies and disables the
+container network during the tests. CI assigns this test to `integration-docker`.
+
 ## Optional GPU graph
 
 The optional `loom[vllm]` graph remains tracked in

@@ -2,9 +2,12 @@
 
 Loom runs pinned Harbor `Terminus2` in-process through two orchestration paths:
 
-- Local and worker-owned trials route `agent.name == "terminus-2"` to
-  `LoomTerminus2Runtime` in the worker image. They do not use a
-  `loom-launcher` subprocess adapter.
+- Worker-owned trials route `agent.name == "terminus-2"` to
+  `LoomTerminus2Runtime` in the worker image. Local `loom run` uses the same
+  runtime in its Python >=3.12 CLI environment with pinned Harbor installed.
+  Neither path uses a `loom-launcher` subprocess adapter. Local execution uses
+  a direct provider connection and a trial-local usage ledger; see the
+  [local connection contract](cli-mode.md#stateless-agent-factory).
 - Automatic Nebius trials freeze a Terminus controller image and phase command
   into the execution plan. The per-trial `execution` container invokes
   `service_execution_sandbox_task terminus-2`; that hosted bridge reuses
@@ -107,10 +110,11 @@ Trial.run()
   └─ LoomTerminus2Runtime
        ├─ LoomHarborEnvironment  (Harbor BaseEnvironment → Loom Driver exec/tmux)
        ├─ harbor.agents.terminus_2.Terminus2  (pinned in-process)
-       ├─ LLM via Gateway step JWT (openai/{model_id})
+       ├─ worker: LLM via Gateway step JWT (openai/{model_id})
+       │  local: native provider API key and provider/model identity
        └─ HarborCheckpointBridge
             ├─ reads Harbor trajectory.json + recording.cast under .loom/agent/
-            ├─ GatewayCallLedger joins episodes to CP llm_calls
+            ├─ GatewayCallLedger joins episodes to CP or local ledger rows
             │    (correlated client_call_id / episode+ordinal; legacy token join)
             └─ appends typed terminus2_* events to Loom trajectory JSONL
 ```
@@ -356,7 +360,7 @@ The Harbor-embedded runtime emits these events for operators and debuggers:
 | `terminus2_episode_checkpoint` | Multi-model **progress marker** for reclaim (not a Harbor resume save; distinct from `HarborCheckpointBridge`) |
 | `terminus2_recovery_failed` | Retry refused rather than merging two Harbor runs |
 
-Gateway join failures (missing `cp_client`, ambiguous token match, command
+Ledger join failures (missing hosted `cp_client` or local ledger, ambiguous token match, command
 without observation on a full episode) fail closed via `CheckpointBridgeError`
 → trial `agent` phase error.
 
