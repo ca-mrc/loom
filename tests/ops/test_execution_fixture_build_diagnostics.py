@@ -6,7 +6,6 @@ import sys
 from pathlib import Path
 
 import pytest
-
 from tests.integration.test_execution_actuator_k3s import _build_image
 
 
