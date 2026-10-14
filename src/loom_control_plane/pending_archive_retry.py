@@ -40,6 +40,24 @@ from loom_control_plane.service_execution_materializer import (
 )
 
 RETRY_AUDIT_KEY = "pending_archive_retry"
+# Separate-verifier pairs parked before the settlement fix (migration 0177).
+VERIFIER_PARK_AUDIT_KEY = "verifier_settlement_park"
+VERIFIER_REQUEUE_AUDIT_KEY = "verifier_settlement_requeue"
+VERIFIER_PARK_ERROR_CODE = "verifier_settlement_constraint"
+
+
+def _verifier_settlement_requeue_intact(lease: ServiceExecutionLease, artifact: Artifact) -> bool:
+    """The database admitted this requeue; recheck its evidence at each qualification."""
+    metadata = artifact.artifact_metadata or {}
+    park, requeue = metadata.get(VERIFIER_PARK_AUDIT_KEY), metadata.get(VERIFIER_REQUEUE_AUDIT_KEY)
+    try:
+        return (isinstance(park, dict) and isinstance(requeue, dict)
+                and lease.execution_role == "attempt" and lease.parent_lease_id is None
+                and park.get("parent_lease_id") == str(lease.id)
+                and park.get("team_id") == str(lease.team_id) and park.get("trial_id") == str(lease.trial_id)
+                and datetime.fromisoformat(requeue["requested_at"]) == lease.materialization_recovery_requested_at)
+    except (KeyError, TypeError, ValueError):
+        return False
 
 
 def _legacy_retry_intact(lease: ServiceExecutionLease, trial: Trial, artifact: Artifact) -> bool:
@@ -192,7 +210,9 @@ async def qualify_requeued_archive(
     audit = (artifact.artifact_metadata or {}).get(RETRY_AUDIT_KEY)
     if audit is None:
         if (lease.materialization_recovery_requested_at is not None
-                and (AUDIT_KEY in (artifact.artifact_metadata or {}) or not _legacy_retry_intact(lease, trial, artifact))):
+                and (AUDIT_KEY in (artifact.artifact_metadata or {}) or not (
+                    _legacy_retry_intact(lease, trial, artifact)
+                    or _verifier_settlement_requeue_intact(lease, artifact)))):
             raise MaterializationIntegrityError("archive_retry_qualification_failed")
         return
     try:

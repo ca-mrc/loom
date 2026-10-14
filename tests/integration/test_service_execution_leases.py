@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import io
 import json
 import tarfile
@@ -2881,6 +2882,188 @@ async def test_verifier_source_settles_with_its_parent_within_lease_constraints(
                 assert child.materialization_state == "unavailable"
                 assert child.materialization_error_code == "integrity"
                 assert child.materialization_error_message
+    finally:
+        await engine.dispose()
+
+
+def _run_operator_sql(postgres_url: str, sql: str) -> dict[str, Any] | None:
+    """Execute operator SQL exactly as one ``psql -c`` would; return its last row."""
+    import psycopg
+
+    with psycopg.connect(postgres_url.replace("postgresql+psycopg://", "postgresql://"),
+                         autocommit=True) as connection, connection.cursor() as cursor:
+        cursor.execute(sql.encode())
+        row = None
+        while True:
+            if cursor.description:
+                row = cursor.fetchone()
+            if not cursor.nextset():
+                break
+    return row[0] if row else None
+
+
+async def test_stuck_verifier_archive_parks_under_installed_schema_and_requeues_once(
+    postgres_url: str, _stub_verifier_plan: list[ExecutionRuntimePlanV1],
+) -> None:
+    # Before #2474 the parent's archive retried forever and both leases stayed
+    # pending, which holds the idle rollout guard. Park clears the guard without
+    # touching results; the 0177 admission lets the fixed worker archive them.
+    from scripts.ops.nebius_verifier_archive_park import apply_sql, preview_sql
+
+    from loom.nebius_rollout_guard import ACTIVITY_SQL
+    from loom_control_plane.pending_archive_retry import qualify_requeued_archive
+
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+
+    async def retire(session: AsyncSession, lease_id: UUID) -> None:
+        # Revocation and deletion as the actuator leaves them; deleted rows are immutable.
+        row = await session.get(ServiceExecutionLease, lease_id)
+        assert row is not None
+        row.generation += 1
+        row.revoked_at = now
+        row.cleanup_state = "complete"
+        row.cleanup_requested_at = now
+        row.cleanup_deadline_at = now + timedelta(seconds=30)
+        row.desired_state = "deleted"
+        row.observed_state = "deleted"
+        row.deleted_at = now
+
+    try:
+        async with sessions() as session:
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            parent = await _reserve(
+                session, trial_id=trial_id, target=target, now=now,
+                requirements=_requirements(verifier_topology=VerifierTopology.SEPARATE_EXECUTION),
+                runtime_contract=_runtime_contract(verifier_execution="separate_execution"),
+            )
+            await session.commit()
+        async with sessions() as session:
+            await _hand_off_to_verifier(session, parent_id=parent.id, now=now)
+            await retire(session, parent.id)
+            await session.commit()
+        async with sessions() as session:
+            [verifier] = await reserve_next_verifier_executions(
+                session, pool_id=target.logical_pool_id,
+                image_admission_keyring=IMAGE_ADMISSION_KEYRING, now=now + timedelta(seconds=5),
+            )
+            await session.commit()
+        async with sessions() as session:
+            child = await session.get(ServiceExecutionLease, verifier.id)
+            trial = await session.get(Trial, trial_id)
+            assert child is not None and trial is not None
+            plan = ExecutionRuntimePlanV1.model_validate(child.runtime_contract_json)
+            upload = ArtifactUploadSession(
+                id=uuid4(), team_id=trial.team_id, commit_kind="service_execution_output",
+                service_execution_lease_id=child.id, service_execution_generation=child.resource_generation,
+                service_execution_role="verifier",
+                service_execution_runtime_contract_sha256=child.runtime_contract_sha256,
+                service_execution_candidate_sha=plan.candidate_sha,
+                service_execution_task_revision_sha256=plan.task_revision_sha256,
+                service_execution_command_identity_sha256=plan.command_identity_sha256,
+                idempotency_key=uuid4().hex, request_digest="sha256:" + "6" * 64,
+                prefix=f"service-execution/{child.id}/{uuid4().hex}/", state="committed",
+                expected_total_max_bytes=1024, canonical_manifest_json={},
+                manifest_sha256="sha256:" + "7" * 64, committed_marker_sha256="sha256:" + "8" * 64,
+                expires_at=now + timedelta(hours=1), committed_at=now,
+            )
+            session.add(upload)
+            await session.flush()
+            child.output_commit_state = "committed"
+            child.output_generation = child.resource_generation
+            child.output_upload_session_id = upload.id
+            child.output_manifest_sha256 = upload.manifest_sha256
+            child.output_marker_sha256 = upload.committed_marker_sha256
+            child.output_committed_at = now
+            child.materialization_state = "pending"
+            child.materialization_next_attempt_at = now
+            trial.state = "materializing"
+            trial.result = {**trial.result, "verifier_execution": {
+                "state": "committed", "parent_lease_id": str(parent.id), "lease_id": str(child.id),
+            }}
+            parent_row = await session.get(ServiceExecutionLease, parent.id)
+            assert parent_row is not None
+            parent_row.materialization_state = "pending"
+            parent_row.materialization_attempts = 67
+            parent_row.materialization_next_attempt_at = now
+            parent_row.materialization_error_code = "transient_materialization_error"
+            parent_row.materialization_error_message = (
+                'new row for relation "execution_leases" violates check constraint '
+                '"execution_leases_materialization_group_check"'
+            )
+            artifact = Artifact(
+                id=uuid4(), artifact_type="loom.trial-artifact-bundle.v1", name="trial_bundle",
+                team_id=trial.team_id, trial_id=trial_id,
+                control_producer_kind="service_execution", control_producer_id=parent.id,
+                content_hash="sha256:" + "1" * 64,
+                artifact_upload_session_id=parent_row.output_upload_session_id,
+                manifest_sha256="sha256:" + "2" * 64,
+                file_count=1, stored_size_bytes=1, unpacked_size_bytes=1,
+                provenance={"lease_id": str(parent.id)},
+            )
+            session.add(artifact)
+            await session.commit()
+            team_id, result_before = trial.team_id, copy.deepcopy(trial.result)
+        async with sessions() as session, session.begin():
+            await retire(session, verifier.id)
+
+        async def guard_count() -> int:
+            # This test owns every lease in the database.
+            async with sessions() as session:
+                return int((await session.execute(text(ACTIVITY_SQL))).mappings().one()["executions"])
+
+        assert await guard_count() == 2
+        preview = _run_operator_sql(postgres_url, preview_sql("park", team_id, (parent.id,)))
+        assert preview is not None and len(preview["qualified"]) == 1
+        assert preview["qualified"][0]["child_id"] == str(verifier.id)
+
+        parked = _run_operator_sql(postgres_url, apply_sql("park", team_id, (parent.id,)))
+        assert parked is not None
+        assert {row["materialization_state"] for row in parked["leases"]} == {"unavailable"}
+        assert await guard_count() == 0
+        with pytest.raises(Exception, match="park_not_eligible"):
+            _run_operator_sql(postgres_url, apply_sql("park", team_id, (parent.id,)))
+
+        async with sessions() as session:
+            # Terminal archives stay immutable without the requeue audit.
+            with pytest.raises(DBAPIError, match="archival recovery requires"):
+                await session.execute(update(ServiceExecutionLease).where(
+                    ServiceExecutionLease.id == parent.id,
+                ).values(materialization_state="pending", materialization_next_attempt_at=now,
+                         materialization_recovery_requested_at=now))
+            await session.rollback()
+
+        requeued = _run_operator_sql(postgres_url, apply_sql("requeue", team_id, (parent.id,)))
+        assert requeued is not None
+        assert {row["materialization_state"] for row in requeued["leases"]} == {"pending"}
+        with pytest.raises(Exception, match="requeue_not_eligible"):
+            _run_operator_sql(postgres_url, apply_sql("requeue", team_id, (parent.id,)))
+
+        async with sessions() as session:
+            parent_row = await session.get(ServiceExecutionLease, parent.id)
+            child = await session.get(ServiceExecutionLease, verifier.id)
+            trial = await session.get(Trial, trial_id)
+            artifact_row = await session.get(Artifact, artifact.id)
+            assert parent_row is not None and child is not None and trial is not None and artifact_row is not None
+            assert (parent_row.materialization_attempts, child.materialization_attempts) == (67, 0)
+            assert parent_row.materialization_recovery_requested_at is not None
+            assert trial.result == result_before
+            audit = artifact_row.artifact_metadata["verifier_settlement_park"]
+            assert audit["parent_materialization_attempts"] == 67
+            assert "materialization_group_check" in audit["previous_error_message"]
+            await qualify_requeued_archive(session, None, parent_row, trial, artifact_row)  # type: ignore[arg-type]
+
+            materializer = object.__new__(ServiceExecutionMaterializer)
+            materializer._source_retention = timedelta(days=1)
+            digests = ("sha256:" + "1" * 64, "sha256:" + "2" * 64)
+            await materializer._settle_verifier_source(
+                session, lease=parent_row, trial=trial, now=now, committed=True, canonical_sha256=digests,
+            )
+            await session.commit()
+        async with sessions() as session:
+            child = await session.get(ServiceExecutionLease, verifier.id)
+            assert child is not None and child.materialization_state == "committed"
     finally:
         await engine.dispose()
 

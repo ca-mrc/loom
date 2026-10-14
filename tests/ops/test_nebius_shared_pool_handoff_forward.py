@@ -453,10 +453,10 @@ def test_shared_drain_checks_both_databases_and_retains_qualified_paged_backlog(
             after = rows[offset - 1]['key'] if offset else None
             query = pool_cutover_readiness_sql(owner=str(spec.operation_id),
                 candidate=bindings.migration.registration.candidate['candidate_sha'], logical_pool_id=logical_pool, after=after)
-            model.readiness_pages[target.namespace, query] = {'status': 'observed', 'schema_revision': '0176', 'rows': rows[offset:offset + 128]}
+            model.readiness_pages[target.namespace, query] = {'status': 'observed', 'schema_revision': '0177', 'rows': rows[offset:offset + 128]}
             page = origins[offset:offset + 128]
             history_reports[pool_management_history_sql(page)] = {'schema': 'loom.pool-management-history.v1',
-                'schema_revision': '0176', 'read_only': True, 'rows': [
+                'schema_revision': '0177', 'read_only': True, 'rows': [
                     {'ordinal': index, 'origin': origin.model_dump(mode='json'), 'application': None, 'operation': None}
                     for index, origin in enumerate(page, start=1)]}
     _, documents, handler = runtime_http_inventory(runtime, shared_runtime[1], completed_pool[3].server, handoff[2])

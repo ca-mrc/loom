@@ -49,7 +49,7 @@ def database(private_database):
 
 
 def install(module, database, **changes):
-    arguments = dict(operation_id=OPERATION, schema_revision='0176',
+    arguments = dict(operation_id=OPERATION, schema_revision='0177',
         actuator_password=PASSWORD, batch_runner_token=TOKEN)
     arguments.update(changes)
     return module.install_runtime_database(database, **arguments)
@@ -177,7 +177,7 @@ def test_replay_rejects_delegation_and_future_table_authority(database, grant):
 
 def test_fixed_job_command_emits_only_receipt_and_refuses_staging(database, monkeypatch, tmp_path, capsys):
     module = runtime()
-    config = {'namespace': 'loom-dev', 'operation_id': str(OPERATION), 'schema_revision': '0176'}
+    config = {'namespace': 'loom-dev', 'operation_id': str(OPERATION), 'schema_revision': '0177'}
     path = tmp_path / 'runtime.json'
     path.write_text(json.dumps(config))
     monkeypatch.setenv('LOOM_DEVELOPMENT_RUNTIME_CONFIG', str(path))
