@@ -268,7 +268,16 @@ async def test_real_connected_cutover_stages_closed_workloads_and_replays_withou
                     await asyncio.to_thread(apps.read_namespaced_deployment, "unregistered-writer-consumer", foreign_namespace)
                 except client.ApiException as error:
                     assert error.status == 404
-                    break
+                    # A point-read 404 can precede the RoleList snapshot used
+                    # by cutover's complete census. Wait for this fixture's
+                    # removal at that revision too; never retry a failed stage.
+                    snapshot = await asyncio.to_thread(api._request, "GET",
+                        "/apis/rbac.authorization.k8s.io/v1/roles?limit=100")
+                    remaining = await asyncio.to_thread(apps.list_namespaced_deployment, foreign_namespace,
+                        field_selector="metadata.name=unregistered-writer-consumer",
+                        resource_version=snapshot["metadata"]["resourceVersion"], resource_version_match="Exact")
+                    if not remaining.items:
+                        break
                 assert time.monotonic() < deadline, "test-only foreign controller did not drain"
                 await asyncio.sleep(0.1)
             methods.clear()
