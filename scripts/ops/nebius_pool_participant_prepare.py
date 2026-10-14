@@ -54,6 +54,15 @@ class ParticipantReleaseSnapshot:
     management_origin: str
 
 
+def participant_source_candidate(*, predecessor: ParticipantPredecessor,
+        bindings: SharedPoolGuardBindings) -> Document:
+    """Select the deployed participant, not initial guard/manager operation identity."""
+    if isinstance(predecessor, CompletedParticipantRollout):
+        return predecessor.retained.inputs.candidate
+    source = bindings.plan.staging.source
+    return source.candidate if source is not None else predecessor.migration.registration.candidate
+
+
 def render_participant_candidate(*, bundle: CandidateBundle, source_files: dict[str, bytes],
         config: Document, keyring: Document) -> dict[str, list[Document]]:
     """Run only the approved candidate's renderer/imports in a private directory.
@@ -125,6 +134,7 @@ def capture_participant_release(*, predecessor: ParticipantPredecessor,
 
     try:
         original = _head_value(predecessor)
+        candidate = participant_source_candidate(predecessor=predecessor, bindings=bindings)
         spec = predecessor.migration.registration.spec
         binding = predecessor.migration.registration.binding
         participant, = (row for row in spec.participants if row.environment_class == 'staging')
@@ -157,13 +167,13 @@ def capture_participant_release(*, predecessor: ParticipantPredecessor,
             catalog = copy.deepcopy(runtime.resources[key])
         if (config['namespace'] != guard.namespace
                 or config['execution_namespace'] != participant.execution_namespace.name
-                or config['cluster_id'] != spec.cluster_id or profile.candidate_sha != predecessor.migration.registration.candidate['candidate_sha']
+                or config['cluster_id'] != spec.cluster_id or profile.candidate_sha != candidate['candidate_sha']
                 or transport.api_server.rstrip('/') != config['kubernetes_api_server'].rstrip('/')):
             raise ValueError
         connection = (transport.api_server, transport.client, str(transport.client.base_url), dict(transport.client.headers))
         rendered = (copy.deepcopy(predecessor.retained.inputs.rendered_files)
             if isinstance(predecessor, CompletedParticipantRollout) else
-            build_platform(config, predecessor.migration.registration.candidate,
+            build_platform(config, candidate,
                 profile.model_dump(mode='json'), spec.profiles.image_admission_keyring, repo_root=repo_root))
         documents = {_key(row): row for rows in rendered.values() for row in rows if row['kind'] != 'Job'}
         if not 0 < len(documents) <= 32768 or any(row['kind'] == 'Secret' for row in documents.values()):

@@ -185,7 +185,9 @@ def _load_inputs(operation: dict[str, Any], *, source_record: Path, include_oper
         runtime = _retained_runtime(inputs.runtime, files)
         manager = runtime.database.manager.retained.request.retained
         registration = runtime.database.manager.retained.request.registration
-        if (source.source_sha != operation['source_sha'] or source != runtime.database.manager.publication.source
+        # Tooling is source-bound by the protected delivery. The completed runtime
+        # has its own retained publication and need not be reinstalled to fix tooling.
+        if (source.source_sha != operation['source_sha']
                 or (operation['installation_id'], operation['namespace'], operation['operation_id']) != (
                     manager.binding.installation_id, manager.binding.namespace, str(registration.spec.operation_id))
                 or path.parents[4] != Path(manager.operation['inputs_path']).parents[3]

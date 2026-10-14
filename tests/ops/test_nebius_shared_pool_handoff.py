@@ -215,12 +215,19 @@ def pool_inputs(request, retained, staging_history, staging_observation, origina
                 sbom_sha256='sha256:' + 'e' * 64, vulnerability_report_sha256='sha256:' + 'f' * 64,
                 highest_vulnerability_severity='high')
         candidate, profile = create_candidate(record, signing_key=tmp_path / 'signer.pem', signing_key_id='publisher',
-            keyring_json=json.dumps(catalog['profiles']['image_admission_keyring']))
+            keyring_json=json.dumps(catalog['profiles']['image_admission_keyring']), supports_task_identity=True,
+            guest_runtime='qemu-tcg-v1', guest_runtime_volume_mib=1024, guest_max_artifact_bytes=6 * 1024**3,
+            supports_emulated_pkcs11=True)
     config = copy.deepcopy(original_platform_inputs[0])
     config.update(namespace=guard.namespace, execution_namespace=old.execution_namespace.name,
         target_id=old.targets[0].target_id, cluster_id=catalog['cluster_id'],
         execution_node_group_id=catalog['node_group_id'],
         task_image_builder={'registry_repository': 'cr.eu-north1.nebius.cloud/staging/task-images', 'max_concurrent': 2})
+    if independent:
+        config.update(guest_execution_target={'target_id': 'staging-guest'},
+            emulated_auth_execution_target={'target_id': 'staging-auth'},
+            task_identity_policy={'mode': 'private-root-v1', 'target_id': config['target_id'],
+                'execution_namespace': config['execution_namespace']})
     rendered = build_platform(config, candidate, profile, catalog['profiles']['image_admission_keyring'], repo_root=ROOT)
     kinds = {'Namespace', 'Deployment', 'StatefulSet', 'CronJob', 'Service', 'ConfigMap',
         'Role', 'RoleBinding', 'ClusterRole', 'ClusterRoleBinding'}
@@ -243,6 +250,9 @@ def pool_inputs(request, retained, staging_history, staging_observation, origina
     staged.update(participant_id=str(uuid4()), pool_id=catalog['pool_id'], installation_id=catalog['installation_id'],
         environment_class='staging', legacy_catalog_environment='development', admission_epoch=catalog['admission_epoch'])
     staged['targets'][0]['workload_kinds'] = ['trial', 'verifier', 'task_image_build']
+    if independent:
+        staged['targets'].extend({'target_id': name, 'profile_id': str(uuid4()), 'workload_kinds': ['trial', 'verifier']}
+            for name in ('staging-guest', 'staging-auth'))
     attachment = prepare_staging_pool_attachment(participant=PoolParticipantV1.model_validate(staged),
         observation=staging_observation, candidate=candidate, cluster_id=catalog['cluster_id'],
         node_group_id=catalog['node_group_id'], repo_root=ROOT)
@@ -417,15 +427,111 @@ def test_shared_handoff_preserves_independent_staging_images(shared_runtime, sta
     assert plan.migration.registration.candidate == runtime.database.manager.publication.bundle.candidate
     assert selected['candidate_sha'] != plan.migration.registration.candidate['candidate_sha']
     for component, name in [('control_plane', 'loom-control-plane'), ('service', 'loom-service'),
-            ('execution_actuator', 'loom-execution-actuator')]:
+            ('execution_actuator', 'loom-execution-actuator'), ('execution_actuator', 'staging-guest-actuator'),
+            ('execution_actuator', 'staging-auth-actuator')]:
         row, = (value for value in plan.staging_targets.values() if value['metadata']['name'] == name)
         before = plan.staging.originals[_key(row)]
         pod = row['spec']['template']['spec']
         assert pod['containers'][0]['image'] == before['spec']['template']['spec']['containers'][0]['image']
         assert pod['containers'][0]['image'] == selected['images'][component]['image_ref']
+        previous_initializers = {row['name']: row['image'] for row in before['spec']['template']['spec'].get('initContainers', [])}
         for initializer in pod.get('initContainers', []):
-            assert initializer['image'] == selected['images']['service']['image_ref']
+            assert initializer['image'] == previous_initializers.get(initializer['name'], selected['images']['service']['image_ref'])
     assert plan.staging.attachment.runtime_profile.candidate_sha == selected['candidate_sha']
+    for damage in ('missing-publication', 'wrong-sha', 'wrong-run', 'overlay', 'raw-observation'):
+        changed = copy.deepcopy(staging_observation)
+        if damage == 'missing-publication':
+            del changed['publication']
+        elif damage == 'wrong-sha':
+            changed['publication']['source_sha'] = 'b' * 40
+        elif damage == 'wrong-run':
+            changed['publication']['run_id'] += 1
+        elif damage == 'overlay':
+            changed['profile'] = {}
+        else:
+            changed = changed['observation']
+        with pytest.raises(ValueError, match='shared pool handoff intent unqualified'):
+            prepare_shared_pool_handoff(runtime=runtime, observation=changed, legacy=staging_history, repo_root=ROOT)
+
+
+@pytest.mark.parametrize('staging_observation', ['independent'], indirect=True)
+async def test_independent_staging_publication_requires_exact_approved_artifact_and_protocol(
+        shared_runtime, staging_history, staging_observation, published_source):
+    import io
+    import zipfile
+
+    import httpx
+    from httpx._client import AsyncClient
+    from scripts.ops import nebius_development_runtime_external as external
+    from scripts.ops.nebius_shared_pool_handoff import prepare_shared_pool_handoff
+
+    runtime, _ = shared_runtime
+    plan = prepare_shared_pool_handoff(runtime=runtime, observation=staging_observation,
+        legacy=staging_history, repo_root=ROOT)
+    reference = staging_observation['publication']
+    candidate = staging_observation['candidate']
+    profile = plan.staging.attachment.runtime_profile.model_dump(mode='json')
+    # Real verifier, signed bytes and HTTP protocol; no readiness callback.
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, 'w') as archive:
+        archive.writestr('candidate.json', json.dumps(candidate))
+        archive.writestr('runtime-profile.json', json.dumps(profile))
+    reference['artifact_sha256'] = 'sha256:' + hashlib.sha256(payload.getvalue()).hexdigest()
+    responses = copy.deepcopy(published_source.responses)
+    responses['actions/runs/123/attempts/1']['head_sha'] = candidate['candidate_sha']
+    pr = responses.pop('pulls/40')
+    pr.update(number=reference['pull_request'], merge_commit_sha=candidate['candidate_sha'])
+    responses['pulls/' + str(reference['pull_request'])] = pr
+    artifact = responses.pop('actions/artifacts/123')
+    artifact.update(id=reference['artifact_id'], digest=reference['artifact_sha256'], size_in_bytes=len(payload.getvalue()),
+        name=f"nebius-candidate-{candidate['candidate_sha']}-123-1")
+    artifact['workflow_run']['head_sha'] = candidate['candidate_sha']
+    responses['actions/artifacts/' + str(reference['artifact_id'])] = artifact
+    floor = '5781389317608cedf95be68590505c96257aa6c7'
+    comparison = {'base_commit': {'sha': floor}, 'merge_base_commit': {'sha': floor},
+        'status': 'ahead', 'ahead_by': 3, 'behind_by': 0}
+    mode, reads = {'unavailable': False}, []
+
+    def respond(request):
+        assert request.method == 'GET'
+        assert request.headers['Authorization'] == 'Bearer scoped-publication-test-token'
+        assert request.url.host == 'api.github.com'
+        path = request.url.path.removeprefix('/repositories/1281629473/')
+        reads.append(path)
+        if mode['unavailable']:
+            return httpx.Response(503)
+        if path == f"actions/artifacts/{reference['artifact_id']}/zip":
+            return httpx.Response(200, content=payload.getvalue())
+        if path.startswith('compare/'):
+            assert path == f"compare/{floor}...{candidate['candidate_sha']}"
+            return httpx.Response(200, json=comparison)
+        return httpx.Response(200, json=responses[path])
+
+    plan = prepare_shared_pool_handoff(runtime=runtime, observation=staging_observation,
+        legacy=staging_history, repo_root=ROOT)
+    async with AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        await external.qualify_staging_publication(request=runtime, staging=plan.staging, http=http)
+        assert any(path.startswith('compare/') for path in reads)
+        for damage in ('profile', 'candidate', 'unapproved', 'old-protocol', 'unavailable'):
+            changed = copy.deepcopy(plan.staging)
+            if damage == 'profile':
+                changed = replace(changed, attachment=replace(changed.attachment,
+                    runtime_profile=changed.attachment.runtime_profile.model_copy(update={'max_artifact_bytes': 1})))
+            elif damage == 'candidate':
+                changed.source.candidate['images']['service']['image_ref'] += '-changed'
+            elif damage == 'unapproved':
+                pr['merged'] = False
+            elif damage == 'old-protocol':
+                comparison.update(status='behind', ahead_by=0, behind_by=2,
+                    merge_base_commit={'sha': candidate['candidate_sha']})
+            else:
+                mode['unavailable'] = True
+            with pytest.raises(ValueError, match='staging runtime publication unqualified') as error:
+                await external.qualify_staging_publication(request=runtime, staging=changed, http=http)
+            assert 'scoped-publication-test-token' not in str(error.value)
+            pr['merged'] = True
+            comparison.update(status='ahead', ahead_by=3, behind_by=0, merge_base_commit={'sha': floor})
+            mode['unavailable'] = False
 
 
 def test_shared_private_entry_binds_retained_runtime_without_retired_operator_access(shared_operation, monkeypatch):
@@ -932,6 +1038,23 @@ def test_shared_handoff_binds_real_completed_dev_and_current_staging(shared_runt
     writes = copy.deepcopy(api.store.resources)
     result = prepare_shared_pool_handoff(runtime=request, observation=staging_observation,
         legacy=staging_history, repo_root=ROOT)
+    # Preserve the historical v1 digest shape, including absence (not null) of
+    # an independent-source selection. Existing journals must remain loadable.
+    from loom.nebius_platform_render import digest
+
+    staging = result.staging
+    registration = result.migration.registration
+    database = staging.attachment.guard.database
+    assert staging.source is None
+    assert staging.input_digest == digest({'registration': registration.spec.model_dump(mode='json'),
+        'candidate': registration.candidate, 'legacy': staging_history.selector.model_dump(mode='json'),
+        'history': {str(path): value for path, value in staging_history.history.items()},
+        'guard': {'namespace_uid': str(staging.attachment.guard.namespace_uid),
+            'database_credential_uid': str(database.credential_uid),
+            'database_credential_resource_version': database.credential_resource_version,
+            'actuator_credential_uid': str(database.actuator_credential_uid),
+            'actuator_credential_resource_version': database.actuator_credential_resource_version},
+        'originals': staging.originals, 'stopped': staging.stopped})
     assert result.development.runtime == dev
     assert len(result.migration.guards) == 2
     assert {row.namespace for row in result.migration.guards} == {'loom-dev', staging_observation['namespace']}
