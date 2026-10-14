@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -107,6 +108,8 @@ def test_management_hook_cannot_change_other_dns_names(tmp_path, monkeypatch, do
 def test_management_hook_issues_and_cleans_only_its_exact_dns_record(tmp_path, monkeypatch):
     import httpx
     from scripts.ops import nebius_dns_challenge as dns
+
+    monkeypatch.setattr(dns, "load_token", partial(dns.load_token, today=NOW.date()))
 
     path = config_path(tmp_path)
     state = tmp_path / 'certificate-state'

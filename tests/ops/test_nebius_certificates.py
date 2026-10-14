@@ -8,6 +8,7 @@ import subprocess
 import sys
 import time
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -381,6 +382,8 @@ def test_two_issuers_cannot_enter_same_state(tmp_path, monkeypatch):
 def test_hook_adds_and_cleans_only_selected_subject_through_real_dns_boundary(tmp_path, monkeypatch, domain):
     import httpx
     from scripts.ops import nebius_dns_challenge as dns
+
+    monkeypatch.setattr(dns, "load_token", partial(dns.load_token, today=NOW.date()))
 
     config = installation(tmp_path)
     state = tmp_path / "certificate-state"
