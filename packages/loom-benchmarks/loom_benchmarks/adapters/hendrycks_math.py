@@ -20,6 +20,7 @@ from loom_benchmarks.base import (
     CatalogBackedAdapter,
     ConvertedTask,
 )
+from loom_benchmarks.scripted_huggingface import load_scripted_source
 from loom_benchmarks.util import (
     sha256_of_dir,
     structured_verifier_script,
@@ -151,12 +152,14 @@ class HendrycksMATHAdapter(CatalogBackedAdapter):
         args: list[str] = [self.upstream_source.locator]
         if self.upstream_source.subset:
             args.append(self.upstream_source.subset)
-        ds = datasets.load_dataset(
-            *args,
-            revision=self.upstream_source.revision,
-            cache_dir=str(source_dir),
-            trust_remote_code=self.upstream_source.trust_remote_code,
-        )
+        if self.upstream_source.trust_remote_code:
+            ds = load_scripted_source(self.upstream_source, cache_dir=source_dir)
+        else:
+            ds = datasets.load_dataset(
+                *args,
+                revision=self.upstream_source.revision,
+                cache_dir=str(source_dir),
+            )
         rows = cast(Iterable[dict[str, Any]], ds[split])
         yield from self._instances_from_rows(rows, split=split)
 

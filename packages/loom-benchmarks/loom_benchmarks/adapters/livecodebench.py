@@ -16,13 +16,12 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, cast
 
-import datasets  # type: ignore[import-untyped]
-
 from loom_benchmarks.base import (
     BenchmarkInstance,
     CatalogBackedAdapter,
     ConvertedTask,
 )
+from loom_benchmarks.scripted_huggingface import load_scripted_source
 from loom_benchmarks.util import (
     oracle_copy_reference_solve_script,
     sha256_of_dir,
@@ -175,24 +174,13 @@ def _decode_cases(raw: object) -> list[dict[str, object]]:
 class LiveCodeBenchAdapter(CatalogBackedAdapter):
     # CC-BY-NC-4.0 is preserved as upstream metadata; Loom does not use
     # benchmark source licenses to gate research evaluation.
-    # `trust_remote_code=True` is set in the catalog.
+    # The catalog retains the legacy script-source identity; loading is data-only.
     name = "livecodebench"
 
     def list_instances(
         self, *, source_dir: Path, split: str,
     ) -> Iterator[BenchmarkInstance]:
-        # `trust_remote_code=True` is required: the upstream repo ships
-        # a custom loader script (`code_generation_lite.py`) that
-        # `datasets>=2.20` won't execute by default. The dataset has
-        # been vetted (CC-BY-NC-4.0, public, no shell-out at load time
-        # — just JSON deserialization), and gating Loom on a non-loader
-        # config would silently drop a major coding benchmark.
-        ds = datasets.load_dataset(
-            self.upstream_source.locator,
-            cache_dir=str(source_dir),
-            revision=self.upstream_source.revision,
-            trust_remote_code=True,
-        )[split]
+        ds = load_scripted_source(self.upstream_source, cache_dir=source_dir)[split]
         for record in ds:
             rec = cast(dict[str, Any], dict(record))
             yield BenchmarkInstance(
