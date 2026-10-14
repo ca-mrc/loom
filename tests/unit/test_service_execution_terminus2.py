@@ -33,6 +33,125 @@ def _config() -> tuple[TaskConfig, TrialConfig]:
     )
 
 
+def _multi_model_config() -> tuple[TaskConfig, TrialConfig]:
+    task, trial = _config()
+    return task, TrialConfig.model_validate({
+        **trial.model_dump(mode="json"),
+        "multi_model": {
+            "enabled": True,
+            "policy": "student_teacher_student",
+            "secondary_model": {"provider": "openai", "name": "teacher", "source": "api"},
+            "switch_episode": 2,
+            "return_switch_episode": 3,
+            "teacher_episodes": 1,
+        },
+    })
+
+
+@pytest.mark.asyncio
+async def test_hosted_terminus_passes_frozen_sts_plan_and_control_identity(
+    tmp_path: Path, monkeypatch: Any,
+) -> None:
+    task, trial = _multi_model_config()
+    captured: dict[str, Any] = {}
+
+    class Runtime:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+        def begin_attempt(self, deadline: AttemptDeadline) -> None:
+            captured["deadline"] = deadline
+
+        async def run(self, **kwargs: Any) -> None:
+            captured["run"] = kwargs
+
+    monkeypatch.setattr("loom.service_execution_terminus2.LoomTerminus2Runtime", Runtime)
+    monkeypatch.setenv("LOOM_TERMINUS_CONTROL_TOKEN", "bound-control-token")
+    driver = FakeDriver()
+    await driver.start()
+    await run_terminus2(
+        driver=driver, workspace=tmp_path, task_config=task, trial_config=trial,
+        trial_id=uuid4(), team_id=uuid4(), gateway_url="http://127.0.0.1:9000",
+        instruction="Inspect /app and write the manifest.",
+    )
+    assert captured["multi_model"].policy == "student_teacher_student"
+    assert captured["model_switch_plan"] == {"mix_mode": "student_teacher_student", "k1": 2, "k2": 3}
+    assert captured["cp_client"]._control_token == "bound-control-token"
+    assert "LOOM_TERMINUS_CONTROL_TOKEN" not in __import__("os").environ
+
+
+@pytest.mark.asyncio
+async def test_hosted_control_client_reclaims_and_checkpoints_bound_trial(monkeypatch: Any) -> None:
+    trial_id, team_id = uuid4(), uuid4()
+    execution_id, attempt_id = uuid4(), uuid4()
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.headers["X-Loom-Terminus-Control"] == "control-token"
+        if request.url.path.endswith("/reclaim"):
+            return httpx.Response(200, json={
+                "agent_execution_id": str(execution_id),
+                "agent_run_attempt_id": str(attempt_id),
+                "attempt_number": 1,
+                "recovery": "fresh",
+                "last_call_ordinal": 0,
+                "last_seq": 0,
+            })
+        return httpx.Response(200, json={"id": str(uuid4()), "version": 1, "checksum": "a" * 64})
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: real_client(
+        **kwargs, transport=httpx.MockTransport(handler),
+    ))
+    client = LeaseGatewayClient(
+        gateway_url="http://127.0.0.1:9000", trial_id=trial_id, team_id=team_id,
+        control_token="control-token",
+    )
+    state = await client.reclaim_terminus_execution(trial_id=trial_id, step_id="agent")
+    assert state["agent_execution_id"] == str(execution_id)
+    await client.post_episode_checkpoint(
+        trial_id=trial_id, execution_id=execution_id, run_attempt_id=attempt_id,
+        episode=2, active_role="teacher", last_call_ordinal=2, last_seq=4,
+    )
+    assert [request.url.path for request in requests] == [
+        "/internal/loom/terminus/reclaim",
+        "/internal/loom/terminus/episode-checkpoints",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_hosted_control_fails_closed_without_reclaim_identity() -> None:
+    client = LeaseGatewayClient(gateway_url="http://127.0.0.1:9000", trial_id=uuid4(), team_id=uuid4())
+    with pytest.raises(AgentError, match="control identity is unavailable"):
+        await client.reclaim_terminus_execution(trial_id=client.trial_id, step_id="agent")
+    with pytest.raises(AgentError, match="does not match its lease"):
+        await client.reclaim_terminus_execution(trial_id=uuid4(), step_id="agent")
+
+
+@pytest.mark.asyncio
+async def test_hosted_terminus_rejects_deferred_multi_model_policies(tmp_path: Path) -> None:
+    task, trial = _config()
+    trial = TrialConfig.model_validate({
+        **trial.model_dump(mode="json"),
+        "multi_model": {
+            "enabled": True,
+            "policy": "beta_mixture",
+            "secondary_model": {"provider": "openai", "name": "teacher", "source": "api"},
+            "beta": 0.5,
+            "mix_seed": "seed",
+        },
+    })
+    driver = FakeDriver()
+    await driver.start()
+    with pytest.raises(AgentError, match="student_teacher_student"):
+        await run_terminus2(
+            driver=driver, workspace=tmp_path, task_config=task, trial_config=trial,
+            trial_id=uuid4(), team_id=uuid4(), gateway_url="http://127.0.0.1:9000",
+            instruction="Inspect /app and write the manifest.",
+        )
+
+
 def _patch_harbor(monkeypatch: Any) -> None:
     class Harbor:
         def __init__(self, logs_dir: Path, **kwargs: Any) -> None:

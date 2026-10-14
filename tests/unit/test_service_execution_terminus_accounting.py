@@ -307,3 +307,32 @@ def test_terminus_model_identity_still_rejects_other_provider_model_or_source(id
         )
     with pytest.raises(ValueError, match="another model identity"):
         reconcile_terminus_ledger(native, rows, trial, trial_id)
+
+
+def test_terminus_sts_accepts_teacher_ledger_identity() -> None:
+    trial, trial_id, native, rows = _case()
+    trial = TrialConfig.model_validate({
+        **trial.model_dump(mode="json"),
+        "multi_model": {
+            "enabled": True,
+            "policy": "student_teacher_student",
+            "secondary_model": {"provider": "openai", "name": "teacher", "source": "api"},
+            "switch_episode": 2,
+            "return_switch_episode": 3,
+            "teacher_episodes": 1,
+        },
+    })
+    teacher_row = {
+        **rows[1],
+        "id": str(uuid4()),
+        "model": "teacher",
+    }
+    teacher_event = llm_call_row_to_event(teacher_row, trial_id=trial_id, seq=1)
+    events = parse_terminus_events(
+        b"\n".join(event.model_dump_json().encode() for event in (*native[:1], teacher_event)),
+        trial=trial,
+        trial_id=trial_id,
+    )
+    assert events[1].model.name == "teacher"
+    reconciled = reconcile_terminus_ledger([events[0]], [teacher_row], trial, trial_id)
+    assert any(isinstance(event, LLMCallEvent) and event.model.name == "teacher" for event in reconciled)

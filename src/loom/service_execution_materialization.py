@@ -210,6 +210,9 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
     max_log_bytes_per_stream: int = Field(default=10 * 1024 * 1024, gt=0)
     max_artifact_bytes: int = Field(default=1024 * 1024 * 1024, gt=0)
     service_lifecycle_ready: bool = False
+    terminus2_multi_model_policies: frozenset[
+        Literal["student_teacher_student"]
+    ] = Field(default_factory=frozenset)
 
     @property
     def supported_guest_capabilities(self) -> frozenset[GuestExecutionCapability]:
@@ -236,6 +239,8 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
             payload.pop("default_task_resource_requests", None)
         if not self.service_lifecycle_ready:
             payload.pop("service_lifecycle_ready", None)
+        if not self.terminus2_multi_model_policies:
+            payload.pop("terminus2_multi_model_policies", None)
         if not self.supports_task_identity:
             payload.pop("supports_task_identity", None)
         if not self.prebuilt_image_pins:
@@ -296,6 +301,9 @@ def build_nebius_runtime_profile(
     supports_task_web_egress: bool = False,
     supports_task_artifact_inputs: bool = False,
     service_lifecycle_ready: bool = False,
+    terminus2_multi_model_policies: frozenset[
+        Literal["student_teacher_student"]
+    ] = frozenset(),
     supports_task_identity: bool = False,
     guest_runtime: Literal["qemu-tcg-v1"] | None = None,
     supports_emulated_pkcs11: bool = False,
@@ -324,6 +332,7 @@ def build_nebius_runtime_profile(
         controller_resources=controller_resources,
         supports_task_web_egress=supports_task_web_egress,
         service_lifecycle_ready=service_lifecycle_ready,
+        terminus2_multi_model_policies=terminus2_multi_model_policies,
         supports_task_artifact_inputs=supports_task_artifact_inputs,
         supports_task_identity=supports_task_identity,
         guest_runtime=guest_runtime,
@@ -580,8 +589,17 @@ def automatic_service_execution_rejections(
             reasons.append("harness_model_forbidden")
     elif trial.agent_model is None or trial.agent_model.source != "api":
         reasons.append("api_model_required")
-    if trial.extra_mcp_servers or trial.extra_skills or trial.multi_model is not None:
+    if trial.extra_mcp_servers or trial.extra_skills:
         reasons.append("extended_agent_runtime_unsupported")
+    if (
+        trial.multi_model is not None
+        and trial.multi_model.enabled
+        and (
+            trial.agent_name != "terminus-2"
+            or trial.multi_model.policy != "student_teacher_student"
+        )
+    ):
+        reasons.append("terminus2_multi_model_policy_unsupported")
     if task.verifier.name != "script" or task.verifier.env_mode not in {"shared", "separate"}:
         reasons.append("script_verifier_required")
     verifier_path = task.verifier.args.get("script_path")
@@ -972,6 +990,12 @@ def runtime_profile_rejections(
         if (binding.agent_name, binding.agent_version) == (trial.agent_name, trial.agent_version)
     ):
         reasons.append("agent_runtime_bridge_incompatible")
+    if (
+        trial.multi_model is not None
+        and trial.multi_model.enabled
+        and trial.multi_model.policy not in profile.terminus2_multi_model_policies
+    ):
+        reasons.append("terminus2_multi_model_runtime_unavailable")
     if spec is None or spec.controller_image == "service-runner":
         # A pinned image must be the deployed runner image; a task that leaves
         # it unset runs in whichever runner image the plan freezes (#2054).
