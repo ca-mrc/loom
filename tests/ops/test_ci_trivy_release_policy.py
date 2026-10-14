@@ -210,9 +210,9 @@ def test_workflow_scans_only_the_controlled_absolute_policy_files() -> None:
         assert policy_step["name"] == "Generate controlled Trivy policy"
         assert policy_step["run"].strip() == (
             "python3 scripts/write_trivy_release_policy.py \\\n"
+            "  --no-exceptions \\\n"
             "  --config-file /tmp/loom-trivy-release.yaml \\\n"
-            "  --ignore-file /tmp/loom-trivy-release.ignore.yaml \\\n"
-            "  --no-exceptions"
+            "  --ignore-file /tmp/loom-trivy-release.ignore.yaml"
         )
         assert "python3 scripts/install_trivy.py" not in scan["run"]
         assert "/tmp/loom-trivy-binaries/${ARCHITECTURE}/trivy" in scan["run"]
@@ -221,11 +221,11 @@ def test_workflow_scans_only_the_controlled_absolute_policy_files() -> None:
         assert "--show-suppressed" in scan["run"]
         validation = (
             "python3 scripts/validate_trivy_release_report.py \\\n"
+            "  --no-exceptions \\\n"
             '  --component "$IMAGE_NAME" \\\n'
             '  --architecture "$ARCHITECTURE" \\\n'
             '  --report "$REPORT" \\\n'
-            "  --ignore-file /tmp/loom-trivy-release.ignore.yaml \\\n"
-            "  --no-exceptions"
+            "  --ignore-file /tmp/loom-trivy-release.ignore.yaml"
         )
         assert scan["run"].rstrip().endswith(validation)
         assert scan["env"]["IMAGE_NAME"] == "${{ matrix.image }}"
