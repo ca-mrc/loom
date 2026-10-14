@@ -170,10 +170,13 @@ The `nebius-pool-ops` suite (`tests/ops/test_nebius*pool*.py`) takes about 450 o
 the ~500 tests-root runner-minutes. A PR or merge group runs it only when a change
 touches its `affected_paths` (operator scripts, Kubernetes and Nebius deploy
 inputs, CI authority files, dependencies), its own tests, or a test helper they
-import. Other changes skip it before merge. `nebius-candidate.yml` runs the whole
-suite on every platform candidate from `dev`, and publishes nothing unless it
-passes, so a regression from a shared module is caught before deployment. Scheduled
-and manual full runs still include it. A `ci:*` selector label also runs it on a PR.
+import. Selection is made once for the whole lane and then sharded, so planned
+shards and job manifests always run the same set. Other changes skip it before
+merge. `nebius-candidate.yml` runs the whole active suite (shared-pool
+simulations stay skipped, below) on every platform candidate from `dev`, and
+publishes nothing unless it passes, so a regression from a shared module is
+caught before deployment. Scheduled and manual full runs still include it. A
+`ci:*` selector label also runs it on a PR.
 
 The shared worker pool is not in use (dev deploys with `NEBIUS_ROLLOUT_MODE`
 unset, i.e. standalone), so `tests/ops/test_nebius_shared_pool_*.py` are skipped

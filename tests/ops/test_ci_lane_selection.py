@@ -128,6 +128,38 @@ def test_pool_operator_suite_runs_on_operator_inputs_only(changes, retained):
     assert regular in selected
 
 
+@pytest.mark.parametrize("changes", [
+    ("tests/ops/nebius_participant_external_fixture.py",),
+    ("scripts/ops/nebius_shared_pool_api.py",),
+    ("src/loom/config.py",),
+])
+def test_shard_manifests_execute_exactly_the_planned_selection(changes):
+    # Select from the whole lane, then shard: each job must run its part of the
+    # planned set, never a set decided by which files share its shard.
+    from pathlib import Path
+
+    from scripts.component_ownership import (
+        _tracked_paths,
+        load_manifest,
+        selected_test_paths,
+        test_shard_matrix,
+    )
+
+    root = Path(__file__).resolve().parents[2]
+    manifest = load_manifest(root / "config/component-ownership.toml")
+    tracked = _tracked_paths(root)
+    common = dict(tracked_paths=tracked, lane="tests-root", repo_root=root, changed_paths=changes)
+    planned = selected_test_paths(manifest, **common)
+    policy = manifest.test_shard_policy("tests-root")
+    assert policy is not None
+    shards = [selected_test_paths(manifest, **common, shard_index=index, shard_count=policy.shard_count)
+              for index in range(policy.shard_count)]
+    executed = [path for shard in shards for path in shard]
+    assert sorted(executed) == sorted(planned) and len(executed) == len(set(executed))
+    matrix = {row["shard_index"] for row in test_shard_matrix(manifest, **common)}
+    assert matrix == {index for index, shard in enumerate(shards) if shard}
+
+
 def test_pool_operator_suite_gates_every_platform_candidate():
     from pathlib import Path
 

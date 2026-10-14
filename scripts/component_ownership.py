@@ -1496,18 +1496,33 @@ def selected_test_paths(
     if policy is not None and shard_strategy is not None and policy.strategy != shard_strategy:
         raise ManifestError(f"test shard strategy differs from manifest authority: {lane}: "
                             f"{shard_strategy} != {policy.strategy}")
-    paths = shard_paths(
+    # Select from the whole lane first, then keep this shard's part of that same
+    # set, exactly as test_shard_matrix plans it. Selection never depends on
+    # which files share a shard.
+    selected = set(_selected_lane_paths(manifest, paths, changed_paths=changed_paths,
+                                        tracked_paths=tracked_paths, repo_root=repo_root,
+                                        test_scope=test_scope))
+    paths = tuple(path for path in shard_paths(
         paths, shard_index=shard_index, shard_count=shard_count,
         strategy=policy.strategy if policy is not None else shard_strategy or "round-robin",
         salt=policy.salt if policy is not None else None,
         pins=policy.pins if policy is not None else (),
-    )
-    paths = narrow_test_only_changes(paths, changed_paths=changed_paths,
-                                    tracked_paths=tracked_paths, repo_root=repo_root)
-    paths = select_affected_test_suites(manifest, paths, changed_paths=changed_paths, repo_root=repo_root)
+    ) if path in selected)
     if suite is not None:
         paths = tuple(path for path in paths if manifest.test_owner_for_path(path).id == suite)
-    return select_test_scope(manifest, paths, scope=test_scope)
+    return paths
+
+
+def _selected_lane_paths(
+    manifest: Manifest, paths: tuple[str, ...], *, changed_paths: tuple[str, ...],
+    tracked_paths: tuple[str, ...], repo_root: Path, test_scope: str,
+) -> tuple[str, ...]:
+    """The one selection contract shared by matrix planning and shard execution."""
+    selected = narrow_test_only_changes(paths, changed_paths=changed_paths,
+                                        tracked_paths=tracked_paths, repo_root=repo_root)
+    selected = select_affected_test_suites(manifest, selected, changed_paths=changed_paths,
+                                           repo_root=repo_root)
+    return select_test_scope(manifest, selected, scope=test_scope)
 
 
 GUEST_PAYLOAD_TESTS = frozenset({
@@ -1540,11 +1555,9 @@ def test_shard_matrix(
     paths = test_paths_for_lane(manifest, tracked_paths=tracked_paths, lane=lane)
     if not paths:
         raise ManifestError(f"CI lane has no tracked test paths: {lane}")
-    selected = narrow_test_only_changes(paths, changed_paths=changed_paths,
-                                       tracked_paths=tracked_paths, repo_root=repo_root)
-    selected = select_affected_test_suites(manifest, selected, changed_paths=changed_paths,
-                                           repo_root=repo_root)
-    selected_set = set(select_test_scope(manifest, selected, scope=test_scope))
+    selected_set = set(_selected_lane_paths(manifest, paths, changed_paths=changed_paths,
+                                            tracked_paths=tracked_paths, repo_root=repo_root,
+                                            test_scope=test_scope))
     policy = manifest.test_shard_policy(lane)
     count = policy.shard_count if policy is not None else 1
     guest_consumers = guest_payload_consumers(paths, repo_root=repo_root)

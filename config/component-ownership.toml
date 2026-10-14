@@ -991,6 +991,7 @@ affected_paths = [
   "scripts/ops/**",
   "deploy/k8s/**",
   "deploy/nebius/**",
+  "tests/__init__.py",
   "tests/conftest.py",
   "tests/ops/conftest.py",
   "config/component-ownership.toml",
