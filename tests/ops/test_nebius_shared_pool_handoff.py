@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
@@ -169,8 +170,8 @@ def staging_history(original_platform_inputs, retained, tmp_path):
 
 
 @pytest.fixture
-def staging_observation():
-    return {}
+def staging_observation(request):
+    return {'independent': True} if getattr(request, 'param', None) == 'independent' else {}
 
 
 @pytest.fixture
@@ -190,7 +191,7 @@ def published_source(publication, source_checkout, tmp_path):
 
 
 @pytest.fixture
-def pool_inputs(request, retained, staging_history, staging_observation, original_platform_inputs):
+def pool_inputs(request, retained, staging_history, staging_observation, original_platform_inputs, tmp_path):
     from scripts.ops.nebius_staging_pool_attachment import prepare_staging_pool_attachment
 
     from loom.nebius_platform_render import build_platform
@@ -202,6 +203,19 @@ def pool_inputs(request, retained, staging_history, staging_observation, origina
     guard, = legacy.context.inputs.guards
     candidate = copy.deepcopy(retained[3].candidate)
     profile = copy.deepcopy(retained[3].profile)
+    independent = staging_observation.pop('independent', False)
+    if independent:
+        from scripts.ops.nebius_candidate import create_candidate
+
+        record = copy.deepcopy(candidate)
+        record.update(candidate_sha='f' * 40, runtime_binary_sha256=profile['runtime_binary_sha256'],
+            policy_sha256='sha256:' + 'd' * 64)
+        for row in record['images'].values():
+            row.update(image_ref=row['image_ref'].split('@')[0] + '@sha256:' + 'e' * 64,
+                sbom_sha256='sha256:' + 'e' * 64, vulnerability_report_sha256='sha256:' + 'f' * 64,
+                highest_vulnerability_severity='high')
+        candidate, profile = create_candidate(record, signing_key=tmp_path / 'signer.pem', signing_key_id='publisher',
+            keyring_json=json.dumps(catalog['profiles']['image_admission_keyring']))
     config = copy.deepcopy(original_platform_inputs[0])
     config.update(namespace=guard.namespace, execution_namespace=old.execution_namespace.name,
         target_id=old.targets[0].target_id, cluster_id=catalog['cluster_id'],
@@ -241,6 +255,14 @@ def pool_inputs(request, retained, staging_history, staging_observation, origina
     machine['token_sha256'] = hashlib.sha256(token.encode()).hexdigest()
     catalog['machines'].append(machine)
     tokens[UUID(machine['machine_id'])] = token
+    if independent:
+        raw = dict(staging_observation)
+        staging_observation.clear()
+        staging_observation.update(schema_version='loom.nebius-staging-pool-source.v1',
+            candidate=candidate, observation=raw,
+            publication={'candidate_id': str(uuid4()), 'source_sha': candidate['candidate_sha'],
+                'run_id': candidate['run_id'], 'run_attempt': 1, 'artifact_id': 9876,
+                'artifact_sha256': 'sha256:' + '9' * 64, 'pull_request': 2443})
     return reference, catalog, tokens
 
 
@@ -364,6 +386,46 @@ def _shared_entry_inputs(args, bindings):
         'inputs_sha256': hashlib.sha256((shared_root / 'inputs.json').read_bytes()).hexdigest()}
     private_state._atomic_json(shared_root / 'operation.json', operation)
     return shared_root, operation, inputs, root, retired
+
+
+def test_shared_tooling_can_advance_without_reinstalling_runtime(shared_operation, monkeypatch):
+    from scripts.ops import nebius_certificates as private_state
+    from scripts.ops import nebius_shared_pool_entry as entry
+
+    args, bindings = shared_operation
+    root, operation, _, _, _ = _shared_entry_inputs(args, bindings)
+    operation['source_sha'] = 'e' * 40
+    private_state._atomic_json(root / 'shared-pool-source.json',
+        {'source_sha': operation['source_sha'], 'source_archive_sha256': 'sha256:' + 'd' * 64})
+    monkeypatch.setattr(entry, 'SOURCE_RECORD', root / 'shared-pool-source.json')
+    context = entry.load_inputs(operation)
+    assert context.runtime == args['runtime']
+    assert context.bindings == bindings
+    assert context.runtime.database.manager.publication.source.source_sha != operation['source_sha']
+    with pytest.raises(ValueError, match='shared pool private inputs unqualified'):
+        entry.load_inputs({**operation, 'source_sha': 'd' * 40})
+
+
+@pytest.mark.parametrize('staging_observation', ['independent'], indirect=True)
+def test_shared_handoff_preserves_independent_staging_images(shared_runtime, staging_history, staging_observation):
+    from scripts.ops.nebius_shared_pool_handoff import prepare_shared_pool_handoff
+
+    runtime, _ = shared_runtime
+    plan = prepare_shared_pool_handoff(runtime=runtime, observation=staging_observation,
+        legacy=staging_history, repo_root=ROOT)
+    selected = staging_observation['candidate']
+    assert plan.migration.registration.candidate == runtime.database.manager.publication.bundle.candidate
+    assert selected['candidate_sha'] != plan.migration.registration.candidate['candidate_sha']
+    for component, name in [('control_plane', 'loom-control-plane'), ('service', 'loom-service'),
+            ('execution_actuator', 'loom-execution-actuator')]:
+        row, = (value for value in plan.staging_targets.values() if value['metadata']['name'] == name)
+        before = plan.staging.originals[_key(row)]
+        pod = row['spec']['template']['spec']
+        assert pod['containers'][0]['image'] == before['spec']['template']['spec']['containers'][0]['image']
+        assert pod['containers'][0]['image'] == selected['images'][component]['image_ref']
+        for initializer in pod.get('initContainers', []):
+            assert initializer['image'] == selected['images']['service']['image_ref']
+    assert plan.staging.attachment.runtime_profile.candidate_sha == selected['candidate_sha']
 
 
 def test_shared_private_entry_binds_retained_runtime_without_retired_operator_access(shared_operation, monkeypatch):
