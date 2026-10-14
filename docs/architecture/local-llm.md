@@ -9,6 +9,10 @@ The [user guide](../user-guide.md#local-llms-vllm-ollama-llamacpp-lm-studio)
 provides commands and records the current local subprocess-agent provider
 wiring limitation.
 
+The optional GPU stack has remaining dependency advisories and requires a
+qualified runtime migration. See [Python dependency qualification](../contributing/python-dependencies.md#optional-gpu-graph)
+for its compatibility constraints and affected boundaries.
+
 ## Four entry points
 
 | Selection | Server owner | Provider registration |
