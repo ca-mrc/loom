@@ -370,7 +370,9 @@ jobs:
     name: tests-root (${{ matrix.shard }})
     runs-on: ubuntu-24.04
     needs: [workflow-plan]
-    timeout-minutes: 40
+    # The slowest full shard needs ~40 minutes for pytest alone on hosted
+    # runners; leave bounded room for setup, wheel verification and cleanup.
+    timeout-minutes: 50
     if: >-
       needs.workflow-plan.outputs.tests_root == 'true' &&
       needs.workflow-plan.outputs.gate_mode == 'full'
