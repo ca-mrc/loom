@@ -457,8 +457,10 @@ class ExecutionRuntimePlanV1(_Strict):
         if guest_class != bool(guests):
             raise ValueError("guest execution class and guest plan must be selected together")
         if guests and (
-            {sidecar.role_name for sidecar in guests} != {"task-sandbox", "verifier-sandbox"}
-            or len(self.sidecars) != 2
+            {sidecar.role_name for sidecar in guests} != (
+                {"task-sandbox"} if self.in_place_verifier else {"task-sandbox", "verifier-sandbox"}
+            )
+            or len(self.sidecars) != (1 if self.in_place_verifier else 2)
             or self.execution_role != "attempt" or self.composition != RuntimeComposition.INIT_PAYLOAD
             or self.verifier_execution != VerifierExecution.IN_ATTEMPT
             or self.runtime_volume_mib < 1024

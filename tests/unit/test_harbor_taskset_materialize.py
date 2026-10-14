@@ -3,10 +3,13 @@
 import io
 import json
 import tarfile
+import tomllib
 from uuid import uuid4
 
 import pytest
 
+from loom.harbor_verifier_script import native_verifier_run_sh_bytes
+from loom.models.task import TaskConfig
 from loom.models.task_checksum import task_checksum
 from loom.models.taskset import UserTaskSetManifest
 from loom.taskset.materialize import materialize_task_set
@@ -43,6 +46,7 @@ def test_taskset_intake_uses_stable_source_identity_and_preserves_authored_bytes
     files = {
         "task.toml": authored,
         "instruction.md": b"Do the task.\n",
+        "tests/test.sh": b"echo 0 > /logs/verifier/reward.txt\n",
         "environment/Dockerfile": b"FROM ubuntu:24.04\nWORKDIR /app\n",
         ".authored": b"keep dotfiles\n",
         "inputs/.loom-bundle-files.v1.json": b"keep nested authored input\n",
@@ -52,7 +56,6 @@ def test_taskset_intake_uses_stable_source_identity_and_preserves_authored_bytes
         path = authored_dir / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
-    expected_checksum = task_checksum(authored_dir)
     archive_files = dict(files)
     if include_transport_metadata:
         archive_files[".loom-bundle-files.v1.json"] = b'{"files":{},"schema_version":1}'
@@ -85,22 +88,31 @@ def test_taskset_intake_uses_stable_source_identity_and_preserves_authored_bytes
     assert task.config["environment"]["memory_mb"] == 2048
     assert task.config["environment"]["cpus"] == 2
     stored_key = task.source.removeprefix("s3://artifacts/") + "task.toml"
-    assert store.objects[stored_key] == authored
+    assert TaskConfig.model_validate(tomllib.loads(store.objects[stored_key].decode())).model_dump(mode="json") == task.config
+    published_files = {
+        **files, "upstream-task.toml": authored, "task.toml": store.objects[stored_key],
+        "verifier/run.sh": native_verifier_run_sh_bytes(),
+    }
+    for name, content in published_files.items():
+        path = authored_dir / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+    expected_checksum = task_checksum(authored_dir)
     binding = task.source_provenance["service_execution_input"]
     manifest = json.loads(store.objects[binding["manifest_uri"].removeprefix("s3://artifacts/")])
-    assert [item["relative_path"] for item in manifest["files"]] == sorted(files)
+    assert [item["relative_path"] for item in manifest["files"]] == sorted(published_files)
     assert task.checksum == expected_checksum
     assert manifest["task_revision_sha256"] == "sha256:" + expected_checksum
-    assert binding["file_count"] == len(files)
-    assert binding["total_bytes"] == sum(map(len, files.values()))
+    assert binding["file_count"] == len(published_files)
+    assert binding["total_bytes"] == sum(map(len, published_files.values()))
     prefix = task.source.removeprefix("s3://artifacts/")
-    assert {key.removeprefix(prefix) for key in store.objects if key.startswith(prefix)} == set(files)
+    assert {key.removeprefix(prefix) for key in store.objects if key.startswith(prefix)} == set(published_files)
     restored = tmp_path / "native-restored"
     download_bundle({
         "task_source": task.source, "task_checksum": task.checksum,
         "task_source_provenance": task.source_provenance, "source_bucket": "artifacts",
     }, store, restored)
     assert task_checksum(restored) == expected_checksum
-    for name, content in files.items():
+    for name, content in published_files.items():
         assert (restored / name).read_bytes() == content
     assert store.objects["tasksets/user/team/slice/bundle.tar.gz"] == archive.getvalue()

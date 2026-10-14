@@ -242,3 +242,11 @@ def test_workflow_scans_only_the_controlled_absolute_policy_files() -> None:
         assert scan["env"]["ARCHITECTURE"] == "${{ matrix.architecture }}"
 
         assert scan_index == len(steps) - 1
+
+
+def test_legacy_policy_writer_accepts_unexpired_review(tmp_path: Path) -> None:
+    config, ignore = tmp_path / "trivy.yaml", tmp_path / "ignore.yaml"
+    policy.write_release_policy(config, ignore, today=date(2026, 10, 13))
+    assert config.read_bytes() == CONFIG_BYTES
+    assert ignore.read_bytes() == IGNORE_BYTES
+    assert hashlib.sha256(ignore.read_bytes()).hexdigest() == IGNORE_SHA256

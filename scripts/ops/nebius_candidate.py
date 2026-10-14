@@ -276,6 +276,7 @@ def create_candidate(
     supports_task_identity: bool = False,
     guest_runtime: Literal["qemu-tcg-v1"] | None = None,
     supports_emulated_pkcs11: bool = False,
+    supports_shared_guest: bool = False,
     guest_runtime_volume_mib: int | None = None,
     guest_max_artifact_bytes: int | None = None,
     node_share_resources: bool = False,
@@ -325,6 +326,7 @@ def create_candidate(
         supports_task_identity=supports_task_identity,
         guest_runtime=guest_runtime,
         supports_emulated_pkcs11=supports_emulated_pkcs11,
+        supports_shared_guest=supports_shared_guest,
         guest_runtime_volume_mib=guest_runtime_volume_mib,
         guest_max_artifact_bytes=guest_max_artifact_bytes,
         resource_allocation_policy="node-share-v1" if node_share_resources else None,
@@ -747,6 +749,7 @@ def build(args: argparse.Namespace) -> None:
                 supports_task_identity=getattr(args, "supports_task_identity", False),
                 guest_runtime=getattr(args, "guest_runtime", None),
                 supports_emulated_pkcs11=getattr(args, "supports_emulated_pkcs11", False),
+                supports_shared_guest=getattr(args, "supports_shared_guest", False),
                 guest_runtime_volume_mib=getattr(args, "guest_runtime_volume_mib", None),
                 guest_max_artifact_bytes=getattr(args, "guest_max_artifact_bytes", None),
                 node_share_resources=True,
@@ -793,6 +796,7 @@ def main() -> int:
         command.add_argument("--supports-task-identity", action="store_true")
         command.add_argument("--guest-runtime", choices=("qemu-tcg-v1",))
         command.add_argument("--supports-emulated-pkcs11", action="store_true")
+        command.add_argument("--supports-shared-guest", action="store_true")
         command.add_argument("--guest-runtime-volume-mib", type=int)
         command.add_argument("--guest-max-artifact-bytes", type=int)
     create.add_argument("--node-share-resources", action="store_true",
@@ -819,6 +823,7 @@ def main() -> int:
                 supports_task_identity=args.supports_task_identity,
                 guest_runtime=args.guest_runtime,
                 supports_emulated_pkcs11=args.supports_emulated_pkcs11,
+                supports_shared_guest=args.supports_shared_guest,
                 guest_runtime_volume_mib=args.guest_runtime_volume_mib,
                 guest_max_artifact_bytes=args.guest_max_artifact_bytes,
                 node_share_resources=args.node_share_resources,

@@ -258,6 +258,10 @@ func TestEffectiveNetworkPolicyMustAgreeWithEgressAndPhases(t *testing.T) {
 	if err := decode(gateway, nil, str(gateway)); err != nil {
 		t.Fatalf("gateway-only plan rejected: %v", err)
 	}
+	offline := `{"kind":"no-network"}`
+	if err := decode(offline, nil, str(offline)); err != nil {
+		t.Fatalf("offline plan rejected: %v", err)
+	}
 	if err := decode(allow, allowPolicy, str(allow)); err != nil {
 		t.Fatalf("web-allowlist plan rejected: %v", err)
 	}
@@ -271,6 +275,7 @@ func TestEffectiveNetworkPolicyMustAgreeWithEgressAndPhases(t *testing.T) {
 		"unknown kind":                 decode(`{"kind":"everything"}`, nil, str(`{"kind":"everything"}`)),
 		"web policy without egress":    decode(allow, nil, str(allow)),
 		"egress without web policy":    decode(gateway, allowPolicy, str(gateway)),
+		"offline plan with egress":     decode(offline, allowPolicy, str(offline)),
 		"egress widens policy":         decode(allow, &publicWeb{Kind: "public-web"}, str(allow)),
 	} {
 		if err == nil {

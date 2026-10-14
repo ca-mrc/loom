@@ -272,11 +272,13 @@ def test_prepare_guest_settings_preserve_ordinary_profile_budgets(tmp_path: Path
     args = _inputs(tmp_path)
     args.guest_runtime = "qemu-tcg-v1"
     args.guest_runtime_volume_mib = 1024
+    args.supports_shared_guest = True
     args.guest_max_artifact_bytes = 6 * 1024**3
     args.supports_task_identity = True
     prepare.prepare(args)
     profile = ServiceExecutionRuntimeProfileV1.model_validate_json(args.output_profile.read_text())
     assert profile.guest_runtime == "qemu-tcg-v1"
+    assert profile.supports_shared_guest
     assert profile.guest_runtime_volume_mib == 1024
     assert profile.guest_max_artifact_bytes == 6 * 1024**3
     assert profile.runtime_volume_mib == 32

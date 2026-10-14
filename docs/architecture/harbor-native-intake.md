@@ -90,7 +90,7 @@ catalog.
 | Environment image/build/resources | `environment` |
 | `architecture`, `memory`, `storage`, `env` | `cpu_arch`, MiB resource fields, `environment.environment` |
 | `gpus`, exact `gpu_types` | GPU count and model declarations in each environment |
-| Native Compose files | Original files plus `environment.compose_files` |
+| Native Compose files | Original files plus `environment.compose_files`; supported workbenches carry `single_service_compose` |
 | `verifier.environment` and `tests/Dockerfile` | Independent typed verifier environment/build context |
 | `verifier.env`, `collect`, execution mode | `environment_vars`, typed collection hooks, `env_mode` |
 | Relative artifact strings | Existing step artifact globs |
@@ -109,7 +109,7 @@ A shared requirement checker drives catalog/API/CLI diagnostics, automatic
 service materialization, worker admission before factories/model launch, and
 the Trial's driver-start boundary. Schema validity and preserved raw files do
 not grant runtime support. Current blockers include independent verifier
-images/resources, native Compose, exact GPU-model placement, verifier env and
+images/resources, unsupported Compose features, exact GPU-model placement, verifier env and
 collection hooks, structured/absolute artifacts, oracle-specific environment
 variables, and declared healthcheck startup intervals.
 

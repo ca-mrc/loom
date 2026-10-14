@@ -36,11 +36,14 @@ keeps an ordinary task in a pod but is rejected as
 `auto` is the default and is normalized away, so existing plans are unchanged.
 `effective_guest_capabilities` is the single rule the planner, workload
 requirements and admission share. A forced guest also requires the Terminus
-controller (`isolation_guest_response_only`) and, until shared grading inside a
-forced guest is qualified, rejects an explicitly requested shared verifier
-(`isolation_guest_shared_unsupported`).
-The compiler requires the Terminus controller with two private sandboxes and
-explicit root task/verifier identities. Unresolved prerequisites and external
+controller (`isolation_guest_response_only`). Shared grading requires the deployment
+profile to publish `supports_shared_guest = true`; the profile/candidate preparation
+commands expose `--supports-shared-guest`. Without readiness, an explicit shared
+request remains `isolation_guest_shared_unsupported`. With readiness, one resident
+task guest retains system files, processes and kernel state between agent and
+verifier controllers. Private verifier inputs are staged only after the agent ends.
+Separate grading retains two private guests. Both modes require explicit root
+task/verifier identities. Unresolved prerequisites and external
 cluster, general PKCS#11 or DPDK requirements remain admission rejections.
 Emulated authentication additionally requires the deployment profile's explicit
 `supports_emulated_pkcs11 = true`. Only a task declaring that capability selects
@@ -54,7 +57,7 @@ Each sidecar carries `guest_execution` with schema
 `loom.guest-execution.v1`, runtime `qemu-tcg-v1`, and the sorted, unique declared
 capabilities. A plain guest carries an empty list; Go rejects a missing
 (`null`) list, and an empty one adds no `--nested-docker` or other capability
-setup. Python and Go both validate the exact class, two private roles,
+setup. Python and Go both validate the exact class, the matching one or two private roles,
 matching task images/resources, root identities, private socket/probe paths,
 timeouts and payload reservation. Historical requirements cannot silently
 upgrade into a guest. Nonroot guest identities are currently rejected.
@@ -199,3 +202,14 @@ invalid PIN/certificate rejection, simultaneous guest isolation and state-disk
 retirement with the same outer confinement. Benchmark instructions, private
 grading and solutions are not part of this fixture. Local evidence does not
 replace installed qualification or the original task's recorded outcome.
+
+Single-service Harbor Compose workbenches retain their original source and a typed
+projection. A local `build`, `privileged`, `stdin_open` and `tty` are supported;
+workbench lifetime and interactive execution belong to the native sandbox and
+agent session. This does not start a Compose daemon or execute image CMD.
+Privileged workbenches declare `isolated_kernel_settings` and run as root inside
+a private guest, never in a privileged host container. Host mounts/devices,
+network mode overrides, custom service commands and multiple services remain
+unsupported rather than being dropped. Guest command lookup preserves the task
+image's tools first. Bundled tools are fallbacks; the nested Docker daemon uses
+its own bundled dependency path.

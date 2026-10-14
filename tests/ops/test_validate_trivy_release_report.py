@@ -673,3 +673,25 @@ def test_validator_rejects_an_uncontrolled_ignore_file(tmp_path: Path) -> None:
     _assert_rejected(
         _run_validator(tmp_path, payload, ignore_file=ignore_file),
     )
+
+
+def test_legacy_validator_cli_rejects_expired_review(tmp_path: Path) -> None:
+    ignore_file, report = tmp_path / "ignore.yaml", tmp_path / "report.json"
+    _write_ignore_file(ignore_file)
+    report.write_text(json.dumps(_report("agent-sandbox", ignore_file)))
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from datetime import UTC, datetime\n"
+            "from unittest.mock import patch\n"
+            "from scripts import validate_trivy_release_report as validator\n"
+            "with patch.object(validator, 'datetime', wraps=datetime) as clock:\n"
+            "    clock.now.return_value = datetime(2026, 10, 14, tzinfo=UTC)\n"
+            "    validator.main()\n",
+            "--component", "agent-sandbox", "--architecture", "amd64",
+            "--report", str(report), "--ignore-file", str(ignore_file),
+        ],
+        cwd=REPO_ROOT, text=True, capture_output=True, check=False,
+    )
+    _assert_rejected(result)

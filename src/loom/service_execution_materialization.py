@@ -195,6 +195,7 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
     supports_task_identity: bool = False
     guest_runtime: Literal["qemu-tcg-v1"] | None = Field(default=None, exclude_if=lambda value: value is None)
     supports_emulated_pkcs11: bool = Field(default=False, exclude_if=lambda value: not value)
+    supports_shared_guest: bool = Field(default=False, exclude_if=lambda value: not value)
     guest_runtime_volume_mib: int | None = Field(default=None, ge=1024, le=4096, exclude_if=lambda value: value is None)
     guest_max_artifact_bytes: int | None = Field(default=None, gt=0, le=10 * 1024**3, exclude_if=lambda value: value is None)
     runtime_image_ref: str
@@ -253,7 +254,7 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
     def consistent_execution_class(self) -> ServiceExecutionRuntimeProfileV1:
         if self.guest_runtime is None and (
             self.guest_runtime_volume_mib is not None or self.guest_max_artifact_bytes is not None
-            or self.supports_emulated_pkcs11
+            or self.supports_emulated_pkcs11 or self.supports_shared_guest
         ):
             raise ValueError("guest budgets require an explicit guest runtime")
         execution_class = nebius_cpu_execution_class(
@@ -298,6 +299,7 @@ def build_nebius_runtime_profile(
     supports_task_identity: bool = False,
     guest_runtime: Literal["qemu-tcg-v1"] | None = None,
     supports_emulated_pkcs11: bool = False,
+    supports_shared_guest: bool = False,
     guest_runtime_volume_mib: int | None = None,
     guest_max_artifact_bytes: int | None = None,
     runtime_volume_mib: int = 32,
@@ -326,6 +328,7 @@ def build_nebius_runtime_profile(
         supports_task_identity=supports_task_identity,
         guest_runtime=guest_runtime,
         supports_emulated_pkcs11=supports_emulated_pkcs11,
+        supports_shared_guest=supports_shared_guest,
         guest_runtime_volume_mib=guest_runtime_volume_mib,
         guest_max_artifact_bytes=guest_max_artifact_bytes,
         runtime_volume_mib=runtime_volume_mib,
@@ -427,6 +430,7 @@ def automatic_service_execution_rejections(
     source_provenance: dict[str, Any],
     allow_task_image_preparation: bool = False,
     supported_capabilities: frozenset[GuestExecutionCapability] = frozenset(),
+    supports_shared_guest: bool = False,
 ) -> tuple[str, ...]:
     """Return stable reasons why the v1 ordinary-TaskSet compiler cannot run a task."""
 
@@ -468,8 +472,9 @@ def automatic_service_execution_rejections(
         # The guest path grades in a fresh verifier guest, not the agent's live
         # sandbox. Reject an explicit request for that until it is supported;
         # task-authored shared guest tasks keep their historical topology.
-        if resolve_verifier_env_mode(task, trial) == "shared" and (
+        if not supports_shared_guest and resolve_verifier_env_mode(task, trial) == "shared" and (
             trial.isolation == "guest" or trial.verifier_env_mode == "shared"
+            or env.single_service_compose is not None
         ):
             reasons.append("isolation_guest_shared_unsupported")
         if env.sidecars:
@@ -534,7 +539,7 @@ def automatic_service_execution_rejections(
                 resolve_sandbox_identity(task.verifier.user, env.environment.get("HOME"))
         except ValueError:
             reasons.append("unsupported_task_identity")
-    if effective_network_policy.kind not in {"gateway-only", "web-allowlist", "public-web"}:
+    if effective_network_policy.kind not in {"no-network", "gateway-only", "web-allowlist", "public-web"}:
         reasons.append("gateway_only_network_required")
     if (
         hosted_http_egress(effective_network_policy) is not None
@@ -665,6 +670,7 @@ def compile_service_execution_plan(
         trial,
         source_provenance=source_provenance,
         supported_capabilities=profile.supported_guest_capabilities,
+        supports_shared_guest=profile.supports_shared_guest,
     )
     if reasons:
         raise ValueError("automatic service execution is incompatible: " + ",".join(reasons))
@@ -948,6 +954,10 @@ def runtime_profile_rejections(
             reasons.append("guest_runtime_volume_too_small")
         if not profile.supports_task_identity:
             reasons.append("task_identity_runtime_unavailable")
+        if (task.environment.single_service_compose is not None
+                and resolve_verifier_env_mode(task, trial) == "shared"
+                and not profile.supports_shared_guest):
+            reasons.append("shared_guest_runtime_unavailable")
     if hosted_http_egress(effective_network_policy) is not None and not profile.supports_task_web_egress:
         reasons.append("task_egress_runtime_unavailable")
     spec = hosted_harness(trial.agent_name)
@@ -1002,6 +1012,7 @@ def execution_selection_rejections(
         task, trial, source_provenance=source_provenance,
         allow_task_image_preparation=allow_task_image_preparation,
         supported_capabilities=profile.supported_guest_capabilities if profile is not None else frozenset(),
+        supports_shared_guest=profile.supports_shared_guest if profile is not None else False,
     ))
     if profile is None:
         reasons.append("runtime_profile_unavailable")
