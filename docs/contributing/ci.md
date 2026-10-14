@@ -175,6 +175,12 @@ suite on every platform candidate from `dev`, and publishes nothing unless it
 passes, so a regression from a shared module is caught before deployment. Scheduled
 and manual full runs still include it. A `ci:*` selector label also runs it on a PR.
 
+The shared worker pool is not in use (dev deploys with `NEBIUS_ROLLOUT_MODE`
+unset, i.e. standalone), so `tests/ops/test_nebius_shared_pool_*.py` are skipped
+by `tests/ops/conftest.py` unless `LOOM_RUN_SHARED_POOL_TESTS=1`. Participant,
+legacy-completion and standalone rollout tests still run: normal rollout uses that
+code. Remove the skip before enabling `NEBIUS_ROLLOUT_MODE=shared`.
+
 Go checks validate the retained execution runtime, gateway sandbox, and sandbox
 runtime. JWT and execution-materialization producer contracts also retain Go
 coverage; unrelated Python changes do not allocate a Go runner. Removed host
