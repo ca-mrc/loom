@@ -36,12 +36,10 @@ export {
   type TeamRegistrationApproval,
   type TeamRegistrationApprovalBody,
   type TeamRegistrationEntry,
-  type TeamRegistrationRequestBody,
   type UserRegistrationEntry,
 } from "./admin";
 export { loadAuthSession, parseAuthMe, type AuthMe, type AuthTeam, type PublicTeam } from "./auth";
 export {
-  type BenchmarkTagsResponse,
   type TaskList,
   type TaskRow,
   type TaskSetDetailResponse,
@@ -139,7 +137,6 @@ export {
   type DiagnosisReport,
   type MonitorSummary,
   type NetworkPolicyPreview,
-  type RerunPlan,
   type TaskFilter,
   type TrialDetail,
 } from "./runs";

@@ -154,7 +154,7 @@ src/loom_cli/run_cmd.run() → _run_async()       async dispatch
           ├─► gateway = UpstreamDirectGatewayClient(...)
           ├─► agent_factory(task_config.agent.name, model, gateway)
           ├─► driver = driver_factory()
-          ├─► verifier = PytestVerifier()
+          ├─► verifier = task_verifier_factory(task_config)()
           │
           └─► Trial(ctx=TrialContext(
                   trial_id, team_id, task_config, task_dir,
@@ -172,6 +172,11 @@ Each trial gets its own `trial_id` (fresh UUID4). Per-trial outputs
 land at `<output_dir>/<trial_id>/{events.jsonl,atif.json}` plus an
 internal MinIO-shaped tree under `<output_dir>/_store/` that
 LocalDiskObjectStore writes through to.
+
+Local trials use the task's `[verifier].name` (`pytest` or `script`) and
+`[verifier.args]`, including custom test directories or script paths. The CLI
+and local worker share this constructor selection. Unknown verifier names or
+invalid constructor arguments fail before the CLI starts the trial sandbox.
 
 ## The four dependency wirings
 
@@ -226,8 +231,8 @@ against provider SDKs directly:
 client = UpstreamDirectGatewayClient(
     anthropic_client=anthropic.AsyncAnthropic(api_key=...),
     openai_client=openai.AsyncOpenAI(api_key=...),
-    google_client=genai,  # google.generativeai module
-    tokens={"anthropic": "sk-ant-...", "openai": "sk-...", "google": "g-..."},
+    google_client=None,
+    tokens={"anthropic": "sk-ant-...", "openai": "sk-..."},
 )
 resp = await client.call(GatewayCallRequest(
     model=ModelSpec(provider="anthropic", name="claude-opus-4-7"),
@@ -240,7 +245,10 @@ resp = await client.call(GatewayCallRequest(
 Dispatches on `request.model.provider`:
 - `anthropic` → `messages.create(...)`
 - `openai` → `chat.completions.create(...)`
-- `google` → `generate_content_async(...)`
+- `google` → currently broken: the CLI supplies the deprecated
+  `google.generativeai` module but calls a method absent from that module.
+  Supported SDK migration and interface qualification are tracked in
+  [#2486](https://github.com/ca-mrc/loom/issues/2486).
 - `local` → OpenAI-compatible HTTP against
   `cfg.local_providers[server].base_url` (used for user-registered
   servers AND for the transient `_auto_vllm` provider the launcher
@@ -257,9 +265,12 @@ with a hint to add one.
 `loom_worker.main_loop._default_agent_factory` but:
 
 - Takes no Control Plane client
-- For `SubprocessAgent`, substitutes a `_NoopCPClient` (the launched
-  CLI talks to the upstream provider via env-var API key in the
-  sandbox; nothing reports back to a Loom Gateway)
+- For `SubprocessAgent`, substitutes a `_NoopCPClient`. Its placeholder token
+  and empty Gateway URL do not wire the configured direct provider credentials
+  into the launched adapter. Local Terminus also has a hardcoded localhost
+  Gateway URL. These local paths require the repair in
+  [#2489](https://github.com/ca-mrc/loom/issues/2489); constructing an adapter
+  does not establish a working provider connection.
 - Routes `oracle` → `OracleAgent(task_dir, trial_id)` directly
 
 ## Concurrency
@@ -376,9 +387,12 @@ Internals:
   invocations, run them inside one `loom run --concurrency N`
   (single-process Semaphore-bounded), not as many separate
   processes.
-- **`--server-url` is best-effort POST**, never gates exit. If you
-  need guaranteed delivery, use service mode (`POST /api/v1/trials`
-  with idempotency_key).
+- **Local result upload is unsupported**. `--server-url` attempts a
+  best-effort POST to `/api/v1/cli/results`, but the service has no such
+  intake route and HTTP failures do not affect CLI exit. Keep the local
+  output files; repair is tracked in
+  [#2490](https://github.com/ca-mrc/loom/issues/2490). Use service mode
+  (`POST /api/v1/trials` with `idempotency_key`) to submit a hosted trial.
 
 ## See also
 

@@ -121,10 +121,10 @@ the formally isolated, installed Case A/B collection and live acceptance.
 
 | Route                    | Dialect             | Forwarded to                       |
 |--------------------------|---------------------|------------------------------------|
-| `POST /v1/messages`      | Anthropic native    | `anthropic.AsyncAnthropic.messages.create` |
+| `POST /v1/messages`      | Anthropic native    | Direct httpx passthrough using the Gateway's configured Anthropic credential |
 | `POST /v1/chat/completions` | OpenAI Chat / BYO chat | Provider connection resolved from the authoritative step-JWT claim, with any header/body values required to match; `openai-compatible` / `custom` use `EgressClientPool`, while native Anthropic / Google connections use their LiteLLM transport |
 | `POST /v1/responses`     | OpenAI Responses / BYO OpenAI-compatible Responses | Native OpenAI path or direct httpx through `EgressClientPool` when the step JWT or `x-loom-provider-connection-id` resolves to `openai-compatible` / `custom`; if a BYO endpoint exposes only Chat Completions and returns the chat-style "messages required" 400 from `/responses`, the provider facade retries once through `/chat/completions` and synthesizes a Responses body/SSE for Codex |
-| `POST /v1/models/{model}:generateContent` | Gemini  | `google.generativeai.GenerativeModel.generate_content_async` |
+| `POST /v1beta/models/{model}:generateContent` | Gemini  | Direct httpx passthrough using the Gateway's configured Google credential; streaming actions are rejected |
 | `POST /v1/chat/completions` *(via litellm)* | Tail-provider shim | non-BYO and non-OpenAI-compatible fallback providers |
 | `POST /openai/v1/chat/completions`, `/openai/v1/responses`, `/anthropic/v1/messages`, `/google/v1beta/...` | Sandbox provider facade | Direct httpx through `EgressClientPool` |
 

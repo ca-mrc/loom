@@ -40,7 +40,10 @@ def parse_litellm_response(
     choice = response["choices"][0]
     msg = choice["message"]
     content = msg.get("content", "")
-    if not isinstance(content, str):
+    if content is None:
+        # Tool-only responses may omit text without omitting the tool calls.
+        content = ""
+    elif not isinstance(content, str):
         # Multimodal content list — collapse to text fragments
         parts = [
             p.get("text", "") for p in content

@@ -13,6 +13,7 @@ import { Card } from "../components/Card";
 import EmptyState from "../components/EmptyState";
 import ErrorState from "../components/ErrorState";
 import { Input } from "../components/Input";
+import { getFrontendConfig } from "../lib/frontendConfig";
 
 const SIGN_IN_FAILURE = new Error(
   "Sign-in failed. Check your username and password, then try again.",
@@ -25,6 +26,7 @@ const PUBLIC_TEAMS_FAILURE = new Error(
 const FIELD_LABEL = "block text-sm font-medium text-slate-700";
 
 export default function AuthLogin(): JSX.Element {
+  const { environmentLabel } = getFrontendConfig();
   const location = useLocation();
   // Carry only an invite code in router state; it never becomes a login URL
   // parameter or an arbitrary return URL. Rebuild the owned route explicitly.
@@ -79,13 +81,13 @@ export default function AuthLogin(): JSX.Element {
     <div className="stack-y-8">
       <header className="max-w-3xl">
         <p className="text-xs font-semibold uppercase tracking-wider text-slate-600">
-          Loom staging
+          Loom {environmentLabel}
         </p>
         <h1 className="mt-2 text-3xl font-bold text-slate-950">
           Sign in to run and review evaluations
         </h1>
         <p className="mt-3 text-base text-slate-600">
-          Staging account requests are reviewed by an admin. Request a
+          Account requests are reviewed by an admin. Request a
           username for a publicly available team, set your password from the
           approved setup link, then use the same account in the browser and CLI.
         </p>

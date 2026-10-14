@@ -1,9 +1,8 @@
 /**
  * Sidebar navigation. Vertical column on left of the app shell.
- * `isAdmin` hides admin-only routes from the nav for team users —
- * those routes 403 today if hit by URL, and the rate-cards read
- * policy will open up in PR B; either way the link only adds noise
- * for non-admin team members so it's hidden here.
+ * Team owners and platform admins see Team access; only platform admins
+ * see Rate cards in the sidebar. Route and server authorization remain
+ * authoritative, including team-aware catalog reads and separate write checks.
  *
  * The `loom` wordmark is intentionally typographic, not an image —
  * keeps the bundle small and matches the rest of the type discipline.

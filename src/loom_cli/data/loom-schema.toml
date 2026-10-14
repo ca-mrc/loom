@@ -615,7 +615,7 @@ description = "Object-store bucket for trial trajectories/ATIF. Must match acros
 used_by     = ["loom-service"]
 python_type = "str"
 # no required, no default → `str | None = None` (codegen rule 4)
-description = "Public-facing MinIO endpoint for presigned URLs. When unset, falls back to minio_endpoint (works for in-cluster clients only)."
+description = "Deprecated compatibility setting; accepted but has no effect. Loom Service proxies authenticated downloads through minio_endpoint instead of issuing public MinIO presigned URLs."
 
 [service_config.artifacts_bucket]
 used_by     = ["control-plane", "llm-gateway", "loom-service", "worker"]

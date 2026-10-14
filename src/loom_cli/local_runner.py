@@ -4,7 +4,7 @@ Constructs a TrialContext against:
   - LocalDiskObjectStore (trajectory + ATIF land on local disk)
   - UpstreamDirectGatewayClient (no Gateway service required)
   - CLI agent factory (oracle / direct-completion / launcher subprocess)
-  - PytestVerifier (the same verifier the worker uses)
+  - Task-configured verifier (the same selection and arguments as the worker)
   - A no-op state_patch_callback (no Control Plane)
 
 After Trial.run() finishes, the trajectory + ATIF docs are already in
@@ -26,7 +26,7 @@ from loom.models.task import TaskConfig
 from loom.models.trial import TrialConfig
 from loom.trajectory.storage import ObjectStore
 from loom.trial.trial import Trial, TrialContext
-from loom.verifier.pytest_verifier import PytestVerifier
+from loom.verifier.factory import task_verifier_factory
 from loom_cli.agent_factory import build_agent_factory
 from loom_cli.config import LocalProvider
 from loom_cli.upstream_gateway import UpstreamDirectGatewayClient
@@ -79,7 +79,7 @@ class LocalRunner:
             self.task_config.agent.model,
             self.task_config.agent.name,
         )
-        verifier = PytestVerifier()
+        verifier = task_verifier_factory(self.task_config)()
         driver = self.driver_factory()
 
         trial_dir = self.output_dir / str(self.trial_id)
