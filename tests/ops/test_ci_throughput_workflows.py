@@ -635,6 +635,7 @@ def test_candidate_images_use_verified_trivy_binaries_and_complete_scans() -> No
         '  exit "$scan_status"\n'
         "fi\n"
         "python3 scripts/validate_trivy_release_report.py \\\n"
+        "  --no-exceptions \\\n"
         '  --component "$IMAGE_NAME" \\\n'
         '  --architecture "$ARCHITECTURE" \\\n'
         '  --report "$REPORT" \\\n'
