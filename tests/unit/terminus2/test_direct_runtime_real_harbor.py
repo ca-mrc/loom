@@ -209,6 +209,43 @@ async def test_real_harbor_direct_provider_and_usage(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("override", ["environment", "global"])
+async def test_google_connection_ignores_ambient_endpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, override: str,
+) -> None:
+    import litellm
+    from litellm.litellm_core_utils.logging_worker import GLOBAL_LOGGING_WORKER
+
+    canonical = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+    if override == "environment":
+        monkeypatch.setenv("GEMINI_API_BASE", "https://ambient.invalid/v1beta")
+    else:
+        monkeypatch.delenv("GEMINI_API_BASE", raising=False)
+        monkeypatch.setattr(litellm, "api_base", "https://global.invalid/v1beta")
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        body = _response(httpx.Request("POST", canonical), model="gemini-2.5-flash").json()
+        return httpx.Response(200, request=request, json=body)
+
+    _install_transport(monkeypatch, respond)
+    runtime, _, driver, writer = _runtime(
+        tmp_path, "google", "gemini-2.5-flash", "https://generativelanguage.googleapis.com",
+    )
+    await driver.start()
+    try:
+        async with writer:
+            await runtime.run(instruction="Finish now.", env=driver, trajectory=writer,
+                              mcp=[], skills_dir=None, step_id="agent")
+        assert len(requests) == 2
+        assert all(str(request.url) == canonical for request in requests)
+    finally:
+        await driver.stop()
+        await GLOBAL_LOGGING_WORKER.stop()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("stop_mode", ["cancel", "provider_error"])
 async def test_real_harbor_direct_failure_stops_attempt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, stop_mode: str,
