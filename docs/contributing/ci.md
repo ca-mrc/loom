@@ -190,11 +190,14 @@ with every variant of their lifecycle matrix. Participant resource observation
 runs beside the measured lighter forward shard, separate from the image
 cancellation and transport matrices that previously crowded its job. Recovery
 census and completed recovery release also run on separate shards to retain
-headroom below the unchanged job deadline. Connected
+headroom below the job deadline. Connected
 transport tests retain independent fixtures and share only immutable
 inputs; full roster tests retain all environments. Duplicate mode-independent
 qualification cases run once, while mode-specific grants and failure cases remain.
-The job limit remains 40 minutes. Connected participant lifecycle tests have
+The root job limit is 50 minutes. A full shard passed all 1,144 tests in 39m38s
+but exhausted the former 40-minute deadline once setup and process shutdown were
+included. The extra bounded headroom changes neither coverage nor shard count;
+individual test deadlines remain enforced. Connected participant lifecycle tests have
 explicit 120-second budgets (180 seconds for two successive releases). The
 participant pool-to-observer catalog/Job lifecycle also has a 180-second budget.
 The complete workflow-selector integration also has a 120-second budget. Exhaustive
