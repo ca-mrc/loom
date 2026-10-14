@@ -80,8 +80,8 @@ ls /tmp/loom-smoke/<trial-id>/
 
 The installed-agent commands below describe the CLI options, but their local
 provider wiring currently needs the repair in
-[#2489](https://github.com/ca-mrc/loom/issues/2489). Local Google SDK calls also
-need the migration in [#2486](https://github.com/ca-mrc/loom/issues/2486).
+[#2489](https://github.com/ca-mrc/loom/issues/2489). Local direct-completion Google
+calls use the supported `google-genai` SDK with a Gemini Developer API key.
 Use the hosted submission workflow for supported, deployment-qualified agents;
 these local examples are not successful-run acceptance evidence.
 

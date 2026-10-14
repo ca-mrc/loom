@@ -10,9 +10,8 @@ from __future__ import annotations
 
 import pytest
 
-# Import skip: envoy-data-plane / xds-protos conflict with the main
-# project's google-generativeai protobuf<6 pin and are NOT in the
-# default dev install. The PR-C1b production Dockerfile installs
+# Import skip: envoy-data-plane / xds-protos belong to the standalone egress
+# control plane and are NOT in the default dev install. Its Dockerfile installs
 # them; local devs run `uv pip install envoy-data-plane xds-protos`
 # (or skip this test).
 envoy_data_plane = pytest.importorskip("envoy.config.cluster.v3.cluster_pb2")

@@ -10,7 +10,7 @@ the service stack.
 Implements:
   - anthropic dialect → anthropic.AsyncAnthropic.messages.create
   - openai dialect    → openai.AsyncOpenAI.chat.completions.create
-  - google dialect    → google.generativeai.GenerativeModel.generate_content
+  - google dialect    → google.genai.Client.aio.models.generate_content
   - local dialect     → openai.AsyncOpenAI client against a
                         user-registered local OpenAI-compatible server
                         (vLLM, ollama, llama.cpp, lm-studio). Model
@@ -210,22 +210,45 @@ class UpstreamDirectGatewayClient:
             for m in request.messages
         ]
         t0 = time.monotonic()
-        raw = await self.google_client.generate_content_async(
+        raw = await self.google_client.aio.models.generate_content(
             model=request.model.name,
             contents=contents,
-            system_instruction=request.system_prompt,
+            config={"system_instruction": request.system_prompt},
         )
         dur = time.monotonic() - t0
 
-        cand = raw.candidates[0]
-        text = "".join(p.text for p in cand.content.parts if hasattr(p, "text"))
-        finish_int = int(getattr(cand, "finish_reason", 1))
-        finish = "stop" if finish_int == 1 else f"finish_reason_{finish_int}"
+        candidates = raw.candidates or []
+        cand = candidates[0] if candidates else None
+        content = getattr(cand, "content", None)
+        parts = getattr(content, "parts", None) or []
+        text = "".join(
+            part.text for part in parts
+            if isinstance(part.text, str) and not part.thought
+        )
+        reason = getattr(cand, "finish_reason", None)
+        if cand is None:
+            reason = getattr(raw.prompt_feedback, "block_reason", None)
+        # The supported SDK exposes string enums, not the legacy numeric enum.
+        reason_value = str(getattr(reason, "value", reason) or "")
+        if reason_value == "STOP":
+            finish = "stop"
+        elif reason_value == "MAX_TOKENS":
+            finish = "length"
+        elif reason_value in {
+            "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII",
+            "IMAGE_SAFETY", "IMAGE_PROHIBITED_CONTENT", "IMAGE_RECITATION",
+        }:
+            finish = "content_filter"
+        elif reason_value in {"", "FINISH_REASON_UNSPECIFIED", "BLOCK_REASON_UNSPECIFIED"}:
+            finish = "unknown"
+        else:
+            finish = reason_value.lower()
 
         usage = raw.usage_metadata
-        in_tok = int(getattr(usage, "prompt_token_count", 0))
-        out_tok = int(getattr(usage, "candidates_token_count", 0))
+        in_tok = int(getattr(usage, "prompt_token_count", 0) or 0)
+        out_tok = int(getattr(usage, "candidates_token_count", 0) or 0)
         cached = int(getattr(usage, "cached_content_token_count", 0) or 0)
+        thinking = int(getattr(usage, "thoughts_token_count", 0) or 0)
 
         entry = lookup_entry(
             self._table(), provider="google", model=request.model.name,
@@ -242,8 +265,11 @@ class UpstreamDirectGatewayClient:
             cached_input_tokens=cached,
             cache_write_tokens=0,
             output_tokens=out_tok,
-            thinking_tokens=0,
-            provider_extras={"cachedContentTokenCount": cached},
+            thinking_tokens=thinking,
+            provider_extras={
+                "cachedContentTokenCount": cached,
+                "thoughtsTokenCount": thinking,
+            },
             cost_usd=cost,
             finish_reason=finish,
             duration_sec=dur,

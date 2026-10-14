@@ -18,7 +18,8 @@ import asyncio
 import json
 import os
 import sys
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from uuid import uuid4
 
@@ -214,8 +215,6 @@ async def _run_one_model(
         )
     store = LocalDiskObjectStore(root=output_dir / "_store")
 
-    a_client, o_client, g_client = _build_sdk_clients(tokens)
-
     sem = asyncio.Semaphore(max(1, int(args.concurrency)))
     completed: list[TrialResult] = []
 
@@ -262,8 +261,9 @@ async def _run_one_model(
             return 0 if result.state == TrialState.SUCCEEDED else 1
 
     try:
-        exit_codes = await asyncio.gather(*[_one(t) for t in tasks])
-        _maybe_write_tb2_report(args, completed)
+        async with _build_sdk_clients(tokens) as (a_client, o_client, g_client):
+            exit_codes = await asyncio.gather(*[_one(t) for t in tasks])
+            _maybe_write_tb2_report(args, completed)
     finally:
         # vLLM teardown happens on EVERY exit path (happy or exception)
         # to close the GPU-orphan window. atexit catches Python exit
@@ -482,35 +482,38 @@ async def _driver_factory(
     return lambda: ModalDriver(image=image, gpu=gpu, config=modal_cfg)
 
 
-def _build_sdk_clients(
+@asynccontextmanager
+async def _build_sdk_clients(
     tokens: dict[str, str],
-) -> tuple[object, object, object]:
-    """Construct provider SDK clients lazily. Each may be None if no
-    token for that provider is set — UpstreamDirectGatewayClient raises
-    a clear ValueError when the call tries to use a missing client."""
-    a_client: object = None
-    o_client: object = None
-    g_client: object = None
-    if tokens.get("anthropic"):
-        try:
+) -> AsyncIterator[tuple[object, object, object]]:
+    """Own configured SDK clients for one run, including partial startup failure."""
+    async with AsyncExitStack() as stack:
+        a_client: object = None
+        o_client: object = None
+        g_client: object = None
+        if tokens.get("anthropic"):
             import anthropic
-            a_client = anthropic.AsyncAnthropic(api_key=tokens["anthropic"])
-        except ImportError:
-            pass
-    if tokens.get("openai"):
-        try:
+
+            a_client = await stack.enter_async_context(
+                anthropic.AsyncAnthropic(api_key=tokens["anthropic"]),
+            )
+        if tokens.get("openai"):
             import openai
-            o_client = openai.AsyncOpenAI(api_key=tokens["openai"])
-        except ImportError:
-            pass
-    if tokens.get("google"):
-        try:
-            import google.generativeai as genai
-            genai.configure(api_key=tokens["google"])  # type: ignore[attr-defined]
-            g_client = genai
-        except ImportError:
-            pass
-    return a_client, o_client, g_client
+
+            o_client = await stack.enter_async_context(
+                openai.AsyncOpenAI(api_key=tokens["openai"]),
+            )
+        if tokens.get("google"):
+            from google import genai
+
+            # Local token.google is a Gemini Developer API credential. Do not
+            # let ambient Vertex/Enterprise settings change that contract.
+            google_client = stack.enter_context(genai.Client(
+                api_key=tokens["google"], vertexai=False, enterprise=False,
+            ))
+            await stack.enter_async_context(google_client.aio)
+            g_client = google_client
+        yield a_client, o_client, g_client
 
 
 def _maybe_warn_unused_vllm_flags(

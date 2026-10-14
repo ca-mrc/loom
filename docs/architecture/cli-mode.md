@@ -245,10 +245,12 @@ resp = await client.call(GatewayCallRequest(
 Dispatches on `request.model.provider`:
 - `anthropic` → `messages.create(...)`
 - `openai` → `chat.completions.create(...)`
-- `google` → currently broken: the CLI supplies the deprecated
-  `google.generativeai` module but calls a method absent from that module.
-  Supported SDK migration and interface qualification are tracked in
-  [#2486](https://github.com/ca-mrc/loom/issues/2486).
+- `google` → supported `google-genai` client through
+  `client.aio.models.generate_content(...)`. Local Google keys select the Gemini
+  Developer API, independently of ambient Vertex/Enterprise settings. System
+  instructions use the generation config; assistant turns use the `model` role.
+  Blocked or empty responses retain their finish status without assuming a text
+  candidate exists. SDK clients close when the run ends, including failures.
 - `local` → OpenAI-compatible HTTP against
   `cfg.local_providers[server].base_url` (used for user-registered
   servers AND for the transient `_auto_vllm` provider the launcher
