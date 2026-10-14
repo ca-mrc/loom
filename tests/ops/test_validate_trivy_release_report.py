@@ -11,7 +11,6 @@ import pytest
 from scripts import write_trivy_release_policy as policy
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-VALIDATOR = REPO_ROOT / "scripts/validate_trivy_release_report.py"
 _PERL_CVES = (
     "CVE-2026-13221",
     "CVE-2026-42496",
@@ -179,7 +178,15 @@ def _run_validator(
     return subprocess.run(
         [
             sys.executable,
-            str(VALIDATOR),
+            "-c",
+            # Exercise historical inventories before their review expires;
+            # the separate expiry tests still exercise the rejection boundary.
+            "from datetime import UTC, datetime\n"
+            "from unittest.mock import patch\n"
+            "from scripts import validate_trivy_release_report as validator\n"
+            "with patch.object(validator, 'datetime', wraps=datetime) as clock:\n"
+            "    clock.now.return_value = datetime(2026, 9, 14, tzinfo=UTC)\n"
+            "    validator.main()\n",
             "--component",
             component,
             "--architecture",
