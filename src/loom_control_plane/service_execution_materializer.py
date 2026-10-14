@@ -1544,7 +1544,7 @@ class ServiceExecutionMaterializer:
                 )[:2000]
             await self._settle_verifier_source(
                 session, lease=lease, trial=trial, now=now, committed=True,
-                events_sha256=result.events_sha256, atif_sha256=result.atif_sha256,
+                canonical_sha256=(result.events_sha256, result.atif_sha256),
             )
             lease.materialization_state = "committed"
             lease.materialization_claim_id = None
@@ -1567,10 +1567,14 @@ class ServiceExecutionMaterializer:
 
     async def _settle_verifier_source(
         self, session: AsyncSession, *, lease: ServiceExecutionLease, trial: Trial, now: datetime,
-        committed: bool, error_code: str | None = None, error_message: str | None = None,
-        events_sha256: str | None = None, atif_sha256: str | None = None,
+        committed: bool, error_code: str | None = None,
+        canonical_sha256: tuple[str, str] | None = None,
     ) -> None:
-        """Close the deferred verifier's spool together with its parent's archive."""
+        """Close the deferred verifier's spool together with its parent's archive.
+
+        The child has no canonical output of its own: it is archived in the
+        parent's bundle, so it records the parent's canonical digests.
+        """
         handoff = (trial.result or {}).get("verifier_execution") if isinstance(trial.result, dict) else None
         if not isinstance(handoff, dict) or handoff.get("lease_id") is None:
             return
@@ -1578,10 +1582,6 @@ class ServiceExecutionMaterializer:
         if (
             child is None
             or child.parent_lease_id != lease.id
-            or child.execution_role != "verifier"
-            or child.team_id != lease.team_id
-            or child.trial_id != trial.id
-            or child.attempt != lease.attempt
             or child.output_commit_state != "committed"
             or child.materialization_state not in {"pending", "running"}
         ):
@@ -1591,19 +1591,14 @@ class ServiceExecutionMaterializer:
         child.materialization_next_attempt_at = None
         child.updated_at = now
         if committed:
-            if events_sha256 is None or atif_sha256 is None:
-                raise MaterializationIntegrityError("verifier_archive_identity_missing")
-            # The verifier is archived by this parent worker, never claimed on
-            # its own. Persist the complete ACK before the Artifact query can
-            # autoflush; both leases refer to the same combined canonical trace.
-            child.materialization_attempts += 1
-            child.materialization_started_at = now
+            if canonical_sha256 is None:
+                raise MaterializationIntegrityError("verifier_source_digest_missing")
             child.materialization_state = "committed"
+            child.materialization_attempts = max(child.materialization_attempts, 1)
             child.materialization_committed_at = now
             child.materialization_error_code = None
             child.materialization_error_message = None
-            child.canonical_trajectory_sha256 = events_sha256
-            child.canonical_atif_sha256 = atif_sha256
+            child.canonical_trajectory_sha256, child.canonical_atif_sha256 = canonical_sha256
             child.source_cleanup_state = "retained"
             child.source_retain_until = now + self._source_retention
             artifact = await session.scalar(select(Artifact).where(
@@ -1621,8 +1616,8 @@ class ServiceExecutionMaterializer:
             child.materialization_state = "unavailable"
             child.materialization_error_code = (error_code or "parent_materialization_unavailable")[:120]
             child.materialization_error_message = (
-                error_message or "parent canonical materialization unavailable"
-            )[:2000]
+                f"parent lease {lease.id} materialization unavailable: {child.materialization_error_code}"
+            )
 
     async def _retry(self, claim: MaterializationClaim, exc: Exception) -> None:
         now = datetime.now(UTC)
@@ -1664,7 +1659,7 @@ class ServiceExecutionMaterializer:
             if trial is None:
                 return
             await self._settle_verifier_source(session, lease=lease, trial=trial, now=now, committed=False,
-                                               error_code=exc.code, error_message=str(exc))
+                                               error_code=exc.code)
             lease.materialization_state = "unavailable"
             lease.materialization_next_attempt_at = None
             lease.materialization_claim_id = None
