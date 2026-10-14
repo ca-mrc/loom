@@ -196,7 +196,9 @@ def test_generation_files_are_synced_before_selecting_them(tmp_path, monkeypatch
 
 def installation(tmp_path):
     credential = tmp_path / "dns.json"
-    credential.write_text(json.dumps({"token": "private-pat", "expires_on": "2026-10-14"}))
+    # Hooks validate against the real clock; their valid fixture must not age out.
+    expires_on = (datetime.now(UTC) + timedelta(days=30)).date().isoformat()
+    credential.write_text(json.dumps({"token": "private-pat", "expires_on": expires_on}))
     credential.chmod(0o600)
     path = tmp_path / "installation.json"
     path.write_text(json.dumps({
