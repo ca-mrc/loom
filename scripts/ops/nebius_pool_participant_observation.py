@@ -82,8 +82,11 @@ class _Choice:
 class _ResourceView:
     """Derive only source-bound alternatives; never write or acknowledge intent."""
 
+    _roots = ('candidate-file-writes', 'candidate-resources', 'candidate-creations', 'pool-refresh')
+
     def __init__(self, retained: RetainedParticipantRollout, preparing: str | None):
         self.retained = retained
+        self._directories = self._directory_paths()
         self.files: dict[Path, bytes | None] = {}
         self.documents: dict[str, Document] = {}
         self.options: dict[str, tuple[_Choice | None, ...]] = {}
@@ -97,13 +100,45 @@ class _ResourceView:
             self.options[key] = (None, choice) if row['kind'] == 'Job' else (choice,)
         self._candidate(preparing)
         self._pool()
-        roots = ('candidate-file-writes', 'candidate-resources', 'candidate-creations', 'pool-refresh')
-        actual = {retained.state_dir / root / name: checksum for root in roots
+        self._check_inventory()
+
+    def _check_inventory(self) -> None:
+        retained = self.retained
+        actual = {retained.state_dir / root / name: checksum for root in self._roots
             if (retained.state_dir / root).exists() or (retained.state_dir / root).is_symlink()
             for name, checksum in _files(retained.state_dir / root, allow_empty=True).items()}
         if actual != {path: hashlib.sha256(raw).hexdigest() for path, raw in self.files.items()
                 if raw is not None and path.is_relative_to(retained.state_dir)}:
             raise ValueError
+        if self._directory_paths() != self._directories:
+            raise ValueError
+
+    def _directory_paths(self) -> set[Path]:
+        directories: set[Path] = set()
+        for name in self._roots:
+            root = self.retained.state_dir / name
+            if root != root.resolve() or root.is_symlink():
+                raise ValueError
+            if not root.exists():
+                continue
+            directories.add(root)
+            for index, path in enumerate(root.rglob('*')):
+                if index >= 2048 or path != path.resolve() or path.is_symlink():
+                    raise ValueError
+                if path.is_dir():
+                    directories.add(path)
+        return directories
+
+    def verify_receipts(self) -> None:
+        """Recheck exact private bytes and inventory within one qualified scope.
+
+        The caller must pin the retained inputs. Matching bytes preserve the
+        already validated semantics, including recorded absence; every read
+        still checks file privacy and rejects symlinked or foreign receipts.
+        """
+        for path in self.files:
+            self._read(path)
+        self._check_inventory()
 
     def _read(self, path: Path, *, required: bool = False) -> Document | None:
         if path != path.resolve():
@@ -528,9 +563,9 @@ class HTTPSParticipantResourceObserver(ManagementKubernetesTransport):
 
         try:
             allowed = {'preflight': {'open', 'held'}, 'guarded': {'held'}, 'ready': {'held'}, 'released': {'open'}}[phase]
-            retained = self.retained
+            retained = copy.deepcopy(self.retained)
             current = self.observe(preparing=preparing)
-            receipts = _ResourceView(retained, preparing).files
+            view = _ResourceView(retained, preparing)
             _, marker = _paths(retained.reference, retained.state_dir.parent, retained.anchor_dir)
             anchor = private_state._private_read(marker)
             original, = (row for row in retained.inputs.previous.guards
@@ -553,9 +588,9 @@ class HTTPSParticipantResourceObserver(ManagementKubernetesTransport):
                         or hashlib.sha256(private_state._private_read(kubeconfig, limit=512 * 1024)).hexdigest() != guards.kubeconfig_sha256
                         or hashlib.sha256(private_state._private_read(retained.state_dir / 'inputs.json', limit=16 * 1024**2)).hexdigest()
                             != retained.reference.inputs_sha256
-                        or private_state._private_read(marker) != anchor
-                        or _ResourceView(retained, preparing).files != receipts):
+                        or private_state._private_read(marker) != anchor):
                     raise ValueError
+                view.verify_receipts()
                 # Full semantic source loading brackets this read-only scope.
                 # Nested SQL challenges recheck its exact bytes, not rebuild
                 # the unchanged release and every ancestor for each read.
