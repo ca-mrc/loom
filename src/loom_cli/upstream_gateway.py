@@ -255,7 +255,9 @@ class UpstreamDirectGatewayClient:
         )
         cost = compute_cost_usd(
             entry,
-            input_tokens=in_tok, output_tokens=out_tok,
+            # Google includes cache hits in prompt tokens, while thoughts are
+            # separate from candidate tokens and billed at the output rate.
+            input_tokens=max(0, in_tok - cached), output_tokens=out_tok + thinking,
             cached_input_tokens=cached, cache_write_tokens=0,
         )
 

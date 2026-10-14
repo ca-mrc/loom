@@ -262,7 +262,16 @@ async def _run_one_model(
 
     try:
         async with _build_sdk_clients(tokens) as (a_client, o_client, g_client):
-            exit_codes = await asyncio.gather(*[_one(t) for t in tasks])
+            running = [asyncio.create_task(_one(t)) for t in tasks]
+            try:
+                exit_codes = await asyncio.gather(*running)
+            finally:
+                # gather propagates setup failures without joining siblings.
+                # Their cleanup must finish before shared SDK clients close.
+                for task in running:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*running, return_exceptions=True)
             _maybe_write_tb2_report(args, completed)
     finally:
         # vLLM teardown happens on EVERY exit path (happy or exception)
