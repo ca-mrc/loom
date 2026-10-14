@@ -73,8 +73,6 @@ class QwenCliAdapter:
             "openai",
             "--openai-base-url",
             env[self.base_url_env],
-            "--openai-api-key",
-            env[self.api_key_env],
         ]
 
     async def capture_events(

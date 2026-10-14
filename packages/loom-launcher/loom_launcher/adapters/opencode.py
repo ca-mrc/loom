@@ -77,7 +77,7 @@ class OpencodeAdapter:
                     "name": "Loom OpenAI-compatible Gateway",
                     "options": {
                         "baseURL": env[self.base_url_env],
-                        "apiKey": env[self.api_key_env],
+                        "apiKey": "{env:" + self.api_key_env + "}",
                     },
                     "models": {model_id: {"name": model_id}},
                 }

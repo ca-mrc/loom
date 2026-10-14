@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID
 
+from loom.agent.direct_provider import DirectCallLedger, DirectProviderConnection
 from loom.agent.terminus2.checkpoint_bridge import HarborCheckpointBridge
 from loom.agent.terminus2.gateway_ledger import CheckpointBridgeError
 from loom.agent.terminus2.harbor_environment import (
@@ -308,7 +309,9 @@ def _scrub_harbor_trajectory_llm_kwargs(path: Path) -> None:
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
-def _assert_harbor_artifacts_have_no_step_secrets(logs_root: Path) -> None:
+def _assert_harbor_artifacts_have_no_step_secrets(
+    logs_root: Path, direct_provider: DirectProviderConnection | None = None,
+) -> None:
     """Fail closed if a step JWT leaked into Harbor's published dump.
 
     Match the real credential (``loom_step_`` JWT prefix). Do not treat a bare
@@ -324,6 +327,12 @@ def _assert_harbor_artifacts_have_no_step_secrets(logs_root: Path) -> None:
         if not path.is_file():
             continue
         body = path.read_bytes()
+        if direct_provider is not None:
+            text = body.decode("utf-8")
+            cleaned = direct_provider.redact_text(text)
+            if cleaned != text:
+                path.write_text(cleaned, encoding="utf-8")
+                body = cleaned.encode()
         if b"loom_step_" in body:
             raise AgentError(
                 f"refusing to publish Harbor artifact {name}: step credential material is present",
@@ -472,6 +481,8 @@ class LoomTerminus2Runtime:
     trial_id: UUID
     cp_client: Any
     gateway_url: str
+    direct_provider: DirectProviderConnection | None = field(default=None, repr=False)
+    direct_ledger: DirectCallLedger | None = field(default=None, repr=False)
     name: str = "terminus-2"
     mode: Literal["out-of-box", "in-box"] = "in-box"
     version: str = LOOM_BRIDGE_REVISION
@@ -519,12 +530,36 @@ class LoomTerminus2Runtime:
         skills_dir: PurePosixPath | None,
         step_id: str,
     ) -> None:
+        try:
+            await self._run(instruction=instruction, env=env, trajectory=trajectory,
+                            mcp=mcp, skills_dir=skills_dir, step_id=step_id)
+        except Exception as exc:
+            if self.direct_provider is None:
+                raise
+            cleaned = self.direct_provider.redact_text(str(exc))
+            if cleaned == str(exc):
+                raise
+            raise AgentError(cleaned) from None
+
+    async def _run(
+        self, *, instruction: str, env: Driver, trajectory: TrajectoryWriter,
+        mcp: Sequence[MCPConnection], skills_dir: PurePosixPath | None, step_id: str,
+    ) -> None:
         del mcp, skills_dir
+        if self.direct_provider is not None:
+            if self.direct_ledger is None:
+                raise AgentError("direct Terminus requires a local usage ledger")
+            if self.multi_model is not None and self.multi_model.enabled:
+                raise AgentError("local Terminus does not support multi_model sessions")
         if self.continue_until_timeout and self._attempt_deadline is None:
             raise AgentContinuationError("continue_until_timeout requires an absolute attempt deadline")
         terminus2_cls, agent_context_cls = _import_terminus2()
 
-        if self._attempt_deadline is None:
+        if self.direct_provider is not None:
+            step_token = self.direct_provider.api_key
+            if self._attempt_deadline is not None:
+                self._attempt_deadline.require_remaining()
+        elif self._attempt_deadline is None:
             step_token = await self.cp_client.mint_step_token(
                 team_id=UUID(self.team_id),
                 trial_id=self.trial_id,
@@ -551,7 +586,7 @@ class LoomTerminus2Runtime:
                 )
             step_token = grant.token
             self._attempt_deadline.require_remaining()
-        api_base = _openai_gateway_base(self.gateway_url)
+        api_base = self.direct_provider.base_url if self.direct_provider else _openai_gateway_base(self.gateway_url)
 
         logs_ctx = tempfile.TemporaryDirectory(
             prefix=f"loom-terminus2-{self.trial_id}-",
@@ -577,7 +612,7 @@ class LoomTerminus2Runtime:
                 # trajectory, sandbox-upload or CP mutation fences at timeout.
                 if self.local_artifact_sink is not None and self._attempt_deadline is not None:
                     if self._attempt_deadline.reached:
-                        _assert_harbor_artifacts_have_no_step_secrets(logs_root)
+                        _assert_harbor_artifacts_have_no_step_secrets(logs_root, self.direct_provider)
                         self.local_artifact_sink(logs_root)
             finally:
                 logs_ctx.cleanup()
@@ -591,7 +626,7 @@ class LoomTerminus2Runtime:
         trajectory: TrajectoryWriter,
         step_id: str,
         step_token: str,
-        api_base: str,
+        api_base: str | None,
         logs_root: Path,
         terminus2_cls: type,
         agent_context_cls: type,
@@ -604,7 +639,9 @@ class LoomTerminus2Runtime:
             trial_id=self.trial_id,
             step_id=step_id,
             model=self.model,
-            cp_client=self.cp_client,
+            cp_client=self.direct_ledger if self.direct_provider else self.cp_client,
+            emit_llm_call_events=self.direct_provider is None,
+            redact_payload=self.direct_provider.redact if self.direct_provider else None,
         )
         _require_attempt_mutation_active(trajectory, self._attempt_deadline)
         # These compatibility overrides are observable behavior, independent
@@ -635,9 +672,9 @@ class LoomTerminus2Runtime:
         reasoning_effort = generation_params.pop("reasoning_effort", None)
         agent = terminus2_cls(
             logs_dir=logs_root,
-            model_name=_harbor_model_name(self.model),
+            model_name=self.direct_provider.harbor_model_name if self.direct_provider else _harbor_model_name(self.model),
             api_base=api_base,
-            session_id=str(self.trial_id),
+            session_id=None if self.direct_provider else str(self.trial_id),
             reasoning_effort=reasoning_effort,
             llm_kwargs={**generation_params, "api_key": step_token},
             **harbor_options,
@@ -826,6 +863,9 @@ class LoomTerminus2Runtime:
         else:
             redact_agent_llm_kwargs(agent)
 
+        if self.direct_ledger is not None and self.direct_provider is not None:
+            self.direct_ledger.install(agent, step_id=step_id, trajectory=trajectory)
+
         context = agent_context_cls()
         trajectory_path = logs_root / "trajectory.json"
         completeness = "full"
@@ -956,7 +996,7 @@ class LoomTerminus2Runtime:
                 )
                 await _write_episode_checkpoint()
                 _require_attempt_mutation_active(trajectory, self._attempt_deadline)
-                _assert_harbor_artifacts_have_no_step_secrets(logs_root)
+                _assert_harbor_artifacts_have_no_step_secrets(logs_root, self.direct_provider)
                 if self._attempt_deadline is None:
                     sandbox_paths = await _publish_harbor_artifacts_to_sandbox(
                         env,

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import tempfile
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -126,7 +125,10 @@ class LoomHarborEnvironment:
                     "terminus-2 does not use download_dir in the Loom bridge",
                 )
 
-        env_dir = Path(tempfile.mkdtemp(prefix="loom-harbor-env-"))
+        # The runtime owns trial_paths and removes it after every attempt.
+        # A separate mkdtemp here leaked a directory on every local run.
+        env_dir = trial_paths.trial_dir / "environment"
+        env_dir.mkdir(parents=True, exist_ok=True)
         task_env = EnvironmentConfig(os=TaskOS.LINUX)
         return _LoomHarborEnvironment(
             environment_dir=env_dir,

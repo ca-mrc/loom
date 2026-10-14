@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Literal, Protocol
@@ -53,12 +54,16 @@ class HarborCheckpointBridge:
         step_id: str,
         model: ModelSpec,
         cp_client: _CpClient | None = None,
+        emit_llm_call_events: bool = True,
+        redact_payload: Callable[[Any], Any] | None = None,
     ) -> None:
         self._trajectory = trajectory
         self._trial_id = trial_id
         self._step_id = step_id
         self._model = model
         self._cp_client = cp_client
+        self._emit_llm_call_events = emit_llm_call_events
+        self._redact_payload = redact_payload
         self._gateway_ledger = GatewayCallLedger(
             trial_id=trial_id,
             step_id=step_id,
@@ -111,6 +116,8 @@ class HarborCheckpointBridge:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             return 0
+        if self._redact_payload is not None:
+            data = self._redact_payload(data)
         steps = data.get("steps") or []
         synced = 0
         for step in steps:
@@ -214,13 +221,14 @@ class HarborCheckpointBridge:
         )
         harbor_step_id = int(step["step_id"])
 
-        await self._trajectory.append(
-            llm_call_row_to_event(
-                llm_row,
-                trial_id=self._trial_id,
-                seq=self._next_seq(),
-            ),
-        )
+        if self._emit_llm_call_events:
+            await self._trajectory.append(
+                llm_call_row_to_event(
+                    llm_row,
+                    trial_id=self._trial_id,
+                    seq=self._next_seq(),
+                ),
+            )
 
         await self._trajectory.append(
             Terminus2TurnEvent(
