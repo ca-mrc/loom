@@ -7,8 +7,7 @@ Flow:
   4. Bound by `--concurrency` asyncio.Semaphore, run each task through
      LocalRunner.run() in `asyncio.gather`
   5. Print result line per task (text or JSON)
-  6. If `--server-url` (or `LOOM_SERVER_URL`) is set, POST each result
-     to `<url>/api/v1/cli/results` (best-effort; never fails the CLI)
+  6. Retain results locally; warn about the deprecated upload option
   7. Exit 0 if every trial state == succeeded, else 1
 """
 
@@ -22,8 +21,6 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 from uuid import uuid4
-
-import httpx
 
 from loom.driver.base import Driver
 from loom.driver.docker import DockerDriver
@@ -55,6 +52,14 @@ async def _run_async(args: argparse.Namespace) -> int:
     """Top-level dispatcher. Single --model: today's behavior.
     Multiple --model: sequential or parallel based on the flag."""
     model_specs: list[str] = args.model or []
+
+    if args.server_url or os.environ.get("LOOM_SERVER_URL"):
+        sys.stderr.write(
+            "warning: local result upload via --server-url or LOOM_SERVER_URL "
+            "is deprecated and unsupported; results are not uploaded. "
+            "Keep the files in --output-dir or use authenticated hosted commands "
+            "to submit new trials.\n",
+        )
 
     if args.parallel_models and len(model_specs) < 2:
         sys.stderr.write(
@@ -254,7 +259,6 @@ async def _run_one_model(
             )
             completed.append(result)
             print(line, flush=True)
-            await _maybe_post_result(args.server_url, result)
             return 0 if result.state == TrialState.SUCCEEDED else 1
 
     try:
@@ -507,24 +511,6 @@ def _build_sdk_clients(
         except ImportError:
             pass
     return a_client, o_client, g_client
-
-
-async def _maybe_post_result(
-    server_url: str | None, result: TrialResult,
-) -> None:
-    url = server_url or os.environ.get("LOOM_SERVER_URL")
-    if not url:
-        return
-    payload = format_json_line(result)
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            await client.post(
-                f"{url.rstrip('/')}/api/v1/cli/results",
-                content=payload,
-                headers={"content-type": "application/json"},
-            )
-    except Exception:
-        pass
 
 
 def _maybe_warn_unused_vllm_flags(

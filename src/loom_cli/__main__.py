@@ -160,7 +160,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--json", dest="json_output", action="store_true",
                        help="Emit JSON one-result-per-line instead of text")
     p_run.add_argument("--server-url", default=None,
-                       help="If set, also POST results to this Control Plane")
+                       help="Deprecated: local results are not uploaded; use --output-dir")
     p_run.add_argument("--tb2-report", dest="tb2_report", type=Path, default=None,
                        help=(
                            "Path to write a Terminal-Bench-2.0 canonical "

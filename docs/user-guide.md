@@ -1936,18 +1936,18 @@ loom run
   --concurrency N         # parallel trials (default 1)
   --output-dir DIR        # default ./runs
   --json                  # JSON-line output instead of text
-  --server-url URL        # unsupported local-result upload; see limitation below
+  --server-url URL        # deprecated; results remain local (see below)
   --tb2-report PATH       # also write a TB2 report with profile provenance
 ```
 
 `--dataset` and `--task` are mutually exclusive (one required).
 
-Local result upload is currently ineffective: `--server-url` or `LOOM_SERVER_URL`
-triggers a best-effort POST to `/api/v1/cli/results`, but the service has no such
-intake route and the CLI ignores HTTP failures. Results remain in the local
-output directory. The compatibility disposition is tracked in
-[#2490](https://github.com/ca-mrc/loom/issues/2490); this does not affect the
-authenticated hosted commands or remote catalog lookup.
+Local result upload is unsupported. The run-only `--server-url` option is
+deprecated and accepted for compatibility. Setting it or `LOOM_SERVER_URL`
+prints one notice on stderr; no results are uploaded. Results remain in
+`--output-dir`, and `--json` continues to emit only result JSON on stdout.
+Authenticated hosted commands and remote catalog lookup retain their server URL
+behavior. Use hosted commands to submit new hosted trials.
 
 `--agent`:
 - `oracle` — runs `solution/solve.sh` from the task bundle (reference

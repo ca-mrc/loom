@@ -387,11 +387,11 @@ Internals:
   invocations, run them inside one `loom run --concurrency N`
   (single-process Semaphore-bounded), not as many separate
   processes.
-- **Local result upload is unsupported**. `--server-url` attempts a
-  best-effort POST to `/api/v1/cli/results`, but the service has no such
-  intake route and HTTP failures do not affect CLI exit. Keep the local
-  output files; repair is tracked in
-  [#2490](https://github.com/ca-mrc/loom/issues/2490). Use service mode
+- **Local result upload is unsupported**. The run-only `--server-url` option
+  is accepted for compatibility but deprecated. It and `LOOM_SERVER_URL` emit
+  one notice on stderr per invocation; no result upload is attempted. Keep the
+  local output files. Other authenticated commands and remote catalog lookup
+  retain their server URL behavior. Use service mode
   (`POST /api/v1/trials` with `idempotency_key`) to submit a hosted trial.
 
 ## See also
