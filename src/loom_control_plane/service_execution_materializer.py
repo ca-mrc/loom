@@ -677,6 +677,21 @@ def defers_verification_result(runtime_result: ExecutionRuntimeResultV1, trial_r
     return runtime_result.execution_role == "attempt" and isinstance(trial_result.get("verifier_execution"), dict)
 
 
+def requires_deferred_verifier_handoff(
+    lease: ServiceExecutionLease, trial_result: dict[str, Any] | None,
+) -> bool:
+    """True only when a succeeded separate attempt never wrote a handoff (#2521).
+
+    Finalize writes ``verifier_execution`` only on ``succeeded``. A committed
+    ``timed_out`` / failed / cancelled attempt is causal, not missing output.
+    """
+    if not defers_verification(lease) or isinstance((trial_result or {}).get("verifier_execution"), dict):
+        return False
+    runtime = (trial_result or {}).get("runtime_result")
+    status = runtime.get("status") if isinstance(runtime, dict) else None
+    return status == "succeeded"
+
+
 def _merge_verifier_execution(
     attempt: ExecutionRuntimeResultV1, trial_result: dict[str, Any], verifier_inputs: dict[str, bytes],
 ) -> tuple[ExecutionRuntimeResultV1, bytes | None]:
@@ -1158,7 +1173,9 @@ class ServiceExecutionMaterializer:
                 ):
                     raise MaterializationIntegrityError("verifier_source_identity_drift")
                 verifier_source = await _load_source(session, child)
-            elif defers_verification(lease) and not isinstance(handoff, dict):
+            elif requires_deferred_verifier_handoff(
+                lease, trial.result if isinstance(trial.result, dict) else None,
+            ):
                 raise MaterializationIntegrityError("verifier_handoff_missing")
             gateway_calls = (await read_service_execution_llm_calls(
                 session, lease, generation=lease.output_generation,
