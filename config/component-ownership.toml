@@ -975,6 +975,31 @@ include_paths = [
 exclude_paths = [
   "tests/unit/test_nebius_runtime_render.py",
   "tests/unit/pipeline/test_behavior_input_import.py",
+  "tests/ops/test_nebius*pool*.py",
+]
+
+[[test_suites]]
+# Pool operator lifecycle tests: ~450 of ~500 tests-root runner-minutes (Oct 14).
+# They guard the operator scripts that deployment runs, so a PR or merge group
+# runs them only when operator inputs change. nebius-candidate.yml runs the
+# whole suite on every dev head before any candidate is published.
+id = "nebius-pool-ops"
+language = "python"
+lane = "tests-root"
+include_paths = ["tests/ops/test_nebius*pool*.py"]
+affected_paths = [
+  "scripts/ops/**",
+  "deploy/k8s/**",
+  "deploy/nebius/**",
+  "tests/conftest.py",
+  "tests/ops/conftest.py",
+  "config/component-ownership.toml",
+  "scripts/component_ownership.py",
+  "scripts/plan_ci_validations.py",
+  ".github/workflows/ci.yml",
+  ".github/workflows/nebius-candidate.yml",
+  "pyproject.toml",
+  "uv.lock",
 ]
 
 [[test_suites]]

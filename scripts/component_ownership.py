@@ -65,6 +65,10 @@ class TestSuite:
     execution_policy: str | None
     ci_enabled: bool
     unaffected_paths: tuple[str, ...] = ()
+    # Opt-in for heavy suites: on a PR or merge group, run only when a change
+    # touches these inputs, the suite's own tests or the test helpers they import.
+    # Everything else is validated after merge, before deployment.
+    affected_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -397,6 +401,7 @@ def _test_suite(raw: dict[str, Any]) -> TestSuite:
             "execution_policy",
             "ci_enabled",
             "unaffected_paths",
+            "affected_paths",
         },
         context,
     )
@@ -432,6 +437,13 @@ def _test_suite(raw: dict[str, Any]) -> TestSuite:
         raise ManifestError(f"{context}.unaffected_paths must be a string array")
     unaffected_paths = tuple(_safe_path(item, context=f"{context}.unaffected_paths", allow_glob=True)
                              for item in raw_unaffected)
+    raw_affected = raw.get("affected_paths", [])
+    if not isinstance(raw_affected, list) or not all(isinstance(item, str) for item in raw_affected):
+        raise ManifestError(f"{context}.affected_paths must be a string array")
+    affected_paths = tuple(_safe_path(item, context=f"{context}.affected_paths", allow_glob=True)
+                           for item in raw_affected)
+    if unaffected_paths and affected_paths:
+        raise ManifestError(f"{context} declares both unaffected_paths and affected_paths")
     return TestSuite(
         id=_required_slug(raw, "id", context),
         language=language,
@@ -441,6 +453,7 @@ def _test_suite(raw: dict[str, Any]) -> TestSuite:
         execution_policy=execution_policy,
         ci_enabled=ci_enabled,
         unaffected_paths=unaffected_paths,
+        affected_paths=affected_paths,
     )
 
 
@@ -945,6 +958,11 @@ def validate_manifest(
                 errors.append(
                     f"test exclude pattern matches no tracked test: {suite.id}: {pattern}"
                 )
+        for pattern in suite.affected_paths:
+            if not any(matches_path(path, pattern) for path in tracked_paths):
+                errors.append(
+                    f"test affected pattern matches no tracked path: {suite.id}: {pattern}"
+                )
     for path in sorted(tracked_paths):
         language = _test_language(path)
         if language is None:
@@ -1402,22 +1420,55 @@ def narrow_test_only_changes(
     return tuple(path for path in paths if path in changed)
 
 
+def _imported_test_modules(paths: tuple[str, ...], *, repo_root: Path) -> frozenset[str]:
+    """Return the test helper modules these tests import, transitively."""
+    seen: set[str] = set()
+    pending = list(paths)
+    while pending:
+        path = pending.pop()
+        if path in seen or not (repo_root / path).is_file():
+            continue
+        seen.add(path)
+        for node in ast.walk(ast.parse((repo_root / path).read_text(encoding="utf-8"))):
+            names = ([alias.name for alias in node.names] if isinstance(node, ast.Import)
+                     else [node.module, *(f"{node.module}.{alias.name}" for alias in node.names)]
+                     if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module else [])
+            pending.extend(name.replace(".", "/") + ".py" for name in names if name.startswith("tests."))
+    return frozenset(seen)
+
+
 def select_affected_test_suites(
     manifest: Manifest, paths: tuple[str, ...], *, changed_paths: tuple[str, ...],
+    repo_root: Path | None = None,
 ) -> tuple[str, ...]:
     """Skip an expensive suite only for its explicitly audited unrelated inputs.
 
-    No diff (nightly/manual/coverage), unknown paths, mixed dependencies and
-    the suite's own tests retain coverage. Unannotated suites remain complete.
+    No diff (nightly/manual/coverage/deploy gate), unknown paths, mixed
+    dependencies and the suite's own tests retain coverage. Unannotated suites
+    remain complete. A suite with ``affected_paths`` runs only when a change
+    matches them or touches its tests or the test helpers they import.
     """
     if not changed_paths:
         return paths
+    helpers: dict[str, frozenset[str]] = {}
     selected = []
     for path in paths:
         owners = manifest.test_owners_for_path(path)
         if len(owners) != 1:
             raise ManifestError(f"test path has no unique owner: {path}")
         owner = owners[0]
+        if owner.affected_paths:
+            if owner.id not in helpers:
+                own = tuple(item for item in paths if owner in manifest.test_owners_for_path(item))
+                helpers[owner.id] = (_imported_test_modules(own, repo_root=repo_root)
+                                     if repo_root is not None else frozenset())
+            if not any(
+                any(matches_path(change, pattern) for pattern in owner.affected_paths)
+                or owner in manifest.test_owners_for_path(change)
+                or change in helpers[owner.id]
+                for change in changed_paths
+            ):
+                continue
         if all(
             any(matches_path(change, pattern) for pattern in owner.unaffected_paths)
             and owner not in manifest.test_owners_for_path(change)
@@ -1432,7 +1483,7 @@ def selected_test_paths(
     manifest: Manifest, *, tracked_paths: tuple[str, ...], lane: str, repo_root: Path,
     changed_paths: tuple[str, ...] = (), test_scope: str = "all",
     shard_index: int = 0, shard_count: int = 1,
-    shard_strategy: str | None = None,
+    shard_strategy: str | None = None, suite: str | None = None,
 ) -> tuple[str, ...]:
     """Use one selection contract for planning a matrix and executing its jobs."""
     paths = test_paths_for_lane(manifest, tracked_paths=tracked_paths, lane=lane)
@@ -1453,7 +1504,9 @@ def selected_test_paths(
     )
     paths = narrow_test_only_changes(paths, changed_paths=changed_paths,
                                     tracked_paths=tracked_paths, repo_root=repo_root)
-    paths = select_affected_test_suites(manifest, paths, changed_paths=changed_paths)
+    paths = select_affected_test_suites(manifest, paths, changed_paths=changed_paths, repo_root=repo_root)
+    if suite is not None:
+        paths = tuple(path for path in paths if manifest.test_owner_for_path(path).id == suite)
     return select_test_scope(manifest, paths, scope=test_scope)
 
 
@@ -1489,7 +1542,8 @@ def test_shard_matrix(
         raise ManifestError(f"CI lane has no tracked test paths: {lane}")
     selected = narrow_test_only_changes(paths, changed_paths=changed_paths,
                                        tracked_paths=tracked_paths, repo_root=repo_root)
-    selected = select_affected_test_suites(manifest, selected, changed_paths=changed_paths)
+    selected = select_affected_test_suites(manifest, selected, changed_paths=changed_paths,
+                                           repo_root=repo_root)
     selected_set = set(select_test_scope(manifest, selected, scope=test_scope))
     policy = manifest.test_shard_policy(lane)
     count = policy.shard_count if policy is not None else 1
@@ -1685,6 +1739,8 @@ def _parser() -> argparse.ArgumentParser:
         choices=("round-robin", "contiguous", "stable-hash"),
         default=None,
     )
+    test_paths.add_argument("--suite", default=None,
+                            help="keep only this test suite's paths, e.g. for the deploy gate")
     execution_plan = subparsers.add_parser(
         "execution-plan",
         help="Print a JSON execution plan for one policy-owned CI lane.",
@@ -1803,7 +1859,7 @@ def main(argv: list[str] | None = None) -> int:
                 manifest, tracked_paths=tracked_paths, lane=args.lane, repo_root=repo_root,
                 changed_paths=changed_paths, test_scope=args.test_scope,
                 shard_index=args.shard_index, shard_count=args.shard_count,
-                shard_strategy=args.shard_strategy,
+                shard_strategy=args.shard_strategy, suite=args.suite,
             )
             for path in paths:
                 print(path)

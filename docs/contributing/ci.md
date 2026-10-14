@@ -164,6 +164,17 @@ nonempty root/integration/Docker/cluster shards before runners are allocated. Ea
 runner writes its selected-path manifest before dependency or fixture setup;
 selector errors fail the job. Empty selections do not invoke pytest.
 
+## Pool operator tests run before deployment
+
+The `nebius-pool-ops` suite (`tests/ops/test_nebius*pool*.py`) takes about 450 of
+the ~500 tests-root runner-minutes. A PR or merge group runs it only when a change
+touches its `affected_paths` (operator scripts, Kubernetes and Nebius deploy
+inputs, CI authority files, dependencies), its own tests, or a test helper they
+import. Other changes skip it before merge. `nebius-candidate.yml` runs the whole
+suite on every platform candidate from `dev`, and publishes nothing unless it
+passes, so a regression from a shared module is caught before deployment. Scheduled
+and manual full runs still include it. A `ci:*` selector label also runs it on a PR.
+
 Go checks validate the retained execution runtime, gateway sandbox, and sandbox
 runtime. JWT and execution-materialization producer contracts also retain Go
 coverage; unrelated Python changes do not allocate a Go runner. Removed host
