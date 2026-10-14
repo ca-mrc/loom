@@ -14,13 +14,18 @@ import signal
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import event, select, text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.orm import defer
+from sqlalchemy import Select, event, select, text
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+from sqlalchemy.orm import ORMExecuteState, defer
 
 from loom.db.schema import Artifact, ArtifactUploadSession, LlmCall, ServiceExecutionLease, Trial
 from loom.nebius_rollout_guard import admission_open
@@ -179,10 +184,15 @@ class TerminalArchiveMaterializer(ServiceExecutionMaterializer):
                 or audit.get("materialization_attempt") != lease.materialization_attempts):
             raise MaterializationIntegrityError("terminal_archive_projection_changed")
 
-    async def _qualify_before_copy(self, session, lease, trial, artifact) -> None:
+    async def _qualify_before_copy(
+        self, session: AsyncSession, lease: ServiceExecutionLease, trial: Trial, artifact: Artifact,
+    ) -> None:
         await self._qualify(session, lease, artifact)
 
-    async def _qualify_commit(self, session, lease, trial, artifact, result: MaterializationResult) -> None:
+    async def _qualify_commit(
+        self, session: AsyncSession, lease: ServiceExecutionLease, trial: Trial,
+        artifact: Artifact, result: MaterializationResult,
+    ) -> None:
         await self._qualify(session, lease, artifact)
         if self.request.trial_state in {"failed", "cancelled"} and result.final_trial_state != self.request.trial_state:
             raise MaterializationIntegrityError("terminal_archive_outcome_changed")
@@ -219,15 +229,16 @@ class TerminalArchiveMaterializer(ServiceExecutionMaterializer):
         }}
 
 
-def archive_sessions(engine, *, legacy_baseline: bool) -> async_sessionmaker[AsyncSession]:
+def archive_sessions(engine: AsyncEngine, *, legacy_baseline: bool) -> async_sessionmaker[AsyncSession]:
     """0175 lacks only the unrelated 0176 baseline linkage used by new runs."""
     class ArchiveSession(AsyncSession):
-        def __init__(self, *args, **kwargs):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
             super().__init__(*args, **kwargs)
             if legacy_baseline:
                 @event.listens_for(self.sync_session, "do_orm_execute")
-                def projected_calls(state):
-                    if state.is_select and any(row.get("expr") is LlmCall for row in state.statement.column_descriptions):
+                def projected_calls(state: ORMExecuteState) -> None:
+                    if (state.is_select and isinstance(state.statement, Select)
+                            and any(row.get("expr") is LlmCall for row in state.statement.column_descriptions)):
                         state.statement = state.statement.options(defer(LlmCall.baseline_session_id, raiseload=True))
     return async_sessionmaker(engine, class_=ArchiveSession, expire_on_commit=False)
 
@@ -239,7 +250,7 @@ async def recover(request: TerminalArchiveRecoveryRequest, settings: ControlPlan
     engine = create_async_engine(settings.db_engine_url, connect_args=settings.db_engine_connect_args)
     canonical = MinioObjectStore(endpoint_url=settings.minio_endpoint,
         access_key=settings.minio_access_key.get_secret_value(), secret_key=settings.minio_secret_key.get_secret_value(), region=settings.minio_region)
-    source = config.build_store(MinioObjectStore)
+    source = cast(MinioObjectStore, config.build_store(MinioObjectStore))
     try:
         async with engine.connect() as connection:
             head = (await connection.execute(text("SELECT version_num FROM alembic_version"))).scalars().all()
@@ -261,12 +272,14 @@ async def recover(request: TerminalArchiveRecoveryRequest, settings: ControlPlan
                     if lease is None:
                         raise RecoveryRefusedError("source_identity_missing")
                     if lease.materialization_state == "running":
-                        if lease.materialization_claim_expires_at <= datetime.now(UTC):
+                        if (lease.materialization_claim_expires_at is None
+                                or lease.materialization_claim_expires_at <= datetime.now(UTC)):
                             raise RecoveryRefusedError("parent_archive_claim_active")
                         delay = 1.0
                     else:
                         await capture_binding(session, team_id=request.team_id, lease_id=request.lease_id)
-                        delay = max(0.0, (lease.materialization_next_attempt_at - datetime.now(UTC)).total_seconds())
+                        retry_at = lease.materialization_next_attempt_at
+                        delay = max(0.0, (retry_at - datetime.now(UTC)).total_seconds()) if retry_at else 0.0
                 if delay > 0:
                     await asyncio.sleep(min(delay, max(0.0, deadline - asyncio.get_running_loop().time())))
                     continue
@@ -292,6 +305,7 @@ async def recover(request: TerminalArchiveRecoveryRequest, settings: ControlPlan
                         or trial.attempt_count != request.attempt
                         or parent.materialization_state != "committed" or child.materialization_state != "committed"
                         or parent.source_cleanup_state != "retained" or child.source_cleanup_state != "retained"
+                        or parent.source_retain_until is None
                         or not parent.canonical_trajectory_sha256 or not parent.canonical_atif_sha256
                         or child.materialization_attempts < 1
                         or parent.canonical_trajectory_sha256 != child.canonical_trajectory_sha256
