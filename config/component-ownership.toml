@@ -687,6 +687,8 @@ source_paths = [
   "deploy/web-runtime-config.sh",
   "web/**",
 ]
+# Browser tests are not copied into the image (see .dockerignore).
+exclude_paths = ["web/e2e/**"]
 smoke_owner = "frontend-smoke"
 scan_owner = "images"
 attestation_owner = "release-provenance"

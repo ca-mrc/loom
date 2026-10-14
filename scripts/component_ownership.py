@@ -53,6 +53,7 @@ class Component:
     runtime_policy: str
     rollout_role: str
     ci_enabled: bool
+    exclude_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -146,7 +147,12 @@ class Manifest:
             component
             for component in self.components
             if component.dockerfile == normalized
-            or any(matches_path(normalized, pattern) for pattern in component.source_paths)
+            or (
+                any(matches_path(normalized, pattern) for pattern in component.source_paths)
+                and not any(
+                    matches_path(normalized, pattern) for pattern in component.exclude_paths
+                )
+            )
         )
 
     def test_owners_for_path(self, path: str) -> tuple[TestSuite, ...]:
@@ -293,6 +299,7 @@ def _component(raw: dict[str, Any]) -> Component:
             "dockerfile",
             "build_context",
             "source_paths",
+            "exclude_paths",
             "smoke_owner",
             "scan_owner",
             "attestation_owner",
@@ -317,6 +324,15 @@ def _component(raw: dict[str, Any]) -> Component:
     source_paths = tuple(
         _safe_path(item, context=f"{context}.source_paths", allow_glob=True)
         for item in _string_list(raw, "source_paths", context)
+    )
+    raw_exclude_paths = raw.get("exclude_paths", [])
+    if not isinstance(raw_exclude_paths, list) or not all(
+        isinstance(item, str) for item in raw_exclude_paths
+    ):
+        raise ManifestError(f"{context}.exclude_paths must be a string array")
+    exclude_paths = tuple(
+        _safe_path(item, context=f"{context}.exclude_paths", allow_glob=True)
+        for item in raw_exclude_paths
     )
     kind = _required_string(raw, "kind", context)
     runtime_policy = _required_string(raw, "runtime_policy", context)
@@ -376,6 +392,7 @@ def _component(raw: dict[str, Any]) -> Component:
         dockerfile=dockerfile,
         build_context=build_context,
         source_paths=source_paths,
+        exclude_paths=exclude_paths,
         smoke_owner=_required_slug(raw, "smoke_owner", context),
         scan_owner=_required_slug(raw, "scan_owner", context),
         attestation_owner=_required_slug(raw, "attestation_owner", context),
@@ -911,6 +928,29 @@ def validate_manifest(
             if not any(matches_path(path, pattern) for path in tracked_paths):
                 errors.append(
                     f"component source pattern matches no tracked path: {component.id}: {pattern}"
+                )
+        dockerignore_path = repo_root / component.build_context / ".dockerignore"
+        dockerignored = (
+            {line.strip() for line in dockerignore_path.read_text(encoding="utf-8").splitlines()}
+            if component.exclude_paths and dockerignore_path.is_file()
+            else set()
+        )
+        for pattern in component.exclude_paths:
+            if not any(matches_path(path, pattern) for path in tracked_paths):
+                errors.append(
+                    f"component exclude pattern matches no tracked path: {component.id}: {pattern}"
+                )
+            # An excluded path must also be absent from the image, or the image
+            # could change without the component being selected for rebuild.
+            context_prefix = "" if component.build_context == "." else f"{component.build_context}/"
+            if not (
+                pattern.startswith(context_prefix)
+                and pattern.endswith("/**")
+                and pattern[len(context_prefix) : -3] in dockerignored
+            ):
+                errors.append(
+                    f"component exclude pattern is not a .dockerignore'd directory: "
+                    f"{component.id}: {pattern}"
                 )
         expected_kind = (
             "release-image"

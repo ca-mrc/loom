@@ -191,13 +191,15 @@ secrets.
   only merge authority: `dev` requires no human approval, no CODEOWNER
   approval, and no conversation resolution. Do not hand-merge an eligible
   `dev` PR just because CI is green.
-- Every non-draft PR event, including description edits and unrelated label
-  changes, starts a complete required-check cycle. A newer filtered metadata
-  workflow can leave native auto-merge blocked even when older checks on the
-  same head are green. The changed-path planner still selects the applicable
-  work; reporting all four gates does not force every heavy lane. Finish PR
-  description and label updates before the final CI cycle to avoid restarting
-  validation. Draft events remain filtered and cannot authorize a merge.
+- Every non-draft PR event, including unrelated label changes, starts a
+  complete required-check cycle. A newer filtered metadata workflow can leave
+  native auto-merge blocked even when older checks on the same head are green.
+  The changed-path planner still selects the applicable work; reporting all
+  four gates does not force every heavy lane. Title and description edits do
+  not trigger the gate workflows, so they no longer restart validation; a base
+  retarget is revalidated by the merge-group run against the actual base.
+  Finish label updates before the final CI cycle. Draft events remain filtered
+  and cannot authorize a merge.
 - Do not assume labels are the only way to select validation. For example,
   relevant image paths select `images-gate` automatically; `ci:images` adds
   Nebius AMD64 image validation when the changed paths do not already require it.

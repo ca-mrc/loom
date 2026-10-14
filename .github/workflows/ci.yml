@@ -56,7 +56,7 @@ on:
   pull_request:
     # `labeled` is included so adding the `ci:integration` label to an
     # existing PR re-triggers CI and runs the gated `integration` job.
-    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled, edited]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled]
   merge_group:
     # Required if dev later enables GitHub merge queue: queued merge groups
     # need to emit the same required `repository-checks` context as PRs.

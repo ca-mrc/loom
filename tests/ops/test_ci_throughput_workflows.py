@@ -199,7 +199,6 @@ def test_source_workflows_share_native_run_identity() -> None:
         "converted_to_draft",
         "labeled",
         "unlabeled",
-        "edited",
     }
     for workflow in workflows.values():
         assert set(_workflow_on(workflow)["pull_request"]["types"]) == expected_pr_types
@@ -703,8 +702,11 @@ def test_protected_workflows_cover_gate_authority_pr_transitions() -> None:
             "converted_to_draft",
             "labeled",
             "unlabeled",
-            "edited",
         } <= set(pull_request["types"]), workflow_path
+        # Title/description edits leave the head unchanged. Any run they start
+        # cancels the head's in-progress gate cycle, and a base retarget is
+        # revalidated against the real base by the merge-group run.
+        assert "edited" not in pull_request["types"], workflow_path
 
 
 def test_manual_and_filtered_contexts_have_distinct_event_specific_names() -> None:
