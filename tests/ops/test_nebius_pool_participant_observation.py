@@ -305,13 +305,23 @@ def test_guard_checks_receipts_without_reprojecting_each_sql_challenge(guard_con
 
 
 @pytest.mark.parametrize('staging_attachment_inputs', [2], indirect=True)
-@pytest.mark.parametrize('damage', ['bytes', 'missing', 'extra', 'symlink', 'permissions', 'retained'])
+@pytest.mark.parametrize('damage', ['bytes', 'missing', 'extra', 'symlink', 'permissions', 'retained',
+    'absent', 'directory'])
 def test_guard_rechecks_receipts_and_inputs_before_next_sql_challenge(guard_connection, damage):
     state, connect, options = guard_connection
     file_writer(state, connect).apply_file('20-database.yaml')
     path = state.retained.state_dir / 'candidate-file-writes/dispatch.json'
     writes = list(state.writes)
     with observer(state.retained, lambda: state.rows)[0] as live:
+        observations = []
+        original = live.observe
+
+        def observe_once(**kwargs):
+            observations.append(None)
+            return original(**kwargs)
+
+        live.observe = observe_once
+
         def changed():
             if damage == 'bytes':
                 path.write_bytes(path.read_bytes() + b'\n')
@@ -325,14 +335,41 @@ def test_guard_rechecks_receipts_and_inputs_before_next_sql_challenge(guard_conn
                 path.symlink_to(moved)
             elif damage == 'permissions':
                 path.chmod(0o644)
+            elif damage == 'absent':
+                private_state._atomic_json(state.retained.anchor_dir /
+                    (str(state.retained.reference.operation_id) + '-pool-effects.json'), {})
+            elif damage == 'directory':
+                path.parent.chmod(0o755)
             else:
                 live.retained.inputs.candidate['candidate_sha'] = 'e' * 40
 
         state.guard_hook = changed
         with pytest.raises(ValueError, match='preserve'):
             live.observe_guard(phase='guarded', **options)
+    assert len(observations) == 1, 'reject drift before another full live observation'
     assert len(state.guard_queries) == 1
     assert state.writes == writes
+
+
+@pytest.mark.parametrize('staging_attachment_inputs', [2], indirect=True)
+def test_guard_rejects_new_empty_retry_directory_during_final_sql_challenge(guard_connection):
+    import hashlib
+
+    state, _, options = guard_connection
+    root = state.retained.state_dir / 'candidate-creations' / hashlib.sha256(b'pre-upgrade-backup').hexdigest()
+
+    def changed():
+        if len(state.guard_queries) == 2:
+            (root / 'attempt-1').mkdir(mode=0o700, parents=True)
+            root.chmod(0o700)
+            root.parent.chmod(0o700)
+
+    state.guard_hook = changed
+    with observer(state.retained, lambda: state.rows)[0] as live:
+        with pytest.raises(ValueError, match='preserve'):
+            live.observe_guard(phase='guarded', **options)
+    assert len(state.guard_queries) == 2
+    assert state.writes == []
 
 
 @pytest.mark.parametrize('damage', ['backend', 'credential', 'pod-restart', 'guard-changed', 'extra-report'])

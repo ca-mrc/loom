@@ -1611,6 +1611,11 @@ backend before running the existing read-only owner/candidate query. Repeated
 guard, process-identity, source and connection reads reject a changed backend,
 restart, credential, release or guard while observing. Preflight accepts open or
 this release's held guard; guarded/ready phases require that exact held owner.
+Within one guard observation, a private snapshot of the retained inputs pins
+receipt semantics. Each SQL challenge rechecks the exact private receipt bytes,
+recorded absences and complete receipt inventory without rebuilding their
+resource projections. Full live-resource and source validation still bracket
+the observation; no receipt qualification is reused by a later call.
 The released-state check requires open intake, but does not establish completed
 release history. None of these observations acquires/releases a guard, qualifies
 application processes or replaces the other protected release checks.
