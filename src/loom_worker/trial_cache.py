@@ -20,8 +20,8 @@ trial against the layered image. The build is shared:
   Docker build/push work so different cold cache keys cannot overload
   the same host Docker daemon concurrently.
 
-See `.claude/plans/2026-06-22-issue-317-agent-runtime-install.md` for
-the full design including the v3 self-review log.
+See `docs/architecture/agent-adapter.md#per-trial-agent-installation`
+for the installation and cache contract.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 import docker
@@ -877,33 +877,3 @@ def evict_stale_managed_images_from_env(
     finally:
         with contextlib.suppress(Exception):
             client.close()
-
-
-class _SupportsCacheSlots(Protocol):
-    """Subset of HttpControlPlaneClient the cache layer uses. Kept
-    here so unit tests can supply a fake without instantiating the
-    full HTTP client."""
-
-    async def claim_trial_cache_slot(
-        self,
-        cache_key: str,
-        worker_id: UUID,
-        *,
-        ttl_sec: float,
-    ) -> bool: ...
-
-    async def trial_cache_slot_exists(self, cache_key: str) -> bool: ...
-
-    async def release_trial_cache_slot(
-        self,
-        cache_key: str,
-        worker_id: UUID,
-    ) -> None: ...
-
-    async def refresh_trial_cache_slot(
-        self,
-        cache_key: str,
-        worker_id: UUID,
-        *,
-        ttl_sec: float,
-    ) -> bool: ...

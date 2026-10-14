@@ -866,7 +866,7 @@ agents need their own adapter-specific support.
 
 In service mode, team-scoped provider connections are the normal path
 for user-hosted OpenAI-compatible endpoints. Register the connection,
-refresh or manually add its model ids, then launch from the SPA. The
+refresh or manually add its model ids, then launch from the SPA.
 The hosted/public platform does not run model servers for users; it only
 stores the team-scoped provider connection and routes calls to the endpoint
 the team provides.
@@ -986,9 +986,11 @@ loom run --task humaneval/HumanEval/0 \
          --backend docker
 ```
 
-With `--local-server` present, `--model` is the upstream model id
-verbatim — no `provider/` split, no `local/<name>/` dance. Loom
-registers a transient `_inline` provider just for this trial.
+With `--local-server` present, Loom sends the full `--model` value as the
+upstream model ID and registers a transient `_inline` provider for that model
+run. The current parser still requires a slash in this value; slashless IDs
+are rejected before inline setup. Use the registered-server path below for
+those IDs.
 
 Auth flag if the server requires it:
 
@@ -1028,13 +1030,17 @@ Path detection (no `file:` prefix needed): `--model` starting with
 `/`, `~`, `./`, or `../` is treated as a local weights directory.
 
 Loom:
-1. Finds a free TCP port (starting at 8234).
-2. Starts vLLM as a subprocess (`vllm serve <model> --port ...`).
+
+1. Starts vLLM at the requested port, or 8234 by default
+   (`vllm serve <model> --port ...`).
+2. Retries the next port if the subprocess exits unsuccessfully during its
+   initial settling interval; it does not probe for a free port first.
 3. Polls `/v1/models` until healthy.
 4. Reads the canonical model id vLLM advertises (so HF ids that get
    shortened by vLLM still resolve correctly).
 5. Runs the trial against `local/_auto_vllm/<served-name>`.
-6. Tears down vLLM at end-of-process (or on Ctrl-C / SIGTERM).
+6. Tears down that model's vLLM after its trials, unless `--keep-alive` is set.
+   Process exit and SIGTERM also stop any remaining registered servers.
 
 This path is local `loom run` behavior only. It is not available as hosted
 platform inference; service-mode users should run their own vLLM or
@@ -1044,13 +1050,13 @@ vLLM tuning (passed through to `vllm serve`):
 
 | Flag | Default | Notes |
 |---|---|---|
-| `--vllm-port N` | 0 (auto-pick from 8234) | Pin if you need a predictable port |
+| `--vllm-port N` | 0 (start at 8234) | Starting port; early process failures can advance it |
 | `--vllm-host HOST` | `127.0.0.1` (loopback) | Set to `0.0.0.0` to expose on the LAN |
 | `--tensor-parallel-size N` | 1 | GPUs across which to shard |
 | `--gpu-memory-utilization F` | 0.90 | 0.0–1.0 |
 | `--max-model-len N` | model's max | Cap context window |
 | `--enforce-eager` | off | Disable CUDA graphs (debug only) |
-| `--keep-alive` | off | Leave vLLM running after the trial (handy when iterating against the same model). Only meaningful for single-`--model` runs; multi-model loops always tear down each iteration's server. |
+| `--keep-alive` | off | Skip per-model teardown, including in multi-model runs; process-exit cleanup still stops the servers. Use `loom serve` for reuse across CLI invocations. |
 
 #### Path C: persisted — same server, many runs
 
@@ -1137,8 +1143,9 @@ base_url = "http://localhost:<port>/v1"
 served_model_name = "<canonical>"
 ```
 
-to `~/.config/loom/config.toml`. On shutdown (Ctrl-C, SIGTERM, or
-vLLM crash), the entry is removed.
+to `~/.config/loom/config.toml`. Ctrl-C or SIGTERM removes the entry and stops
+the server. The foreground command currently waits for a shutdown signal;
+a vLLM process exit alone does not remove its registration.
 
 ### Comparing multiple models
 
@@ -1156,7 +1163,7 @@ model. Default behavior:
 Opt into multi-GPU parallel:
 
 ```bash
-loom run ... --model hf:A --model hf:B --parallel-models
+loom run ... --model hf:org/model-a --model hf:org/model-b --parallel-models
 ```
 
 You're responsible for ensuring enough GPU memory for both. Loom

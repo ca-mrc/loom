@@ -1,5 +1,5 @@
 /**
- * NewBatch tests — Plan 28 PR-4 redesign.
+ * NewBatch submission and task-selection tests.
  *
  * The submit body always includes `combinations` and never a `backend`
  * (Nebius is the only backend and the server resolves it)
@@ -1291,7 +1291,7 @@ describe("NewBatch", () => {
     expect(batchCall(spy)).toBeNull();
   });
 
-  // Series/tags catalog redesign (PR-3) — multi-benchmark group-select
+  // Series/tags catalog — multi-benchmark group-select
   // and tag-filter card behavior.
 
   it("group-selects all benchmarks in a series with the series checkbox", async () => {

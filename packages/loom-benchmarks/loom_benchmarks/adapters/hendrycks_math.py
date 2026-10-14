@@ -26,8 +26,6 @@ from loom_benchmarks.util import (
     toml_string,
 )
 
-_SUBSET = "all"
-
 _CHECK_PY = (
     textwrap.dedent(r'''
     import json

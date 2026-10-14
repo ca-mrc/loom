@@ -8,7 +8,6 @@ from typing import Any, Literal
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 _API_VERSION = "loom.taskset/v1"
-_KIND = "UserTaskSet"
 _SOURCE_TYPES = frozenset({"hf", "git", "https", "jsonl-inline", "bundle-upload"})
 _INTENTS = frozenset({"trajectory_generation", "evaluation"})
 _VERIFIER_TYPES = frozenset({"pytest", "script"})

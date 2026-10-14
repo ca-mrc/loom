@@ -32,7 +32,6 @@ from loom.security.redaction import redact_mapping, redact_text
 from loom_cli.server_client import NotLoggedInError, authed_client, require_logged_in
 
 _IDEMPOTENCY_HEADER = "Idempotency-Key"
-_TERMINAL_RUN_STATES = frozenset({"finished"})
 _IMPORT_KINDS = ("dataset", "policy", "mop_bank")
 _BUDGET_FIELDS = frozenset(
     {

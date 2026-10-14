@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
-import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -122,17 +121,6 @@ def _validated_v1_workload_contract(
             "invalid v1 workload trust contract: " + "; ".join(violations),
         )
     return contract
-
-
-_NATIVE_BUILDER_DIGEST = re.compile(r"[0-9a-f]{64}")
-_NATIVE_BUILDER_KEY_ID = re.compile(r"[a-z][a-z0-9._-]{0,63}")
-_NATIVE_BUILDER_IMAGE = re.compile(
-    r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,511}@sha256:[0-9a-f]{64}"
-)
-
-
-
-
 
 
 async def _assert_secret_store_startup(

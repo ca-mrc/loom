@@ -131,7 +131,6 @@ _SETUP_FAILURE_TRUNCATION_MARKER = (
     "\n...[truncated setup diagnostic; preserved trailing output]...\n"
 )
 _WORKER_SLICE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*\.slice$")
-_CANDIDATE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 logger = logging.getLogger(__name__)
 

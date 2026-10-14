@@ -63,8 +63,8 @@ export default function App(): JSX.Element {
         <Route path="trials/:trialId" element={<TrialDetail />} />
         <Route path="batches/new" element={<NewBatch />} />
         <Route path="batches/:batchId" element={<BatchDetail />} />
-        {/* Tasks / Benchmarks / Usage routes still resolve so power-user
-            URLs don't 404 mid-redesign; they're absent from nav per PR-4. */}
+        {/* Preserve bookmarked Tasks, Benchmarks, and Usage routes outside
+            primary navigation. */}
         <Route path="tasks" element={<Tasks />} />
         <Route path="benchmarks" element={<Benchmarks />} />
         <Route path="usage" element={<UsageDashboard />} />
