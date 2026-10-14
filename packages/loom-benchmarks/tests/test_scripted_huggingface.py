@@ -9,7 +9,8 @@ from pathlib import Path
 import datasets
 import huggingface_hub
 import pytest
-
+import requests
+from huggingface_hub import constants as hub_constants
 from loom_benchmarks.adapters.hendrycks_math import HendrycksMATHAdapter
 from loom_benchmarks.adapters.livecodebench import LiveCodeBenchAdapter
 from loom_benchmarks.fetch import cache_key, fetch_upstream
@@ -21,7 +22,7 @@ def source_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     files: dict[str, list[dict[str, object]]] = {}
     downloads: list[tuple[str, str, str]] = []
 
-    def download(*, repo_id, filename, revision, repo_type, cache_dir):
+    def download(*, repo_id, filename, revision, repo_type):
         assert repo_type == "dataset"
         assert filename.endswith(".jsonl")
         downloads.append((repo_id, revision, filename))
@@ -106,7 +107,41 @@ def test_livecodebench_preserves_all_six_files_and_private_cases(tmp_path, sourc
 def test_unreviewed_script_source_fails_without_completion(tmp_path, source_files, change):
     _, downloads = source_files
     src = replace(HendrycksMATHAdapter.upstream_source, **change)
-    with pytest.raises(ValueError, match="reviewed.*source"):
+    with pytest.raises(ValueError, match=r"reviewed.*source"):
         fetch_upstream(src, cache_root=tmp_path)
     assert downloads == []
     assert not (tmp_path / "huggingface" / cache_key(src) / ".fetch_complete").exists()
+
+
+def test_failed_download_does_not_mark_source_complete(tmp_path, monkeypatch):
+    def unavailable(**kwargs):
+        raise OSError("fixture transport unavailable")
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", unavailable)
+    src = LiveCodeBenchAdapter.upstream_source
+    with pytest.raises(OSError, match="fixture transport unavailable"):
+        fetch_upstream(src, cache_root=tmp_path)
+    assert not (tmp_path / "huggingface" / cache_key(src) / ".fetch_complete").exists()
+
+
+def test_existing_hub_snapshot_is_reused_without_network(tmp_path, monkeypatch):
+    src = replace(HendrycksMATHAdapter.upstream_source, subset="algebra")
+    hub_cache = tmp_path / "hub"
+    snapshot = hub_cache / "datasets--HuggingFaceTB--MATH" / "snapshots" / src.revision
+    for filename in ["algebra_train.jsonl", "algebra_test.jsonl", "prompts_4shot.jsonl"]:
+        path = snapshot / "data" / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"problem": filename, "solution": "\\boxed{3}"}) + "\n")
+    monkeypatch.setattr(hub_constants, "HF_HUB_CACHE", str(hub_cache))
+
+    def no_network(*args, **kwargs):
+        raise AssertionError("a pinned cached snapshot must not require a network request")
+
+    monkeypatch.setattr(requests.Session, "request", no_network)
+    monkeypatch.setattr(HendrycksMATHAdapter, "upstream_source", src)
+    source = fetch_upstream(src, cache_root=tmp_path / "loom-source")
+    instances = list(HendrycksMATHAdapter().list_instances(source_dir=source, split="test"))
+    assert instances[0].instance_id == "test/00000"
+    assert instances[0].raw["problem"] == "algebra_test.jsonl"
+    assert (source / ".fetch_complete").is_file()
+    assert not (source / "datasets--HuggingFaceTB--MATH").exists()
