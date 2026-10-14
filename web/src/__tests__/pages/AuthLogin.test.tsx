@@ -41,6 +41,35 @@ describe("AuthLogin", () => {
     vi.restoreAllMocks();
   });
 
+  it.each([
+    { environment: "production", environmentLabel: "Production", routePath: "/prod", identity: "Loom Production" },
+    { environment: "development", environmentLabel: "Research development", routePath: "/dev", identity: "Loom Research development" },
+  ] as const)("shows the configured $environment label when signed out", async ({ environment, environmentLabel, routePath, identity }) => {
+    setFrontendConfigForTests({
+      environment,
+      environmentLabel,
+      routePath,
+      apiBase: routePath,
+      apiRouteBase: `${window.location.origin}${routePath}/api`,
+    });
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/v1/auth/me")) {
+        return jsonResponse({ detail: "unauthorized" }, 401);
+      }
+      if (url.endsWith("/api/v1/auth/public-teams")) {
+        return jsonResponse({ items: [] });
+      }
+      return jsonResponse({ detail: `unhandled ${url}` }, 404);
+    });
+
+    renderWithProviders(<AuthLogin />, { route: "/auth/login" });
+
+    expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
+    expect(screen.getByText(identity)).toBeInTheDocument();
+    expect(screen.queryByText(/staging/i)).not.toBeInTheDocument();
+  });
+
   it("shows admin-reviewed onboarding choices and CLI setup guidance when signed out", async () => {
     setFrontendConfigForTests({
       environment: "staging",
@@ -116,7 +145,7 @@ describe("AuthLogin", () => {
     expect(screen.queryByText(/check your email/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/invite link/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/one-time login code/i)).not.toBeInTheDocument();
-    expect(screen.getByText(/Staging account requests are reviewed by an admin/i)).toBeInTheDocument();
+    expect(screen.getByText(/^Account requests are reviewed by an admin/i)).toBeInTheDocument();
     expect(screen.getAllByText("Request account").length).toBeGreaterThan(0);
     expect(screen.getByText("Forgot password")).toBeInTheDocument();
     expect(screen.getByText("CLI setup")).toBeInTheDocument();

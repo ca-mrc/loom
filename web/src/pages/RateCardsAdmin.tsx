@@ -58,7 +58,7 @@ function moneyPerMtok(value?: number | null): string {
 
 function RateCardSummary({ items }: { items: RateCard[] }): JSX.Element {
   return (
-    <div className="space-y-4">
+    <div className="stack-y-4">
       {items.map((card, index) => {
         const entries = card.table?.entries ?? [];
         return (
@@ -81,7 +81,7 @@ function RateCardSummary({ items }: { items: RateCard[] }): JSX.Element {
               </p>
             ) : (
               <div className="mt-3 overflow-x-auto" tabIndex={0} role="region" aria-label="Model prices scroll area">
-                <table aria-label="Model prices" className="min-w-full divide-y divide-slate-200 text-sm">
+                <table aria-label="Model prices" className="min-w-full stack-divide-y stack-divide-slate-200 text-sm">
                   <thead>
                     <tr className="text-left text-xs uppercase tracking-wider text-slate-500">
                       <th scope="col" className="py-2 pr-4 font-medium">Provider</th>
@@ -92,7 +92,7 @@ function RateCardSummary({ items }: { items: RateCard[] }): JSX.Element {
                       <th scope="col" className="py-2 pr-4 font-medium">Cache write</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-100">
+                  <tbody className="stack-divide-y stack-divide-slate-100">
                     {entries.map((entry, entryIndex) => (
                       <tr key={`${entry.provider}-${entry.model}-${entryIndex}`}>
                         <td className="py-2 pr-4 text-slate-700">
@@ -192,7 +192,7 @@ export default function RateCardsAdmin(): JSX.Element {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="stack-y-6">
       <header>
         <h1 className="text-2xl font-bold text-slate-900">Rate cards</h1>
         <p className="mt-1 text-sm text-slate-500">
@@ -221,7 +221,7 @@ export default function RateCardsAdmin(): JSX.Element {
             list.data.items.length === 0 ? (
               <EmptyState label="No rate cards published yet." />
             ) : (
-              <div className="space-y-4">
+              <div className="stack-y-4">
                 <RateCardSummary items={list.data.items as RateCard[]} />
                 <DiagnosticPanel
                   title="Rate-card diagnostics"
@@ -247,7 +247,7 @@ export default function RateCardsAdmin(): JSX.Element {
             title="Publish a new rate card"
             description="Review prices before publishing. Sample prices are illustrative, not current provider pricing. Publishing changes the shared card for all teams."
           />
-          <Card.Body className="space-y-3">
+          <Card.Body className="stack-y-3">
             <details open><summary className="cursor-pointer text-sm">Advanced JSON input</summary>
             <Textarea
               aria-label="Rate card JSON payload"
@@ -256,7 +256,7 @@ export default function RateCardsAdmin(): JSX.Element {
               rows={14}
             />
             </details>
-            {preview ? <section aria-label="Publication preview" className="space-y-3"><h3 className="font-semibold">Review publication: {String(preview.id)}</h3><RateCardSummary items={[{ id: String(preview.id), table: { entries: preview.entries as RateCardEntry[] } }]} /><p className="text-sm">{(list.data?.items as RateCard[] | undefined)?.some((card) => card.id === preview.id) ? "Replaces the published version with this ID." : "Creates a new published version."} Compare against the current prices above. The new card becomes effective after publication.</p><PriceChanges before={(list.data?.items as RateCard[] | undefined)?.[0]?.table?.entries ?? []} after={preview.entries as RateCardEntry[]} /></section> : null}
+            {preview ? <section aria-label="Publication preview" className="stack-y-3"><h3 className="font-semibold">Review publication: {String(preview.id)}</h3><RateCardSummary items={[{ id: String(preview.id), table: { entries: preview.entries as RateCardEntry[] } }]} /><p className="text-sm">{(list.data?.items as RateCard[] | undefined)?.some((card) => card.id === preview.id) ? "Replaces the published version with this ID." : "Creates a new published version."} Compare against the current prices above. The new card becomes effective after publication.</p><PriceChanges before={(list.data?.items as RateCard[] | undefined)?.[0]?.table?.entries ?? []} after={preview.entries as RateCardEntry[]} /></section> : null}
             {localError ? (
               <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
                 {localError}

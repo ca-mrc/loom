@@ -38,7 +38,7 @@ class RedactedEnvironmentEntry:
 
 
 _TOKEN_RE = re.compile(
-    r"\bloom_(?:admin|api|invite|team|w|session|csrf|login)_"
+    r"\bloom_(?:admin|api|invite|team|w|session|csrf|login|baseline)_"
     r"[A-Za-z0-9._~+/=-]+",
 )
 _OPENAI_STYLE_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9][A-Za-z0-9_-]{6,}\b")

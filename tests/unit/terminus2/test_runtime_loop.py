@@ -73,12 +73,15 @@ def _patch_harbor(
     *,
     tokens_seen: list[str],
     llm_kwargs_seen: list[dict[str, object]] | None = None,
+    reasoning_seen: list[object] | None = None,
     lifecycle: list[str] | None = None,
     deadline_clock: list[float] | None = None,
 ) -> None:
     class _FakeTerminus2:
         def __init__(self, logs_dir, **kwargs: object) -> None:
             self._logs_dir = logs_dir
+            if reasoning_seen is not None:
+                reasoning_seen.append(kwargs.get("reasoning_effort"))
             llm_kwargs = kwargs.get("llm_kwargs")
             if isinstance(llm_kwargs, dict) and "api_key" in llm_kwargs:
                 tokens_seen.append(str(llm_kwargs["api_key"]))
@@ -140,14 +143,15 @@ async def test_single_model_forwards_generation_params_without_reserved_override
     monkeypatch,
 ) -> None:
     kwargs_seen: list[dict[str, object]] = []
-    _patch_harbor(monkeypatch, tokens_seen=[], llm_kwargs_seen=kwargs_seen)
+    reasoning_seen: list[object] = []
+    _patch_harbor(monkeypatch, tokens_seen=[], llm_kwargs_seen=kwargs_seen, reasoning_seen=reasoning_seen)
     runtime = LoomTerminus2Runtime(
         model=ModelSpec(provider="openai", name="glm-5.2"), team_id=str(uuid4()),
         trial_id=uuid4(), cp_client=_TokenCP(), gateway_url="http://127.0.0.1:9000",
     )
     # Worker assigns after construction; run must sanitize again at dispatch.
     runtime.request_params = {
-        "temperature": 0.2, "max_tokens": 4096, "api_key": "attacker",
+        "temperature": 0.2, "max_tokens": 4096, "reasoning_effort": "high", "api_key": "attacker",
         "model": "foreign", "api_base": "http://foreign",
         "messages": [{"role": "system", "content": "override"}],
         "extra_body": {"top_k": 20, "authorization": "attacker"},
@@ -162,6 +166,7 @@ async def test_single_model_forwards_generation_params_without_reserved_override
             instruction="task", env=driver, trajectory=trajectory,
             mcp=[], skills_dir=None, step_id="agent",
         )
+    assert reasoning_seen == ["high"]
     assert kwargs_seen == [{
         "temperature": 0.2, "max_tokens": 4096,
         "extra_body": {"top_k": 20}, "api_key": "token-1",

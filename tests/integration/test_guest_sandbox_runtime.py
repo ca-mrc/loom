@@ -599,3 +599,24 @@ def test_installed_agent_reaches_the_pod_loopback_broker_from_a_guest(monkeypatc
         broker.shutdown()
         broker.server_close()
         thread.join(timeout=5)
+
+
+def test_shared_guest_verification_observes_system_changes_after_client_reconnect() -> None:
+    """Shared grading must retain agent changes outside the workspace and kernel state."""
+    with guest() as (client, _, directory):
+        boot = execute(client, "cat /proc/sys/kernel/random/boot_id")
+        execute(client, "echo repaired > /etc/repair-result; echo guest-repaired > /proc/sys/kernel/core_pattern")
+        # The agent and verifier controllers are independent clients of the
+        # same resident sandbox, not separate guest incarnations.
+        with httpx.Client(transport=httpx.HTTPTransport(uds=str(directory / "sandbox.sock")), timeout=40) as verifier:
+            assert execute(verifier, "cat /etc/repair-result /proc/sys/kernel/core_pattern") == "repaired\nguest-repaired\n"
+            assert execute(verifier, "cat /proc/sys/kernel/random/boot_id") == boot
+        assert not (directory / "root/etc/repair-result").exists()
+
+
+def test_guest_preserves_image_authored_tools() -> None:
+    with guest() as (client, _, _):
+        response = client.put("http://sandbox/file", params={"path": "/usr/bin/iptables-save"},
+                              content=b"#!/bin/sh\necho image-authored-rules\n", headers={"X-File-Mode": "0755"})
+        assert response.status_code == 204, response.text
+        assert execute(client, "iptables-save") == "image-authored-rules\n"

@@ -54,7 +54,7 @@ function TrialColumn({ trialId }: { trialId: string }): JSX.Element {
 
   return (
     <Card>
-      <Card.Body className="space-y-5">
+      <Card.Body className="stack-y-5">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
             <p className="text-xs uppercase tracking-wider text-slate-600">
@@ -124,7 +124,7 @@ function PickerForB({
   });
   return (
     <Card>
-      <Card.Body className="space-y-3">
+      <Card.Body className="stack-y-3">
         <p className="text-sm text-slate-600">
           Search by task or trial ID, or paste a trial ID.
         </p>
@@ -135,7 +135,7 @@ function PickerForB({
           onChange={(e) => setValue(e.target.value)}
         />
         {matches.isError ? <ErrorState error={matches.error} /> : null}
-        {matches.data ? <ul className="max-h-64 space-y-2 overflow-auto" aria-label="Matching trials">{matches.data.items.map((item) => <li key={item.id}><button onClick={() => onPick(item.id)} className="w-full rounded border p-2 text-left text-sm">{item.task_id} · {item.id} · {item.state}</button></li>)}</ul> : null}
+        {matches.data ? <ul className="max-h-64 stack-y-2 overflow-auto" aria-label="Matching trials">{matches.data.items.map((item) => <li key={item.id}><button onClick={() => onPick(item.id)} className="w-full rounded border p-2 text-left text-sm">{item.task_id} · {item.id} · {item.state}</button></li>)}</ul> : null}
         {matches.data?.items.length === 0 ? <p className="text-sm text-slate-500">No matching trials. Check the task or trial ID and your team access.</p> : null}
         <div className="flex justify-end">
           <Button
@@ -170,7 +170,7 @@ export default function TrialCompare(): JSX.Element {
 
   if (!a) {
     return (
-      <div className="space-y-6">
+      <div className="stack-y-6">
         <header>
           <h1 className="text-2xl font-bold text-slate-900">
             Compare trials
@@ -193,7 +193,7 @@ export default function TrialCompare(): JSX.Element {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="stack-y-6">
       <header>
         <h1 className="text-2xl font-bold text-slate-900">Compare trials</h1>
         <p className="mt-1 text-sm text-slate-500">
@@ -202,7 +202,7 @@ export default function TrialCompare(): JSX.Element {
       </header>
 
       <Link to={`/trials/${a}`} state={location.state} className="text-sm text-accent">← Back to first Trial</Link>
-      {first.data && second.data ? <Card><Card.Body className="space-y-3">
+      {first.data && second.data ? <Card><Card.Body className="stack-y-3">
         <p className={first.data.task_id === second.data.task_id ? "text-sm" : "text-sm font-semibold text-amber-800"}>
           {first.data.task_id === second.data.task_id ? "Same task, different runs." : `Different tasks: ${first.data.task_id} and ${second.data.task_id}. Scores may not be directly comparable.`}
         </p>

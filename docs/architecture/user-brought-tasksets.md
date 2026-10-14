@@ -27,6 +27,45 @@ Statuses are:
 Task filtering rechecks TaskSet ownership even when callers supply exact task
 IDs. A TaskSet must be `ready` or `partial` before its tasks can run.
 
+## Harbor bundle execution adaptation
+
+Harbor-shaped uploads using the default script verifier share the native
+catalog bundle adapter. It adds `verifier/run.sh`, which executes the original
+`tests/test.sh` and converts its numeric reward into Loom's verifier result.
+The original archive, tests and solution remain unchanged. The original config
+is preserved byte-for-byte in `upstream-task.toml`; `task.toml` contains the
+validated execution config also stored in the task row, so the executor reads
+the same contract as admission. Published bundles, checksums and execution input
+manifests include both configs and the generated private bridge. Missing test entrypoints or
+collisions at `verifier/run.sh` fail materialization with a diagnostic.
+An explicitly selected non-script verifier (such as `pytest`) or a custom
+script path keeps its existing intake behavior and does not receive this bridge.
+
+The projected verifier defaults to `shared`; explicit modes are preserved.
+An independent verifier environment or `tests/Dockerfile` defaults to
+`separate` and remains an explicit runtime requirement. Compose files are
+retained byte-for-byte. A bounded single-service local-build workbench is
+projected to native execution; `privileged` requires a private root guest and
+shared-guest deployment readiness. Mounts, devices, networking overrides, custom
+service commands and multiple services remain explicit admission blockers. See
+[guest execution](guest-execution.md) for the supported contract.
+When no network policy is declared, Harbor internet access is projected to
+`public-web` (HTTP/HTTPS through the hosted gateway). This does not provide
+unrestricted TCP access. Explicit offline policies and allowlists are preserved;
+unsupported runtime combinations still fail admission. Legacy `[task].allow_internet`
+is retained; conflicting task/environment declarations fail import. Offline
+tasks remain `no-network` through native admission, plan and sandbox policy.
+Only authored artifact paths are projected. Verifier reward and optional CTRF
+are collected by the verifier runtime, not by an injected agent-artifact glob.
+The numeric reward bridge supports either Python 3 or legacy Python 2.7 in the
+task image, without installing dependencies or changing original tests.
+
+Already materialized TaskSets need an ordinary `loom tasksets rebuild ID_OR_SLUG`
+after deploying this change. Rebuild uses the retained archive and publishes a
+new materialization; it does not edit historical trial inputs. `ready` confirms
+materialization, not successful task execution or support for every declared
+runtime requirement.
+
 ## Storage limits
 
 TaskSets have no per-team count limit. Both ordinary submission and deployment

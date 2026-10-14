@@ -679,21 +679,25 @@ shared fixture mount. It uploads bundle files under
 `s3://<bucket>/<benchmark-id>/<task-id>/` and upserts DB rows with those
 sources, reusing the worker's existing `s3://` materializer. Tasks may declare
 either `environment.docker_image` for a prebuilt sandbox image or
-`environment.dockerfile` for a Dockerfile inside the task bundle. Service-mode
-workers build Dockerfile tasks from the materialized bundle and cache the image
-under a deterministic `loom-task:<hash>` tag. Worker operators bound cache-miss
-build contexts with `LOOM_TASK_IMAGE_BUILD_MAX_FILES` (default 2000) and
+`environment.dockerfile` for a Dockerfile inside the task bundle. Hosted native
+execution prepares Dockerfile images through build Jobs; local Compose uses a
+task-image-builder sidecar. Trial workers pull the prepared digest. Standalone
+`loom run` uses a local Docker build and a deterministic `loom-task:<hash>` cache
+tag. Local Docker build contexts are bounded by
+`LOOM_TASK_IMAGE_BUILD_MAX_FILES` (default 2000) and
 `LOOM_TASK_IMAGE_BUILD_MAX_BYTES` (default 536870912).
 
-The resolved `task_image` is then layered with the chosen adapter's
+For local worker execution, the resolved `task_image` is layered with the chosen adapter's
 `install_script` at trial spawn — see
 [`agent-adapter.md#per-trial-agent-installation`](agent-adapter.md#per-trial-agent-installation).
+Hosted native execution uses the controller or installed-harness setup path
+described in [hosted agent harnesses](hosted-agent-harness.md).
 
 ### Task Dockerfile build contract
 
-When a task declares `environment.dockerfile`, the worker runs
-`docker build` against the materialized bundle directory. Authors of
-benchmark Dockerfiles should know:
+When a task declares `environment.dockerfile`, its image builder uses the
+materialized bundle directory as the build context (or its declared subdirectory).
+Authors of benchmark Dockerfiles should know:
 
 - **The build context layout is literal.** Loom preserves the uploaded or
   mirrored object tree. With the default root build context, `COPY . /app/`

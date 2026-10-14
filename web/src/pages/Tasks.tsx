@@ -109,7 +109,7 @@ export default function Tasks(): JSX.Element {
       );
     }
     return (
-      <ul className="divide-y divide-slate-100">
+      <ul className="stack-divide-y stack-divide-slate-100">
         {query.data.items.map((t) => (
           <li
             key={t.id}
@@ -160,7 +160,7 @@ export default function Tasks(): JSX.Element {
   })();
 
   return (
-    <div className="space-y-6">
+    <div className="stack-y-6">
       <header>
         <h1 className="text-2xl font-bold text-slate-900">Tasks</h1>
         <p className="mt-1 text-sm text-slate-500">

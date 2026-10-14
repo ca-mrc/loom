@@ -174,3 +174,23 @@ func TestEmulatedAuthenticationRequiresExactGuestClass(t *testing.T) {
 		})
 	}
 }
+
+func TestSharedGuestUsesExactlyOneTaskSandbox(t *testing.T) {
+	p := guestPlanPayload(t)
+	p["in_place_verifier"] = true
+	sides := p["sidecars"].([]any)
+	for _, side := range sides {
+		if side.(map[string]any)["role_name"] == "task-sandbox" {
+			p["sidecars"] = []any{side}
+		}
+	}
+	raw, _ := json.Marshal(p)
+	if _, err := decodePlan(raw); err != nil {
+		t.Fatal(err)
+	}
+	p["sidecars"] = sides
+	raw, _ = json.Marshal(p)
+	if _, err := decodePlan(raw); err == nil {
+		t.Fatal("shared verification accepted a separate guest")
+	}
+}

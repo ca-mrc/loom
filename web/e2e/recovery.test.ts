@@ -359,6 +359,11 @@ test("a root render failure remounts cleanly", async ({
   const response = await page.goto(`${browserHarness.baseURL}/`);
   expect(response?.ok()).toBe(true);
   await expectFocusedRecovery(page, "Loom could not display this page");
+  for (const name of ["Retry", "Reload Loom"]) {
+    const action = page.getByRole("button", { name, exact: true });
+    await expect(action).toHaveCSS("min-height", "44px");
+    expect((await action.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+  }
   await page.getByRole("button", { name: "Retry" }).click();
   await expectHealthyHome(page);
 });

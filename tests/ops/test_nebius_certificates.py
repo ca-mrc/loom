@@ -382,6 +382,9 @@ def test_hook_adds_and_cleans_only_selected_subject_through_real_dns_boundary(tm
     import httpx
     from scripts.ops import nebius_dns_challenge as dns
 
+    # Keep real credential validation aligned with the fixed certificate fixture.
+    load_token = dns.load_token
+    monkeypatch.setattr(dns, "load_token", lambda path: load_token(path, today=NOW.date()))
     config = installation(tmp_path)
     state = tmp_path / "certificate-state"
     state.mkdir(mode=0o700)

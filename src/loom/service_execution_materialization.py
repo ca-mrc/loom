@@ -62,6 +62,7 @@ from loom.models.task import TaskConfig, normalize_steps
 from loom.models.trial import TrialConfig
 from loom.mutable_paths import validate_task_workdir
 from loom.pipeline.keys import canonical_digest
+from loom.prebuilt_task_images import resolve_prebuilt_task_image, validate_prebuilt_image_pins
 from loom.sandbox_identity import resolve_sandbox_identity
 from loom.task_image_materialization import TaskImageExecutionGrantV1, resolve_prepared_task
 from loom.task_sandbox_planner import (
@@ -194,11 +195,13 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
     supports_task_identity: bool = False
     guest_runtime: Literal["qemu-tcg-v1"] | None = Field(default=None, exclude_if=lambda value: value is None)
     supports_emulated_pkcs11: bool = Field(default=False, exclude_if=lambda value: not value)
+    supports_shared_guest: bool = Field(default=False, exclude_if=lambda value: not value)
     guest_runtime_volume_mib: int | None = Field(default=None, ge=1024, le=4096, exclude_if=lambda value: value is None)
     guest_max_artifact_bytes: int | None = Field(default=None, gt=0, le=10 * 1024**3, exclude_if=lambda value: value is None)
     runtime_image_ref: str
     runtime_binary_sha256: str = Field(pattern=_SHA256.pattern)
     image_admission: ExecutionImageAdmissionBundleV1
+    prebuilt_image_pins: dict[str, str] = Field(default_factory=dict)
     run_as_user: int = Field(default=65532, gt=0)
     run_as_group: int = Field(default=65532, gt=0)
     fs_group: int = Field(default=65532, gt=0)
@@ -213,6 +216,12 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
         if self.guest_runtime is None:
             return frozenset()
         return ALL_GUEST_EXECUTION_CAPABILITIES if self.supports_emulated_pkcs11 else GUEST_EXECUTION_CAPABILITIES
+
+    def published_image_refs(self) -> tuple[str, ...]:
+        """Exact publisher-owned subjects, including explicit upstream task pins."""
+        return tuple(sorted({self.task_image_ref, self.runtime_image_ref,
+            *([self.agent_image_ref] if self.agent_image_ref is not None else []),
+            *self.prebuilt_image_pins.values()}))
 
     @model_serializer(mode="wrap")
     def _omit_empty_requests(self, handler: Any) -> dict[str, Any]:
@@ -229,13 +238,23 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
             payload.pop("service_lifecycle_ready", None)
         if not self.supports_task_identity:
             payload.pop("supports_task_identity", None)
+        if not self.prebuilt_image_pins:
+            payload.pop("prebuilt_image_pins", None)
         return payload
+
+    @model_validator(mode="after")
+    def admitted_prebuilt_pins(self) -> ServiceExecutionRuntimeProfileV1:
+        validate_prebuilt_image_pins(self.prebuilt_image_pins)
+        admitted = {item.statement.image_ref for item in self.image_admission.admissions}
+        if not set(self.prebuilt_image_pins.values()) <= admitted:
+            raise ValueError("prebuilt image pins require existing image admission coverage")
+        return self
 
     @model_validator(mode="after")
     def consistent_execution_class(self) -> ServiceExecutionRuntimeProfileV1:
         if self.guest_runtime is None and (
             self.guest_runtime_volume_mib is not None or self.guest_max_artifact_bytes is not None
-            or self.supports_emulated_pkcs11
+            or self.supports_emulated_pkcs11 or self.supports_shared_guest
         ):
             raise ValueError("guest budgets require an explicit guest runtime")
         execution_class = nebius_cpu_execution_class(
@@ -280,6 +299,7 @@ def build_nebius_runtime_profile(
     supports_task_identity: bool = False,
     guest_runtime: Literal["qemu-tcg-v1"] | None = None,
     supports_emulated_pkcs11: bool = False,
+    supports_shared_guest: bool = False,
     guest_runtime_volume_mib: int | None = None,
     guest_max_artifact_bytes: int | None = None,
     runtime_volume_mib: int = 32,
@@ -308,6 +328,7 @@ def build_nebius_runtime_profile(
         supports_task_identity=supports_task_identity,
         guest_runtime=guest_runtime,
         supports_emulated_pkcs11=supports_emulated_pkcs11,
+        supports_shared_guest=supports_shared_guest,
         guest_runtime_volume_mib=guest_runtime_volume_mib,
         guest_max_artifact_bytes=guest_max_artifact_bytes,
         runtime_volume_mib=runtime_volume_mib,
@@ -409,6 +430,7 @@ def automatic_service_execution_rejections(
     source_provenance: dict[str, Any],
     allow_task_image_preparation: bool = False,
     supported_capabilities: frozenset[GuestExecutionCapability] = frozenset(),
+    supports_shared_guest: bool = False,
 ) -> tuple[str, ...]:
     """Return stable reasons why the v1 ordinary-TaskSet compiler cannot run a task."""
 
@@ -450,8 +472,9 @@ def automatic_service_execution_rejections(
         # The guest path grades in a fresh verifier guest, not the agent's live
         # sandbox. Reject an explicit request for that until it is supported;
         # task-authored shared guest tasks keep their historical topology.
-        if resolve_verifier_env_mode(task, trial) == "shared" and (
+        if not supports_shared_guest and resolve_verifier_env_mode(task, trial) == "shared" and (
             trial.isolation == "guest" or trial.verifier_env_mode == "shared"
+            or env.single_service_compose is not None
         ):
             reasons.append("isolation_guest_shared_unsupported")
         if env.sidecars:
@@ -516,7 +539,7 @@ def automatic_service_execution_rejections(
                 resolve_sandbox_identity(task.verifier.user, env.environment.get("HOME"))
         except ValueError:
             reasons.append("unsupported_task_identity")
-    if effective_network_policy.kind not in {"gateway-only", "web-allowlist", "public-web"}:
+    if effective_network_policy.kind not in {"no-network", "gateway-only", "web-allowlist", "public-web"}:
         reasons.append("gateway_only_network_required")
     if (
         hosted_http_egress(effective_network_policy) is not None
@@ -636,6 +659,9 @@ def compile_service_execution_plan(
             or source_provenance != task_image_grant.task_source_provenance):
             raise ValueError("prepared task image does not match the frozen task")
         task = resolve_prepared_task(task, task_image_grant)
+    source_task_image = task.environment.docker_image
+    if is_workspace_harness(trial.agent_name):
+        task = resolve_prebuilt_task_image(task, profile.prebuilt_image_pins)
     task = normalize_steps(task)
     if (task.environment.service_lifecycle is not None or task.environment.sidecars) and not profile.service_lifecycle_ready:
         raise ValueError("service_lifecycle runtime is not ready")
@@ -644,6 +670,7 @@ def compile_service_execution_plan(
         trial,
         source_provenance=source_provenance,
         supported_capabilities=profile.supported_guest_capabilities,
+        supports_shared_guest=profile.supports_shared_guest,
     )
     if reasons:
         raise ValueError("automatic service execution is incompatible: " + ",".join(reasons))
@@ -678,6 +705,8 @@ def compile_service_execution_plan(
         {
             "schema_version": "loom.automatic-service-execution-command.v1",
             "task_revision_sha256": task_revision_sha256,
+            **({"prebuilt_task_image": {"source": source_task_image, "resolved": task.environment.docker_image}}
+               if source_task_image != task.environment.docker_image else {}),
             "agent": trial.agent_name,
             **({"agent_version": trial.agent_version, "agent_image_ref": selected_agent_image}
                if trial.agent_version is not None else {}),
@@ -905,6 +934,8 @@ def runtime_profile_rejections(
     Every applicable reason is returned, in a fixed order whose first element
     is the most specific one; callers that surface a single error use it.
     """
+    if is_workspace_harness(trial.agent_name):
+        task = resolve_prebuilt_task_image(task, profile.prebuilt_image_pins)
     reasons: list[str] = []
     try:
         effective_network_policy = resolve_effective_network_policy(
@@ -923,6 +954,10 @@ def runtime_profile_rejections(
             reasons.append("guest_runtime_volume_too_small")
         if not profile.supports_task_identity:
             reasons.append("task_identity_runtime_unavailable")
+        if (task.environment.single_service_compose is not None
+                and resolve_verifier_env_mode(task, trial) == "shared"
+                and not profile.supports_shared_guest):
+            reasons.append("shared_guest_runtime_unavailable")
     if hosted_http_egress(effective_network_policy) is not None and not profile.supports_task_web_egress:
         reasons.append("task_egress_runtime_unavailable")
     spec = hosted_harness(trial.agent_name)
@@ -971,10 +1006,13 @@ def execution_selection_rejections(
     """Every reason the selected harness, network policy, verification and
     isolation cannot run together for this task on this deployment (#2314)."""
 
+    if profile is not None and is_workspace_harness(trial.agent_name):
+        task = resolve_prebuilt_task_image(task, profile.prebuilt_image_pins)
     reasons = list(automatic_service_execution_rejections(
         task, trial, source_provenance=source_provenance,
         allow_task_image_preparation=allow_task_image_preparation,
         supported_capabilities=profile.supported_guest_capabilities if profile is not None else frozenset(),
+        supports_shared_guest=profile.supports_shared_guest if profile is not None else False,
     ))
     if profile is None:
         reasons.append("runtime_profile_unavailable")

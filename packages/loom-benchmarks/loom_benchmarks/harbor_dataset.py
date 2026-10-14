@@ -8,6 +8,7 @@ the caller explicitly fetches an ``UpstreamSource(kind="harbor-package")``.
 from __future__ import annotations
 
 import json
+import shutil
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -58,6 +59,19 @@ async def download_harbor_dataset(
     reference = f"{source.locator}@{source.revision}"
     metadata = await client.get_dataset_metadata(reference)
     items = await client.download_dataset(reference, output_dir=output_dir, export=True)
+    # Harbor export is flat (<output>/<task-name>); adapters consume the
+    # stable <materialization>/tasks/<task-name> layout. Dataset-level files
+    # remain at the materialization root, separate from executable tasks.
+    tasks_dir = output_dir / "tasks"
+    tasks_dir.mkdir(exist_ok=True)
+    for item in items:
+        downloaded = Path(item.downloaded_path)
+        if downloaded.parent != output_dir or not downloaded.is_dir() or downloaded.is_symlink():
+            raise HarborDatasetError("Harbor export task must be a directory directly under output_dir")
+        target = tasks_dir / downloaded.name
+        if target.exists():
+            raise HarborDatasetError("Harbor materialization has an existing task; refresh the cache")
+        shutil.move(str(downloaded), target)
     return write_materialization_metadata(
         output_dir,
         source=source,

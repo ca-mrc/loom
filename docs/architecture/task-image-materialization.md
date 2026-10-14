@@ -50,6 +50,33 @@ publication admission; the controller and runtime still require it.
 See [isolated fixtures](nebius-service-execution.md) for the supported subset and
 [execution security](nebius-execution-security.md) for mount and identity controls.
 
+## Upstream prebuilt task images
+
+Official benchmark packages can declare prebuilt image tags instead of Dockerfiles.
+These do not create build queue work. A deployment-owned runtime profile may carry
+`prebuilt_image_pins`, mapping each exact source tag to a qualified immutable
+`linux/amd64` image. Submission and plan compilation resolve only explicit entries
+for workspace harnesses. The original TaskConfig, task revision and source bundle
+remain unchanged; the execution plan records the selected digest and the command
+identity binds the source-tag resolution. Unmapped tags keep failing immutable
+image admission. No Dockerfile fallback or image rebuilding occurs.
+
+Each resolved image uses the existing signed `image_admission` mechanism. Protected
+publication and rollout require exact coverage of platform/controller images plus
+the declared pin values, rejecting unsigned pins and undeclared extra admissions.
+The bounded profile supports 128 images, sufficient for the 89 TB2.1 task images
+and platform components. Individual execution plans retain only their required
+admissions. Prepared fixture grants and Dockerfile build authority are unchanged.
+
+The opt-in protected publication described in
+[the Nebius runbook](../runbooks/nebius-terminus2.md#qualify-official-tb21-prebuilt-images)
+resolves the reviewed upstream list, checks image OS/architecture, scans the exact
+digest using the established Trivy policy, and signs accepted evidence with the
+existing trusted publisher key. Every resolved image receives a qualification
+result. Any rejected image prevents publishing a ready profile. A new profile must
+enter the ordinary protected candidate artifact and rollout; operators must not
+append admissions or edit a live/frozen profile manually.
+
 ## Attempts, publication and cleanup
 
 The materialization lease owns retries. Kubernetes Jobs do not independently

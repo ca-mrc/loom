@@ -11,7 +11,7 @@ def plan(path, labels=()):
 
 def test_frontend_change_does_not_start_backend_baseline():
     outputs = plan("web/src/App.tsx").github_outputs()
-    for lane in ("tests_root", "tests_packages", "go_checks", "runtime_payload", "nebius_iac", "locked_environments"):
+    for lane in ("lint_and_static", "tests_root", "tests_packages", "go_checks", "runtime_payload", "nebius_iac", "locked_environments"):
         assert outputs[lane] == "false"
     assert outputs["web_checks"] == "true"
 
@@ -19,6 +19,14 @@ def test_frontend_change_does_not_start_backend_baseline():
 def test_unrelated_label_preserves_test_selection():
     p = "tests/ops/test_ci_hosted_execution.py"
     assert json.loads(plan(p, ["bug"]).github_outputs()["test_changes"]) == [p]
+
+
+def test_go_only_change_does_not_start_python_lint():
+    assert plan("internal/guestchannel/channel.go").github_outputs()["lint_and_static"] == "false"
+
+
+def test_ignored_retired_source_still_gets_static_validation():
+    assert plan("src/loom/integrations/behavior/retired.py").github_outputs()["lint_and_static"] == "true"
 
 
 @pytest.mark.parametrize("path", [
@@ -186,7 +194,8 @@ def test_retired_ignored_inputs_do_not_restart_backend_jobs(extra):
 
     p = plan_validations(changed_paths=("src/loom/integrations/behavior/stages/rollout.py", *extra),
                          labels=(), event_name="pull_request")
-    assert not any(getattr(p, lane) for lane in BASELINE_CHECKS)
+    assert p.lint_and_static
+    assert not any(getattr(p, lane) for lane in BASELINE_CHECKS if lane != "lint_and_static")
     assert not p.integration and not p.integration_docker
     assert p.web_checks == bool(extra)
 

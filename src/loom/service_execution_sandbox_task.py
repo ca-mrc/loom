@@ -177,7 +177,7 @@ def sandbox_driver(role: str, task: TaskConfig, trial: TrialConfig) -> ServiceSa
         Path(f"/loom/sandboxes/{role}/sandbox.sock"),
         capabilities=Capabilities(
             os="linux", cpu_arch="x86_64", gpu_vendor="none",
-            network_policies=frozenset({"gateway-only", "web-allowlist", "public-web"}), dynamic_network_policy=False,
+            network_policies=frozenset({"no-network", "gateway-only", "web-allowlist", "public-web"}), dynamic_network_policy=False,
             mounted_fs=False, resource_modes=frozenset({"limit"}),
         ),
         network_policy=network_policy,

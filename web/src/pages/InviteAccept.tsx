@@ -102,7 +102,7 @@ export default function InviteAccept(): JSX.Element {
   }, [code, joinedTeam, status]);
 
   return (
-    <div className="mx-auto max-w-2xl space-y-6">
+    <div className="mx-auto max-w-2xl stack-y-6">
       <header>
         <h1 className="text-2xl font-bold text-slate-900">{title}</h1>
         <p className="mt-1 text-sm text-slate-500">
@@ -122,9 +122,9 @@ export default function InviteAccept(): JSX.Element {
             ) : null
           }
         />
-        <Card.Body className="space-y-5">
+        <Card.Body className="stack-y-5">
           {!code ? (
-            <div className="space-y-3">
+            <div className="stack-y-3">
               <p className="text-sm text-slate-600">
                 Open the invite link you received, or paste the full link in the browser address bar.
               </p>
@@ -145,7 +145,7 @@ export default function InviteAccept(): JSX.Element {
           {invite.data ? <InviteSummary invite={invite.data} /> : null}
 
           {canAccept && !joinedTeam ? (
-            <div className="space-y-3 border-t border-slate-100 pt-4">
+            <div className="stack-y-3 border-t border-slate-100 pt-4">
               <label className="block text-sm font-medium text-slate-700" htmlFor="invite-email">
                 Invite email
               </label>
@@ -171,7 +171,7 @@ export default function InviteAccept(): JSX.Element {
           ) : null}
 
           {joinedTeam ? (
-            <div className="space-y-3 border-t border-slate-100 pt-4">
+            <div className="stack-y-3 border-t border-slate-100 pt-4">
               <p className="text-sm text-slate-600">Your team is ready to use. Choose an existing provider connection or ask an owner to configure one.</p>
               <HelpButton topic="quickstart">Getting started</HelpButton>
               <div className="flex flex-wrap gap-2">

@@ -68,8 +68,12 @@ func (p plan) validateGuestExecution() error {
 			}
 		}
 	}
-	if guestClass && (guests != 2 || len(p.Sidecars) != 2 || p.RuntimeVolumeMiB < 1024 || p.ControllerResources == nil || p.AgentImageRef == nil || p.ExecutionRole != "attempt" || p.Composition != "init_payload" || p.VerifierExecution != "in_attempt" || p.Verifier == nil) {
-		return fmt.Errorf("guest class requires two private guests and bounded runtime payload storage")
+	expectedGuests := 2
+	if p.InPlaceVerifier {
+		expectedGuests = 1
+	}
+	if guestClass && (guests != expectedGuests || len(p.Sidecars) != expectedGuests || p.RuntimeVolumeMiB < 1024 || p.ControllerResources == nil || p.AgentImageRef == nil || p.ExecutionRole != "attempt" || p.Composition != "init_payload" || p.VerifierExecution != "in_attempt" || p.Verifier == nil) {
+		return fmt.Errorf("guest class requires matching private guests and bounded runtime payload storage")
 	}
 	if guestClass {
 		declared := p.TaskResources

@@ -6,7 +6,7 @@ data in explicit diagnostics disclosures.
 
 ## Shared presentation components
 
-- `InfoHint` supplies short explanations beside controls and labels.
+- `HelpButton` opens the relevant in-app help topic.
 - `DiagnosticPanel` renders a closed `details` disclosure for raw/internal
   data. `JsonViewer` is used inside diagnostics unless the page is an explicit
   JSON editor.
@@ -14,8 +14,8 @@ data in explicit diagnostics disclosures.
   value and a copy action.
 - `DestructiveActionDialog` provides the confirmation, pending, retry, and
   focus behavior for destructive or credential-invalidating mutations.
-- `humanizeTaskFilter`, `humanizeTrialConfig`, `humanizeFailureReason`, and
-  `humanizeState` return structured summaries shared across pages.
+- `humanizeTaskFilter`, `humanizeTrialConfig`, and `humanizeFailureReason`
+  return structured summaries shared across pages.
 
 ## Page behavior
 
@@ -120,7 +120,8 @@ uv run pytest -q tests/ops/test_frontend_accessibility_contract.py
 
 Every normal shell includes a keyboard skip link that focuses `main`, as do
 loading/recovery shells. `RouteContext` supplies titles and breadcrumb links
-using the router basename. Task sets have a primary-navigation entry.
+using the router basename. Getting started links to Task sets; the TaskSet
+routes remain available outside primary navigation.
 
 Run Library keeps search visible, debounces it for 300 ms, and puts the dense
 filters behind native `details`. Removable chips and Clear filters preserve

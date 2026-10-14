@@ -121,7 +121,7 @@ func TestDecodeTaskInputManifestRejectsBindingDrift(t *testing.T) {
 		FileCount:      1,
 		TotalBytes:     1,
 	}
-	if _, err := decodeTaskInputManifest([]byte("{}"), p); err == nil || !strings.Contains(err.Error(), "digest mismatch") {
+	if _, err := decodeInputManifest([]byte("{}"), p, p.TaskInput, false); err == nil || !strings.Contains(err.Error(), "digest mismatch") {
 		t.Fatalf("manifest digest drift was accepted: %v", err)
 	}
 }

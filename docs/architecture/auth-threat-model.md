@@ -30,7 +30,7 @@ and onboarding behavior is documented in [Authentication and Teams](auth-and-tea
 
 | Compromise | Contained authority |
 | --- | --- |
-| User-owned API token | The token's user, team, scopes, and expiry; no other team or platform-admin authority |
+| User-owned API token | An ordinary owner's team and allowed scopes; a current platform administrator's token also carries administrative authority, including cross-team access. Expiry and revocation still apply. |
 | Setup or reset link | One target account until consumption, revocation, or expiry |
 | Browser session | The signed-in user's current role until logout, revocation, or expiry |
 | Staging acceptance cookie | The remaining part of its fixed 900-second staging platform-admin session; no refresh or production use |
@@ -39,6 +39,11 @@ and onboarding behavior is documented in [Authentication and Teams](auth-and-tea
 | Database read | Hashed tokens and sessions plus application data; not the singleton plaintext secret or plaintext provider keys |
 
 ## Enforced controls
+
+User-token administrative authority follows the owner's current role on each
+request. Granting the role preserves existing credentials and elevates their
+authority on subsequent requests; revoking it revokes the owner's sessions and
+API tokens. See [platform administrator changes](auth-and-teams.md#platform-administrator-changes).
 
 - Production starts only with a valid, private singleton-secret file.
 - Registration targets an existing team with public registration enabled and

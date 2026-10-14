@@ -36,7 +36,7 @@ HEAVY_CHECKS = (
     "staging_smoke",
 )
 
-BASELINE_CHECKS = ("tests_root", "tests_packages", "go_checks", "runtime_payload", "nebius_iac", "locked_environments")
+BASELINE_CHECKS = ("lint_and_static", "tests_root", "tests_packages", "go_checks", "runtime_payload", "nebius_iac", "locked_environments")
 
 SUPPORTED_EVENTS = {"merge_group", "pull_request", "push", "workflow_dispatch", "schedule"}
 
@@ -164,6 +164,7 @@ class ValidationPlan:
     web_checks: bool
     reasons: dict[str, tuple[str, ...]]
     test_changes: tuple[str, ...] = ()
+    lint_and_static: bool = True
     tests_root: bool = True
     tests_packages: bool = True
     go_checks: bool = True
@@ -460,7 +461,10 @@ def plan_validations(
             elif lane == "system-smoke":
                 select("staging_smoke", reason)
         if _matches(path, exact=NEBIUS_IAC_EXACT, prefixes=NEBIUS_IAC_PREFIXES):
-            select("integration", f"nebius-iac:{path}")
+            # Terraform has its own fmt, validate and module-test lane. The
+            # Python integration suite does not apply Terraform plans.
+            if path in NEBIUS_IAC_EXACT:
+                select("integration", f"nebius-iac:{path}")
             matched_owner = True
         if _is_dependency_authority_path(path):
             for name in HEAVY_CHECKS:
@@ -474,7 +478,9 @@ def plan_validations(
         if not (policy_tool or go_input) and (path.startswith("tests/contract/") or (not test_owner_lanes and _matches(path, exact=integration_exact, prefixes=integration_prefixes))):
             select("integration", f"path:{path}")
             matched_owner = True
-        elif not test_owner_lanes and not _is_frontend_input(path) and not (policy_tool or go_input):
+        elif (not test_owner_lanes and not _is_frontend_input(path)
+              and not (policy_tool or go_input)
+              and not path.startswith(NEBIUS_IAC_PREFIXES)):
             # Frontend inputs already select browser and image contracts below.
             # They do not change the Python runtime exercised by this lane.
             select("integration", f"non-doc-path:{path}")
@@ -540,10 +546,19 @@ def plan_validations(
                or _is_dependency_authority_path(path) for path in paths)
     )
     backend_paths = tuple(path for path in runtime_paths
-                          if not _is_frontend_input(path))
+                          if not _is_frontend_input(path)
+                          and not path.startswith(NEBIUS_IAC_PREFIXES))
     baseline = {name: bool(backend_paths) for name in BASELINE_CHECKS}
     python_paths = tuple(path for path in backend_paths
                          if not _is_go_input(path) and path not in REPOSITORY_POLICY_TOOLS)
+    # Static Python checks still inspect retired inputs, while pure frontend,
+    # Go and Terraform edits do not need a Python toolchain runner.
+    baseline["lint_and_static"] = (
+        bool(python_paths)
+        or any(path in REPOSITORY_POLICY_TOOLS for path in backend_paths)
+        or any(_component_ownership_manifest().ci_ignores_path(path)
+               and not _is_documentation_path(path) for path in paths)
+    )
     baseline["tests_root"] = bool(python_paths) or any(path in REPOSITORY_POLICY_TOOLS for path in backend_paths)
     baseline["tests_packages"] = bool(python_paths)
     baseline["runtime_payload"] = bool(python_paths)

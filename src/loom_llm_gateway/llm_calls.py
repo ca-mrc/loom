@@ -11,14 +11,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.auth import AuthContext
 from loom.data_lifecycle_registry import ensure_trial_event_lifecycle_authority
-from loom.db.schema import ExecutionAttempt, LlmCall, PipelineRun, PipelineStageRun
+from loom.db.schema import (
+    ExecutionAttempt,
+    HarborBaselineSession,
+    LlmCall,
+    PipelineRun,
+    PipelineStageRun,
+)
 from loom.request_params import coerce_request_params, normalize_request_params
 from loom_llm_gateway.dialect import TokenUsage
 from loom_llm_gateway.metrics import COST_USD_TOTAL, LLM_CALLS_TOTAL
 
 
 def _service_execution_binding(
-    auth_context: AuthContext | None, *, team_id: UUID, trial_id: UUID | None,
+    auth_context: AuthContext | None,
+    *,
+    team_id: UUID,
+    trial_id: UUID | None,
 ) -> dict[str, Any] | None:
     """The lease/generation a service-execution call is attributed to.
 
@@ -44,6 +53,7 @@ async def record_call(
     team_id: UUID,
     trial_id: UUID | None = None,
     execution_attempt_id: UUID | None = None,
+    baseline_session_id: UUID | None = None,
     step_id: str,
     dialect: str,
     model: str,
@@ -63,6 +73,7 @@ async def record_call(
     response_model: str | None = None,
     role: str | None = None,
     correlation_status: str = "legacy_uncorrelated",
+    commit: bool = True,
     auth_context: AuthContext | None = None,
 ) -> None:
     """Insert one row into `llm_calls`. Called by every dialect endpoint
@@ -81,8 +92,21 @@ async def record_call(
     this successful row (#298 Slice B). Defaults to 1 so callers that
     don't go through the retry helper keep the historical semantics.
     """
-    if (trial_id is None) == (execution_attempt_id is None):
+    if (
+        sum(
+            subject is not None for subject in (trial_id, execution_attempt_id, baseline_session_id)
+        )
+        != 1
+    ):
         raise ValueError("exactly one LLM call subject is required")
+    if baseline_session_id is not None:
+        baseline_team = await session.scalar(
+            select(HarborBaselineSession.team_id).where(
+                HarborBaselineSession.id == baseline_session_id
+            )
+        )
+        if baseline_team != team_id:
+            raise ValueError("Harbor baseline attribution does not belong to team")
     if execution_attempt_id is not None:
         attempt_team_id = (
             await session.execute(
@@ -110,14 +134,18 @@ async def record_call(
             "execution_attempt_id": (
                 str(execution_attempt_id) if execution_attempt_id is not None else None
             ),
+            "baseline_session_id": str(baseline_session_id) if baseline_session_id else None,
             "step_id": step_id,
             "ref": f"llm_calls/{llm_call_id}/provider_extras/_loom_raw_provider_log",
         }
     # Every dialect, not only routes that keep a raw provider log: the lease
     # ledger reads only bound rows (#2054).
-    if (binding := _service_execution_binding(auth_context, team_id=team_id, trial_id=trial_id)) is not None:
+    if (
+        binding := _service_execution_binding(auth_context, team_id=team_id, trial_id=trial_id)
+    ) is not None:
         provider_extras["_loom_raw_provider_log"] = {
-            **provider_extras.get("_loom_raw_provider_log", {}), "service_execution": binding,
+            **provider_extras.get("_loom_raw_provider_log", {}),
+            "service_execution": binding,
         }
 
     lifecycle_authority_id = None
@@ -134,6 +162,7 @@ async def record_call(
             team_id=team_id,
             trial_id=trial_id,
             execution_attempt_id=execution_attempt_id,
+            baseline_session_id=baseline_session_id,
             step_id=step_id,
             dialect=dialect,
             model=model,
@@ -156,7 +185,8 @@ async def record_call(
             correlation_status=correlation_status,
         )
     )
-    await session.commit()
+    if commit:
+        await session.commit()
     provider_label = provider if provider is not None else dialect
     LLM_CALLS_TOTAL.labels(
         provider=provider_label,
@@ -176,6 +206,7 @@ async def record_failed_call(
     team_id: UUID,
     trial_id: UUID | None = None,
     execution_attempt_id: UUID | None = None,
+    baseline_session_id: UUID | None = None,
     step_id: str,
     dialect: str,
     model: str,
@@ -195,6 +226,7 @@ async def record_failed_call(
     role: str | None = None,
     correlation_status: str = "legacy_uncorrelated",
     auth_context: AuthContext | None = None,
+    commit: bool = True,
 ) -> None:
     """Insert one zero-token audit row for an attempted upstream call.
 
@@ -203,8 +235,21 @@ async def record_failed_call(
     request controls so debug surfaces can distinguish "no request attempted"
     from "request attempted and failed upstream".
     """
-    if (trial_id is None) == (execution_attempt_id is None):
+    if (
+        sum(
+            subject is not None for subject in (trial_id, execution_attempt_id, baseline_session_id)
+        )
+        != 1
+    ):
         raise ValueError("exactly one LLM call subject is required")
+    if baseline_session_id is not None:
+        baseline_team = await session.scalar(
+            select(HarborBaselineSession.team_id).where(
+                HarborBaselineSession.id == baseline_session_id
+            )
+        )
+        if baseline_team != team_id:
+            raise ValueError("Harbor baseline attribution does not belong to team")
     if execution_attempt_id is not None:
         attempt_team_id = (
             await session.execute(
@@ -232,7 +277,9 @@ async def record_failed_call(
     if failure_error_type:
         provider_extras["_loom_failure_error_type"] = failure_error_type
 
-    if (binding := _service_execution_binding(auth_context, team_id=team_id, trial_id=trial_id)) is not None:
+    if (
+        binding := _service_execution_binding(auth_context, team_id=team_id, trial_id=trial_id)
+    ) is not None:
         provider_extras["_loom_raw_provider_log"] = {"service_execution": binding}
 
     lifecycle_authority_id = None
@@ -248,6 +295,7 @@ async def record_failed_call(
             team_id=team_id,
             trial_id=trial_id,
             execution_attempt_id=execution_attempt_id,
+            baseline_session_id=baseline_session_id,
             step_id=step_id,
             dialect=dialect,
             model=model,
@@ -270,7 +318,8 @@ async def record_failed_call(
             correlation_status=correlation_status,
         )
     )
-    await session.commit()
+    if commit:
+        await session.commit()
     provider_label = provider if provider is not None else dialect
     result = "timeout" if failure_category == "upstream_timeout" else "upstream_error"
     LLM_CALLS_TOTAL.labels(

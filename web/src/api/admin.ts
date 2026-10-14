@@ -9,11 +9,6 @@ export type PasswordResetRequestEntry = import("./schema").components["schemas"]
 
 export type TeamRegistrationEntry = import("./schema").components["schemas"]["TeamRegistrationEntry"];
 
-export interface TeamRegistrationRequestBody {
-  name: string;
-  contact_email: string;
-}
-
 export interface TeamRegistrationApprovalBody {
   team_id: string;
   role: InviteRole;
@@ -104,11 +99,6 @@ export const adminApi = {
     apiFetch<void>(`/api/v1/tokens/${encodeURIComponent(prefix)}`, {
       method: "DELETE",
       headers: actor ? { "X-Loom-Admin-Actor": actor } : undefined,
-    }),
-  requestTeamRegistration: (body: TeamRegistrationRequestBody) =>
-    apiFetch<TeamRegistrationEntry>("/api/v1/teams/register", {
-      method: "POST",
-      body: JSON.stringify(body),
     }),
   listTeamRegistrations: (status: TeamRegistrationEntry["status"] = "pending") =>
     apiFetch<{ items: TeamRegistrationEntry[] }>(`/api/v1/admin/team-registrations${qs({ status })}`),

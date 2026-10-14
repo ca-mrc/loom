@@ -32,7 +32,7 @@ export function DiagnosticPanel({
         {title}
       </summary>
       {open ? (
-        <div className="space-y-4 border-t border-slate-100 px-5 py-4">
+        <div className="stack-y-4 border-t border-slate-100 px-5 py-4">
           <p className="text-xs text-slate-500">{description}</p>
           {blocks.map((block) => (
             <div key={block.title}>

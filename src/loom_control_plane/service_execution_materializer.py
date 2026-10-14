@@ -77,6 +77,7 @@ from loom.service_execution_terminus_trace import (
 from loom.trajectory.atif import project_to_atif
 from loom.trajectory.object_identity import TrajectoryObjectIdentity
 from loom.trajectory.storage import ObjectStore, ObjectWriteResult
+from loom.trajectory.upload_observation import UploadSpan, bind_upload_source, observe_upload
 from loom_control_plane.metrics import (
     SERVICE_EXECUTION_MATERIALIZATION_BACKLOG,
     SERVICE_EXECUTION_MATERIALIZATION_COMPLETED_TOTAL,
@@ -1124,6 +1125,7 @@ class ServiceExecutionMaterializer:
                 or lease.output_upload_session_id is None
             ):
                 raise MaterializationIntegrityError("materialization_claim_lost")
+            bind_upload_source(generation=lease.resource_generation, session_id=lease.output_upload_session_id)
             trial = await session.get(Trial, lease.trial_id)
             if trial is None:
                 raise MaterializationIntegrityError("source_identity_missing")
@@ -1958,21 +1960,24 @@ class ServiceExecutionMaterializer:
         A return is work completion, not canonical success; callers must read
         persisted state. The bounded recovery requires immutable version receipts.
         """
-        try:
-            result = await self._load_and_materialize(claim)
-            if require_versions and (result.events_version_id in {None, "", "null"} or result.atif_version_id in {None, "", "null"} or any(
-                item.version_id in {None, "", "null"} for item in (*result.files, *result.source_evidence)
-            )):
-                raise ValueError("recovery_requires_immutable_versions")
-            await self._commit(claim, result)
-        except MaterializationIntegrityError as exc:
-            await self._unavailable(claim, exc)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # object-store and database transport failures retry
-            _raise_if_cancellation_requested(exc)
-            logger.warning("service execution materialization retry: %s", exc)
-            await self._retry(claim, exc)
+        with observe_upload("canonical", lease_id=claim.lease_id, request_id=claim.claim_id), UploadSpan("materialization", "materialize") as span:
+            try:
+                result = await self._load_and_materialize(claim)
+                if require_versions and (result.events_version_id in {None, "", "null"} or result.atif_version_id in {None, "", "null"} or any(
+                    item.version_id in {None, "", "null"} for item in (*result.files, *result.source_evidence)
+                )):
+                    raise ValueError("recovery_requires_immutable_versions")
+                span.outcome = "success" if await self._commit(claim, result) else "fenced"
+            except MaterializationIntegrityError as exc:
+                await self._unavailable(claim, exc)
+                span.outcome = "unavailable"
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # object-store and database transport failures retry
+                _raise_if_cancellation_requested(exc)
+                logger.warning("service execution materialization retry: %s", exc)
+                await self._retry(claim, exc)
+                span.outcome = "retry"
 
 
 async def run_service_execution_materializer_loop(

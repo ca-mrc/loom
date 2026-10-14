@@ -40,14 +40,16 @@ shared-provider audit, usage and cost accounting, verifier evidence, and
 reproducible result exports. That lets researchers focus on tasks, agents, and
 models while Loom keeps the execution trail and operational boundary explicit.
 
-Canonical hosted routes:
+Use the hostname verified for your deployment. The earlier installation used
+these routes:
 
 - Development: [https://yylx.world/dev](https://yylx.world/dev)
 - Staging: [https://yylx.world/staging](https://yylx.world/staging)
 - Production: [https://yylx.world/prod](https://yylx.world/prod)
 
-Each route has its own namespace, database, object storage, credentials,
-provider connections, and native execution targets.
+These examples do not establish current deployment identity. Managed environments
+declare their hostnames, namespaces, data stores, credentials and execution
+targets explicitly; see the [environment contract](docs/architecture/nebius-primary-platform.md#managed-environment-identity-and-rendering).
 
 ## Supported task sources
 

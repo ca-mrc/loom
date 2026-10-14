@@ -51,7 +51,7 @@ export function DiagnosisCard({
         title="Diagnosis"
         description="Human-readable interpretation of the structured debug evidence."
       />
-      <Card.Body className="space-y-5">
+      <Card.Body className="stack-y-5">
         <div>
           <p className="text-sm font-semibold text-slate-900">
             {diagnosis.summary}
@@ -74,7 +74,7 @@ export function DiagnosisCard({
         {evidence.length > 0 ? (
           <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
             <div className="font-semibold text-slate-900">Evidence</div>
-            <ul className="mt-1 space-y-1 text-xs text-slate-600">
+            <ul className="mt-1 stack-y-1 text-xs text-slate-600">
               {evidence.map((item) => (
                 <li key={item}>{item}</li>
               ))}
@@ -95,7 +95,7 @@ export function DiagnosisCard({
                     <th scope="col" className="py-1 pr-3 font-medium">Representative</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100">
+                <tbody className="stack-divide-y stack-divide-slate-100">
                   {clusters.map((cluster) => (
                     <tr key={`${cluster.reason_code}:${cluster.representative_trial_id ?? ""}`}>
                       <td className="py-1 pr-3 font-mono text-slate-800">
@@ -119,7 +119,7 @@ export function DiagnosisCard({
         {actions.length > 0 ? (
           <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
             <div className="font-semibold text-slate-900">Next actions</div>
-            <div className="mt-2 space-y-2">
+            <div className="mt-2 stack-y-2">
               {actions.map((action, index) => {
                 if (action.action === "rerun_failed" && onRerunFailed) {
                   return (

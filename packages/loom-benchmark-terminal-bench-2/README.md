@@ -54,9 +54,10 @@ native `/tests` location, and reads `/logs/verifier/reward.txt`. A finite
 numeric reward, including `0`, is a valid verifier result. Missing, empty,
 malformed, non-finite, or timed-out reward evidence is a platform/verifier
 failure and is never converted to zero. CTRF and verifier-log paths are kept
-in the structured verifier result, and the runnable Loom step appends
-`logs/verifier/**` to the native artifact patterns so CTRF and verifier
-evidence are collected even when a source task declares `artifacts = []`.
+in the structured verifier result. The runnable Loom step preserves only the
+source task's authored artifact patterns; it does not append `logs/verifier/**`.
+The native verifier runtime independently collects the structured verifier result
+and optional CTRF, including when a source task declares `artifacts = []`.
 
 TB2 report conversion normalizes both `terminal-bench-2/<task>` and
 `terminal-bench-2@tb2.1-r6/<task>` to the short task ID. Physical revision-6
