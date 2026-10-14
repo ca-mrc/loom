@@ -164,8 +164,9 @@ async def test_google_filters_nontext_and_thought_parts_and_records_usage() -> N
         "cachedContentTokenCount": 40,
         "thoughtsTokenCount": 7,
     }
-    # Preserve local rate-card semantics: prompt + candidate + cache charges.
-    assert response.cost_usd == pytest.approx(0.00032)
+    # Google prompt tokens include cache hits; thoughts are separate from
+    # candidate tokens but billed as output: (60*2 + 40*.5 + 27*5) / 1e6.
+    assert response.cost_usd == pytest.approx(0.000275)
 
 
 @pytest.mark.asyncio
