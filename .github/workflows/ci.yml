@@ -994,6 +994,11 @@ jobs:
           path: ${{ runner.temp }}/minio-fixtures
           key: ${{ runner.os }}-${{ steps.manifest.outputs.minio_cache_key }}
 
+      - name: Prepare selected Docker Hub fixtures before test deadlines
+        run: >-
+          uv run --no-sync python -m tests.support.docker_hub_images
+          --test-paths-file "${{ steps.manifest.outputs.paths_file }}"
+
       - name: Pytest — integration (fast tier, no docker)
         shell: bash
         env:
@@ -1107,6 +1112,11 @@ jobs:
         with:
           path: ${{ runner.temp }}/minio-fixtures
           key: ${{ runner.os }}-${{ steps.manifest.outputs.minio_cache_key }}
+
+      - name: Prepare selected Docker Hub fixtures before test deadlines
+        run: >-
+          uv run --no-sync python -m tests.support.docker_hub_images
+          --test-paths-file "${{ steps.manifest.outputs.paths_file }}"
 
       - name: Build and extract the admitted software-guest payload
         if: matrix.guest_payload
