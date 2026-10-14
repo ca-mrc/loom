@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import subprocess
-from functools import partial
 from pathlib import Path
 
 import pytest
@@ -109,8 +108,9 @@ def test_management_hook_issues_and_cleans_only_its_exact_dns_record(tmp_path, m
     import httpx
     from scripts.ops import nebius_dns_challenge as dns
 
-    monkeypatch.setattr(dns, "load_token", partial(dns.load_token, today=NOW.date()))
-
+    # Keep real credential validation aligned with the fixed certificate fixture.
+    load_token = dns.load_token
+    monkeypatch.setattr(dns, 'load_token', lambda path: load_token(path, today=NOW.date()))
     path = config_path(tmp_path)
     state = tmp_path / 'certificate-state'
     state.mkdir(mode=0o700)

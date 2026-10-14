@@ -4,7 +4,6 @@ import copy
 import json
 import subprocess
 import sys
-from datetime import date
 from pathlib import Path
 from urllib.parse import quote
 
@@ -168,7 +167,6 @@ def _run_validator(
     component: str = "agent-sandbox",
     architecture: str = "amd64",
     ignore_file: Path | None = None,
-    today: date = date(2026, 9, 14),
 ) -> subprocess.CompletedProcess[str]:
     controlled_ignore = ignore_file or tmp_path / "loom-trivy-release.ignore.yaml"
     if ignore_file is None:
@@ -181,14 +179,14 @@ def _run_validator(
         [
             sys.executable,
             "-c",
+            # Exercise historical inventories before their review expires;
+            # the separate expiry tests still exercise the rejection boundary.
             "from datetime import UTC, datetime\n"
+            "from unittest.mock import patch\n"
             "from scripts import validate_trivy_release_report as validator\n"
-            "class ReviewClock(datetime):\n"
-            "    @classmethod\n"
-            "    def now(cls, tz=None):\n"
-            f"        return datetime({today.year}, {today.month}, {today.day}, tzinfo=UTC)\n"
-            "validator.datetime = ReviewClock\n"
-            "validator.main()\n",
+            "with patch.object(validator, 'datetime', wraps=datetime) as clock:\n"
+            "    clock.now.return_value = datetime(2026, 9, 14, tzinfo=UTC)\n"
+            "    validator.main()\n",
             "--component",
             component,
             "--architecture",
@@ -304,9 +302,23 @@ def test_report_validator_independently_rejects_expired_review(monkeypatch) -> N
 
 
 def test_legacy_validator_cli_rejects_expired_review(tmp_path: Path) -> None:
-    ignore_file = tmp_path / "loom-trivy-release.ignore.yaml"
-    result = _run_validator(
-        tmp_path, _report("agent-sandbox", ignore_file), today=date(2026, 10, 14),
+    ignore_file, report = tmp_path / "ignore.yaml", tmp_path / "report.json"
+    _write_ignore_file(ignore_file)
+    report.write_text(json.dumps(_report("agent-sandbox", ignore_file)))
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from datetime import UTC, datetime\n"
+            "from unittest.mock import patch\n"
+            "from scripts import validate_trivy_release_report as validator\n"
+            "with patch.object(validator, 'datetime', wraps=datetime) as clock:\n"
+            "    clock.now.return_value = datetime(2026, 10, 14, tzinfo=UTC)\n"
+            "    validator.main()\n",
+            "--component", "agent-sandbox", "--architecture", "amd64",
+            "--report", str(report), "--ignore-file", str(ignore_file),
+        ],
+        cwd=REPO_ROOT, text=True, capture_output=True, check=False,
     )
     _assert_rejected(result)
 
