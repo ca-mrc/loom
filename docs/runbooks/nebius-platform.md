@@ -153,8 +153,9 @@ cannot pass report validation. Expired exceptions for unrelated legacy images
 do not block this lane before a scan. No exception deadline is extended.
 The pure-Nebius image CI workflow passes `--no-exceptions` to both
 `write_trivy_release_policy.py` and `validate_trivy_release_report.py`, matching
-the candidate publisher's Python calls. Omitting the flag retains the legacy
-CLI policy; selecting it only on the writer or only on the validator is invalid.
+the candidate publisher's Python calls. The ordinary image matrix and the
+independent Harbor job share these strict scan steps. Omitting the flag retains
+the legacy CLI policy; selecting it only on the writer or only on the validator is invalid.
 
 The GitHub-hosted native image CI selects from the same seven published platform
 and Harbor image names. `plan-images --image-set nebius` uses their manifest-owned
@@ -169,9 +170,10 @@ See Debian's records for [CVE-2026-13221](https://security-tracker.debian.org/tr
 [CVE-2026-42496](https://security-tracker.debian.org/tracker/CVE-2026-42496) and
 [CVE-2026-8376](https://security-tracker.debian.org/tracker/CVE-2026-8376).
 The runtime package remains installed. These Dockerfiles are shared with other
-release consumers, but the existing dev workflow and CRITICAL blocking level
-remain unchanged. The legacy report validator permits a subset of reviewed
-exceptions as packages are fixed; it still rejects unreviewed/mismatched PURLs,
+release consumers. CI and Nebius publication keep the same CRITICAL blocking
+level and reject all active or suppressed findings; compatibility fixtures with
+remaining CRITICAL packages continue to fail their scans. The legacy report
+validator permits a subset of reviewed exceptions as packages are fixed; it still rejects unreviewed/mismatched PURLs,
 expired suppressed findings and active vulnerabilities. Legacy policy generation
 continues to enforce its own exception expiry. New Nebius images require none.
 

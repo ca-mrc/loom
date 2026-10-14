@@ -4,6 +4,7 @@ import copy
 import json
 import subprocess
 import sys
+from datetime import date
 from pathlib import Path
 from urllib.parse import quote
 
@@ -11,7 +12,6 @@ import pytest
 from scripts import write_trivy_release_policy as policy
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-VALIDATOR = REPO_ROOT / "scripts/validate_trivy_release_report.py"
 _PERL_CVES = (
     "CVE-2026-13221",
     "CVE-2026-42496",
@@ -168,6 +168,7 @@ def _run_validator(
     component: str = "agent-sandbox",
     architecture: str = "amd64",
     ignore_file: Path | None = None,
+    today: date = date(2026, 9, 14),
 ) -> subprocess.CompletedProcess[str]:
     controlled_ignore = ignore_file or tmp_path / "loom-trivy-release.ignore.yaml"
     if ignore_file is None:
@@ -179,7 +180,15 @@ def _run_validator(
     return subprocess.run(
         [
             sys.executable,
-            str(VALIDATOR),
+            "-c",
+            "from datetime import UTC, datetime\n"
+            "from scripts import validate_trivy_release_report as validator\n"
+            "class ReviewClock(datetime):\n"
+            "    @classmethod\n"
+            "    def now(cls, tz=None):\n"
+            f"        return datetime({today.year}, {today.month}, {today.day}, tzinfo=UTC)\n"
+            "validator.datetime = ReviewClock\n"
+            "validator.main()\n",
             "--component",
             component,
             "--architecture",
@@ -292,6 +301,14 @@ def test_report_validator_independently_rejects_expired_review(monkeypatch) -> N
     monkeypatch.setattr(validator, "datetime", ExpiredClock)
     with pytest.raises(validator.TrivyReportError, match="expired"):
         validator._policy_statements()
+
+
+def test_legacy_validator_cli_rejects_expired_review(tmp_path: Path) -> None:
+    ignore_file = tmp_path / "loom-trivy-release.ignore.yaml"
+    result = _run_validator(
+        tmp_path, _report("agent-sandbox", ignore_file), today=date(2026, 10, 14),
+    )
+    _assert_rejected(result)
 
 
 def test_validator_rejects_a_missing_suppressed_finding(tmp_path: Path) -> None:
