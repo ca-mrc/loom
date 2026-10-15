@@ -166,6 +166,8 @@ class ValidationPlan:
     test_changes: tuple[str, ...] = ()
     lint_and_static: bool = True
     tests_root: bool = True
+    # Pool operator lane: eligible with tests-root; its own matrix decides the final selection.
+    nebius_pool: bool = True
     tests_packages: bool = True
     go_checks: bool = True
     runtime_payload: bool = True
@@ -186,6 +188,7 @@ class ValidationPlan:
                 "unowned_runtime",
                 *HEAVY_CHECKS,
                 *BASELINE_CHECKS,
+                "nebius_pool",
                 "coverage_summary",
                 "web_checks",
             )
@@ -601,6 +604,7 @@ def plan_validations(
         reasons={name: tuple(values) for name, values in reasons.items()},
         # Explicit selector labels and manual runs retain full regression.
         test_changes=paths if event_name in {"pull_request", "merge_group"} and not set(labels) & LABEL_TO_CHECK.keys() else (),
+        nebius_pool=baseline["tests_root"],
         **baseline,
     )
 
@@ -640,9 +644,11 @@ def main() -> int:
     outputs = plan.github_outputs()
     effective_changes = tuple(json.loads(outputs["test_changes"]))
     tracked_paths = _tracked_paths(REPO_ROOT)
-    pool_selected = plan.tests_root and plan.gate_mode == "full"
     for lane, selected_name, matrix_name in (
         ("tests-root", "tests_root", "tests_root_matrix"),
+        # Its eligibility is fixed before tests-root narrows, so an empty
+        # tests-root matrix never suppresses a selected pool matrix.
+        ("nebius-pool", "nebius_pool", "nebius_pool_matrix"),
         ("integration", "integration", "integration_matrix"),
         ("integration-docker", "integration_docker", "integration_docker_matrix"),
         ("cluster-smoke", "cluster_smoke", "cluster_smoke_matrix"),
@@ -656,14 +662,6 @@ def main() -> int:
         # Jobs and the final gate must agree on that deliberate empty selection.
         outputs[selected_name] = str(bool(matrix)).lower()
         plan = replace(plan, **{selected_name: bool(matrix)})
-    # The pool operator suite has its own shards. It is a candidate whenever
-    # tests-root is; its manifest affected_paths decide whether this change selects it.
-    pool_matrix = test_shard_matrix(
-        _component_ownership_manifest(), tracked_paths=tracked_paths, lane="nebius-pool",
-        repo_root=REPO_ROOT, changed_paths=effective_changes, test_scope=args.test_scope,
-    ) if pool_selected else ()
-    outputs["nebius_pool_matrix"] = json.dumps(pool_matrix, separators=(",", ":"))
-    outputs["nebius_pool"] = str(bool(pool_matrix)).lower()
     with args.github_output.open("a", encoding="utf-8") as handle:
         for name, value in outputs.items():
             handle.write(f"{name}={value}\n")

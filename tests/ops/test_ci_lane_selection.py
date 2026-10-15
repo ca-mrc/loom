@@ -161,12 +161,18 @@ def test_shard_manifests_execute_exactly_the_planned_selection(changes, lane):
     assert matrix == {index for index, shard in enumerate(shards) if shard}
 
 
-@pytest.mark.parametrize(("path", "pool"), [
-    ("src/loom/config.py", False),
-    ("scripts/ops/deploy_nebius_platform.py", True),
-    ("tests/ops/test_nebius_pool_runtime.py", True),
+# Built from parts: narrowing keeps the full lane if any .py file names the module.
+UNREFERENCED_POOL_TEST = "tests/ops/" + "_".join(("test_nebius_pool", "activation_transport")) + ".py"
+
+
+@pytest.mark.parametrize(("path", "pool", "tests_root"), [
+    ("src/loom/config.py", False, True),
+    ("scripts/ops/deploy_nebius_platform.py", True, True),
+    ("tests/ops/test_nebius_pool_runtime.py", True, True),
+    # A pool-only edit narrows tests-root to nothing; that must not drop the pool lane.
+    (UNREFERENCED_POOL_TEST, True, False),
 ])
-def test_pool_suite_has_its_own_shards_so_tests_root_stays_small(tmp_path, path, pool):
+def test_pool_suite_has_its_own_shards_so_tests_root_stays_small(tmp_path, path, pool, tests_root):
     import subprocess
     import sys
     from pathlib import Path
@@ -174,12 +180,17 @@ def test_pool_suite_has_its_own_shards_so_tests_root_stays_small(tmp_path, path,
     root = Path(__file__).resolve().parents[2]
     changes, output = tmp_path / "changes", tmp_path / "output"
     changes.write_text(f"{path}\n")
-    subprocess.run([sys.executable, "scripts/plan_ci_validations.py", "--changed-files", str(changes),
-                    "--event-name", "pull_request", "--pull-request-action", "synchronize",
-                    "--github-output", str(output), "--test-scope", "nebius"],
-                   cwd=root, check=True, capture_output=True, text=True)
+    run = subprocess.run([sys.executable, "scripts/plan_ci_validations.py", "--changed-files", str(changes),
+                          "--event-name", "pull_request", "--pull-request-action", "synchronize",
+                          "--github-output", str(output), "--test-scope", "nebius"],
+                         cwd=root, check=True, capture_output=True, text=True)
     values = dict(line.split("=", 1) for line in output.read_text().splitlines())
     assert values["nebius_pool"] == str(pool).lower()
+    assert values["tests_root"] == str(tests_root).lower()
+    # The printed diagnostic plan and the job outputs agree on every lane.
+    printed = json.loads(run.stdout.splitlines()[-1])
+    for name in ("tests_root", "nebius_pool", "integration", "integration_docker", "cluster_smoke"):
+        assert values[name] == str(printed[name]).lower(), name
     pool_rows = json.loads(values["nebius_pool_matrix"])
     assert bool(pool_rows) is pool
     assert all(row["shard_count"] == 20 for row in pool_rows)
