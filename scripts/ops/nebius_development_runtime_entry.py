@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 from scripts.ops.nebius_development_build_cloud import DevelopmentRegistryCloudScope
 from scripts.ops.nebius_development_collector_cloud import DevelopmentCollectorCloudScope
 from scripts.ops.nebius_development_entry import _transport
@@ -34,9 +34,21 @@ from loom_service.environment_management.manager import CandidateBundle
 SOURCE_RECORD = Path(__file__).resolve().parents[2] / 'development-runtime-source.json'
 
 
+class DevelopmentDataRuntimeInputs(BaseModel):
+    model_config = ConfigDict(extra='forbid', frozen=True, hide_input_in_errors=True)
+    source: PreparedDevelopmentSource
+    publication: ProtectedPublication
+    candidate: dict[str, Any]
+    profile: dict[str, Any]
+
+    def selection(self) -> DevelopmentRuntimePublication:
+        return DevelopmentRuntimePublication(self.source, self.publication,
+            CandidateBundle(self.publication.candidate_id, self.candidate, self.profile))
+
+
 class DevelopmentRuntimePrivateInputs(BaseModel):
     model_config = ConfigDict(extra='forbid', frozen=True, hide_input_in_errors=True)
-    schema_version: Literal['loom.nebius-development-runtime-inputs.v1']
+    schema_version: Literal['loom.nebius-development-runtime-inputs.v1', 'loom.nebius-development-runtime-inputs.v2']
     retained: RetainedDevelopmentPoolReference
     publication: ProtectedPublication
     candidate: dict[str, Any]
@@ -49,6 +61,15 @@ class DevelopmentRuntimePrivateInputs(BaseModel):
     batch_runner_token_file: Path
     cache_files: dict[str, Path] | None = None
     operator_connection: NebiusKubernetesConnection
+    publication_source: PreparedDevelopmentSource | None = None
+    data_runtime: DevelopmentDataRuntimeInputs | None = None
+
+    @model_validator(mode='after')
+    def publication_domains(self) -> DevelopmentRuntimePrivateInputs:
+        split = self.schema_version == 'loom.nebius-development-runtime-inputs.v2'
+        if split != (self.publication_source is not None) or split != (self.data_runtime is not None):
+            raise ValueError('runtime publication domains differ from input version')
+        return self
 
 
 def load_inputs(operation: dict[str, Any]) -> tuple[DevelopmentRuntimePrivateInputs, DevelopmentRuntimeInstallRequest, dict[Path, bytes]]:
@@ -69,9 +90,10 @@ def load_inputs(operation: dict[str, Any]) -> tuple[DevelopmentRuntimePrivateInp
         files = {item: _private(item) for item in paths}
         if files[path] != raw or files[SOURCE_RECORD] != source_raw:
             raise ValueError
-        publication = DevelopmentRuntimePublication(source, inputs.publication,
+        publication = DevelopmentRuntimePublication(inputs.publication_source or source, inputs.publication,
             CandidateBundle(inputs.publication.candidate_id, inputs.candidate, inputs.profile))
         database = prepare_database_runtime(inputs.retained, publication=publication,
+            data_publication=inputs.data_runtime.selection() if inputs.data_runtime is not None else None,
             operation_id=UUID(operation['operation_id']),
             actuator_password=files[inputs.actuator_password_file].decode(),
             batch_runner_token=files[inputs.batch_runner_token_file].decode())

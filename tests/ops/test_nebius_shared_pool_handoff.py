@@ -174,7 +174,7 @@ def staging_observation():
 
 
 @pytest.fixture
-def published_source(publication, source_checkout, tmp_path):
+def published_source(publication, source_checkout, tmp_path, request):
     from tests.ops import test_nebius_development_preflight as preflight
 
     original = preflight.inputs
@@ -186,7 +186,7 @@ def published_source(publication, source_checkout, tmp_path):
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(preflight, 'inputs', canonical)
-        return preflight.published_source.__wrapped__(publication, source_checkout, tmp_path)
+        return preflight.published_source.__wrapped__(publication, source_checkout, tmp_path, request)
 
 
 @pytest.fixture

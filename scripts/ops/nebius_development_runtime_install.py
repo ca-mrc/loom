@@ -170,10 +170,13 @@ def prepare_runtime_install(request: DevelopmentRuntimeInstallRequest) -> Develo
                 raise ValueError
             stopped[key] = _snapshot(original)
             stopped[key]['spec']['replicas'] = 0
-        checksum = digest({'reference': database.reference.model_dump(mode='json'),
+        intent = {'reference': database.reference.model_dump(mode='json'),
             'operation_id': str(database.operation_id), 'source': database.manager.publication.source.model_dump(mode='json'),
             'collector': request.collector_scope.model_dump(mode='json'), 'registry': request.registry_scope.model_dump(mode='json'),
-            'fixed': fixed, 'originals': originals, 'stopped': stopped, 'targets': targets})
+            'fixed': fixed, 'originals': originals, 'stopped': stopped, 'targets': targets}
+        if database.data_publication is not None:
+            intent['data_source'] = database.data_publication.source.model_dump(mode='json')
+        checksum = digest(intent)
         return DevelopmentRuntimePlan(fixed, originals, stopped, targets, checksum)
     except Exception:
         raise ValueError('development runtime installation intent unqualified') from None

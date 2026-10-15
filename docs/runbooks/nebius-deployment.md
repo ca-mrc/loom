@@ -698,6 +698,27 @@ The `loom.nebius-development-runtime-inputs.v1` document contains:
   files. Optional `cache_files` contains only the configured build-cache access and
   secret keys; omit it when no cache is configured.
 
+Use `loom.nebius-development-runtime-inputs.v2` when the installed manager and
+shared-dev databases have different schema heads, or installer source differs
+from the selected images. It retains the above fields and additionally requires:
+
+- `publication_source`: the manager publication's `source_sha` and
+  `source_archive_sha256`, independently of the installer source record.
+- `data_runtime`: an object containing `source` (the same source identity shape),
+  `publication`, `candidate`, and `profile` for the shared-dev runtime.
+
+Select an exact CI-published data-runtime candidate matching the retained
+foundation/application schema and a manager candidate matching the retained
+manager schema. The two explicitly supported data heads are `0175` and `0176`;
+both selected releases must descend from the shared-pool protocol baseline.
+Live GitHub approval, artifact and signature verification apply to **both**
+selections. The SQL Job uses the data-runtime service image and still requires
+its exact live schema; it performs no migration. Do not alter retained application
+releases or pool build recipes, relabel a candidate's schema, or select a newer
+incompatible image to bypass this check. The source-bound protected bundle still
+pins the installer independently. Existing v1 inputs keep their single-source
+contract and cannot contain either v2 selection field.
+
 Preflight performs read-only qualification and writes no installation state.
 Installation stages the fixed SQL setup, material, read-only authority and build
 isolation, then records each stopped/replaced/started workload transition. It may
