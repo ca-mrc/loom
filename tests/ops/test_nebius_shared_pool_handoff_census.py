@@ -170,8 +170,16 @@ def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writ
     rbac_kinds = {'Role': 'roles', 'ClusterRole': 'clusterroles', 'RoleBinding': 'rolebindings',
         'ClusterRoleBinding': 'clusterrolebindings'}
     kinds.update(rbac_kinds)
+    historical_database = json.loads((staging_history.context.original.upgrade.original_state
+        / 'database' / 'stage.json').read_bytes())
+    historical_database_resources = []
+    for item in historical_database['resources'].values():
+        row = copy.deepcopy(item['observed'])
+        row['metadata']['uid'] = item['uid']
+        historical_database_resources.append(row)
     roots = {_key(row): copy.deepcopy(row) for row in (*staging_history.context.request.platform_consumers,
-        *staging_history.completion.workloads.values(), *documents.values(), *staging_observation['resources'])
+        *staging_history.completion.workloads.values(), *documents.values(), *staging_observation['resources'],
+        *historical_database_resources)
         if row['kind'] in {'Deployment', 'StatefulSet', 'CronJob'}}
     inventory = {plural: [] for plural in kinds.values()}
     authority = {_key(row): copy.deepcopy(row) for row in (*staging_history.context.original.retained.values(),

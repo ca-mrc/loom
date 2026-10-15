@@ -884,7 +884,11 @@ authority, process readiness or an operational shared pool.
 
 The initial writer census reads all RBAC and built-in workload collections at one
 API-server revision, including terminal Pods. Its retained roots include current
-staging, completed dev, and the retired old manager/gateway. It rejects changed
+staging, the still-live staging manager PostgreSQL StatefulSet and Service from
+the exact hash-bound original `database/stage.json` journal, completed dev, and
+the retired old manager/gateway. That database exception is identity-bound to
+the completed predecessor; a name, namespace or PostgreSQL account alone never
+qualifies a root. It rejects changed
 root identities/templates, detached processes using their ServiceAccounts,
 undeclared schedules in worker namespaces (even suspended schedules), and
 additional named, group, or cross-namespace writer grants. Old gateway Roles

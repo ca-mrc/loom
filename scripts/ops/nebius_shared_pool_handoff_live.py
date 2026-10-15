@@ -7,14 +7,16 @@ evidence, persist its phase intent, and repeat authority checks before mutation.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 from collections.abc import Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 from uuid import UUID
 
+from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_development_bootstrap import _secret_documents
 from scripts.ops.nebius_development_runtime_external import qualify_runtime_cloud
 from scripts.ops.nebius_development_runtime_install import DevelopmentRuntimeInstallRequest
@@ -156,10 +158,13 @@ class SharedPoolWriterObservation:
 
 
 def _resource_roots(plan: SharedPoolHandoffPlan, kinds: frozenset[str]) -> dict[str, dict[str, Any]]:
-    """Current fixed consumers, including the retired old manager/gateway.
+    """Current fixed consumers, including the retained old manager database.
 
     Current staging replaces historical staging templates; completed dev runtime
-    replaces its foundation templates. Neither source is caller-supplied authority.
+    replaces its foundation templates. The staging manager database is still live,
+    but its original StatefulSet has no Kubernetes owner reference. Load only its
+    exact hash-bound stage journal entry so this exception cannot adopt a foreign
+    PostgreSQL workload. Neither source is caller-supplied authority.
     """
     result: dict[str, dict[str, Any]] = {}
 
@@ -186,6 +191,34 @@ def _resource_roots(plan: SharedPoolHandoffPlan, kinds: frozenset[str]) -> dict[
                 row = copy.deepcopy(item['observed'])
                 row['metadata']['uid'] = item['uid']
                 add(row)
+    # The staging manager's original database StatefulSet/Service are retained
+    # roots even though the StatefulSet has no owner reference. `legacy.history`
+    # binds the exact private bytes; do not scan a directory or accept a name-only
+    # exception, which would weaken the fail-closed foreign-writer census.
+    historical = plan.staging.legacy.context.original.upgrade.original_state / 'database' / 'stage.json'
+    checksum = plan.history.get(historical)
+    if checksum is None:
+        raise ValueError
+    raw = private_state._private_read(historical, limit=4 * 1024**2)
+    if hashlib.sha256(raw).hexdigest() != checksum:
+        raise ValueError
+    journal = json.loads(raw)
+    binding = plan.staging.legacy.context.original.upgrade.setup.binding
+    database_keys = {kind + ':' + binding.namespace + ':loom-postgres' for kind in ('StatefulSet', 'Service')}
+    if (journal.get('schema') != 'loom.nebius-management-stage.v1'
+            or journal.get('binding') != asdict(binding)
+            or journal.get('phase') != '20-database.yaml'
+            or set(journal.get('resources', {})) != database_keys):
+        raise ValueError
+    for key in database_keys:
+        item = journal['resources'][key]
+        if (set(item) != {'desired', 'expected', 'status', 'uid', 'observed'}
+                or item['status'] != 'created' or not isinstance(item['uid'], str)
+                or not isinstance(item['observed'], dict) or _key(item['observed']) != key):
+            raise ValueError
+        row = copy.deepcopy(item['observed'])
+        row['metadata']['uid'] = item['uid']
+        add(row)
     for row in plan.development.runtime.resources.values():
         add(row)
     if len({_uid(row) for row in result.values()}) != len(result):
