@@ -104,6 +104,7 @@ SOURCES += tuple("scripts/ops/" + name + ".py" for name in (
     "nebius_pool_startup_repair_live",
     "nebius_pool_template_restoration",
     "nebius_shared_pool_activation",
+    "nebius_shared_pool_application_authority",
     "nebius_shared_pool_build_activation",
     "nebius_shared_pool_command",
     "nebius_shared_pool_database",
