@@ -1704,40 +1704,7 @@ def test_batch_show_network_policy_json_remains_unchanged(
     assert json.loads(capsys.readouterr().out) == payload
 
 
-def test_batch_create_rejects_verifier_env_mode_with_skip_verifier(
-    mock_server: MockServer,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    _stub_connection_lookup(mock_server)
-    rc = main(
-        [
-            "eval",
-            "batch",
-            "create",
-            "--purpose",
-            "trajectory_generation",
-            "--provider",
-            "openai-prod",
-            "--model",
-            "gpt-4o",
-            "--agent",
-            "litellm",
-            "--benchmark",
-            "humaneval",
-            "--skip-verifier",
-            "--verifier-env-mode",
-            "shared",
-            "--name",
-            "n",
-        ]
-    )
-    assert rc == 2
-    assert "verifier-env-mode" in capsys.readouterr().err
-    paths = [(r.method, r.url.path) for r in mock_server.requests]
-    assert ("POST", "/api/v1/batches") not in paths
-
-
-def test_batch_create_evaluation_rejects_skip_verifier(
+def test_batch_create_evaluation_rejects_skipped_verification(
     mock_server: MockServer,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -1757,13 +1724,14 @@ def test_batch_create_evaluation_rejects_skip_verifier(
             "litellm",
             "--benchmark",
             "humaneval",
-            "--skip-verifier",
+            "--verifier-env-mode",
+            "skipped",
             "--name",
             "n",
         ]
     )
     assert rc == 2
-    assert "skip-verifier" in capsys.readouterr().err.lower()
+    assert "trajectory_generation" in capsys.readouterr().err
     paths = [(r.method, r.url.path) for r in mock_server.requests]
     assert ("POST", "/api/v1/batches") not in paths
 
@@ -3911,7 +3879,7 @@ def test_batch_create_complete_request_preserves_export(
 
 @pytest.mark.parametrize("flags", [
     ["--agent", "oracle"], ["--team-id", "another-team"],
-    ["--skip-verifier"], ["--name-suffix", "overwrite"],
+    ["--verifier-env-mode", "skipped"], ["--name-suffix", "overwrite"],
     ["--combinations-json", '[{"agent_name":"oracle"}]'],
     ["--storage-preflight-evidence", "does-not-exist.json"],
     ["--n-per-task", "1"], ["--n-per-task=1"], ["--name-suffix", ""],
@@ -3981,6 +3949,33 @@ def test_batch_create_execution_config_maps_all_four_axes(
     assert trial_config["baseline_network_policy_override"] == {
         "kind": "web-allowlist", "destinations": [{"host": "pypi.org", "protocol": "https"}],
     }
+    capsys.readouterr()
+
+
+def test_batch_create_execution_config_skipped_maps_to_skip_verifier(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str], tmp_path: Path,
+) -> None:
+    _stub_connection_lookup(mock_server)
+    mock_server.canned[("POST", "/api/v1/batches")] = httpx.Response(201, json={
+        "batch_id": _BATCH_ID, "expected_trial_count": 1, "state": "submitted",
+        "created_at": "2026-06-16T00:00:00Z",
+    })
+    config = _execution_config(
+        tmp_path,
+        harness={"name": "terminus-2"},
+        network_policy={"mode": "gateway-only"},
+        verification="skipped",
+    )
+    rc = main([
+        "eval", "batch", "create", "--purpose", "trajectory_generation",
+        "--provider", "openai-prod", "--model", "gpt-4o",
+        "--task-set", "ts/team/demo", "--execution-config", config,
+    ])
+    assert rc == 0
+    trial_config = json.loads(mock_server[-1].content)["trial_config"]
+    assert trial_config["skip_verifier"] is True
+    assert "verifier_env_mode" not in trial_config
+    assert trial_config["baseline_network_policy_override"] == {"kind": "gateway-only"}
     capsys.readouterr()
 
 

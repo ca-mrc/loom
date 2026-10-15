@@ -119,9 +119,11 @@ expire existing sets; operators must review and explicitly backfill them.
 Batches declare a `purpose` at create time:
 
 - `evaluation` — official/native **benchmarks** only; verification required
-  (`skip_verifier` rejected). Private TaskSets are not selectable.
+  (`verification: skipped` / `skip_verifier` rejected). Private TaskSets are
+  not selectable.
 - `trajectory_generation` — team **TaskSets** and, during transition, native
-  benchmarks too; verifier optional.
+  benchmarks too; verifier optional (`verification: skipped` on the
+  execution-selection document).
 
 Trial execution, agent harness selection, and trajectory export are the same
 for both purposes. The split is catalog provenance and verification policy,

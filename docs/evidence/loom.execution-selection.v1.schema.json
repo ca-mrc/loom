@@ -108,7 +108,8 @@
         {
           "enum": [
             "shared",
-            "separate"
+            "separate",
+            "skipped"
           ],
           "type": "string"
         },

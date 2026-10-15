@@ -7,11 +7,10 @@ export { RETRY_REASONS, clampFloat, clampInt, type RetryReason } from "./advance
 export interface AdvancedState {
   forceBuild: boolean;
   deleteEnv: boolean;
-  verifierEnvMode: "" | "shared" | "separate";
+  verifierEnvMode: "" | "shared" | "separate" | "skipped";
   isolation: "" | "container" | "guest";
   networkPolicy: "" | "gateway-only" | "web-allowlist" | "public-web";
   allowedWebsites: string;
-  skipVerifier: boolean;
   overrideAgentTimeoutSec: string;
   agentTimeoutMultiplier: string;
   overrideVerifierTimeoutSec: string;
@@ -42,7 +41,6 @@ export const INITIAL_ADVANCED: AdvancedState = {
   isolation: "",
   networkPolicy: "",
   allowedWebsites: "",
-  skipVerifier: false,
   overrideAgentTimeoutSec: "",
   agentTimeoutMultiplier: "1",
   overrideVerifierTimeoutSec: "",
@@ -108,8 +106,8 @@ export function buildAdvancedConfig(
   const out: Record<string, unknown> = {};
   if (s.forceBuild) out.force_build = true;
   if (!s.deleteEnv) out.delete_env = false;
-  if (s.skipVerifier) out.skip_verifier = true;
-  if (s.verifierEnvMode) out.verifier_env_mode = s.verifierEnvMode;
+  if (s.verifierEnvMode === "skipped") out.skip_verifier = true;
+  else if (s.verifierEnvMode) out.verifier_env_mode = s.verifierEnvMode;
   if (s.isolation) out.isolation = s.isolation;
   const networkPolicy = buildNetworkPolicyOverride(s);
   if (!networkPolicy.ok) return networkPolicy;

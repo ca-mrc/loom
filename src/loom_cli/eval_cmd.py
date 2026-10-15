@@ -40,7 +40,7 @@ from urllib.parse import urlsplit
 import httpx
 from pydantic import ValidationError
 
-from loom.execution_selection import ExecutionSelectionV1
+from loom.execution_selection import ExecutionSelectionV1, apply_verification_selection
 from loom.models.networking import WebDestination
 from loom.security.redaction import redact_mapping
 from loom_cli.backend_flag import add_legacy_backend_flag, warn_legacy_backend_flag
@@ -1003,22 +1003,14 @@ def _batch_create(args: argparse.Namespace) -> int:
                             args.multi_model_episode_ceiling
                         )
                 trial_config["multi_model"] = multi_model_block
-            if getattr(args, "skip_verifier", False):
-                if args.purpose != "trajectory_generation":
-                    sys.stderr.write(
-                        "error: --skip-verifier is only allowed with "
-                        "--purpose trajectory_generation.\n",
-                    )
-                    return 2
-                trial_config["skip_verifier"] = True
-            if getattr(args, "verifier_env_mode", None):
-                if trial_config.get("skip_verifier"):
-                    sys.stderr.write(
-                        "error: --verifier-env-mode cannot be combined with "
-                        "--skip-verifier.\n",
-                    )
-                    return 2
-                trial_config["verifier_env_mode"] = args.verifier_env_mode
+            verification_error = apply_verification_selection(
+                trial_config,
+                getattr(args, "verifier_env_mode", None),
+                purpose=args.purpose,
+            )
+            if verification_error is not None:
+                sys.stderr.write(f"error: {verification_error}\n")
+                return 2
             try:
                 network_policy_override = _network_policy_override(
                     getattr(args, "network_policy", None),
@@ -1979,23 +1971,16 @@ def dispatch(argv: list[str]) -> int:
         ),
     )
     p_bc.add_argument(
-        "--skip-verifier",
-        dest="skip_verifier",
-        action="store_true",
-        help=(
-            "Skip the verifier phase (trajectory_generation only). "
-            "Rejected with --purpose evaluation."
-        ),
-    )
-    p_bc.add_argument(
         "--verifier-env-mode",
         dest="verifier_env_mode",
-        choices=("shared", "separate"),
+        choices=("shared", "separate", "skipped"),
         default=None,
         help=(
-            "Grade in the agent sandbox (shared) or the second verifier "
-            "sandbox (separate). Omit to use the task file, which defaults "
-            "to separate. Cannot be combined with --skip-verifier."
+            "Verification axis: grade in the agent sandbox (shared), the "
+            "second verifier sandbox (separate), or skip the verifier "
+            "(skipped, trajectory_generation only). Omit to use the task "
+            "file, which defaults to separate. Same values as "
+            "execution-config verification."
         ),
     )
     p_bc.add_argument(

@@ -134,7 +134,9 @@ export function useNewBatch() {
       const next = new Set(Array.from(prev).filter((id) => !isTaskSetId(id)));
       return next.size === prev.size ? prev : next;
     });
-    setAdvanced((prev) => (prev.skipVerifier ? { ...prev, skipVerifier: false } : prev));
+    setAdvanced((prev) =>
+      prev.verifierEnvMode === "skipped" ? { ...prev, verifierEnvMode: "" } : prev,
+    );
   }, [batchPurpose]);
 
   // Parse the explicit textarea continuously so we can show the
@@ -557,7 +559,9 @@ export function useNewBatch() {
     }
 
     const adv = buildAdvancedConfig(
-      batchPurpose === "evaluation" ? { ...advanced, skipVerifier: false } : advanced,
+      batchPurpose === "evaluation" && advanced.verifierEnvMode === "skipped"
+        ? { ...advanced, verifierEnvMode: "" }
+        : advanced,
     );
     if (!adv.ok) {
       return { ok: false, error: `Advanced options: ${adv.error}` };
