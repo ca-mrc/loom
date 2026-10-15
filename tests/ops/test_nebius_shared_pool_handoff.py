@@ -457,6 +457,32 @@ def test_shared_handoff_preserves_independent_staging_images(shared_runtime, sta
             prepare_shared_pool_handoff(runtime=runtime, observation=changed, legacy=staging_history, repo_root=ROOT)
 
 
+def test_shared_writer_roots_include_historical_management_database(
+        shared_runtime, staging_history, staging_observation):
+    """The still-used staging manager database is a retained census root."""
+    from scripts.ops.nebius_shared_pool_handoff import prepare_shared_pool_handoff
+    from scripts.ops.nebius_shared_pool_handoff_live import _resource_roots
+
+    runtime, _ = shared_runtime
+    plan = prepare_shared_pool_handoff(runtime=runtime, observation=staging_observation,
+        legacy=staging_history, repo_root=ROOT)
+    stage_path = staging_history.context.original.upgrade.original_state / 'database' / 'stage.json'
+    assert stage_path in staging_history.history
+    stage = json.loads(stage_path.read_bytes())
+    item = stage['resources']['StatefulSet:' + stage['binding']['namespace'] + ':loom-postgres']
+    roots = _resource_roots(plan, frozenset({'StatefulSet'}))
+
+    root = roots['StatefulSet:' + stage['binding']['namespace'] + ':loom-postgres']
+    assert root['metadata']['uid'] == item['uid']
+    original = stage_path.read_bytes()
+    stage_path.write_bytes(original + b'\n')
+    try:
+        with pytest.raises(ValueError):
+            _resource_roots(plan, frozenset({'StatefulSet'}))
+    finally:
+        stage_path.write_bytes(original)
+
+
 @pytest.mark.parametrize('staging_observation', ['independent'], indirect=True)
 async def test_independent_staging_publication_requires_exact_approved_artifact_and_protocol(
         shared_runtime, staging_history, staging_observation, published_source):
