@@ -804,6 +804,20 @@ The protected closed-runtime parent delivers this fixed Job only after qualifyin
 the dev database and retained private material. The primitive itself is not
 installed readiness evidence.
 
+The manager database and shared-development application database are independent
+schema domains. The v2 closed-runtime input pins their protected publications
+separately from the installer source. Manager and collector code use the manager
+publication; shared service, control plane, actuator and fixed SQL/catalog Jobs
+use the data-runtime publication. Both publications are resolved through the
+protected GitHub catalog and must include the shared-pool protocol. The selected
+manager head must match its retained database head; the data head must match the
+retained foundation and application schema (currently explicitly supported heads
+`0175` and `0176`). This does not make different heads mutually compatible. The
+published SQL command still checks its own exact live database revision before
+writes. Application release records, the frozen build recipe and task-execution
+artifact provenance remain unchanged. A schema upgrade is a separate coordinated
+operation, not an implicit side effect of installing runtime code.
+
 The independent closed-runtime parent consumes the completed pool and original
 foundation/manager histories. Its protected entry freezes exact source-bound
 publication, fresh material and every fixed target before writes. Child resource

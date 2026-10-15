@@ -236,6 +236,7 @@ def publication_inputs(completed_pool):
 
     inputs = completed_pool[3].server.request.retained.inputs
     candidate, profile = copy.deepcopy(inputs.candidate), copy.deepcopy(inputs.profile)
+    candidate.setdefault('service_schema_head', '0176')
     candidate.update(candidate_sha='e' * 40, source_archive_sha256='sha256:' + '5' * 64, run_id=12345)
     candidate['images']['service']['image_ref'] = candidate['images']['service']['image_ref'].split('@')[0] + '@sha256:' + '6' * 64
     profile.update(candidate_sha=candidate['candidate_sha'], task_image_ref=candidate['images']['service']['image_ref'])
@@ -503,6 +504,28 @@ def test_runtime_keeps_separate_database_publications_and_immutable_application_
 def test_runtime_rejects_manager_image_for_an_older_shared_database(completed_pool, published_source):
     with pytest.raises(ValueError, match='development runtime database delivery unqualified'):
         database_runtime(completed_pool)
+
+
+@pytest.mark.parametrize('published_source', ['0175'], indirect=True)
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material-split-schema'], indirect=True)
+@pytest.mark.parametrize('retained', [False], indirect=True)
+def test_split_runtime_refuses_schema_or_source_drift(completed_pool, published_source):
+    from dataclasses import replace
+
+    for damage in ('data-schema', 'unknown-schema', 'missing-schema', 'manager-schema', 'source'):
+        manager, data = runtime_publication(completed_pool), foundation_publication(completed_pool)
+        if damage == 'data-schema':
+            data.bundle.candidate['service_schema_head'] = '0176'
+        elif damage == 'unknown-schema':
+            data.bundle.candidate['service_schema_head'] = '0159'
+        elif damage == 'missing-schema':
+            data.bundle.candidate.pop('service_schema_head')
+        elif damage == 'manager-schema':
+            manager.bundle.candidate['service_schema_head'] = '0175'
+        else:
+            data = replace(data, source=data.source.model_copy(update={'source_sha': 'f' * 40}))
+        with pytest.raises(ValueError, match='development runtime database delivery unqualified'):
+            database_runtime(completed_pool, publication=manager, data_publication=data)
 
 
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
@@ -861,6 +884,23 @@ def test_runtime_private_entry_binds_source_history_and_separate_material_before
     assert actual == request and all(item.read_bytes() == raw for item, raw in files.items())
     assert {path, source, *(Path(item) for item in material.values())} <= files.keys()
     assert request.collector_credential.decode() not in repr(actual)
+    # The successor must consume v2 history after installer credentials retire;
+    # it must not reinterpret it as the old single-source format.
+    if input_version == 'v2':
+        from scripts.ops.nebius_development_runtime_install import (
+            install_development_runtime,
+            prepare_runtime_install,
+        )
+        from scripts.ops.nebius_shared_pool_entry import RetainedRuntimeReference, _retained_runtime
+
+        parent = RuntimeParentAPI(request, prepare_runtime_install(request))
+        parent.database_complete = parent.catalog_complete = True
+        assert install_development_runtime(request=request, api=parent, execute=True)['status'] == 'development_runtime_installed_closed'
+        operation_path = root / 'operation.json'
+        private_state._atomic_json(operation_path, operation)
+        retained_reference = RetainedRuntimeReference(operation_path=operation_path,
+            operation_sha256=hashlib.sha256(operation_path.read_bytes()).hexdigest())
+        assert _retained_runtime(retained_reference, {}) == request
     for damage in ('source', 'staging', 'history', 'material'):
         changed = copy.deepcopy(operation)
         if damage == 'source':
@@ -941,19 +981,37 @@ def runtime_github_transport(published_source):
 
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
 @pytest.mark.parametrize('retained', [False], indirect=True)
+@pytest.mark.parametrize('domain', ['manager', 'data'])
 async def test_runtime_publication_resolves_protected_bytes_and_rejects_changed_bundle(
-        completed_pool, publisher_cloud, published_source):
+        completed_pool, publisher_cloud, published_source, domain):
+    from dataclasses import replace
+
     from httpx._client import AsyncClient
     from scripts.ops import nebius_development_runtime_external as module
 
     request = protected_runtime_request(completed_pool, publisher_cloud, published_source)
+    if domain == 'data':
+        request = replace(request, database=replace(request.database,
+            data_publication=copy.deepcopy(request.database.manager.publication)))
+        baseline = '5781389317608cedf95be68590505c96257aa6c7'
+        comparison = {'base_commit': {'sha': baseline}, 'merge_base_commit': {'sha': baseline},
+            'ahead_by': 10, 'behind_by': 0, 'status': 'ahead'}
+        published_source.responses['compare/' + baseline + '...' + published_source.reference['source_sha']] = comparison
     transport = runtime_github_transport(published_source)
     # Real GitHub approval, digest and signature validation; only HTTPS is replaced.
     async with AsyncClient(transport=transport) as http:
         await module.qualify_runtime_publication(request=request, http=http)
-        request.database.manager.publication.bundle.candidate['images']['service']['image_ref'] += '-changed'
+        target = request.database.data_publication if domain == 'data' else request.database.manager.publication
+        original_image = target.bundle.candidate['images']['service']['image_ref']
+        target.bundle.candidate['images']['service']['image_ref'] += '-changed'
         with pytest.raises(ValueError, match='development runtime publication unqualified'):
             await module.qualify_runtime_publication(request=request, http=http)
+        if domain == 'data':
+            target.bundle.candidate['images']['service']['image_ref'] = original_image
+            comparison.update(status='behind', ahead_by=0, behind_by=1,
+                merge_base_commit={'sha': published_source.reference['source_sha']})
+            with pytest.raises(ValueError, match='development runtime publication unqualified'):
+                await module.qualify_runtime_publication(request=request, http=http)
     # Same immutable selection cannot become approved merely because its local
     # candidate was once resolved: a now-failed protected check is re-read.
     request = protected_runtime_request(completed_pool, publisher_cloud, published_source)

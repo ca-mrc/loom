@@ -21,6 +21,10 @@ from loom_execution_capacity_collector.contracts import ProviderCapacitySnapshot
 from loom_execution_capacity_collector.nebius import NebiusCapacityReader
 from loom_service.environment_management.candidates import GitHubCandidateCatalog, _json
 
+# The split selections must implement the common shared-pool protocol (#2443).
+# Ancestry does not replace protected checks, artifact or signature verification.
+_SPLIT_RUNTIME_BASELINE = '5781389317608cedf95be68590505c96257aa6c7'
+
 
 async def qualify_runtime_publication(*, request: DevelopmentRuntimeInstallRequest,
                                       http: httpx.AsyncClient) -> None:
@@ -29,15 +33,23 @@ async def qualify_runtime_publication(*, request: DevelopmentRuntimeInstallReque
         manager = request.database.manager
         retained = manager.retained.request.retained
         installation = manager.deployment.installation
-        selected = manager.publication.validate(installation.registry_prefix)
+        publications = [manager.publication]
+        if request.database.data_publication is not None:
+            publications.append(request.database.data_publication)
         history = _json(retained.files[Path(retained.operation['state_dir']) / 'supplied/stage.json'])
         key = 'Secret:' + retained.binding.namespace + ':loom-management-publications'
         token = base64.b64decode(history['resources'][key]['observed']['data']['token'], validate=True).decode()
-        catalog = GitHubCandidateCatalog(http, token=token, publications=[selected.publication],
-            registry_prefix=installation.registry_prefix,
-            keyring=ImageAdmissionKeyring.from_json(json.dumps(installation.keyring)))
-        if await catalog.resolve(selected.publication.candidate_id) != selected.bundle:
-            raise ValueError
+        for publication in publications:
+            selected = publication.validate(installation.registry_prefix)
+            catalog = GitHubCandidateCatalog(http, token=token, publications=[selected.publication],
+                registry_prefix=installation.registry_prefix,
+                keyring=ImageAdmissionKeyring.from_json(json.dumps(installation.keyring)))
+            if await catalog.resolve(selected.publication.candidate_id) != selected.bundle:
+                raise ValueError
+            if (request.database.data_publication is not None
+                    and not await catalog.candidate_follows(candidate_id=selected.publication.candidate_id,
+                        current_sha=_SPLIT_RUNTIME_BASELINE)):
+                raise ValueError
     except Exception:
         raise ValueError('development runtime publication unqualified') from None
 
