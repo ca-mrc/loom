@@ -99,7 +99,7 @@ async def test_skips_build_only_contexts(tmp_path: Path) -> None:
 
 
 async def test_tb21_policy_excludes_private_paths_in_agent_phase(tmp_path: Path) -> None:
-    """#1263: named tb21 policy must hide solution/tests/verifier from agents."""
+    """#2418: verification-lifecycle withholding hides solution/tests/verifier."""
     (tmp_path / "instruction.md").write_text("do the thing\n")
     (tmp_path / "render_scene.py").write_text("print('hi')\n")
     (tmp_path / "solution").mkdir()

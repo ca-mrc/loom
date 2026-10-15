@@ -36,13 +36,18 @@ from loom.models.trajectory import (
 from loom.models.trial import RetryPolicy, RetryReason
 from loom.models.verifier import VerifierError, VerifierResult
 from loom.retry import next_attempt_at
+from loom.service_execution_oracle import remove_oracle_solution
 from loom.trajectory.reader import TrajectoryReader
 from loom.trajectory.writer import TrajectoryWriter
 from loom.trial.artifacts import ArtifactCollector
 from loom.trial.attempt_supervisor import supervise_agent_attempt
 from loom.trial.phase_network import phase_network
 from loom.trial.stale_running import effective_agent_timeout_sec
-from loom.trial.workspace import materialize_workspace, refuse_planted_private_paths
+from loom.trial.workspace import (
+    materialize_workspace,
+    platform_verification_workspace_policy,
+    refuse_planted_private_paths,
+)
 from loom.trial.workspace_snapshot import handoff_workspace_snapshot
 from loom.verifier_runtime import resolve_verifier_env_mode
 
@@ -202,16 +207,21 @@ async def _run_step_impl(
         verifier_started = time.monotonic()
         try:
             in_place = resolve_verifier_env_mode(ctx.task_config, ctx.trial_config) == "shared"
-            if ctx.workspace_staging_policy is not None and in_place:
+            workspace_policy = (
+                ctx.workspace_staging_policy or platform_verification_workspace_policy()
+            )
+            if in_place:
+                if ctx.trial_config.agent_name == "oracle":
+                    await remove_oracle_solution(ctx.driver, workdir)
                 await refuse_planted_private_paths(ctx.driver, workdir)
                 await materialize_workspace(
                     driver=ctx.driver,
                     task_dir=ctx.task_dir,
                     dst=workdir,
-                    policy=ctx.workspace_staging_policy,
+                    policy=workspace_policy,
                     phase="verifier",
                 )
-            elif ctx.workspace_staging_policy is not None:
+            else:
                 factory = ctx.verifier_driver_factory
                 if factory is None:
                     raise RuntimeError(
@@ -230,21 +240,21 @@ async def _run_step_impl(
                     driver=verifier_env,
                     task_dir=ctx.task_dir,
                     dst=workdir,
-                    policy=ctx.workspace_staging_policy,
+                    policy=workspace_policy,
                     phase="agent",
                 )
                 await materialize_workspace(
                     driver=verifier_env,
                     task_dir=ctx.task_dir,
                     dst=workdir,
-                    policy=ctx.workspace_staging_policy,
+                    policy=workspace_policy,
                     phase="verifier",
                 )
                 await _handoff_agent_workspace(
                     agent_driver=ctx.driver,
                     verifier_driver=verifier_env,
                     workdir=workdir,
-                    policy=ctx.workspace_staging_policy,
+                    policy=workspace_policy,
                     preserve_acls=ctx.task_config.environment.preserve_acls,
                 )
             async with phase_network(

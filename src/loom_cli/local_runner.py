@@ -93,6 +93,9 @@ class LocalRunner:
             object_store=self.object_store,
             local_trajectory_path=trial_dir / "events.jsonl",
             llm_calls_fetcher=None,
+            # Separate verification always gets a fresh driver from the same
+            # factory the CLI used for the agent sandbox (#2418).
+            verifier_driver_factory=self.driver_factory,
         )
         trial = Trial(ctx=ctx, state_patch=None)
         result = await trial.run()

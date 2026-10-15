@@ -149,6 +149,7 @@ async def test_trial_run_happy_path(hello_task: Path, tmp_path: Path):
         verifier=_AlwaysPassVerifier(),
         object_store=store,
         local_trajectory_path=tmp_path / "events.jsonl",
+        verifier_driver_factory=FakeDriver,
     )
 
     trial = Trial(ctx=ctx)
@@ -203,6 +204,7 @@ async def test_trial_run_records_finalize_failure_message(
         verifier=_AlwaysPassVerifier(),
         object_store=_FailingAtifObjectStore(),
         local_trajectory_path=tmp_path / "events.jsonl",
+        verifier_driver_factory=FakeDriver,
     )
 
     result = await Trial(ctx=ctx).run()
@@ -263,6 +265,7 @@ async def test_trial_run_respects_environment_workdir(
         verifier=_WorkdirVerifier(),
         object_store=store,
         local_trajectory_path=tmp_path / "events.jsonl",
+        verifier_driver_factory=FakeDriver,
     )
 
     result = await Trial(ctx=ctx).run()
@@ -333,6 +336,7 @@ async def test_trial_run_passes_task_sandbox_start_options(
         local_trajectory_path=tmp_path / "events.jsonl",
         sandbox_extra_hosts=(("host.docker.internal", "host-gateway"),),
         container_cgroup_parent="/local-test.slice/worker.scope",
+        verifier_driver_factory=FakeDriver,
     )
 
     result = await Trial(ctx=ctx).run()
@@ -388,6 +392,7 @@ async def test_trial_run_driver_start_failure_classified(
         verifier=_AlwaysPassVerifier(),
         object_store=store,
         local_trajectory_path=tmp_path / "events.jsonl",
+        verifier_driver_factory=FakeDriver,
     )
     result = await Trial(ctx=ctx).run()
     assert result.state == TrialState.FAILED
@@ -433,6 +438,7 @@ async def test_trial_run_state_patch_failure_doesnt_kill_trial(
         verifier=_AlwaysPassVerifier(),
         object_store=store,
         local_trajectory_path=tmp_path / "events.jsonl",
+        verifier_driver_factory=FakeDriver,
     )
 
     async def _boom_patch(state: str, reason: str | None) -> None:
@@ -485,6 +491,7 @@ async def test_trial_run_cancellation_stashes_result(
         verifier=_AlwaysPassVerifier(),
         object_store=store,
         local_trajectory_path=tmp_path / "events.jsonl",
+        verifier_driver_factory=FakeDriver,
     )
     trial = Trial(ctx=ctx)
     task_handle = asyncio.create_task(trial.run())
@@ -533,6 +540,7 @@ async def test_trial_run_watchdog_hard_deadline_records_agent_timeout(
         verifier=_AlwaysPassVerifier(),
         object_store=FakeObjectStore(),
         local_trajectory_path=tmp_path / "events.jsonl",
+        verifier_driver_factory=FakeDriver,
     )
     trial = Trial(ctx=ctx)
 
@@ -603,6 +611,7 @@ async def test_scored_verifier_cannot_override_attempt_timeout_evidence(
         verifier=_AlwaysPassVerifier(),
         object_store=store,
         local_trajectory_path=tmp_path / "deadline-events.jsonl",
+        verifier_driver_factory=FakeDriver,
     )
 
     result = await Trial(ctx=ctx, state_patch=_record_state).run()
@@ -671,6 +680,7 @@ async def test_trial_run_unscored_agent_error_marks_failed(
         verifier=_MissingTestsVerifier(),
         object_store=store,
         local_trajectory_path=tmp_path / "events.jsonl",
+        verifier_driver_factory=FakeDriver,
     )
     result = await Trial(ctx=ctx).run()
     assert result.state == TrialState.FAILED
@@ -717,6 +727,7 @@ async def test_trial_run_scored_agent_error_stays_succeeded(
         verifier=_ScoredVerifierError(),
         object_store=store,
         local_trajectory_path=tmp_path / "events.jsonl",
+        verifier_driver_factory=FakeDriver,
     )
     result = await Trial(ctx=ctx).run()
 
@@ -756,6 +767,7 @@ async def test_trial_run_harbor_setup_error_not_succeeded_despite_reward(
         verifier=_ScoredPassedZeroVerifier(),
         object_store=store,
         local_trajectory_path=tmp_path / "events.jsonl",
+        verifier_driver_factory=FakeDriver,
     )
     result = await Trial(ctx=ctx).run()
 
@@ -805,6 +817,7 @@ async def test_trial_run_empty_reward_verifier_error_marks_failed(
         verifier=_MissingTestsVerifier(),
         object_store=store,
         local_trajectory_path=tmp_path / "events.jsonl",
+        verifier_driver_factory=FakeDriver,
     )
     result = await Trial(ctx=ctx).run()
 
@@ -854,6 +867,7 @@ async def test_trial_run_scored_verifier_error_stays_succeeded(
         verifier=_ScoredVerifierError(),
         object_store=store,
         local_trajectory_path=tmp_path / "events.jsonl",
+        verifier_driver_factory=FakeDriver,
     )
     result = await Trial(ctx=ctx).run()
 

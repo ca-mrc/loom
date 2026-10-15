@@ -98,6 +98,10 @@ async def context(tmp_path: Path) -> TrialContext:
         verifier=_AlwaysPassVerifier(),
         object_store=FakeObjectStore(),
         local_trajectory_path=tmp_path / "events.jsonl",
+        workspace_staging_policy=WorkspaceStagingPolicy.from_provenance(
+            TB21_AGENT_WORKSPACE_POLICY,
+        ),
+        verifier_driver_factory=FakeDriver,
     )
 
 
@@ -552,6 +556,7 @@ async def test_run_step_collects_verifier_required_artifacts_after_verifier(
             duration_sec=0.01,
         )
 
+    context.trial_config = stub_trial_config(verifier_env_mode="shared")
     context.driver.exec_handler = handler
     context.verifier = _WritesRequiredArtifactVerifier()  # type: ignore[assignment]
     step = StepConfig(

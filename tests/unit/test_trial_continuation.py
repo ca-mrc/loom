@@ -27,6 +27,7 @@ def context(tmp_path, agent, enabled):
         task_dir=tmp_path, trial_config=stub_trial_config(), driver=FakeDriver(),
         agent=agent, verifier=_AlwaysPassVerifier(), object_store=FakeObjectStore(),
         local_trajectory_path=tmp_path / "trajectory.jsonl",
+        verifier_driver_factory=FakeDriver,
     )
 
 

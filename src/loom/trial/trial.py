@@ -51,7 +51,11 @@ from loom.trial.watchdog_cancellation import (
     extract_watchdog_cancellation,
     watchdog_timeout_failure_message,
 )
-from loom.trial.workspace import WorkspaceStagingPolicy, materialize_workspace
+from loom.trial.workspace import (
+    WorkspaceStagingPolicy,
+    materialize_workspace,
+    platform_verification_workspace_policy,
+)
 from loom.verifier.base import Verifier
 
 logger = logging.getLogger(__name__)
@@ -296,16 +300,20 @@ class Trial:
                     # workdir. Mirrors what oracle_runner does for the
                     # verify CLI. Skips `task.toml` (host-side metadata).
                     workdir = self.ctx.task_config.environment.workdir
+                    workspace_policy = (
+                        self.ctx.workspace_staging_policy
+                        or platform_verification_workspace_policy()
+                    )
                     await materialize_workspace(
                         driver=self.ctx.driver,
                         task_dir=self.ctx.task_dir,
                         dst=workdir,
-                        policy=self.ctx.workspace_staging_policy,
+                        policy=workspace_policy,
                         phase="agent",
                         trusted_private_paths=(
-                            self.ctx.workspace_staging_policy.trusted_oracle_paths
+                            workspace_policy.trusted_oracle_paths
                             if (
-                                self.ctx.workspace_staging_policy is not None
+                                workspace_policy is not None
                                 and self.ctx.trial_config.agent_name == "oracle"
                                 and isinstance(self.ctx.agent, OracleAgent)
                             )

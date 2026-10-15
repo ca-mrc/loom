@@ -152,14 +152,17 @@ class WorkspaceStagingPolicy:
         return any(fnmatchcase(candidate, pattern) for pattern in self.agent_excluded_paths)
 
 
+def platform_verification_workspace_policy() -> WorkspaceStagingPolicy:
+    """Private-path withholding for task-sandbox verification (#2418)."""
+    return WorkspaceStagingPolicy.from_provenance(TB21_AGENT_WORKSPACE_POLICY)
+
+
 def resolve_workspace_staging_policy_name(
     name: str,
-) -> WorkspaceStagingPolicy | None:
-    """Map a CLI/TrialConfig policy name to a concrete staging policy (#1263)."""
-    if name == "tb21":
-        return WorkspaceStagingPolicy.from_provenance(TB21_AGENT_WORKSPACE_POLICY)
-    if name == "none":
-        return None
+) -> WorkspaceStagingPolicy:
+    """Historical name mapper. ``none`` no longer opens private paths (#2418)."""
+    if name in {"tb21", "none"}:
+        return platform_verification_workspace_policy()
     raise ValueError(
         f"unknown workspace_staging_policy_name {name!r}; expected 'tb21' or 'none'",
     )
@@ -192,29 +195,18 @@ def resolve_trial_workspace_staging_policy(
     policy_name: WorkspaceStagingPolicyName | None,
     task_id: str,
     raw_provenance_policy: object,
-) -> WorkspaceStagingPolicy | None:
-    """Resolve the effective agent-workspace staging policy for a trial (#1263).
+) -> WorkspaceStagingPolicy:
+    """Resolve agent-workspace withholding for task-sandbox verification (#2418).
 
-    Order:
-    1. Explicit ``trial_config.workspace_staging_policy_name``
-    2. TB2.1-r6 task-id prefix → required canonical policy (``none`` rejected)
-    3. Task provenance dict, else no filter
+    ``policy_name`` is ignored. Historical ``none`` no longer uploads tests or
+    the solution into the agent sandbox. TB2.1-r6 still requires the canonical
+    provenance policy; every other task-sandbox trial uses the same four
+    private paths, keyed off shared versus separate at apply time.
     """
-    is_tb21 = task_id.startswith(TB21_TASK_ID_PREFIX)
-    if policy_name == "tb21":
-        return resolve_workspace_staging_policy_name("tb21")
-    if policy_name == "none":
-        if is_tb21:
-            raise ValueError(
-                "TB2.1 task cannot use workspace_staging_policy_name=none; "
-                "private workspace isolation is required",
-            )
-        return None
-    if is_tb21:
+    _ = policy_name  # historical batch switch; ignored (#2418)
+    if task_id.startswith(TB21_TASK_ID_PREFIX):
         return require_tb21_workspace_staging_policy(raw_provenance_policy)
-    if isinstance(raw_provenance_policy, dict):
-        return WorkspaceStagingPolicy.from_provenance(raw_provenance_policy)
-    return None
+    return platform_verification_workspace_policy()
 
 
 _PLANTED_PRIVATE = ("tests", "verifier", "solution", "upstream-task.toml")
