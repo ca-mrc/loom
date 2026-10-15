@@ -64,12 +64,14 @@ def fetch_upstream(
         return target
     target.mkdir(parents=True, exist_ok=True)
     if src.kind == "huggingface":
-        kwargs: dict[str, object] = {
-            "revision": src.revision, "cache_dir": str(target),
-        }
-        if getattr(src, "trust_remote_code", False):
-            kwargs["trust_remote_code"] = True
-        datasets.load_dataset(src.locator, src.subset, **kwargs)
+        if src.trust_remote_code:
+            from loom_benchmarks.scripted_huggingface import load_scripted_source
+
+            load_scripted_source(src, cache_dir=target)
+        else:
+            datasets.load_dataset(
+                src.locator, src.subset, revision=src.revision, cache_dir=str(target),
+            )
     elif src.kind == "git":
         repo_dir = target / "repo"
         if src.revision and _looks_like_sha(src.revision):

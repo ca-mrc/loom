@@ -17,9 +17,11 @@ dependencies = [
   "alembic>=1.13,<2.0",
   "anthropic>=0.40,<1.0",
   "boto3>=1.34,<2.0",
-  "cryptography>=42.0,<50.0",
+  "cryptography>=50.0,<51.0",
   "docker>=7.0,<8.0",
   "fastapi>=0.110,<1.0",
+  # Security floor for Hugging Face Hub's transitive filesystem dependency.
+  "fsspec>=2026.6,<2027",
   "greenlet>=3.0,<4.0",
   "google-generativeai>=0.8,<1.0",
   "h11>=0.16,<1.0",
@@ -109,7 +111,7 @@ dev = [
 # Isolated gateway tooling only; do not add ACME dependencies to app images.
 nebius-certificates = [
   "certbot==5.8.0",
-  "cryptography>=42.0,<50.0",
+  "cryptography>=50.0,<51.0",
   "dnspython>=2.8,<3.0",
   "httpx>=0.27,<1.0",
 ]

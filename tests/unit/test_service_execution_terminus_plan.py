@@ -29,6 +29,7 @@ from tests.unit.test_service_execution_materialization import (
     _REVISION,
     _RUNTIME_IMAGE,
     _TASK_IMAGE,
+    _multi_model_trial,
     _profile,
     _provenance,
     _task,
@@ -113,6 +114,46 @@ def test_verifier_restores_committed_workspace_archive(tmp_path):
     staged = stage_committed_workspace_archive(tmp_path)
     assert staged == tmp_path / ".loom" / "workspace.tar"
     assert staged.read_bytes() == b"committed-workspace"
+
+
+def test_terminus_plan_keeps_materialized_sts_schedule_in_trial_json():
+    task, _trial_config, profile = _inputs()
+    trial = _multi_model_trial()
+    with pytest.raises(ValueError, match="terminus2_multi_model_runtime_unavailable"):
+        compile_service_execution_plan(
+            task=task, trial=trial, profile=profile, source_provenance=_provenance(),
+            task_revision_sha256=_REVISION,
+        )
+    enabled = profile.model_copy(update={
+        "terminus2_multi_model_policies": frozenset({"student_teacher_student"}),
+    })
+    first = compile_service_execution_plan(
+        task=task, trial=trial, profile=enabled, source_provenance=_provenance(),
+        task_revision_sha256=_REVISION,
+    )
+    second = compile_service_execution_plan(
+        task=task, trial=trial, profile=enabled, source_provenance=_provenance(),
+        task_revision_sha256=_REVISION,
+    )
+    payload = json.loads(first.main.environment["LOOM_TASK_TRIAL_JSON"])
+    assert payload["multi_model"]["enabled"] is True
+    assert payload["multi_model"].get("policy", "student_teacher_student") == "student_teacher_student"
+    assert payload["multi_model"]["switch_episode"] == 2
+    assert payload["multi_model"]["return_switch_episode"] == 3
+    assert second.main.environment["LOOM_TASK_TRIAL_JSON"] == first.main.environment["LOOM_TASK_TRIAL_JSON"]
+    assert "model_switch" not in first.canonical_payload()
+    assert "multi_model" not in first.canonical_payload()
+
+
+def test_single_model_terminus_plan_is_unchanged_without_sts_capability():
+    task, trial, profile = _inputs()
+    plan = compile_service_execution_plan(
+        task=task, trial=trial, profile=profile, source_provenance=_provenance(),
+        task_revision_sha256=_REVISION,
+    )
+    payload = json.loads(plan.main.environment["LOOM_TASK_TRIAL_JSON"])
+    assert payload["agent_name"] == "terminus-2"
+    assert "multi_model" not in payload
 
 
 def test_shared_terminus_plan_omits_idle_verifier_sidecar():

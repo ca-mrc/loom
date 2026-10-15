@@ -80,7 +80,7 @@ on:
   pull_request:
     # Every non-draft PR event reports the protected gate name. The planner
     # selects smoke from changed paths or labels; drafts remain filtered.
-    types: [labeled, unlabeled, opened, synchronize, reopened, ready_for_review, converted_to_draft, edited]
+    types: [labeled, unlabeled, opened, synchronize, reopened, ready_for_review, converted_to_draft]
   merge_group:
     types: [checks_requested]
 

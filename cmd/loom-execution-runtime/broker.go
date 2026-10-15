@@ -3,7 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -44,6 +47,7 @@ type workloadBroker struct {
 	phaseDeadline time.Time
 	phaseBound    bool
 	phaseRole     string
+	terminusToken string
 }
 
 type tokenRequest struct {
@@ -56,6 +60,34 @@ type tokenResponse struct {
 	SchemaVersion string    `json:"schema_version"`
 	Token         string    `json:"token"`
 	ExpiresAt     time.Time `json:"expires_at"`
+}
+
+type terminusReclaimRequest struct {
+	workloadIdentity
+	SchemaVersion string `json:"schema_version"`
+}
+
+type terminusCheckpointBody struct {
+	ExecutionID     string  `json:"execution_id"`
+	RunAttemptID    string  `json:"run_attempt_id"`
+	Episode         int     `json:"episode"`
+	ActiveRole      string  `json:"active_role"`
+	LastCallOrdinal int     `json:"last_call_ordinal"`
+	LastSeq         int     `json:"last_seq"`
+	TmuxSessionID   *string `json:"tmux_session_id"`
+}
+
+type terminusCheckpointRequest struct {
+	workloadIdentity
+	SchemaVersion            string    `json:"schema_version"`
+	ExecutionID              string    `json:"execution_id"`
+	RunAttemptID             string    `json:"run_attempt_id"`
+	Episode                  int       `json:"episode"`
+	ActiveRole               string    `json:"active_role"`
+	LastCallOrdinal          int       `json:"last_call_ordinal"`
+	LastSeq                  int       `json:"last_seq"`
+	TmuxSessionID            *string   `json:"tmux_session_id"`
+	AttemptDeadlineWallClock time.Time `json:"attempt_deadline_wall_clock"`
 }
 
 type outputFile struct {
@@ -176,6 +208,7 @@ func (b *workloadBroker) doJSON(ctx context.Context, method, endpoint string, re
 	for name, value := range headers {
 		req.Header.Set(name, value)
 	}
+	b.identityHeaders(req)
 	if err := b.authorizePodRequest(req); err != nil {
 		return err
 	}
@@ -290,6 +323,13 @@ func (b *workloadBroker) startProxy(ctx context.Context, modelLifetime ...contex
 	if len(modelLifetime) > 0 {
 		modelContext = modelLifetime[0]
 	}
+	if b.terminusToken == "" {
+		raw := make([]byte, 32)
+		if _, err := rand.Read(raw); err != nil {
+			return "", nil, fmt.Errorf("generate terminus control token: %w", err)
+		}
+		b.terminusToken = base64.RawURLEncoding.EncodeToString(raw)
+	}
 	// Model calls follow the caller's phase lifetime and the Gateway's deadline.
 	// Keep the transport's connect/TLS bounds and the finite broker-operation client.
 	gatewayClient := *b.client
@@ -301,6 +341,11 @@ func (b *workloadBroker) startProxy(ctx context.Context, modelLifetime ...contex
 	server := &http.Server{
 		ReadHeaderTimeout: 10 * time.Second,
 		Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			if request.URL.Path == "/internal/loom/terminus/reclaim" ||
+				request.URL.Path == "/internal/loom/terminus/episode-checkpoints" {
+				b.serveTerminusControl(writer, request)
+				return
+			}
 			if request.URL.Path == "/internal/loom/llm-calls" {
 				b.serveCallLedger(writer, request)
 				return
@@ -390,6 +435,84 @@ func (b *workloadBroker) startProxy(ctx context.Context, modelLifetime ...contex
 	}, nil
 }
 
+func (b *workloadBroker) serveTerminusControl(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost || request.URL.RawQuery != "" ||
+		b.identity.ExecutionRole != "attempt" ||
+		subtle.ConstantTimeCompare(
+			[]byte(request.Header.Get("X-Loom-Terminus-Control")),
+			[]byte(b.terminusToken),
+		) != 1 {
+		http.Error(writer, "terminus control route unavailable", http.StatusForbidden)
+		return
+	}
+	b.mu.Lock()
+	deadline, phaseBound, phaseRole, phaseContext := b.phaseDeadline, b.phaseBound, b.phaseRole, b.phaseContext
+	b.mu.Unlock()
+	if !phaseBound || phaseRole != "agent" || !deadline.After(time.Now()) {
+		http.Error(writer, "terminus control requires an active agent phase", http.StatusForbidden)
+		return
+	}
+	requestContext, cancel := context.WithCancel(request.Context())
+	defer cancel()
+	stop := context.AfterFunc(phaseContext, cancel)
+	defer stop()
+
+	var endpoint string
+	var payload any
+	switch request.URL.Path {
+	case "/internal/loom/terminus/reclaim":
+		endpoint = "/terminus/reclaim"
+		payload = terminusReclaimRequest{
+			workloadIdentity: b.identity,
+			SchemaVersion:    "loom.service-execution-terminus-reclaim.v1",
+		}
+	case "/internal/loom/terminus/episode-checkpoints":
+		var body terminusCheckpointBody
+		decoder := json.NewDecoder(io.LimitReader(request.Body, 16*1024))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&body); err != nil {
+			http.Error(writer, "invalid terminus checkpoint", http.StatusBadRequest)
+			return
+		}
+		if body.Episode < 1 || body.LastCallOrdinal < 0 || body.LastSeq < 0 ||
+			(body.ActiveRole != "student" && body.ActiveRole != "teacher") {
+			http.Error(writer, "invalid terminus checkpoint", http.StatusBadRequest)
+			return
+		}
+		endpoint = "/terminus/episode-checkpoints"
+		payload = terminusCheckpointRequest{
+			workloadIdentity:         b.identity,
+			SchemaVersion:            "loom.service-execution-terminus-checkpoint.v1",
+			ExecutionID:              body.ExecutionID,
+			RunAttemptID:             body.RunAttemptID,
+			Episode:                  body.Episode,
+			ActiveRole:               body.ActiveRole,
+			LastCallOrdinal:          body.LastCallOrdinal,
+			LastSeq:                  body.LastSeq,
+			TmuxSessionID:            body.TmuxSessionID,
+			AttemptDeadlineWallClock: deadline,
+		}
+	default:
+		http.Error(writer, "terminus control route unavailable", http.StatusForbidden)
+		return
+	}
+	var response json.RawMessage
+	if err := b.doJSON(
+		requestContext, http.MethodPost, b.endpoint(endpoint), payload, nil, &response,
+	); err != nil {
+		http.Error(writer, "terminus control unavailable", http.StatusBadGateway)
+		return
+	}
+	if !json.Valid(response) {
+		http.Error(writer, "terminus control response invalid", http.StatusBadGateway)
+		return
+	}
+	writer.Header().Set("Content-Type", "application/json")
+	writer.Header().Set("Cache-Control", "no-store")
+	writer.WriteHeader(http.StatusOK)
+	_, _ = writer.Write(response)
+}
+
 // The local caller cannot select a trial, lease, token, or upstream URL. The
 // broker presents its current Pod identity, never a model-call step credential.
 func (b *workloadBroker) serveCallLedger(writer http.ResponseWriter, request *http.Request) {
@@ -439,8 +562,8 @@ func allowedGatewayRequest(method string, target *url.URL) bool {
 	}
 }
 
-func trustedGatewayEnvironment(proxyURL string) map[string]string {
-	return map[string]string{
+func trustedGatewayEnvironment(proxyURL string, terminusToken ...string) map[string]string {
+	environment := map[string]string{
 		"LOOM_GATEWAY_URL":       proxyURL,
 		"OPENAI_BASE_URL":        proxyURL + "/v1",
 		"ANTHROPIC_BASE_URL":     proxyURL + "/anthropic/v1",
@@ -449,6 +572,10 @@ func trustedGatewayEnvironment(proxyURL string) map[string]string {
 		"ANTHROPIC_API_KEY":      "loom_workload_proxy",
 		"GOOGLE_API_KEY":         "loom_workload_proxy",
 	}
+	if len(terminusToken) == 1 && terminusToken[0] != "" {
+		environment["LOOM_TERMINUS_CONTROL_TOKEN"] = terminusToken[0]
+	}
+	return environment
 }
 
 func (b *workloadBroker) outputRequestID() string {
