@@ -122,10 +122,14 @@ def test_scope_is_conservative_for_unknown_common_inputs_and_rejects_invalid_mod
 
 
 def test_go_checks_cover_current_runtime_packages():
+    from scripts.plan_ci_validations import plan_validations
     jobs = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]
     commands = [step.get("run", "") for step in jobs["go-checks"]["steps"]]
-    assert "go vet ./cmd/... ./internal/..." in commands
-    assert "go test -race ./cmd/... ./internal/..." in commands
+    assert any('go vet "${packages[@]}"' in command for command in commands)
+    assert any('go test -race "${packages[@]}"' in command for command in commands)
+    assert plan_validations(changed_paths=['go.mod'], labels=(), event_name='pull_request').go_packages == (
+        './cmd/...', './internal/...',
+    )
 
 
 def test_retired_capacity_hooks_are_removed():

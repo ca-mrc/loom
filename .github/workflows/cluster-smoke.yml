@@ -60,7 +60,8 @@ run-name: >-
 # Trigger model:
 #   - workflow_dispatch (manual)
 #   - PRs selected by changed paths or the additive `cluster-smoke` label
-#   - push to dev when cluster CLI / templates change
+# Native merge groups validate the exact commit that becomes dev; do not repeat
+# those contracts on the following dev push.
 
 on:
   workflow_dispatch:
@@ -70,13 +71,6 @@ on:
         required: false
         type: boolean
         default: false
-  push:
-    branches: [dev]
-    paths:
-      - "src/loom_cli/cluster_cmd.py"
-      - "src/loom_cli/cluster_config.py"
-      - "src/loom_cli/templates/k8s/**"
-      - ".github/workflows/cluster-smoke.yml"
   pull_request:
     # Every non-draft PR event reports the protected gate name. The planner
     # selects smoke from changed paths or labels; drafts remain filtered.
