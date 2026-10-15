@@ -54,8 +54,10 @@ def requested_verification(trial_config: Any) -> ExecutionVerificationSelection 
     if config.get("skip_verifier") is True:
         return "skipped"
     mode = config.get("verifier_env_mode")
-    if mode in {"shared", "separate"}:
-        return mode
+    if mode == "shared":
+        return "shared"
+    if mode == "separate":
+        return "separate"
     return None
 
 
