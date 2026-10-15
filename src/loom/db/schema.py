@@ -973,6 +973,7 @@ class TaskBundleSource(Base):
 class TaskBundleSourceIncarnation(Base):
     __tablename__ = "task_bundle_source_incarnations"
     __table_args__ = (
+        UniqueConstraint("id", "source_id", name="task_bundle_incarnation_identity_uidx"),
         CheckConstraint("state IN ('uploading','available','deleting','retired')", name="task_bundle_incarnation_state_check"),
         CheckConstraint("expires_at > created_at", name="task_bundle_incarnation_deadline_check"),
         Index("task_bundle_incarnation_source_idx", "source_id", "state"),
@@ -1030,11 +1031,38 @@ class TaskBundleSourceVersion(Base):
 
 class TaskBundleSourceReference(Base):
     __tablename__ = "task_bundle_source_references"
-    __table_args__ = (CheckConstraint("kind IN ('catalog','materialization','trial')", name="task_bundle_reference_kind_check"),)
+    __table_args__ = (CheckConstraint("kind IN ('catalog','materialization','trial','publication')", name="task_bundle_reference_kind_check"),)
     source_id: Mapped[str] = mapped_column(String(64), ForeignKey("task_bundle_sources.id"), primary_key=True)
     kind: Mapped[str] = mapped_column(String, primary_key=True)
     owner_id: Mapped[str] = mapped_column(Text, primary_key=True)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+
+
+class TaskSourcePublication(Base):
+    """Producer-owned retention history, not permission for a peer to read."""
+
+    __tablename__ = "task_source_publications"
+    __table_args__ = (
+        ForeignKeyConstraint(["incarnation_id", "source_id"], ["task_bundle_source_incarnations.id", "task_bundle_source_incarnations.source_id"], name="task_source_publication_incarnation_fkey"),
+        UniqueConstraint("destination_installation_id", "destination_import_id", "source_id", name="task_source_publication_import_uidx"),
+        CheckConstraint("state IN ('prepared','active','released')", name="task_source_publication_state_check"),
+        CheckConstraint("descriptor_sha256 ~ '^[0-9a-f]{64}$' AND jsonb_typeof(descriptor_json)='object'", name="task_source_publication_descriptor_check"),
+        CheckConstraint("id <> '00000000-0000-0000-0000-000000000000'::uuid AND destination_installation_id <> '00000000-0000-0000-0000-000000000000'::uuid AND destination_import_id <> '00000000-0000-0000-0000-000000000000'::uuid", name="task_source_publication_identity_check"),
+        CheckConstraint("(state='released') = (released_at IS NOT NULL) AND (state<>'active' OR activated_at IS NOT NULL) AND (state<>'prepared' OR activated_at IS NULL)", name="task_source_publication_lifecycle_check"),
+        CheckConstraint("(activated_at IS NULL OR activated_at>=created_at) AND (revoked_at IS NULL OR revoked_at>=created_at) AND (released_at IS NULL OR (released_at>=created_at AND (activated_at IS NULL OR released_at>=activated_at) AND (revoked_at IS NULL OR released_at>=revoked_at)))", name="task_source_publication_time_check"),
+    )
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
+    source_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    incarnation_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    destination_installation_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    destination_import_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    descriptor_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    descriptor_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    state: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    activated_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    released_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
 
 
 class TaskImageMaterialization(Base):

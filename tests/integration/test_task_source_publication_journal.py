@@ -12,6 +12,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
+from loom.db.schema import TaskSourcePublication
 from loom.trajectory.storage import ObjectWriteResult
 from tests.integration.test_task_bundle_source_journal import (
     NOW,
@@ -140,6 +141,53 @@ async def test_terminal_replay_never_resurrects_a_released_pin(journal, tmp_path
             "SELECT count(*) FROM task_bundle_source_references "
             "WHERE source_id=:source AND kind='publication'"
         ), {"source": spec.id}) == 0
+
+
+@pytest.mark.parametrize("isolation", ["REPEATABLE READ", "SERIALIZABLE", "AUTOCOMMIT"])
+async def test_publication_rejects_unsafe_transaction_before_authority(
+    journal, tmp_path, isolation,
+):
+    spec, _, _ = await _published(journal, tmp_path)
+    identity = _identity(spec.id)
+    async with journal() as session:
+        await session.connection(execution_options={"isolation_level": isolation})
+        with pytest.raises(ValueError, match="READ COMMITTED"):
+            await _module().prepare_task_source_publication(session, **identity, now=NOW)
+        assert await session.scalar(text(
+            "SELECT count(*) FROM task_source_publications WHERE id=:id"
+        ), {"id": identity["publication_id"]}) == 0
+
+
+async def test_publication_activation_rejects_unsafe_transaction_before_mutation(journal, tmp_path):
+    spec, _, _ = await _published(journal, tmp_path)
+    identity = _identity(spec.id)
+    publication = await _prepare(journal, identity)
+    async with journal() as session:
+        await session.connection(execution_options={"isolation_level": "SERIALIZABLE"})
+        with pytest.raises(ValueError, match="READ COMMITTED"):
+            await _module().activate_task_source_publication(
+                session, **_binding(identity, publication), now=NOW,
+            )
+    async with journal() as session:
+        assert await session.scalar(text(
+            "SELECT state FROM task_source_publications WHERE id=:id"
+        ), {"id": publication.publication_id}) == "prepared"
+
+
+async def test_publication_lifecycle_checks_transaction_before_autoflush(journal, tmp_path):
+    spec, _, _ = await _published(journal, tmp_path)
+    identity = _identity(spec.id)
+    publication = await _prepare(journal, identity)
+    async with journal() as session:
+        await session.connection(execution_options={"isolation_level": "SERIALIZABLE"})
+        row = await session.get(TaskSourcePublication, publication.publication_id)
+        assert row is not None
+        row.revoked_at = NOW
+        with pytest.raises(ValueError, match="READ COMMITTED"):
+            await _module().activate_task_source_publication(
+                session, **_binding(identity, publication), now=NOW,
+            )
+        assert row in session.dirty
 
 
 async def test_pin_and_reference_roll_back_together(journal, tmp_path):

@@ -44,6 +44,19 @@ this synchronous I/O outside database transactions and the event loop. An object
 descriptor is neither read permission nor a retention pin; this primitive does
 not enable cross-environment sharing or change ordinary artifact download routes.
 
+Cross-environment source reuse adds a separate producer-owned publication pin.
+Preparing an import records the exact source incarnation and one verified object
+version for every source member, then retains those versions through the
+consumer's prepared/active lifecycle. The descriptor is immutable and is not a
+read capability: peer authentication, exact-version reads and import admission
+remain separate checks. Revocation stops future reads without releasing storage;
+only an authenticated terminal release removes the publication reference. A lost
+reply, owner teardown or elapsed upload deadline therefore cannot release a
+source that another environment still uses. Publication history is append-only,
+replay-safe and transaction-bound; ordinary catalog/materialization/trial
+references cannot bypass it, and no object-store I/O occurs while its database
+locks are held.
+
 ## Prepared service fixture components
 
 A build records the primary image as `task` and each built sidecar as
