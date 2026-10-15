@@ -164,6 +164,30 @@ nonempty root/integration/Docker/cluster shards before runners are allocated. Ea
 runner writes its selected-path manifest before dependency or fixture setup;
 selector errors fail the job. Empty selections do not invoke pytest.
 
+## Pool operator tests run before deployment
+
+The `nebius-pool-ops` suite (`tests/ops/test_nebius*pool*.py`) takes about 450 of
+the ~500 tests-root runner-minutes. A PR or merge group runs it only when a change
+touches its `affected_paths` (operator scripts, Kubernetes and Nebius deploy
+inputs, CI authority files, dependencies), its own tests, or a test helper they
+import. Selection is made once for the whole lane and then sharded, so planned
+shards and job manifests always run the same set. Other changes skip it before
+merge. `nebius-candidate.yml` runs the whole active suite (shared-pool
+simulations stay skipped, below) on every platform candidate from `dev`, and
+publishes nothing unless it passes, so a regression from a shared module is
+caught before deployment. Scheduled and manual full runs still include it. A
+`ci:*` selector label also runs it on a PR.
+
+The dev-only candidate test job saves uv caches under the same checksum-pinned,
+locked-workspace policy as candidate publication. PR and merge-group jobs retain
+their existing cache-write restrictions.
+
+The shared worker pool is not in use (dev deploys with `NEBIUS_ROLLOUT_MODE`
+unset, i.e. standalone), so `tests/ops/test_nebius_shared_pool_*.py` are skipped
+by `tests/ops/conftest.py` unless `LOOM_RUN_SHARED_POOL_TESTS=1`. Participant,
+legacy-completion and standalone rollout tests still run: normal rollout uses that
+code. Remove the skip before enabling `NEBIUS_ROLLOUT_MODE=shared`.
+
 Go checks validate the retained execution runtime, gateway sandbox, and sandbox
 runtime. JWT and execution-materialization producer contracts also retain Go
 coverage; unrelated Python changes do not allocate a Go runner. Removed host
@@ -228,6 +252,14 @@ runs only restore caches; trusted pushes, dispatches and scheduled runs may save
 them. Recipe or release changes get a new cache key, and invalid archives fall
 back to normal pinned-image preparation. The lazy per-fixture resolver remains
 available for local tests.
+
+Both integration lanes also prepare selected `postgres:16` and
+`python:3.11-slim` fixtures before pytest, following literal references through
+fixture imports and parent conftests. Cached images are reused. Cold pulls use
+the configured Docker Hub mirror, have a 180-second preparation deadline and
+fail the job visibly without a retry loop or alternate image. This keeps network
+downloads outside the existing 60-second test setup budget; individual test
+deadlines, fixture references and coverage remain unchanged.
 
 The final repository gate checks individual lane results directly. Coverage
 aggregation runners are allocated only when optional Python coverage is requested.

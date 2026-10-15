@@ -226,6 +226,43 @@ async def test_persist_turn_plan_rejects_wrong_role_before_window() -> None:
 
 
 @pytest.mark.asyncio
+async def test_persist_sts_plan_accepts_teacher_inside_window() -> None:
+    extras = _student_extras(requested_model="openai/glm-5.2-urg")
+    extras["loom_role"] = "teacher"
+    extras["loom_episode"] = 2
+    session = _FakeSession(_switch_plan())
+    result = await persist_correlated_intent(
+        session,  # type: ignore[arg-type]
+        trial_id=uuid4(),
+        step_id="agent",
+        extras=extras,
+        jwt_connection_id=None,
+        requested_model="glm-5.2-urg",
+    )
+    assert result["correlation_status"] == "correlated"
+    assert result["role"] == "teacher"
+
+
+@pytest.mark.asyncio
+async def test_persist_sts_plan_rejects_teacher_before_k1() -> None:
+    extras = _student_extras(requested_model="openai/glm-5.2-urg")
+    extras["loom_role"] = "teacher"
+    extras["loom_episode"] = 1
+    session = _FakeSession(_switch_plan())
+    with pytest.raises(HTTPException) as exc:
+        await persist_correlated_intent(
+            session,  # type: ignore[arg-type]
+            trial_id=uuid4(),
+            step_id="agent",
+            extras=extras,
+            jwt_connection_id=None,
+            requested_model="glm-5.2-urg",
+        )
+    assert exc.value.status_code == 400
+    assert "does not match plan role" in str(exc.value.detail)
+
+
+@pytest.mark.asyncio
 async def test_persist_still_rejects_different_models() -> None:
     session = _FakeSession(_switch_plan())
     with pytest.raises(HTTPException) as exc:

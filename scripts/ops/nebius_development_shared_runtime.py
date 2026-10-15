@@ -80,7 +80,7 @@ def prepare_shared_runtime(request: DevelopmentDatabaseRuntime) -> DevelopmentSh
                 if row['observed']['kind'] == 'Deployment' and row['observed']['metadata']['name'] == name)
             before = copy.deepcopy(item['observed'])
             before['metadata']['uid'] = item['uid']
-            image = manager.publication.bundle.candidate['images'][component]['image_ref']
+            image = request.data_runtime.bundle.candidate['images'][component]['image_ref']
             if not isinstance(image, str) or re.fullmatch(r'.+@sha256:[0-9a-f]{64}', image) is None:
                 raise ValueError
             result, pod, container = _disabled(before, namespace='loom-dev', name=name, container_name=name, image=image)
@@ -107,7 +107,7 @@ def prepare_shared_runtime(request: DevelopmentDatabaseRuntime) -> DevelopmentSh
                             for key in ('SCHEDULER_ENABLED', 'MATERIALIZER_ENABLED'))):
                     raise ValueError
                 token = mount_machine_token(pod, machine_id=machine.machine_id,
-                    service_image=manager.publication.bundle.candidate['images']['service']['image_ref'])
+                    service_image=request.data_runtime.bundle.candidate['images']['service']['image_ref'])
                 runtime = PoolRuntimeSettings(participant=participant, environment='development',
                     logical_pool_id=profile.logical_pool_id, management_origin='https://' + manager.deployment.public_host,
                     bearer_token_file=Path(token))

@@ -38,3 +38,5 @@ config/storage-lifecycle.toml
 web/node_modules
 web/dist
 web/.vite
+# Playwright browser tests run in web-checks, not in the image.
+web/e2e

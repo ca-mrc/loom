@@ -149,9 +149,10 @@ def _retained_runtime(reference: RetainedRuntimeReference, files: dict[Path, byt
         raise ValueError
     for material in paths:
         read(material)
-    publication = DevelopmentRuntimePublication(source, inputs.publication,
+    publication = DevelopmentRuntimePublication(inputs.publication_source or source, inputs.publication,
         CandidateBundle(inputs.publication.candidate_id, inputs.candidate, inputs.profile))
     database = prepare_database_runtime(inputs.retained, publication=publication, operation_id=UUID(operation['operation_id']),
+        data_publication=inputs.data_runtime.selection() if inputs.data_runtime is not None else None,
         actuator_password=files[inputs.actuator_password_file].decode(), batch_runner_token=files[inputs.batch_runner_token_file].decode())
     manager = database.manager.retained.request.retained
     if (manager.binding.installation_id != operation['installation_id'] or manager.binding.namespace != operation['namespace']

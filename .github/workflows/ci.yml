@@ -56,7 +56,7 @@ on:
   pull_request:
     # `labeled` is included so adding the `ci:integration` label to an
     # existing PR re-triggers CI and runs the gated `integration` job.
-    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled, edited]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled]
   merge_group:
     # Required if dev later enables GitHub merge queue: queued merge groups
     # need to emit the same required `repository-checks` context as PRs.
@@ -996,6 +996,11 @@ jobs:
           path: ${{ runner.temp }}/minio-fixtures
           key: ${{ runner.os }}-${{ steps.manifest.outputs.minio_cache_key }}
 
+      - name: Prepare selected Docker Hub fixtures before test deadlines
+        run: >-
+          uv run --no-sync python -m tests.support.docker_hub_images
+          --test-paths-file "${{ steps.manifest.outputs.paths_file }}"
+
       - name: Pytest — integration (fast tier, no docker)
         shell: bash
         env:
@@ -1109,6 +1114,11 @@ jobs:
         with:
           path: ${{ runner.temp }}/minio-fixtures
           key: ${{ runner.os }}-${{ steps.manifest.outputs.minio_cache_key }}
+
+      - name: Prepare selected Docker Hub fixtures before test deadlines
+        run: >-
+          uv run --no-sync python -m tests.support.docker_hub_images
+          --test-paths-file "${{ steps.manifest.outputs.paths_file }}"
 
       - name: Build and extract the admitted software-guest payload
         if: matrix.guest_payload

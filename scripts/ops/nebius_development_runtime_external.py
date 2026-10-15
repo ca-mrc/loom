@@ -54,10 +54,18 @@ async def qualify_runtime_publication(*, request: DevelopmentRuntimeInstallReque
     try:
         manager = request.database.manager
         installation = manager.deployment.installation
-        selected = manager.publication.validate(installation.registry_prefix)
-        catalog = _publication_catalog(request=request, http=http, publications=[selected.publication])
-        if await catalog.resolve(selected.publication.candidate_id) != selected.bundle:
-            raise ValueError
+        publications = [manager.publication]
+        if request.database.data_publication is not None:
+            publications.append(request.database.data_publication)
+        for publication in publications:
+            selected = publication.validate(installation.registry_prefix)
+            catalog = _publication_catalog(request=request, http=http, publications=[selected.publication])
+            if await catalog.resolve(selected.publication.candidate_id) != selected.bundle:
+                raise ValueError
+            if (request.database.data_publication is not None
+                    and not await catalog.candidate_follows(candidate_id=selected.publication.candidate_id,
+                        current_sha=_SHARED_PROTOCOL_BASELINE)):
+                raise ValueError
     except Exception:
         raise ValueError('development runtime publication unqualified') from None
 
