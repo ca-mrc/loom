@@ -268,7 +268,10 @@ def test_shared_parent_rechecks_personal_scope_during_process_barrier(
     arguments, _ = authority_case
     scope = {name: copy.deepcopy(row) for name, row in arguments['current'].items()
         if row['kind'] in {'Namespace', 'ValidatingAdmissionPolicy', 'ValidatingAdmissionPolicyBinding'}}
-    live = {module.runtime_resource_path(row): copy.deepcopy(row) for row in scope.values()}
+    paths = {'Namespace': '/api/v1/namespaces/',
+        'ValidatingAdmissionPolicy': '/apis/admissionregistration.k8s.io/v1/validatingadmissionpolicies/',
+        'ValidatingAdmissionPolicyBinding': '/apis/admissionregistration.k8s.io/v1/validatingadmissionpolicybindings/'}
+    live = {paths[row['kind']] + row['metadata']['name']: copy.deepcopy(row) for row in scope.values()}
     captured = SimpleNamespace(plan=object())
     writers = module.SharedPoolWriterObservation(captured.plan, '10', {}, {}, 'census', scope)
     monkeypatch.setattr(module, 'observe_shared_pool_recovery_writers' if recovering else
