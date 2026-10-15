@@ -210,7 +210,11 @@ def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writ
                 'loom.nebius/incarnation': '124db80f-3858-431f-9db4-bf0cbac2f3d1',
                 'pod-security.kubernetes.io/enforce': 'restricted'}}}
         personal_binding = application_namespace_binding(domain, namespace['metadata']['name'])
-        personal_binding['metadata'].update(uid=str(uuid4()), resourceVersion='401')
+        personal_binding['metadata'].update(uid=str(uuid4()), resourceVersion='401',
+            labels={name: namespace['metadata']['labels'][name]
+                for name in ('loom.nebius/application-id', 'loom.nebius/incarnation')},
+            annotations={'loom.nebius/operation-id': str(uuid4()),
+                'loom.nebius/deployment-generation': '1', 'loom.nebius/effect-key': 'namespace-binding'})
         inventory['rolebindings'].append(personal_binding)
         kinds.update({'Namespace': 'namespaces', 'ValidatingAdmissionPolicy': 'validatingadmissionpolicies',
             'ValidatingAdmissionPolicyBinding': 'validatingadmissionpolicybindings'})
