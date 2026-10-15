@@ -209,13 +209,21 @@ def test_pool_operator_suite_gates_every_platform_candidate():
     policy = manifest.test_shard_policy(suite.lane)
     assert policy is not None
     jobs = yaml.safe_load((root / ".github/workflows/nebius-candidate.yml").read_text())["jobs"]
+    assert "pool-ops-plan" in jobs, "publication must reuse complete exact-commit coverage before scheduling tests"
     tests = jobs["pool-ops-tests"]
     assert "environment" not in tests and "secrets." not in json.dumps(tests)
-    assert tests["strategy"]["matrix"]["shard_index"] == list(range(policy.shard_count))
+    assert tests["needs"] == ["pool-ops-plan"]
+    assert tests["strategy"]["matrix"] == "${{ fromJSON(needs.pool-ops-plan.outputs.matrix) }}"
+    assert tests["if"] == "needs.pool-ops-plan.outputs.required == 'true'"
     run = "\n".join(step.get("run", "") for step in tests["steps"])
-    assert "--suite nebius-pool-ops" in run and f"--shard-count {policy.shard_count}" in run
-    assert "--changed-paths-json" not in run
-    assert jobs["publish"]["needs"] == ["pool-ops-tests"]
+    assert 'os.environ["TEST_PATHS_JSON"]' in run
+    assert "mapfile -t test_paths" in run and '"${test_paths[@]}"' in run
+    assert jobs["pool-ops-plan"]["permissions"] == {
+        "contents": "read", "actions": "read", "checks": "read"}
+    assert "environment" not in jobs["pool-ops-plan"]
+    assert jobs["publish"]["needs"] == ["pool-ops-plan", "pool-ops-tests"]
+    assert "needs.pool-ops-plan.result == 'success'" in jobs["publish"]["if"]
+    assert "needs.pool-ops-plan.outputs.required == 'false'" in jobs["publish"]["if"]
     assert "needs.pool-ops-tests.result == 'success'" in jobs["publish"]["if"]
 
 

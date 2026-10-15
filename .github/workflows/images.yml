@@ -186,6 +186,10 @@ jobs:
             --changed-files "$CHANGED_FILES"
             --github-output "$GITHUB_OUTPUT"
           )
+          if [[ "$REQUIRED" == "false" && "$EVENT_NAME" != "workflow_dispatch" ]]; then
+            printf '%s\n' 'required=false' 'images=[]' 'native_builds=[]' 'harbor_required=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [[ "$EVENT_NAME" == "workflow_dispatch" || \
                 "$UNOWNED_RUNTIME" == "true" ]]; then
             args+=(--force-all)

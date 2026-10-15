@@ -127,6 +127,9 @@ jobs:
       staging_smoke: ${{ steps.plan.outputs.staging_smoke || steps.event.outputs.staging_smoke }}
       coverage_summary: ${{ steps.plan.outputs.coverage_summary || steps.event.outputs.coverage_summary }}
       web_checks: ${{ steps.plan.outputs.web_checks || steps.event.outputs.web_checks }}
+      web_runtime: ${{ steps.plan.outputs.web_runtime }}
+      go_packages: ${{ steps.plan.outputs.go_packages || '["./cmd/...","./internal/..."]' }}
+      iac_targets: ${{ steps.plan.outputs.iac_targets || '[]' }}
       lint_and_static: ${{ steps.plan.outputs.lint_and_static || steps.event.outputs.lint_and_static }}
       tests_root: ${{ steps.plan.outputs.tests_root || steps.event.outputs.tests_root }}
       nebius_pool: ${{ steps.plan.outputs.nebius_pool || steps.event.outputs.nebius_pool }}
@@ -720,22 +723,29 @@ jobs:
           echo "${install_dir}" >> "${GITHUB_PATH}"
 
       - name: Validate pinned Nebius module and stack
+        env:
+          IAC_TARGETS_JSON: ${{ needs.workflow-plan.outputs.iac_targets }}
         run: |
           set -euo pipefail
           terraform fmt -check -recursive deploy/terraform/nebius
-          terraform -chdir=deploy/terraform/nebius/modules/execution-target init -backend=false -input=false
-          # The reusable module requires an aliased provider configuration;
-          # its mock-backed tests supply both provider instances explicitly.
-          terraform -chdir=deploy/terraform/nebius/modules/execution-target test
-          terraform -chdir=deploy/terraform/nebius/stack init -backend=false -input=false
-          terraform -chdir=deploy/terraform/nebius/stack validate
-          terraform -chdir=deploy/terraform/nebius/modules/platform init -backend=false -input=false
-          terraform -chdir=deploy/terraform/nebius/modules/platform test
-          terraform -chdir=deploy/terraform/nebius/platform init -backend=false -input=false
-          terraform -chdir=deploy/terraform/nebius/platform validate
-          terraform -chdir=deploy/terraform/nebius/modules/regional-execution init -backend=false -input=false
-          terraform -chdir=deploy/terraform/nebius/modules/regional-execution test
-          terraform -chdir=deploy/terraform/nebius/platform test
+          python3 - <<'PY' > "$RUNNER_TEMP/iac-targets.txt"
+          import json, os
+          from scripts.plan_ci_validations import IAC_ALL_TARGETS
+          targets = json.loads(os.environ['IAC_TARGETS_JSON'])
+          assert targets and all(target in IAC_ALL_TARGETS for target in targets)
+          print('\n'.join(targets))
+          PY
+          while IFS= read -r target; do
+            directory="deploy/terraform/nebius/$target"
+            terraform -chdir="$directory" init -backend=false -input=false
+            case "$target" in
+              stack) terraform -chdir="$directory" validate ;;
+              platform)
+                terraform -chdir="$directory" validate
+                terraform -chdir="$directory" test ;;
+              *) terraform -chdir="$directory" test ;;
+            esac
+          done < "$RUNNER_TEMP/iac-targets.txt"
 
   # Coverage instrumentation is optional. Ordinary PRs validate each selected
   # source job directly in repository-checks, without an intermediate runner.
@@ -854,6 +864,8 @@ jobs:
   go-checks:
     name: go-checks
     runs-on: ubuntu-24.04
+    env:
+      GO_PACKAGES_JSON: ${{ needs.workflow-plan.outputs.go_packages }}
     needs: [workflow-plan]
     if: >-
       needs.workflow-plan.outputs.gate_mode == 'full' &&
@@ -867,16 +879,32 @@ jobs:
           cache: false
       - name: gofmt
         run: |
-          out=$(gofmt -l ./cmd/ ./internal/)
+          set -euo pipefail
+          python3 - <<'PY' > "$RUNNER_TEMP/go-packages.txt"
+          import json, os
+          packages = json.loads(os.environ['GO_PACKAGES_JSON'])
+          allowed = {'./cmd/...', './internal/...', './internal/guestchannel/...'}
+          from scripts.plan_ci_validations import GO_INPUT_PREFIXES
+          allowed.update('./' + prefix.rstrip('/') + '/...' for prefix in GO_INPUT_PREFIXES)
+          assert packages and all(package in allowed for package in packages)
+          print('\n'.join(packages))
+          PY
+          mapfile -t packages < "$RUNNER_TEMP/go-packages.txt"
+          directories=("${packages[@]%/...}")
+          out=$(gofmt -l "${directories[@]}")
           if [ -n "$out" ]; then
             echo "$out"
             echo "gofmt found issues; run \`gofmt -w ./cmd/ ./internal/\` to fix"
             exit 1
           fi
       - name: go vet
-        run: go vet ./cmd/... ./internal/...
+        run: |
+          mapfile -t packages < "$RUNNER_TEMP/go-packages.txt"
+          go vet "${packages[@]}"
       - name: go test
-        run: go test -race ./cmd/... ./internal/...
+        run: |
+          mapfile -t packages < "$RUNNER_TEMP/go-packages.txt"
+          go test -race "${packages[@]}"
 
   # Required frontend gate. It builds and serves the production bundle under
   # a route prefix, then exercises logged-out, user, and admin paths at
@@ -918,24 +946,30 @@ jobs:
 
       - name: Verify generated API types
         working-directory: web
-        run: npm run gen-api -- --check
+        env:
+          WEB_RUNTIME: ${{ needs.workflow-plan.outputs.web_runtime }}
+        run: |
+          [[ "$WEB_RUNTIME" == 'true' || "$WEB_RUNTIME" == 'false' ]]
+          npm run gen-api -- --check
 
       - name: TypeScript strict and ESLint
+        if: needs.workflow-plan.outputs.web_runtime == 'true'
         working-directory: web
         run: |
           npm run typecheck
           npm run lint
 
       - name: Vitest coverage gate
+        if: needs.workflow-plan.outputs.web_runtime == 'true'
         shell: bash
         run: |
           set -euo pipefail
           if [[ -f config/component-ownership.toml && \
                 -f scripts/component_ownership.py ]] && \
              python3 scripts/component_ownership.py --help | grep -q -- 'test-paths'; then
-            mapfile -t owned_tests < <(
-              python3 scripts/component_ownership.py test-paths --lane frontend --test-scope "${CI_TEST_SCOPE:-all}"
-            )
+            python3 scripts/component_ownership.py test-paths --lane frontend --test-scope "${CI_TEST_SCOPE:-all}" \
+              > "$RUNNER_TEMP/frontend-tests.txt"
+            mapfile -t owned_tests < "$RUNNER_TEMP/frontend-tests.txt"
             [[ ${#owned_tests[@]} -gt 0 ]]
             web_tests=()
             for test_path in "${owned_tests[@]}"; do
@@ -954,6 +988,7 @@ jobs:
           fi
 
       - name: Production build
+        if: needs.workflow-plan.outputs.web_runtime == 'true'
         working-directory: web
         run: npm run build
 
@@ -967,10 +1002,12 @@ jobs:
           retention-days: 7
 
       - name: Install Chromium
+        if: needs.workflow-plan.outputs.web_runtime == 'true'
         working-directory: web
         run: npx --no-install playwright install --with-deps chromium
 
       - name: Prefix-route browser, axe, console, and network gate
+        if: needs.workflow-plan.outputs.web_runtime == 'true'
         working-directory: web
         run: npm run test:e2e
 

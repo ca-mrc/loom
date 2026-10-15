@@ -97,6 +97,7 @@ jobs:
     outputs:
       required: ${{ steps.plan.outputs.staging_smoke || steps.event.outputs.required }}
       gate_mode: ${{ steps.plan.outputs.gate_mode || steps.event.outputs.gate_mode }}
+      test_changes: ${{ steps.plan.outputs.test_changes || '[]' }}
     steps:
       - name: Classify filtered event before checkout
         id: event
@@ -207,11 +208,13 @@ jobs:
         shell: bash
         env:
           LOOM_SYSTEM_SMOKE_DIAGNOSTICS: ${{ runner.temp }}/system-smoke-compose.log
+          TEST_CHANGED_PATHS: ${{ needs.plan.outputs.test_changes }}
         run: |
           set -euo pipefail
-          mapfile -t test_paths < <(
-            uv run --no-sync python scripts/component_ownership.py test-paths --lane system-smoke --test-scope "${CI_TEST_SCOPE:-all}"
-          )
+          manifest_paths_file="$RUNNER_TEMP/system-smoke-tests.txt"
+          uv run --no-sync python scripts/component_ownership.py test-paths --lane system-smoke --test-scope "${CI_TEST_SCOPE:-all}" \
+            --changed-paths-json "$TEST_CHANGED_PATHS" > "$manifest_paths_file"
+          mapfile -t test_paths < "$manifest_paths_file"
           [[ ${#test_paths[@]} -gt 0 ]]
           uv run --no-sync pytest -m "${CI_PYTEST_MARKERS:-not legacy_pool}" --timeout=1200 "${test_paths[@]}"
 
