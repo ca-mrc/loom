@@ -177,6 +177,59 @@ def test_failure_diagnostics_continue_after_error_and_bound_output(monkeypatch):
     assert all(len(note) < 17000 for note in error.__notes__)
 
 
+@pytest.mark.parametrize("pods_unavailable", [False, True])
+def test_failure_diagnostics_read_api_without_exec_or_pod_specs(monkeypatch, pods_unavailable):
+    from types import SimpleNamespace
+
+    from kubernetes import client
+
+    pod = client.V1Pod(metadata=client.V1ObjectMeta(name="control", annotations={"private": "private-annotation"}),
+        spec=client.V1PodSpec(node_name="disposable-node", containers=[client.V1Container(
+            name="fixture", env=[client.V1EnvVar(name="TOKEN", value="private-env")])]),
+        status=client.V1PodStatus(phase="Pending", conditions=[client.V1PodCondition(
+            type="PodReadyToStartContainers", status="False")]))
+    event = client.CoreV1Event(metadata=client.V1ObjectMeta(),
+        involved_object=client.V1ObjectReference(name="control", kind="Pod"),
+        reason="FailedCreatePodSandBox", message="sandbox network stalled", count=3)
+
+    def pods(namespace, **kwargs):
+        assert namespace == "test-platform" and kwargs == {"limit": 32, "_request_timeout": (2, 3)}
+        if pods_unavailable:
+            raise RuntimeError("private-api-response")
+        return client.V1PodList(items=[pod])
+
+    def events(namespace, **kwargs):
+        assert namespace == "test-platform"
+        assert kwargs == {"limit": 32, "field_selector": "type=Warning", "_request_timeout": (2, 3)}
+        return client.CoreV1EventList(items=[event])
+
+    def command(args, **kwargs):
+        if "exec" in args:
+            raise subprocess.TimeoutExpired(args, kwargs["timeout"])
+        return subprocess.CompletedProcess(args, 0, "process-wait-state", "")
+
+    monkeypatch.setattr(subprocess, "run", command)
+    core = SimpleNamespace(list_namespaced_pod=pods, list_namespaced_event=events)
+    container = SimpleNamespace(get_wrapped_container=lambda: SimpleNamespace(id="disposable-node"))
+    original = AssertionError("original")
+    with pytest.raises(AssertionError) as caught:
+        try:
+            raise original
+        except AssertionError as error:
+            _add_failure_diagnostics(container, "test-platform", error, core=core)
+            raise
+    assert caught.value is original
+    notes = "\n".join(original.__notes__)
+    assert "FailedCreatePodSandBox" in notes and "sandbox network stalled" in notes
+    assert "private-" not in notes
+    assert any("docker top disposable-node" in note and "process-wait-state" in note for note in original.__notes__)
+    if pods_unavailable:
+        assert "RuntimeError" in original.__notes__[0]
+    else:
+        assert "PodReadyToStartContainers" in notes and "Pending" in notes
+    assert all(len(note) < 17000 for note in original.__notes__)
+
+
 def _backend(ns, name, port, *, tls=False):
     spec = {"automountServiceAccountToken": False,
             "securityContext": {"runAsNonRoot": True, "runAsUser": 1000, "runAsGroup": 1000,
