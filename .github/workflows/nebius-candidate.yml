@@ -44,7 +44,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The tests-root shard policy; shards without pool tests finish at once.
+        # The nebius-pool shard policy; shards without active pool tests finish at once.
         shard_index: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
@@ -59,7 +59,7 @@ jobs:
         run: |
           set -euo pipefail
           paths_file="${RUNNER_TEMP}/pool-ops-tests.txt"
-          python3 scripts/component_ownership.py test-paths --lane tests-root --test-scope nebius \
+          python3 scripts/component_ownership.py test-paths --lane nebius-pool --test-scope nebius \
             --suite nebius-pool-ops --shard-index "$SHARD_INDEX" --shard-count 20 > "$paths_file"
           echo "paths_file=$paths_file" >> "$GITHUB_OUTPUT"
           echo "selected=$([[ -s "$paths_file" ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"

@@ -129,6 +129,7 @@ jobs:
       web_checks: ${{ steps.plan.outputs.web_checks || steps.event.outputs.web_checks }}
       lint_and_static: ${{ steps.plan.outputs.lint_and_static || steps.event.outputs.lint_and_static }}
       tests_root: ${{ steps.plan.outputs.tests_root || steps.event.outputs.tests_root }}
+      nebius_pool: ${{ steps.plan.outputs.nebius_pool || steps.event.outputs.nebius_pool }}
       tests_packages: ${{ steps.plan.outputs.tests_packages || steps.event.outputs.tests_packages }}
       go_checks: ${{ steps.plan.outputs.go_checks || steps.event.outputs.go_checks }}
       runtime_payload: ${{ steps.plan.outputs.runtime_payload || steps.event.outputs.runtime_payload }}
@@ -136,6 +137,7 @@ jobs:
       locked_environments: ${{ steps.plan.outputs.locked_environments || steps.event.outputs.locked_environments }}
       test_changes: ${{ steps.plan.outputs.test_changes || '[]' }}
       tests_root_matrix: ${{ steps.plan.outputs.tests_root_matrix || '[]' }}
+      nebius_pool_matrix: ${{ steps.plan.outputs.nebius_pool_matrix || '[]' }}
       integration_matrix: ${{ steps.plan.outputs.integration_matrix || '[]' }}
       integration_docker_matrix: ${{ steps.plan.outputs.integration_docker_matrix || '[]' }}
     steps:
@@ -165,6 +167,7 @@ jobs:
               echo 'web_checks=false'
               echo 'lint_and_static=false'
               echo 'tests_root=false'
+              echo 'nebius_pool=false'
               echo 'tests_packages=false'
               echo 'go_checks=false'
               echo 'runtime_payload=false'
@@ -370,8 +373,8 @@ jobs:
     name: tests-root (${{ matrix.shard }})
     runs-on: ubuntu-24.04
     needs: [workflow-plan]
-    # The slowest full shard needs ~40 minutes for pytest alone on hosted
-    # runners; leave bounded room for setup, wheel verification and cleanup.
+    # Shards project ~7 minutes of pytest without coverage; leave room for
+    # coverage, setup, wheel verification and cleanup.
     timeout-minutes: 50
     if: >-
       needs.workflow-plan.outputs.tests_root == 'true' &&
@@ -537,6 +540,76 @@ jobs:
           path: ${{ env.COVERAGE_FILE }}
           include-hidden-files: true
           if-no-files-found: error
+
+  nebius-pool:
+    name: nebius-pool (${{ matrix.shard }})
+    runs-on: ubuntu-24.04
+    needs: [workflow-plan]
+    # Pool operator lifecycle modules; the slowest shard needs ~40 minutes
+    # for pytest alone. Selected only when operator inputs change.
+    timeout-minutes: 50
+    if: >-
+      needs.workflow-plan.outputs.nebius_pool == 'true' &&
+      needs.workflow-plan.outputs.gate_mode == 'full'
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.workflow-plan.outputs.nebius_pool_matrix) }}
+    env:
+      TEST_CHANGED_PATHS: ${{ needs.workflow-plan.outputs.test_changes }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          fetch-depth: 0
+
+      - name: Configure credential-free Docker Hub mirror
+        run: python3 scripts/configure_ci_registry_mirror.py
+
+      - name: Select nonempty nebius-pool manifest
+        id: manifest
+        shell: bash
+        env:
+          SHARD_INDEX: ${{ matrix.shard_index }}
+          SHARD_COUNT: ${{ matrix.shard_count }}
+        run: |
+          set -euo pipefail
+          manifest_paths_file="${RUNNER_TEMP}/nebius-pool-manifest.txt"
+          python3 scripts/component_ownership.py test-paths --lane nebius-pool --test-scope "${CI_TEST_SCOPE:-all}" \
+            --changed-paths-json "$TEST_CHANGED_PATHS" \
+            --shard-index "$SHARD_INDEX" --shard-count "$SHARD_COUNT" \
+            > "$manifest_paths_file"
+          test -s "$manifest_paths_file"
+          echo "paths_file=$manifest_paths_file" >> "$GITHUB_OUTPUT"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: "0.11.26"
+          checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
+          enable-cache: true
+          save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+          cache-dependency-glob: uv.lock
+
+      - name: Set up Python 3.11
+        run: uv python install 3.11
+
+      - name: Sync locked workspace
+        run: |
+          uv sync --locked --all-packages --extra dev --python 3.11
+          uv pip check --python .venv/bin/python
+
+      - name: Pytest — manifest-owned pool shard
+        shell: bash
+        env:
+          SHARD_INDEX: ${{ matrix.shard_index }}
+          SHARD_COUNT: ${{ matrix.shard_count }}
+        run: |
+          set -euo pipefail
+          mapfile -t test_paths < "${{ steps.manifest.outputs.paths_file }}"
+          [[ ${#test_paths[@]} -gt 0 ]]
+          uv run --no-sync pytest -m "${CI_PYTEST_MARKERS:-not legacy_pool}" "${test_paths[@]}" \
+            -x --durations=25 \
+            -p no:cov
 
   tests-packages:
     name: tests-packages
@@ -1250,6 +1323,7 @@ jobs:
       - runtime-payload
       - nebius-iac
       - tests-root
+      - nebius-pool
       - tests-packages
       - fast-coverage
       - go-checks
@@ -1268,6 +1342,8 @@ jobs:
           LOCKED_RESULT: ${{ needs.locked-environments.result }}
           ROOT_SELECTED: ${{ needs.workflow-plan.outputs.tests_root }}
           ROOT_RESULT: ${{ needs.tests-root.result }}
+          POOL_SELECTED: ${{ needs.workflow-plan.outputs.nebius_pool }}
+          POOL_RESULT: ${{ needs.nebius-pool.result }}
           PACKAGES_SELECTED: ${{ needs.workflow-plan.outputs.tests_packages }}
           PACKAGES_RESULT: ${{ needs.tests-packages.result }}
           PAYLOAD_SELECTED: ${{ needs.workflow-plan.outputs.runtime_payload }}
@@ -1330,12 +1406,14 @@ jobs:
           require_success workflow-plan "$PLAN_RESULT"
           require_boolean locked_environments "$LOCKED_SELECTED"
           require_boolean tests_root "$ROOT_SELECTED"
+          require_boolean nebius_pool "$POOL_SELECTED"
           require_boolean tests_packages "$PACKAGES_SELECTED"
           require_boolean runtime_payload "$PAYLOAD_SELECTED"
           require_boolean nebius_iac "$IAC_SELECTED"
           require_selected "$LINT_SELECTED" lint-and-static "$LINT_RESULT"
           require_selected "$LOCKED_SELECTED" locked-environments "$LOCKED_RESULT"
           require_selected "$ROOT_SELECTED" tests-root "$ROOT_RESULT"
+          require_selected "$POOL_SELECTED" nebius-pool "$POOL_RESULT"
           require_selected "$PACKAGES_SELECTED" tests-packages "$PACKAGES_RESULT"
           require_selected "$PAYLOAD_SELECTED" runtime-payload "$PAYLOAD_RESULT"
           require_selected "$IAC_SELECTED" nebius-iac "$IAC_RESULT"
