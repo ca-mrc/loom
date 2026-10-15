@@ -1,73 +1,59 @@
-name: classified-ci-retry
-run-name: >-
-  ci-retry-v1 source_run=${{ inputs.source_run_id }}
-  failed_attempt=${{ inputs.failed_attempt }} reason=${{ inputs.reason }}
-  actor=${{ github.actor }}
-
+name: ci-runner-bridge-probe
+run-name: Isolated hosted VM to native Actions runner bridge proof
 on:
   workflow_dispatch:
-    inputs:
-      source_run_id:
-        description: Terminal required-source workflow run ID
-        required: true
-        type: string
-      failed_attempt:
-        description: Current failed/cancelled attempt number
-        required: true
-        type: string
-      reason:
-        description: Root-cause classification
-        required: true
-        type: choice
-        options: [platform_transient, external_dependency, capacity_queue, code_failure]
-      evidence_url:
-        description: Same-repository run, issue, or PR evidence URL
-        required: true
-        type: string
-      mode:
-        description: Retry failed jobs, or all jobs only after capacity/queue loss
-        required: true
-        type: choice
-        options: [failed_jobs, all_jobs]
-
 permissions:
   contents: read
-
-# A retry request mutates the source workflow run. Serialize requests for the
-# same source run and let an accepted request finish so a later dispatch cannot
-# cancel it after GitHub has begun the rerun operation.
-concurrency:
-  group: classified-ci-retry-${{ inputs.source_run_id }}
-  cancel-in-progress: false
-
 jobs:
-  retry:
+  bridge-host:
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      actions: write
-      contents: read
+    timeout-minutes: 10
     steps:
-      - name: Checkout trusted retry policy
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-        with:
-          ref: ${{ github.workflow_sha }}
-          persist-credentials: false
-      - name: Record classification and request bounded retry
+      - name: Prepare pinned one-job Actions runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -d -m 700 "$RUNNER_TEMP/bridge-runner"
+          cd "$RUNNER_TEMP/bridge-runner"
+          curl --fail --location --retry 2 --max-time 120 --output runner.tar.gz \
+            https://github.com/actions/runner/releases/download/v2.336.0/actions-runner-linux-x64-2.336.0.tar.gz
+          echo '04cf0be1aff4c3ec3554466c39124ca250e3effd8873bb7e8d68535aa9505d5d  runner.tar.gz' | sha256sum --check
+          tar xzf runner.tar.gz
+          rm runner.tar.gz
+      - name: Accept one native Actions job then exit
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
-          FAILED_ATTEMPT: ${{ inputs.failed_attempt }}
-          RETRY_REASON: ${{ inputs.reason }}
-          EVIDENCE_URL: ${{ inputs.evidence_url }}
-          RETRY_MODE: ${{ inputs.mode }}
-          RETRY_ACTOR: ${{ github.actor }}
-        run: >-
-          python3 scripts/ops/ci_retry_governance.py
-          --repository "$GITHUB_REPOSITORY"
-          --source-run-id "$SOURCE_RUN_ID"
-          --failed-attempt "$FAILED_ATTEMPT"
-          --reason "$RETRY_REASON"
-          --evidence-url "$EVIDENCE_URL"
-          --mode "$RETRY_MODE"
-          --actor "$RETRY_ACTOR"
+          LOOM_JIT: ${{ secrets.LOOM_CI_BRIDGE_PROBE_JIT }}
+        run: |
+          set -euo pipefail
+          test -n "$LOOM_JIT"
+          cd "$RUNNER_TEMP/bridge-runner"
+          env -i HOME="$HOME" USER="$USER" LOGNAME="$LOGNAME" PATH="$PATH" LANG=C.UTF-8 \
+            ./run.sh --jitconfig "$LOOM_JIT"
+  bridge-payload:
+    runs-on: [self-hosted, linux, x64, loom-ci-bridge-probe]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+      - name: Prove native checkout and isolated Docker execution
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = self-hosted
+          test "$(uname -m)" = x86_64
+          docker version
+          timeout 90 docker run --rm hello-world
+          python3 - <<'PY'
+          import json,os,subprocess
+          from pathlib import Path
+          proof={"runner_name":os.environ["RUNNER_NAME"],"runner_environment":os.environ["RUNNER_ENVIRONMENT"],"checkout_sha":subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip(),"native_checkout":"PASS","docker_run":"PASS"}
+          Path("bridge-proof.json").write_text(json.dumps(proof,indent=2)+"\n")
+          print(json.dumps(proof))
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: hosted-vm-native-runner-proof
+          path: bridge-proof.json
+          if-no-files-found: error
