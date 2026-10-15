@@ -288,6 +288,7 @@ async def anthropic_messages_facade(
             provider=row.provider_type,
             attempt=outcome.attempt,
             request_params=normalize_request_params(payload),
+            auth_context=ctx,
         )
 
     return body
@@ -587,4 +588,5 @@ async def _record_anthropic_usage_from_stream(
             provider=row.provider_type,
             attempt=1,
             request_params=normalize_request_params(request_payload),
+            auth_context=ctx,
         )
