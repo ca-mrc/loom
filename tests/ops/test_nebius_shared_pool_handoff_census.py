@@ -148,8 +148,8 @@ from tests.ops.test_nebius_shared_pool_handoff import (
 
 
 @pytest.mark.timeout(1200)
-@pytest.mark.parametrize('forward_census', [False, True, 'participant', 'preparation'],
-    ids=['initial', 'forward', 'participant', 'preparation'])
+@pytest.mark.parametrize('forward_census', [False, True, 'participant', 'preparation', 'personal'],
+    ids=['initial', 'forward', 'participant', 'preparation', 'personal'])
 def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writers(
         shared_runtime, staging_history, staging_observation, completed_pool, handoff, shared_operation, forward_census,
         publisher_cloud):
@@ -195,6 +195,31 @@ def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writ
     for row in roots.values():
         row['metadata']['resourceVersion'] = '401'
         inventory[kinds[row['kind']]].append(row)
+    personal_binding = None
+    if forward_census == 'personal':
+        from loom.nebius_application_authority import application_namespace_binding
+
+        applications = request.database.manager.deployment.installation.applications
+        assert applications is not None
+        domain = applications.authority
+        namespace = {'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {
+            'name': 'loom-dev-census-owner', 'uid': str(uuid4()), 'resourceVersion': '401',
+            'labels': {'loom.nebius/application-installation': str(domain.installation_id),
+                'loom.nebius/data-environment-id': str(domain.data_environment_id),
+                'loom.nebius/application-id': 'ee03a1b0-dba2-40de-beb8-9256831c9e29',
+                'loom.nebius/incarnation': '124db80f-3858-431f-9db4-bf0cbac2f3d1',
+                'pod-security.kubernetes.io/enforce': 'restricted'}}}
+        personal_binding = application_namespace_binding(domain, namespace['metadata']['name'])
+        personal_binding['metadata'].update(uid=str(uuid4()), resourceVersion='401')
+        inventory['rolebindings'].append(personal_binding)
+        kinds.update({'Namespace': 'namespaces', 'ValidatingAdmissionPolicy': 'validatingadmissionpolicies',
+            'ValidatingAdmissionPolicyBinding': 'validatingadmissionpolicybindings'})
+        inventory['namespaces'] = [namespace]
+        for kind in ('ValidatingAdmissionPolicy', 'ValidatingAdmissionPolicyBinding'):
+            inventory[kinds[kind]] = [copy.deepcopy(row) for row in documents.values() if row['kind'] == kind]
+            assert inventory[kinds[kind]]
+            for row in inventory[kinds[kind]]:
+                row['metadata']['resourceVersion'] = '401'
     controller = roots['Deployment:' + staging_observation['namespace'] + ':loom-control-plane']
     replica = writer_descendant(controller, 'ReplicaSet')
     inventory['replicasets'].append(replica)
@@ -231,7 +256,8 @@ def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writ
             assert version == '500' and message.url.params['resourceVersionMatch'] == 'Exact'
         if plural == 'pods' and mode.get('during_read') is not None:
             mode.pop('during_read')()
-        return httpx.Response(200, json={'apiVersion': 'v1' if plural in {'pods', 'replicationcontrollers'}
+        return httpx.Response(200, json={'apiVersion': 'v1' if plural in {'pods', 'replicationcontrollers', 'namespaces'}
+            else 'admissionregistration.k8s.io/v1' if kind.startswith('ValidatingAdmissionPolicy')
             else 'batch/v1' if plural in {'jobs', 'cronjobs'} else 'rbac.authorization.k8s.io/v1'
             if kind in rbac_kinds else 'apps/v1', 'kind': kind + 'List',
             'metadata': {'resourceVersion': mode['revision'] if plural == 'pods' else '500', 'continue': ''},
@@ -242,7 +268,7 @@ def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writ
         transport.client.close()
         transport.client = type(completed_pool[3].api.client)(base_url=transport.api_server,
             transport=httpx.MockTransport(respond))
-        if forward_census:
+        if forward_census and forward_census != 'personal':
             _exercise_forward_writer_census(shared_operation, transport, inventory, kinds, calls, mode,
                 recovery=forward_census == 'recovery',
                 participant=forward_census if forward_census in {'participant', 'preparation'} else False,
@@ -261,6 +287,10 @@ def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writ
         gateway, = (row for row in staging_history.completion.workloads.values()
             if row['metadata']['name'] == 'loom-pool-gateway')
         assert result.workloads[_key(gateway)]['spec']['replicas'] == 0
+        if personal_binding is not None:
+            assert result.authority[_key(personal_binding)] == personal_binding
+            assert all(message.method == 'GET' for message in calls)
+            return
         original = copy.deepcopy(inventory)
         # Completed Jobs and Pods may have been garbage-collected normally.
         # No absent historical object becomes a required deployment target.
