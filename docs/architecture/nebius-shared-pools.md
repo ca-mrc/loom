@@ -900,6 +900,18 @@ platform trust. This does not prove external-credential/provider exclusivity,
 effective post-fencing permissions or process drain; it cannot be replayed
 unchanged after an intentional handoff transition.
 
+Personal application lifecycle RoleBindings are a separate qualification class,
+not generic readers. Their exact manager subject and fixed resource role must
+belong to a completed installation. The census verifies the retained role and
+fail-closed admission policies against their renderer, and reads each personal
+namespace at the same API-server revision. Installation, data, application and
+incarnation identities, restricted Pod Security and a non-deleting namespace
+must match; shared, management, worker, build and ingress namespaces are excluded.
+Cluster-wide bindings receive no personal exception. Repeated handoff and normal
+participant-release checks also compare namespace and admission-policy identities,
+so replacing a namespace with the same labels cannot preserve stale qualification.
+No personal grant means no additional scope inventory reads.
+
 The shared preflight reuses the runtime's authenticated provider read with the
 installed collector identity, bracketed by current runtime/material and retained
 history checks. The returned node-group and quota identities must match the

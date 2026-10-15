@@ -3328,7 +3328,7 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
                 for name, probe in (('peer', peer_process), ('gateway', gateway_process)):
                     changed = []
 
-                    def drift(command, **options):
+                    def drift(command, *, changed=changed, **options):
                         result = execute_probe(command, **options)
                         if 'exec' in command and not changed:
                             scope['metadata']['uid'] = str(uuid4())

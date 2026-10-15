@@ -345,8 +345,11 @@ class HTTPSSharedPoolOperationAPI(HTTPSSharedPoolRuntimeProbes):
         current = observer(bindings=self._captured, state_dir=self.shared_state, transport=self)
         if current.plan != self._captured.plan or current.authority.keys() != writers.authority.keys():
             raise ValueError('shared writer authority changed')
-        if any(not _matches(current.authority[key], row, _uid(row)) for key, row in writers.authority.items()):
-            raise ValueError('shared writer authority changed')
+        for before_scope, after_scope in ((writers.authority, current.authority),
+                (writers.application_scopes, current.application_scopes)):
+            if (before_scope.keys() != after_scope.keys()
+                    or any(not _matches(after_scope[key], row, _uid(row)) for key, row in before_scope.items())):
+                raise ValueError('shared writer authority changed')
         arguments: _ObservationArguments = dict(bindings=self._captured, state_dir=self.shared_state,
             kubeconfig=self.guards.kubeconfig, executable=Path(self.prefix[0]))
         result: SharedPoolForwardProcessObservation | SharedPoolRecoveryProcessObservation
