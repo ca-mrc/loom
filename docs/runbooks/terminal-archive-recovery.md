@@ -19,6 +19,22 @@ runtime result/reward/attempt are preserved. A successful `materializing` Trial
 becomes succeeded only after ordinary validated canonical commit. Each source
 is bounded to 1,024 files and 512 MiB. The independent source store is retained.
 
+Before selecting recovery targets, dispatch the protected read-only lease census:
+
+```bash
+gh workflow run nebius-rollout.yml --repo ca-mrc/loom --ref dev \
+  -f operation=lease-census
+```
+
+Download the `nebius-lease-census-RUN_ID-ATTEMPT` artifact from that run. It
+contains the exact active lease, team, Trial, parent, Kubernetes Job/Pod,
+cleanup/materialization, retry/error-code timestamp, and command-state bindings
+needed to classify recovery. The census uses the unchanged rollout activity
+predicate in a read-only transaction and is bounded; it exposes no command
+payloads, source contents, credentials, or error messages. Requalify every
+record immediately before an operator request because this inventory is a
+point-in-time observation.
+
 1. Inspect each exact team and parent lease using the kubeconfig already configured
    for ordinary protected rollout. Its current context is preserved; the cluster
    identity is checked again before submitting a Job. Inspection exports bindings and safe
