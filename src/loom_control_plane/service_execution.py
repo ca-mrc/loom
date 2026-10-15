@@ -2232,6 +2232,19 @@ async def record_kubernetes_observation(
         },
         persisted=False,
     )
+    # Command, watch and reconciliation loops may observe the same resource
+    # concurrently. Serialize key lookup and ordinal allocation at the lease:
+    # another observer can commit this key while we wait for its row lock.
+    lease = (
+        await session.execute(
+            select(ServiceExecutionLease)
+            .where(ServiceExecutionLease.id == lease_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if lease is None:
+        raise ServiceExecutionConflict("execution lease not found")
     existing = (
         await session.execute(
             select(ServiceExecutionEvent).where(
@@ -2242,15 +2255,6 @@ async def record_kubernetes_observation(
     if existing is not None:
         ordinal = existing.ordinal
     else:
-        lease = (
-            await session.execute(
-                select(ServiceExecutionLease)
-                .where(ServiceExecutionLease.id == lease_id)
-                .with_for_update()
-            )
-        ).scalar_one_or_none()
-        if lease is None:
-            raise ServiceExecutionConflict("execution lease not found")
         ordinal = lease.last_event_ordinal + 1
     return await record_execution_event(
         session,
