@@ -51,6 +51,7 @@ from loom.execution_diagnosis_store import execution_failure_groups
 from loom.execution_selection import execution_selection_readback
 from loom.hosted_harness import harnesses_supporting, hosted_harness
 from loom.models.batch import Combination
+from loom.models.cancellation import CancellationRequest
 from loom.models.networking import (
     NetworkPolicy,
     UnsupportedNetworkPolicyOverrideError,
@@ -3211,6 +3212,7 @@ async def cancel_batch(
     sc: SessionAndCtx,
     batch_id: UUID,
     authorization: Annotated[str | None, Header()] = None,
+    payload: CancellationRequest | None = None,
 ) -> Any:
     s, ctx = sc
     require_scope(ctx, "submit")
@@ -3225,6 +3227,9 @@ async def cancel_batch(
             detail="batch not found",
         )
     require_team_or_admin(ctx, b.team_id)
+    actor = None
+    if is_admin(ctx):
+        actor = await actor_from_context(s, ctx, request.headers.get("X-Loom-Admin-Actor"))
     now = datetime.now(UTC)
     active_trial_ids = (
         await s.execute(
@@ -3247,6 +3252,7 @@ async def cancel_batch(
             path=f"/trials/{trial_id}/cancel",
             authorization=authorization,
             cancellation_request=request,
+            json_body=payload.model_dump() if payload else None,
         )
         if response.status_code not in {200, 409}:
             return propagate(response)
@@ -3254,5 +3260,12 @@ async def cancel_batch(
     await s.execute(
         update(Batch).where(Batch.id == batch_id).values(state="cancelled", finished_at=now),
     )
+    if actor is not None:
+        await write_admin_audit_event(
+            s, actor=actor, action="batch.cancel", target_type="batch",
+            target_id=str(batch_id), request=request,
+            metadata={"reason": redact_text(payload.reason) if payload and payload.reason else None,
+                      "team_id": str(b.team_id)},
+        )
     await s.commit()
     return {"batch_id": str(batch_id), "state": "cancelled"}

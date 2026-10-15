@@ -3592,6 +3592,11 @@ export interface components {
             /** Verifier */
             verifier?: string | null;
         };
+        /** CancellationRequest */
+        CancellationRequest: {
+            /** Reason */
+            reason?: string | null;
+        };
         /** CatalogCreate */
         CatalogCreate: {
             /** Aliases */
@@ -10743,7 +10748,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["CancellationRequest"] | null;
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -14929,7 +14938,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["CancellationRequest"] | null;
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {

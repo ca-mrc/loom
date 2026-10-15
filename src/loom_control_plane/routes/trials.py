@@ -29,6 +29,7 @@ from loom.db.schema import Trial as TrialRow
 from loom.db.task_set_visibility import visible_tasks
 from loom.execution_architecture import execution_cpu_arch
 from loom.llm_call_ledger import serialize_llm_call
+from loom.models.cancellation import CancellationRequest
 from loom.models.task import TaskConfig, normalize_steps
 from loom.models.trial import TrialConfig
 from loom.nebius_pool_priority import PoolWorkOriginV1
@@ -675,6 +676,7 @@ async def cancel_trial(
     trial_id: UUID,
     request: Request,
     authorization: str | None = Header(default=None),
+    payload: CancellationRequest | None = None,
 ) -> dict[str, str]:
     async with request.app.state.session_factory() as session:
         ctx = await verify_bearer_token(
@@ -726,6 +728,9 @@ async def cancel_trial(
 
         trial_id=trial_id,
         team_id=scoped_team_id,
+        admin_context=ctx if caller_is_admin else None,
+        reason=payload.reason if payload else None,
+        request=request,
     )
 
     if row is None:
