@@ -101,6 +101,9 @@ async def test_e2e_oracle_pytest_docker(
         verifier=PytestVerifier(tests_dir=PurePosixPath("/workspace/tests")),
         object_store=store,
         local_trajectory_path=tmp_path / "events.jsonl",
+        verifier_driver_factory=lambda: DockerDriver(
+            image="python:3.11-alpine", workspace=PurePosixPath("/workspace"),
+        ),
     )
 
     result = await Trial(ctx=ctx).run()
