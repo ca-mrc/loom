@@ -10,9 +10,9 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: Idle rollout, inventory, certificates, ingress, or protected management installation
+        description: Idle rollout, lease census, inventory, certificates, ingress, or protected management installation
         type: choice
-        options: [rollout, recover, inspect, certificate, development-management-certificate, ingress, ingress-rollback, ingress-dns, management-preflight, management-install, management-diagnostic-preflight, management-diagnostic-install, management-recovery-preflight, management-recovery-install, management-refresh-preflight, management-refresh-install, management-pool-preflight, management-pool-install, management-pool-rollback, management-pool-repair-preflight, management-pool-repair-install, management-pool-repair-rollback, development-preflight, development-install, development-management-preflight, development-management-install, development-management-renewal-preflight, development-management-renewal-renew, development-pool-preflight, development-pool-install, development-runtime-preflight, development-runtime-install, shared-pool-preflight, shared-pool-install, shared-pool-recover]
+        options: [rollout, recover, inspect, lease-census, certificate, development-management-certificate, ingress, ingress-rollback, ingress-dns, management-preflight, management-install, management-diagnostic-preflight, management-diagnostic-install, management-recovery-preflight, management-recovery-install, management-refresh-preflight, management-refresh-install, management-pool-preflight, management-pool-install, management-pool-rollback, management-pool-repair-preflight, management-pool-repair-install, management-pool-repair-rollback, development-preflight, development-install, development-management-preflight, development-management-install, development-management-renewal-preflight, development-management-renewal-renew, development-pool-preflight, development-pool-install, development-runtime-preflight, development-runtime-install, shared-pool-preflight, shared-pool-install, shared-pool-recover]
         default: rollout
       recovery_run_id:
         description: With recover only, terminal failed rollout whose immutable candidate and guard are resumed
@@ -1301,5 +1301,65 @@ jobs:
         with:
           name: nebius-inspect-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/nebius-inspect/management-preflight.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+  lease-census:
+    if: >-
+      github.repository_id == '1281629473' &&
+      github.ref == 'refs/heads/dev' &&
+      github.event_name == 'workflow_dispatch' &&
+      inputs.operation == 'lease-census'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    environment:
+      name: nebius-integration
+      deployment: false
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: dev
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: "0.11.26"
+          checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
+          enable-cache: true
+          save-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv sync --locked --no-dev --extra cluster
+      - name: Read execution lease census without changing cluster state
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.NEBIUS_DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ vars.NEBIUS_DEPLOY_SSH_KNOWN_HOSTS }}
+          LOOM_DEPLOY_SSH_TARGET: ${{ vars.NEBIUS_DEPLOY_SSH_TARGET }}
+          REMOTE_KUBECONFIG: ${{ vars.NEBIUS_DEPLOY_KUBECONFIG_PATH }}
+          CLUSTER_ID: ${{ vars.NEBIUS_DEPLOY_CLUSTER_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          export LOOM_DEPLOY_SSH_KEY_FILE="$RUNNER_TEMP/nebius-census-key"
+          export LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE="$RUNNER_TEMP/nebius-census-known-hosts"
+          trap 'rm -f -- "$LOOM_DEPLOY_SSH_KEY_FILE" "$LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE"' EXIT
+          test -n "$DEPLOY_SSH_KEY"
+          test -n "$DEPLOY_KNOWN_HOSTS"
+          test -n "$LOOM_DEPLOY_SSH_TARGET"
+          test -n "$REMOTE_KUBECONFIG"
+          test -n "$CLUSTER_ID"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$LOOM_DEPLOY_SSH_KEY_FILE"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE"
+          unset DEPLOY_SSH_KEY DEPLOY_KNOWN_HOSTS
+          uv run --no-sync python scripts/ops/nebius_lease_census.py \
+            --kubeconfig "$REMOTE_KUBECONFIG" --expected-cluster-id "$CLUSTER_ID" \
+            --evidence-dir "$RUNNER_TEMP/nebius-lease-census"
+      - name: Preserve bounded lease census
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nebius-lease-census-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/nebius-lease-census/lease-census.json
           if-no-files-found: ignore
           retention-days: 30
