@@ -37,7 +37,10 @@ from scripts.ops import nebius_shared_pool_recovery_workloads as recovery_worklo
 from scripts.ops import nebius_shared_pool_roles as roles
 from scripts.ops import nebius_shared_pool_workloads as workloads
 from scripts.ops.nebius_development_activation import review_development_gateway_permissions
-from scripts.ops.nebius_development_runtime_external import qualify_runtime_publication
+from scripts.ops.nebius_development_runtime_external import (
+    qualify_runtime_publication,
+    qualify_staging_publication,
+)
 from scripts.ops.nebius_development_runtime_install import DevelopmentRuntimeInstallRequest, _read
 from scripts.ops.nebius_development_runtime_live import runtime_resource_path
 from scripts.ops.nebius_development_runtime_probes import HTTPSDevelopmentRuntimeProbes
@@ -259,6 +262,7 @@ class HTTPSSharedPoolOperationAPI(HTTPSSharedPoolRuntimeProbes):
         self._scope()
         async with httpx.AsyncClient(trust_env=False, follow_redirects=False, timeout=30) as http:
             await qualify_runtime_publication(request=self.request, http=http)
+            await qualify_staging_publication(request=self.request, staging=self._captured.plan.staging, http=http)
         observed = await observe_shared_pool_provider(**self._arguments(), development=development,
             operator_credentials=self.operator_credentials)
         if observed.plan != self._captured.plan:

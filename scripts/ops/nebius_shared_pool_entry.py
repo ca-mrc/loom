@@ -149,9 +149,10 @@ def _retained_runtime(reference: RetainedRuntimeReference, files: dict[Path, byt
         raise ValueError
     for material in paths:
         read(material)
-    publication = DevelopmentRuntimePublication(source, inputs.publication,
+    publication = DevelopmentRuntimePublication(inputs.publication_source or source, inputs.publication,
         CandidateBundle(inputs.publication.candidate_id, inputs.candidate, inputs.profile))
     database = prepare_database_runtime(inputs.retained, publication=publication, operation_id=UUID(operation['operation_id']),
+        data_publication=inputs.data_runtime.selection() if inputs.data_runtime is not None else None,
         actuator_password=files[inputs.actuator_password_file].decode(), batch_runner_token=files[inputs.batch_runner_token_file].decode())
     manager = database.manager.retained.request.retained
     if (manager.binding.installation_id != operation['installation_id'] or manager.binding.namespace != operation['namespace']
@@ -185,7 +186,9 @@ def _load_inputs(operation: dict[str, Any], *, source_record: Path, include_oper
         runtime = _retained_runtime(inputs.runtime, files)
         manager = runtime.database.manager.retained.request.retained
         registration = runtime.database.manager.retained.request.registration
-        if (source.source_sha != operation['source_sha'] or source != runtime.database.manager.publication.source
+        # Tooling is source-bound by the protected delivery. The completed runtime
+        # has its own retained publication and need not be reinstalled to fix tooling.
+        if (source.source_sha != operation['source_sha']
                 or (operation['installation_id'], operation['namespace'], operation['operation_id']) != (
                     manager.binding.installation_id, manager.binding.namespace, str(registration.spec.operation_id))
                 or path.parents[4] != Path(manager.operation['inputs_path']).parents[3]

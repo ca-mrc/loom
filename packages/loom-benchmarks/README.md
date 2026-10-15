@@ -33,6 +33,22 @@ SPA marks the benchmark ready. Protected shared environments should use
 object storage while HF repo/revision/checksum provenance remains on the task
 rows.
 
+### Hugging Face loader compatibility
+
+The package uses `datasets>=5.0.1` and `fsspec>=2026.6` for their security
+fixes. Hugging Face Python loader scripts are no longer executed. The pinned
+MATH and LiveCodeBench sources use reviewed local readers for the JSONL files
+already present at their existing revisions. File order, field defaults,
+string conversion, split membership and task identifiers are preserved.
+Normal data-only Hub datasets continue through `datasets.load_dataset`.
+
+The catalog's historical `trust_remote_code` flag remains a source marker;
+it does not grant permission to execute code. An unreviewed script source,
+revision or configuration fails with a migration diagnostic. Adding support
+requires reviewing its data layout and testing row compatibility. Dataset
+downloads retain the ordinary Hugging Face cache behavior; no benchmark is
+republished or re-registered by upgrading these dependencies.
+
 ## SkillFlow and SkillLearnBench task bundles
 
 `skillflow` points at the public Hugging Face git dataset

@@ -16,6 +16,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.db.schema import LlmCall, ServiceExecutionTarget
+from loom.llm_call_ledger import read_service_execution_llm_calls
 from loom_control_plane.service_execution import enqueue_execution_transition
 from loom_control_plane.service_execution_output import VerifiedExecutionPod
 from loom_llm_gateway.routes import (
@@ -158,6 +159,38 @@ async def test_facade_records_lease_from_auth_for_json_and_sse(
         }
     if stream:
         assert "data: [DONE]" in response.text
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("path", ["/openai/v1/responses", "/v1/responses"])
+async def test_responses_records_lease_from_auth_for_json_and_sse(
+    facade_setup, monkeypatch: pytest.MonkeyPatch, path: str, stream: bool,  # noqa: F811
+) -> None:
+    # Codex calls Responses. Without the binding its calls are missing from
+    # the lease ledger, so native accounting reports zero calls (#2054).
+    app, token, team_id, trial_id, connection_id, _captures = facade_setup
+    await admit_trial_model(app, trial_id, name="glm-5.2")
+    lease_id = uuid4()
+    original_auth = responses.verify_facade_auth
+
+    async def authenticated_lease(*args, **kwargs):
+        context = await original_auth(*args, **kwargs)
+        return replace(context, step_id="agent", service_execution_lease_id=lease_id,
+                       service_execution_generation=4)
+
+    monkeypatch.setattr(responses, "verify_facade_auth", authenticated_lease)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(path, headers={
+            "Authorization": f"Bearer {token}", "x-loom-provider-connection-id": str(connection_id),
+        }, json={"model": "glm-5.2", "stream": stream, "input": "hello"})
+    assert response.status_code == 200, response.text
+    async with app.state.session_factory() as session:
+        row = (await session.execute(select(LlmCall).where(LlmCall.trial_id == trial_id))).scalar_one()
+        assert row.provider_extras["_loom_raw_provider_log"]["service_execution"] == {
+            "lease_id": str(lease_id), "generation": 4,
+        }
+        lease = SimpleNamespace(id=lease_id, trial_id=trial_id, team_id=team_id, generation=4)
+        assert [call["id"] for call in await read_service_execution_llm_calls(session, lease)] == [str(row.id)]
 
 
 def _native_lease_auth(monkeypatch: pytest.MonkeyPatch) -> None:

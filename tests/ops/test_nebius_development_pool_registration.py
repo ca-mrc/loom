@@ -118,6 +118,7 @@ class Server:
         self.pod = None
         self.damage_report = False
         self.drift_on_log = False
+        self.pod_region = None
         self.namespace_uid_overrides = {}
 
     def handle(self, message):
@@ -168,6 +169,8 @@ class Server:
                     'spec': copy.deepcopy(job['spec']['template']['spec']), 'status': {'phase': 'Succeeded',
                         'containerStatuses': [{'name': 'register', 'restartCount': 0,
                             'state': {'terminated': {'exitCode': 0}}}]}}
+                if self.pod_region is not None:
+                    self.pod['metadata']['labels']['topology.kubernetes.io/region'] = self.pod_region
             if name == 'pods':
                 return httpx.Response(200, json={'apiVersion': 'v1', 'kind': 'PodList', 'metadata': {},
                     'items': [self.pod]})
@@ -224,6 +227,26 @@ def test_fresh_registration_requires_no_legacy_predecessor(retained):
     assert request.registration.binding.namespace == 'loom-nebius-management-dev'
     assert request.registration.candidate == retained[3].candidate
     assert request.registration.spec.installation_id == spec.installation_id
+
+
+@pytest.mark.parametrize('matching_region', [True, False])
+def test_registration_accepts_only_pinned_provider_region_label(registered, matching_region):
+    assert run(registered)['status'] == 'pending_registration'
+    registered.server.complete = True
+    registered.server.pod_region = (
+        registered.request.registration.spec.quota_identities['nodes'][1]
+        if matching_region else 'foreign-region'
+    )
+
+    if matching_region:
+        assert run(registered)['status'] == 'development_pool_registered_closed'
+        assert run(registered)['status'] == 'development_pool_registered_closed'
+    else:
+        with pytest.raises(ValueError):
+            run(registered)
+        state = Path(registered.request.retained.operation['state_dir']).parent / 'pool-registration/registration.json'
+        assert json.loads(state.read_text())['phase'] == 'started'
+    assert len(registered.server.store.creates) == 2
 
 
 @pytest.mark.parametrize('staging_first', [False, True])

@@ -391,16 +391,23 @@ def _docker_platform() -> str:
 
 def _build_image(*, tag: str, dockerfile: str, platform: str) -> None:
     repo_root = Path(__file__).resolve().parents[2]
-    _docker(
-        "build",
-        "--platform",
-        platform,
-        "--file",
-        str(repo_root / dockerfile),
-        "--tag",
-        tag,
-        str(repo_root),
-    )
+    try:
+        _docker(
+            "build",
+            "--platform",
+            platform,
+            "--file",
+            str(repo_root / dockerfile),
+            "--tag",
+            tag,
+            str(repo_root),
+        )
+    except subprocess.CalledProcessError as exc:
+        if exc.stderr:
+            # Pytest truncates captured subprocess locals; keep the final build
+            # error visible without flooding logs with the complete build output.
+            exc.add_note("Docker fixture build stderr (last 16384 characters):\n" + exc.stderr[-16_384:])
+        raise
 
 
 @pytest.fixture(scope="module")

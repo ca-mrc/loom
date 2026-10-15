@@ -567,6 +567,7 @@ async def chat_completions(
             provider=byo_row.provider_type if byo_row is not None else provider,
             attempt=attempt,
             request_params=normalize_request_params(raw_body),
+            auth_context=ctx,
         )
     response = dict(parsed.raw_response)
     response["loom"] = loom_block

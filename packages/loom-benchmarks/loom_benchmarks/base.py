@@ -26,10 +26,9 @@ class UpstreamSource:
     locator: str
     revision: str | None = None
     subset: str | None = None
-    # HF-only: opt-in to running the dataset's custom loader script.
-    # Required for repos like LiveCodeBench that ship a Python loader.
-    # Adapters declare this on their upstream_source so fetch_upstream
-    # consents at the boundary; default False keeps the safe behavior.
+    # Legacy HF script-source marker, retained for catalog identity. Only the
+    # reviewed pinned MATH/LiveCodeBench data layouts are supported; no remote
+    # Python is executed. Other script sources fail with a migration diagnostic.
     trust_remote_code: bool = False
 
 

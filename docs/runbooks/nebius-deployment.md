@@ -665,8 +665,10 @@ or arbitrary manifests. Prepare the exact clean integrated source with
 --requirements LOCKED_REQUIREMENTS --evidence-dir PRIVATE_EVIDENCE
 --prepare-bundle PRIVATE_BUNDLE`, then grant only that bundle's digest using
 `scripts.ops.install_nebius_development_runtime_entrypoint`. Existing operator
-grants remain unchanged. The operator host needs its existing `kubectl`; probes
-use an explicit private connection, not ambient kubeconfig or credential plugins.
+grants remain unchanged. The operator host needs its existing `kubectl` in
+`/usr/local/bin` or the system executable directories (`/bin`, `/usr/bin` on the
+Linux gateway). Probes resolve that executable independently of ambient `PATH`
+and use an explicit private connection, not ambient kubeconfig or credential plugins.
 
 The runtime workflow uses Loom's stable GitHub repository ID, following the
 [organization-transfer contract](nebius-candidate.md#github-organization-transfer).
@@ -697,6 +699,27 @@ The `loom.nebius-development-runtime-inputs.v1` document contains:
 - `operator_connection`: explicit Kubernetes endpoint, CA and operator credential
   files. Optional `cache_files` contains only the configured build-cache access and
   secret keys; omit it when no cache is configured.
+
+Use `loom.nebius-development-runtime-inputs.v2` when the installed manager and
+shared-dev databases have different schema heads, or installer source differs
+from the selected images. It retains the above fields and additionally requires:
+
+- `publication_source`: the manager publication's `source_sha` and
+  `source_archive_sha256`, independently of the installer source record.
+- `data_runtime`: an object containing `source` (the same source identity shape),
+  `publication`, `candidate`, and `profile` for the shared-dev runtime.
+
+Select an exact CI-published data-runtime candidate matching the retained
+foundation/application schema and a manager candidate matching the retained
+manager schema. The two explicitly supported data heads are `0175` and `0176`;
+both selected releases must descend from the shared-pool protocol baseline.
+Live GitHub approval, artifact and signature verification apply to **both**
+selections. The SQL Job uses the data-runtime service image and still requires
+its exact live schema; it performs no migration. Do not alter retained application
+releases or pool build recipes, relabel a candidate's schema, or select a newer
+incompatible image to bypass this check. The source-bound protected bundle still
+pins the installer independently. Existing v1 inputs keep their single-source
+contract and cannot contain either v2 selection field.
 
 Preflight performs read-only qualification and writes no installation state.
 Installation stages the fixed SQL setup, material, read-only authority and build
@@ -747,7 +770,17 @@ The `loom.nebius-shared-pool-inputs.v1` private document contains:
   and runtime material must match; retired operator CA/key files are not reopened.
 - `legacy`: the completed original pool/rollback selector.
 - `staging_observation_file` and `staging_observation_sha256`: the captured
-  current-source staging observation, not an arbitrary target manifest.
+  current-source staging observation, not an arbitrary target manifest. For an
+  independently selected staging release, pin an envelope containing exactly
+  `schema_version: loom.nebius-staging-pool-source.v1`, `publication` (the
+  `ProtectedPublication` selection), `candidate` (its exact `candidate.json`),
+  and `observation` (the unchanged protected resource observation). The file hash
+  covers the whole envelope. The parent resolves GitHub's approved artifact,
+  compares its candidate and typed runtime profile with observed staging, and
+  requires ancestry from shared-protocol baseline
+  `5781389317608cedf95be68590505c96257aa6c7` (#2443) before guard acquisition or
+  writes. Missing approval or incompatible source fails closed. Legacy raw
+  observations retain their same-candidate contract and historical hashes.
 - `development_guard`: the exact database-bound result of the read-only guard
   observer. The parent reconstructs the plan and qualifies current live state;
   this input cannot assert readiness or bypass the census.
@@ -763,6 +796,12 @@ The operator grants only that bundle digest through
 unchanged. The source-bound bootstrap imports only the standard library before
 installing locked dependencies and the exact-source wheels. Private inputs and
 credentials are not included in the bundle or public result.
+The bundle's tooling source must match the shared operation and its source
+sidecar, but need not equal the retained runtime's publication source. Both
+runtime publications remain independently qualified; shipping a tooling repair
+does not upgrade staging or reinstall the dev manager. Staging wiring retains its
+selected images, while guard ownership and recovery retain the dev registration
+candidate as their operation identity.
 
 Preflight observes current authority without acquiring guards or creating handoff
 history. `pending` names the exact forward/recovery phase; it does not mean

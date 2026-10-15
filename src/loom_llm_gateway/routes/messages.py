@@ -212,6 +212,7 @@ async def messages(
             rate_card_hash=hash_table(table),
             attempt=outcome.attempt,
             request_params=normalize_request_params(payload),
+            auth_context=ctx,
         )
     return body
 
@@ -484,6 +485,7 @@ async def _record_stream_call(
             rate_card_hash=hash_table(table),
             attempt=1,
             request_params=normalize_request_params(request_payload),
+            auth_context=ctx,
         )
 
 

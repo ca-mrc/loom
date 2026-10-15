@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import copy
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
+from pydantic import BaseModel, ConfigDict
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_development_activation import (
     DevelopmentActivationPlan,
@@ -37,11 +38,22 @@ from scripts.ops.nebius_staging_pool_attachment import (
 )
 
 from loom.nebius_platform_render import digest
+from loom_service.environment_management.candidates import ProtectedPublication
 from loom_service.pool_management.installation import PoolInstallation
 
 MARKER = 'loom.nebius/shared-pool-handoff-operation'
 _LEGACY_MARKERS = {'loom.nebius/pool-retirement-operation', 'loom.nebius/pool-cutover-operation',
     'loom.nebius/pool-startup-operation'}
+
+
+class StagingPoolSource(BaseModel):
+    """Pinned selection, not approval; the connected parent resolves publication."""
+
+    model_config = ConfigDict(extra='forbid', frozen=True, hide_input_in_errors=True)
+    schema_version: Literal['loom.nebius-staging-pool-source.v1']
+    publication: ProtectedPublication
+    candidate: dict[str, Any]
+    observation: dict[str, Any]
 
 
 @dataclass(frozen=True, repr=False)
@@ -51,6 +63,7 @@ class StagingForwardPlan:
     originals: dict[str, dict[str, Any]]
     stopped: dict[str, dict[str, Any]]
     input_digest: str
+    source: StagingPoolSource | None = None
 
 
 @dataclass(frozen=True, repr=False)
@@ -87,8 +100,17 @@ def prepare_staging_forward(*, registration: PoolRegistrationRequest, observatio
                 or registration.binding.namespace != 'loom-nebius-management-dev'):
             raise ValueError
         participant, = (row for row in spec.participants if row.environment_class == 'staging')
+        source = None
+        candidate = registration.candidate
+        if observation.get('schema_version') == 'loom.nebius-staging-pool-source.v1':
+            source = StagingPoolSource.model_validate(copy.deepcopy(observation))
+            candidate, observation = source.candidate, source.observation
+            if (not source.publication.candidate_id.int
+                    or source.publication.source_sha != candidate.get('candidate_sha')
+                    or source.publication.run_id != candidate.get('run_id')):
+                raise ValueError
         attachment = prepare_staging_pool_attachment(participant=participant, observation=observation,
-            candidate=registration.candidate, cluster_id=spec.cluster_id, node_group_id=spec.node_group_id, repo_root=repo_root)
+            candidate=candidate, cluster_id=spec.cluster_id, node_group_id=spec.node_group_id, repo_root=repo_root)
         # Initial registration is immutable. Derive and compare before it is
         # frozen, then repeat on the completed closed installation before guard.
         if spec.profiles.image_admission_keyring != attachment.profiles.image_admission_keyring:
@@ -166,8 +188,9 @@ def prepare_staging_forward(*, registration: PoolRegistrationRequest, observatio
                 'database_credential_resource_version': attachment.guard.database.credential_resource_version,
                 'actuator_credential_uid': str(attachment.guard.database.actuator_credential_uid),
                 'actuator_credential_resource_version': attachment.guard.database.actuator_credential_resource_version},
-            'originals': originals, 'stopped': stopped})
-        return StagingForwardPlan(attachment, legacy, originals, stopped, checksum)
+            'originals': originals, 'stopped': stopped,
+            **({'staging_source': source.model_dump(mode='json')} if source is not None else {})})
+        return StagingForwardPlan(attachment, legacy, originals, stopped, checksum, source)
     except Exception:
         raise ValueError('shared pool staging predecessor unqualified') from None
 
@@ -188,8 +211,8 @@ def prepare_shared_pool_handoff(*, runtime: DevelopmentRuntimeInstallRequest,
         pool = database.manager.retained.request
         registration = pool.registration
         participant = retained_development_participant(pool)
-        # One verified baseline already runs staging. The handoff does not
-        # silently deploy a newer manager/controller candidate into staging.
+        # The completed dev runtime retains its own verified registration source.
+        # Staging can independently retain a different approved publication.
         if (database.manager.publication.bundle.candidate != registration.candidate
                 or len(registration.spec.participants) != 2):
             raise ValueError
@@ -202,7 +225,11 @@ def prepare_shared_pool_handoff(*, runtime: DevelopmentRuntimeInstallRequest,
         migration_contract(migration)
         attachment = staging.attachment
         service = staging.originals[f'Deployment:{attachment.guard.namespace}:loom-service']
-        wired = wire_participant(request=migration, participant_id=attachment.participant.participant_id,
+        # Pure projection only: never use this candidate selection for catalog,
+        # guard identity, database mutation or recovery authority.
+        projection = migration if staging.source is None else replace(migration,
+            registration=replace(registration, candidate=staging.source.candidate))
+        wired = wire_participant(request=projection, participant_id=attachment.participant.participant_id,
             management_origin='https://' + database.manager.deployment.public_host,
             actuator=attachment.actuators[0], guest_actuators=attachment.actuators[1:],
             service=service, runtime_profile=attachment.runtime_profile)

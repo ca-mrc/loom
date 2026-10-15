@@ -34,6 +34,7 @@ from scripts.ops.nebius_management_supplied import _defaulted as _secret_default
 from sqlalchemy.engine import make_url
 
 from loom.nebius_application_database import _PASSWORD
+from loom.nebius_candidate_contract import candidate_service_schema_head
 from loom.nebius_development_runtime_database import _REVISION
 from loom.nebius_platform_bootstrap import database_url
 from loom.nebius_platform_render import _secret_env, digest
@@ -51,11 +52,17 @@ class DevelopmentDatabaseRuntime:
     operation_id: UUID
     material: tuple[dict[str, Any], dict[str, Any]]
     database: tuple[dict[str, Any], dict[str, Any]]
+    data_publication: DevelopmentRuntimePublication | None = None
+
+    @property
+    def data_runtime(self) -> DevelopmentRuntimePublication:
+        return self.data_publication or self.manager.publication
 
 
 def prepare_database_runtime(reference: RetainedDevelopmentPoolReference, *,
         publication: DevelopmentRuntimePublication, operation_id: UUID,
-        actuator_password: str, batch_runner_token: str) -> DevelopmentDatabaseRuntime:
+        actuator_password: str, batch_runner_token: str,
+        data_publication: DevelopmentRuntimePublication | None = None) -> DevelopmentDatabaseRuntime:
     """Use a new source-bound image but retain original dev DB/CA authority.
 
     Credentials must already be privately retained by the protected parent.
@@ -73,13 +80,25 @@ def prepare_database_runtime(reference: RetainedDevelopmentPoolReference, *,
         foundation = load_retained_foundation(retained.inputs.prerequisites.foundation)
         application = manager.deployment.installation.applications
         binding = foundation.binding
+        data = (data_publication or manager.publication).validate(manager.deployment.installation.registry_prefix)
+        revision = candidate_service_schema_head(data.bundle.candidate)
+        if data_publication is not None:
+            # Separate databases may use separate approved releases. This stage
+            # never migrates either DB or rewrites personal release/build pins.
+            if (revision not in {'0175', '0176'}
+                    or revision != candidate_service_schema_head(foundation.inputs.candidate)
+                    or candidate_service_schema_head(manager.publication.bundle.candidate)
+                        != candidate_service_schema_head(retained.inputs.candidate)):
+                raise ValueError
+        elif revision != _REVISION:
+            raise ValueError
         if (application is None or application.shared.platform_namespace != 'loom-dev'
                 or str(application.shared.data_environment_id) != binding.bootstrap.installation_id
                 or application.shared.cluster_id != foundation.inputs.config['cluster_id']
                 or str(retained.inputs.shared_namespace_uid) != binding.namespace_uid
                 or retained.binding.kube_system_uid != binding.bootstrap.kube_system_uid
                 or manager.deployment.installation.foundation.platform_config != foundation.inputs.config
-                or application.shared.schema_revision != _REVISION):
+                or application.shared.schema_revision != revision):
             raise ValueError
         original = foundation.bootstrap['material']['loom-platform-db']
         history = _json(retained.files[Path(retained.operation['state_dir']) / 'application-material/stage.json'])
@@ -112,7 +131,7 @@ def prepare_database_runtime(reference: RetainedDevelopmentPoolReference, *,
         config = {'apiVersion': 'v1', 'kind': 'ConfigMap', 'immutable': True,
             'metadata': {'name': name, 'namespace': 'loom-dev', 'labels': dict(labels)},
             'data': {'setup.json': json.dumps({'namespace': 'loom-dev', 'operation_id': str(operation_id),
-                'schema_revision': _REVISION}, sort_keys=True, separators=(',', ':'))}}
+                'schema_revision': revision}, sort_keys=True, separators=(',', ':'))}}
         target = manager.publication.bundle
         rendered = render_management(manager.deployment, candidate=target.candidate, profile=target.profile, repo_root=_ROOT)
         job = copy.deepcopy(rendered.files['30-migrate.yaml'][0])
@@ -122,6 +141,7 @@ def prepare_database_runtime(reference: RetainedDevelopmentPoolReference, *,
         pod.pop('initContainers', None)
         pod.update(automountServiceAccountToken=False, restartPolicy='Never')
         container, = pod['containers']
+        container['image'] = data.bundle.candidate['images']['service']['image_ref']
         container['command'] = ['python', '-m', 'loom.nebius_development_runtime_database']
         container['env'] = [
             {'name': 'LOOM_DEVELOPMENT_RUNTIME_CONFIG', 'value': '/var/run/loom-runtime-setup/setup.json'},
@@ -134,7 +154,8 @@ def prepare_database_runtime(reference: RetainedDevelopmentPoolReference, *,
         container['volumeMounts'] = [row for row in container['volumeMounts'] if row['name'] == 'db-ca'] + [
             {'name': 'runtime-setup', 'mountPath': '/var/run/loom-runtime-setup', 'readOnly': True}]
         job['spec']['template']['metadata']['labels'] = {'app': name, **labels}
-        return DevelopmentDatabaseRuntime(reference, manager, foundation, operation_id, material, (config, job))
+        return DevelopmentDatabaseRuntime(reference, manager, foundation, operation_id, material, (config, job),
+            data if data_publication is not None else None)
     except Exception:
         raise ValueError('development runtime database delivery unqualified') from None
 
@@ -143,6 +164,7 @@ def database_runtime_documents(request: DevelopmentDatabaseRuntime) -> dict[str,
     """Reproduce the fixed projection before accepting any caller-held documents."""
     credentials = request.material[0]['data']
     expected = prepare_database_runtime(request.reference, publication=request.manager.publication,
+        data_publication=request.data_publication,
         operation_id=request.operation_id,
         actuator_password=base64.b64decode(credentials['actuator-password'], validate=True).decode(),
         batch_runner_token=base64.b64decode(credentials['batch-runner-token'], validate=True).decode())
