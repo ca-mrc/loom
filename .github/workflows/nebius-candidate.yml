@@ -39,6 +39,7 @@ jobs:
       github.ref == 'refs/heads/dev' &&
       vars.NEBIUS_RELEASE_ENABLED == 'true' &&
       (inputs.mode || 'platform') == 'platform'
+    # The metadata reader uses the GitHub CLI supplied by the hosted image.
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -66,7 +67,7 @@ jobs:
     name: pool-ops-tests (${{ matrix.shard_index }})
     needs: [pool-ops-plan]
     if: needs.pool-ops-plan.outputs.required == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-24.04' }}
     timeout-minutes: 40
     strategy:
       fail-fast: false
@@ -122,7 +123,7 @@ jobs:
         (needs.pool-ops-tests.result == 'success' ||
          (needs.pool-ops-tests.result == 'skipped' && needs.pool-ops-plan.outputs.required == 'false'))) ||
        (needs.pool-ops-plan.result == 'skipped' && needs.pool-ops-tests.result == 'skipped' && inputs.mode == 'harness-only'))
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && !inputs.qualify_tb21_images && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-24.04' }}
     environment:
       name: nebius-integration
       deployment: false

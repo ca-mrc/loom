@@ -20,7 +20,9 @@ from typing import Any
 SHARED_LABEL = "loom-ci-exec"
 CAPABILITY = "loom-ci-isolated-v1"
 GITHUB_PROVIDER = "loom-ci-provider-github"
-SOURCE_WORKFLOWS = frozenset({"ci.yml", "images.yml", "cluster-smoke.yml", "staging-smoke.yml"})
+SOURCE_WORKFLOWS = frozenset(
+    {"ci.yml", "images.yml", "cluster-smoke.yml", "staging-smoke.yml", "nebius-candidate.yml"}
+)
 SOURCE_REPOSITORY = "ca-mrc/loom"
 SECRET_PREFIX = "LOOM_CI_HOSTED_JIT_"
 

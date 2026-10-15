@@ -171,7 +171,7 @@ def test_lost_dispatch_response_is_not_repeated(tmp_path):
     assert len(calls) == 1
 
 
-@pytest.mark.parametrize("name", ["ci", "images", "cluster-smoke", "staging-smoke"])
+@pytest.mark.parametrize("name", ["ci", "images", "cluster-smoke", "staging-smoke", "nebius-candidate"])
 def test_real_workflow_graphs_are_supported(name):
     import yaml
 
@@ -219,3 +219,70 @@ def test_registered_dispatcher_keeps_retry_policy_and_parallel_capacity_separate
     assert capacity["runs-on"] == "ubuntu-24.04"
     assert "inputs.request_id" in workflow["concurrency"]["group"]
     assert "inputs.source_run_id" in workflow["concurrency"]["group"]
+
+
+@pytest.mark.parametrize("stage,expected", [("plan", 0), ("tests", 2), ("publish", 1), ("qualification", 0)])
+def test_candidate_demand_tracks_ready_jobs_and_preserves_direct_hosted_qualification(tmp_path, stage, expected):
+    import base64
+
+    import yaml
+
+    supply = module("ci_runner_supply")
+    workflow_path = ".github/workflows/nebius-candidate.yml"
+    workflow_source = (ROOT / workflow_path).read_bytes()
+    jobs = [
+        {"name": "Plan missing pool operator tests", "status": "queued"},
+        {"name": "pool-ops-tests (0)", "status": "queued"},
+        {"name": "pool-ops-tests (1)", "status": "queued"},
+        {"name": "publish", "status": "queued"},
+    ]
+    for job in jobs:
+        job["labels"] = ["self-hosted", "loom-ci-exec"]
+    jobs[0]["labels"] = ["ubuntu-24.04"]
+    if stage != "plan":
+        jobs[0]["status"] = "completed"
+    if stage in {"publish", "qualification"}:
+        for job in jobs[1:3]:
+            job["status"] = "completed"
+    if stage == "qualification":
+        jobs[3]["labels"] = ["ubuntu-24.04"]
+
+    class API:
+        def pages(self, path, key):
+            if path == "/actions/runs?status=queued":
+                return [{"id": 7, "path": workflow_path, "head_sha": "a" * 40}]
+            if path == "/actions/runs/7/jobs?filter=latest":
+                return jobs
+            return []
+
+        def request(self, method, path):
+            assert method == "GET"
+            assert path == "/contents/" + workflow_path + "?ref=" + "a" * 40
+            return {"content": base64.b64encode(workflow_source).decode()}
+
+    assert supply.source_demand(API(), tmp_path, now=100) == expected
+    # The same real graph is supported even when harness-only skips both test jobs.
+    if stage == "publish":
+        for job in jobs[:3]:
+            job["conclusion"] = "skipped"
+        assert supply.ready_jobs(jobs, yaml.safe_load(workflow_source)) == [jobs[3]]
+
+
+def test_candidate_placement_keeps_publication_budget_and_protected_boundary():
+    import yaml
+
+    candidate = yaml.safe_load((ROOT / ".github/workflows/nebius-candidate.yml").read_text())
+    dispatcher = yaml.safe_load((ROOT / ".github/workflows/ci-retry.yml").read_text())
+    assert candidate["jobs"]["pool-ops-plan"]["runs-on"] == "ubuntu-24.04"
+    for job_id in ("pool-ops-tests", "publish"):
+        job = candidate["jobs"][job_id]
+        assert "vars.LOOM_CI_UNIFIED_RUNNERS == 'true'" in job["runs-on"]
+        assert '"loom-ci-isolated-v1"' in job["runs-on"]
+        assert job["runs-on"].endswith("|| 'ubuntu-24.04' }}")
+    publish = candidate["jobs"]["publish"]
+    assert "!inputs.qualify_tb21_images" in publish["runs-on"]
+    assert publish["environment"] == {"name": "nebius-integration", "deployment": False}
+    assert "github.ref == 'refs/heads/dev'" in publish["if"]
+    assert "360 || 180" in publish["timeout-minutes"]
+    assert dispatcher["jobs"]["capacity"]["timeout-minutes"] >= 180 + 15
+    assert candidate["concurrency"]["cancel-in-progress"] is False

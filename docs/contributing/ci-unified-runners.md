@@ -1,7 +1,7 @@
 # Native CI queue across GitHub and OLDLAB
 
 Set repository variable `LOOM_CI_UNIFIED_RUNNERS=true` to opt all four development
-CI workflows into the common native Actions labels
+CI workflows and normal candidate publication into the common native Actions labels
 `self-hosted,linux,x64,loom-ci-exec,loom-ci-isolated-v1`. This selects an execution
 interface, not a physical pool: both disposable OLDLAB KVM guests and disposable
 GitHub-hosted VMs serving one nested native job can accept work. GitHub retains
@@ -12,7 +12,11 @@ Coverage aggregation maps both providers’ `*/_work/*/*` roots into the local
 checkout, retaining the existing hosted paths and coverage checks.
 
 The flag defaults off, retaining original hosted placements. Main promotion,
-fork PRs, macOS, ARM, and candidate/deployment workflows retain existing routing.
+fork PRs, macOS, ARM, rollout/deployment jobs and optional six-hour TB2.1 image
+qualification retain existing routing. Missing pool tests and normal
+platform/harness publication share the common queue; candidate planning keeps
+the hosted image with its GitHub CLI; the protected
+publication environment and credential scope are unchanged.
 Existing queued jobs do not migrate or restart when the flag changes. Plan and
 final gate jobs also use the common queue, avoiding a deadlock when hosted donor
 VMs fill the account's hosted quota.
@@ -24,7 +28,8 @@ queued or booting never suppresses ready OLDLAB capacity. A controller/API error
 cannot hide existing OLDLAB labels. GitHub donor VMs are supplied on demand up
 to the currently confirmed Free-organization ceiling of 20; other hosted
 workflows share that limit. Only runnable queued jobs whose native `needs`
-dependencies have completed contribute to demand, including all matrix rows.
+dependencies have completed contribute to demand, including candidate missing-test
+matrix rows and publication after its prerequisite jobs finish.
 
 GitHub has no atomic provider preference between matching runners. Hosted
 capacity is supplied while OLDLAB contributes overflow, but simultaneous ready
@@ -63,7 +68,10 @@ The provider runs on native `ubuntu-24.04`. `ci_hosted_worker.py` verifies its
 pinned runner archive at download, removes the outer Actions/token/runtime
 state, marks the disposable VM and serves exactly one native job. The nested
 job receives its own native token/workspace/artifact ownership, then exits; the
-outer VM is discarded normally. No custom status publisher or merge controller
+outer VM is discarded normally. The capacity job allows 195 minutes so a normal
+180-minute candidate publication retains its budget plus bootstrap/teardown time.
+Optional 360-minute TB2.1 image qualification runs directly on hosted Ubuntu
+24.04, preserving its full budget without nesting under a donor timeout. No custom status publisher or merge controller
 is involved. Only this controller's own unused donor runs may be cancelled,
 after fresh busy-state readback and successful deregistration. API/deletion
 failure preserves execution. Source CI is never cancelled or retried here.
