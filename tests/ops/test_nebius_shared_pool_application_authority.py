@@ -255,3 +255,62 @@ def test_shared_parent_rejects_application_scope_drift_before_process_barrier(
         guards=SimpleNamespace(kubeconfig=tmp_path / 'not-read'), prefix=['/usr/bin/kubectl'])
     with pytest.raises(ValueError, match='shared writer authority changed'):
         module.HTTPSSharedPoolOperationAPI._observe(api)
+
+
+@pytest.mark.parametrize('recovering', [False, True])
+@pytest.mark.parametrize('damage', [None, 'namespace_uid', 'namespace_labels', 'policy_uid', 'binding_uid', 'missing'])
+def test_shared_parent_rechecks_personal_scope_during_process_barrier(
+        authority_case, monkeypatch, tmp_path, recovering, damage):
+    from types import SimpleNamespace
+
+    from scripts.ops import nebius_shared_pool_api as module
+
+    arguments, _ = authority_case
+    scope = {name: copy.deepcopy(row) for name, row in arguments['current'].items()
+        if row['kind'] in {'Namespace', 'ValidatingAdmissionPolicy', 'ValidatingAdmissionPolicyBinding'}}
+    live = {module.runtime_resource_path(row): copy.deepcopy(row) for row in scope.values()}
+    captured = SimpleNamespace(plan=object())
+    writers = module.SharedPoolWriterObservation(captured.plan, '10', {}, {}, 'census', scope)
+    monkeypatch.setattr(module, 'observe_shared_pool_recovery_writers' if recovering else
+        'observe_shared_pool_forward_writers', lambda **_: writers)
+    monkeypatch.setattr(module, '_files', lambda _: {})
+    databases = SimpleNamespace(bindings=captured)
+    monkeypatch.setattr(module, 'observe_shared_pool_recovery_databases', lambda **_: databases)
+    result = SimpleNamespace(bindings=captured, pending_workloads=())
+    reads = []
+
+    def process(**options):
+        if damage:
+            kind = ('ValidatingAdmissionPolicy' if damage == 'policy_uid' else
+                'ValidatingAdmissionPolicyBinding' if damage == 'binding_uid' else 'Namespace')
+            path, row = next((path, row) for path, row in live.items() if row['kind'] == kind)
+            if damage == 'missing':
+                del live[path]
+            elif damage.endswith('_uid'):
+                row['metadata']['uid'] = str(uuid4())
+            else:
+                row['metadata']['labels']['loom.nebius/incarnation'] = str(uuid4())
+        if options.get('recheck_application_scopes') is not None:
+            options['recheck_application_scopes']()
+        return result
+
+    monkeypatch.setattr(module, 'observe_shared_pool_recovery_processes' if recovering else
+        'observe_shared_pool_forward_processes', process)
+
+    async def external(_):
+        pass
+
+    def request(method, path):
+        assert method == 'GET' and '?' not in path
+        reads.append(path)
+        return copy.deepcopy(live.get(path))
+
+    api = SimpleNamespace(_state=lambda: ({}, recovering), shared_state=tmp_path, _captured=captured,
+        _external=external, _permissions=lambda *_, **__: None, _request=request, _scope=lambda: None,
+        guards=SimpleNamespace(kubeconfig=tmp_path / 'not-read'), prefix=['/usr/bin/kubectl'])
+    if damage:
+        with pytest.raises(ValueError):
+            module.HTTPSSharedPoolOperationAPI._observe(api)
+    else:
+        assert module.HTTPSSharedPoolOperationAPI._observe(api) is result
+        assert set(reads) == set(live)
