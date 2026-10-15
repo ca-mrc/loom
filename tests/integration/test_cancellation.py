@@ -190,7 +190,7 @@ def test_cancel_as_platform_admin(app, cancel_seed):  # type: ignore[no-untyped-
     with TestClient(app) as client:
         r = client.post(
             f"/trials/{queued}/cancel",
-            headers={"Authorization": f"Bearer {admin_raw}"},
+            headers={"Authorization": f"Bearer {admin_raw}", "X-Loom-Admin-Actor": "test-operator"},
         )
         assert r.status_code == 200
         assert r.json()["state"] == "cancelled"
