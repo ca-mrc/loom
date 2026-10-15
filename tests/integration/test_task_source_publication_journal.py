@@ -205,6 +205,30 @@ async def test_identity_cannot_change_via_direct_sql(journal, tmp_path):
             ), {"other": uuid4(), "id": identity["publication_id"]})
 
 
+async def test_database_rejects_removing_a_reference_without_terminal_history(journal, tmp_path):
+    spec, _, _ = await _published(journal, tmp_path)
+    identity = _identity(spec.id)
+    await _prepare(journal, identity)
+    with pytest.raises(DBAPIError):
+        async with journal.begin() as session:
+            await session.execute(text(
+                "DELETE FROM task_bundle_source_references "
+                "WHERE source_id=:source AND kind='publication' AND owner_id=:owner"
+            ), {"source": spec.id, "owner": str(identity["publication_id"])})
+
+
+async def test_generic_reference_release_cannot_bypass_publication_history(journal, tmp_path):
+    spec, _, _ = await _published(journal, tmp_path)
+    identity = _identity(spec.id)
+    await _prepare(journal, identity)
+    async with journal.begin() as session:
+        with pytest.raises(ValueError):
+            await _source().release_task_bundle_reference(
+                session, source_id=spec.id, reference_kind="publication",
+                owner_id=str(identity["publication_id"]),
+            )
+
+
 @pytest.mark.parametrize("changed", ["publication_id", "destination_installation_id", "destination_import_id"])
 async def test_nil_identity_is_rejected_before_authority(journal, tmp_path, changed):
     spec, _, _ = await _published(journal, tmp_path)
