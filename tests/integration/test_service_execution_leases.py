@@ -4,6 +4,7 @@ import asyncio
 import io
 import json
 import tarfile
+from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -4262,28 +4263,71 @@ async def test_observed_pod_broker_commits_semantic_runtime_output(
                 == 1
             )
 
+            def retained_output(current, current_trial, bundle):  # type: ignore[no-untyped-def]
+                return deepcopy((
+                    current_trial.state, current_trial.result, current_trial.failure_reason,
+                    current_trial.failure_message, current_trial.finished_at,
+                    current_trial.attempt_count, current_trial.trajectory_index,
+                    current.generation, current.resource_generation, current.revoked_at,
+                    current.finalized_at, current.pod_terminated_at,
+                    current.output_commit_state, current.output_upload_session_id,
+                    current.output_generation, current.output_manifest_sha256,
+                    current.output_marker_sha256, current.output_committed_at,
+                    current.materialization_state, current.canonical_trajectory_sha256,
+                    current.canonical_atif_sha256, current.source_cleanup_state,
+                    current.source_retain_until, bundle.storage, bundle.artifact_metadata,
+                    bundle.content_hash, bundle.file_count,
+                ))
+
+            artifact = await session.get(Artifact, artifact.id)
+            assert artifact is not None
+            retained = retained_output(persisted, trial, artifact)
+            source_objects = dict(store.objects)
+
         # A completed Job remains observable between durable finalization and
-        # deletion. Replaying that Kubernetes state must not regress the lease
-        # from ``finalized`` or erase its terminal timestamp.
+        # deletion. Full reconciliation now owns the durable delete intent too;
+        # it must preserve the finalized failure and committed output while
+        # deleting the exact Job, before absence owns the cleanup ACK.
         kubernetes.jobs[lease.job_name] = terminal_observation.model_copy(
             update={"resource_version": "9", "terminated_at": None}
         )
-        assert await actuator.reconcile_full_once(now=now + timedelta(seconds=5)) == 0
+        assert await actuator.reconcile_full_once(now=now + timedelta(seconds=5)) == 1
+        assert kubernetes.delete_count == 1 and lease.job_name not in kubernetes.jobs
         async with sessions() as session:
             persisted = await session.get(ServiceExecutionLease, lease.id)
+            trial = await session.get(Trial, trial_id)
+            artifact = await session.get(Artifact, artifact.id)
             assert persisted is not None
+            assert trial is not None and artifact is not None
             assert persisted.observed_state == "finalized"
+            assert persisted.desired_state == "delete_pending" and persisted.cleanup_state == "pending"
+            assert persisted.deleted_at is None
             assert persisted.pod_terminated_at == now + timedelta(seconds=3)
+            assert retained_output(persisted, trial, artifact) == retained
+            assert store.objects == source_objects
 
+        # The still-pending delete command acknowledges actual absence without
+        # deleting twice. The following full pass must be fully converged.
         assert await actuator.run_commands_once(now=now + timedelta(seconds=5)) == 1
         assert kubernetes.delete_count == 1
-        assert await actuator.reconcile_full_once(now=now + timedelta(seconds=6)) == 1
+        assert await actuator.reconcile_full_once(now=now + timedelta(seconds=6)) == 0
 
         async with sessions() as session:
             persisted = await session.get(ServiceExecutionLease, lease.id)
+            trial = await session.get(Trial, trial_id)
+            artifact = await session.get(Artifact, artifact.id)
             assert persisted is not None
+            assert trial is not None and artifact is not None
             assert persisted.desired_state == "deleted"
             assert persisted.cleanup_state == "complete"
+            assert persisted.deleted_at == now + timedelta(seconds=5)
+            assert retained_output(persisted, trial, artifact) == retained
+            assert store.objects == source_objects
+            deletion = await session.scalar(select(ServiceExecutionCommand).where(
+                ServiceExecutionCommand.lease_id == lease.id,
+                ServiceExecutionCommand.command_type == "delete",
+            ))
+            assert deletion is not None and deletion.state == "acknowledged"
 
         async with sessions() as session:
             with pytest.raises(ServiceExecutionBrokerError, match="not_observed"):
