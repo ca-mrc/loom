@@ -91,7 +91,7 @@ async def _record(session: AsyncSession, row: TaskSourcePublication) -> SourcePu
     if (
         descriptor.source_id != row.source_id or descriptor.incarnation_id != row.incarnation_id
         or _digest(descriptor.model_dump(mode="json")) != row.descriptor_sha256
-        or retained is not (row.state != "released")
+        or retained != (row.state != "released")
     ):
         raise ValueError("publication descriptor or retention drifted")
     return SourcePublicationRecord(
