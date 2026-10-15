@@ -29,11 +29,66 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  publish:
+  # PRs and merge groups run the pool operator suite only when operator inputs
+  # change (component-ownership.toml: nebius-pool-ops). Every platform candidate
+  # runs the whole suite here, without protected credentials, before publishing.
+  pool-ops-tests:
+    name: pool-ops-tests (${{ matrix.shard_index }})
     if: >-
       github.repository_id == '1281629473' &&
       github.ref == 'refs/heads/dev' &&
-      vars.NEBIUS_RELEASE_ENABLED == 'true'
+      vars.NEBIUS_RELEASE_ENABLED == 'true' &&
+      (inputs.mode || 'platform') == 'platform'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        # The tests-root shard policy; shards without pool tests finish at once.
+        shard_index: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Select pool operator tests
+        id: manifest
+        shell: bash
+        env:
+          SHARD_INDEX: ${{ matrix.shard_index }}
+        run: |
+          set -euo pipefail
+          paths_file="${RUNNER_TEMP}/pool-ops-tests.txt"
+          python3 scripts/component_ownership.py test-paths --lane tests-root --test-scope nebius \
+            --suite nebius-pool-ops --shard-index "$SHARD_INDEX" --shard-count 20 > "$paths_file"
+          echo "paths_file=$paths_file" >> "$GITHUB_OUTPUT"
+          echo "selected=$([[ -s "$paths_file" ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        if: steps.manifest.outputs.selected == 'true'
+        with:
+          version: "0.11.26"
+          checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
+          enable-cache: true
+          save-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Pytest — pool operator shard
+        if: steps.manifest.outputs.selected == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv sync --locked --all-packages --extra dev --python 3.11
+          mapfile -t test_paths < "${{ steps.manifest.outputs.paths_file }}"
+          uv run --no-sync pytest -m "not legacy_pool" -p no:cov "${test_paths[@]}" -x --durations=25
+
+  publish:
+    needs: [pool-ops-tests]
+    if: >-
+      !cancelled() &&
+      github.repository_id == '1281629473' &&
+      github.ref == 'refs/heads/dev' &&
+      vars.NEBIUS_RELEASE_ENABLED == 'true' &&
+      (needs.pool-ops-tests.result == 'success' ||
+       (needs.pool-ops-tests.result == 'skipped' && inputs.mode == 'harness-only'))
     runs-on: ubuntu-24.04
     environment:
       name: nebius-integration

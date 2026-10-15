@@ -672,6 +672,20 @@ Constraints:
   `POST /trials/claim` attach the same snapshot. `beta_mixture` cannot
   recover the mix seed from `trial_config.mix_seed` at runtime.
 
+### Nebius hosted slice (#2396)
+
+Hosted Terminus-2 admits only `student_teacher_student`. The same two LiteLLM
+delegates share one Harbor session; `--combinations-json` and combination
+fan-out stay independent. The selected runtime profile must list
+`student_teacher_student` in `terminus2_multi_model_policies` (default empty,
+so merged code stays inert until the broker and controller images are
+published). Frozen K1/K2 remain inside `LOOM_TASK_TRIAL_JSON`. The trusted
+broker derives trial identity from the active attempt lease, reclaims the
+Terminus execution/run attempt, and accepts bounded episode checkpoints.
+Missing reclaim identity fails closed instead of emitting uncorrelated
+multi-model calls. `beta_mixture` and `student_to_teacher_turns` remain
+rejected on Nebius in this slice.
+
 ### Worker retry: fail closed (no merged Harbor rerun)
 
 Loom's scheduler already retries a trial by letting a new worker claim it and
@@ -724,6 +738,9 @@ Related: `src/loom_control_plane/terminus_recovery.py`,
 | `src/loom_service/multi_model.py` | Batch validation / materialization |
 | `src/loom_control_plane/routes/workers.py` | Claim payload `model_switch_plan` (`/work/claim` and `/trials/claim`) |
 | `src/loom_control_plane/terminus_recovery.py` | Execution reclaim; fail closed if a checkpoint exists |
+| `src/loom/service_execution_terminus2.py` | Hosted runtime; lease-bound reclaim/checkpoint client |
+| `cmd/loom-execution-runtime/broker.go` | Loopback reclaim/checkpoint proxy |
+| `src/loom_llm_gateway/execution_attempt_dispatch.py` | Hosted student/teacher model allowlist |
 | `packages/loom-launcher/loom_launcher/terminus_2_runner.py` | Import-stability stub; exits with current runtime guidance |
 | `tests/conformance/terminus2/README.md` | Local conformance notes |
 | `tests/unit/test_multi_model_switch.py` | Role router + config unit tests |

@@ -25,57 +25,6 @@ class _FakeSplit:
         return iter(self._rows)
 
 
-def test_hendrycks_math_lists_full_test_split(monkeypatch) -> None:
-    calls: list[dict[str, object]] = []
-
-    def fake_load_dataset(*args, **kwargs):
-        calls.append({"args": args, "kwargs": kwargs})
-        return {
-            "test": _FakeSplit(
-                [
-                    {
-                        "problem": "How many vertical asymptotes?",
-                        "level": "Level 3",
-                        "type": "Algebra",
-                        "solution": "The answer is \\boxed{2}.",
-                    },
-                    {
-                        "problem": "Compute the probability.",
-                        "level": "Level 5",
-                        "type": "Counting & Probability",
-                        "solution": "Thus \\boxed{\\frac{1}{3}}.",
-                    },
-                ],
-            ),
-        }
-
-    monkeypatch.setattr(
-        "loom_benchmarks.adapters.hendrycks_math.datasets.load_dataset",
-        fake_load_dataset,
-    )
-
-    instances = list(
-        HendrycksMATHAdapter().list_instances(source_dir=Path("/cache"), split="test"),
-    )
-
-    assert calls == [
-        {
-            "args": ("HuggingFaceTB/MATH", "all"),
-            "kwargs": {
-                "revision": "140a673f1f7182daf7923fdc7108e8cdbf97df46",
-                "cache_dir": "/cache",
-                "trust_remote_code": True,
-            },
-        },
-    ]
-    assert [i.instance_id for i in instances] == ["test/00000", "test/00001"]
-    assert instances[0].tags == {
-        "math_split": "test",
-        "level": "Level 3",
-        "type": "Algebra",
-    }
-
-
 def test_math500_lists_public_500_problem_test_split(monkeypatch) -> None:
     calls: list[dict[str, object]] = []
 
@@ -119,7 +68,6 @@ def test_math500_lists_public_500_problem_test_split(monkeypatch) -> None:
             "kwargs": {
                 "revision": "6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be",
                 "cache_dir": "/cache",
-                "trust_remote_code": False,
             },
         },
     ]

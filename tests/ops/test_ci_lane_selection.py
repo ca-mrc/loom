@@ -99,6 +99,89 @@ def test_schema_component_scope_retains_database_and_unknown_inputs(changes, ret
     assert regular in selected
 
 
+@pytest.mark.parametrize(("changes", "retained"), [
+    (("src/loom/config.py",), False),
+    (("src/loom_service/app.py", "web/src/main.tsx"), False),
+    (("docs/contributing/ci.md",), False),
+    (("scripts/ops/nebius_shared_pool_api.py",), True),
+    (("scripts/ops/deploy_nebius_platform.py",), True),
+    (("deploy/k8s/control-plane.yaml",), True),
+    (("tests/ops/test_nebius_pool_runtime.py",), True),
+    (("tests/ops/nebius_participant_external_fixture.py",), True),
+    (("src/loom/config.py", "uv.lock"), True),
+    (("config/component-ownership.toml",), True),
+    ((), True),
+])
+def test_pool_operator_suite_runs_on_operator_inputs_only(changes, retained):
+    # Pool operator tests are ~90% of tests-root time. Deployment runs them on
+    # every dev head (nebius-candidate.yml); a PR runs them only for its inputs.
+    from pathlib import Path
+
+    from scripts.component_ownership import load_manifest, select_affected_test_suites
+
+    root = Path(__file__).resolve().parents[2]
+    manifest = load_manifest(root / "config/component-ownership.toml")
+    pool = "tests/ops/test_nebius_shared_pool_handoff_census.py"
+    regular = "tests/ops/test_plan_ci_validations.py"
+    selected = select_affected_test_suites(manifest, (pool, regular), changed_paths=changes, repo_root=root)
+    assert (pool in selected) is retained
+    assert regular in selected
+
+
+@pytest.mark.parametrize("changes", [
+    ("tests/ops/nebius_participant_external_fixture.py",),
+    ("scripts/ops/nebius_shared_pool_api.py",),
+    ("src/loom/config.py",),
+])
+def test_shard_manifests_execute_exactly_the_planned_selection(changes):
+    # Select from the whole lane, then shard: each job must run its part of the
+    # planned set, never a set decided by which files share its shard.
+    from pathlib import Path
+
+    from scripts.component_ownership import (
+        _tracked_paths,
+        load_manifest,
+        selected_test_paths,
+        test_shard_matrix,
+    )
+
+    root = Path(__file__).resolve().parents[2]
+    manifest = load_manifest(root / "config/component-ownership.toml")
+    tracked = _tracked_paths(root)
+    common = dict(tracked_paths=tracked, lane="tests-root", repo_root=root, changed_paths=changes)
+    planned = selected_test_paths(manifest, **common)
+    policy = manifest.test_shard_policy("tests-root")
+    assert policy is not None
+    shards = [selected_test_paths(manifest, **common, shard_index=index, shard_count=policy.shard_count)
+              for index in range(policy.shard_count)]
+    executed = [path for shard in shards for path in shard]
+    assert sorted(executed) == sorted(planned) and len(executed) == len(set(executed))
+    matrix = {row["shard_index"] for row in test_shard_matrix(manifest, **common)}
+    assert matrix == {index for index, shard in enumerate(shards) if shard}
+
+
+def test_pool_operator_suite_gates_every_platform_candidate():
+    from pathlib import Path
+
+    import yaml
+    from scripts.component_ownership import load_manifest
+
+    root = Path(__file__).resolve().parents[2]
+    manifest = load_manifest(root / "config/component-ownership.toml")
+    [suite] = [item for item in manifest.test_suites if item.id == "nebius-pool-ops"]
+    policy = manifest.test_shard_policy(suite.lane)
+    assert policy is not None
+    jobs = yaml.safe_load((root / ".github/workflows/nebius-candidate.yml").read_text())["jobs"]
+    tests = jobs["pool-ops-tests"]
+    assert "environment" not in tests and "secrets." not in json.dumps(tests)
+    assert tests["strategy"]["matrix"]["shard_index"] == list(range(policy.shard_count))
+    run = "\n".join(step.get("run", "") for step in tests["steps"])
+    assert "--suite nebius-pool-ops" in run and f"--shard-count {policy.shard_count}" in run
+    assert "--changed-paths-json" not in run
+    assert jobs["publish"]["needs"] == ["pool-ops-tests"]
+    assert "needs.pool-ops-tests.result == 'success'" in jobs["publish"]["if"]
+
+
 def test_scheduled_workflow_shell_emits_full_plan(tmp_path):
     import os
     import subprocess

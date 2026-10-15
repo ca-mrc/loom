@@ -4,7 +4,7 @@
   ],
   "execution_class_id": "linux-amd64-cpu-pod-v1",
   "schema_version": "loom.service-workload-compatibility-report.v2",
-  "source_sha256": "c7fa3b1a718bc8eac227f894b4ca5bb3493c66bab7fbffb5a3fafa7baefc37ee",
+  "source_sha256": "9c3945cf76399af89d19098e48af3667271a3b0d7277be8e1e28836d5a4b0423",
   "summary": {
     "pools": {
       "nebius-cpu": {

@@ -45,6 +45,7 @@ async def test_shared_data_accepts_managed_apis_but_not_other_namespaces_or_web(
     policies = render_application_shared_access(authority, shared, foundation)
     fixture_tag = "docker.io/library/loom-personal-network:" + uuid4().hex
     container = None
+    core = None
     try:
         platform = await asyncio.to_thread(_docker_platform)
         await asyncio.to_thread(_build_image, tag=fixture_tag,
@@ -158,7 +159,7 @@ async def test_shared_data_accepts_managed_apis_but_not_other_namespaces_or_web(
         if container is not None:
             # Preserve sandbox/CNI/image-startup evidence before disposable
             # teardown. This adds no retries and never reads Secret contents.
-            await asyncio.to_thread(_add_failure_diagnostics, container, shared.platform_namespace, exc)
+            await asyncio.to_thread(_add_failure_diagnostics, container, shared.platform_namespace, exc, core=core)
         raise
     finally:
         if container is not None:

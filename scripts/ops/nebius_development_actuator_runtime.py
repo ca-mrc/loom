@@ -59,7 +59,7 @@ def prepare_actuator_runtime(request: DevelopmentDatabaseRuntime) -> Development
         pod['nodeSelector'] = {'loom.nebius/node-role': 'system', 'loom.nebius/platform': 'integration'}
         pod['tolerations'] = [{'key': 'loom.nebius/platform', 'operator': 'Equal', 'value': 'integration', 'effect': 'NoSchedule'}]
         container, = pod['containers']
-        images = manager.publication.bundle.candidate['images']
+        images = request.data_runtime.bundle.candidate['images']
         container['image'] = images['execution_actuator']['image_ref']
         settings = _environment(container)
         db_secret = request.material[1]['metadata']['name']
