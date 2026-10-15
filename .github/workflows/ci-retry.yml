@@ -1,12 +1,24 @@
 name: classified-ci-retry
 run-name: >-
-  ci-retry-v1 source_run=${{ inputs.source_run_id }}
-  failed_attempt=${{ inputs.failed_attempt }} reason=${{ inputs.reason }}
-  actor=${{ github.actor }}
+  ${{ inputs.purpose == 'runner_capacity' &&
+      format('loom-ci-hosted slot={0} request={1}', inputs.slot, inputs.request_id) ||
+      format('ci-retry-v1 source_run={0} failed_attempt={1} reason={2} actor={3}',
+             inputs.source_run_id, inputs.failed_attempt, inputs.reason, github.actor) }}
 
 on:
   workflow_dispatch:
     inputs:
+      purpose:
+        description: Classified retry or isolated single-job runner capacity
+        type: choice
+        options: [retry, runner_capacity]
+        default: retry
+      slot:
+        description: Capacity controller slot (unused for retries)
+        type: string
+      request_id:
+        description: Unique capacity request (unused for retries)
+        type: string
       source_run_id:
         description: Terminal required-source workflow run ID
         required: true
@@ -37,11 +49,15 @@ permissions:
 # same source run and let an accepted request finish so a later dispatch cannot
 # cancel it after GitHub has begun the rerun operation.
 concurrency:
-  group: classified-ci-retry-${{ inputs.source_run_id }}
+  group: >-
+    ${{ inputs.purpose == 'runner_capacity' &&
+        format('loom-ci-hosted-{0}', inputs.request_id) ||
+        format('classified-ci-retry-{0}', inputs.source_run_id) }}
   cancel-in-progress: false
 
 jobs:
   retry:
+    if: inputs.purpose != 'runner_capacity'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -71,3 +87,18 @@ jobs:
           --evidence-url "$EVIDENCE_URL"
           --mode "$RETRY_MODE"
           --actor "$RETRY_ACTOR"
+
+  capacity:
+    if: inputs.purpose == 'runner_capacity'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+      - name: Serve one native Actions job on this disposable hosted VM
+        env:
+          LOOM_CI_JIT_CONFIG: ${{ secrets[format('LOOM_CI_HOSTED_JIT_{0}', inputs.slot)] }}
+        run: python3 scripts/ops/ci_hosted_worker.py

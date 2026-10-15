@@ -180,6 +180,10 @@ def test_verified_read_detects_in_place_change_during_open_descriptor_read(tmp_p
 
     path = tmp_path / "a"
     path.write_bytes(b"original")
+    # Same-size writes can share mtime/ctime on Linux. Give the real mutation
+    # an observable mtime transition without depending on clock resolution.
+    os.utime(path, ns=(1, 1))
+    before = path.stat()
     source = manifest(entry("a", b"original"))
     original = os.read
     changed = False
@@ -195,3 +199,5 @@ def test_verified_read_detects_in_place_change_during_open_descriptor_read(tmp_p
     monkeypatch.setattr(os, "read", race)
     with pytest.raises(ValueError):
         read_application_source_file(tmp_path, source.files[0])
+    assert changed and path.read_bytes() == b"modified"
+    assert path.stat().st_mtime_ns != before.st_mtime_ns

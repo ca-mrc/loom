@@ -13,6 +13,17 @@ runtime changes, explicit CI labels and unknown paths can select additional work
 See [Nebius CI integration](../contributing/ci.md) for the combined platform contract and
 optional integration coverage diagnostic.
 
+Before allocating pool-operator runners, publication selects affected modules
+against the immutable candidate's first parent, then checks successful native CI
+coverage on the exact candidate commit. Only complete test modules whose selected
+owning jobs passed are reused; partial coverage schedules only the missing files.
+Missing or unreadable evidence retains the required affected tests, and no empty
+shard is launched. An unavailable change boundary retains the entire suite.
+This does not reuse image-build or vulnerability-scan results, change protected
+merge authority, or relax the deployment idle check, backup or rollback. See
+[pool test scheduling](../contributing/ci.md#pool-operator-tests-run-before-deployment)
+for the evidence boundaries and measured shard rebalance.
+
 ## Bootstrap
 
 Publication runs on GitHub-hosted Ubuntu 24.04 AMD64. CI and publication require

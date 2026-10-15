@@ -70,6 +70,9 @@ class TestSuite:
     # touches these inputs, the suite's own tests or the test helpers they import.
     # Everything else is validated after merge, before deployment.
     affected_paths: tuple[str, ...] = ()
+    # Component-local operators may select their transitive test consumers.
+    # Other affected inputs retain the complete suite.
+    component_sources: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -419,6 +422,7 @@ def _test_suite(raw: dict[str, Any]) -> TestSuite:
             "ci_enabled",
             "unaffected_paths",
             "affected_paths",
+            "component_sources",
         },
         context,
     )
@@ -459,8 +463,11 @@ def _test_suite(raw: dict[str, Any]) -> TestSuite:
         raise ManifestError(f"{context}.affected_paths must be a string array")
     affected_paths = tuple(_safe_path(item, context=f"{context}.affected_paths", allow_glob=True)
                            for item in raw_affected)
-    if unaffected_paths and affected_paths:
-        raise ManifestError(f"{context} declares both unaffected_paths and affected_paths")
+    raw_sources = raw.get("component_sources", [])
+    if not isinstance(raw_sources, list) or not all(isinstance(item, str) for item in raw_sources):
+        raise ManifestError(f"{context}.component_sources must be a string array")
+    component_sources = tuple(_safe_path(item, context=f"{context}.component_sources", allow_glob=True)
+                              for item in raw_sources)
     return TestSuite(
         id=_required_slug(raw, "id", context),
         language=language,
@@ -471,6 +478,7 @@ def _test_suite(raw: dict[str, Any]) -> TestSuite:
         ci_enabled=ci_enabled,
         unaffected_paths=unaffected_paths,
         affected_paths=affected_paths,
+        component_sources=component_sources,
     )
 
 
@@ -998,7 +1006,7 @@ def validate_manifest(
                 errors.append(
                     f"test exclude pattern matches no tracked test: {suite.id}: {pattern}"
                 )
-        for pattern in suite.affected_paths:
+        for pattern in (*suite.affected_paths, *suite.component_sources):
             if not any(matches_path(path, pattern) for path in tracked_paths):
                 errors.append(
                     f"test affected pattern matches no tracked path: {suite.id}: {pattern}"
@@ -1179,6 +1187,15 @@ def select_release_image_matrix(
         selected_ids = {component.id for component in release_components}
     else:
         changed_paths = tuple(path for path in changed_paths if not manifest.ci_ignores_path(path))
+        # Executable unit/integration/browser tests are validation inputs, not
+        # production-image inputs. Preserve policy-owned runtime payloads: those
+        # files really are copied into their conformance images.
+        changed_paths = tuple(path for path in changed_paths if not (
+            manifest.test_owners_for_path(path)
+            and all(owner.execution_policy is None for owner in manifest.test_owners_for_path(path))
+            and (Path(path).name.startswith("test_") or ".test." in Path(path).name
+                 or path.endswith("_test.go"))
+        ))
         if not changed_paths:
             # Ignore retired inputs by default, but preserve an explicit caller
             # request (for example ci:images) for the active image set.
@@ -1357,7 +1374,7 @@ def _fixture_reference_source(source: str, *, path: str, changed_paths: set[str]
         elif isinstance(names_arg, (ast.Tuple, ast.List)) and all(
             isinstance(item, ast.Constant) and isinstance(item.value, str) for item in names_arg.elts
         ):
-            names = tuple(str(item.value) for item in names_arg.elts)
+            names = tuple(str(item.value) for item in names_arg.elts if isinstance(item, ast.Constant))
         else:
             return False
         if not isinstance(values_arg, (ast.Tuple, ast.List)):
@@ -1443,21 +1460,31 @@ def narrow_test_only_changes(
         for name in changed
     ):
         return paths
-    identifiers = re.compile(r"\b(?:" + "|".join(re.escape(Path(name).stem) for name in changed) + r")\b")
-    for name in tracked_paths:
-        if name in changed or not name.endswith(".py"):
-            continue
-        try:
-            source = (repo_root / name).read_text(encoding="utf-8")
-        except (OSError, UnicodeError):
-            return paths
-        # Metadata filtering only blanks path literals; an unmatched source
-        # cannot gain a changed-module reference from that AST walk.
-        if not identifiers.search(source):
-            continue
-        if identifiers.search(_fixture_reference_source(source, path=name, changed_paths=changed)):
-            return paths
-    return tuple(path for path in paths if path in changed)
+    try:
+        sources = {name: (repo_root / name).read_text(encoding="utf-8")
+                   for name in tracked_paths if name.endswith(".py") and name not in changed}
+    except (OSError, UnicodeError):
+        return paths
+    affected = set(changed)
+    while True:
+        identifiers = re.compile(r"\b(?:" + "|".join(re.escape(Path(name).stem) for name in affected) + r")\b")
+        added = set()
+        for name, source in sources.items():
+            if name in affected or not identifiers.search(source):
+                continue
+            if not identifiers.search(_fixture_reference_source(source, path=name, changed_paths=affected)):
+                continue
+            # Runtime/metadata/unknown consumers still require a complete lane.
+            # Known test-module consumers can expand transitively without also
+            # running every unrelated test module in that same lane.
+            if (name in _TEST_SELECTION_METADATA_FILES
+                    or not (name.startswith("tests/") or "/tests/" in name)
+                    or not Path(name).name.startswith("test_")):
+                return paths
+            added.add(name)
+        if not added:
+            return tuple(path for path in paths if path in affected)
+        affected.update(added)
 
 
 def _imported_test_modules(paths: tuple[str, ...], *, repo_root: Path) -> frozenset[str]:
@@ -1491,12 +1518,18 @@ def select_affected_test_suites(
     if not changed_paths:
         return paths
     helpers: dict[str, frozenset[str]] = {}
+    components: dict[str, frozenset[str]] = {}
     selected = []
     for path in paths:
         owners = manifest.test_owners_for_path(path)
         if len(owners) != 1:
             raise ManifestError(f"test path has no unique owner: {path}")
         owner = owners[0]
+        changes = tuple(change for change in changed_paths if not any(
+            matches_path(change, pattern) for pattern in owner.unaffected_paths
+        ) or owner in manifest.test_owners_for_path(change))
+        if not changes:
+            continue
         if owner.affected_paths:
             if owner.id not in helpers:
                 own = tuple(item for item in paths if owner in manifest.test_owners_for_path(item))
@@ -1506,17 +1539,59 @@ def select_affected_test_suites(
                 any(matches_path(change, pattern) for pattern in owner.affected_paths)
                 or owner in manifest.test_owners_for_path(change)
                 or change in helpers[owner.id]
-                for change in changed_paths
+                for change in changes
             ):
                 continue
-        if all(
-            any(matches_path(change, pattern) for pattern in owner.unaffected_paths)
-            and owner not in manifest.test_owners_for_path(change)
-            for change in changed_paths
-        ):
-            continue
+        if owner.component_sources and repo_root is not None:
+            if owner.id not in components:
+                own = tuple(item for item in paths if owner in manifest.test_owners_for_path(item))
+                relevant = tuple(change for change in changes if
+                                 any(matches_path(change, pattern) for pattern in owner.affected_paths)
+                                 or owner in manifest.test_owners_for_path(change)
+                                 or change in helpers.get(owner.id, ()))
+                components[owner.id] = _component_test_consumers(
+                    own, changes=relevant, sources=owner.component_sources, repo_root=repo_root,
+                )
+            if path not in components[owner.id]:
+                continue
         selected.append(path)
     return tuple(selected)
+
+
+def _component_test_consumers(
+    paths: tuple[str, ...], *, changes: tuple[str, ...], sources: tuple[str, ...], repo_root: Path,
+) -> frozenset[str]:
+    """Narrow only explicitly component-local operators with known consumers.
+
+    Follow module-name references through operator sources and test fixtures.
+    Keeping string references is intentionally conservative: subprocess/CLI and
+    dynamic imports must retain coverage too. Shared inputs, missing sources and
+    operators with no known consumer keep the full suite.
+    """
+    local = tuple(change for change in changes if change.startswith("scripts/ops/"))
+    if not local or any(not any(matches_path(change, pattern) for pattern in sources)
+                        for change in changes):
+        return frozenset(paths)
+    try:
+        helpers = _imported_test_modules(paths, repo_root=repo_root)
+        source_paths = tuple(str(path.relative_to(repo_root))
+                             for path in (repo_root / "scripts/ops").rglob("*")
+                             if path.is_file() and path.suffix in {".py", ".sh"})
+        contents = {name: (repo_root / name).read_text(encoding="utf-8")
+                    for name in (*source_paths, *helpers)}
+        if any(change not in contents for change in local):
+            return frozenset(paths)
+        affected = set(local)
+        while True:
+            names = re.compile(r"\b(?:" + "|".join(re.escape(Path(name).stem) for name in affected) + r")\b")
+            added = {name for name, source in contents.items() if name not in affected and names.search(source)}
+            if not added:
+                break
+            affected.update(added)
+        selected = frozenset(paths) & affected
+        return selected or frozenset(paths)
+    except (OSError, UnicodeError, SyntaxError):
+        return frozenset(paths)
 
 
 def selected_test_paths(

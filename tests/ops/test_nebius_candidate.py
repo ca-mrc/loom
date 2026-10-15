@@ -5,6 +5,7 @@ import base64
 import hashlib
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -733,25 +734,26 @@ def test_registry_copy_streams_redacted_progress_and_bounds_failure(
     attempt_count = tmp_path / "attempt-count"
     executable = tmp_path / "skopeo"
     executable.write_text(
-        f"#!{Path(sys.executable).resolve()}\n"
-        "import os, sys, time\nfrom pathlib import Path\n"
-        "assert sys.argv[1:3] == ['copy', '--preserve-digests']\n"
-        f"count = Path({str(attempt_count)!r})\n"
-        "attempt = int(count.read_text()) + 1 if count.exists() else 1\n"
-        "count.write_text(str(attempt))\n"
-        "print('upload progress ' + os.environ['TEST_UPLOAD_TOKEN'], flush=True)\n"
-        f"ack = Path({str(acknowledged)!r})\n"
-        "deadline = time.monotonic() + 1\n"
-        "while not ack.exists() and time.monotonic() < deadline: time.sleep(0.01)\n"
-        "if not ack.exists(): sys.exit(19)\n"
-        "print('registry response https://registry.invalid/path?token=hidden', file=sys.stderr, flush=True)\n"
-        f"outcome = {outcome!r}\n"
-        "if outcome == 'denied':\n"
-        " print('unauthorized: connection reset by peer', file=sys.stderr, flush=True); sys.exit(7)\n"
-        "if outcome.startswith('retry') and (attempt == 1 or outcome == 'retry_failure'):\n"
-        " print('connection reset by peer', file=sys.stderr, flush=True); sys.exit(7)\n"
-        "if outcome in ('timeout', 'retry_timeout'): time.sleep(60)\n"
-        "sys.exit(7 if outcome == 'failure' else 0)\n"
+        # Native shell startup avoids spending the two-second upload budget on
+        # a second Python interpreter on a busy developer host. Keep the real
+        # subprocess, streaming acknowledgement, retry and total-timeout path.
+        "#!/bin/sh\nset -eu\n"
+        '[ "$1" = copy ] && [ "$2" = --preserve-digests ]\n'
+        f"count={shlex.quote(str(attempt_count))}\nack={shlex.quote(str(acknowledged))}\n"
+        'attempt=0\nif [ -f "$count" ]; then read -r attempt < "$count"; fi\n'
+        'attempt=$((attempt + 1))\nprintf "%s\\n" "$attempt" > "$count"\n'
+        'printf "upload progress %s\\n" "$TEST_UPLOAD_TOKEN"\n'
+        'waited=0\nwhile [ ! -f "$ack" ] && [ "$waited" -lt 100 ]; do\n'
+        ' sleep 0.01; waited=$((waited + 1))\ndone\n[ -f "$ack" ] || exit 19\n'
+        'echo "registry response https://registry.invalid/path?token=hidden" >&2\n'
+        f"outcome={shlex.quote(outcome)}\n"
+        'if [ "$outcome" = denied ]; then\n'
+        ' echo "unauthorized: connection reset by peer" >&2; exit 7\nfi\n'
+        'case "$outcome" in retry*)\n'
+        ' if [ "$attempt" = 1 ] || [ "$outcome" = retry_failure ]; then\n'
+        '  echo "connection reset by peer" >&2; exit 7\n fi;;\nesac\n'
+        'case "$outcome" in timeout|retry_timeout) exec sleep 60;; esac\n'
+        '[ "$outcome" != failure ] || exit 7\nexit 0\n'
     )
     executable.chmod(0o700)
     monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
