@@ -30,6 +30,20 @@ manifest from the actual files and checks the registered identity, legacy revisi
 and mode digest together. Malformed or mismatched strong identity cannot fall back
 to checksum-only validation. Sources without that field retain the legacy reader.
 
+Task-source recovery inventories only versions whose stored metadata matches the
+committed write intent. Its shared `loom.trajectory.immutable_object` reader then
+fetches the exact non-null S3 `VersionId` and verifies the returned version, byte
+count and SHA-256 under the caller's read budget. It never substitutes the latest
+object at that key. Equal bytes written by another owner are still excluded.
+
+The reader can copy verified input to a caller-owned private staging sink, but
+that sink remains untrusted until the complete read succeeds and must be discarded
+on failure. Reads use bounded chunks and close the response body on failure or
+completion. Callers supply authenticated, timeout-bounded storage clients and run
+this synchronous I/O outside database transactions and the event loop. An object
+descriptor is neither read permission nor a retention pin; this primitive does
+not enable cross-environment sharing or change ordinary artifact download routes.
+
 ## Prepared service fixture components
 
 A build records the primary image as `task` and each built sidecar as
