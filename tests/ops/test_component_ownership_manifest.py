@@ -828,6 +828,70 @@ runtime_policy = "start"
     assert "component build context is not a directory: example: missing-context" in errors
 
 
+def _write_excluding_component(tmp_path: Path, dockerignore: str) -> component_ownership.Manifest:
+    manifest_path = tmp_path / "component-ownership.toml"
+    manifest_path.write_text(
+        """
+schema_version = 2
+
+[[components]]
+id = "example"
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.example"
+build_context = "."
+source_paths = ["deploy/Dockerfile.example", "web/**"]
+exclude_paths = ["web/e2e/**"]
+smoke_owner = "smoke"
+scan_owner = "scan"
+attestation_owner = "attest"
+release_digest = "loom-example"
+runtime_policy = "start"
+""".strip(),
+        encoding="utf-8",
+    )
+    dockerfile = tmp_path / "deploy/Dockerfile.example"
+    dockerfile.parent.mkdir()
+    dockerfile.write_text("FROM scratch\n", encoding="utf-8")
+    (tmp_path / ".dockerignore").write_text(dockerignore, encoding="utf-8")
+    return component_ownership.load_manifest(manifest_path)
+
+
+def test_component_exclude_paths_drop_ownership_of_unbuilt_inputs(tmp_path: Path) -> None:
+    manifest = _write_excluding_component(tmp_path, "web/e2e\n")
+
+    assert [c.id for c in manifest.component_owners_for_path("web/src/main.tsx")] == ["example"]
+    assert manifest.component_owners_for_path("web/e2e/monitor.test.ts") == ()
+    errors = component_ownership.validate_manifest(
+        manifest,
+        repo_root=tmp_path,
+        tracked_paths=("deploy/Dockerfile.example", "web/src/main.tsx", "web/e2e/monitor.test.ts"),
+    )
+
+    assert not [error for error in errors if "exclude pattern" in error]
+
+
+def test_validator_requires_component_exclude_paths_to_be_dockerignored(tmp_path: Path) -> None:
+    manifest = _write_excluding_component(tmp_path, "web/node_modules\n")
+
+    errors = component_ownership.validate_manifest(
+        manifest,
+        repo_root=tmp_path,
+        tracked_paths=("deploy/Dockerfile.example", "web/src/main.tsx", "web/e2e/monitor.test.ts"),
+    )
+
+    assert (
+        "component exclude pattern is not a .dockerignore'd directory: example: web/e2e/**"
+        in errors
+    )
+
+
+def test_web_image_ignores_browser_test_only_changes() -> None:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+
+    assert manifest.component_owners_for_path("web/e2e/2099-monitor-results.test.ts") == ()
+    assert [c.id for c in manifest.component_owners_for_path("web/playwright.config.ts")] == ["web"]
+
+
 def test_validator_requires_source_paths_to_own_component_dockerfile(tmp_path: Path) -> None:
     manifest_path = tmp_path / "component-ownership.toml"
     manifest_path.write_text(
