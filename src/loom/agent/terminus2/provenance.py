@@ -6,7 +6,7 @@ import os
 from importlib.metadata import PackageNotFoundError, version
 
 HARBOR_COMPAT_SHA = os.environ.get(
-    "LOOM_HARBOR_SOURCE_REVISION", "2821487da7415a9bc328d8cc930e7b3181df4e61",
+    "LOOM_HARBOR_SOURCE_REVISION", "f527f8e447038fd242d08ecfa8aaa8029100da97",
 )
 try:
     HARBOR_RUNTIME_VERSION = version("harbor")
