@@ -48,6 +48,23 @@ def test_guest_plugin_refuses_unknown_lifecycle():
         module("ci_runner_unified_host").guest_script("# different bootstrap\n")
 
 
+def test_common_guest_refuses_insufficient_memory_before_creation():
+    from types import SimpleNamespace
+
+    created = []
+    base = SimpleNamespace(
+        _slot_run_script=lambda: "systemctl is-active --quiet docker\nrun-one-job\n",
+        GitHubAPI=type("API", (), {"generate_jit_config": lambda *args, **kwargs: None}),
+        _create_slot=lambda profile, **kwargs: created.append(profile.memory_mib_per_slot),
+    )
+    module("ci_runner_unified_host").install(base)
+    with pytest.raises(ValueError, match="12 GiB"):
+        base._create_slot(SimpleNamespace(memory_mib_per_slot=6144), slot=0)
+    assert created == []
+    base._create_slot(SimpleNamespace(memory_mib_per_slot=12288), slot=0)
+    assert created == [12288]
+
+
 def test_dependencies_do_not_allocate_workers_for_blocked_matrix_rows():
     supply = module("ci_runner_supply")
     graph = {

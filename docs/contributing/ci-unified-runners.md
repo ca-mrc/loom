@@ -72,7 +72,14 @@ Inspect root-owned `status.json` and per-slot `worker.json`; never print JIT fil
 On each OLDLAB host, install `scripts/ops/ci_runner_unified_host.py` and run it
 with `--install-runtime /usr/local/lib/loom-ci-runner-expansion
 --retire-legacy-idle`. It adds the common/capability labels and root-owned marker
-to the existing isolated guest bootstrap. Idle old guests are deregistered
+to the existing isolated guest bootstrap. Before its listener starts, the guest
+installs the existing service image's pinned kubectl CLI if absent. Common-queue
+guests require at least 12 GiB RAM: the unchanged Docker qualification includes
+an 8 GiB nested sandbox. The five host profiles use a six-slot ceiling with
+12.5 GiB budget per slot including QEMU overhead, within the existing 80 GiB
+aggregate limit and shared-host reserves. The adaptive policy takes its footprint
+and ceiling from the actual profile; logical runner count is not usable capacity.
+Idle legacy 6 GiB guests are deregistered
 before removal; busy guests stay intact. One-job shutdown and JIT shredding stay
 unchanged. The registry helper permits marked disposable guests, rejects shared
 unmarked hosts/writable markers, and still refuses remote Docker contexts.

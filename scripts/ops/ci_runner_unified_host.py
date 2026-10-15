@@ -12,8 +12,27 @@ from pathlib import Path
 from typing import Any
 
 CAPABILITY = "loom-ci-isolated-v1"
+MEMORY_CAPABILITY = "loom-ci-guest12g-v1"
 MARKER = "/etc/loom-ci-ephemeral-runner"
 RUNTIME = Path("/usr/local/lib/loom-ci-runner-expansion")
+# Reuse the service image's existing pinned kubectl build. Hosted images already
+# provide this CLI; the minimal OLDLAB guest must provide the same executable
+# boundary before accepting operator-test jobs.
+KUBECTL_IMAGE = "registry.k8s.io/kubectl:v1.36.2@sha256:b0d792e0d8dfb9bb1b922b78b23137e2a34bb6f9667640353a9d2aadd1fd7761"
+
+
+def guest_tools_script() -> str:
+    return (
+        "if ! PATH=/usr/local/bin:/usr/bin:/bin command -v kubectl >/dev/null; then\n"
+        "  kubectl_container=$(timeout 180 docker create " + KUBECTL_IMAGE + ")\n"
+        "  if ! docker cp \"$kubectl_container:/bin/kubectl\" /usr/local/bin/kubectl; then\n"
+        "    docker rm \"$kubectl_container\" >/dev/null\n"
+        "    exit 1\n"
+        "  fi\n"
+        "  docker rm \"$kubectl_container\" >/dev/null\n"
+        "  chmod 0755 /usr/local/bin/kubectl\n"
+        "fi\n"
+    )
 
 
 def guest_script(original: str) -> str:
@@ -24,7 +43,7 @@ def guest_script(original: str) -> str:
         'printf \'%s\\n\' \'{"schema_version":1,"provider":"oldlab"}\' > ' + MARKER + "\n"
         "chmod 0444 " + MARKER + "\n"
     )
-    return original.replace(boundary, boundary + marker)
+    return original.replace(boundary, boundary + guest_tools_script() + marker)
 
 
 def install(base: Any) -> None:
@@ -32,17 +51,26 @@ def install(base: Any) -> None:
         return
     original_script = base._slot_run_script
     original_jit = base.GitHubAPI.generate_jit_config
+    original_create = base._create_slot
 
     def slot_script() -> str:
         return guest_script(original_script())
 
     def generate_jit(self: Any, *, name: str, labels: Any) -> Any:
         return original_jit(
-            self, name=name, labels=tuple(dict.fromkeys((*labels, CAPABILITY, "loom-ci-exec")))
+            self,
+            name=name,
+            labels=tuple(dict.fromkeys((*labels, CAPABILITY, MEMORY_CAPABILITY, "loom-ci-exec"))),
         )
+
+    def create_slot(profile: Any, **kwargs: Any) -> Any:
+        if profile.memory_mib_per_slot < 12288:
+            raise ValueError("common-queue guests need 12 GiB for the existing 8 GiB sandbox tests")
+        return original_create(profile, **kwargs)
 
     base._slot_run_script = slot_script
     base.GitHubAPI.generate_jit_config = generate_jit
+    base._create_slot = create_slot
     base._loom_unified_installed = True
 
 
@@ -96,7 +124,7 @@ def main() -> None:
             inventory = base._runner_inventory(api, profile)
             for slot, state in base._existing_states(profile).items():
                 record = inventory.get(state.runner_id)
-                if record and CAPABILITY in {item["name"] for item in record.get("labels", [])}:
+                if record and MEMORY_CAPABILITY in {item["name"] for item in record.get("labels", [])}:
                     continue
                 if adaptive_pool.retire(profile, state, api, runner):
                     retired.append(slot)

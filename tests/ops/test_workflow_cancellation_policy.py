@@ -9,7 +9,6 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 EXPLICIT_NON_CANCELLABLE_WORKFLOWS = {
-    ".github/workflows/ci-retry.yml": "classified-ci-retry-${{ inputs.source_run_id }}",
     ".github/workflows/main-promotion-gate.yml": (
         "main-promotion-gate-${{ inputs.candidate_sha }}"
     ),
@@ -48,6 +47,23 @@ def test_manual_image_validation_is_outside_pr_cancellation_scope() -> None:
     assert "github.event_name == 'pull_request'" in cancellation
     assert "workflow_dispatch" not in cancellation
     assert "push" not in cancellation
+
+
+def test_retry_serialization_is_preserved_alongside_independent_capacity_requests() -> None:
+    workflow = _workflow(".github/workflows/ci-retry.yml")
+    concurrency = workflow["concurrency"]
+
+    # Retries still share their original source-run key. Capacity dispatches
+    # have independent request keys, so they cannot serialize unrelated VMs.
+    # Neither branch may cancel an accepted operation.
+    assert concurrency["cancel-in-progress"] is False
+    assert " ".join(concurrency["group"].split()) == (
+        "${{ inputs.purpose == 'runner_capacity' && "
+        "format('loom-ci-hosted-{0}', inputs.request_id) || "
+        "format('classified-ci-retry-{0}', inputs.source_run_id) }}"
+    )
+    inputs = workflow[True]["workflow_dispatch"]["inputs"]
+    assert inputs["purpose"]["default"] == "retry"
 
 
 def test_cancellable_macos_workflow_has_no_write_authority() -> None:
