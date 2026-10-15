@@ -196,7 +196,7 @@ def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writ
         row['metadata']['resourceVersion'] = '401'
         inventory[kinds[row['kind']]].append(row)
     personal_binding = None
-    if forward_census == 'personal':
+    if forward_census:
         from loom.nebius_application_authority import application_namespace_binding
 
         applications = request.database.manager.deployment.installation.applications
@@ -219,8 +219,23 @@ def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writ
         kinds.update({'Namespace': 'namespaces', 'ValidatingAdmissionPolicy': 'validatingadmissionpolicies',
             'ValidatingAdmissionPolicyBinding': 'validatingadmissionpolicybindings'})
         inventory['namespaces'] = [namespace]
+        if forward_census == 'personal':
+            old_domain = staging_history.deployment.installation.applications.authority
+            old_namespace = copy.deepcopy(namespace)
+            old_namespace['metadata'].update(name='loom-dev-retained-owner', uid=str(uuid4()))
+            old_namespace['metadata']['labels'].update({
+                'loom.nebius/application-installation': str(old_domain.installation_id),
+                'loom.nebius/data-environment-id': str(old_domain.data_environment_id)})
+            old_binding = application_namespace_binding(old_domain, old_namespace['metadata']['name'])
+            old_binding['metadata'].update(uid=str(uuid4()), resourceVersion='401',
+                labels=copy.deepcopy(personal_binding['metadata']['labels']),
+                annotations=copy.deepcopy(personal_binding['metadata']['annotations']))
+            inventory['namespaces'].append(old_namespace)
+            inventory['rolebindings'].append(old_binding)
         for kind in ('ValidatingAdmissionPolicy', 'ValidatingAdmissionPolicyBinding'):
-            inventory[kinds[kind]] = [copy.deepcopy(row) for row in documents.values() if row['kind'] == kind]
+            fixed = {_key(row): copy.deepcopy(row) for row in (*staging_history.context.original.retained.values(),
+                *staging_history.context.predecessor.retained.values(), *documents.values()) if row['kind'] == kind}
+            inventory[kinds[kind]] = list(fixed.values())
             assert inventory[kinds[kind]]
             for row in inventory[kinds[kind]]:
                 row['metadata']['resourceVersion'] = '401'
@@ -264,7 +279,9 @@ def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writ
             else 'admissionregistration.k8s.io/v1' if kind.startswith('ValidatingAdmissionPolicy')
             else 'batch/v1' if plural in {'jobs', 'cronjobs'} else 'rbac.authorization.k8s.io/v1'
             if kind in rbac_kinds else 'apps/v1', 'kind': kind + 'List',
-            'metadata': {'resourceVersion': mode['revision'] if plural == 'pods' else '500', 'continue': ''},
+            'metadata': {'resourceVersion': mode['revision'] if plural == 'pods' else
+                mode.get('scope_revision', '500') if kind in {'Namespace', 'ValidatingAdmissionPolicy',
+                    'ValidatingAdmissionPolicyBinding'} else '500', 'continue': ''},
             'items': inventory[plural]})
 
     with ManagementKubernetesTransport(api_server=request.database.foundation.inputs.config['kubernetes_api_server'],
@@ -281,8 +298,18 @@ def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writ
         from scripts.ops.nebius_shared_pool_handoff_live import observe_shared_pool_writers
 
         def observe():
-            return observe_shared_pool_writers(runtime=request, observation=staging_observation,
-                legacy=staging_history, repo_root=ROOT, transport=transport)
+            try:
+                return observe_shared_pool_writers(runtime=request, observation=staging_observation,
+                    legacy=staging_history, repo_root=ROOT, transport=transport)
+            except ValueError as error:
+                import traceback
+
+                frames, cause = [], error
+                while cause is not None:
+                    frames.extend(f'{Path(frame.filename).name}:{frame.lineno}:{frame.name}'
+                        for frame in traceback.extract_tb(cause.__traceback__))
+                    cause = cause.__context__
+                raise ValueError('shared census unqualified; ' + ', '.join(frames)) from None
 
         result = observe()
         assert result.resource_version == '500'
@@ -293,6 +320,11 @@ def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writ
         assert result.workloads[_key(gateway)]['spec']['replicas'] == 0
         if personal_binding is not None:
             assert result.authority[_key(personal_binding)] == personal_binding
+            assert result.authority[_key(old_binding)] == old_binding
+            assert _key(namespace) in result.application_scopes
+            mode['scope_revision'] = '499'
+            with pytest.raises(ValueError):
+                observe()
             assert all(message.method == 'GET' for message in calls)
             return
         original = copy.deepcopy(inventory)

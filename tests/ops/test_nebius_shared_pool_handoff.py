@@ -148,6 +148,9 @@ def staging_history(original_platform_inputs, retained, tmp_path):
     base.mkdir()
     platform = copy.deepcopy(original_platform_inputs)
     management = entry.management_inputs.__wrapped__(platform)
+    # These are independent installations in one cluster, not two histories
+    # sharing the same cluster-scoped application-role and admission names.
+    management[0]['installation_id'] = '30000000-0000-4000-8000-000000000002'
     installed = install.installation.__wrapped__(management, entry.material.__wrapped__())
     bound = replace(installed[0].binding, kube_system_uid=retained[3].binding.kube_system_uid)
     installed = replace(installed[0], binding=bound), install.InstallationAPI(bound)
@@ -3295,6 +3298,15 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
                 publisher_cloud=publisher_cloud, patch=patch, payload=published_payload)
             capacity = external()
             assert capacity.node_count == capacity.ready_node_count == capacity.target_node_count == 0
+            if inventory.get('namespaces'):
+                # Replacement with identical labels still invalidates the
+                # namespace UID observed before external provider/publication I/O.
+                scope = inventory['namespaces'][0]
+                saved_uid = scope['metadata']['uid']
+                external_mode['hook'] = lambda: scope['metadata'].update(uid=str(uuid4()))
+                with pytest.raises(ValueError, match='preserve'):
+                    external()
+                scope['metadata']['uid'] = saved_uid
             assert manager_process() == ()
             assert gateway_process() is None
             registry_mode['manager-pending'] = True

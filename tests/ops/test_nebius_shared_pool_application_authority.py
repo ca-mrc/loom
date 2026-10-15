@@ -63,7 +63,9 @@ def test_exact_personal_binding_has_separate_scope_evidence(authority_case):
     'binding_subject', 'binding_group', 'binding_application', 'binding_incarnation', 'binding_operation',
     'binding_generation', 'binding_extra_field', 'cluster_binding', 'expanded_role', 'replaced_role',
     'missing_policy', 'replaced_policy', 'policy_ignore', 'policy_selector', 'policy_condition',
-    'policy_extra_validation', 'policy_binding_audit', 'unretained_policy'])
+    'policy_extra_validation', 'policy_binding_audit', 'unretained_policy', 'retained_expansion',
+    'cluster_binding_foreign', 'namespace_owner', 'namespace_installation', 'namespace_reserved',
+    'binding_nil_uid', 'binding_generation_overflow', 'role_aggregation'])
 def test_personal_scope_cannot_hide_other_authority(authority_case, damage):
     from scripts.ops.nebius_shared_pool_application_authority import qualify_application_bindings
 
@@ -104,11 +106,13 @@ def test_personal_scope_cannot_hide_other_authority(authority_case, damage):
             'operation-id' if damage == 'binding_operation' else 'deployment-generation')] = '0'
     elif damage == 'binding_extra_field':
         binding['extraAuthority'] = True
-    elif damage == 'cluster_binding':
+    elif damage in {'cluster_binding', 'cluster_binding_foreign'}:
         del current[selected]
         binding['kind'] = 'ClusterRoleBinding'
         binding['metadata'].pop('namespace')
         current[key(binding)] = binding
+        if damage == 'cluster_binding_foreign':
+            binding['subjects'][0]['name'] = 'foreign'
     elif damage == 'expanded_role':
         role['rules'].append({'apiGroups': ['batch'], 'resources': ['jobs'], 'verbs': ['create']})
     elif damage == 'replaced_role':
@@ -127,6 +131,26 @@ def test_personal_scope_cannot_hide_other_authority(authority_case, damage):
         policy['spec']['validations'] = [{'expression': 'true'}]
     elif damage == 'policy_binding_audit':
         current['ValidatingAdmissionPolicyBinding:-:' + domain.name + '-bindings']['spec']['validationActions'] = ['Audit']
+    elif damage == 'retained_expansion':
+        role['rules'].append({'apiGroups': ['batch'], 'resources': ['jobs'], 'verbs': ['create']})
+        arguments['retained'][key(role)] = copy.deepcopy(role)
+    elif damage == 'namespace_owner':
+        namespace['metadata']['ownerReferences'] = [{'kind': 'Namespace', 'uid': str(uuid4())}]
+    elif damage == 'namespace_installation':
+        labels['loom.nebius/namespace-installation'] = str(uuid4())
+    elif damage == 'namespace_reserved':
+        del current[key(namespace)]
+        namespace['metadata']['name'] = 'loom-dev-shared'
+        current[key(namespace)] = namespace
+        del current[selected]
+        binding['metadata']['namespace'] = 'loom-dev-shared'
+        current[key(binding)] = binding
+    elif damage == 'binding_nil_uid':
+        binding['metadata']['uid'] = str(UUID(int=0))
+    elif damage == 'binding_generation_overflow':
+        binding['metadata']['annotations']['loom.nebius/deployment-generation'] = str(2**63)
+    elif damage == 'role_aggregation':
+        role['aggregationRule'] = {'clusterRoleSelectors': [{}]}
     else:
         del arguments['retained'][policy_key]
     with pytest.raises(ValueError, match='application lifecycle authority unqualified'):
@@ -150,11 +174,25 @@ def test_harmless_kubernetes_defaults_do_not_require_new_policy(authority_case):
     assert set(qualify_application_bindings(**arguments)[0]) == {selected}
 
 
+def test_retained_installer_marker_is_identity_not_extra_permission(authority_case):
+    from scripts.ops.nebius_shared_pool_application_authority import qualify_application_bindings
+
+    arguments, selected = authority_case
+    for key in arguments['retained']:
+        for values in (arguments['retained'], arguments['current']):
+            values[key]['metadata']['annotations'] = {
+                'loom.nebius/management-stage-operation': 'fe8862e4-274b-420c-bdbd-f310124c2c8c'}
+    assert set(qualify_application_bindings(**arguments)[0]) == {selected}
+
+
 @pytest.mark.parametrize('api,resource,kind', [('v1', 'namespaces', 'Namespace'),
     ('admissionregistration.k8s.io/v1', 'validatingadmissionpolicies', 'ValidatingAdmissionPolicy'),
     ('admissionregistration.k8s.io/v1', 'validatingadmissionpolicybindings', 'ValidatingAdmissionPolicyBinding')])
 def test_scope_inventory_is_complete_and_version_pinned(api, resource, kind):
-    from scripts.ops.nebius_management_prerequisites import ManagementPrerequisiteError, inventory_resources
+    from scripts.ops.nebius_management_prerequisites import (
+        ManagementPrerequisiteError,
+        inventory_resources,
+    )
 
     calls = []
     versions = ['10', '10']
@@ -174,3 +212,46 @@ def test_scope_inventory_is_complete_and_version_pinned(api, resource, kind):
     versions[1] = '11'
     with pytest.raises(ManagementPrerequisiteError):
         inventory_resources(read, api, resource, kind)
+
+
+@pytest.mark.parametrize('recovering', [False, True])
+@pytest.mark.parametrize('damage', ['namespace_uid', 'namespace_labels', 'policy_uid', 'missing_scope'])
+def test_shared_parent_rejects_application_scope_drift_before_process_barrier(
+        authority_case, monkeypatch, tmp_path, recovering, damage):
+    from types import SimpleNamespace
+
+    from scripts.ops import nebius_shared_pool_api as module
+
+    arguments, _ = authority_case
+    scope = {name: copy.deepcopy(row) for name, row in arguments['current'].items()
+        if row['kind'] in {'Namespace', 'ValidatingAdmissionPolicy'}}
+    changed = copy.deepcopy(scope)
+    if damage == 'missing_scope':
+        changed.clear()
+    else:
+        kind = 'ValidatingAdmissionPolicy' if damage == 'policy_uid' else 'Namespace'
+        target = next(row for row in changed.values() if row['kind'] == kind)
+        if damage.endswith('_uid'):
+            target['metadata']['uid'] = str(uuid4())
+        else:
+            target['metadata']['labels']['loom.nebius/incarnation'] = str(uuid4())
+    plan = object()
+    observations = iter([module.SharedPoolWriterObservation(plan, '10', {}, {}, 'first', scope),
+        module.SharedPoolWriterObservation(plan, '11', {}, {}, 'second', changed)])
+    monkeypatch.setattr(module, 'observe_shared_pool_recovery_writers' if recovering else
+        'observe_shared_pool_forward_writers', lambda **_: next(observations))
+    monkeypatch.setattr(module, '_files', lambda _: {})
+
+    async def external(_):
+        pass
+
+    def barrier(**_):
+        pytest.fail('changed personal scope reached the process barrier')
+
+    monkeypatch.setattr(module, 'observe_shared_pool_forward_processes', barrier)
+    monkeypatch.setattr(module, 'observe_shared_pool_recovery_databases', barrier)
+    api = SimpleNamespace(_state=lambda: ({}, recovering), shared_state=tmp_path,
+        _captured=SimpleNamespace(plan=plan), _external=external, _permissions=lambda *_, **__: None,
+        guards=SimpleNamespace(kubeconfig=tmp_path / 'not-read'), prefix=['/usr/bin/kubectl'])
+    with pytest.raises(ValueError, match='shared writer authority changed'):
+        module.HTTPSSharedPoolOperationAPI._observe(api)
