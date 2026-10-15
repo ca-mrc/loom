@@ -910,6 +910,9 @@ must match; shared, management, worker, build and ingress namespaces are exclude
 Cluster-wide bindings receive no personal exception. Repeated handoff and normal
 participant-release checks also compare namespace and admission-policy identities,
 so replacing a namespace with the same labels cannot preserve stale qualification.
+The shared process barriers recheck captured personal namespace/admission objects
+before their closing process/backend identities; they do not append a full
+inventory after those final database checks.
 No personal grant means no additional scope inventory reads.
 
 The shared preflight reuses the runtime's authenticated provider read with the

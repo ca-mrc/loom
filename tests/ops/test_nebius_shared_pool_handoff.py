@@ -1584,10 +1584,11 @@ def _exercise_recovery_processes(*, kwargs, state, api, documents, probes, mode,
             documents.setdefault('/apis/batch/v1/namespaces/' + namespace + '/jobs',
                 {'apiVersion': 'batch/v1', 'kind': 'JobList', 'metadata': {'resourceVersion': '501'}, 'items': []})
 
-    def observe():
+    def observe(recheck_application_scopes=None):
         try:
             return module.observe_shared_pool_recovery_processes(bindings=bindings, state_dir=state,
-                kubeconfig=Path(probes.prefix[probes.prefix.index('--kubeconfig') + 1]), executable=Path(probes.prefix[0]))
+                kubeconfig=Path(probes.prefix[probes.prefix.index('--kubeconfig') + 1]), executable=Path(probes.prefix[0]),
+                recheck_application_scopes=recheck_application_scopes)
         except ValueError as exc:
             import traceback
 
@@ -1687,7 +1688,11 @@ def _exercise_recovery_processes(*, kwargs, state, api, documents, probes, mode,
             observe()
         mode['process_hook'] = None
         documents.clear()
-        documents.update(before)
+        documents.update(copy.deepcopy(before))
+        with pytest.raises(ValueError, match=error):
+            observe(recheck_application_scopes=late_backend)
+        documents.clear()
+        documents.update(copy.deepcopy(before))
         # A service restart during the earlier collector challenge is not
         # covered by that callback's controller/database checks. The aggregate
         # selected-process readback must reject the changed service too.
@@ -2010,11 +2015,11 @@ def _exercise_forward_processes(*, bindings, development, documents, mode, check
         documents.setdefault('/apis/batch/v1/namespaces/' + namespace + '/jobs',
             {'apiVersion': 'batch/v1', 'kind': 'JobList', 'metadata': {'resourceVersion': '1'}, 'items': []})
 
-    def observe():
+    def observe(recheck_application_scopes=None):
         try:
             return module.observe_shared_pool_forward_processes(bindings=bindings, state_dir=state, development=development,
                 kubeconfig=Path(development.prefix[development.prefix.index('--kubeconfig') + 1]),
-                executable=Path(development.prefix[0]))
+                executable=Path(development.prefix[0]), recheck_application_scopes=recheck_application_scopes)
         except ValueError as exc:
             import traceback
 
@@ -2052,6 +2057,17 @@ def _exercise_forward_processes(*, bindings, development, documents, mode, check
             assert inventory_reads == 4
         finally:
             mode['http_hook'] = None
+            documents.clear()
+            documents.update(saved)
+        saved = copy.deepcopy(documents)
+        def restart_during_scope_read():
+            pod, = (row for row in documents['/api/v1/namespaces/' + manager.binding.namespace + '/pods']['items']
+                if row['metadata']['name'] == 'loom-postgres-0')
+            pod['status']['containerStatuses'][0]['restartCount'] += 1
+        try:
+            with pytest.raises(ValueError):
+                observe(recheck_application_scopes=restart_during_scope_read)
+        finally:
             documents.clear()
             documents.update(saved)
         _exercise_scoped_process_observation(development=development, documents=documents,
