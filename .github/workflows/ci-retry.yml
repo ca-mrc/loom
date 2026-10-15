@@ -2,10 +2,16 @@ name: ci-runner-bridge-probe
 run-name: Isolated hosted VM to native Actions runner bridge proof
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        type: choice
+        options: [both, host, payload]
+        default: both
 permissions:
   contents: read
 jobs:
   bridge-host:
+    if: inputs.mode != 'payload'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -31,6 +37,7 @@ jobs:
           env -i HOME="$HOME" USER="$USER" LOGNAME="$LOGNAME" PATH="$PATH" LANG=C.UTF-8 \
             ./run.sh --jitconfig "$LOOM_JIT"
   bridge-payload:
+    if: inputs.mode != 'host'
     runs-on: [self-hosted, linux, x64, loom-ci-bridge-probe]
     timeout-minutes: 5
     steps:
@@ -48,7 +55,7 @@ jobs:
           python3 - <<'PY'
           import json,os,subprocess
           from pathlib import Path
-          proof={"runner_name":os.environ["RUNNER_NAME"],"runner_environment":os.environ["RUNNER_ENVIRONMENT"],"checkout_sha":subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip(),"native_checkout":"PASS","docker_run":"PASS"}
+          proof={"workflow_run_id":os.environ["GITHUB_RUN_ID"],"runner_name":os.environ["RUNNER_NAME"],"runner_environment":os.environ["RUNNER_ENVIRONMENT"],"checkout_sha":subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip(),"native_checkout":"PASS","docker_run":"PASS"}
           Path("bridge-proof.json").write_text(json.dumps(proof,indent=2)+"\n")
           print(json.dumps(proof))
           PY
