@@ -166,6 +166,8 @@ class ValidationPlan:
     test_changes: tuple[str, ...] = ()
     lint_and_static: bool = True
     tests_root: bool = True
+    # Pool operator lane: eligible with tests-root; its own matrix decides the final selection.
+    nebius_pool: bool = True
     tests_packages: bool = True
     go_checks: bool = True
     runtime_payload: bool = True
@@ -186,6 +188,7 @@ class ValidationPlan:
                 "unowned_runtime",
                 *HEAVY_CHECKS,
                 *BASELINE_CHECKS,
+                "nebius_pool",
                 "coverage_summary",
                 "web_checks",
             )
@@ -577,7 +580,7 @@ def plan_validations(
             and not force_baseline and not set(labels) & LABEL_TO_CHECK.keys()):
         owners = {lane for path in independent_tests for lane in _test_owner_lanes(path)}
         crosslanguage_contract = any(path in GO_CROSSLANGUAGE_CONTRACTS for path in independent_tests)
-        baseline.update(tests_root="tests-root" in owners,
+        baseline.update(tests_root=bool(owners & {"tests-root", "nebius-pool"}),
                         tests_packages="tests-packages" in owners,
                         go_checks="go-checks" in owners or crosslanguage_contract,
                         runtime_payload="runtime-payload" in owners,
@@ -601,6 +604,7 @@ def plan_validations(
         reasons={name: tuple(values) for name, values in reasons.items()},
         # Explicit selector labels and manual runs retain full regression.
         test_changes=paths if event_name in {"pull_request", "merge_group"} and not set(labels) & LABEL_TO_CHECK.keys() else (),
+        nebius_pool=baseline["tests_root"],
         **baseline,
     )
 
@@ -642,6 +646,9 @@ def main() -> int:
     tracked_paths = _tracked_paths(REPO_ROOT)
     for lane, selected_name, matrix_name in (
         ("tests-root", "tests_root", "tests_root_matrix"),
+        # Its eligibility is fixed before tests-root narrows, so an empty
+        # tests-root matrix never suppresses a selected pool matrix.
+        ("nebius-pool", "nebius_pool", "nebius_pool_matrix"),
         ("integration", "integration", "integration_matrix"),
         ("integration-docker", "integration_docker", "integration_docker_matrix"),
         ("cluster-smoke", "cluster_smoke", "cluster_smoke_matrix"),

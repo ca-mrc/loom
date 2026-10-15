@@ -133,7 +133,8 @@ def test_pool_operator_suite_runs_on_operator_inputs_only(changes, retained):
     ("scripts/ops/nebius_shared_pool_api.py",),
     ("src/loom/config.py",),
 ])
-def test_shard_manifests_execute_exactly_the_planned_selection(changes):
+@pytest.mark.parametrize("lane", ["tests-root", "nebius-pool"])
+def test_shard_manifests_execute_exactly_the_planned_selection(changes, lane):
     # Select from the whole lane, then shard: each job must run its part of the
     # planned set, never a set decided by which files share its shard.
     from pathlib import Path
@@ -148,9 +149,9 @@ def test_shard_manifests_execute_exactly_the_planned_selection(changes):
     root = Path(__file__).resolve().parents[2]
     manifest = load_manifest(root / "config/component-ownership.toml")
     tracked = _tracked_paths(root)
-    common = dict(tracked_paths=tracked, lane="tests-root", repo_root=root, changed_paths=changes)
+    common = dict(tracked_paths=tracked, lane=lane, repo_root=root, changed_paths=changes)
     planned = selected_test_paths(manifest, **common)
-    policy = manifest.test_shard_policy("tests-root")
+    policy = manifest.test_shard_policy(lane)
     assert policy is not None
     shards = [selected_test_paths(manifest, **common, shard_index=index, shard_count=policy.shard_count)
               for index in range(policy.shard_count)]
@@ -158,6 +159,42 @@ def test_shard_manifests_execute_exactly_the_planned_selection(changes):
     assert sorted(executed) == sorted(planned) and len(executed) == len(set(executed))
     matrix = {row["shard_index"] for row in test_shard_matrix(manifest, **common)}
     assert matrix == {index for index, shard in enumerate(shards) if shard}
+
+
+# Built from parts: narrowing keeps the full lane if any .py file names the module.
+UNREFERENCED_POOL_TEST = "tests/ops/" + "_".join(("test_nebius_pool", "activation_transport")) + ".py"
+
+
+@pytest.mark.parametrize(("path", "pool", "tests_root"), [
+    ("src/loom/config.py", False, True),
+    ("scripts/ops/deploy_nebius_platform.py", True, True),
+    ("tests/ops/test_nebius_pool_runtime.py", True, True),
+    # A pool-only edit narrows tests-root to nothing; that must not drop the pool lane.
+    (UNREFERENCED_POOL_TEST, True, False),
+])
+def test_pool_suite_has_its_own_shards_so_tests_root_stays_small(tmp_path, path, pool, tests_root):
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    changes, output = tmp_path / "changes", tmp_path / "output"
+    changes.write_text(f"{path}\n")
+    run = subprocess.run([sys.executable, "scripts/plan_ci_validations.py", "--changed-files", str(changes),
+                          "--event-name", "pull_request", "--pull-request-action", "synchronize",
+                          "--github-output", str(output), "--test-scope", "nebius"],
+                         cwd=root, check=True, capture_output=True, text=True)
+    values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    assert values["nebius_pool"] == str(pool).lower()
+    assert values["tests_root"] == str(tests_root).lower()
+    # The printed diagnostic plan and the job outputs agree on every lane.
+    printed = json.loads(run.stdout.splitlines()[-1])
+    for name in ("tests_root", "nebius_pool", "integration", "integration_docker", "cluster_smoke"):
+        assert values[name] == str(printed[name]).lower(), name
+    pool_rows = json.loads(values["nebius_pool_matrix"])
+    assert bool(pool_rows) is pool
+    assert all(row["shard_count"] == 20 for row in pool_rows)
+    assert all(row["shard_count"] == 4 for row in json.loads(values["tests_root_matrix"]))
 
 
 def test_pool_operator_suite_gates_every_platform_candidate():
@@ -202,6 +239,7 @@ def test_scheduled_workflow_shell_emits_full_plan(tmp_path):
     values = dict(line.split("=", 1) for line in output.read_text().splitlines())
     assert values["coverage_summary"] == values["integration_docker"] == values["web_checks"] == "true"
     assert values["test_changes"] == "[]"
+    assert values["nebius_pool"] == values["tests_root"] == "true"
 
 
 def test_cli_component_selection_preserves_full_and_affected_modes():
