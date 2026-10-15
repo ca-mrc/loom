@@ -2922,6 +2922,8 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
                 'system:serviceaccounts', 'system:serviceaccounts:' + namespace, 'system:authenticated'}
             selected = json.loads(message.content)['spec']['namespace']
             reviews.append((namespace, account, selected))
+            if hook := mode.pop('during_rules', None):
+                hook()
             rules = []
             catalog = {_key(row): row for plural in ('roles', 'clusterroles') for row in inventory[plural]}
             for binding in (*inventory['rolebindings'], *inventory['clusterrolebindings']):
@@ -3004,6 +3006,13 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
             observe()
         mode.pop('effective_write')
         assert reviews, 'RBAC objects alone do not prove effective permissions'
+        if inventory.get('namespaces'):
+            namespace_scope = inventory['namespaces'][0]
+            namespace_uid = namespace_scope['metadata']['uid']
+            mode['during_rules'] = lambda: namespace_scope['metadata'].update(uid=str(uuid4()))
+            with pytest.raises(ValueError, match='preserve'):
+                observe()
+            namespace_scope['metadata']['uid'] = namespace_uid
 
         # A newly captured source snapshot cannot replace an already retained
         # actuator UID, even if all individual resource reads agree with it.
@@ -3309,6 +3318,35 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
                 scope['metadata']['uid'] = saved_uid
             assert manager_process() == ()
             assert gateway_process() is None
+            if inventory.get('namespaces'):
+                # Each process probe brackets remote execution with censuses;
+                # both must retain the earlier personal scope, not only workloads.
+                scope = inventory['namespaces'][0]
+                saved_uid = scope['metadata']['uid']
+                execute_probe = subprocess.run
+                accepted = []
+                for name, probe in (('peer', peer_process), ('gateway', gateway_process)):
+                    changed = []
+
+                    def drift(command, **options):
+                        result = execute_probe(command, **options)
+                        if 'exec' in command and not changed:
+                            scope['metadata']['uid'] = str(uuid4())
+                            changed.append(True)
+                        return result
+
+                    with pytest.MonkeyPatch.context() as scope_patch:
+                        scope_patch.setattr(subprocess, 'run', drift)
+                        try:
+                            probe()
+                        except ValueError as error:
+                            assert 'preserve' in str(error)
+                        else:
+                            accepted.append(name)
+                        finally:
+                            scope['metadata']['uid'] = saved_uid
+                    assert changed == [True]
+                assert not accepted, f'process probes accepted changed personal scopes: {accepted}'
             registry_mode['manager-pending'] = True
             with pytest.raises(ValueError, match='preserve'):
                 manager_process()

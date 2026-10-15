@@ -309,7 +309,7 @@ def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writ
                     frames.extend(f'{Path(frame.filename).name}:{frame.lineno}:{frame.name}'
                         for frame in traceback.extract_tb(cause.__traceback__))
                     cause = cause.__context__
-                raise ValueError('shared census unqualified; ' + ', '.join(frames)) from None
+                raise ValueError('shared pool writer census unqualified; ' + ', '.join(frames)) from None
 
         result = observe()
         assert result.resource_version == '500'
