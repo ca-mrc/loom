@@ -69,7 +69,7 @@ jobs:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
           enable-cache: true
-          save-cache: false
+          save-cache: true
           cache-dependency-glob: uv.lock
       - name: Pytest — pool operator shard
         if: steps.manifest.outputs.selected == 'true'

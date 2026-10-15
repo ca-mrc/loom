@@ -178,6 +178,10 @@ publishes nothing unless it passes, so a regression from a shared module is
 caught before deployment. Scheduled and manual full runs still include it. A
 `ci:*` selector label also runs it on a PR.
 
+The dev-only candidate test job saves uv caches under the same checksum-pinned,
+locked-workspace policy as candidate publication. PR and merge-group jobs retain
+their existing cache-write restrictions.
+
 The shared worker pool is not in use (dev deploys with `NEBIUS_ROLLOUT_MODE`
 unset, i.e. standalone), so `tests/ops/test_nebius_shared_pool_*.py` are skipped
 by `tests/ops/conftest.py` unless `LOOM_RUN_SHARED_POOL_TESTS=1`. Participant,
