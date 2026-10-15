@@ -161,6 +161,7 @@ class HTTPSDevelopmentPoolRegistrationAPI(HTTPSRetainedDevelopmentManagementAPI,
             token=token, private_files=private_files)
         self.development_request = request
         self.request = request.registration
+        self.region = request.registration.spec.quota_identities['nodes'][1]
         self.documents = registration_documents(request.registration)
 
     def qualify(self, request: DevelopmentPoolRegistrationRequest) -> None:

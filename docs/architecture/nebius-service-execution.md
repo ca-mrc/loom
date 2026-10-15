@@ -236,13 +236,25 @@ checklist is in [`hosted-agent-harness.md`](hosted-agent-harness.md).
 
 The compiler rejects GPU, multi-step, undeclared identity extensions, ordinary sidecars, skill, MCP,
 extra environment-variable, custom DNS/host/tmpfs, health-check, capability,
-multi-model and other extended-runtime shapes. A mutable image is not accepted
+and other extended-runtime shapes. A mutable image is not accepted
 as an execution image. Supporting another harness or task shape requires a
 reviewed materializer change; the wider harness target in
 [#2054](https://github.com/qianyi-sun/loom/issues/2054) is not evidence that all
 of those harnesses have native execution acceptance. The current admission
 rules live in
 [`automatic_service_execution_rejections`](../../src/loom/service_execution_materialization.py).
+
+Terminus-2 `student_teacher_student` is the only hosted multi-model policy
+([#2396](https://github.com/ca-mrc/loom/issues/2396)). Admission stays inert
+until the selected runtime profile advertises
+`terminus2_multi_model_policies: ["student_teacher_student"]`. Deferred
+policies (`beta_mixture`, `student_to_teacher_turns`), non-Terminus agents,
+extra MCP/skills, and `--combinations-json` stay rejected or independent. The
+frozen K1/K2 schedule travels in `LOOM_TASK_TRIAL_JSON`;
+`ExecutionRuntimePlanV1` is unchanged. The workload broker exposes
+lease-bound reclaim and episode-checkpoint routes so the existing role router
+can stamp correlated `loom_*` fields instead of falling back to
+`legacy_uncorrelated`.
 
 The candidate-bound acceptance TaskSet builder and authenticated staged runner
 are the executable acceptance path. The builder derives the immutable task

@@ -5,6 +5,7 @@ import copy
 import importlib
 import ssl
 from contextlib import asynccontextmanager, contextmanager
+from dataclasses import replace
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -61,7 +62,8 @@ def preparation(operation_inputs, monkeypatch):
         request=SimpleNamespace(database=SimpleNamespace(manager=SimpleNamespace(deployment=SimpleNamespace(
             public_host='manage.example.test')))))
     bindings = SimpleNamespace(plan=SimpleNamespace(development=SimpleNamespace(runtime=runtime),
-        staging=SimpleNamespace(attachment=SimpleNamespace(config=config, runtime_profile=profile, resources=originals))))
+        staging=SimpleNamespace(source=None,
+            attachment=SimpleNamespace(config=config, runtime_profile=profile, resources=originals))))
     selected = {key: (copy.deepcopy(row),) for key, row in current.items() if row['kind'] in {
         'Deployment', 'StatefulSet', 'CronJob', 'Role', 'RoleBinding', 'ClusterRole', 'ClusterRoleBinding'}}
     choices = ({'test_boundary': 'completed handoff receipt choices'}, selected, {}, {})
@@ -97,7 +99,20 @@ def preparation(operation_inputs, monkeypatch):
             repo_root=inputs['repo_root'], transport=transport), control
 
 
-def test_new_release_captures_complete_live_baseline_then_retains_it(operation_inputs, preparation):
+def independent_manager(operation_inputs, preparation):
+    options, _ = preparation
+    previous = options['predecessor']
+    staging = copy.deepcopy(previous.migration.registration.candidate)
+    registration = replace(previous.migration.registration, candidate={**staging, 'candidate_sha': 'f' * 40})
+    options['predecessor'] = replace(previous, migration=replace(previous.migration, registration=registration))
+    operation_inputs['predecessor'] = options['predecessor']
+    options['bindings'].plan.staging.source = SimpleNamespace(candidate=staging)
+
+
+@pytest.mark.parametrize('independent', [False, True])
+def test_new_release_captures_complete_live_baseline_then_retains_it(operation_inputs, preparation, independent):
+    if independent:
+        independent_manager(operation_inputs, preparation)
     options, live = preparation
     captured = module().capture_participant_release(**options)
     current = {_key(row): row for row in captured.current}
@@ -186,7 +201,7 @@ def test_preparation_accepts_only_inert_admission_defaults(preparation):
     assert all(captured[_key(row)] == row for row in policies)
 
 
-@pytest.mark.parametrize('failure', [None, 'publication', 'ancestry', 'source', 'renderer', 'qualification', 'schema'])
+@pytest.mark.parametrize('failure', [None, 'independent', 'publication', 'ancestry', 'source', 'renderer', 'qualification', 'schema'])
 def test_host_prepares_exact_publication_and_replays_only_retained_inputs(
         operation_inputs, preparation, tmp_path, monkeypatch, failure):
     from scripts.ops import nebius_development_entry as authentication
@@ -199,6 +214,9 @@ def test_host_prepares_exact_publication_and_replays_only_retained_inputs(
     assert callable(getattr(entry, 'prepare_retained_participant_release', None)), 'host publication preparation is not connected'
     options, live = preparation
     inputs = operation_inputs
+    if failure == 'independent':
+        independent_manager(inputs, preparation)
+        failure = None
     ca, credential = (tmp_path / name for name in ('current-ca.pem', 'current-operator.json'))
     for path in (ca, credential):
         path.write_bytes(b'current-private-test-material')
@@ -251,7 +269,7 @@ def test_host_prepares_exact_publication_and_replays_only_retained_inputs(
 
     async def follows(**selected):
         assert selected == {'candidate_id': inputs['publication'].candidate_id,
-            'current_sha': inputs['predecessor'].migration.registration.candidate['candidate_sha']}
+            'current_sha': options['bindings'].plan.staging.attachment.runtime_profile.candidate_sha}
         return failure != 'ancestry'
 
     @asynccontextmanager

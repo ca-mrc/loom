@@ -38,14 +38,14 @@ task execution retries.
 
 `archive.ubuntu.com` removes a package file from `pool/` once Ubuntu publishes
 a newer version, so a pinned URL there can start returning 404. The `libssl3t64`
-and `libpng16-16t64` entries use Ubuntu's primary archive on
-[Launchpad](https://launchpad.net/ubuntu/+archive/primary), which retains the
-exact package versions after they leave the current APT pool. The former
-`20260928T000000Z` Ubuntu snapshot URLs exhausted the download retry budget
-with HTTP 502. The retained Launchpad archives have the same locked sizes and
-SHA256 hashes, so extracted payload files and dependency versions are unchanged;
-only the source URLs in the retained `sources.lock.json` differ. Download and
-content verification still fail closed if those fixed archives are unavailable.
+and `libpng16-16t64` entries use direct historical files in Ubuntu's Launchpad
+Librarian archive. Their numeric file URLs were resolved through Launchpad's
+official `+files` endpoint and verified against the existing sizes and SHA256
+hashes. Direct file URLs avoid the lookup redirect, which previously timed out
+or returned 502 in CI. The previously pinned Ubuntu snapshot URLs also returned
+500/502/503 during builds. Package versions, sizes, hashes and extracted files
+are unchanged; the retained source lock and its checksum record the new URLs.
+The same download and integrity checks apply to these historical archives.
 
 The output is relocatable and contains regular files rather than absolute
 distro symlinks. `SHA256SUMS` covers all other payload files; `sources.lock.json`

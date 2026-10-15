@@ -682,3 +682,103 @@ func TestSandboxAbortKeepsLedgerAvailableAndRejectsNewModelCalls(t *testing.T) {
 		t.Fatalf("expected exactly one ledger request, got %d", calls)
 	}
 }
+
+func TestTerminusControlBindsPodIdentityAndRejectsCallerScope(t *testing.T) {
+	tokenFile := filepath.Join(t.TempDir(), "pod-token")
+	if err := os.WriteFile(tokenFile, []byte("pod-bound-token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var reclaim, checkpoints int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer pod-bound-token" ||
+			r.Header.Get("X-Loom-Execution-Lease-Id") != "bound-lease" ||
+			r.Header.Get("X-Loom-Execution-Generation") != "3" ||
+			r.Header.Get("X-Loom-Execution-Role") != "attempt" {
+			t.Errorf("terminus control identity was not broker-owned: %s", r.URL.Path)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body["lease_id"] != "bound-lease" || body["generation"] != float64(3) ||
+			body["execution_role"] != "attempt" {
+			t.Errorf("terminus control body selected a foreign lease: %v", body)
+		}
+		switch r.URL.Path {
+		case "/internal/service-execution/terminus/reclaim":
+			reclaim++
+			if body["schema_version"] != "loom.service-execution-terminus-reclaim.v1" {
+				t.Errorf("unexpected reclaim schema %v", body["schema_version"])
+			}
+			_, _ = w.Write([]byte(`{"agent_execution_id":"11111111-1111-1111-1111-111111111111","agent_run_attempt_id":"22222222-2222-2222-2222-222222222222","recovery":"fresh"}`))
+		case "/internal/service-execution/terminus/episode-checkpoints":
+			checkpoints++
+			if body["schema_version"] != "loom.service-execution-terminus-checkpoint.v1" ||
+				body["execution_id"] != "11111111-1111-1111-1111-111111111111" ||
+				body["active_role"] != "teacher" {
+				t.Errorf("unexpected checkpoint body %v", body)
+			}
+			_, _ = w.Write([]byte(`{"id":"33333333-3333-3333-3333-333333333333","version":1,"checksum":"` + strings.Repeat("a", 64) + `"}`))
+		default:
+			t.Errorf("unexpected control path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	root, _ := url.Parse(server.URL + "/internal/service-execution")
+	broker := &workloadBroker{root: root, client: server.Client(), podTokenFile: tokenFile,
+		identity: workloadIdentity{LeaseID: "bound-lease", Generation: 3, ExecutionRole: "attempt"}}
+	proxy, stop, err := broker.startProxy(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = stop() }()
+	broker.setPhase("agent", time.Now().Add(time.Minute))
+	control := func(path, token, body string) *http.Response {
+		request, _ := http.NewRequest(http.MethodPost, proxy+path, strings.NewReader(body))
+		request.Header.Set("X-Loom-Terminus-Control", token)
+		request.Header.Set("X-Loom-Execution-Lease-Id", "foreign-lease")
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return response
+	}
+	reclaimResp := control("/internal/loom/terminus/reclaim", broker.terminusToken, `{"trial_id":"foreign"}`)
+	_ = reclaimResp.Body.Close()
+	if reclaimResp.StatusCode != http.StatusOK {
+		t.Fatalf("reclaim: got %d", reclaimResp.StatusCode)
+	}
+	checkpointResp := control(
+		"/internal/loom/terminus/episode-checkpoints",
+		broker.terminusToken,
+		`{"execution_id":"11111111-1111-1111-1111-111111111111","run_attempt_id":"22222222-2222-2222-2222-222222222222","episode":2,"active_role":"teacher","last_call_ordinal":2,"last_seq":4}`,
+	)
+	_ = checkpointResp.Body.Close()
+	if checkpointResp.StatusCode != http.StatusOK {
+		t.Fatalf("checkpoint: got %d", checkpointResp.StatusCode)
+	}
+	denied := control("/internal/loom/terminus/reclaim", "wrong-token", `{}`)
+	_ = denied.Body.Close()
+	if denied.StatusCode != http.StatusForbidden {
+		t.Fatalf("wrong token: got %d", denied.StatusCode)
+	}
+	query, _ := http.NewRequest(http.MethodPost, proxy+"/internal/loom/terminus/reclaim?trial_id=foreign", strings.NewReader(`{}`))
+	query.Header.Set("X-Loom-Terminus-Control", broker.terminusToken)
+	queryResp, err := http.DefaultClient.Do(query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = queryResp.Body.Close()
+	if queryResp.StatusCode != http.StatusForbidden {
+		t.Fatalf("query: got %d", queryResp.StatusCode)
+	}
+	broker.setPhase("verifier", time.Now().Add(time.Minute))
+	verifier := control("/internal/loom/terminus/reclaim", broker.terminusToken, `{}`)
+	_ = verifier.Body.Close()
+	if verifier.StatusCode != http.StatusForbidden {
+		t.Fatalf("verifier phase: got %d", verifier.StatusCode)
+	}
+	if reclaim != 1 || checkpoints != 1 {
+		t.Fatalf("unscoped requests reached broker: reclaim=%d checkpoints=%d", reclaim, checkpoints)
+	}
+}

@@ -562,7 +562,7 @@
       "name": "libpng16-16t64",
       "version": "1.6.43-5ubuntu0.6",
       "architecture": "amd64",
-      "url": "https://launchpad.net/ubuntu/+archive/primary/+files/libpng16-16t64_1.6.43-5ubuntu0.6_amd64.deb",
+      "url": "https://launchpadlibrarian.net/859942394/libpng16-16t64_1.6.43-5ubuntu0.6_amd64.deb",
       "bytes": 188776,
       "sha256": "ac0163f58b8aa52dfdd17cdc10a83f3db084cb91a62686023f5c983d6ff89f8b"
     },
@@ -658,7 +658,7 @@
       "name": "libssl3t64",
       "version": "3.0.13-0ubuntu3.15",
       "architecture": "amd64",
-      "url": "https://launchpad.net/ubuntu/+archive/primary/+files/libssl3t64_3.0.13-0ubuntu3.15_amd64.deb",
+      "url": "https://launchpadlibrarian.net/874112376/libssl3t64_3.0.13-0ubuntu3.15_amd64.deb",
       "bytes": 1944134,
       "sha256": "3d0955bc049bbcca0f4c3e78a3a8b994593d96db7d84f4320217224433844534"
     },

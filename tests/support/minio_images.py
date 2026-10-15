@@ -171,13 +171,16 @@ def prepare_test_image(image: str) -> str:
     return image
 
 
-def selected_fixture_images(paths: list[str], *, root: Path | None = None) -> tuple[str, ...]:
+def selected_fixture_images(paths: list[str], *, root: Path | None = None,
+                            known_images: tuple[str, ...] | None = None) -> tuple[str, ...]:
     """Follow test fixture imports without importing tests or contacting Docker.
 
     Parent conftests participate in collection, even when a test does not name
-    their fixtures. Unreadable/invalid selected Python files retain both images.
+    their fixtures. Unreadable/invalid selected Python files retain every known
+    image. Other fixture preparers reuse the same import walk with their images.
     """
     root = root or Path(__file__).resolve().parents[2]
+    known_images = known_images if known_images is not None else tuple(spec.image for spec in SOURCE_FIXTURES)
     pending = [root / path for path in paths]
     for path in tuple(pending):
         for parent in path.parents:
@@ -197,12 +200,14 @@ def selected_fixture_images(paths: list[str], *, root: Path | None = None) -> tu
             source = path.read_text()
             tree = ast.parse(source)
         except (OSError, SyntaxError, UnicodeError):
-            return tuple(spec.image for spec in SOURCE_FIXTURES)
+            return known_images
         if path.name == "minio_tls.py" or "MINIO_TLS_IMAGE" in source:
             images.add(MINIO_TLS_IMAGE)
         if any(name in source for name in ("MinioContainer", "MINIO_TEST_IMAGE", "MINIO_TESTCONTAINERS_IMAGE")):
             images.add(MINIO_TESTCONTAINERS_IMAGE)
         for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value in known_images:
+                images.add(node.value)
             modules: list[str] = []
             if isinstance(node, ast.Import):
                 modules = [alias.name for alias in node.names]
@@ -215,13 +220,13 @@ def selected_fixture_images(paths: list[str], *, root: Path | None = None) -> tu
             for module in modules:
                 # The resolver defines both releases; importing its lazy API is
                 # not itself a request to prepare both images.
-                if module == "tests.support.minio_images":
+                if module in ("tests.support.minio_images", "tests.support.docker_hub_images"):
                     continue
                 candidate = root.joinpath(*module.split("."))
                 for dependency in (candidate.with_suffix(".py"), candidate / "__init__.py"):
                     if dependency.is_file() and dependency.is_relative_to(root):
                         pending.append(dependency)
-    return tuple(spec.image for spec in SOURCE_FIXTURES if spec.image in images)
+    return tuple(image for image in known_images if image in images)
 
 
 def fixture_cache_key(images: tuple[str, ...]) -> str:

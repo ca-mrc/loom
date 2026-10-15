@@ -453,7 +453,11 @@ single fetcher. Dispatches on `src.kind`:
 - **huggingface** — `datasets.load_dataset(src.locator, src.subset,
   revision=src.revision, cache_dir=str(target))`. `locator` MUST be
   namespaced (`namespace/name`) — newer `huggingface_hub` releases
-  reject unnamespaced IDs.
+  reject unnamespaced IDs. The two legacy script-backed sources, pinned
+  MATH and LiveCodeBench, use reviewed local JSONL readers instead. Their
+  historical `trust_remote_code` marker preserves source identity but does
+  not execute remote Python; unreviewed script revisions/configurations
+  are rejected. See [loader compatibility](../../packages/loom-benchmarks/README.md#hugging-face-loader-compatibility).
 - **git** — `git init && git remote add origin <locator> && git
   fetch --depth=1 origin <revision>` when `revision` is a SHA;
   otherwise `git clone --depth=1 --branch <revision>`.

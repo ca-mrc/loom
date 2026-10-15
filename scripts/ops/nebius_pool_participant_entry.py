@@ -293,6 +293,7 @@ def prepare_retained_participant_release(*, publication: ProtectedPublication, o
     from scripts.ops.nebius_development_entry import _transport
     from scripts.ops.nebius_pool_participant_prepare import (
         capture_participant_release,
+        participant_source_candidate,
         render_participant_candidate,
         resolve_participant_publication,
     )
@@ -348,7 +349,8 @@ def prepare_retained_participant_release(*, publication: ProtectedPublication, o
                                 publication=publication, keyring=expected.migration.registration.spec.profiles.image_admission_keyring,
                                 transport=transport, http=http) as (catalog, bundle):
                             if not await catalog.candidate_follows(candidate_id=publication.candidate_id,
-                                    current_sha=expected.migration.registration.candidate['candidate_sha']):
+                                    current_sha=participant_source_candidate(predecessor=expected,
+                                        bindings=historical.bindings)['candidate_sha']):
                                 raise ValueError
                             candidate_service_schema_head(bundle.candidate)
                             source_files = await catalog.render_source(candidate_id=publication.candidate_id)
