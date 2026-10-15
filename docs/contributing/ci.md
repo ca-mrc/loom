@@ -160,14 +160,16 @@ unless a suite explicitly declares an audited unaffected component.
 CI selector labels and manual runs request full regression within the active scope; ordinary labels such
 as `bug` do not change test selection. Sharding happens before filtering,
 so ownership and paired-fixture ordering remain stable. The planner emits only
-nonempty root/integration/Docker/cluster shards before runners are allocated. Each
+nonempty root/pool/integration/Docker/cluster shards before runners are allocated. Each
 runner writes its selected-path manifest before dependency or fixture setup;
 selector errors fail the job. Empty selections do not invoke pytest.
 
 ## Pool operator tests run before deployment
 
-The `nebius-pool-ops` suite (`tests/ops/test_nebius*pool*.py`) takes about 450 of
-the ~500 tests-root runner-minutes. A PR or merge group runs it only when a change
+The `nebius-pool-ops` suite (`tests/ops/test_nebius*pool*.py`) took about 450 of
+the ~500 tests-root runner-minutes. It runs in its own `nebius-pool` lane with 20
+shards sized for its 15-30 minute lifecycle modules, so `tests-root` needs only 4
+shards (~7 minutes of pytest each). A PR or merge group runs it only when a change
 touches its `affected_paths` (operator scripts, Kubernetes and Nebius deploy
 inputs, CI authority files, dependencies), its own tests, or a test helper they
 import. Selection is made once for the whole lane and then sharded, so planned

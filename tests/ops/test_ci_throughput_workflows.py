@@ -857,6 +857,7 @@ REPOSITORY_SELECTED_RESULTS = {
     "LINT_SELECTED": "LINT_RESULT",
     "LOCKED_SELECTED": "LOCKED_RESULT",
     "ROOT_SELECTED": "ROOT_RESULT",
+    "POOL_SELECTED": "POOL_RESULT",
     "PACKAGES_SELECTED": "PACKAGES_RESULT",
     "PAYLOAD_SELECTED": "PAYLOAD_RESULT",
     "IAC_SELECTED": "IAC_RESULT",
@@ -991,7 +992,7 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
     assert "repository-checks" in jobs["repository-checks"]["name"]
     assert set(jobs["repository-checks"]["needs"]) == {
         "workflow-plan", "locked-environments", "lint-and-static", "runtime-payload", "nebius-iac",
-        "tests-root", "tests-packages", "fast-coverage", "go-checks", "integration",
+        "tests-root", "nebius-pool", "tests-packages", "fast-coverage", "go-checks", "integration",
         "integration-docker", "coverage-summary", "web-checks",
     }
     assert "always()" in jobs["repository-checks"]["if"]

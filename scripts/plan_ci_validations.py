@@ -577,7 +577,7 @@ def plan_validations(
             and not force_baseline and not set(labels) & LABEL_TO_CHECK.keys()):
         owners = {lane for path in independent_tests for lane in _test_owner_lanes(path)}
         crosslanguage_contract = any(path in GO_CROSSLANGUAGE_CONTRACTS for path in independent_tests)
-        baseline.update(tests_root="tests-root" in owners,
+        baseline.update(tests_root=bool(owners & {"tests-root", "nebius-pool"}),
                         tests_packages="tests-packages" in owners,
                         go_checks="go-checks" in owners or crosslanguage_contract,
                         runtime_payload="runtime-payload" in owners,
@@ -640,6 +640,7 @@ def main() -> int:
     outputs = plan.github_outputs()
     effective_changes = tuple(json.loads(outputs["test_changes"]))
     tracked_paths = _tracked_paths(REPO_ROOT)
+    pool_selected = plan.tests_root and plan.gate_mode == "full"
     for lane, selected_name, matrix_name in (
         ("tests-root", "tests_root", "tests_root_matrix"),
         ("integration", "integration", "integration_matrix"),
@@ -655,6 +656,14 @@ def main() -> int:
         # Jobs and the final gate must agree on that deliberate empty selection.
         outputs[selected_name] = str(bool(matrix)).lower()
         plan = replace(plan, **{selected_name: bool(matrix)})
+    # The pool operator suite has its own shards. It is a candidate whenever
+    # tests-root is; its manifest affected_paths decide whether this change selects it.
+    pool_matrix = test_shard_matrix(
+        _component_ownership_manifest(), tracked_paths=tracked_paths, lane="nebius-pool",
+        repo_root=REPO_ROOT, changed_paths=effective_changes, test_scope=args.test_scope,
+    ) if pool_selected else ()
+    outputs["nebius_pool_matrix"] = json.dumps(pool_matrix, separators=(",", ":"))
+    outputs["nebius_pool"] = str(bool(pool_matrix)).lower()
     with args.github_output.open("a", encoding="utf-8") as handle:
         for name, value in outputs.items():
             handle.write(f"{name}={value}\n")
