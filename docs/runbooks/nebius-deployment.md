@@ -665,8 +665,10 @@ or arbitrary manifests. Prepare the exact clean integrated source with
 --requirements LOCKED_REQUIREMENTS --evidence-dir PRIVATE_EVIDENCE
 --prepare-bundle PRIVATE_BUNDLE`, then grant only that bundle's digest using
 `scripts.ops.install_nebius_development_runtime_entrypoint`. Existing operator
-grants remain unchanged. The operator host needs its existing `kubectl`; probes
-use an explicit private connection, not ambient kubeconfig or credential plugins.
+grants remain unchanged. The operator host needs its existing `kubectl` in
+`/usr/local/bin` or the system executable directories (`/bin`, `/usr/bin` on the
+Linux gateway). Probes resolve that executable independently of ambient `PATH`
+and use an explicit private connection, not ambient kubeconfig or credential plugins.
 
 The runtime workflow uses Loom's stable GitHub repository ID, following the
 [organization-transfer contract](nebius-candidate.md#github-organization-transfer).

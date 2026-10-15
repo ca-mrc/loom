@@ -1508,7 +1508,8 @@ def test_runtime_probe_finds_system_kubectl_without_trusting_ambient_path(
         token='operator-test')
     if ambient == 'missing-system-tool':
         with pytest.raises(ValueError, match='probe transport unavailable'):
-            module.HTTPSDevelopmentRuntimeProbes(**arguments)
+            with module.HTTPSDevelopmentRuntimeProbes(**arguments):
+                pass
         return
     with module.HTTPSDevelopmentRuntimeProbes(**arguments) as probes:
         assert probes.prefix[0] == str(system / 'kubectl')
