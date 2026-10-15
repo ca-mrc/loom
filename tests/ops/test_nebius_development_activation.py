@@ -413,6 +413,8 @@ def gateway_permission_review(completed_runtime):
         transport.client.close()
 
 
+# Ten full reviews: 35-48s of call time on hosted runners, plus 7-12s of setup.
+@pytest.mark.timeout(180)
 def test_activation_gateway_review_detects_foreign_direct_and_inherited_write_grants(gateway_permission_review):
     module, request, _, transport, state = gateway_permission_review
     review = getattr(module, 'review_development_gateway_permissions', None)
