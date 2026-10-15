@@ -810,6 +810,9 @@ class ServiceExecutionMaterializer:
             await session.commit()
             return True
 
+    async def _qualify_claim(self, session: AsyncSession, lease: ServiceExecutionLease) -> None:
+        """Allow a bounded recovery worker to qualify under the ordinary claim lock."""
+
     async def claim_one(
         self, *, now: datetime | None = None, lease_id: UUID | None = None,
     ) -> MaterializationClaim | None:
@@ -872,6 +875,7 @@ class ServiceExecutionMaterializer:
             ).scalar_one_or_none()
             if lease is None:
                 return None
+            await self._qualify_claim(session, lease)
             if lease.finalized_at is None:
                 await recover_deleted_committed_trial(session, lease=lease, observed_at=current)
                 if lease.finalized_at is not None:
@@ -1975,7 +1979,9 @@ class ServiceExecutionMaterializer:
                 raise
             except Exception as exc:  # object-store and database transport failures retry
                 _raise_if_cancellation_requested(exc)
-                logger.warning("service execution materialization retry: %s", exc)
+                # Transport/SQL exceptions may contain private source URLs or
+                # row payloads. Keep detail in the retained lease diagnostic.
+                logger.warning("service execution materialization retry (%s)", type(exc).__name__)
                 await self._retry(claim, exc)
                 span.outcome = "retry"
 
