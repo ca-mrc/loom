@@ -263,6 +263,7 @@ async def google_generate_content_facade(
             provider=row.provider_type,
             attempt=outcome.attempt,
             request_params=normalize_request_params(payload),
+            auth_context=ctx,
         )
 
     return body

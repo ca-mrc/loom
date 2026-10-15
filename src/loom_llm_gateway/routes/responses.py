@@ -542,6 +542,7 @@ async def responses(
             rate_card_hash=hash_table(table),
             attempt=attempt,
             request_params=normalize_request_params(payload),
+            auth_context=ctx,
         )
     return _responses_result(upstream_response, body_or_stream, request=request)
 
@@ -1026,6 +1027,7 @@ async def _record_responses_call(
             provider=provider,
             attempt=attempt,
             request_params=normalize_request_params(request_payload),
+            auth_context=getattr(request.state, "llm_auth_context", None),
         )
 
 
