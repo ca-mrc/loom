@@ -181,6 +181,9 @@ async def reconcile_cleanup(
         async with asyncio.timeout(60):
             while await actuator._get(lease) is not None:
                 await asyncio.sleep(1)
+        # The normal actuator may already have acknowledged this absence.
+        # Refresh before deciding whether an acknowledgement remains necessary.
+        lease = await actuator._lease(request.lease_id)
         if lease.desired_state != "deleted":
             missing = KubernetesJobObservation(
                 namespace=lease.namespace_name,
@@ -192,6 +195,7 @@ async def reconcile_cleanup(
                 normalized_state=NormalizedJobState.DELETED,
                 job_uid=lease.job_uid,
                 reason="JobMissing",
+                message="expected exact Kubernetes Job was not listed",
             )
             await actuator._persist_observation(lease, missing, now=datetime.now(UTC))
         async with sessions() as verify:

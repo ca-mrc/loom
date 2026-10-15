@@ -296,6 +296,100 @@ async def test_bound_cleanup_uses_normal_delete_and_exact_absence(
         await engine.dispose()
 
 
+@pytest.mark.parametrize("normal_ack_timing", ["after_delete", "before_worker_ack"])
+async def test_cleanup_worker_accepts_absence_already_acknowledged_by_normal_actuator(
+    postgres_url,
+    normal_ack_timing,
+):
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+
+    class OtherActuatorFirst(ReadbackKubernetes):
+        normal_actuator = None
+
+        async def delete_job(self, **kwargs):
+            await super().delete_job(**kwargs)
+            assert self.normal_actuator is not None
+            # Real normal reconciliation records its standard JobMissing event
+            # and closes the lease before the recovery worker checks absence.
+            if normal_ack_timing == "after_delete":
+                await self.normal_actuator.reconcile_full_once(now=datetime.now(UTC))
+
+    class RecoveryActuator(ExecutionActuator):
+        async def _persist_observation(self, lease, observation, *, now):
+            if observation.normalized_state == NormalizedJobState.DELETED:
+                # A fresh read cannot serialize the later ACK by itself. The
+                # ordinary observer may win immediately before persistence.
+                if normal_ack_timing == "before_worker_ack":
+                    await kube.normal_actuator.reconcile_full_once(now=datetime.now(UTC))
+            await super()._persist_observation(lease, observation, now=now)
+
+    kube = OtherActuatorFirst()
+    kube.guard_sessions = sessions
+    try:
+        lease_id, team_id, trial_id, target, command_id = await _seed_cleanup(sessions, now)
+        async with sessions() as session:
+            binding = await capture_cleanup_binding(session, team_id=team_id, lease_id=lease_id)
+            request = TerminalCleanupRecoveryRequest(
+                **binding.model_dump(),
+                operation_id=uuid4(),
+                cluster_id="mk8scluster-test",
+                namespace="loom-nebius-platform",
+                installed_candidate="a" * 40,
+                candidate_sha="b" * 40,
+                schema_head="0176",
+                image_ref="cr.region.nebius.cloud/test/loom-control-plane@sha256:" + "b" * 64,
+                installed_image_ref="cr.region.nebius.cloud/test/loom-control-plane@sha256:"
+                + "a" * 64,
+            )
+            lease = await session.get(ServiceExecutionLease, lease_id)
+            trial = await session.get(Trial, trial_id)
+            assert lease is not None and trial is not None
+            before = _retained_projection(lease, trial)
+            kube.jobs[lease.job_name] = KubernetesJobObservation(
+                namespace=target.namespace_name,
+                job_name=lease.job_name,
+                lease_id=str(lease.id),
+                resource_generation=lease.resource_generation,
+                target_id=target.target_id,
+                execution_unit_key=str(lease.execution_unit_key),
+                job_uid=lease.job_uid,
+                normalized_state=NormalizedJobState.FAILED,
+                reason="MissingTerminationSummary",
+                resource_version="normal-actuator-ack-race",
+            )
+        runtime = ExecutionTargetRuntime(
+            target_id=target.target_id, namespace=target.namespace_name
+        )
+        worker = RecoveryActuator(
+            sessions=sessions, kubernetes=kube, target=runtime, controller_id="bound-cleanup-worker"
+        )
+        kube.normal_actuator = ExecutionActuator(
+            sessions=sessions,
+            kubernetes=kube,
+            target=runtime,
+            controller_id="normal-active-actuator",
+        )
+        try:
+            report = await reconcile_cleanup(request, worker, sessions)
+        finally:
+            # Even the unfixed worker error cannot turn real successful cleanup
+            # into permission to alter the outcome, reset commands or delete twice.
+            async with sessions() as session:
+                current = await session.get(ServiceExecutionLease, lease_id)
+                trial = await session.get(Trial, trial_id)
+                command = await session.get(ServiceExecutionCommand, command_id)
+                assert current is not None and trial is not None and command is not None
+                assert current.cleanup_state == "complete" and current.deleted_at is not None
+                assert _retained_projection(current, trial) == before
+                assert command.state == "dead_letter" and command.delivery_count == 1
+            assert kube.delete_count == 1 and not kube.jobs
+        assert report["status"] == "cleaned"
+    finally:
+        await engine.dispose()
+
+
 async def test_complete_cleanup_worker_on_real_installed_0175(
     isolated_migration_postgres_url,
     monkeypatch,
