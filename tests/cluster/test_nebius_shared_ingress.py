@@ -101,12 +101,30 @@ def _run(container, *args, payload=None, timeout=120):
     return result.stdout
 
 
-def _add_failure_diagnostics(container, namespace, error):
+def _add_failure_diagnostics(container, namespace, error, *, core=None):
     """Best-effort reads must not hide the original failing assertion/timeout."""
+    if core is not None:
+        # The node's exec path may itself be blocked. Read through the existing
+        # authenticated API client first; never include Pod specs or Secrets.
+        for label, read in (
+            ("API Pod status", lambda: [{"name": pod.metadata.name, "node": pod.spec.node_name,
+                "status": pod.status.to_dict()} for pod in core.list_namespaced_pod(
+                    namespace, limit=32, _request_timeout=(2, 3)).items]),
+            ("API warning events", lambda: [{"object": event.involved_object.name,
+                "reason": event.reason, "message": event.message, "count": event.count}
+                for event in core.list_namespaced_event(namespace, limit=32,
+                    field_selector="type=Warning", _request_timeout=(2, 3)).items]),
+        ):
+            try:
+                detail = json.dumps(read(), default=str)
+            except Exception as diagnostic_error:
+                detail = type(diagnostic_error).__name__
+            error.add_note(label + "\n" + detail[-16384:])
     ident = container.get_wrapped_container().id
     commands = [
         ["docker", "logs", "--tail=100", ident],
         ["docker", "inspect", "--format={{json .State}}", ident],
+        ["docker", "top", ident, "-eo", "pid,ppid,stat,wchan:32,comm"],
         *[["docker", "exec", ident, *command] for command in (
             ["kubectl", "--request-timeout=3s", "get", "pods", "-A", "-o", "wide"],
             ["kubectl", "--request-timeout=3s", "get", "events", "-A", "--field-selector", "type=Warning"],
