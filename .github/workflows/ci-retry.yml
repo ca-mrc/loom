@@ -1,66 +1,79 @@
 name: ci-runner-bridge-probe
-run-name: Isolated hosted VM to native Actions runner bridge proof
+run-name: loom-ci-hosted slot=${{ inputs.slot }} request=${{ inputs.request_id }}
 on:
   workflow_dispatch:
     inputs:
+      slot:
+        type: string
+        required: true
+      request_id:
+        type: string
+        required: true
       mode:
         type: choice
-        options: [both, host, payload]
-        default: both
+        options:
+        - capacity
+        - payload
+        default: capacity
 permissions:
   contents: read
 jobs:
-  bridge-host:
-    if: inputs.mode != 'payload'
+  capacity:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 75
     steps:
-      - name: Prepare pinned one-job Actions runner
-        shell: bash
-        run: |
-          set -euo pipefail
-          install -d -m 700 "$RUNNER_TEMP/bridge-runner"
-          cd "$RUNNER_TEMP/bridge-runner"
-          curl --fail --location --retry 2 --max-time 120 --output runner.tar.gz \
-            https://github.com/actions/runner/releases/download/v2.336.0/actions-runner-linux-x64-2.336.0.tar.gz
-          echo '04cf0be1aff4c3ec3554466c39124ca250e3effd8873bb7e8d68535aa9505d5d  runner.tar.gz' | sha256sum --check
-          tar xzf runner.tar.gz
-          rm runner.tar.gz
-      - name: Accept one native Actions job then exit
-        shell: bash
-        env:
-          LOOM_JIT: ${{ secrets.LOOM_CI_BRIDGE_PROBE_JIT }}
-        run: |
-          set -euo pipefail
-          test -n "$LOOM_JIT"
-          cd "$RUNNER_TEMP/bridge-runner"
-          env -i HOME="$HOME" USER="$USER" LOGNAME="$LOGNAME" PATH="$PATH" LANG=C.UTF-8 \
-            ./run.sh --jitconfig "$LOOM_JIT"
+    - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      with:
+        persist-credentials: false
+    - name: Serve one native Actions job on this disposable hosted VM
+      env:
+        LOOM_CI_JIT_CONFIG: ${{ secrets[format('LOOM_CI_HOSTED_JIT_{0}', inputs.slot)]
+          }}
+      run: python3 scripts/ops/ci_hosted_worker.py
+    if: inputs.mode != 'payload'
   bridge-payload:
-    if: inputs.mode != 'host'
-    runs-on: [self-hosted, linux, x64, loom-ci-bridge-probe]
+    if: inputs.mode == 'payload'
+    runs-on:
+    - self-hosted
+    - linux
+    - x64
+    - loom-ci-bridge-probe
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
-        with:
-          persist-credentials: false
-      - name: Prove native checkout and isolated Docker execution
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$RUNNER_ENVIRONMENT" = self-hosted
-          test "$(uname -m)" = x86_64
-          docker version
-          timeout 90 docker run --rm hello-world
-          python3 - <<'PY'
-          import json,os,subprocess
-          from pathlib import Path
-          proof={"workflow_run_id":os.environ["GITHUB_RUN_ID"],"runner_name":os.environ["RUNNER_NAME"],"runner_environment":os.environ["RUNNER_ENVIRONMENT"],"checkout_sha":subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip(),"native_checkout":"PASS","docker_run":"PASS"}
-          Path("bridge-proof.json").write_text(json.dumps(proof,indent=2)+"\n")
-          print(json.dumps(proof))
-          PY
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: hosted-vm-native-runner-proof
-          path: bridge-proof.json
-          if-no-files-found: error
+    - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      with:
+        persist-credentials: false
+    - name: Verify marked disposable Docker daemon
+      run: python3 scripts/configure_ci_registry_mirror.py
+    - name: Prove native checkout and isolated Docker execution
+      shell: bash
+      run: 'set -euo pipefail
+
+        test "$RUNNER_ENVIRONMENT" = self-hosted
+
+        test "$(uname -m)" = x86_64
+
+        docker version
+
+        timeout 90 docker run --rm hello-world
+
+        python3 - <<''PY''
+
+        import json,os,subprocess
+
+        from pathlib import Path
+
+        proof={"workflow_run_id":os.environ["GITHUB_RUN_ID"],"runner_name":os.environ["RUNNER_NAME"],"runner_environment":os.environ["RUNNER_ENVIRONMENT"],"checkout_sha":subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip(),"native_checkout":"PASS","docker_run":"PASS"}
+
+        Path("bridge-proof.json").write_text(json.dumps(proof,indent=2)+"\n")
+
+        print(json.dumps(proof))
+
+        PY
+
+        '
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: hosted-vm-native-runner-proof
+        path: bridge-proof.json
+        if-no-files-found: error
