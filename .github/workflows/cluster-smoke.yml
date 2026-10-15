@@ -106,7 +106,7 @@ env:
 jobs:
   plan:
     name: cluster smoke plan
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-latest' }}
     outputs:
       required: ${{ steps.plan.outputs.cluster_smoke || steps.event.outputs.required }}
       gate_mode: ${{ steps.plan.outputs.gate_mode || steps.event.outputs.gate_mode }}
@@ -201,7 +201,7 @@ jobs:
     if: >-
       needs.plan.outputs.gate_mode == 'full' &&
       needs.plan.outputs.required == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-24.04' }}
     # The expanded serial suite reached only 61% before its 35-minute limit.
     # Independent runners retain complete coverage and every per-test deadline.
     timeout-minutes: 35
@@ -276,7 +276,7 @@ jobs:
           github.event_name == 'push' && 'cluster-smoke-gate-push' ||
           needs.plan.outputs.gate_mode == 'full' && 'cluster-smoke-gate' ||
           'cluster-smoke-gate-filtered' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-latest' }}
     if: always() && needs.plan.outputs.gate_mode != 'filtered'
     needs: [plan, cluster-contract]
     steps:

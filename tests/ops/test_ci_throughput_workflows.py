@@ -153,11 +153,14 @@ def test_hosted_workflows_do_not_depend_on_a_private_uv_mirror() -> None:
             assert "manifest-file" not in step["with"]
 
 
-def test_planners_gates_publish_and_aggregation_stay_github_hosted() -> None:
+def test_control_jobs_keep_hosted_fallback_and_use_the_same_optional_queue() -> None:
     for workflow_path, job_ids in GITHUB_HOSTED_CONTROL_JOBS.items():
         jobs = _workflow(workflow_path)["jobs"]
         for job_id in job_ids:
-            assert jobs[job_id]["runs-on"] == "ubuntu-latest"
+            placement = jobs[job_id]["runs-on"]
+            assert placement.endswith("|| 'ubuntu-latest' }}")
+            assert "LOOM_CI_UNIFIED_RUNNERS" in placement
+            assert "loom-ci-exec" in placement
 
 
 def test_coverage_artifacts_map_hosted_checkout_roots() -> None:
@@ -168,6 +171,7 @@ def test_coverage_artifacts_map_hosted_checkout_roots() -> None:
         assert paths[path_group] == [
             source_root,
             f"/home/runner/work/*/*/{source_root}",
+            f"*/_work/*/*/{source_root}",
         ]
 
 
@@ -575,7 +579,7 @@ def test_candidate_images_use_verified_trivy_binaries_and_complete_scans() -> No
 
     assert trivy_binary["needs"] == ["plan"]
     assert trivy_binary["permissions"] == {"contents": "read"}
-    assert trivy_binary["runs-on"] == "ubuntu-24.04"
+    assert trivy_binary["runs-on"].endswith("|| 'ubuntu-24.04' }}")
     assert "strategy" not in trivy_binary
     install = next(
         step

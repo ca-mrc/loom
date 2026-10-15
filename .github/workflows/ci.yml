@@ -113,7 +113,7 @@ env:
 jobs:
   workflow-plan:
     name: workflow-plan
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-latest' }}
     timeout-minutes: 5
     outputs:
       event_relevant: ${{ steps.plan.outputs.event_relevant || steps.event.outputs.event_relevant }}
@@ -275,7 +275,7 @@ jobs:
             expected_system: Linux
             expected_machine: x86_64
             uv_checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || matrix.runner }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
@@ -318,7 +318,7 @@ jobs:
 
   lint-and-static:
     name: lint-and-static
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-24.04' }}
     needs: [workflow-plan]
     timeout-minutes: 12
     if: >-
@@ -371,7 +371,7 @@ jobs:
 
   tests-root:
     name: tests-root (${{ matrix.shard }})
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-24.04' }}
     needs: [workflow-plan]
     # Shards project ~7 minutes of pytest without coverage; leave room for
     # coverage, setup, wheel verification and cleanup.
@@ -543,7 +543,7 @@ jobs:
 
   nebius-pool:
     name: nebius-pool (${{ matrix.shard }})
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-24.04' }}
     needs: [workflow-plan]
     # Pool operator lifecycle modules; the slowest shard needs ~40 minutes
     # for pytest alone. Selected only when operator inputs change.
@@ -613,7 +613,7 @@ jobs:
 
   tests-packages:
     name: tests-packages
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-24.04' }}
     needs: [workflow-plan]
     timeout-minutes: 10
     if: >-
@@ -672,7 +672,7 @@ jobs:
 
   runtime-payload:
     name: runtime-payload
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-24.04' }}
     needs: [workflow-plan]
     timeout-minutes: 10
     if: >-
@@ -690,7 +690,7 @@ jobs:
 
   nebius-iac:
     name: nebius-iac
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-latest' }}
     needs: [workflow-plan]
     timeout-minutes: 10
     if: >-
@@ -741,7 +741,7 @@ jobs:
   # source job directly in repository-checks, without an intermediate runner.
   fast-coverage:
     name: fast-coverage
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-latest' }}
     needs: [workflow-plan, tests-root, tests-packages]
     timeout-minutes: 10
     if: >-
@@ -853,7 +853,7 @@ jobs:
   # for both toolchains without increasing Python CI latency.
   go-checks:
     name: go-checks
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-24.04' }}
     needs: [workflow-plan]
     if: >-
       needs.workflow-plan.outputs.gate_mode == 'full' &&
@@ -883,7 +883,7 @@ jobs:
   # four viewports with strict browser failure ledgers and axe.
   web-checks:
     name: web-checks
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-24.04' }}
     needs: [workflow-plan]
     timeout-minutes: 20
     if: >-
@@ -990,7 +990,7 @@ jobs:
   # integration shards need bounded headroom for tests, coverage and cleanup.
   integration:
     name: integration (${{ matrix.shard }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-latest' }}
     needs: [workflow-plan]
     timeout-minutes: 75
     if: >-
@@ -1111,7 +1111,7 @@ jobs:
   # paths, the `ci:integration-docker` label, or a workflow_dispatch input.
   integration-docker:
     name: integration-docker (${{ matrix.shard }})
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-24.04' }}
     needs: [workflow-plan]
     timeout-minutes: 40
     if: >-
@@ -1223,7 +1223,7 @@ jobs:
   # keeps the same information on the workflow page without email spam.
   coverage-summary:
     name: coverage-summary
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-latest' }}
     needs: [workflow-plan, fast-coverage, integration]
     if: >-
       always() &&
@@ -1312,7 +1312,7 @@ jobs:
           github.event_name == 'push' && 'repository-checks-push' ||
           needs.workflow-plan.outputs.gate_mode == 'full' && 'repository-checks' ||
           'repository-checks-filtered' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-latest' }}
     if: >-
       always() &&
       needs.workflow-plan.outputs.gate_mode != 'filtered'

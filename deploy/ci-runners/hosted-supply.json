@@ -1,0 +1,8 @@
+{
+  "repository": "ca-mrc/loom",
+  "enabled": true,
+  "max_github_workers": 20,
+  "worker_workflow": "ci-retry.yml",
+  "worker_ref": "dev",
+  "registered_capacity_dispatch": true
+}

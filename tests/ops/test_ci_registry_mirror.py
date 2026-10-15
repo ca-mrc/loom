@@ -126,10 +126,21 @@ def test_validation_failure_does_not_replace_daemon_config(
         },
     ],
 )
-def test_setup_refuses_non_hosted_or_remote_daemons(environment: dict[str, str]) -> None:
+def test_setup_refuses_non_hosted_or_remote_daemons(
+    environment: dict[str, str], tmp_path: Path
+) -> None:
     assert SCRIPT.is_file(), "CI must provide the Docker daemon mirror setup"
+    # Model an unmarked shared host even when this test itself runs inside a
+    # marked disposable worker. Never inspect or modify the execution host.
+    entry = (
+        "import runpy, sys\n"
+        "from pathlib import Path\n"
+        "main = runpy.run_path(sys.argv[1])['main']\n"
+        "main.__globals__['EPHEMERAL_MARKER'] = Path(sys.argv[2])\n"
+        "raise SystemExit(main())\n"
+    )
     result = subprocess.run(
-        [sys.executable, str(SCRIPT)],
+        [sys.executable, "-c", entry, str(SCRIPT), str(tmp_path / "absent-marker")],
         capture_output=True,
         text=True,
         env={"PATH": os.environ["PATH"], **environment},
@@ -274,3 +285,45 @@ def test_default_local_docker_endpoint_is_accepted(
 
     monkeypatch.setattr(registry_setup.subprocess, "run", run)
     registry_setup.require_local_context()
+
+
+def test_marked_ephemeral_guest_uses_local_daemon(registry_setup, tmp_path, monkeypatch):
+    import types
+
+    marker = tmp_path / "marker"
+    marker.write_text('{"schema_version":1,"provider":"oldlab"}')
+
+    # Root ownership is a host property, independent of the test process uid.
+    class Marker:
+        def lstat(self):
+            return types.SimpleNamespace(st_uid=0, st_mode=0o100444, st_size=marker.stat().st_size)
+
+        def is_symlink(self):
+            return False
+
+        def read_text(self):
+            return marker.read_text()
+
+    monkeypatch.setattr(registry_setup, "EPHEMERAL_MARKER", Marker())
+    monkeypatch.setenv("RUNNER_ENVIRONMENT", "self-hosted")
+    assert registry_setup.disposable_runner()
+    marker.write_text('{"schema_version":1,"provider":"shared-host"}')
+    assert not registry_setup.disposable_runner()
+
+
+def test_user_writable_marker_cannot_authorize_daemon_change(registry_setup, monkeypatch):
+    import types
+
+    class Marker:
+        def lstat(self):
+            return types.SimpleNamespace(st_uid=0, st_mode=0o100666, st_size=48)
+
+        def is_symlink(self):
+            return False
+
+        def read_text(self):
+            pytest.fail("unsafe marker must not be read")
+
+    monkeypatch.setattr(registry_setup, "EPHEMERAL_MARKER", Marker())
+    monkeypatch.setenv("RUNNER_ENVIRONMENT", "self-hosted")
+    assert not registry_setup.disposable_runner()
