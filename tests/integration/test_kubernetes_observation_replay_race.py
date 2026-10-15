@@ -26,10 +26,7 @@ async def _wait_for_lease_lock(session: AsyncSession, backend_pid: int) -> None:
     async with asyncio.timeout(5):
         while True:
             waiting = await session.scalar(
-                text(
-                    "SELECT wait_event_type = 'Lock' FROM pg_stat_activity "
-                    "WHERE pid = :pid"
-                ),
+                text("SELECT wait_event_type = 'Lock' FROM pg_stat_activity WHERE pid = :pid"),
                 {"pid": backend_pid},
             )
             if waiting:
@@ -39,7 +36,8 @@ async def _wait_for_lease_lock(session: AsyncSession, backend_pid: int) -> None:
 
 @pytest.mark.parametrize("changed_payload", [False, True])
 async def test_concurrent_observation_uses_existing_ordinal_after_lease_lock(
-    postgres_url: str, changed_payload: bool,
+    postgres_url: str,
+    changed_payload: bool,
 ) -> None:
     engine = create_async_engine(postgres_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
@@ -67,7 +65,9 @@ async def test_concurrent_observation_uses_existing_ordinal_after_lease_lock(
 
             async def duplicate_delivery() -> tuple[UUID, bool]:
                 event, duplicate = await record_kubernetes_observation(
-                    second, lease_id=lease_id, generation=1,
+                    second,
+                    lease_id=lease_id,
+                    generation=1,
                     payload={**payload, "reason": "changed"} if changed_payload else payload,
                     observed_at=now,
                 )
@@ -79,13 +79,18 @@ async def test_concurrent_observation_uses_existing_ordinal_after_lease_lock(
             # The first observer commits while the other caller waits for its
             # lease lock. The second caller must refresh the key/ordinal then.
             original, duplicate = await record_kubernetes_observation(
-                first, lease_id=lease_id, generation=1,
-                payload=payload, observed_at=now,
+                first,
+                lease_id=lease_id,
+                generation=1,
+                payload=payload,
+                observed_at=now,
             )
             assert not duplicate
             await first.commit()
             if changed_payload:
-                with pytest.raises(ServiceExecutionConflict, match="execution event replay changed"):
+                with pytest.raises(
+                    ServiceExecutionConflict, match="execution event replay changed"
+                ):
                     await asyncio.wait_for(delivery, timeout=5)
                 await second.rollback()
             else:
@@ -93,11 +98,14 @@ async def test_concurrent_observation_uses_existing_ordinal_after_lease_lock(
                 assert duplicate and event_id == original.id
 
         async with sessions() as session:
-            assert await session.scalar(
-                select(func.count(ServiceExecutionEvent.id)).where(
-                    ServiceExecutionEvent.lease_id == lease_id,
-                ),
-            ) == 1
+            assert (
+                await session.scalar(
+                    select(func.count(ServiceExecutionEvent.id)).where(
+                        ServiceExecutionEvent.lease_id == lease_id,
+                    ),
+                )
+                == 1
+            )
             persisted = await session.get(ServiceExecutionLease, lease_id)
             assert persisted is not None and persisted.last_event_ordinal == original.ordinal == 1
     finally:

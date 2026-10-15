@@ -67,3 +67,37 @@ normal broker rollout acquire idle protection and deploy the published latest
 `dev`. Then read back workload digests, platform candidate, service health, and
 the original Trials' downloadable artifacts. Green candidate/Job checks alone
 are not deployment or acceptance evidence.
+
+## Finalized attempt with a dead-letter deletion
+
+Kubernetes command, watch and reconciliation observers serialize their event-key
+lookup and ordinal allocation under the lease lock. Identical observations reuse
+the persisted event; changed payloads still fail. Periodic full reconciliation
+also honors `delete_pending` through the ordinary exact-UID deletion and output
+window checks. A lost or dead-letter command remains in its audit history; only
+observed resource absence acknowledges cleanup.
+
+When that cleanup defect itself blocks upgrading the installed actuator, use
+`scripts/ops/nebius_terminal_cleanup_recovery.py` after its protected publication.
+Its inspect/prepare/apply arguments follow the archive entry above. Inspection
+binds one team/lease, generation, resource generation, Job UID, target, terminal
+Trial outcome, retained canonical pointers and the original dead-letter command.
+The request adds the same installed/published candidate and platform identities.
+Preparation qualifies the installed platform and immutable published image.
+
+This worker runs in the existing actuator's **execution namespace**, preserving
+its ConfigMap and database Secret references, CA mount and service account. It
+uses the existing node and normal Kubernetes authority; it creates no RBAC,
+credential copies, tasks, builds, migrations or scheduler loop. The supported
+route is the existing in-cluster native actuator, not a global-pool or remote
+Kubernetes route. The ordinary shared rollout-admission lock remains held across
+deletion and its exact GET readback. The worker rechecks schema and ledger fences,
+calls the existing deletion path, then records ordinary deletion observation only
+after absence. It never resets the dead-letter row, bumps the lease generation,
+rewrites a Trial result or clears the rollout guard.
+
+The Job has no retries, a 300-second deadline and a one-hour completed-Job TTL.
+Preserve its receipt and logs before TTL cleanup. Read back actual Job absence,
+lease cleanup completion, retained source/canonical data and unchanged original
+Trial outcome/attempt and command history. Then use the normal backed-up rollout
+only when its unchanged idle predicate is naturally clear.

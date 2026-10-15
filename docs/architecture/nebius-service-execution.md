@@ -1491,6 +1491,15 @@ There is no default global consumer. Cancellation also covers an attempt that
 never created a Job: authoritative namespace reconciliation must finish its
 existing cleanup path without treating an active create as deleted.
 
+Kubernetes observation event keys and ordinals are allocated under the same
+lease lock, so concurrent command/watch/reconcile deliveries reuse the same
+event without weakening payload validation. Full reconciliation retries
+`delete_pending` through the normal UID and output-window checks even when its
+command became dead-letter. The command history remains intact and cleanup
+completes only after resource absence. A bounded published-code recovery before
+an idle-gated actuator upgrade is described in the
+[terminal recovery runbook](../runbooks/terminal-archive-recovery.md).
+
 Legacy worker heartbeat and stale-claim requeues exclude Trials whose current
 attempt belongs to a service-execution lease, including revoked leases awaiting
 cleanup. The service scheduler never selects a cancel-requested queued Trial.
