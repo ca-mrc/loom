@@ -41,7 +41,9 @@ def inventory_resources(request: Callable[[str, str], dict[str, Any] | None],
                         api: str, resource: str, kind: str, *,
                         include_terminal_pods: bool = False) -> list[dict[str, Any]]:
     """Fixed read-only collections; incomplete or unstable pages never qualify."""
-    collections = {("v1", "nodes", "Node"), ("v1", "pods", "Pod"),
+    collections = {("v1", "nodes", "Node"), ("v1", "pods", "Pod"), ("v1", "namespaces", "Namespace"),
+        ("admissionregistration.k8s.io/v1", "validatingadmissionpolicies", "ValidatingAdmissionPolicy"),
+        ("admissionregistration.k8s.io/v1", "validatingadmissionpolicybindings", "ValidatingAdmissionPolicyBinding"),
         ("v1", "persistentvolumes", "PersistentVolume"),
         ("v1", "replicationcontrollers", "ReplicationController"),
         ("v1", "persistentvolumeclaims", "PersistentVolumeClaim"),

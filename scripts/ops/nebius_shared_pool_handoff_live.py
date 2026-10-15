@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import copy
 import json
-from dataclasses import dataclass, replace
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -40,6 +41,11 @@ from scripts.ops.nebius_pool_role_fencing import (
     POOL_WRITER_WORKLOAD_COLLECTIONS,
     qualify_pool_writer_bindings,
     qualify_pool_writer_workloads,
+)
+from scripts.ops.nebius_shared_pool_application_authority import (
+    APPLICATION_SCOPE_COLLECTIONS,
+    application_binding_candidates,
+    qualify_application_bindings,
 )
 from scripts.ops.nebius_shared_pool_handoff import (
     SharedPoolHandoffPlan,
@@ -146,6 +152,7 @@ class SharedPoolWriterObservation:
     workloads: dict[str, dict[str, Any]]
     authority: dict[str, dict[str, Any]]
     input_digest: str
+    application_scopes: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 def _resource_roots(plan: SharedPoolHandoffPlan, kinds: frozenset[str]) -> dict[str, dict[str, Any]]:
@@ -206,6 +213,37 @@ def _authority_roots(plan: SharedPoolHandoffPlan) -> dict[str, dict[str, Any]]:
             raise ValueError
         result[key] = row
     return result
+
+
+def _application_authority(plan: SharedPoolHandoffPlan, permissions: dict[str, list[dict[str, Any]]],
+        read: Callable[[str, str], dict[str, Any] | None], authority: dict[str, dict[str, Any]]
+        ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Read additional scope evidence only for grants from completed managers."""
+    deployments = (plan.development.runtime.request.database.manager.deployment, plan.staging.legacy.deployment)
+    authorities = tuple(deployment.installation.applications.authority for deployment in deployments
+        if deployment.installation.applications is not None)
+    current = {_key(row): row for rows in permissions.values() for row in rows}
+    if not application_binding_candidates(authorities, current):
+        return {}, {}
+    for api, resource, kind in APPLICATION_SCOPE_COLLECTIONS:
+        for row in inventory_resources(read, api, resource, kind):
+            key = _key(row)
+            if key in current:
+                raise ValueError
+            current[key] = row
+    kinds = frozenset({'ValidatingAdmissionPolicy', 'ValidatingAdmissionPolicyBinding'})
+    legacy = plan.staging.legacy.context
+    retained = {_key(row): row for row in (*legacy.original.retained.values(), *legacy.predecessor.retained.values())
+        if row['kind'] in kinds}
+    retained.update(_resource_roots(plan, kinds))
+    retained.update(authority)
+    forbidden = {deployment.installation.foundation.ingress_namespace for deployment in deployments}
+    forbidden.update(guard.namespace for guard in plan.migration.guards)
+    forbidden.update(ns.name for participant in plan.migration.registration.spec.participants
+        for ns in (participant.execution_namespace, participant.build_namespace))
+    forbidden.update(row['metadata']['namespace'] for row in authority.values() if row['metadata'].get('namespace'))
+    return qualify_application_bindings(authorities=authorities, retained=retained, current=current,
+        forbidden_namespaces=frozenset(forbidden))
 
 
 def observe_shared_pool_writers(*, runtime: DevelopmentRuntimeInstallRequest,
@@ -309,6 +347,10 @@ def _observe_shared_writer_options(*, plan: SharedPoolHandoffPlan, transport: Ma
             for api, resource, kind in POOL_WRITER_WORKLOAD_COLLECTIONS}
         roots = _select_writer_options(workload_options, inventory)
         authority = _select_writer_options(authority_options, permissions)
+        personal, application_scopes = _application_authority(plan, permissions, read, authority)
+        if personal.keys() & authority.keys():
+            raise ValueError
+        authority.update(personal)
         subjects = set()
         for row in (*roots.values(), *retained_jobs.values()):
             pod = (row['spec']['jobTemplate']['spec']['template']['spec'] if row['kind'] == 'CronJob'
@@ -335,8 +377,9 @@ def _observe_shared_writer_options(*, plan: SharedPoolHandoffPlan, transport: Ma
         if revision is None:
             raise ValueError
         checksum = digest({'handoff': plan.input_digest, 'resource_version': revision,
-            'workloads': inventory, 'permissions': permissions})
-        return SharedPoolWriterObservation(plan, revision, copy.deepcopy(current), copy.deepcopy(current_authority), checksum)
+            'workloads': inventory, 'permissions': permissions, 'application_scopes': application_scopes})
+        return SharedPoolWriterObservation(plan, revision, copy.deepcopy(current), copy.deepcopy(current_authority),
+            checksum, application_scopes)
     except Exception:
         raise ValueError('shared pool writer census unqualified') from None
 
