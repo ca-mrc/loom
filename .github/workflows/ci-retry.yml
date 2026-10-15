@@ -14,6 +14,7 @@ on:
         options:
         - capacity
         - payload
+        - oldlab
         default: capacity
 permissions:
   contents: read
@@ -30,14 +31,11 @@ jobs:
         LOOM_CI_JIT_CONFIG: ${{ secrets[format('LOOM_CI_HOSTED_JIT_{0}', inputs.slot)]
           }}
       run: python3 scripts/ops/ci_hosted_worker.py
-    if: inputs.mode != 'payload'
+    if: inputs.mode == 'capacity'
   bridge-payload:
-    if: inputs.mode == 'payload'
-    runs-on:
-    - self-hosted
-    - linux
-    - x64
-    - loom-ci-bridge-probe
+    if: inputs.mode != 'capacity'
+    runs-on: ${{ inputs.mode == 'oldlab' && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]')
+      || fromJSON('["self-hosted","linux","x64","loom-ci-bridge-probe"]') }}
     timeout-minutes: 5
     steps:
     - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
