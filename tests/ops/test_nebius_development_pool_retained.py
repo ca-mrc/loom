@@ -1472,6 +1472,53 @@ def test_runtime_observer_checks_retained_data_and_successors_without_replaying_
 
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
 @pytest.mark.parametrize('retained', [False], indirect=True)
+@pytest.mark.parametrize('ambient', ['protected', 'untrusted', 'missing-system-tool'])
+def test_runtime_probe_finds_system_kubectl_without_trusting_ambient_path(
+        completed_pool, publisher_cloud, monkeypatch, tmp_path, ambient):
+    from scripts.ops import nebius_development_runtime_probes as module
+
+    _, request = runtime_install_request(completed_pool, publisher_cloud)
+    system = tmp_path / 'local-bin'
+    untrusted = tmp_path / 'untrusted-bin'
+    empty = tmp_path / 'empty-bin'
+    for directory in (system, untrusted, empty):
+        directory.mkdir()
+    for directory in (system, untrusted):
+        executable = directory / 'kubectl'
+        executable.write_text('#!/bin/sh\nexit 0\n')
+        executable.chmod(0o700)
+    if ambient == 'missing-system-tool':
+        (system / 'kubectl').unlink()
+    monkeypatch.setenv('PATH', module.os.defpath if ambient == 'protected' else str(untrusted))
+    real_which = module.shutil.which
+
+    def mounted_which(command, mode=module.os.F_OK | module.os.X_OK, path=None):
+        # Map system directories into the test sandbox; retain real executable
+        # lookup and any untrusted ambient directory selected by the caller.
+        mounts = {'/usr/local/bin': str(system), '/bin': str(empty), '/usr/bin': str(empty)}
+        search = module.os.environ['PATH'] if path is None else path
+        return real_which(command, mode=mode, path=module.os.pathsep.join(
+            mounts.get(directory, directory) for directory in search.split(module.os.pathsep)))
+
+    monkeypatch.setattr(module.shutil, 'which', mounted_which)
+    arguments = dict(request=request,
+        api_server=request.database.foundation.inputs.config['kubernetes_api_server'],
+        ssl_context=ssl.create_default_context(
+            cadata=request.database.foundation.bootstrap['material']['loom-platform-db']['ca.crt']),
+        token='operator-test')
+    if ambient == 'missing-system-tool':
+        with pytest.raises(ValueError, match='probe transport unavailable'):
+            module.HTTPSDevelopmentRuntimeProbes(**arguments)
+        return
+    with module.HTTPSDevelopmentRuntimeProbes(**arguments) as probes:
+        assert probes.prefix[0] == str(system / 'kubectl')
+        connection = Path(probes.prefix[probes.prefix.index('--kubeconfig') + 1])
+        assert connection.is_file() and connection.stat().st_mode & 0o077 == 0
+    assert not connection.exists()
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
+@pytest.mark.parametrize('retained', [False], indirect=True)
 def test_runtime_closed_database_probe_is_bound_readonly_and_independent_of_manager_process(
         completed_pool, publisher_cloud, monkeypatch):
     from types import SimpleNamespace
