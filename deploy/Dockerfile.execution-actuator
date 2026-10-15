@@ -35,8 +35,8 @@ COPY src/loom/application_image_build.py src/loom/application_session.py \
     src/loom/nebius_management_authority.py src/loom/nebius_pool_application_image.py ./src/loom/
 COPY src/loom/driver/__init__.py src/loom/driver/task_image.py ./src/loom/driver/
 COPY src/loom/family_run/__init__.py src/loom/family_run/spec.py ./src/loom/family_run/
-COPY src/loom/trajectory/__init__.py src/loom/trajectory/storage.py \
-    src/loom/trajectory/upload_observation.py ./src/loom/trajectory/
+COPY src/loom/trajectory/__init__.py src/loom/trajectory/immutable_object.py \
+    src/loom/trajectory/storage.py src/loom/trajectory/upload_observation.py ./src/loom/trajectory/
 COPY src/loom/db ./src/loom/db
 COPY src/loom/security ./src/loom/security
 COPY src/loom/models/__init__.py src/loom/models/healthcheck.py src/loom/models/mcp.py \
