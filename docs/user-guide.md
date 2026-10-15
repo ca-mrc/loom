@@ -577,6 +577,14 @@ submitting. Unset fields keep the task's own value:
 }
 ```
 
+`verification` is `shared`, `separate`, or `skipped`. `skipped` is only valid
+with `--purpose trajectory_generation`; the CLI stores it as
+`trial_config.skip_verifier=true` and leaves `verifier_env_mode` unset. There
+is no `--skip-verifier` flag; use `"verification": "skipped"` or
+`--verifier-env-mode skipped`. Delivery export and canonical archive already
+accept a succeeded trial without a numeric reward when that boolean is true.
+Hosted Nebius still rejects skip at admission (`verifier_mode_required`).
+
 ```bash
 loom eval batch create --purpose evaluation \
   --benchmark terminal-bench-2 --provider smoke-openai --model gpt-4o-mini \

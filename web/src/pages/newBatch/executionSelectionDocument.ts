@@ -56,8 +56,8 @@ export function parseExecutionSelection(
     value.allowedWebsites = (allow as string[]).join("\n");
   }
   if (doc.verification !== undefined && doc.verification !== null) {
-    if (doc.verification !== "shared" && doc.verification !== "separate") {
-      return { ok: false, error: "verification must be shared or separate." };
+    if (doc.verification !== "shared" && doc.verification !== "separate" && doc.verification !== "skipped") {
+      return { ok: false, error: "verification must be shared, separate or skipped." };
     }
     value.verifierEnvMode = doc.verification;
   }

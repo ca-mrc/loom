@@ -1161,8 +1161,9 @@ describe("NewBatch", () => {
     await user.click(
       screen.getByRole("checkbox", { name: /Force rebuild env image/i }),
     );
-    await user.click(
-      screen.getByRole("checkbox", { name: /Skip verifier/i }),
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: /verification/i }),
+      "skipped",
     );
     await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
     await vi.waitFor(() => expect(batchCall(spy)).not.toBeNull());
@@ -1171,9 +1172,10 @@ describe("NewBatch", () => {
     const tc = body.trial_config as Record<string, unknown>;
     expect(tc.force_build).toBe(true);
     expect(tc.skip_verifier).toBe(true);
+    expect(tc).not.toHaveProperty("verifier_env_mode");
   });
 
-  it("hides skip verifier for evaluation and sends purpose evaluation", async () => {
+  it("hides skipped verification for evaluation and sends purpose evaluation", async () => {
     const spy = mockEndpoints({ matchingTasks: 12 });
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
@@ -1183,9 +1185,7 @@ describe("NewBatch", () => {
     await screen.findByText(/12 tasks match across 1 benchmark/i);
     await user.click(screen.getByText(/Advanced trial settings/i));
     await screen.findByLabelText(/Max attempts/i);
-    expect(
-      screen.queryByRole("checkbox", { name: /Skip verifier/i }),
-    ).toBeNull();
+    expect(screen.queryByRole("option", { name: "skipped" })).toBeNull();
     await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
     await vi.waitFor(() => expect(batchCall(spy)).not.toBeNull());
     expect(batchCall(spy)!.body.purpose).toBe("evaluation");

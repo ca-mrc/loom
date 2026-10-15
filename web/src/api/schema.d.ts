@@ -6554,7 +6554,7 @@ export interface components {
                 [key: string]: unknown;
             } | null;
             /** Verification */
-            verification: ("shared" | "separate") | null;
+            verification: ("shared" | "separate" | "skipped") | null;
         } & {
             [key: string]: unknown;
         };
@@ -6645,7 +6645,7 @@ export interface components {
              * Verification
              * @enum {string}
              */
-            verification: "shared" | "separate";
+            verification: "shared" | "separate" | "skipped";
         } & {
             [key: string]: unknown;
         };
