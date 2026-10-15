@@ -2805,6 +2805,86 @@ async def test_scheduler_reserves_one_verifier_after_parent_cleanup(
         await engine.dispose()
 
 
+@pytest.mark.parametrize("committed", [True, False])
+async def test_verifier_source_settles_with_its_parent_within_lease_constraints(
+    postgres_url: str, _stub_verifier_plan: list[ExecutionRuntimePlanV1], committed: bool,
+) -> None:
+    # The child is archived in its parent's bundle. Settling it must satisfy
+    # the materialization group check, or the parent's archive rolls back and
+    # retries forever; every separate-verifier Trial then lacks a bundle.
+    from loom_control_plane.service_execution_materializer import ServiceExecutionMaterializer
+
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    digests = ("sha256:" + "1" * 64, "sha256:" + "2" * 64)
+    try:
+        trial_id, parent, target = await _separate_attempt_awaiting_verifier(sessions, now=now)
+        async with sessions() as session:
+            [verifier] = await reserve_next_verifier_executions(
+                session, pool_id=target.logical_pool_id,
+                image_admission_keyring=IMAGE_ADMISSION_KEYRING, now=now + timedelta(seconds=5),
+            )
+            await session.commit()
+        async with sessions() as session:
+            child = await session.get(ServiceExecutionLease, verifier.id)
+            trial = await session.get(Trial, trial_id)
+            assert child is not None and trial is not None
+            plan = ExecutionRuntimePlanV1.model_validate(child.runtime_contract_json)
+            upload = ArtifactUploadSession(
+                id=uuid4(), team_id=trial.team_id, commit_kind="service_execution_output",
+                service_execution_lease_id=child.id, service_execution_generation=child.resource_generation,
+                service_execution_role="verifier",
+                service_execution_runtime_contract_sha256=child.runtime_contract_sha256,
+                service_execution_candidate_sha=plan.candidate_sha,
+                service_execution_task_revision_sha256=plan.task_revision_sha256,
+                service_execution_command_identity_sha256=plan.command_identity_sha256,
+                idempotency_key=uuid4().hex, request_digest="sha256:" + "6" * 64,
+                prefix=f"service-execution/{child.id}/{uuid4().hex}/", state="committed",
+                expected_total_max_bytes=1024, canonical_manifest_json={},
+                manifest_sha256="sha256:" + "7" * 64, committed_marker_sha256="sha256:" + "8" * 64,
+                expires_at=now + timedelta(hours=1), committed_at=now,
+            )
+            session.add(upload)
+            await session.flush()
+            child.output_commit_state = "committed"
+            child.output_generation = child.resource_generation
+            child.output_upload_session_id = upload.id
+            child.output_manifest_sha256 = upload.manifest_sha256
+            child.output_marker_sha256 = upload.committed_marker_sha256
+            child.output_committed_at = now
+            child.materialization_state = "pending"
+            child.materialization_next_attempt_at = now
+            trial.result = {**trial.result, "verifier_execution": {
+                "state": "committed", "parent_lease_id": str(parent.id), "lease_id": str(child.id),
+            }}
+            await session.commit()
+
+        materializer = object.__new__(ServiceExecutionMaterializer)
+        materializer._source_retention = timedelta(days=1)
+        async with sessions() as session:
+            parent_row = await session.get(ServiceExecutionLease, parent.id)
+            trial = await session.get(Trial, trial_id)
+            await materializer._settle_verifier_source(
+                session, lease=parent_row, trial=trial, now=now, committed=committed,
+                canonical_sha256=digests if committed else None, error_code="integrity",
+            )
+            await session.commit()
+        async with sessions() as session:
+            child = await session.get(ServiceExecutionLease, verifier.id)
+            assert child is not None
+            if committed:
+                assert child.materialization_state == "committed"
+                assert (child.canonical_trajectory_sha256, child.canonical_atif_sha256) == digests
+                assert child.source_cleanup_state == "retained"
+            else:
+                assert child.materialization_state == "unavailable"
+                assert child.materialization_error_code == "integrity"
+                assert child.materialization_error_message
+    finally:
+        await engine.dispose()
+
+
 async def _fail_verifier_natively(
     sessions: async_sessionmaker[AsyncSession], *, lease_id: UUID, at: datetime,
     historical_regression: bool = False,

@@ -27,6 +27,25 @@ def _same_model_identity(actual: ModelSpec, expected: ModelSpec | None) -> bool:
     return expected is not None and actual.model_dump(exclude=limits) == expected.model_dump(exclude=limits)
 
 
+def _admitted_model_identities(trial: TrialConfig) -> tuple[ModelSpec, ...]:
+    models: list[ModelSpec] = []
+    if trial.agent_model is not None:
+        models.append(trial.agent_model)
+    multi = trial.multi_model
+    if (
+        multi is not None
+        and multi.enabled
+        and multi.policy == "student_teacher_student"
+        and multi.secondary_model is not None
+    ):
+        models.append(multi.secondary_model)
+    return tuple(models)
+
+
+def _same_admitted_model_identity(actual: ModelSpec, trial: TrialConfig) -> bool:
+    return any(_same_model_identity(actual, expected) for expected in _admitted_model_identities(trial))
+
+
 def parse_terminus_events(
     body: bytes | None, *, trial: TrialConfig, trial_id: UUID | None = None,
 ) -> list[TrajectoryEvent]:
@@ -43,7 +62,7 @@ def parse_terminus_events(
         if not (event.kind.startswith("terminus2_") or isinstance(event, LLMCallEvent)):
             raise ValueError("Terminus source cannot author lifecycle events")
         if isinstance(event, LLMCallEvent):
-            if not _same_model_identity(event.model, trial.agent_model):
+            if not _same_admitted_model_identity(event.model, trial):
                 raise ValueError("Terminus trace has another model identity")
             if not event.gateway_request_id or event.gateway_request_id in call_ids:
                 raise ValueError("Terminus trace has missing or duplicate Gateway calls")
@@ -109,7 +128,7 @@ def reconcile_terminus_ledger(
                 or row.get("step_id") != "agent"):
             raise ValueError("Gateway ledger has invalid or duplicate call identity")
         call = llm_call_row_to_event(row, trial_id=trial_id, seq=0)
-        if not _same_model_identity(call.model, trial.agent_model):
+        if not _same_admitted_model_identity(call.model, trial):
             raise ValueError("Gateway ledger has another model identity")
         if row.get("finish_reason"):
             call = call.model_copy(update={"finish_reason": row["finish_reason"]})

@@ -418,11 +418,16 @@ def test_connected_shared_parent_gates_real_guard_acquisition_and_unknown_replie
         assert options['request'] == args['runtime']
         checked('publication')
 
+    async def staging_publication(**options):
+        assert options['request'] == args['runtime'] and options['staging'] == bindings.plan.staging
+        checked('staging-publication')
+
     async def provider(**options):
         assert options['operator_credentials'] == operator and options['runtime'] == args['runtime']
         return checked('provider', **options)
 
     monkeypatch.setattr(module, 'qualify_runtime_publication', publication)
+    monkeypatch.setattr(module, 'qualify_staging_publication', staging_publication, raising=False)
     monkeypatch.setattr(module, 'observe_shared_pool_provider', provider)
     monkeypatch.setattr(module, 'observe_shared_pool_writers', lambda **options: checked('writers', **options))
     monkeypatch.setattr(module, 'observe_shared_pool_forward_writers', lambda **options: checked('writers', **options))
@@ -465,7 +470,7 @@ def test_connected_shared_parent_gates_real_guard_acquisition_and_unknown_replie
 
     with connect() as api:
         model.busy = bindings.migration.guards[0].namespace
-        for failed in ('publication', 'provider', 'writers', 'processes'):
+        for failed in ('publication', 'staging-publication', 'provider', 'writers', 'processes'):
             failures.add(failed)
             with pytest.raises(ValueError):
                 parent.run_shared_pool_operation(**args, bindings=bindings, api=api, action='install')
@@ -473,7 +478,7 @@ def test_connected_shared_parent_gates_real_guard_acquisition_and_unknown_replie
             assert not model.acquires and not model.held
         result = run(api)
         assert result['status'] == 'pending' and result['phase'] == 'forward-guards'
-        assert seen == {'publication', 'provider', 'writers', 'processes'}
+        assert seen == {'publication', 'staging-publication', 'provider', 'writers', 'processes'}
         assert model.acquires == [bindings.migration.guards[0].namespace]
         manager = args['runtime'].database.manager.retained.request.retained
         state = Path(manager.operation['state_dir']).parent / 'shared-pool-handoff'

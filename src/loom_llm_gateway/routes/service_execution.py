@@ -5,14 +5,23 @@ from __future__ import annotations
 import hashlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import Annotated, Any, Literal, cast
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Header, HTTPException, Request
+from pydantic import Field
+from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.requests import HTTPConnection
 from starlette.responses import Response, StreamingResponse
 
-from loom.db.schema import ServiceExecutionLease, ServiceExecutionTarget, Trial
+from loom.db.schema import (
+    ServiceExecutionLease,
+    ServiceExecutionTarget,
+    TerminusAgentExecution,
+    TerminusAgentRunAttempt,
+    Trial,
+)
 from loom.execution_runtime_contract import ExecutionRuntimePlanV1
 from loom.llm_call_ledger import read_service_execution_llm_calls as read_lease_calls
 from loom.pipeline.artifact_commit import ArtifactCommitError
@@ -47,6 +56,26 @@ UploadTokenHeader = Annotated[str, Header(alias="X-Loom-Upload-Token", min_lengt
 ContentSha256Header = Annotated[
     str, Header(alias="X-Loom-Content-SHA256", pattern=r"^sha256:[0-9a-f]{64}$")
 ]
+
+
+class TerminusReclaimRequestV1(ServiceExecutionPeerV1):
+    schema_version: Literal["loom.service-execution-terminus-reclaim.v1"] = (
+        "loom.service-execution-terminus-reclaim.v1"
+    )
+
+
+class TerminusCheckpointRequestV1(ServiceExecutionPeerV1):
+    schema_version: Literal["loom.service-execution-terminus-checkpoint.v1"] = (
+        "loom.service-execution-terminus-checkpoint.v1"
+    )
+    execution_id: UUID
+    run_attempt_id: UUID
+    episode: int = Field(ge=1)
+    active_role: Literal["student", "teacher"]
+    last_call_ordinal: int = Field(ge=0)
+    last_seq: int = Field(ge=0)
+    tmux_session_id: str | None = Field(default=None, max_length=255)
+    attempt_deadline_wall_clock: datetime
 
 
 def _peer_ip(request: HTTPConnection) -> str | None:
@@ -169,6 +198,97 @@ async def read_service_execution_llm_calls(
             }
     except ServiceExecutionBrokerError as exc:
         raise _broker_http(exc) from exc
+
+
+async def _authorized_attempt_lease(
+    request: Request,
+    identity: ServiceExecutionPeerV1,
+    session: AsyncSession,
+) -> tuple[ServiceExecutionLease, Trial]:
+    if identity.execution_role != "attempt":
+        raise HTTPException(status_code=403, detail="terminus_execution_scope_invalid")
+    try:
+        verified_pod = await _verified_pod(request, identity)
+        lease = await authorize_service_execution_peer(
+            session,
+            peer_ip=_peer_ip(request),
+            verified_pod=verified_pod,
+            identity=identity,
+            purpose="token",
+            lock=True,
+        )
+        trial = await session.get(Trial, lease.trial_id, with_for_update=True)
+        if (
+            trial is None
+            or trial.team_id != lease.team_id
+            or trial.attempt_count != lease.attempt
+            or trial.state not in {"claimed", "running"}
+        ):
+            raise ServiceExecutionBrokerError("execution_generation_fenced")
+        return lease, trial
+    except ServiceExecutionBrokerError as exc:
+        raise _broker_http(exc) from exc
+
+
+@router.post("/terminus/reclaim")
+async def reclaim_service_execution_terminus(
+    payload: TerminusReclaimRequestV1,
+    request: Request,
+) -> dict[str, Any]:
+    from loom_control_plane.terminus_recovery import reclaim_terminus_execution
+
+    async with request.app.state.session_factory() as session:
+        lease, _trial = await _authorized_attempt_lease(request, payload, session)
+        state = await reclaim_terminus_execution(
+            session,
+            trial_id=lease.trial_id,
+            step_id="agent",
+        )
+        await session.commit()
+        return state.model_dump(mode="json")
+
+
+@router.post("/terminus/episode-checkpoints")
+async def checkpoint_service_execution_terminus(
+    payload: TerminusCheckpointRequestV1,
+    request: Request,
+) -> dict[str, Any]:
+    from loom_control_plane.terminus_recovery import write_episode_checkpoint
+
+    deadline = payload.attempt_deadline_wall_clock
+    if deadline.tzinfo is None or deadline.utcoffset() is None:
+        raise HTTPException(status_code=422, detail="attempt_deadline_timezone_required")
+    deadline = deadline.astimezone(UTC)
+    if datetime.now(UTC) >= deadline:
+        raise HTTPException(status_code=409, detail="attempt_deadline_elapsed")
+    async with request.app.state.session_factory() as session:
+        lease, _trial = await _authorized_attempt_lease(request, payload, session)
+        execution = await session.get(TerminusAgentExecution, payload.execution_id)
+        attempt = await session.get(TerminusAgentRunAttempt, payload.run_attempt_id)
+        if (
+            execution is None
+            or execution.trial_id != lease.trial_id
+            or execution.step_id != "agent"
+            or attempt is None
+            or attempt.execution_id != execution.id
+            or attempt.state != "running"
+        ):
+            raise HTTPException(status_code=409, detail="terminus_execution_identity_invalid")
+        row = await write_episode_checkpoint(
+            session,
+            execution_id=execution.id,
+            run_attempt_id=attempt.id,
+            episode=payload.episode,
+            active_role=payload.active_role,
+            last_call_ordinal=payload.last_call_ordinal,
+            last_seq=payload.last_seq,
+            tmux_session_id=payload.tmux_session_id,
+        )
+        if datetime.now(UTC) >= deadline:
+            await session.rollback()
+            raise HTTPException(status_code=409, detail="attempt_deadline_elapsed")
+        await session.commit()
+        return {"id": str(row.id), "version": row.version, "checksum": row.checksum}
 
 
 @router.post("/token")

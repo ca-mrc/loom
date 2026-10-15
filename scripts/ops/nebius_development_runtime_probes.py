@@ -60,7 +60,10 @@ class HTTPSDevelopmentRuntimeProbes(HTTPSDevelopmentRuntimeObserver):
         super().__init__(request=request, api_server=api_server, ssl_context=ssl_context,
             token=token, private_files=private_files)
         try:
-            executable = shutil.which('kubectl')
+            # The protected gateway strips PATH to os.defpath. Include the
+            # standard operator installation directory without trusting ambient
+            # PATH or widening the environment of any child command.
+            executable = shutil.which('kubectl', path='/usr/local/bin' + os.pathsep + os.defpath)
             trust = ''.join(ssl.DER_cert_to_PEM_cert(row) for row in ssl_context.get_ca_certs(binary_form=True))
             if executable is None or not trust:
                 raise ValueError

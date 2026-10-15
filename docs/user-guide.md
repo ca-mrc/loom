@@ -1997,7 +1997,14 @@ authenticated hosted commands or remote catalog lookup.
   `role` on agent steps. Gateway `llm_calls.role` / `requested_model`
   are the call-grain evidence.
 
-  Not supported with `--combinations-json`.
+  Not supported with `--combinations-json`. Those combination shapes stay
+  independent of this one-session Terminus-2 router.
+
+  Nebius hosted execution currently admits only Path A
+  (`student_teacher_student`), and only after the selected runtime profile
+  advertises `terminus2_multi_model_policies`. Paths B and C stay local-worker
+  policies until a later slice. Ordinary single-model Terminus-2 trials are
+  unchanged.
 
   If a worker dies after the agent has already written episode checkpoints,
   Loom **does not** restart Harbor from episode 1 on the same trial

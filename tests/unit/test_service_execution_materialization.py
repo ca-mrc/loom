@@ -18,6 +18,7 @@ from loom.service_execution_materialization import (
     automatic_service_execution_rejections,
     build_service_execution_input_manifest,
     compile_service_execution_plan,
+    execution_selection_rejections,
     load_service_execution_runtime_profile,
     prepare_service_execution_input_manifest,
     service_execution_input_binding,
@@ -88,6 +89,112 @@ def test_continuation_admission_uses_resolved_agent_not_source_default(agent_nam
 def test_default_completion_does_not_restrict_direct_completion():
     reasons = automatic_service_execution_rejections(_task(), _trial(), source_provenance=_provenance())
     assert "agent_continuation_unsupported" not in reasons
+
+
+def _multi_model_trial(
+    policy: str = "student_teacher_student",
+) -> TrialConfig:
+    multi_model: dict[str, object] = {
+        "enabled": True,
+        "policy": policy,
+        "secondary_model": {
+            "provider": "openai",
+            "name": "teacher",
+            "source": "api",
+        },
+    }
+    if policy == "student_teacher_student":
+        multi_model.update(
+            switch_episode=2,
+            return_switch_episode=3,
+            teacher_episodes=1,
+        )
+    elif policy == "beta_mixture":
+        multi_model.update(beta=0.5, mix_seed="seed")
+    else:
+        multi_model.update(step_start=2, step_end=4, mix_seed="seed")
+    return TrialConfig.model_validate({
+        "agent_name": "terminus-2",
+        "agent_model": {
+            "provider": "openai",
+            "name": "student",
+            "source": "api",
+        },
+        "multi_model": multi_model,
+    })
+
+
+def test_automatic_admission_keeps_multi_model_scoped_to_terminus_sts() -> None:
+    sts = _multi_model_trial()
+    reasons = automatic_service_execution_rejections(
+        _task(), sts, source_provenance=_provenance(),
+    )
+    assert "extended_agent_runtime_unsupported" not in reasons
+    assert "terminus2_multi_model_policy_unsupported" not in reasons
+
+    for policy in ("beta_mixture", "student_to_teacher_turns"):
+        reasons = automatic_service_execution_rejections(
+            _task(), _multi_model_trial(policy), source_provenance=_provenance(),
+        )
+        assert "terminus2_multi_model_policy_unsupported" in reasons
+
+    wrong_agent = sts.model_copy(update={"agent_name": "direct-completion"})
+    reasons = automatic_service_execution_rejections(
+        _task(), wrong_agent, source_provenance=_provenance(),
+    )
+    assert "terminus2_multi_model_policy_unsupported" in reasons
+
+
+def test_runtime_profile_explicitly_activates_terminus_sts() -> None:
+    trial = _multi_model_trial()
+    disabled = execution_selection_rejections(
+        _task(), trial, _profile(), source_provenance=_provenance(),
+    )
+    assert "terminus2_multi_model_runtime_unavailable" in disabled
+    enabled_profile = _profile().model_copy(update={
+        "terminus2_multi_model_policies": frozenset({"student_teacher_student"}),
+    })
+    enabled = execution_selection_rejections(
+        _task(), trial, enabled_profile, source_provenance=_provenance(),
+    )
+    assert "terminus2_multi_model_runtime_unavailable" not in enabled
+
+
+def test_sts_admission_keeps_extended_runtime_and_single_model_decoupled() -> None:
+    extra = TrialConfig.model_validate({
+        **_multi_model_trial().model_dump(mode="json"),
+        "extra_mcp_servers": [{"name": "extra", "transport": "http", "url": "https://example.invalid/mcp"}],
+    })
+    reasons = automatic_service_execution_rejections(
+        _task(), extra, source_provenance=_provenance(),
+    )
+    assert "extended_agent_runtime_unsupported" in reasons
+    assert "terminus2_multi_model_policy_unsupported" not in reasons
+
+    single = TrialConfig(
+        agent_name="terminus-2",
+        agent_model={"provider": "openai", "name": "student", "source": "api"},
+    )
+    assert "terminus2_multi_model_policy_unsupported" not in automatic_service_execution_rejections(
+        _task(), single, source_provenance=_provenance(),
+    )
+    assert "terminus2_multi_model_runtime_unavailable" not in execution_selection_rejections(
+        _task(), single, _profile(), source_provenance=_provenance(),
+    )
+
+
+def test_runtime_profile_omits_inert_terminus_sts_capability() -> None:
+    original = _profile().model_dump(mode="json")
+    assert "terminus2_multi_model_policies" not in original
+    loaded = load_service_execution_runtime_profile(json.dumps(original))
+    assert loaded is not None and loaded.terminus2_multi_model_policies == frozenset()
+    assert loaded.model_dump(mode="json") == original
+    enabled = loaded.model_copy(update={
+        "terminus2_multi_model_policies": frozenset({"student_teacher_student"}),
+    })
+    assert enabled.model_dump(mode="json") == {
+        **original, "terminus2_multi_model_policies": ["student_teacher_student"],
+    }
 
 
 @pytest.mark.parametrize("workdir", ["/media/project", "/opt/project", "/root/project"])
