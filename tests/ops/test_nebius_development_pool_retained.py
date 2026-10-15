@@ -120,7 +120,8 @@ def manager_entry(request):
         payload.update(binding=asdict(manager.binding), shared_namespace_uid=manager.shared_namespace_uid,
             deployment=manager.deployment.model_dump(mode='json'))
         applications = payload['deployment']['installation']['applications']
-        schema = '0159' if mode == 'foundation-old-schema' else '0176'
+        schema = ('0159' if mode == 'foundation-old-schema'
+            else '0175' if mode == 'foundation-runtime-build-material-split-schema' else '0176')
         applications['shared']['schema_revision'] = schema
         for release in applications['releases']:
             release['schema_revision'] = schema
@@ -138,6 +139,11 @@ def manager_entry(request):
 
             inputs = load_retained_foundation(RetainedDevelopmentReference.model_validate(reference)).inputs
             payload.update(candidate=copy.deepcopy(inputs.candidate), profile=copy.deepcopy(inputs.profile))
+            if mode == 'foundation-runtime-build-material-split-schema':
+                # The manager has its own database; its migration head is not
+                # the head of the retained shared-dev foundation/application DB.
+                # Publication authenticity is covered separately over HTTPS.
+                payload['candidate']['service_schema_head'] = '0176'
             payload['deployment']['installation']['keyring'] = copy.deepcopy(inputs.keyring)
             payload['deployment']['installation']['registry_prefix'] = inputs.candidate['registry_prefix']
             operation.update(candidate=inputs.candidate['candidate_sha'], source_sha=inputs.candidate['candidate_sha'])
@@ -420,7 +426,7 @@ def test_build_material_refuses_unbound_input_without_emitting_documents(complet
         build_material(request, publisher_cloud, **changes)
 
 
-def runtime_install_request(completed_pool, publisher_cloud):
+def runtime_install_request(completed_pool, publisher_cloud, **changes):
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import rsa
     from scripts.ops.nebius_development_build_cloud import DevelopmentRegistryCloudScope
@@ -430,7 +436,7 @@ def runtime_install_request(completed_pool, publisher_cloud):
     if importlib.util.find_spec(name) is None:
         pytest.fail('connected development runtime installation is missing')
     runtime = importlib.import_module(name)
-    request = database_runtime(completed_pool)
+    request = database_runtime(completed_pool, **changes)
     project = request.foundation.inputs.config['project_id']
     registry = DevelopmentRegistryCloudScope.model_validate({**publisher_cloud.scope, 'project_id': project})
     observer = DevelopmentCollectorCloudScope(tenant_id='tenant-test', region='eu-north1', project_id=project,
@@ -442,6 +448,61 @@ def runtime_install_request(completed_pool, publisher_cloud):
         'kid': observer.key_id, 'iss': observer.account_id, 'sub': observer.account_id}}).encode()
     return runtime, runtime.DevelopmentRuntimeInstallRequest(database=request, collector_scope=observer,
         collector_credential=credential, registry_scope=registry, registry_credential=publisher_cloud.credential)
+
+
+def foundation_publication(completed_pool):
+    from scripts.ops.nebius_development_management_foundation import load_retained_foundation
+    from scripts.ops.nebius_development_runtime_render import DevelopmentRuntimePublication
+
+    from loom_service.environment_management.manager import CandidateBundle
+
+    retained = module().load_retained_pool(reference(module(), completed_pool))
+    foundation = load_retained_foundation(retained.request.retained.inputs.prerequisites.foundation)
+    inputs = foundation.inputs
+    selected = inputs.settings.preflight.publication
+    return DevelopmentRuntimePublication(inputs.settings.preflight.source, selected,
+        CandidateBundle(selected.candidate_id, inputs.candidate, inputs.profile))
+
+
+@pytest.mark.parametrize('published_source', ['0175'], indirect=True)
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material-split-schema'], indirect=True)
+@pytest.mark.parametrize('retained', [False], indirect=True)
+def test_runtime_keeps_separate_database_publications_and_immutable_application_schema(
+        completed_pool, publisher_cloud, published_source):
+    """A newer manager must not force its schema or image onto shared dev."""
+    manager = runtime_publication(completed_pool)
+    data = foundation_publication(completed_pool)
+    assert manager.bundle.candidate['service_schema_head'] == '0176'
+    assert data.bundle.candidate['service_schema_head'] == '0175'
+    runtime, request = runtime_install_request(completed_pool, publisher_cloud,
+        publication=manager, data_publication=data)
+    plan = runtime.prepare_runtime_install(request)
+    job = next(row for row in plan.fixed['database'].values() if row['kind'] == 'Job')
+    config = next(row for row in plan.fixed['database'].values() if row['kind'] == 'ConfigMap')
+    assert json.loads(config['data']['setup.json'])['schema_revision'] == '0175'
+    assert job['spec']['template']['spec']['containers'][0]['image'] == data.bundle.candidate['images']['service']['image_ref']
+    for component, name in [('service', 'loom-service'), ('control_plane', 'loom-control-plane')]:
+        target = plan.targets['Deployment:loom-dev:' + name]
+        assert target['spec']['template']['spec']['containers'][0]['image'] == data.bundle.candidate['images'][component]['image_ref']
+        assert target['spec']['replicas'] == 0
+    management = plan.targets['Deployment:loom-nebius-management-dev:loom-service']
+    assert management['spec']['template']['spec']['containers'][0]['image'] == manager.bundle.candidate['images']['service']['image_ref']
+    actuator = next(row for row in plan.fixed['workloads'].values()
+        if row['kind'] == 'Deployment' and row['metadata']['name'] == 'loom-execution-actuator')
+    assert actuator['spec']['template']['spec']['containers'][0]['image'] == data.bundle.candidate['images']['execution_actuator']['image_ref']
+    application = request.database.manager.deployment.installation.applications
+    assert application.shared.schema_revision == '0175'
+    assert application.runtime.build.binding.recipe.schema_revision == '0175'
+    assert all(row.schema_revision == '0175' for row in application.releases)
+    assert all(path.read_bytes() == raw for path, raw in request.database.foundation.files.items())
+
+
+@pytest.mark.parametrize('published_source', ['0175'], indirect=True)
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material-split-schema'], indirect=True)
+@pytest.mark.parametrize('retained', [False], indirect=True)
+def test_runtime_rejects_manager_image_for_an_older_shared_database(completed_pool, published_source):
+    with pytest.raises(ValueError, match='development runtime database delivery unqualified'):
+        database_runtime(completed_pool)
 
 
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
@@ -746,11 +807,13 @@ def test_runtime_prechild_window_cannot_hide_existing_history_or_another_phase(c
 
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
 @pytest.mark.parametrize('retained', [False], indirect=True)
+@pytest.mark.parametrize('input_version', ['v1', 'v2'])
 def test_runtime_private_entry_binds_source_history_and_separate_material_before_connection(
-        completed_pool, publisher_cloud, monkeypatch):
+        completed_pool, publisher_cloud, monkeypatch, input_version):
     from scripts.ops import nebius_certificates as private_state
 
-    _, request = runtime_install_request(completed_pool, publisher_cloud)
+    extra = {'data_publication': foundation_publication(completed_pool)} if input_version == 'v2' else {}
+    _, request = runtime_install_request(completed_pool, publisher_cloud, **extra)
     name = 'scripts.ops.nebius_development_runtime_entry'
     if importlib.util.find_spec(name) is None:
         pytest.fail('protected development runtime entry is missing')
@@ -768,9 +831,12 @@ def test_runtime_private_entry_binds_source_history_and_separate_material_before
         private_state._write_private(path, raw)
         material[field] = str(path)
     source = root / 'development-runtime-source.json'
-    private_state._atomic_json(source, request.database.manager.publication.source.model_dump(mode='json'))
+    installer_source = request.database.manager.publication.source.model_dump(mode='json')
+    if input_version == 'v2':
+        installer_source = {'source_sha': 'd' * 40, 'source_archive_sha256': 'sha256:' + 'e' * 64}
+    private_state._atomic_json(source, installer_source)
     monkeypatch.setattr(entry, 'SOURCE_RECORD', source)
-    value = {'schema_version': 'loom.nebius-development-runtime-inputs.v1',
+    value = {'schema_version': 'loom.nebius-development-runtime-inputs.' + input_version,
         'retained': request.database.reference.model_dump(mode='json'),
         'publication': request.database.manager.publication.publication.model_dump(mode='json'),
         'candidate': request.database.manager.publication.bundle.candidate,
@@ -778,10 +844,16 @@ def test_runtime_private_entry_binds_source_history_and_separate_material_before
         'collector_scope': request.collector_scope.model_dump(mode='json'),
         'registry_scope': request.registry_scope.model_dump(mode='json'),
         'operator_connection': completed_pool[1]['operator_connection'], **material}
+    if input_version == 'v2':
+        data = extra['data_publication']
+        value.update(publication_source=request.database.manager.publication.source.model_dump(mode='json'),
+            data_runtime={'source': data.source.model_dump(mode='json'),
+                'publication': data.publication.model_dump(mode='json'),
+                'candidate': data.bundle.candidate, 'profile': data.bundle.profile})
     path = root / 'inputs.json'
     private_state._atomic_json(path, value)
     operation = {'schema': 'loom.nebius-development-runtime-operation.v1',
-        'source_sha': request.database.manager.publication.source.source_sha,
+        'source_sha': installer_source['source_sha'],
         'installation_id': manager.binding.installation_id, 'namespace': manager.binding.namespace,
         'operation_id': str(request.database.operation_id), 'inputs_path': str(path),
         'inputs_sha256': hashlib.sha256(path.read_bytes()).hexdigest()}

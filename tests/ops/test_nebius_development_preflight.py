@@ -30,10 +30,12 @@ def module():
 
 
 @pytest.fixture
-def published_source(publication, source_checkout, tmp_path):
+def published_source(publication, source_checkout, tmp_path, request):
     reference, responses, _, _, _ = copy.deepcopy(publication)
     _, revision, archive = source_checkout
     record, private, keyring = inputs(tmp_path)
+    if hasattr(request, 'param'):
+        record['service_schema_head'] = request.param
     record.update(candidate_sha=revision, source_archive_sha256="sha256:" + hashlib.sha256(archive).hexdigest())
     candidate, profile = create_candidate(record, signing_key=private, signing_key_id="publisher", keyring_json=keyring)
     output = io.BytesIO()
