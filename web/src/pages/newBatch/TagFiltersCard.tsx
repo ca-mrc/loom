@@ -3,7 +3,7 @@
  *
  * Renders one labelled checkbox-group per distinct tag key discovered
  * across the selected benchmarks. AND across keys, OR within each
- * key's value list — matches the backend resolver added in PR-2.
+ * key's value list — matches the backend resolver.
  * Empty value lists are skipped at submit so a mid-edit "no values
  * checked under this key" state is a no-op rather than a filter that
  * matches zero rows.

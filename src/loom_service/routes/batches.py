@@ -217,16 +217,6 @@ def _build_service_state_backend(request: Request) -> Any:
     return S3ArtifactsStateBackend(store=store, bucket=settings.artifacts_bucket)
 
 
-_RERUNNABLE_FAILURE_REASONS: frozenset[str] = frozenset(
-    {
-        "gateway_error",
-        "provider_transport_disconnect",
-        "retry_exhausted",
-        "exhausted_retries",
-    }
-)
-
-
 @dataclass(frozen=True)
 class _BatchTrialProjection:
     id: UUID
@@ -2290,7 +2280,6 @@ async def _trial_projections_for_batch(
     batch_id: UUID,
 ) -> list[_BatchTrialProjection]:
     return await _trial_projections_for_batch_ids(session, [batch_id])
-
 
 
 def _empty_trial_summary() -> dict[str, int]:

@@ -755,8 +755,8 @@ loom dev retry <blocked-operation-uuid>
 dispatches the same create request. It is not yet an update command or arbitrary
 source deployment. Reuse the printed idempotency key after a lost response; `wait`
 timeout exits 2 without cancelling the operation. Hosted-target errors never fall
-back to local Compose. No target (or explicit `--environment local`) retains local
-Compose and prints that target. Destroy reads the current generation unless
+back to local Compose. Omitting `--environment` selects local Compose and prints
+that target. Destroy reads the current generation unless
 `--expected-generation` is supplied and prints the exact generation/idempotency-key
 retry command before mutation. Retained destroy is not suspend/resume or data purge.
 Explicit retry retains the runner epoch and all confirmed resource identities;

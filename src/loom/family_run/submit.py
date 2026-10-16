@@ -3,27 +3,22 @@
 Called by the service on POST /batches when the trial_config opts into
 family-run mode. Groups tasks by ``family_key_extractor``, orders each
 family by ``sequencer``, provisions per-family ``state_uri`` via the
-resolved state backend, and returns the (family_key -> ordered task ids)
-mapping so the fanout path can populate ``trials.family_key``.
+resolved state backend, and returns ``FamilySeed`` values so the fanout
+path can populate ``trials.family_key``.
 
-This is a pure orchestration helper - no DB session dependency other
-than an ``add()`` callback. Concrete session wiring lives in
-``loom_service.routes.batches``.
+This orchestration helper has no DB session dependency. Persistence and
+service wiring live in ``loom_service.family_run_seed``.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any
 from uuid import UUID
 
 from loom.family_run.protocols import TaskLike
 from loom.family_run.registry import resolve_plugin
 from loom.family_run.spec import ResolvedFamilyRunSpec
-
-
-class _Adder(Protocol):
-    def __call__(self, row: Any) -> None: ...
 
 
 @dataclass(frozen=True)
