@@ -215,6 +215,31 @@ def test_guest_prerequisites_are_checked_before_admission(section, change, reaso
     assert reason in reasons
 
 
+@pytest.mark.parametrize("guest", [True, False], ids=["guest-rejected", "container-supported"])
+def test_resolved_image_entrypoint_is_rejected_only_for_guest_before_compilation(guest):
+    task, trial, profile = _guest_inputs("nested_docker")
+    task = task.model_copy(update={"environment": task.environment.model_copy(update={
+        "image_entrypoint": False, "entrypoint": ("/entrypoint.sh",),
+        **({"execution_requirements": None} if not guest else {}),
+    })})
+    if not guest:
+        trial = trial.model_copy(update={"isolation": "container"})
+    reasons = automatic_service_execution_rejections(
+        task, trial, source_provenance=_provenance(),
+        supported_capabilities=profile.supported_guest_capabilities,
+    )
+    if guest:
+        assert reasons == ("guest_image_entrypoint_unsupported",)
+        with pytest.raises(ValueError, match="guest_image_entrypoint_unsupported"):
+            _compile(task, trial, profile)
+    else:
+        assert not reasons
+        plan = _compile(task, trial, profile)
+        sandbox = next(sidecar for sidecar in plan.sidecars if sidecar.private_sandbox)
+        assert sandbox.argv[:2] == ("/entrypoint.sh", "/loom/bin/loom-sandbox-runtime")
+        assert sandbox.guest_execution is None
+
+
 def test_guest_requires_terminus_and_external_requirements_remain_rejected():
     task, trial, profile = _guest_inputs("nested_docker", "external_cluster")
     reasons = automatic_service_execution_rejections(task, trial.model_copy(update={

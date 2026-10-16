@@ -24,6 +24,7 @@ var (
 	keyID             = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 	envName           = regexp.MustCompile(`^[A-Z_][A-Z0-9_]{0,127}$`)
 	secretEnv         = regexp.MustCompile(`(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|KUBECONFIG)`)
+	publicFingerprint = regexp.MustCompile(`^(?:[A-Fa-f0-9]{40}|[A-Fa-f0-9]{64})$`)
 	workspacePath     = regexp.MustCompile(`^/workspace(?:/[-A-Za-z0-9._]+)*$`)
 	probePath         = regexp.MustCompile(`^/[ -~]*$`)
 	materializationID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
@@ -629,7 +630,7 @@ func (p phase) validate() error {
 		return fmt.Errorf("invalid %s environment", p.Role)
 	}
 	for name, value := range p.Environment {
-		if !envName.MatchString(name) || secretEnv.MatchString(name) || strings.ContainsRune(value, '\x00') || len(value) > 4096 {
+		if !validEnvironmentEntry(name, value) {
 			return fmt.Errorf("invalid %s environment", p.Role)
 		}
 	}
@@ -701,7 +702,7 @@ func (s sidecar) validate(known map[string]bool) error {
 		}
 	}
 	for name, value := range s.Environment {
-		if !envName.MatchString(name) || secretEnv.MatchString(name) || strings.ContainsRune(value, '\x00') || len(value) > 4096 {
+		if !validEnvironmentEntry(name, value) {
 			return fmt.Errorf("invalid sidecar environment")
 		}
 	}
@@ -709,6 +710,11 @@ func (s sidecar) validate(known map[string]bool) error {
 		return err
 	}
 	return s.ReadinessProbe.validate()
+}
+
+func validEnvironmentEntry(name, value string) bool {
+	public := name == "GPG_KEY" && publicFingerprint.MatchString(value)
+	return envName.MatchString(name) && (!secretEnv.MatchString(name) || public) && !strings.ContainsRune(value, '\x00') && len(value) <= 4096
 }
 
 func (p probe) validate() error {

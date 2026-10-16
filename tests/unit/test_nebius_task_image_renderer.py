@@ -243,7 +243,7 @@ def test_build_commands_cover_each_component_and_set_limits_before_rootlesskit(i
         and environment["DOCKER_CONFIG"] == "/scratch/docker-config"
     )
     assert "--oci-worker-no-process-sandbox" in environment["BUILDKITD_FLAGS"]
-    assert "--oci-worker-snapshotter=overlayfs" in environment["BUILDKITD_FLAGS"]
+    assert "--oci-worker-snapshotter=native" in environment["BUILDKITD_FLAGS"]
     assert "/var/run/loom-task-build" not in script
     assert not any(flag in script for flag in ("--secret", "--ssh", "push=true", "--allow"))
     assert '"loom_task_image_stage":"solve"' in script
@@ -262,8 +262,8 @@ def test_build_script_stage_markers_include_duration_shell(inputs) -> None:
     )
 
 
-def test_buildkit_snapshotter_native_rollback(inputs) -> None:
-    inputs["config"] = replace(inputs["config"], snapshotter="native")
+def test_buildkit_snapshotter_overlayfs_is_explicit_opt_in(inputs) -> None:
+    inputs["config"] = replace(inputs["config"], snapshotter="overlayfs")
     _, job = render_task_image_job(**inputs)
     builder = next(
         container
@@ -271,8 +271,23 @@ def test_buildkit_snapshotter_native_rollback(inputs) -> None:
         if container["name"] == "build"
     )
     environment = {entry["name"]: entry["value"] for entry in builder["env"]}
-    assert "--oci-worker-snapshotter=native" in environment["BUILDKITD_FLAGS"]
-    assert "--oci-worker-snapshotter=overlayfs" not in environment["BUILDKITD_FLAGS"]
+    assert "--oci-worker-snapshotter=overlayfs" in environment["BUILDKITD_FLAGS"]
+    assert "--oci-worker-snapshotter=native" not in environment["BUILDKITD_FLAGS"]
+
+
+def test_installed_task_image_settings_default_to_compatible_snapshotter() -> None:
+    from loom_execution_actuator.task_image_settings import NativeTaskImageSettings
+
+    settings = NativeTaskImageSettings(
+        namespace="task-builds",
+        service_image="registry.example/service@sha256:" + "a" * 64,
+        storage_endpoint="https://storage.example",
+        storage_region="eu-north1",
+        source_bucket="task-source",
+        registry_repository="registry.example/tasks",
+    )
+    assert settings.job_config().snapshotter == "native"
+    assert settings.model_copy(update={"snapshotter": "overlayfs"}).job_config().snapshotter == "overlayfs"
 
 
 def test_task_image_job_config_rejects_unknown_snapshotter() -> None:

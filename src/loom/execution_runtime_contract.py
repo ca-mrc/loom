@@ -30,14 +30,13 @@ from loom.execution_contract import (
 from loom.execution_image_admission import ExecutionImageAdmissionBundleV1
 from loom.execution_requirements import ALL_GUEST_EXECUTION_CAPABILITIES, GuestExecutionCapability
 from loom.models.networking import NetworkPolicy, TaskHttpEgress, WebAllowlist, hosted_http_egress
+from loom.runtime_environment import MAX_ENV_VALUE_BYTES, validate_runtime_environment
 from loom.sandbox_identity import SandboxIdentityV1
 
 _DIGEST_REF = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _CANDIDATE = re.compile(r"^[0-9a-f]{40}$")
-_ENV_NAME = re.compile(r"^[A-Z_][A-Z0-9_]{0,127}$")
 _ROLE_NAME = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
-_SECRET_ENV = re.compile(r"(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|KUBECONFIG)")
 _NETWORK_POLICY_ADAPTER: TypeAdapter[NetworkPolicy] = TypeAdapter(NetworkPolicy)
 
 
@@ -131,7 +130,7 @@ class NodeResourceAllocationV1(_Strict):
 
 class ProcessPhaseV1(_Strict):
     # Shared by plan validation and compiler transport selection.
-    MAX_ENV_VALUE_BYTES: ClassVar[int] = 4096
+    MAX_ENV_VALUE_BYTES: ClassVar[int] = MAX_ENV_VALUE_BYTES
     role: Literal["setup", "agent", "verifier"]
     argv: tuple[str, ...] = Field(min_length=1, max_length=128)
     working_directory: str = Field(pattern=r"^(?:/app|/workspace(?:/[-A-Za-z0-9._]+)*)$")
@@ -157,14 +156,7 @@ class ProcessPhaseV1(_Strict):
     @field_validator("environment")
     @classmethod
     def _environment_is_nonsecret(cls, value: dict[str, str]) -> dict[str, str]:
-        if len(value) > 64:
-            raise ValueError("process environment exceeds 64 entries")
-        for name, item in value.items():
-            if _ENV_NAME.fullmatch(name) is None or _SECRET_ENV.search(name):
-                raise ValueError("process environment contains a forbidden name")
-            if "\x00" in item or len(item.encode("utf-8")) > cls.MAX_ENV_VALUE_BYTES:
-                raise ValueError("process environment value is invalid")
-        return value
+        return validate_runtime_environment(value)
 
 
 class ProbeV1(_Strict):

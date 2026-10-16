@@ -324,13 +324,14 @@ them. Recipe or release changes get a new cache key, and invalid archives fall
 back to normal pinned-image preparation. The lazy per-fixture resolver remains
 available for local tests.
 
-Both integration lanes also prepare selected `postgres:16` and
+Both integration lanes also prepare selected `postgres:16`, `postgres:17` and
 `python:3.11-slim` fixtures before pytest, following literal references through
 fixture imports and parent conftests. Cached images are reused. Cold pulls use
 the configured Docker Hub mirror, have a 180-second preparation deadline and
 fail the job visibly without a retry loop or alternate image. This keeps network
 downloads outside the existing 60-second test setup budget; individual test
-deadlines, fixture references and coverage remain unchanged.
+deadlines, fixture references and coverage remain unchanged. Parameterized image
+matrices declare literal references so every selected version is prepared.
 
 The final repository gate checks individual lane results directly. Coverage
 aggregation runners are allocated only when optional Python coverage is requested.
