@@ -19,7 +19,7 @@ import ssl
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import PostgresDsn
 from scripts.ops import nebius_certificates as private_state
@@ -51,14 +51,18 @@ from scripts.ops.nebius_pool_startup_database import (
 
 from loom_service.environment_management.candidates import _json
 
+if TYPE_CHECKING:
+    from scripts.ops.nebius_pool_preactivation_operation import CompletedPreactivationCatalog
+
 
 class HTTPSDevelopmentRuntimeProbes(HTTPSDevelopmentRuntimeObserver):
     def __init__(self, *, request: DevelopmentRuntimeInstallRequest, api_server: str,
-                 ssl_context: ssl.SSLContext, token: str, private_files: dict[Path, bytes] | None = None):
+                 ssl_context: ssl.SSLContext, token: str, private_files: dict[Path, bytes] | None = None,
+                 preactivation: CompletedPreactivationCatalog | None = None):
         if not token:
             raise ValueError('development runtime probe credential missing')
         super().__init__(request=request, api_server=api_server, ssl_context=ssl_context,
-            token=token, private_files=private_files)
+            token=token, private_files=private_files, preactivation=preactivation)
         try:
             # The protected gateway strips PATH to os.defpath. Include the
             # standard operator installation directory without trusting ambient
@@ -156,7 +160,8 @@ class HTTPSDevelopmentRuntimeProbes(HTTPSDevelopmentRuntimeObserver):
     def qualify_closed_pool(self) -> None:
         """One fixed READ ONLY query, bracketed by retained database qualification."""
         try:
-            spec = self.request.database.manager.retained.request.registration.spec
+            spec = (self.request.database.manager.retained.request.registration.spec if self.preactivation is None
+                else self.preactivation.retained.registration.spec)
             before = self._database(self.manager.binding.namespace)
             report = self._exec(before, 'loom-postgres', ['psql', '-X', '-qAt', '-v', 'ON_ERROR_STOP=1',
                 '-U', 'postgres', '-d', 'loom', '-c', pool_startup_closed_sql(spec)])
@@ -172,6 +177,8 @@ class HTTPSDevelopmentRuntimeProbes(HTTPSDevelopmentRuntimeObserver):
     def _running(self, key: str, state_dir: Path) -> tuple[PoolSettingsComponent, dict[str, Any], dict[str, Any]]:
         """Resolve only a regenerated started target through anchored live history."""
         desired = copy.deepcopy({**self.plan.targets, **self.plan.fixed['workloads']}[key])
+        if self.preactivation is not None and key == _key(self.preactivation.resources.manager):
+            desired = copy.deepcopy(self.preactivation.resources.manager)
         if desired['kind'] != 'Deployment':
             raise ValueError
         namespace, name = desired['metadata']['namespace'], desired['metadata']['name']
@@ -210,7 +217,8 @@ class HTTPSDevelopmentRuntimeProbes(HTTPSDevelopmentRuntimeObserver):
         """Challenge real typed settings/catalog/token readers; never return secrets."""
         try:
             component, workload, before = self._running(key, state_dir)
-            spec = self.request.database.manager.retained.request.registration.spec
+            spec = (self.request.database.manager.retained.request.registration.spec if self.preactivation is None
+                else self.preactivation.retained.registration.spec)
             participant = retained_development_participant(self.request.database.manager.retained.request)
             machine, = (row for row in spec.machines
                 if row.participant_id == participant.participant_id and row.workload_scope == 'environment')

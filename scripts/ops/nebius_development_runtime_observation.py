@@ -36,6 +36,7 @@ from scripts.ops.nebius_management_transport import ManagementKubernetesTranspor
 from loom_service.environment_management.candidates import _json
 
 if TYPE_CHECKING:
+    from scripts.ops.nebius_pool_preactivation_operation import CompletedPreactivationCatalog
     from scripts.ops.nebius_shared_pool_handoff_live import SharedPoolGuardBindings
 
 _READ_PATHS = {**_PATHS, 'Namespace': ('v1', 'namespaces', True), 'Service': ('v1', 'services', False),
@@ -46,9 +47,23 @@ _READ_PATHS = {**_PATHS, 'Namespace': ('v1', 'namespaces', True), 'Service': ('v
 class HTTPSDevelopmentRuntimeObserver(ManagementKubernetesTransport):
     def __init__(self, *, request: DevelopmentRuntimeInstallRequest, api_server: str,
                  ssl_context: ssl.SSLContext, token: str | None = None,
-                 private_files: dict[Path, bytes] | None = None):
+                 private_files: dict[Path, bytes] | None = None,
+                 preactivation: CompletedPreactivationCatalog | None = None):
         self.plan = prepare_runtime_install(request)
         self.request, self.private_files = copy.deepcopy(request), dict(private_files or {})
+        self.preactivation = copy.deepcopy(preactivation)
+        if preactivation is not None:
+            from scripts.ops.nebius_pool_preactivation_operation import load_completed_preactivation
+
+            selected = load_completed_preactivation(runtime=preactivation.retained.inputs.runtime,
+                reference=preactivation.retained.reference, repo_root=Path(__file__).resolve().parents[2])
+            if selected != preactivation or selected.retained.runtime != self.request:
+                raise ValueError('development runtime catalog ancestry differs')
+            for path, raw in selected.files.items():
+                if path in self.private_files and self.private_files[path] != raw:
+                    raise ValueError('development runtime catalog evidence differs')
+                self.private_files[path] = raw
+        self._preactivation_origin = copy.deepcopy(self.preactivation)
         retained = request.database.manager.retained.request.retained
         if api_server.rstrip('/') != request.database.foundation.inputs.config['kubernetes_api_server'].rstrip('/'):
             raise ValueError('development runtime observation connection differs')
@@ -75,6 +90,8 @@ class HTTPSDevelopmentRuntimeObserver(ManagementKubernetesTransport):
                 super().__exit__(*args)
 
     def _private_inputs(self) -> None:
+        if self.preactivation != self._preactivation_origin:
+            raise ValueError('development runtime catalog selection changed')
         database = self.request.database
         files = (*database.manager.retained.files.items(), *database.foundation.files.items(), *self.private_files.items())
         # Exact retained bytes also bound the read allocation. The reader's
@@ -114,6 +131,11 @@ class HTTPSDevelopmentRuntimeObserver(ManagementKubernetesTransport):
             record, choices, _ = view
             if _expected_record is not None and record != _expected_record:
                 raise ValueError
+            if self.preactivation is not None:
+                if _prechild_phase is not None or any(item['status'] != 'complete' for item in record['phases'].values()):
+                    raise ValueError
+                catalog = self.preactivation.resources
+                choices = {**choices, _key(catalog.manager): (catalog.manager,), _key(catalog.catalog): (catalog.catalog,)}
             shared_view = None
             if _shared_handoff is not None:
                 from scripts.ops.nebius_shared_pool_runtime_observation import (
@@ -122,12 +144,14 @@ class HTTPSDevelopmentRuntimeObserver(ManagementKubernetesTransport):
 
                 completed = _shared_handoff.plan.development.runtime
                 if (self.request != completed.request or self.plan != completed.plan
-                        or state_dir != completed.state_dir or _prechild_phase is not None):
+                        or state_dir != completed.state_dir or _prechild_phase is not None
+                        or self.preactivation != _shared_handoff.plan.preactivation):
                     raise ValueError
                 shared_state = Path(manager.operation['state_dir']).parent / 'shared-pool-handoff'
                 shared_view = shared_runtime_view(bindings=_shared_handoff, state_dir=shared_state)
+                predecessors = _shared_handoff.plan.effective_runtime_resources
                 for key in choices.keys() & shared_view[2].keys():
-                    predecessor = completed.resources[key]
+                    predecessor = predecessors[key]
                     if len(choices[key]) != 1 or not _matches(choices[key][0], predecessor, _uid(predecessor)):
                         raise ValueError
                 choices = {**choices, **shared_view[2]}
