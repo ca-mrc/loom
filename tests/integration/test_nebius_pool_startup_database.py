@@ -102,8 +102,12 @@ async def test_preactivation_catalog_rejects_any_previous_work_or_authority_drif
     refresh, url = await preactivation_setup(sessions)
     if damage in {'waiting', 'reserved', 'neighbor-work', 'terminal-work'}:
         participant = refresh.before.participants[1 if damage == 'neighbor-work' else 0]
-        await reserved(sessions, refresh, participant,
-            phase='waiting' if damage == 'waiting' else 'cancelled_unstarted' if damage == 'terminal-work' else 'reserved')
+        identity = await reserved(sessions, refresh, participant,
+            phase='waiting' if damage in {'waiting', 'terminal-work'} else 'reserved')
+        if damage == 'terminal-work':
+            async with sessions.begin() as session:
+                await session.execute(update(NebiusPoolRequest).where(NebiusPoolRequest.request_id == identity)
+                    .values(phase='cancelled_unstarted'))
     else:
         async with sessions.begin() as session:
             if damage in {'global', 'fenced', 'binding'}:
