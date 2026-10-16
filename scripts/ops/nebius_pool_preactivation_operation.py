@@ -297,6 +297,7 @@ class _ScopedCatalog:
         self.api.verify_identity(binding)
 
     def get_resource(self, document: dict[str, Any]) -> dict[str, Any] | None:
+        self.check()
         return self.api.get_resource(document)
 
     def default_resource(self, document: dict[str, Any]) -> dict[str, Any]:
@@ -326,8 +327,10 @@ class _ScopedManager:
     def qualify(self) -> None:
         self.check()
         self.api.qualify()
+        self.check()
 
     def read_workload(self, key: str) -> dict[str, Any]:
+        self.check()
         return self.api.read_workload(key)
 
     def preview_workload(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> dict[str, Any] | None:
@@ -370,6 +373,7 @@ def run_preactivation_catalog(*, retained: RetainedPreactivationCatalog, api: Pr
         identity = {'schema': 'loom.pool-preactivation-operation.v1', 'reference': frozen.reference.model_dump(mode='json')}
         record: dict[str, Any] = {**identity, 'status': 'pending',
             'phases': {phase: 'prepared' for phase in _CHILDREN}, 'files': {}}
+        qualification_failed = False
 
         def roots() -> None:
             if retained != frozen:
@@ -380,6 +384,8 @@ def run_preactivation_catalog(*, retained: RetainedPreactivationCatalog, api: Pr
                     raise ValueError
 
         def local() -> None:
+            if qualification_failed:
+                raise ValueError
             roots()
             if _json(_read(marker)) != identity or _json(_read(path)) != record:
                 raise ValueError
@@ -388,9 +394,24 @@ def run_preactivation_catalog(*, retained: RetainedPreactivationCatalog, api: Pr
                     raise ValueError
 
         def scope(phase: str) -> None:
+            nonlocal qualification_failed
             local()
-            api.qualify(copy.deepcopy(frozen), phase)
-            local()
+            # A child legitimately advances its journal between callbacks, but
+            # a remote qualification must not change the evidence authorizing
+            # the next effect. Pin active (not just completed) journals across
+            # that boundary. Latch failure so a child's uncertain-write catch
+            # cannot read back and reconstruct the damaged journal afterward.
+            active = {state / suffix: _read(state / suffix)
+                for name, suffix in _CHILDREN.items()
+                if record['phases'][name] == 'intent'
+                and ((state / suffix).exists() or (state / suffix).is_symlink())}
+            try:
+                api.qualify(copy.deepcopy(frozen), phase)
+                _unchanged(active)
+                local()
+            except Exception:
+                qualification_failed = True
+                raise
 
         def manager_ready() -> None:
             local()
