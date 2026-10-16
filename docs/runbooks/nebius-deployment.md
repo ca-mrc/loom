@@ -752,8 +752,8 @@ composition must be connected and qualified first.
 
 ### Shared-pool handoff delivery
 
-The separate `shared-pool-preflight`, `shared-pool-install` and
-`shared-pool-recover` actions use the protected `nebius-rollout` workflow,
+The separate `shared-pool-preflight`, `shared-pool-install`,
+`shared-pool-recover` and `shared-pool-refresh-catalog` actions use the protected `nebius-rollout` workflow,
 `NEBIUS_SHARED_POOL_SSH_KEY` and `NEBIUS_SHARED_POOL_OPERATION_JSON`. They do not
 extend the CLOSED-runtime key. They are source-implemented delivery routes, not
 evidence that a grant or multi-owner environment is installed. Complete ordinary
@@ -778,6 +778,44 @@ anchors. Once a handoff has anchored its intent, an incompatible preparation is
 rejected: resume or recover the anchored operation rather than selecting new
 inputs. A new directory does not bypass live preflight, writer, drain, publication
 or recovery qualification, and is not a second independent handoff.
+
+If the captured staging release also differs from the catalog frozen at dev
+registration, a new input directory alone is insufficient. Before handoff:
+
+1. Retain the original completed runtime and registration. From the integrated
+   tooling, call `retain_preactivation_catalog` in
+   `scripts.ops.nebius_pool_preactivation_operation` with that runtime reference,
+   the exact current staging-source envelope and a new operation UUID. This
+   creates private immutable inputs only; it does not contact Kubernetes or SQL.
+   For a subsequent refresh, explicitly select the previous completed
+   `PreactivationReference` as `predecessor`.
+2. In the new handoff preparation, use private input schema
+   `loom.nebius-shared-pool-inputs.v2` and its `preactivation` reference
+   (`operation_id`, `inputs_sha256`). Keep `runtime` and the shared operation's
+   registered `operation_id` unchanged. The staging envelope must be exactly the
+   one retained by preactivation. Build and install the exact integrated-source,
+   digest-bound shared tooling grant as above.
+3. Dispatch protected `shared-pool-refresh-catalog`. Its separate intake accepts
+   the prepared selector; ordinary handoff intake still requires a completed
+   selector. The operation requalifies publication and current staging, proves
+   the pool is never-used and CLOSED, and proves the gateway has no live Pods.
+   Under the common handoff lock it creates the immutable catalog, changes only
+   the manager's catalog mount, proves actual manager readiness/settings, and
+   commits the fixed CLOSED registry successor. It does not stop staging,
+   acquire an execution guard, change credentials, open admission or migrate
+   the installed database schema.
+4. `catalog_pending` means the exact manager rollout is not yet ready.
+   `shared_pool_catalog_refreshed` means the catalog transition completed, not
+   activation: both admission and writer-migration flags remain false. Preserve
+   all child receipts and the dispatch anchor. An uncertain SQL result is read
+   back, never blindly retried. Missing or damaged dispatched history blocks
+   further effects; do not delete it or create another operation to bypass it.
+5. Run fresh protected `shared-pool-preflight`, then the existing bounded handoff
+   and acceptance procedure. Handoff, recovery and the first ordinary participant
+   release consume the same completed effective catalog without rewriting the
+   original installation. If staging advances again, retain another qualified
+   successor while still CLOSED; never weaken catalog equality or roll staging
+   backward to make an earlier preparation pass.
 
 The `loom.nebius-shared-pool-inputs.v1` private document contains:
 
