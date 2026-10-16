@@ -340,3 +340,7 @@ jobs:
     - name: Remove only experiment resources
       if: always()
       run: if [[ -n "${PROBE_PYTHON:-}" && -d "$PROBE_ROOT" ]]; then "$PROBE_PYTHON" experiments/candidate_ab/run.py cleanup; fi
+    permissions:
+      contents: read
+      actions: read
+      checks: read
