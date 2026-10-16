@@ -43,7 +43,7 @@ from scripts.ops.nebius_shared_pool_api import (
     HTTPSSharedPoolOperationAPI,
     SharedPoolPhaseEvidence,
 )
-from scripts.ops.nebius_shared_pool_command import validate_operation
+from scripts.ops.nebius_shared_pool_command import operator_home, validate_operation
 from scripts.ops.nebius_shared_pool_handoff import prepare_shared_pool_handoff
 from scripts.ops.nebius_shared_pool_handoff_live import SharedPoolGuardBindings
 from scripts.ops.nebius_shared_pool_operation import (
@@ -191,7 +191,7 @@ def _load_inputs(operation: dict[str, Any], *, source_record: Path, include_oper
         if (source.source_sha != operation['source_sha']
                 or (operation['installation_id'], operation['namespace'], operation['operation_id']) != (
                     manager.binding.installation_id, manager.binding.namespace, str(registration.spec.operation_id))
-                or path.parents[4] != Path(manager.operation['inputs_path']).parents[3]
+                or operator_home(operation) != Path(manager.operation['inputs_path']).parents[3]
                 or inputs.operator_connection.endpoint != runtime.database.foundation.inputs.config['kubernetes_api_server'].rstrip('/')):
             raise ValueError
         paths = (inputs.staging_observation_file, inputs.operator_connection.ca_file, inputs.operator_connection.credentials_file)

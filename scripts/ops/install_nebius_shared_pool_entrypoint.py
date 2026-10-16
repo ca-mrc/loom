@@ -25,6 +25,7 @@ from scripts.ops.install_nebius_management_entrypoint import (
 from scripts.ops.nebius_shared_pool_command import (
     operation_root,
     operator_home,
+    pool_root,
 )
 from scripts.ops.nebius_shared_pool_delivery_gateway import (
     COMMANDS,
@@ -74,6 +75,7 @@ def install(content: bytes, *, expected_sha256: str, public_key: str, apply: boo
     try:
         files, operation = unpack_bundle(content)
         root = operation_root(operation)
+        pool = pool_root(operation)
         owner = operator_home(operation) / ".loom"
         if owner.name != ".loom":
             raise ValueError()
@@ -109,7 +111,8 @@ def install(content: bytes, *, expected_sha256: str, public_key: str, apply: boo
         _read(lock_path, 1)
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         previous = check_keys()
-        for directory in (root.parent.parent, root.parent, root,
+        preparations = (root.parent, root) if root != pool else ()
+        for directory in (pool.parent.parent, pool.parent, pool, *preparations,
                 root / "authority", destination, destination / "scripts", destination / "scripts/ops"):
             _directory(directory, create=True)
             _sync(directory.parent)
