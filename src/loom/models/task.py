@@ -143,6 +143,8 @@ class EnvironmentConfig(BaseModel):
         default=None, exclude_if=lambda value: value is None,
     )
     user: str | int = "agent"
+    # Authored / Harbor-projected menu. Override resolution no longer uses
+    # this list; batches may select any hosted kind on ``baseline``.
     network_policies_supported: frozenset[NetworkPolicyKind] = frozenset({"public"})
     baseline_network_policy: NetworkPolicy = Public()
     skills_dir: PurePosixPath | None = None

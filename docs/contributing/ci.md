@@ -101,6 +101,16 @@ It refuses local, self-hosted, non-Linux, or remote-Docker execution.
 The separate image BuildKit containers use `config/ci-buildkit.toml` by default;
 an existing readable `/etc/buildkit/loom-ci.toml` retains precedence and is not
 modified. Both pull paths retain every original image reference and digest.
+
+The pinned `setup-uv` action uses v10.0.1, which handles transient manifest
+transport failures with at most three attempts and stops reading the version
+list after the selected version. This addresses the observed single five-second manifest
+lookup failure before Python or pytest starts. uv remains 0.11.26 with the
+existing platform checksums; locked installs and PR/merge-group cache-write
+restrictions are unchanged. `prune-cache: true` explicitly preserves the previous
+cache-pruning behavior. A persistent manifest error still fails setup; this is
+not a workflow or failed-test rerun policy.
+
 The public Google mirror serves cached Docker Hub images over TLS, without
 credentials, publication authority, or shared cache writes. Digest-pinned pulls
 still verify the requested content; existing tag-only fixtures remain tag-only.

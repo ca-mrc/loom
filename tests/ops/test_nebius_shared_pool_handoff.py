@@ -328,7 +328,7 @@ def shared_operation(shared_runtime, staging_history, staging_observation, compl
     return args, bound
 
 
-def _shared_entry_inputs(args, bindings):
+def _shared_entry_inputs(args, bindings, *, preparation_id=None):
     """Retain genuine runtime input/source and a separately captured shared operation."""
     import base64
     import json
@@ -376,6 +376,8 @@ def _shared_entry_inputs(args, bindings):
         'inputs_path': str(root / 'inputs.json'), 'inputs_sha256': hashlib.sha256((root / 'inputs.json').read_bytes()).hexdigest()}
     private_state._atomic_json(root / 'operation.json', runtime_operation)
     shared_root = owner / '.loom/nebius-shared-pool' / manager.binding.installation_id / str(bindings.migration.registration.spec.operation_id)
+    if preparation_id is not None:
+        shared_root = shared_root / 'preparations' / preparation_id
     shared_root.mkdir(parents=True, mode=0o700)
     private_state._atomic_json(shared_root / 'shared-pool-source.json', source)
     private_state._write_private(shared_root / 'operator-ca.pem', runtime.database.foundation.bootstrap['material']['loom-platform-db']['ca.crt'].encode())
@@ -397,16 +399,19 @@ def _shared_entry_inputs(args, bindings):
         'operation_id': str(bindings.migration.registration.spec.operation_id),
         'inputs_path': str(shared_root / 'inputs.json'),
         'inputs_sha256': hashlib.sha256((shared_root / 'inputs.json').read_bytes()).hexdigest()}
+    if preparation_id is not None:
+        operation.update(schema='loom.nebius-shared-pool-operation.v2', preparation_id=preparation_id)
     private_state._atomic_json(shared_root / 'operation.json', operation)
     return shared_root, operation, inputs, root, retired
 
 
-def test_shared_tooling_can_advance_without_reinstalling_runtime(shared_operation, monkeypatch):
+@pytest.mark.parametrize('preparation_id', [None, '335c9f82-6f9a-43de-ab0c-a312034b9efe'])
+def test_shared_tooling_can_advance_without_reinstalling_runtime(shared_operation, monkeypatch, preparation_id):
     from scripts.ops import nebius_certificates as private_state
     from scripts.ops import nebius_shared_pool_entry as entry
 
     args, bindings = shared_operation
-    root, operation, _, _, _ = _shared_entry_inputs(args, bindings)
+    root, operation, _, _, _ = _shared_entry_inputs(args, bindings, preparation_id=preparation_id)
     operation['source_sha'] = 'e' * 40
     private_state._atomic_json(root / 'shared-pool-source.json',
         {'source_sha': operation['source_sha'], 'source_archive_sha256': 'sha256:' + 'd' * 64})
@@ -455,6 +460,55 @@ def test_shared_handoff_preserves_independent_staging_images(shared_runtime, sta
             changed = changed['observation']
         with pytest.raises(ValueError, match='shared pool handoff intent unqualified'):
             prepare_shared_pool_handoff(runtime=runtime, observation=changed, legacy=staging_history, repo_root=ROOT)
+
+
+@pytest.mark.timeout(180)
+def test_shared_preparation_preserves_history_and_cannot_replace_anchored_handoff(shared_operation):
+    """Distinct immutable inputs share the real parent lock and intent anchor."""
+    from scripts.ops import nebius_certificates as private_state
+    from scripts.ops import nebius_shared_pool_entry as entry
+    from scripts.ops import nebius_shared_pool_operation as parent
+
+    args, bindings = shared_operation
+    root, operation, inputs, _, _ = _shared_entry_inputs(args, bindings)
+    original = {path: path.read_bytes() for path in root.iterdir() if path.is_file()}
+    preparation = '335c9f82-6f9a-43de-ab0c-a312034b9efe'
+    refreshed = root / 'preparations' / preparation
+    private_state._private_directory(refreshed.parent)
+    private_state._private_directory(refreshed)
+    # A newly observed Secret version is a genuinely different bound intent.
+    inputs['development_guard']['database']['credential_resource_version'] = '502'
+    private_state._atomic_json(refreshed / 'inputs.json', inputs)
+    private_state._write_private(refreshed / 'shared-pool-source.json', original[root / 'shared-pool-source.json'])
+    selected = operation | {'schema': 'loom.nebius-shared-pool-operation.v2', 'preparation_id': preparation,
+        'inputs_path': str(refreshed / 'inputs.json'),
+        'inputs_sha256': hashlib.sha256((refreshed / 'inputs.json').read_bytes()).hexdigest()}
+    private_state._atomic_json(refreshed / 'operation.json', selected)
+    current = entry._load_inputs(selected, source_record=refreshed / 'shared-pool-source.json', include_operator=True)
+    assert current.bindings.input_digest != bindings.input_digest
+    assert current.runtime == args['runtime']
+    assert all(path.read_bytes() == raw for path, raw in original.items())
+
+    manager = args['runtime'].database.manager.retained.request.retained
+    anchor = Path(manager.operation['anchor_dir'])
+    state = Path(manager.operation['state_dir']).parent / 'shared-pool-handoff'
+    api = SharedPhaseAPI(parent)
+    api.block = 'forward-guards'
+    options = dict(**args, bindings=current.bindings, api=api)
+    assert parent.run_shared_pool_operation(**options, action='preflight')['status'] == 'shared_pool_preflight_qualified'
+    assert not (anchor / 'shared-pool-handoff.json').exists()
+    with private_state._locked_state(anchor / 'shared-pool-handoff-lock'):
+        with pytest.raises(ValueError, match='shared pool operation unconfirmed'):
+            parent.run_shared_pool_operation(**options, action='install')
+    assert not state.exists() and not api.events
+    assert parent.run_shared_pool_operation(**args, bindings=bindings, api=api, action='install')['status'] == 'pending'
+    frozen = {path: path.read_bytes() for path in (anchor / 'shared-pool-handoff.json', state / 'operation.json')}
+    before = api.preflights, list(api.qualifications), list(api.events)
+    for action in ('preflight', 'install', 'recover'):
+        with pytest.raises(ValueError, match='shared pool operation unconfirmed'):
+            parent.run_shared_pool_operation(**options, action=action)
+    assert (api.preflights, api.qualifications, api.events) == before
+    assert all(path.read_bytes() == raw for path, raw in (original | frozen).items())
 
 
 def test_shared_writer_roots_include_historical_management_database(
@@ -634,13 +688,15 @@ def test_shared_private_entry_binds_retained_runtime_without_retired_operator_ac
         module.load_inputs(operation)
 
 
-def test_shared_history_loads_original_source_without_retired_operator_credentials(shared_operation, monkeypatch, tmp_path):
+@pytest.mark.parametrize('preparation_id', [None, '335c9f82-6f9a-43de-ab0c-a312034b9efe'])
+def test_shared_history_loads_original_source_without_retired_operator_credentials(
+        shared_operation, monkeypatch, tmp_path, preparation_id):
     from scripts.ops import nebius_certificates as private_state
     from scripts.ops import nebius_shared_pool_entry as entry
 
     assert hasattr(entry, 'load_historical_inputs'), 'normal release cannot load historical shared inputs independently'
     args, bindings = shared_operation
-    root, operation, inputs, _, _ = _shared_entry_inputs(args, bindings)
+    root, operation, inputs, _, _ = _shared_entry_inputs(args, bindings, preparation_id=preparation_id)
     path = root / 'operation.json'
     checksum = hashlib.sha256(path.read_bytes()).hexdigest()
     retired = {Path(inputs['operator_connection'][field]) for field in ('ca_file', 'credentials_file')}

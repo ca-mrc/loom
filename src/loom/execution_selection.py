@@ -131,7 +131,6 @@ def resolved_execution_selection(task: TaskConfig, trial: TrialConfig) -> dict[s
     try:
         policy: dict[str, Any] | None = resolve_effective_network_policy(
             baseline=task.environment.baseline_network_policy,
-            supported=task.environment.network_policies_supported,
             override=trial.baseline_network_policy_override,
         ).model_dump(mode="json")
     except UnsupportedNetworkPolicyOverrideError:

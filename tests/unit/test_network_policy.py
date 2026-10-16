@@ -3,9 +3,15 @@ from pydantic import TypeAdapter, ValidationError
 
 from loom.models.networking import (
     Allowlist,
+    GatewayOnly,
     NetworkPolicy,
     NoNetwork,
     Public,
+    PublicWeb,
+    UnsupportedNetworkPolicyOverrideError,
+    WebAllowlist,
+    WebDestination,
+    resolve_effective_network_policy,
 )
 
 
@@ -56,3 +62,21 @@ def test_immutability():
     p = Allowlist(domains=("example.com",))
     with pytest.raises(ValidationError):
         p.domains = ("changed",)  # type: ignore[misc]
+
+
+def test_override_selects_any_hosted_kind_regardless_of_supported_list() -> None:
+    baseline = GatewayOnly()
+    allowlist = WebAllowlist(destinations=(WebDestination(host="example.com", protocol="https"),))
+    assert resolve_effective_network_policy(baseline=baseline, override=None) == baseline
+    assert resolve_effective_network_policy(baseline=baseline, override=PublicWeb()) == PublicWeb()
+    assert resolve_effective_network_policy(baseline=baseline, override=allowlist) == allowlist
+    assert resolve_effective_network_policy(
+        baseline=baseline, override=PublicWeb(), supported=frozenset({"gateway-only"}),
+    ) == PublicWeb()
+
+
+def test_override_rejects_legacy_kinds() -> None:
+    with pytest.raises(UnsupportedNetworkPolicyOverrideError, match="hosted kind"):
+        resolve_effective_network_policy(baseline=GatewayOnly(), override=Public())
+    with pytest.raises(UnsupportedNetworkPolicyOverrideError, match="hosted kind"):
+        resolve_effective_network_policy(baseline=GatewayOnly(), override=NoNetwork())

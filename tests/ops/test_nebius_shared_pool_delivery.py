@@ -39,6 +39,84 @@ def operation(tmp_path):
         'inputs_path': str(root / 'inputs.json'), 'inputs_sha256': 'b' * 64}
 
 
+def preparation_operation(tmp_path, preparation='335c9f82-6f9a-43de-ab0c-a312034b9efe'):
+    selected = operation(tmp_path)
+    root = Path(selected['inputs_path']).parent / 'preparations' / preparation
+    return selected | {'schema': 'loom.nebius-shared-pool-operation.v2',
+        'preparation_id': preparation, 'inputs_path': str(root / 'inputs.json')}
+
+
+def test_shared_preparation_path_retains_operator_and_pool_identity(tmp_path):
+    command = module('command')
+    selected = preparation_operation(tmp_path)
+    command.validate_operation(selected)
+    assert command.operator_home(selected) == tmp_path
+    assert command.operation_root(selected) == Path(selected['inputs_path']).parent
+    assert command.operator_home(operation(tmp_path)) == tmp_path
+    files = members(tmp_path)
+    files['operation.json'] = json.dumps(selected, sort_keys=True).encode()
+    assert module().unpack_bundle(archive(files))[1] == selected
+
+
+@pytest.mark.parametrize('damage', ['missing', 'nil', 'noncanonical', 'wrong-directory',
+    'wrong-pool', 'wrong-installation', 'legacy-path', 'legacy-extra', 'symlink'])
+def test_shared_preparation_rejects_unbound_identity_or_location(tmp_path, damage):
+    selected = preparation_operation(tmp_path)
+    if damage == 'missing':
+        del selected['preparation_id']
+    elif damage == 'nil':
+        selected['preparation_id'] = '00000000-0000-0000-0000-000000000000'
+    elif damage == 'noncanonical':
+        selected['preparation_id'] = selected['preparation_id'].upper()
+    elif damage == 'wrong-directory':
+        selected['inputs_path'] = selected['inputs_path'].replace('/preparations/', '/releases/')
+    elif damage in {'wrong-pool', 'wrong-installation'}:
+        field = 'operation_id' if damage == 'wrong-pool' else 'installation_id'
+        selected[field] = 'adead924-b991-42b7-81d7-7d58d08775e8'
+    elif damage == 'legacy-path':
+        selected['inputs_path'] = operation(tmp_path)['inputs_path']
+    elif damage == 'legacy-extra':
+        selected['schema'] = 'loom.nebius-shared-pool-operation.v1'
+    else:
+        parent = Path(selected['inputs_path']).parent
+        parent.parent.mkdir(parents=True)
+        actual = tmp_path / 'foreign'
+        actual.mkdir()
+        parent.symlink_to(actual, target_is_directory=True)
+    with pytest.raises(ValueError, match='shared pool operation unqualified'):
+        module('command').validate_operation(selected)
+
+
+@pytest.mark.parametrize('new_first', [False, True])
+def test_shared_preparation_installs_separate_grants_without_overwriting_history(tmp_path, new_first):
+    (tmp_path / '.loom').mkdir(mode=0o700)
+    (tmp_path / '.ssh').mkdir(mode=0o700)
+    keys = tmp_path / '.ssh/authorized_keys'
+    keys.write_bytes(b'# original operator grants\n')
+    keys.chmod(0o600)
+    frozen = {}
+    selections = [operation(tmp_path), preparation_operation(tmp_path),
+        preparation_operation(tmp_path, '83a53ef9-beb4-432c-826f-28c9170751bf')]
+    for index, selected in enumerate(reversed(selections) if new_first else selections):
+        files = members(tmp_path)
+        files['operation.json'] = json.dumps(selected, sort_keys=True).encode()
+        raw = archive(files)
+        checksum = hashlib.sha256(raw).hexdigest()
+        wire = struct.pack('>I', 11) + b'ssh-ed25519' + struct.pack('>I', 32) + bytes([index + 1]) * 32
+        key = 'ssh-ed25519 ' + base64.b64encode(wire).decode()
+        old_keys = keys.read_bytes()
+        result = module('grant').install(raw, expected_sha256=checksum, public_key=key, apply=True)
+        assert result['status'] == 'installed'
+        assert keys.read_bytes().startswith(old_keys)
+        assert all(path.read_bytes() == before for path, before in frozen.items())
+        root = Path(selected['inputs_path']).parent
+        entry = root / 'authority' / checksum / 'entrypoint.py'
+        assert entry.is_file() and not (root / 'inputs.json').exists()
+        frozen.update({path: path.read_bytes() for path in entry.parent.rglob('*') if path.is_file()})
+    assert len(keys.read_bytes().splitlines()) == 4
+    assert not (tmp_path / '.loom/nebius-development-runtime').exists()
+
+
 def members(tmp_path):
     return {**{name: (ROOT / name).read_bytes() for name in module().SOURCES}, 'uv': b'test-uv',
         'requirements.txt': b'test==1 --hash=sha256:' + b'a' * 64,
@@ -172,12 +250,15 @@ def test_shared_report_checks_direction_and_truthful_admission_without_exporting
             gateway.safe_report(json.dumps(report(tmp_path, status, opened=opened)).encode(), operation(tmp_path), action)
 
 
-def test_shared_release_preparation_and_acknowledgement_preserve_pending_and_blocked(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize('version', [1, 2])
+def test_shared_release_preparation_and_acknowledgement_preserve_pending_and_blocked(tmp_path, monkeypatch, capsys, version):
     gateway = module()
-    selected = operation(tmp_path)
+    selected = operation(tmp_path) if version == 1 else preparation_operation(tmp_path)
     root = Path(selected['inputs_path']).parent
     root.mkdir(mode=0o700, parents=True)
-    raw, calls = archive(members(tmp_path)), []
+    files = members(tmp_path)
+    files['operation.json'] = json.dumps(selected, sort_keys=True).encode()
+    raw, calls = archive(files), []
     output = {'status': 'tooling_qualified'}
 
     def run(argv, **kwargs):
@@ -316,7 +397,8 @@ def test_shared_publisher_requires_exact_clean_integrated_source(tmp_path, monke
 
 
 @pytest.mark.parametrize('action', ['preflight', 'install', 'recover'])
-def test_shared_workflow_executes_protected_selector_and_cleans_its_key(tmp_path, action):
+@pytest.mark.parametrize('version', [1, 2])
+def test_shared_workflow_executes_protected_selector_and_cleans_its_key(tmp_path, action, version):
     flow = yaml.safe_load((ROOT / '.github/workflows/nebius-rollout.yml').read_text())
     choices = flow.get('on', flow.get(True))['workflow_dispatch']['inputs']['operation']['options']
     assert 'shared-pool-' + action in choices
@@ -344,8 +426,9 @@ assert json.loads(os.environ['NEBIUS_SHARED_POOL_OPERATION_JSON'])['namespace'] 
 pathlib.Path(os.environ['RUNNER_TEMP'], 'transport-invoked').write_text('selected')
 ''')
     uv.chmod(0o700)
+    selected = operation(tmp_path) if version == 1 else preparation_operation(tmp_path)
     env = os.environ | {'PATH': str(bindir) + ':' + os.environ['PATH'], 'SHARED_POOL_OPERATION': 'shared-pool-' + action,
-        'NEBIUS_SHARED_POOL_OPERATION_JSON': json.dumps(operation(tmp_path)), 'DEPLOY_SSH_KEY': 'private-shared-key',
+        'NEBIUS_SHARED_POOL_OPERATION_JSON': json.dumps(selected), 'DEPLOY_SSH_KEY': 'private-shared-key',
         'DEPLOY_KNOWN_HOSTS': 'test-host', 'LOOM_DEPLOY_SSH_TARGET': 'test-target', 'RUNNER_TEMP': str(tmp_path),
         'GITHUB_OUTPUT': str(tmp_path / 'outputs'), 'EXPECTED_SHA': 'a' * 40, 'EXPECTED_ACTION': action}
     for step in (selector, runner):
