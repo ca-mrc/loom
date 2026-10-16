@@ -51,15 +51,19 @@ def live_children(manager):
         {'apiVersion': 'v1', 'kind': 'PodList', 'metadata': {'resourceVersion': '27'}, 'items': [pod]})
 
 
-@pytest.fixture
-def connection(catalog_inputs, tmp_path):
+@pytest.fixture(params=['participant', 'catalog-only'])
+def connection(catalog_inputs, tmp_path, request):
     inputs = copy.deepcopy(catalog_inputs)
+    binding = inputs['release'].migration.registration.binding
+    if request.param == 'catalog-only':
+        from scripts.ops import nebius_pool_participant_release as release
+
+        inputs['release'] = release.PoolCatalogRefresh(inputs['release'].refresh, binding)
     manager = inputs['manager']
     manager['metadata']['generation'] = 1
     manager['status'] = {'observedGeneration': 1, 'replicas': 1, 'updatedReplicas': 1,
         'readyReplicas': 1, 'availableReplicas': 1}
     request = module().ParticipantCatalogRequest(**inputs)
-    binding = request.release.migration.registration.binding
     state = SimpleNamespace(request=request, directory=tmp_path, manager=copy.deepcopy(manager), config=None,
         writes=[], failure=None, ready=True, init_ready=True, old_pod=False, replaced_catalog=False, collections=None)
 
