@@ -254,6 +254,68 @@ async def test_preactivation_registry_journal_reads_uncertain_commit_without_red
     assert record['status'] == ('intent' if failure == 'lost-before' else 'complete')
 
 
+@pytest.mark.parametrize('failure', ['qualification', 'adapter-preflight'])
+@pytest.mark.parametrize('damage', [None, 'delete', 'replace'])
+async def test_preactivation_registry_releases_only_proven_undispatched_intent(sessions, tmp_path, failure, damage):
+    """A failed read before dispatch must not strand intent or reconstruct damaged evidence."""
+    from scripts.ops import nebius_pool_preactivation_registry as journal
+
+    from tests.integration.test_nebius_pool_activation_fence import read_sql
+    from tests.integration.test_nebius_pool_participant_refresh import snapshot
+
+    refresh, url = await preactivation_setup(sessions)
+    reader = preactivation_module()
+    state = tmp_path / 'registry'
+    path = state / 'registry.json'
+    dispatches, damaged = [], []
+    failing = True
+
+    def fail():
+        assert json.loads(path.read_bytes())['status'] == 'intent'
+        if damage == 'delete':
+            path.unlink()
+        elif damage == 'replace':
+            damaged.append(path.read_bytes() + b' ')
+            path.write_bytes(damaged[0])
+        if failure == 'adapter-preflight':
+            raise journal.PreactivationNotDispatched('private qualification failure')
+        raise ValueError('private qualification failure')
+
+    class Database:
+        def observe(self, request):
+            return read_sql(url, reader.pool_preactivation_state_sql(request))
+
+        def commit(self, request):
+            if failing and failure == 'adapter-preflight':
+                fail()
+            dispatches.append(request.after.operation_id)
+            return read_sql(url, reader.refresh_closed_pool_sql(request))
+
+    def qualify():
+        if (failing and failure == 'qualification' and path.exists()
+                and json.loads(path.read_bytes())['status'] == 'intent'):
+            fail()
+
+    def advance():
+        return journal.advance_preactivation_registry(request=refresh, api=Database(), state_dir=state, qualify=qualify)
+
+    before = await snapshot(sessions)
+    with pytest.raises(ValueError, match='preserve evidence') as error:
+        await asyncio.to_thread(advance)
+    assert 'private qualification failure' not in str(error.value)
+    assert dispatches == [] and await snapshot(sessions) == before
+    if damage == 'delete':
+        assert not path.exists()
+    elif damage == 'replace':
+        assert path.read_bytes() == damaged[0]
+    else:
+        assert journal.validate_preactivation_registry(request=refresh, state_dir=state)['status'] == 'prepared'
+        failing = False
+        assert await asyncio.to_thread(advance)
+        assert await asyncio.to_thread(advance)
+        assert dispatches == [refresh.after.operation_id]
+
+
 @pytest.mark.parametrize('damage', ['parent', 'record', 'unrecorded-successor', 'changed-request'])
 async def test_preactivation_registry_refuses_unqualified_or_changed_authority(sessions, tmp_path, damage):
     import importlib
