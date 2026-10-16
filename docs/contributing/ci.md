@@ -92,11 +92,13 @@ PR checks do not receive its credentials. CI does not deploy the live platform.
 
 The protected Docker consumers (root tests, runtime payloads, both integration
 tiers, cluster and staging smoke, and ordinary/Harbor image builds) configure
-`https://mirror.gcr.io` on their disposable GitHub-hosted Linux Docker daemons
+`https://mirror.gcr.io` on their disposable Linux Docker daemons
 before pulling or building. `scripts/configure_ci_registry_mirror.py` preserves
 existing daemon settings and mirror priority, validates the merged configuration
 before installation, restarts the runner daemon, and checks the active mirrors.
-It refuses local, self-hosted, non-Linux, or remote-Docker execution.
+It accepts GitHub-hosted Linux runners or disposable self-hosted Linux guests
+with the root-owned ephemeral-runner marker. It refuses unmarked hosts,
+non-Linux runners, and remote-Docker execution.
 
 The separate image BuildKit containers use `config/ci-buildkit.toml` by default;
 an existing readable `/etc/buildkit/loom-ci.toml` retains precedence and is not
@@ -104,9 +106,9 @@ modified. Both pull paths retain every original image reference and digest.
 
 The pinned `setup-uv` action uses v10.0.1, which handles transient manifest
 transport failures with at most three attempts and stops reading the version
-list after the selected version. This addresses the observed single five-second manifest
-lookup failure before Python or pytest starts. uv remains 0.11.26 with the
-existing platform checksums; locked installs and PR/merge-group cache-write
+list after the selected version. This addresses the observed single five-second
+manifest lookup failure before Python or pytest starts. uv remains 0.11.26 with
+the existing platform checksums; locked installs and PR/merge-group cache-write
 restrictions are unchanged. `prune-cache: true` explicitly preserves the previous
 cache-pruning behavior. A persistent manifest error still fails setup; this is
 not a workflow or failed-test rerun policy.
