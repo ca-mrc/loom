@@ -10,7 +10,7 @@ from loom.execution_runtime_contract import (
     RuntimeHandoffInputV1,
 )
 from loom.models.task import TaskConfig
-from loom.sandbox_identity import inherited_sandbox_user
+from loom.sandbox_identity import concrete_sandbox_user, inherited_sandbox_user
 from loom.service_execution_materialization import (
     automatic_service_execution_rejections,
     compile_service_execution_plan,
@@ -25,6 +25,8 @@ def test_omitted_verifier_user_inherits_the_task_user():
     assert inherited_sandbox_user("root", None) == "root"
     assert inherited_sandbox_user("1001:1001", None) == "1001:1001"
     assert inherited_sandbox_user("root", "1001:1001") == "1001:1001"
+    assert concrete_sandbox_user("image") is None
+    assert concrete_sandbox_user("root") == "root"
 
 
 def _identity_task(user, home=None, verifier_user=None):

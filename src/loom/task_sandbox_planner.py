@@ -380,6 +380,8 @@ def compile_deferred_verifier_plan(
     """
     if agent_plan.execution_role != "attempt" or agent_plan.verifier_execution != "separate_execution":
         raise ValueError("only a separate-execution attempt defers its verifier")
+    # #2544 restores the frozen task environment from the attempt handoff
+    # before this inherit. Merge must decode that payload first, then inherit.
     task_sandbox = next(sidecar for sidecar in agent_plan.sidecars if sidecar.role_name == TASK_SANDBOX)
     user = inherited_sandbox_user(task.environment.user, task.verifier.user)
     identity = resolve_sandbox_identity(

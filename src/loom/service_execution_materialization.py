@@ -63,7 +63,11 @@ from loom.models.trial import TrialConfig
 from loom.mutable_paths import validate_task_workdir
 from loom.pipeline.keys import canonical_digest
 from loom.prebuilt_task_images import resolve_prebuilt_task_image, validate_prebuilt_image_pins
-from loom.sandbox_identity import inherited_sandbox_user, resolve_sandbox_identity
+from loom.sandbox_identity import (
+    concrete_sandbox_user,
+    inherited_sandbox_user,
+    resolve_sandbox_identity,
+)
 from loom.task_image_materialization import TaskImageExecutionGrantV1, resolve_prepared_task
 from loom.task_sandbox_planner import (
     TaskSandboxPlanRequest,
@@ -488,8 +492,13 @@ def automatic_service_execution_rejections(
         if env.sidecars:
             reasons.append("guest_sidecars_unsupported")
         for user in (env.user, inherited_sandbox_user(env.user, task.verifier.user)):
+            # ``user="image"`` waits for #2544 publication metadata. Do not
+            # resolve it here or treat the placeholder as a missing root uid.
+            concrete = concrete_sandbox_user(user)
+            if concrete is None:
+                continue
             try:
-                identity = resolve_sandbox_identity(user, env.environment.get("HOME")) if user is not None else None
+                identity = resolve_sandbox_identity(concrete, env.environment.get("HOME"))
             except ValueError:
                 identity = None
             if identity is None or identity.run_as_user != 0 or identity.run_as_group != 0:
@@ -542,11 +551,14 @@ def automatic_service_execution_rejections(
         except ValueError:
             reasons.append("standard_workspace_identity_required")
         try:
-            resolve_sandbox_identity(env.user, env.environment.get("HOME"))
-            resolve_sandbox_identity(
-                inherited_sandbox_user(env.user, task.verifier.user),
-                env.environment.get("HOME"),
-            )
+            # Keep #2544's deferred ``user="image"`` handling on merge: only a
+            # concrete identity is resolved. Image preparation still owns the
+            # metadata-required reason.
+            for user in (env.user, inherited_sandbox_user(env.user, task.verifier.user)):
+                concrete = concrete_sandbox_user(user)
+                if concrete is None:
+                    continue
+                resolve_sandbox_identity(concrete, env.environment.get("HOME"))
         except ValueError:
             reasons.append("unsupported_task_identity")
     if effective_network_policy.kind not in {"no-network", "gateway-only", "web-allowlist", "public-web"}:
