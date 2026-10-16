@@ -11,8 +11,10 @@ from loom.nebius_terminus_image import (
     OFFLINE_SCRIPT,
     _arch_package_install,
     adapt_harbor_test_script,
+    append_terminus_runtime_tools,
     prepare_nebius_terminus_image,
 )
+from loom.service_execution_terminus2 import TASK_IMAGE_TOOLS_REQUIRED
 
 SCRIPT = """#!/bin/bash
 apt-get update
@@ -855,3 +857,23 @@ def test_rejects_apk_in_unreviewed_control_flow_before_writing(tmp_path, wrapped
         prepare_nebius_terminus_image(tmp_path, environment)
     assert not (tmp_path / OFFLINE_SCRIPT).exists()
     assert not (tmp_path / 'environment/Dockerfile.loom-nebius').exists()
+
+
+def test_task_dockerfile_gains_terminus_runtime_tools() -> None:
+    prepared = append_terminus_runtime_tools(
+        "FROM python:3.12-slim-bookworm\nUSER agent\nWORKDIR /app\n"
+    )
+    assert "apt-get install -y --no-install-recommends" in prepared
+    install = prepared.split("apt-get install", 1)[1]
+    for package in ("asciinema", "bash", "ca-certificates", "curl", "tmux"):
+        assert package in install
+    assert "command -v bash" in prepared
+    assert "command -v tmux" in prepared
+    assert "command -v asciinema" in prepared
+    assert TASK_IMAGE_TOOLS_REQUIRED in prepared
+    assert prepared.rstrip().endswith("USER agent")
+
+
+def test_task_dockerfile_fails_closed_when_the_base_cannot_be_prepared() -> None:
+    with pytest.raises(ValueError, match="image preparation supports"):
+        append_terminus_runtime_tools("FROM scratch\n")

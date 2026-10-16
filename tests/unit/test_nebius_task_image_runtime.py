@@ -142,7 +142,7 @@ class FakeS3:
 def source_bundle(tmp_path):
     original = tmp_path / "original"
     (original / "environment").mkdir(parents=True)
-    (original / "environment/Dockerfile").write_text("FROM scratch\n")
+    (original / "environment/Dockerfile").write_text("FROM debian:bookworm-slim\n")
     (original / "instruction.md").write_text("Run the task.\n")
     (original / "run.sh").write_text("#!/bin/sh\nexit 0\n")
     (original / "run.sh").chmod(0o755)
@@ -1509,3 +1509,60 @@ def test_publish_directory_oci_uses_skopeo_oci_transport(
     source = next(arg for arg in calls[0] if arg.startswith("oci:"))
     assert source == f"oci:{layout_dir}"
     assert cache.uploads == []
+
+
+def test_prepare_installs_terminus_tools_into_the_task_dockerfile(
+    source_bundle, tmp_path, monkeypatch
+) -> None:
+    claim, source = source_bundle
+    monkeypatch.setattr(runtime, "_client", lambda _claim, _secret: source)
+    work = tmp_path / "prepared"
+    runtime.prepare(claim, work, tmp_path / "secrets")
+    dockerfile = (work / "context/environment/Dockerfile").read_text()
+    assert dockerfile.startswith("FROM debian:bookworm-slim\n")
+    for package in ("bash", "tmux", "asciinema", "ca-certificates", "curl"):
+        assert package in dockerfile
+    assert "command -v bash" in dockerfile
+    assert "task image must preinstall bash, tmux and asciinema" in dockerfile
+
+
+def test_prepare_fails_closed_when_the_base_cannot_be_prepared(tmp_path, monkeypatch) -> None:
+    original = tmp_path / "original"
+    (original / "environment").mkdir(parents=True)
+    (original / "environment/Dockerfile").write_text("FROM scratch\n")
+    (original / "instruction.md").write_text("Run the task.\n")
+    (original / "environment/Dockerfile").chmod(0o644)
+    (original / "instruction.md").chmod(0o644)
+    claim = {
+        "id": str(uuid4()),
+        "task_checksum": sha256_of_dir(original),
+        "materialization_key": "b" * 64,
+        "task_source": "s3://source/tasks/revision/",
+        "source_bucket": "source",
+        "cache_bucket": "cache",
+        "task_source_provenance": {
+            "bundle_file_metadata_sha256": bundle_file_metadata_sha256(original)
+        },
+        "registry_repository": "registry.example/tasks",
+        "lease_epoch": 3,
+        "task_config": {
+            "schema_version": "1",
+            "task": {"id": "test", "name": "test"},
+            "environment": {
+                "os": "linux",
+                "cpu_arch": "x86_64",
+                "dockerfile": "environment/Dockerfile",
+            },
+            "agent": {"name": "oracle"},
+            "verifier": {"name": "pytest"},
+        },
+    }
+    objects = {
+        "tasks/revision/" + path.relative_to(original).as_posix(): path.read_bytes()
+        for path in original.rglob("*")
+        if path.is_file()
+    }
+    objects["tasks/revision/" + BUNDLE_FILE_METADATA_NAME] = bundle_file_metadata_body(original)
+    monkeypatch.setattr(runtime, "_client", lambda _claim, _secret: FakeS3(objects))
+    with pytest.raises(runtime.BuildPreparationError, match="image preparation supports"):
+        runtime.prepare(claim, tmp_path / "work", tmp_path / "secrets")

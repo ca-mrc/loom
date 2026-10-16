@@ -240,13 +240,14 @@ export const test = base.extend<GuardedFixtures>({
     };
     installGuards(page, browserHarness, failures, diagnostics);
     await provideFixture(sink);
-    for (const diagnostic of diagnostics) {
-      if (diagnostic.remaining !== 0) {
-        failures.push(
-          `unconsumed-diagnostic ref=${diagnostic.reference} expected=${diagnostic.expectation.count} observed=${diagnostic.expectation.count - diagnostic.remaining}`,
-        );
-      }
-    }
+    // Chromium can deliver an expected HTTP console diagnostic just after the
+    // final page assertion. Keep its exact count, but await delivery before
+    // deciding that it is missing; the existing assertion timeout bounds this.
+    await expect.poll(() => diagnostics
+      .filter(diagnostic => diagnostic.remaining !== 0)
+      .map(diagnostic =>
+        `unconsumed-diagnostic ref=${diagnostic.reference} expected=${diagnostic.expectation.count} observed=${diagnostic.expectation.count - diagnostic.remaining}`,
+      )).toEqual([]);
     expect(failures, failures.join("\n")).toEqual([]);
   },
   apiHarness: async ({ page, browserHarness }, provideFixture) => {

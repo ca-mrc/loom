@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from pathlib import Path
 
 
 def test_native_controller_import_has_no_storage_or_database_side_effects() -> None:
@@ -53,6 +54,44 @@ def test_unknown_agent_error_does_not_expose_its_message() -> None:
     assert result.returncode == 1
     assert result.stderr == "isolated execution failed (AgentError)\n"
     assert result.stdout == ""
+
+
+def test_validation_error_stderr_is_location_and_type_only() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-B",
+            "-c",
+            "import sys\n"
+            f"sys.path.insert(0, {str(Path(__file__).resolve().parents[2] / 'src')!r})\n"
+            "import runpy\n"
+            "from unittest.mock import patch\n"
+            "from pydantic import BaseModel, ConfigDict, ValidationError\n"
+            "class Probe(BaseModel):\n"
+            "    model_config = ConfigDict(extra='forbid')\n"
+            "    name: str\n"
+            "try:\n"
+            "    Probe.model_validate({\n"
+            "        'name': 'ok',\n"
+            "        'token': 'private-token-fixture',\n"
+            "        'trial_json': '{\"secret\":\"private-token-fixture\"}',\n"
+            "    })\n"
+            "except ValidationError as exc:\n"
+            "    error = exc\n"
+            "patch('argparse.ArgumentParser.parse_args', side_effect=error).start()\n"
+            "runpy.run_module('loom.service_execution_sandbox_task', run_name='__main__')\n",
+        ],
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr.startswith("isolated execution failed (ValidationError): ")
+    assert "token:extra_forbidden" in result.stderr
+    assert "trial_json:extra_forbidden" in result.stderr
+    assert "private-token-fixture" not in result.stderr
+    assert "Extra inputs" not in result.stderr
+    assert result.stderr.count("\n") == 1
 
 
 def test_safe_sandbox_rpc_error_survives_native_entrypoint() -> None:
