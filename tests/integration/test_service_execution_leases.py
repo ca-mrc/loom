@@ -4,6 +4,7 @@ import asyncio
 import io
 import json
 import tarfile
+from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -2805,6 +2806,86 @@ async def test_scheduler_reserves_one_verifier_after_parent_cleanup(
         await engine.dispose()
 
 
+@pytest.mark.parametrize("committed", [True, False])
+async def test_verifier_source_settles_with_its_parent_within_lease_constraints(
+    postgres_url: str, _stub_verifier_plan: list[ExecutionRuntimePlanV1], committed: bool,
+) -> None:
+    # The child is archived in its parent's bundle. Settling it must satisfy
+    # the materialization group check, or the parent's archive rolls back and
+    # retries forever; every separate-verifier Trial then lacks a bundle.
+    from loom_control_plane.service_execution_materializer import ServiceExecutionMaterializer
+
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    digests = ("sha256:" + "1" * 64, "sha256:" + "2" * 64)
+    try:
+        trial_id, parent, target = await _separate_attempt_awaiting_verifier(sessions, now=now)
+        async with sessions() as session:
+            [verifier] = await reserve_next_verifier_executions(
+                session, pool_id=target.logical_pool_id,
+                image_admission_keyring=IMAGE_ADMISSION_KEYRING, now=now + timedelta(seconds=5),
+            )
+            await session.commit()
+        async with sessions() as session:
+            child = await session.get(ServiceExecutionLease, verifier.id)
+            trial = await session.get(Trial, trial_id)
+            assert child is not None and trial is not None
+            plan = ExecutionRuntimePlanV1.model_validate(child.runtime_contract_json)
+            upload = ArtifactUploadSession(
+                id=uuid4(), team_id=trial.team_id, commit_kind="service_execution_output",
+                service_execution_lease_id=child.id, service_execution_generation=child.resource_generation,
+                service_execution_role="verifier",
+                service_execution_runtime_contract_sha256=child.runtime_contract_sha256,
+                service_execution_candidate_sha=plan.candidate_sha,
+                service_execution_task_revision_sha256=plan.task_revision_sha256,
+                service_execution_command_identity_sha256=plan.command_identity_sha256,
+                idempotency_key=uuid4().hex, request_digest="sha256:" + "6" * 64,
+                prefix=f"service-execution/{child.id}/{uuid4().hex}/", state="committed",
+                expected_total_max_bytes=1024, canonical_manifest_json={},
+                manifest_sha256="sha256:" + "7" * 64, committed_marker_sha256="sha256:" + "8" * 64,
+                expires_at=now + timedelta(hours=1), committed_at=now,
+            )
+            session.add(upload)
+            await session.flush()
+            child.output_commit_state = "committed"
+            child.output_generation = child.resource_generation
+            child.output_upload_session_id = upload.id
+            child.output_manifest_sha256 = upload.manifest_sha256
+            child.output_marker_sha256 = upload.committed_marker_sha256
+            child.output_committed_at = now
+            child.materialization_state = "pending"
+            child.materialization_next_attempt_at = now
+            trial.result = {**trial.result, "verifier_execution": {
+                "state": "committed", "parent_lease_id": str(parent.id), "lease_id": str(child.id),
+            }}
+            await session.commit()
+
+        materializer = object.__new__(ServiceExecutionMaterializer)
+        materializer._source_retention = timedelta(days=1)
+        async with sessions() as session:
+            parent_row = await session.get(ServiceExecutionLease, parent.id)
+            trial = await session.get(Trial, trial_id)
+            await materializer._settle_verifier_source(
+                session, lease=parent_row, trial=trial, now=now, committed=committed,
+                canonical_sha256=digests if committed else None, error_code="integrity",
+            )
+            await session.commit()
+        async with sessions() as session:
+            child = await session.get(ServiceExecutionLease, verifier.id)
+            assert child is not None
+            if committed:
+                assert child.materialization_state == "committed"
+                assert (child.canonical_trajectory_sha256, child.canonical_atif_sha256) == digests
+                assert child.source_cleanup_state == "retained"
+            else:
+                assert child.materialization_state == "unavailable"
+                assert child.materialization_error_code == "integrity"
+                assert child.materialization_error_message
+    finally:
+        await engine.dispose()
+
+
 async def _fail_verifier_natively(
     sessions: async_sessionmaker[AsyncSession], *, lease_id: UUID, at: datetime,
     historical_regression: bool = False,
@@ -4262,28 +4343,71 @@ async def test_observed_pod_broker_commits_semantic_runtime_output(
                 == 1
             )
 
+            def retained_output(current, current_trial, bundle):  # type: ignore[no-untyped-def]
+                return deepcopy((
+                    current_trial.state, current_trial.result, current_trial.failure_reason,
+                    current_trial.failure_message, current_trial.finished_at,
+                    current_trial.attempt_count, current_trial.trajectory_index,
+                    current.generation, current.resource_generation, current.revoked_at,
+                    current.finalized_at, current.pod_terminated_at,
+                    current.output_commit_state, current.output_upload_session_id,
+                    current.output_generation, current.output_manifest_sha256,
+                    current.output_marker_sha256, current.output_committed_at,
+                    current.materialization_state, current.canonical_trajectory_sha256,
+                    current.canonical_atif_sha256, current.source_cleanup_state,
+                    current.source_retain_until, bundle.storage, bundle.artifact_metadata,
+                    bundle.content_hash, bundle.file_count,
+                ))
+
+            artifact = await session.get(Artifact, artifact.id)
+            assert artifact is not None
+            retained = retained_output(persisted, trial, artifact)
+            source_objects = dict(store.objects)
+
         # A completed Job remains observable between durable finalization and
-        # deletion. Replaying that Kubernetes state must not regress the lease
-        # from ``finalized`` or erase its terminal timestamp.
+        # deletion. Full reconciliation now owns the durable delete intent too;
+        # it must preserve the finalized failure and committed output while
+        # deleting the exact Job, before absence owns the cleanup ACK.
         kubernetes.jobs[lease.job_name] = terminal_observation.model_copy(
             update={"resource_version": "9", "terminated_at": None}
         )
-        assert await actuator.reconcile_full_once(now=now + timedelta(seconds=5)) == 0
+        assert await actuator.reconcile_full_once(now=now + timedelta(seconds=5)) == 1
+        assert kubernetes.delete_count == 1 and lease.job_name not in kubernetes.jobs
         async with sessions() as session:
             persisted = await session.get(ServiceExecutionLease, lease.id)
+            trial = await session.get(Trial, trial_id)
+            artifact = await session.get(Artifact, artifact.id)
             assert persisted is not None
+            assert trial is not None and artifact is not None
             assert persisted.observed_state == "finalized"
+            assert persisted.desired_state == "delete_pending" and persisted.cleanup_state == "pending"
+            assert persisted.deleted_at is None
             assert persisted.pod_terminated_at == now + timedelta(seconds=3)
+            assert retained_output(persisted, trial, artifact) == retained
+            assert store.objects == source_objects
 
+        # The still-pending delete command acknowledges actual absence without
+        # deleting twice. The following full pass must be fully converged.
         assert await actuator.run_commands_once(now=now + timedelta(seconds=5)) == 1
         assert kubernetes.delete_count == 1
-        assert await actuator.reconcile_full_once(now=now + timedelta(seconds=6)) == 1
+        assert await actuator.reconcile_full_once(now=now + timedelta(seconds=6)) == 0
 
         async with sessions() as session:
             persisted = await session.get(ServiceExecutionLease, lease.id)
+            trial = await session.get(Trial, trial_id)
+            artifact = await session.get(Artifact, artifact.id)
             assert persisted is not None
+            assert trial is not None and artifact is not None
             assert persisted.desired_state == "deleted"
             assert persisted.cleanup_state == "complete"
+            assert persisted.deleted_at == now + timedelta(seconds=5)
+            assert retained_output(persisted, trial, artifact) == retained
+            assert store.objects == source_objects
+            deletion = await session.scalar(select(ServiceExecutionCommand).where(
+                ServiceExecutionCommand.lease_id == lease.id,
+                ServiceExecutionCommand.command_type == "delete",
+            ))
+            assert deletion is not None and deletion.state == "acknowledged"
 
         async with sessions() as session:
             with pytest.raises(ServiceExecutionBrokerError, match="not_observed"):

@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh capacity for the native Loom CI queue
+
+[Timer]
+OnBootSec=15s
+OnUnitInactiveSec=30s
+AccuracySec=2s
+Unit=loom-ci-hosted-supply.service
+
+[Install]
+WantedBy=timers.target

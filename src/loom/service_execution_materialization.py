@@ -616,8 +616,6 @@ def automatic_service_execution_rejections(
     if controller:
         if not isinstance(verifier_path, str) or not verifier_path.startswith("verifier/"):
             reasons.append("private_verifier_directory_required")
-        if trial.workspace_staging_policy_name == "none":
-            reasons.append("private_workspace_isolation_required")
     if task.steps:
         step = task.steps[0]
         if (

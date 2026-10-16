@@ -39,26 +39,8 @@ export default function NewBatchAdvancedFields({ advanced, setAdv, batchPurpose,
             <Help>Default: off (env is deleted). Turn on for post-mortem inspection.</Help>
           </span>
         </label>
-        {batchPurpose === "trajectory_generation" ? (
-          <label className="flex items-start gap-2 text-sm text-slate-700">
-            <input
-              type="checkbox"
-              checked={advanced.skipVerifier}
-              onChange={(e) => setAdv("skipVerifier", e.target.checked)}
-              className="mt-1 h-4 w-4 rounded border-slate-300"
-            />
-            <span>
-              Skip verifier
-              <Help>Allowed for trajectory generation. Evaluation always runs verification.</Help>
-            </span>
-          </label>
-        ) : (
-          <p className="text-xs text-slate-500">
-            Evaluation always runs the verifier; skip is unavailable.
-          </p>
-        )}
         <label className="block max-w-sm">
-          <FieldLabel hint="default: task setting">Verifier env mode</FieldLabel>
+          <FieldLabel hint="default: task setting">Verification</FieldLabel>
           <select
             className="block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800"
             value={advanced.verifierEnvMode}
@@ -69,7 +51,15 @@ export default function NewBatchAdvancedFields({ advanced, setAdv, batchPurpose,
             <option value="">Use task default</option>
             <option value="shared">shared</option>
             <option value="separate">separate</option>
+            {batchPurpose === "trajectory_generation" ? (
+              <option value="skipped">skipped</option>
+            ) : null}
           </select>
+          {batchPurpose === "evaluation" ? (
+            <Help>Evaluation always runs the verifier; skipped is unavailable.</Help>
+          ) : (
+            <Help>shared and separate grade the run. skipped writes skip_verifier and omits the grader.</Help>
+          )}
         </label>
         <label className="block max-w-sm">
           <FieldLabel hint="default: auto">Isolation</FieldLabel>

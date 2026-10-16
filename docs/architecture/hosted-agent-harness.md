@@ -390,10 +390,15 @@ Known limits, deliberate and shared with Terminus-2:
 
 A batch chooses four independent axes, all stored on `TrialConfig`: harness
 (`agent_name`/`agent_version`), network (`baseline_network_policy_override`),
-verification (`verifier_env_mode`) and isolation (`isolation`:
-`auto`/`container`/`guest`). `execution_selection_rejections` validates the
-combination as a whole and returns every reason, so a rejected batch lists all
-conflicts per task in one 400 instead of failing on the first.
+verification (`verifier_env_mode`, or `skip_verifier` when the axis is
+`skipped`) and isolation (`isolation`: `auto`/`container`/`guest`).
+`execution_selection_rejections` validates the combination as a whole and
+returns every reason, so a rejected batch lists all conflicts per task in one
+400 instead of failing on the first. Input `verification` is `shared`,
+`separate`, or `skipped` (#2529). `--skip-verifier` is retired; skip is that
+third value. Hosted admission still rejects `skip_verifier`
+(`verifier_mode_required`). Local workers omit the grader and persist
+`skip_verifier`, which export and archive already honor.
 
 `loom.execution-selection.v1` (`docs/evidence/loom.execution-selection.v1.schema.json`)
 is an input document for the same fields, accepted by
@@ -409,6 +414,15 @@ from each frozen attempt plan; it is `null`/empty until a plan is compiled.
 `resolve_verifier_env_mode(task, trial)` selects the batch override first and
 then the task value. A workspace harness must not implement its own shared or
 separate grader.
+
+### Skipped
+
+`verification: skipped` (or `--verifier-env-mode skipped`) sets
+`trial.skip_verifier` and leaves `verifier_env_mode` unset. The local
+harness omits the grader. Succeeded trials may have a null reward;
+export, tbv2, and terminal-result checks accept that only when
+`skip_verifier` is exactly `true`. Hosted Nebius still rejects this
+selection (`verifier_mode_required`).
 
 ### Shared
 
@@ -513,8 +527,10 @@ tested:
    accounting are proven for the harness's actual wire format.
 7. Driver operations, deadlines, cancellation, process cleanup and output
    bounds are supported without local-worker assumptions.
-8. Public/private workspace staging and both applicable verifier modes pass
-   tests without harness-specific verifier branches.
+8. Public/private workspace withholding is verification-lifecycle behavior
+   (shared injects after the agent; separate uses verifier-sandbox), not a
+   batch staging switch. Both modes pass tests without harness-specific
+   verifier branches.
 9. Every required canonical and native artifact is declared, captured,
    materialized and downloadable from the complete Trial bundle.
 10. Unit tests cover admission rejection, plan shape, command dispatch,

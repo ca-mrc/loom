@@ -95,12 +95,6 @@ export function humanizeTrialConfig(
       `Network policy: ${kind}` + (destinations.length > 0 ? ` (${destinations.join(", ")})` : ""),
     );
   }
-  if (
-    typeof c.workspace_staging_policy_name === "string" &&
-    c.workspace_staging_policy_name
-  ) {
-    items.push(`Workspace staging: ${c.workspace_staging_policy_name}`);
-  }
   if (c.multi_model && typeof c.multi_model === "object") {
     const mm = c.multi_model as Record<string, unknown>;
     if (mm.enabled === true) {

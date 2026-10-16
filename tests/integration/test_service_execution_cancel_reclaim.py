@@ -140,7 +140,7 @@ async def test_normal_cancel_replay_repairs_queued_cancel_with_deleted_lease(
         ) as client:
             for _ in range(2):
                 response = await client.post(
-                    f"/trials/{trial_id}/cancel", headers={"Authorization": "Bearer " + token}
+                    f"/trials/{trial_id}/cancel", headers={"Authorization": "Bearer " + token, "X-Loom-Admin-Actor": "reclaim-operator"}
                 )
                 assert response.status_code == 200, response.text
                 assert response.json()["state"] == "cancelled"

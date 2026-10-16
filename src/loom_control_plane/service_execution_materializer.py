@@ -677,6 +677,21 @@ def defers_verification_result(runtime_result: ExecutionRuntimeResultV1, trial_r
     return runtime_result.execution_role == "attempt" and isinstance(trial_result.get("verifier_execution"), dict)
 
 
+def requires_deferred_verifier_handoff(
+    lease: ServiceExecutionLease, trial_result: dict[str, Any] | None,
+) -> bool:
+    """True only when a succeeded separate attempt never wrote a handoff (#2521).
+
+    Finalize writes ``verifier_execution`` only on ``succeeded``. A committed
+    ``timed_out`` / failed / cancelled attempt is causal, not missing output.
+    """
+    if not defers_verification(lease) or isinstance((trial_result or {}).get("verifier_execution"), dict):
+        return False
+    runtime = (trial_result or {}).get("runtime_result")
+    status = runtime.get("status") if isinstance(runtime, dict) else None
+    return status == "succeeded"
+
+
 def _merge_verifier_execution(
     attempt: ExecutionRuntimeResultV1, trial_result: dict[str, Any], verifier_inputs: dict[str, bytes],
 ) -> tuple[ExecutionRuntimeResultV1, bytes | None]:
@@ -810,6 +825,9 @@ class ServiceExecutionMaterializer:
             await session.commit()
             return True
 
+    async def _qualify_claim(self, session: AsyncSession, lease: ServiceExecutionLease) -> None:
+        """Allow a bounded recovery worker to qualify under the ordinary claim lock."""
+
     async def claim_one(
         self, *, now: datetime | None = None, lease_id: UUID | None = None,
     ) -> MaterializationClaim | None:
@@ -872,6 +890,7 @@ class ServiceExecutionMaterializer:
             ).scalar_one_or_none()
             if lease is None:
                 return None
+            await self._qualify_claim(session, lease)
             if lease.finalized_at is None:
                 await recover_deleted_committed_trial(session, lease=lease, observed_at=current)
                 if lease.finalized_at is not None:
@@ -1158,7 +1177,9 @@ class ServiceExecutionMaterializer:
                 ):
                     raise MaterializationIntegrityError("verifier_source_identity_drift")
                 verifier_source = await _load_source(session, child)
-            elif defers_verification(lease) and not isinstance(handoff, dict):
+            elif requires_deferred_verifier_handoff(
+                lease, trial.result if isinstance(trial.result, dict) else None,
+            ):
                 raise MaterializationIntegrityError("verifier_handoff_missing")
             gateway_calls = (await read_service_execution_llm_calls(
                 session, lease, generation=lease.output_generation,
@@ -1538,7 +1559,10 @@ class ServiceExecutionMaterializer:
                 trial.failure_message = (
                     f"{result.exception_info.exception_type}: {result.exception_info.exception_message}"
                 )[:2000]
-            await self._settle_verifier_source(session, lease=lease, trial=trial, now=now, committed=True)
+            await self._settle_verifier_source(
+                session, lease=lease, trial=trial, now=now, committed=True,
+                canonical_sha256=(result.events_sha256, result.atif_sha256),
+            )
             lease.materialization_state = "committed"
             lease.materialization_claim_id = None
             lease.materialization_claim_expires_at = None
@@ -1561,8 +1585,13 @@ class ServiceExecutionMaterializer:
     async def _settle_verifier_source(
         self, session: AsyncSession, *, lease: ServiceExecutionLease, trial: Trial, now: datetime,
         committed: bool, error_code: str | None = None,
+        canonical_sha256: tuple[str, str] | None = None,
     ) -> None:
-        """Close the deferred verifier's spool together with its parent's archive."""
+        """Close the deferred verifier's spool together with its parent's archive.
+
+        The child has no canonical output of its own: it is archived in the
+        parent's bundle, so it records the parent's canonical digests.
+        """
         handoff = (trial.result or {}).get("verifier_execution") if isinstance(trial.result, dict) else None
         if not isinstance(handoff, dict) or handoff.get("lease_id") is None:
             return
@@ -1579,8 +1608,14 @@ class ServiceExecutionMaterializer:
         child.materialization_next_attempt_at = None
         child.updated_at = now
         if committed:
+            if canonical_sha256 is None:
+                raise MaterializationIntegrityError("verifier_source_digest_missing")
             child.materialization_state = "committed"
+            child.materialization_attempts = max(child.materialization_attempts, 1)
             child.materialization_committed_at = now
+            child.materialization_error_code = None
+            child.materialization_error_message = None
+            child.canonical_trajectory_sha256, child.canonical_atif_sha256 = canonical_sha256
             child.source_cleanup_state = "retained"
             child.source_retain_until = now + self._source_retention
             artifact = await session.scalar(select(Artifact).where(
@@ -1597,6 +1632,9 @@ class ServiceExecutionMaterializer:
         else:
             child.materialization_state = "unavailable"
             child.materialization_error_code = (error_code or "parent_materialization_unavailable")[:120]
+            child.materialization_error_message = (
+                f"parent lease {lease.id} materialization unavailable: {child.materialization_error_code}"
+            )
 
     async def _retry(self, claim: MaterializationClaim, exc: Exception) -> None:
         now = datetime.now(UTC)
@@ -1958,7 +1996,9 @@ class ServiceExecutionMaterializer:
                 raise
             except Exception as exc:  # object-store and database transport failures retry
                 _raise_if_cancellation_requested(exc)
-                logger.warning("service execution materialization retry: %s", exc)
+                # Transport/SQL exceptions may contain private source URLs or
+                # row payloads. Keep detail in the retained lease diagnostic.
+                logger.warning("service execution materialization retry (%s)", type(exc).__name__)
                 await self._retry(claim, exc)
                 span.outcome = "retry"
 

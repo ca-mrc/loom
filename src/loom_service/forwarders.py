@@ -69,6 +69,11 @@ async def forward(
             # caller-provided audience: this process already authenticated only
             # its own protected binding. CP still verifies cookie/CSRF/team.
             headers["X-Loom-Session-Audience"] = settings.session_audience.model_dump_json()
+    if cancellation_request is not None:
+        for name in ("X-Loom-Admin-Actor", "X-Request-ID"):
+            value = cancellation_request.headers.get(name)
+            if value:
+                headers[name] = value
     try:
         resp = await client.request(
             method, path, headers=headers, json=json_body,

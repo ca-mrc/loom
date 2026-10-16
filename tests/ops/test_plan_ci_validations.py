@@ -541,7 +541,7 @@ def test_docs_plus_manifest_owned_root_test_keeps_only_the_root_test_lane(indepe
         ("tests/contract/test_driver_contract.py", {"integration"}),
         (
             "tests/integration/test_docker_driver_exec.py",
-            {"integration", "integration_docker"},
+            {"integration_docker"},
         ),
         ("tests/cluster/test_staging_k3s_render_contract.py", {"cluster_smoke"}),
         ("tests/system/test_full_stack_hello.py", {"staging_smoke"}),

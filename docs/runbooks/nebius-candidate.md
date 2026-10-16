@@ -13,18 +13,45 @@ runtime changes, explicit CI labels and unknown paths can select additional work
 See [Nebius CI integration](../contributing/ci.md) for the combined platform contract and
 optional integration coverage diagnostic.
 
+Before allocating pool-operator runners, publication selects affected modules
+against the immutable candidate's first parent, then checks successful native CI
+coverage on the exact candidate commit. Only complete test modules whose selected
+owning jobs passed are reused; partial coverage schedules only the missing files.
+Missing or unreadable evidence retains the required affected tests, and no empty
+shard is launched. An unavailable change boundary retains the entire suite.
+This does not reuse image-build or vulnerability-scan results, change protected
+merge authority, or relax the deployment idle check, backup or rollback. See
+[pool test scheduling](../contributing/ci.md#pool-operator-tests-run-before-deployment)
+for the evidence boundaries and measured shard rebalance.
+
 ## Bootstrap
 
-Publication runs on GitHub-hosted Ubuntu 24.04 AMD64. CI and publication require
-no Nebius runner node groups, ARC controller, runner registration credentials or
-custom runner image. The workflow installs version-pinned Skopeo from Ubuntu and
-starts the pinned BuildKit container on the disposable hosted machine.
+With `LOOM_CI_UNIFIED_RUNNERS=true`, missing pool-operator tests and image
+publication use the common native Actions queue across disposable
+OLDLAB KVM guests and GitHub-hosted VMs. With the flag disabled they use
+GitHub-hosted Ubuntu 24.04 AMD64. See
+[native runner supply](../contributing/ci-unified-runners.md) for activation,
+drain and rollback. The protected `dev` ref, `nebius-integration` environment,
+registry/signing credentials, image qualification and publication guards remain
+in force. Only the publication step receives those environment credentials.
+The optional
+`qualify_tb21_images=true` publication stays directly on GitHub-hosted Ubuntu
+24.04 to retain its full 360-minute budget. Normal builds keep 180 minutes;
+hosted donors allow 195 minutes including bootstrap and teardown.
+
+The short metadata-planning job stays on the hosted image with its GitHub CLI;
+minimal OLDLAB guests do not need another tool installed for planning.
+Both execution providers use Ubuntu 24.04 AMD64. No Nebius runner node groups
+or ARC controller are required. The existing common-pool infrastructure owns
+runner registration and disposable guest images. The publication workflow
+installs version-pinned Skopeo from Ubuntu and
+starts the pinned BuildKit container on the disposable execution VM.
 Its client is copied from that same immutable image. The daemon's container port
 is published only on host loopback; no host network, host workspace mount, or
 Docker socket is passed into the builder. Workspaces and builder data disappear
 with the job, and an always-run cleanup retains bounded, sanitized daemon diagnostics before removal.
-The standard privileged BuildKit container runs only on that disposable hosted
-machine, with no host socket or workspace mount. The rootless daemon exited before
+The standard privileged BuildKit container runs only on that disposable execution
+VM, with no host socket or workspace mount. The rootless daemon exited before
 listening in the first GitHub-hosted run; this supported container mode removes
 its dependency on host user namespaces.
 Failed publication commands use the same bounded diagnostic sanitizer.
@@ -75,8 +102,8 @@ admission and execution qualification; successful image publication alone
 does not establish that evidence.
 
 BuildKit is pinned to `v0.33.0` and its manifest digest in the workflow.
-Skopeo is pinned to Ubuntu package `1.13.3+ds1-2ubuntu0.24.04.3`; the explicit
-Ubuntu 24.04 runner label keeps that package source stable. Its APT update and
+Skopeo is pinned to Ubuntu package `1.13.3+ds1-2ubuntu0.24.04.3`; both providers
+use Ubuntu 24.04 to keep that package source stable. Its APT update and
 install use only the runner's `/etc/apt/sources.list.d/ubuntu.sources`, retaining
 the configured Ubuntu mirrors and native signature/checksum validation. Unrelated
 vendor repositories cannot block this install; their files remain untouched.
@@ -88,7 +115,7 @@ Nebius SDK. Images are built to an OCI archive, scanned and copied with digest
 preservation; registry readback must match the scanned immutable image. Initial
 publication builds all seven platform/harness images without an incremental-release controller or
 another required CI gate. The resulting platform images and all deployed
-platform resources use Nebius; the build job itself uses GitHub infrastructure.
+platform resources use Nebius; the build job uses the selected disposable execution provider.
 
 The execution-actuator image copies a selected set of shared modules. Its image
 build imports both actuator and capacity-collector entrypoints as the runtime UID,

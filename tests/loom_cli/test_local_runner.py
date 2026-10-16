@@ -18,6 +18,7 @@ from loom.models.result import TrialState
 from loom.models.task import TaskConfig
 from loom_cli.local_object_store import LocalDiskObjectStore
 from loom_cli.local_runner import LocalRunner
+from tests._trial_config_defaults import stub_trial_config
 
 
 def _oracle_task_config(verifier: dict[str, Any]) -> TaskConfig:
@@ -55,6 +56,9 @@ def _runner(
         object_store=store,
         upstream_gateway_tokens={"anthropic": "x"},
         anthropic_client=None, openai_client=None, google_client=None,
+        # These cases plant verifier evidence on one FakeDriver; a second
+        # start() on that instance is rejected. Shared injects after refuse.
+        trial_config=stub_trial_config(verifier_env_mode="shared"),
     )
 
 

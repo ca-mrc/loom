@@ -8,6 +8,7 @@ separate mandatory observations owned by the connected parent.
 from __future__ import annotations
 
 import copy
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -138,7 +139,8 @@ def _gateway_history_target(bindings: SharedPoolGuardBindings, credential: dict[
 
 
 def observe_shared_pool_forward_processes(*, bindings: SharedPoolGuardBindings, state_dir: Path,
-        development: HTTPSSharedPoolRuntimeProbes, kubeconfig: Path, executable: Path) -> SharedPoolForwardProcessObservation:
+        development: HTTPSSharedPoolRuntimeProbes, kubeconfig: Path, executable: Path,
+        recheck_application_scopes: Callable[[], None] | None = None) -> SharedPoolForwardProcessObservation:
     """Challenge current sources without replaying original open-guard preflight.
 
     The child readiness engine must finish every pending workload before the
@@ -314,6 +316,8 @@ def observe_shared_pool_forward_processes(*, bindings: SharedPoolGuardBindings, 
         # guard and database identities. No scope-exit remote read may follow
         # those final checks and leave a newly changed backend unchallenged.
         with development.process_observation(state_dir=completed.state_dir):
+            if recheck_application_scopes is not None:
+                recheck_application_scopes()
             for key, identity in dev_processes.items():
                 if development._process_identity(development._running(key, completed.state_dir)[2]) != identity:
                     raise ValueError

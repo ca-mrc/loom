@@ -148,6 +148,9 @@ def staging_history(original_platform_inputs, retained, tmp_path):
     base.mkdir()
     platform = copy.deepcopy(original_platform_inputs)
     management = entry.management_inputs.__wrapped__(platform)
+    # These are independent installations in one cluster, not two histories
+    # sharing the same cluster-scoped application-role and admission names.
+    management[0]['installation_id'] = '30000000-0000-4000-8000-000000000002'
     installed = install.installation.__wrapped__(management, entry.material.__wrapped__())
     bound = replace(installed[0].binding, kube_system_uid=retained[3].binding.kube_system_uid)
     installed = replace(installed[0], binding=bound), install.InstallationAPI(bound)
@@ -452,6 +455,32 @@ def test_shared_handoff_preserves_independent_staging_images(shared_runtime, sta
             changed = changed['observation']
         with pytest.raises(ValueError, match='shared pool handoff intent unqualified'):
             prepare_shared_pool_handoff(runtime=runtime, observation=changed, legacy=staging_history, repo_root=ROOT)
+
+
+def test_shared_writer_roots_include_historical_management_database(
+        shared_runtime, staging_history, staging_observation):
+    """The still-used staging manager database is a retained census root."""
+    from scripts.ops.nebius_shared_pool_handoff import prepare_shared_pool_handoff
+    from scripts.ops.nebius_shared_pool_handoff_live import _resource_roots
+
+    runtime, _ = shared_runtime
+    plan = prepare_shared_pool_handoff(runtime=runtime, observation=staging_observation,
+        legacy=staging_history, repo_root=ROOT)
+    stage_path = staging_history.context.original.upgrade.original_state / 'database' / 'stage.json'
+    assert stage_path in staging_history.history
+    stage = json.loads(stage_path.read_bytes())
+    item = stage['resources']['StatefulSet:' + stage['binding']['namespace'] + ':loom-postgres']
+    roots = _resource_roots(plan, frozenset({'StatefulSet'}))
+
+    root = roots['StatefulSet:' + stage['binding']['namespace'] + ':loom-postgres']
+    assert root['metadata']['uid'] == item['uid']
+    original = stage_path.read_bytes()
+    stage_path.write_bytes(original + b'\n')
+    try:
+        with pytest.raises(ValueError):
+            _resource_roots(plan, frozenset({'StatefulSet'}))
+    finally:
+        stage_path.write_bytes(original)
 
 
 @pytest.mark.parametrize('staging_observation', ['independent'], indirect=True)
@@ -1581,10 +1610,11 @@ def _exercise_recovery_processes(*, kwargs, state, api, documents, probes, mode,
             documents.setdefault('/apis/batch/v1/namespaces/' + namespace + '/jobs',
                 {'apiVersion': 'batch/v1', 'kind': 'JobList', 'metadata': {'resourceVersion': '501'}, 'items': []})
 
-    def observe():
+    def observe(recheck_application_scopes=None):
         try:
             return module.observe_shared_pool_recovery_processes(bindings=bindings, state_dir=state,
-                kubeconfig=Path(probes.prefix[probes.prefix.index('--kubeconfig') + 1]), executable=Path(probes.prefix[0]))
+                kubeconfig=Path(probes.prefix[probes.prefix.index('--kubeconfig') + 1]), executable=Path(probes.prefix[0]),
+                recheck_application_scopes=recheck_application_scopes)
         except ValueError as exc:
             import traceback
 
@@ -1684,7 +1714,11 @@ def _exercise_recovery_processes(*, kwargs, state, api, documents, probes, mode,
             observe()
         mode['process_hook'] = None
         documents.clear()
-        documents.update(before)
+        documents.update(copy.deepcopy(before))
+        with pytest.raises(ValueError, match=error):
+            observe(recheck_application_scopes=late_backend)
+        documents.clear()
+        documents.update(copy.deepcopy(before))
         # A service restart during the earlier collector challenge is not
         # covered by that callback's controller/database checks. The aggregate
         # selected-process readback must reject the changed service too.
@@ -2007,11 +2041,11 @@ def _exercise_forward_processes(*, bindings, development, documents, mode, check
         documents.setdefault('/apis/batch/v1/namespaces/' + namespace + '/jobs',
             {'apiVersion': 'batch/v1', 'kind': 'JobList', 'metadata': {'resourceVersion': '1'}, 'items': []})
 
-    def observe():
+    def observe(recheck_application_scopes=None):
         try:
             return module.observe_shared_pool_forward_processes(bindings=bindings, state_dir=state, development=development,
                 kubeconfig=Path(development.prefix[development.prefix.index('--kubeconfig') + 1]),
-                executable=Path(development.prefix[0]))
+                executable=Path(development.prefix[0]), recheck_application_scopes=recheck_application_scopes)
         except ValueError as exc:
             import traceback
 
@@ -2049,6 +2083,17 @@ def _exercise_forward_processes(*, bindings, development, documents, mode, check
             assert inventory_reads == 4
         finally:
             mode['http_hook'] = None
+            documents.clear()
+            documents.update(saved)
+        saved = copy.deepcopy(documents)
+        def restart_during_scope_read():
+            pod, = (row for row in documents['/api/v1/namespaces/' + manager.binding.namespace + '/pods']['items']
+                if row['metadata']['name'] == 'loom-postgres-0')
+            pod['status']['containerStatuses'][0]['restartCount'] += 1
+        try:
+            with pytest.raises(ValueError):
+                observe(recheck_application_scopes=restart_during_scope_read)
+        finally:
             documents.clear()
             documents.update(saved)
         _exercise_scoped_process_observation(development=development, documents=documents,
@@ -2919,6 +2964,8 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
                 'system:serviceaccounts', 'system:serviceaccounts:' + namespace, 'system:authenticated'}
             selected = json.loads(message.content)['spec']['namespace']
             reviews.append((namespace, account, selected))
+            if hook := mode.pop('during_rules', None):
+                hook()
             rules = []
             catalog = {_key(row): row for plural in ('roles', 'clusterroles') for row in inventory[plural]}
             for binding in (*inventory['rolebindings'], *inventory['clusterrolebindings']):
@@ -3001,6 +3048,13 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
             observe()
         mode.pop('effective_write')
         assert reviews, 'RBAC objects alone do not prove effective permissions'
+        if inventory.get('namespaces'):
+            namespace_scope = inventory['namespaces'][0]
+            namespace_uid = namespace_scope['metadata']['uid']
+            mode['during_rules'] = lambda: namespace_scope['metadata'].update(uid=str(uuid4()))
+            with pytest.raises(ValueError, match='preserve'):
+                observe()
+            namespace_scope['metadata']['uid'] = namespace_uid
 
         # A newly captured source snapshot cannot replace an already retained
         # actuator UID, even if all individual resource reads agree with it.
@@ -3295,8 +3349,46 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
                 publisher_cloud=publisher_cloud, patch=patch, payload=published_payload)
             capacity = external()
             assert capacity.node_count == capacity.ready_node_count == capacity.target_node_count == 0
+            if inventory.get('namespaces'):
+                # Replacement with identical labels still invalidates the
+                # namespace UID observed before external provider/publication I/O.
+                scope = inventory['namespaces'][0]
+                saved_uid = scope['metadata']['uid']
+                external_mode['hook'] = lambda: scope['metadata'].update(uid=str(uuid4()))
+                with pytest.raises(ValueError, match='preserve'):
+                    external()
+                scope['metadata']['uid'] = saved_uid
             assert manager_process() == ()
             assert gateway_process() is None
+            if inventory.get('namespaces'):
+                # Each process probe brackets remote execution with censuses;
+                # both must retain the earlier personal scope, not only workloads.
+                scope = inventory['namespaces'][0]
+                saved_uid = scope['metadata']['uid']
+                execute_probe = subprocess.run
+                accepted = []
+                for name, probe in (('peer', peer_process), ('gateway', gateway_process)):
+                    changed = []
+
+                    def drift(command, *, changed=changed, **options):
+                        result = execute_probe(command, **options)
+                        if 'exec' in command and not changed:
+                            scope['metadata']['uid'] = str(uuid4())
+                            changed.append(True)
+                        return result
+
+                    with pytest.MonkeyPatch.context() as scope_patch:
+                        scope_patch.setattr(subprocess, 'run', drift)
+                        try:
+                            probe()
+                        except ValueError as error:
+                            assert 'preserve' in str(error)
+                        else:
+                            accepted.append(name)
+                        finally:
+                            scope['metadata']['uid'] = saved_uid
+                    assert changed == [True]
+                assert not accepted, f'process probes accepted changed personal scopes: {accepted}'
             registry_mode['manager-pending'] = True
             with pytest.raises(ValueError, match='preserve'):
                 manager_process()

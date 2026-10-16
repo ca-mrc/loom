@@ -177,22 +177,23 @@ def test_empty_selection_is_safe_and_selector_failure_still_fails_the_job(
 
 
 @pytest.mark.timeout(120)
+@pytest.mark.parametrize("lane", ["tests-root", "nebius-pool"])
 @pytest.mark.parametrize("scope", ["all", "nebius"])
-def test_root_workflow_runs_complete_disjoint_fail_fast_shards(tmp_path: Path, scope: str) -> None:
+def test_shard_workflows_run_complete_disjoint_fail_fast_shards(tmp_path: Path, scope: str, lane: str) -> None:
     """Exercise the workflow/selector boundary, not a second shard algorithm."""
     root = Path(__file__).resolve().parents[2]
     workflow = yaml.safe_load((root / ".github/workflows/ci.yml").read_text())
-    job = workflow["jobs"]["tests-root"]
+    job = workflow["jobs"][lane]
     from scripts import component_ownership as ownership
     manifest = ownership.load_manifest(root / "config/component-ownership.toml")
     matrix = ownership.test_shard_matrix(manifest, tracked_paths=ownership._tracked_paths(root),
-                                        lane="tests-root", repo_root=root, test_scope=scope)
+                                        lane=lane, repo_root=root, test_scope=scope)
     step = next(row for row in job["steps"] if row.get("name", "").startswith("Pytest"))
     selector_step = next(row for row in job["steps"] if row.get("id") == "manifest")
-    count = manifest.test_shard_policy("tests-root").shard_count
+    count = manifest.test_shard_policy(lane).shard_count
     assert sorted(row["shard_index"] for row in matrix) == list(range(count))
     complete = subprocess.run(
-        [sys.executable, "scripts/component_ownership.py", "test-paths", "--lane", "tests-root",
+        [sys.executable, "scripts/component_ownership.py", "test-paths", "--lane", lane,
          "--test-scope", scope], cwd=root, text=True, capture_output=True, check=True,
     ).stdout.splitlines()
     uv = tmp_path / "uv"
@@ -219,7 +220,7 @@ def test_root_workflow_runs_complete_disjoint_fail_fast_shards(tmp_path: Path, s
         selected = subprocess.run(["bash", "-c", selector_step["run"]], cwd=root,
                                   env=env, text=True, capture_output=True)
         assert selected.returncode == 0, selected.stderr
-        script = step["run"].replace("${{ steps.manifest.outputs.paths_file }}", str(tmp_path / "tests-root-manifest.txt"))
+        script = step["run"].replace("${{ steps.manifest.outputs.paths_file }}", str(tmp_path / f"{lane}-manifest.txt"))
         result = subprocess.run(["bash", "-c", script], cwd=root, env=env, text=True, capture_output=True)
         assert result.returncode == pytest_exit, result.stderr
         arguments = json.loads(recorded.read_text())
@@ -229,6 +230,8 @@ def test_root_workflow_runs_complete_disjoint_fail_fast_shards(tmp_path: Path, s
         assert all(paths.isdisjoint(previous) for previous in shards)
         shards.append(paths)
     assert set().union(*shards) == set(complete)
+    if lane != "nebius-pool":
+        return
     gateway = next(shard for shard in shards if "tests/ops/test_nebius_pool_gateway_retirement_live.py" in shard)
     assert gateway.isdisjoint({"tests/ops/test_nebius_pool_role_restoration_live.py",
                                "tests/ops/test_nebius_pool_template_restoration_live.py"})

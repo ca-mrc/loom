@@ -251,7 +251,6 @@ def preflight_nebius_terminus_admission(
     trial = TrialConfig(
         agent_name="terminus-2",
         agent_model=ModelSpec(provider="openai", name="gpt-5", source="api"),
-        workspace_staging_policy_name="tb21",
     )
     return automatic_service_execution_rejections(
         task,

@@ -12,8 +12,11 @@ import os
 import signal
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Annotated, Any, cast
+from typing import TYPE_CHECKING, Annotated, Any, cast
 from uuid import UUID, uuid4
+
+if TYPE_CHECKING:
+    from loom_control_plane.terminal_archive_recovery import TerminalArchiveRecoveryRequest
 
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, text
@@ -230,7 +233,9 @@ PROJECTION_FIELDS = ("trial_config_sha256", "task_config_sha256", "runtime_resul
                      "derivation_sha256", "events_sha256", "atif_sha256")
 
 
-async def qualify_lifecycle_scope(session: AsyncSession, request: ArchiveRecoveryRequest) -> RuntimeLifecycleScope:
+async def qualify_lifecycle_scope(
+    session: AsyncSession, request: ArchiveRecoveryRequest | TerminalArchiveRecoveryRequest,
+) -> RuntimeLifecycleScope:
     """Verify existing ownership before copying; never create a parent in preflight."""
     scope = RuntimeLifecycleScope.from_environ()
     if scope.namespace != request.namespace:

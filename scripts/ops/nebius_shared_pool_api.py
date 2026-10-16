@@ -345,14 +345,28 @@ class HTTPSSharedPoolOperationAPI(HTTPSSharedPoolRuntimeProbes):
         current = observer(bindings=self._captured, state_dir=self.shared_state, transport=self)
         if current.plan != self._captured.plan or current.authority.keys() != writers.authority.keys():
             raise ValueError('shared writer authority changed')
-        if any(not _matches(current.authority[key], row, _uid(row)) for key, row in writers.authority.items()):
-            raise ValueError('shared writer authority changed')
+        for before_scope, after_scope in ((writers.authority, current.authority),
+                (writers.application_scopes, current.application_scopes)):
+            if (before_scope.keys() != after_scope.keys()
+                    or any(not _matches(after_scope[key], row, _uid(row)) for key, row in before_scope.items())):
+                raise ValueError('shared writer authority changed')
+        def recheck_application_scopes() -> None:
+            # Scope identity must survive the process challenges too. Use only
+            # the captured namespace/admission objects, inside the process
+            # barrier, so the final backend identities remain the last reads.
+            for row in current.application_scopes.values():
+                path = ('/api/v1/namespaces' if row['kind'] == 'Namespace' else runtime_resource_path(row))
+                actual = self._request('GET', path + '/' + row['metadata']['name'])
+                if actual is None or not _matches(actual, row, _uid(row)):
+                    raise ValueError('shared application scope changed during process observation')
+
         arguments: _ObservationArguments = dict(bindings=self._captured, state_dir=self.shared_state,
             kubeconfig=self.guards.kubeconfig, executable=Path(self.prefix[0]))
         result: SharedPoolForwardProcessObservation | SharedPoolRecoveryProcessObservation
         if recovering:
             databases = observe_shared_pool_recovery_databases(**arguments)
-            result = observe_shared_pool_recovery_processes(**arguments)
+            result = observe_shared_pool_recovery_processes(**arguments,
+                recheck_application_scopes=recheck_application_scopes)
             # The process observer challenges restored staging, not the stopped
             # dev or manager backends. Pin every retained database across those
             # later reads, including on read-only terminal replay.
@@ -360,7 +374,8 @@ class HTTPSSharedPoolOperationAPI(HTTPSSharedPoolRuntimeProbes):
                     or observe_shared_pool_recovery_databases(**arguments) != databases):
                 raise ValueError('shared recovery database scope changed')
         else:
-            result = observe_shared_pool_forward_processes(**arguments, development=self)
+            result = observe_shared_pool_forward_processes(**arguments, development=self,
+                recheck_application_scopes=recheck_application_scopes)
         if result.bindings != self._captured or (ready and result.pending_workloads):
             raise ValueError('shared process observation pending or mismatched')
         if self._state() != (before, recovering) or _files(self.shared_state) != files:

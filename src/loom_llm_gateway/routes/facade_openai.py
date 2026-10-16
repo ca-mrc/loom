@@ -328,6 +328,7 @@ async def openai_chat_facade(
                     "correlation_status",
                 )
             },
+            auth_context=ctx,
         )
 
     return openai_chat_facade_result(

@@ -11,6 +11,15 @@ _AGENT = "oracle"
 _MODEL = ModelSpec(provider="local", name="stub")
 
 
+def test_trial_config_keeps_historical_workspace_staging_policy_name():
+    c = TrialConfig(
+        agent_name=_AGENT,
+        agent_model=_MODEL,
+        workspace_staging_policy_name="none",
+    )
+    assert c.workspace_staging_policy_name == "none"
+
+
 def test_trial_config_defaults():
     c = TrialConfig(agent_name=_AGENT, agent_model=_MODEL)
     assert c.schema_version == "1"

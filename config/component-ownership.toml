@@ -5,6 +5,7 @@ ci_lanes = [
   "go-checks",
   "integration",
   "integration-docker",
+  "nebius-pool",
   "runtime-payload",
   "system-smoke",
   "tests-packages",
@@ -113,8 +114,18 @@ attestation_owners = [
 
 [[test_sharding]]
 lane = "tests-root"
+shard_count = 4
+strategy = "stable-hash"
+# Without the pool operator suite (lane nebius-pool), PR #2474 run 38746079826
+# spent 28m of pytest across 824 files. This salt projects 6.9 / 7.1 / 6.8 / 7.2
+# minutes. Stable hashing keeps existing assignments when files are added.
+salt = "tests-root-v3-4-196"
+
+[[test_sharding]]
+lane = "nebius-pool"
 shard_count = 20
 strategy = "stable-hash"
+# Moved unchanged from tests-root, so every pool file keeps its shard.
 # Runs 38159584210/38163731249/38167845683 exceeded the 40m job limit.
 # Recovery authority/release and participant transport are now separate complete
 # lifecycle modules. Give the 20-30m groups their own space; retain measured heavy
@@ -124,15 +135,16 @@ strategy = "stable-hash"
 # Every selected file still runs once; the 40m job limit stays unchanged.
 # Censored CI tails are not duration evidence. Verify the new balance in CI.
 salt = "tests-root-v2-8275"
+# Candidate 38793279887: shards 1/5/6 took 1825/1607/1635s,
+# while 13/12/14 took 41/35/58s. The slow-25 log entries alone
+# account for >=642/354/489s in the three complete modules moved below.
+# Keep every scenario and the existing time budgets; balance whole modules.
 pins = [
-  { path = "tests/ops/test_ci_secret_isolation.py", shard_index = 0 },
-  { path = "tests/ops/test_component_ownership_manifest.py", shard_index = 1 },
   { path = "tests/ops/test_nebius_pool_application_connected.py", shard_index = 0 },
   { path = "tests/ops/test_nebius_pool_image_transport.py", shard_index = 0 },
   { path = "tests/ops/test_nebius_pool_legacy_reopening_live.py", shard_index = 0 },
   { path = "tests/ops/test_nebius_pool_legacy_restart.py", shard_index = 0 },
-  { path = "tests/ops/test_ci_test_selection.py", shard_index = 1 },
-  { path = "tests/ops/test_nebius_pool_image_cancellation.py", shard_index = 1 },
+  { path = "tests/ops/test_nebius_pool_image_cancellation.py", shard_index = 13 },
   { path = "tests/ops/test_nebius_pool_startup_repair.py", shard_index = 1 },
   { path = "tests/ops/test_nebius_pool_template_restoration.py", shard_index = 1 },
   { path = "tests/ops/test_nebius_pool_database_guard.py", shard_index = 2 },
@@ -150,17 +162,14 @@ pins = [
   { path = "tests/ops/test_nebius_pool_recovery_qualification_live.py", shard_index = 5 },
   { path = "tests/ops/test_nebius_pool_shutdown.py", shard_index = 5 },
   { path = "tests/ops/test_nebius_pool_startup_live.py", shard_index = 5 },
-  { path = "tests/ops/test_nebius_pool_startup_repair_rollback.py", shard_index = 5 },
+  { path = "tests/ops/test_nebius_pool_startup_repair_rollback.py", shard_index = 12 },
   { path = "tests/ops/test_nebius_pool_legacy_reopening.py", shard_index = 6 },
   { path = "tests/ops/test_nebius_pool_operation.py", shard_index = 6 },
-  { path = "tests/ops/test_nebius_pool_refresh_connected.py", shard_index = 6 },
+  { path = "tests/ops/test_nebius_pool_refresh_connected.py", shard_index = 14 },
   { path = "tests/ops/test_nebius_pool_role_restoration.py", shard_index = 6 },
-  { path = "tests/ops/test_ci_throughput_workflows.py", shard_index = 7 },
   { path = "tests/ops/test_nebius_pool_activation_live.py", shard_index = 7 },
   { path = "tests/ops/test_nebius_pool_cutover.py", shard_index = 7 },
   { path = "tests/ops/test_nebius_pool_gateway_retirement_live.py", shard_index = 7 },
-  # Observation was unfinished at 38m41s beside the image lifecycle matrices
-  # in 38181207030. The forward shard completed in 12m49s and has room for it.
   { path = "tests/ops/test_nebius_pool_participant_observation.py", shard_index = 10 },
   { path = "tests/ops/test_nebius_pool_participant_resource.py", shard_index = 1 },
   { path = "tests/ops/test_nebius_pool_participant_processes.py", shard_index = 1 },
@@ -168,40 +177,23 @@ pins = [
   { path = "tests/ops/test_nebius_development_pool_install.py", shard_index = 5 },
   { path = "tests/ops/test_nebius_development_pool_registration.py", shard_index = 5 },
   { path = "tests/ops/test_nebius_pool_participant_release.py", shard_index = 5 },
-  { path = "tests/ops/test_nebius_management_rollout.py", shard_index = 5 },
   { path = "tests/ops/test_nebius_pool_machine_retirement.py", shard_index = 5 },
   { path = "tests/ops/test_nebius_pool_participant_creation.py", shard_index = 6 },
   { path = "tests/ops/test_nebius_pool_participant_adapter.py", shard_index = 6 },
-  { path = "tests/ops/test_nebius_management_refresh_connected.py", shard_index = 6 },
-  { path = "tests/ops/test_nebius_development_activation.py", shard_index = 7 },
   { path = "tests/ops/test_nebius_pool_participant_delivery.py", shard_index = 8 },
-  # Delivery passed all cases but hit 40m during cleanup in 38172223205.
-  # Its completed-release/history matrix shares the measured 9m47s authority
-  # shard instead of leaving normal delivery at the job deadline.
   { path = "tests/ops/test_nebius_pool_participant_delivery_history.py", shard_index = 11 },
   { path = "tests/ops/test_nebius_shared_pool_handoff.py", shard_index = 7 },
-  # Parent passed in about 9m40s before the co-located process matrix hit
-  # the job deadline. Place it beside the measured 11m07s recovery-role job.
   { path = "tests/ops/test_nebius_shared_pool_handoff_parent.py", shard_index = 15 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_forward.py", shard_index = 10 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_processes.py", shard_index = 9 },
-  # The process shard exceeded 37m before its fifth scenario timed out.
-  # Give both successor scenarios a separate job.
   { path = "tests/ops/test_nebius_shared_pool_handoff_processes_recovery.py", shard_index = 17 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_processes_observation.py", shard_index = 10 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_census.py", shard_index = 18 },
-  # Give recovery census its own headroom: beside completed release it used
-  # 38m26s in 38181207030. Keep it separate from the other census variants.
   { path = "tests/ops/test_nebius_shared_pool_handoff_census_recovery.py", shard_index = 19 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_fences.py", shard_index = 4 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_authority.py", shard_index = 11 },
-  # The release matrix used about 17m including setup; shard 7's complete
-  # job used 17m45s, leaving more room than its previous census neighbor.
   { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_release.py", shard_index = 7 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_stop.py", shard_index = 12 },
-  # The stop matrix exceeded its original CI test budget.
-  # Templates completed in 8m06s in 38172223205; this placement gives the
-  # committed outcome room without stacking both outcomes in one 40m job.
   { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_stop_committed.py", shard_index = 14 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_gateway.py", shard_index = 13 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_templates.py", shard_index = 14 },
@@ -212,12 +204,13 @@ pins = [
 
 [[test_sharding]]
 lane = "integration"
-shard_count = 4
+shard_count = 6
 strategy = "stable-hash"
-# PR #1973 head 69359261: ~155 minutes across 518 timed modules.
-# This salt projects 39.0 / 38.2 / 38.8 / 39.1 minutes without splitting modules.
+# PR #2474 run 38746079826: 59.5m of pytest across the nebius-scope modules, with
+# 12.5-16.8m per job at four shards. This salt projects 9.3 / 10.2 / 10.0 / 10.3 /
+# 10.3 / 9.4 minutes without splitting modules.
 # Stable hashing keeps existing assignments when new test files are added.
-salt = "integration-v3-4"
+salt = "integration-v4-6-3494"
 pins = [
   # Preserve the existing auth-before-schema ordering within one process.
   { path = "tests/integration/test_username_password_auth.py", shard_index = 3 },
@@ -453,6 +446,7 @@ source_paths = [
   "src/loom/terminal_bench_normalize.py",
   "src/loom/terminal_result_semantics.py",
   "src/loom/trajectory/__init__.py",
+  "src/loom/trajectory/immutable_object.py",
   "src/loom/trajectory/storage.py",
   "src/loom/trajectory/upload_observation.py",
   "src/loom/verifier_runtime.py",
@@ -982,13 +976,30 @@ exclude_paths = [
 
 [[test_suites]]
 # Pool operator lifecycle tests: ~450 of ~500 tests-root runner-minutes (Oct 14).
-# They guard the operator scripts that deployment runs, so a PR or merge group
-# runs them only when operator inputs change. nebius-candidate.yml runs the
-# whole suite on every dev head before any candidate is published.
+# Component-local operator edits run their test consumers; shared inputs retain
+# the full suite. Candidate publication reuses exact-commit native CI coverage
+# and executes only missing affected modules.
 id = "nebius-pool-ops"
 language = "python"
-lane = "tests-root"
+lane = "nebius-pool"
 include_paths = ["tests/ops/test_nebius*pool*.py"]
+# These recovery CLIs have dedicated lifecycle/archive/idle-protection tests in
+# tests-root; they do not operate the legacy pool transition state machine.
+unaffected_paths = [
+  "scripts/ops/nebius_archive_recovery.py",
+  "scripts/ops/nebius_terminal_archive_recovery.py",
+  "scripts/ops/nebius_terminal_cleanup_recovery.py",
+]
+component_sources = [
+  "scripts/ops/nebius_pool_activation_*.py",
+  "scripts/ops/nebius_pool_cutover*.py",
+  "scripts/ops/nebius_pool_startup*.py",
+  "scripts/ops/nebius_pool_participant_*.py",
+  "scripts/ops/nebius_pool_*retirement*.py",
+  "scripts/ops/nebius_pool_*restoration*.py",
+  "scripts/ops/nebius_pool_role_fencing*.py",
+  "scripts/ops/install_nebius*pool*.py",
+]
 affected_paths = [
   "scripts/ops/**",
   "deploy/k8s/**",

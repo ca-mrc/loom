@@ -1182,18 +1182,17 @@ async def _spawn_trial(
             raw_provenance = bundle.get("source_provenance")
             provenance = raw_provenance if isinstance(raw_provenance, dict) else {}
             raw_policy = provenance.get("workspace_staging_policy")
-            # #1263: trial_config.workspace_staging_policy_name (from batch
-            # create CLI) wins over provenance; TB2.1-r6 still fail-closed.
+            # #2418: withholding is verification-lifecycle, not a batch switch.
+            # Historical workspace_staging_policy_name is ignored.
             workspace_staging_policy = resolve_trial_workspace_staging_policy(
                 policy_name=trial_config.workspace_staging_policy_name,
                 task_id=task_config.task.id,
                 raw_provenance_policy=raw_policy,
             )
             logger.info(
-                "trial %s workspace_staging_policy_name=%s applied=%s",
+                "trial %s verification workspace withholding applied (tb21=%s)",
                 trial_id,
-                trial_config.workspace_staging_policy_name,
-                workspace_staging_policy is not None,
+                task_config.task.id.startswith("terminal-bench-2@tb2.1-r6/"),
             )
 
             # Plan 13 Task 3: materialize the fixture content from

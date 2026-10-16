@@ -47,6 +47,27 @@ describe("execution selection document", () => {
     expect(parseExecutionSelection(doc)).toEqual({ ok: true, value: axes });
   });
 
+  it("maps skipped verification onto skip_verifier and not verifier_env_mode", () => {
+    const axes = {
+      networkPolicy: "gateway-only" as const,
+      allowedWebsites: "",
+      verifierEnvMode: "skipped" as const,
+      isolation: "" as const,
+    };
+    expect(JSON.parse(executionSelectionDocument(axes))).toEqual({
+      schema_version: "loom.execution-selection.v1",
+      network_policy: { mode: "gateway-only" },
+      verification: "skipped",
+      isolation: "auto",
+    });
+    expect(parseExecutionSelection(executionSelectionDocument(axes))).toEqual({
+      ok: true, value: { ...axes, isolation: "" },
+    });
+    const config = buildAdvancedConfig(state({ verifierEnvMode: "skipped" }));
+    expect(config.ok && config.value).toMatchObject({ skip_verifier: true });
+    expect(config.ok && config.value).not.toHaveProperty("verifier_env_mode");
+  });
+
   it.each([
     ["{", "not valid JSON"],
     ['{"schema_version":"loom.execution-selection.v1","isolation":"vm"}', "isolation must be"],
