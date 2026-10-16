@@ -110,9 +110,10 @@ def test_shared_recovery_selects_original_publication_not_another_success_for_sa
 
 
 @pytest.mark.timeout(120)
-@pytest.mark.parametrize('recover,file_writes', [(False, False), (False, True), (True, False), (True, True),
-    ('pre-upgrade-backup', True), ('30-migrate.yaml', True), ('50-configure.yaml', True), ('guard-release', True),
-    ('release-before-commit', True), ('completion-prepare', True), ('completion-ack', True)])
+# Failed deploy jobs and completion faults run this same lifecycle from
+# test_nebius_pool_participant_delivery_{job_failures,completion}.py so the
+# 33 slow cases spread over three pool shards.
+@pytest.mark.parametrize('recover,file_writes', [(False, False), (False, True), (True, False), (True, True)])
 def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation_inputs, connection, tmp_path, monkeypatch, recover, file_writes,
         host_delivery=False):
     """Real pool effects and deployment lifecycle; external I/O/qualification doubled."""

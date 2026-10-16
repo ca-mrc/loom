@@ -239,6 +239,19 @@ legacy/shared-pool selection and time budgets stay unchanged. The slow-25 logs
 give lower bounds for moved costs, not a measured speedup; compare subsequent
 hosted execution and queue time before claiming an end-to-end improvement.
 
+The October 16 rebalance splits the two single-module bottlenecks along their
+existing scenario boundaries. Pool tests run about twice as slowly on GitHub VMs
+as on OLDLAB guests, and there participant delivery took 24.4 minutes and
+development pool retained 19.5 minutes (runs 38842326680/38836780289). Delivery's
+failed deploy jobs and completion faults now run the same lifecycle from
+`test_nebius_pool_participant_delivery_{job_failures,completion}.py`; the
+retained module's runtime probe, HTTPS, database/catalog stage and network tests
+moved to `test_nebius_development_pool_retained_runtime_stages.py`, importing the
+same fixtures. Each part has its own near-empty shard, and recovery
+qualification moves off a 21-minute shard. Every case still runs exactly once
+with unchanged assertions and timeouts; the projected longest pool shard on a
+GitHub VM drops from ~25 to ~18 minutes, to be confirmed in CI.
+
 The dev-only candidate test job saves uv caches under the same checksum-pinned,
 locked-workspace policy as candidate publication. PR and merge-group jobs retain
 their existing cache-write restrictions.

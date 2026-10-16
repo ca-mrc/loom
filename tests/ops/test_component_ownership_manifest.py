@@ -1470,6 +1470,8 @@ def test_pool_shards_distribute_shared_handoff_phases_and_observation() -> None:
         ("shared_pool_handoff_recovery_release", "pool_shutdown_live"),
         ("shared_pool_handoff_recovery_stop", "shared_pool_handoff_recovery_stop_committed"),
         ("pool_participant_delivery", "pool_participant_delivery_history"),
+        # The two halves of the 19.5m retained module run on separate jobs.
+        ("development_pool_retained", "development_pool_retained_runtime_stages"),
         ("shared_pool_handoff_parent", "shared_pool_handoff_processes"),
         # Run 38181207030 reached 38m41s with observation still unfinished.
         # Keep its retained-resource matrix away from these measured heavy
@@ -1490,6 +1492,7 @@ def test_pool_shards_distribute_shared_handoff_phases_and_observation() -> None:
         "shared_pool_handoff_recovery_release", "shared_pool_handoff_recovery_reopening",
         "shared_pool_handoff_recovery_stop", "shared_pool_handoff_census",
         "pool_participant_delivery", "pool_participant_delivery_transport",
+        "pool_participant_delivery_job_failures", "pool_participant_delivery_completion",
     )]
     assert len(set(isolated)) == len(isolated)
 

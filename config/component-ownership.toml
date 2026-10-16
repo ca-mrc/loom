@@ -139,6 +139,11 @@ salt = "tests-root-v2-8275"
 # while 13/12/14 took 41/35/58s. The slow-25 log entries alone
 # account for >=642/354/489s in the three complete modules moved below.
 # Keep every scenario and the existing time budgets; balance whole modules.
+# Runs 38842326680/38836780289 (Oct 16): pool tests run ~2x slower on GitHub VMs
+# than OLDLAB, and on GitHub VMs participant delivery (shard 9) took 24.4m and
+# development pool retained (shard 3) 19.5m, each in a single module. Both are
+# split along existing scenario boundaries onto near-empty shards 10/19/20;
+# recovery qualification leaves shard 6 (21.4m) for shard 16 (1.4m).
 pins = [
   { path = "tests/ops/test_nebius_pool_application_connected.py", shard_index = 0 },
   { path = "tests/ops/test_nebius_pool_image_transport.py", shard_index = 0 },
@@ -159,7 +164,7 @@ pins = [
   { path = "tests/ops/test_nebius_pool_shutdown_live.py", shard_index = 4 },
   { path = "tests/ops/test_nebius_pool_startup_fence_live.py", shard_index = 4 },
   { path = "tests/ops/test_nebius_pool_predecessor.py", shard_index = 5 },
-  { path = "tests/ops/test_nebius_pool_recovery_qualification_live.py", shard_index = 5 },
+  { path = "tests/ops/test_nebius_pool_recovery_qualification_live.py", shard_index = 15 },
   { path = "tests/ops/test_nebius_pool_shutdown.py", shard_index = 5 },
   { path = "tests/ops/test_nebius_pool_startup_live.py", shard_index = 5 },
   { path = "tests/ops/test_nebius_pool_startup_repair_rollback.py", shard_index = 12 },
@@ -200,6 +205,9 @@ pins = [
   { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_roles.py", shard_index = 15 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_reopening.py", shard_index = 16 },
   { path = "tests/ops/test_nebius_pool_participant_delivery_transport.py", shard_index = 17 },
+  { path = "tests/ops/test_nebius_pool_participant_delivery_job_failures.py", shard_index = 9 },
+  { path = "tests/ops/test_nebius_pool_participant_delivery_completion.py", shard_index = 19 },
+  { path = "tests/ops/test_nebius_development_pool_retained_runtime_stages.py", shard_index = 18 },
 ]
 
 [[test_sharding]]
