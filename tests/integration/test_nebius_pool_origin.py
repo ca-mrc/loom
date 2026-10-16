@@ -126,6 +126,7 @@ async def read_management_history(factory, origins):
             return rows[0][0]
 
 
+@pytest.mark.parametrize('environment_registry', ['0176'], indirect=True)
 async def test_fixed_management_sql_qualifies_original_source_after_retirement_without_writes(applications):
     from scripts.ops.nebius_pool_origin_history import qualify_management_history_page
 
@@ -141,6 +142,7 @@ async def test_fixed_management_sql_qualifies_original_source_after_retirement_w
 
 
 @pytest.mark.parametrize('damage', ['source', 'incarnation', 'generation', 'missing_app', 'cluster', 'environment', 'missing_row', 'extra_row'])
+@pytest.mark.parametrize('environment_registry', ['0176'], indirect=True)
 async def test_fixed_history_readback_denies_unknown_or_misbound_original_work(applications, damage):
     from scripts.ops.nebius_pool_origin_history import qualify_management_history_page
 
@@ -167,6 +169,7 @@ async def test_fixed_history_readback_denies_unknown_or_misbound_original_work(a
         qualify_management_history_page(report, origins=(origin,), participant=binding, cluster_id=cluster)
 
 
+@pytest.mark.parametrize('environment_registry', ['0176'], indirect=True)
 async def test_bound_management_transport_reads_real_retained_history_without_opening_admission(applications, management_history, monkeypatch):
     from scripts.ops.nebius_pool_migration import PoolMigrationError
     from scripts.ops.nebius_pool_origin_history import KubectlPoolHistoryAPI

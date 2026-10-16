@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -25,6 +26,7 @@ from loom_control_plane.terminal_cleanup_recovery import (
 from loom_execution_actuator.contracts import KubernetesJobObservation, NormalizedJobState
 from loom_execution_actuator.controller import ExecutionActuator
 from loom_execution_actuator.renderer import ExecutionTargetRuntime
+from tests.integration.conftest import retain_pool_schema
 from tests.integration.test_delete_pending_reconciliation import _retained_projection
 from tests.integration.test_service_execution_leases import (
     _cleanup_service_execution_test_rows,  # noqa: F401
@@ -141,8 +143,12 @@ async def _seed_cleanup(sessions, now, *, failed=False):
     ],
 )
 async def test_bound_cleanup_uses_normal_delete_and_exact_absence(
-    postgres_url, boundary, monkeypatch
+    isolated_migration_postgres_url, boundary, monkeypatch
 ):
+    # This recovery entrypoint deliberately supports installed 0175/0176 only.
+    # Use a real isolated 0176 database without downgrading shared current-head tests.
+    postgres_url = isolated_migration_postgres_url
+    await asyncio.to_thread(retain_pool_schema, postgres_url)
     engine = create_async_engine(postgres_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     now = datetime.now(UTC)

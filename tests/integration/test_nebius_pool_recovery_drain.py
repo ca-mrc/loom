@@ -14,11 +14,13 @@ from loom.nebius_pool_workload import PoolExecutionPrepareV1
 from loom_execution_capacity_collector.contracts import CapacityPlacement
 from loom_service.pool_management.auth import resolve_pool_machine
 from tests.execution_placement_fixtures import placement_fixture
+from tests.integration.conftest import retained_pool_sessions
 from tests.integration.test_nebius_pool_activation_fence import read_sql
 from tests.integration.test_nebius_pool_registry import prepare, publish_placement
-from tests.integration.test_nebius_pool_registry import sessions as sessions
 from tests.integration.test_nebius_pool_startup_capacity import prepare_startup_capacity
 from tests.unit.test_nebius_pool_execution_render import inputs
+
+sessions = retained_pool_sessions
 
 
 async def request_setup(sessions, tmp_path, *, waiting=False):
