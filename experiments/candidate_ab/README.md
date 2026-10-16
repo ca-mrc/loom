@@ -2,6 +2,11 @@
 
 Manual-only experiment on `codex/candidate-artifact-transfer-20261016`; never a
 merge gate, admitted candidate, signer, production registry writer or rollout.
+Actual read-only production artifact metadata lookup is timed per consumer arm.
+Its real result is retained separately from explicitly controlled cache fixtures;
+manual experiment runs are never qualified merge-group evidence. The metadata
+token is removed before launching an unsigned worker.
+
 The independent application checkout is pinned by `source_sha`; workflow/tool
 SHA, app SHA, runner and budgets are recorded separately.
 

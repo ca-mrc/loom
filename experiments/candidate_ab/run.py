@@ -173,10 +173,14 @@ def producer():
 def case_init(case):
     info,p,old,rows=context();output=ROOT/'metrics'/case;output.mkdir()
     started=time.time();name,host=start_builder(info,output)
+    from scripts.ops.nebius_image_artifacts import plan
+    lookup_started=time.monotonic();hint=plan(SHA);lookup_seconds=time.monotonic()-lookup_started
+    os.environ.pop('GH_TOKEN',None)  # The unsigned worker does not inherit the API token.
+    save(output/'metadata-lookup.json',{'seconds':lookup_seconds,'actual_plan':hint,'experiment_cache_plan_is_explicit_fixture':True})
     scenario,mode=case.rsplit('-',1)
     available=list(p.COMPONENTS) if scenario=='all-hit' else PARTIAL
     state={'case':case,'scenario':scenario,'mode':mode,'source_sha':SHA,'started':started,'builder_name':name,'builder_host':host,'available':available,
-           'expected_built':[c for c in p.COMPONENTS if c not in available],'work':str(ROOT/case),'ready':time.time()}
+           'expected_built':[c for c in p.COMPONENTS if c not in available],'work':str(ROOT/case),'ready':time.time(),'metadata_lookup_seconds':lookup_seconds}
     work=Path(state['work']);work.mkdir()
     if mode=='new':
         with (output/'worker.log').open('w') as log:

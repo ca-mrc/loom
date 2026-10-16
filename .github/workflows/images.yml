@@ -201,6 +201,8 @@ jobs:
     - *id003
     - *id004
     - name: Start all-hit-old
+      env:
+        GH_TOKEN: ${{ github.token }}
       run: '"$PROBE_PYTHON" experiments/candidate_ab/run.py init --case all-hit-old'
     - name: Native download all-hit-old
       id: all_hit_old
@@ -220,6 +222,8 @@ jobs:
         NATIVE_DOWNLOAD_OUTCOME: ${{ steps.all_hit_old.outcome }}
       run: '"$PROBE_PYTHON" experiments/candidate_ab/run.py finish --case all-hit-old --outcome "$NATIVE_DOWNLOAD_OUTCOME"'
     - name: Start all-hit-new
+      env:
+        GH_TOKEN: ${{ github.token }}
       run: '"$PROBE_PYTHON" experiments/candidate_ab/run.py init --case all-hit-new'
     - name: Native download all-hit-new
       id: all_hit_new
@@ -239,6 +243,8 @@ jobs:
         NATIVE_DOWNLOAD_OUTCOME: ${{ steps.all_hit_new.outcome }}
       run: '"$PROBE_PYTHON" experiments/candidate_ab/run.py finish --case all-hit-new --outcome "$NATIVE_DOWNLOAD_OUTCOME"'
     - name: Start partial-hit-old
+      env:
+        GH_TOKEN: ${{ github.token }}
       run: '"$PROBE_PYTHON" experiments/candidate_ab/run.py init --case partial-hit-old'
     - name: Native download partial-hit-old
       id: partial_hit_old
@@ -258,6 +264,8 @@ jobs:
         NATIVE_DOWNLOAD_OUTCOME: ${{ steps.partial_hit_old.outcome }}
       run: '"$PROBE_PYTHON" experiments/candidate_ab/run.py finish --case partial-hit-old --outcome "$NATIVE_DOWNLOAD_OUTCOME"'
     - name: Start partial-hit-new
+      env:
+        GH_TOKEN: ${{ github.token }}
       run: '"$PROBE_PYTHON" experiments/candidate_ab/run.py init --case partial-hit-new'
     - name: Native download partial-hit-new
       id: partial_hit_new
@@ -277,6 +285,8 @@ jobs:
         NATIVE_DOWNLOAD_OUTCOME: ${{ steps.partial_hit_new.outcome }}
       run: '"$PROBE_PYTHON" experiments/candidate_ab/run.py finish --case partial-hit-new --outcome "$NATIVE_DOWNLOAD_OUTCOME"'
     - name: Start full-fallback-old
+      env:
+        GH_TOKEN: ${{ github.token }}
       run: '"$PROBE_PYTHON" experiments/candidate_ab/run.py init --case full-fallback-old'
     - name: Native download full-fallback-old
       id: full_fallback_old
@@ -296,6 +306,8 @@ jobs:
         NATIVE_DOWNLOAD_OUTCOME: ${{ steps.full_fallback_old.outcome }}
       run: '"$PROBE_PYTHON" experiments/candidate_ab/run.py finish --case full-fallback-old --outcome "$NATIVE_DOWNLOAD_OUTCOME"'
     - name: Start full-fallback-new
+      env:
+        GH_TOKEN: ${{ github.token }}
       run: '"$PROBE_PYTHON" experiments/candidate_ab/run.py init --case full-fallback-new'
     - name: Native download full-fallback-new
       id: full_fallback_new
