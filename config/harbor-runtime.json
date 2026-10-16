@@ -1,6 +1,6 @@
 {
   "repository": "harbor-framework/harbor",
   "upstream_ref": "main",
-  "source_revision": "f527f8e447038fd242d08ecfa8aaa8029100da97",
+  "source_revision": "2de4605b9404eada7d341388291e6e469c90330b",
   "version": "0.24.0"
 }
