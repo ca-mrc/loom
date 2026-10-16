@@ -8,6 +8,7 @@ import json
 import os
 import ssl
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -53,7 +54,7 @@ pytestmark = pytest.mark.skipif(os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1"
 
 
 def _add_retirement_diagnostics(container, core, error):
-    """Bounded reads from this disposable node; retain the original failure."""
+    """Bounded diagnostics from this disposable node; retain the original failure."""
     if core is not None:
         for label, read in (
             ("Pod lifecycle after failure", lambda: [{"name": pod.metadata.name,
@@ -79,17 +80,33 @@ def _add_retirement_diagnostics(container, core, error):
                 detail = type(diagnostic_error).__name__
             error.add_note(label + "\n" + detail[-16384:])
     ident = container.get_wrapped_container().id
-    for command in (
-        ["docker", "logs", "--tail=150", ident],
-        ["docker", "inspect", "--format={{json .State}}", ident],
-        ["docker", "exec", ident, "tail", "-n", "150", "/var/lib/rancher/k3s/agent/containerd/containerd.log"],
+    for command, limit in (
+        (["docker", "exec", ident, "sh", "-c",
+          'ps -ef; for p in /proc/[0-9]*; do echo "$p"; '
+          'cat "$p/comm" "$p/wchan" "$p/stack" 2>/dev/null; done'], 32768),
+        (["docker", "logs", "--tail=150", ident], 16384),
+        (["docker", "inspect", "--format={{json .State}}", ident], 16384),
+        # SIGUSR1 also writes its dump to this log, so retain the lifecycle
+        # timeline before requesting the stack snapshot.
+        (["docker", "exec", ident, "tail", "-n", "150", "/var/lib/rancher/k3s/agent/containerd/containerd.log"], 16384),
+        # The pinned containerd handles SIGUSR1 by dumping goroutines without
+        # stopping. Target only its verified PID inside this disposable node.
+        # Sandbox exit can precede a blocked shm, NRI, CNI or netns cleanup;
+        # the ordinary runtime log cannot distinguish those waits.
+        (["docker", "exec", ident, "sh", "-c",
+          'set -- $(pidof containerd); [ "$#" = 1 ] || exit 1; p="$1"; '
+          '[ "$(cat "/proc/$p/comm")" = containerd ] || exit 1; '
+          'kill -USR1 "$p" || exit 1; '
+          'for i in 1 2 3 4 5 6 7 8 9 10; do '
+          '[ -s "/tmp/containerd.$p.stacks.log" ] && break; sleep 0.1; done; '
+          'cat "/tmp/containerd.$p.stacks.log"'], 262144),
     ):
         try:
             result = subprocess.run(command, text=True, capture_output=True, timeout=5)
             detail = f"exit={result.returncode}\n{result.stdout}{result.stderr}"
         except Exception as diagnostic_error:
             detail = type(diagnostic_error).__name__
-        error.add_note(" ".join(command) + "\n" + detail[-16384:])
+        error.add_note(" ".join(command) + "\n" + detail[-limit:])
 
 
 def test_retirement_diagnostics_retain_pod_lifecycle_without_manifest_contents(monkeypatch):
@@ -140,8 +157,48 @@ def test_retirement_diagnostics_do_not_replace_failure_when_reads_fail(monkeypat
             _add_retirement_diagnostics(container, core, error)
             raise
     assert caught.value is original
-    assert len(original.__notes__) == 6
+    assert len(original.__notes__) == 8
     assert all("TimeoutError" in note for note in original.__notes__)
+
+
+async def _cleanup_retirement_fixture(container, *, image_tag, error):
+    try:
+        try:
+            await asyncio.to_thread(container.stop)
+        except Exception as cleanup_error:
+            if error is None:
+                raise
+            error.add_note(f"disposable container cleanup failed: {cleanup_error}")
+    finally:
+        if image_tag is not None:
+            await asyncio.to_thread(subprocess.run, ["docker", "image", "rm", image_tag],
+                                   capture_output=True, check=False)
+
+
+@pytest.mark.parametrize("original_failure", [False, True])
+async def test_retirement_cleanup_preserves_failure_and_removes_image(monkeypatch, original_failure):
+    from types import SimpleNamespace
+
+    def failed_stop():
+        raise RuntimeError("disposable container removal failed")
+
+    removed = []
+    monkeypatch.setattr(subprocess, "run", lambda command, **kwargs: removed.append(command))
+    container = SimpleNamespace(stop=failed_stop)
+    error = AssertionError("personal process retirement did not converge") if original_failure else None
+    if error is None:
+        with pytest.raises(RuntimeError, match="disposable container removal failed"):
+            await _cleanup_retirement_fixture(container, image_tag="fixture-image", error=error)
+    else:
+        with pytest.raises(AssertionError) as caught:
+            try:
+                raise error
+            finally:
+                await _cleanup_retirement_fixture(container, image_tag="fixture-image", error=sys.exception())
+        assert caught.value is error
+        assert str(error) == "personal process retirement did not converge"
+        assert "disposable container removal failed" in "\n".join(error.__notes__)
+    assert removed == [["docker", "image", "rm", "fixture-image"]]
 
 
 @pytest.mark.timeout(240)
@@ -240,9 +297,7 @@ async def test_runtime_retires_routes_and_waits_for_real_deployment_controllers(
             error.add_note(f"retirement diagnostics unavailable: {type(diagnostic_error).__name__}")
         raise
     finally:
-        await asyncio.to_thread(container.stop)
-        if running:
-            await asyncio.to_thread(subprocess.run, ["docker", "image", "rm", tag], capture_output=True, check=False)
+        await _cleanup_retirement_fixture(container, image_tag=tag if running else None, error=sys.exception())
 
 
 @pytest.mark.timeout(180)
