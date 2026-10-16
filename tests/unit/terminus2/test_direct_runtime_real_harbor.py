@@ -55,6 +55,21 @@ _CASES = [
 ]
 
 
+@pytest.fixture(autouse=True)
+async def _isolated_litellm_clients(monkeypatch: pytest.MonkeyPatch):
+    import litellm
+    from litellm.caching.llm_caching_handler import LLMClientCache
+    from litellm.llms.custom_httpx.async_client_cleanup import close_litellm_async_clients
+
+    # Cached clients retain a test's MockTransport. Event-loop IDs can be reused
+    # between cases, so constructor patches alone cannot isolate their callbacks.
+    monkeypatch.setattr(litellm, "in_memory_llm_clients_cache", LLMClientCache())
+    try:
+        yield
+    finally:
+        await close_litellm_async_clients()
+
+
 def _response(request: httpx.Request, *, model: str) -> httpx.Response:
     if request.url.host == "anthropic.test":
         body = {
