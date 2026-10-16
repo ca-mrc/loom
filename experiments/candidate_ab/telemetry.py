@@ -33,7 +33,10 @@ def cpu_stat(text: str) -> dict[str, int]:
     if len(values) < len(CPU_FIELDS):
         raise ValueError("aggregate CPU stat has fewer than eight counters")
     # guest/guest_nice are already included in user/nice; do not count twice.
-    return dict(zip(CPU_FIELDS, map(int, values[:8]), strict=True))
+    counters = dict(zip(CPU_FIELDS, map(int, values[:8]), strict=True))
+    if any(value < 0 for value in counters.values()):
+        raise ValueError("negative raw CPU counter")
+    return counters
 
 
 def meminfo(text: str) -> dict[str, int]:
@@ -152,6 +155,8 @@ class Collector:
         self.pid = None
         self.devices: set[str] = set()
         self.network_interfaces: set[str] = set()
+        self.cpu_coverage = {"valid_intervals": 0, "warning_intervals": 0, "error_intervals": 0,
+                             "valid_seconds": 0.0, "observed_seconds": 0.0}
         try:
             result = subprocess.run(["docker", "inspect", "--format", "{{.State.Pid}}", builder],
                                     check=True, capture_output=True, text=True, timeout=10)
@@ -183,7 +188,7 @@ class Collector:
 
     def sample(self) -> dict:
         record = {"type": "sample", "time": time.time(), "monotonic": time.monotonic(),
-                  "vm": {}, "builder": {}, "errors": []}
+                  "vm": {}, "builder": {}, "errors": [], "warnings": []}
         def read(target, key, path, parse):
             try:
                 target[key] = parse(path.read_text())
@@ -206,7 +211,8 @@ class Collector:
         if self.previous:
             elapsed = record["monotonic"] - self.previous["monotonic"]
             record["interval_seconds"] = elapsed
-            for scope, fields in (("vm", ("cpu_ticks", "disk", "network")),
+            self.cpu_interval(record, elapsed)
+            for scope, fields in (("vm", ("disk", "network")),
                                    ("builder", ("cpu", "memory_events", "io"))):
                 for field in fields:
                     try:
@@ -216,18 +222,63 @@ class Collector:
                             continue
                         changes = delta(current, old, ("device_count", "interface_count", "in_flight"))
                         record[scope][field + "_delta"] = changes
-                        if scope == "vm" and field == "cpu_ticks":
-                            total = sum(changes.values())
-                            if total <= 0:
-                                raise ValueError("CPU counters did not advance")
-                            vm["cpu_percent"] = {key: 100 * changes[key] / total for key in ("idle", "iowait", "steal")}
-                            vm["cpu_percent"]["usage"] = 100 * sum(changes[key] for key in ("user", "nice", "system", "irq", "softirq")) / total
                         if scope == "builder" and field == "cpu":
                             builder["usage_cores"] = changes["usage_usec"] / 1_000_000 / elapsed
                     except Exception as exc:
                         record["errors"].append(self.error(scope + "." + field + "_delta", exc))
+        else:
+            vm["cpu_interval"] = {"status": "baseline" if "cpu_ticks" in vm else "unavailable"}
+        record["cpu_coverage"] = self.cpu_coverage.copy()
         self.previous = record
         return record
+
+    def cpu_interval(self, record: dict, elapsed: float) -> None:
+        """Retain raw ticks; derive CPU percentages only for usable intervals."""
+        vm = record["vm"]
+        interval = vm["cpu_interval"] = {"status": "unavailable", "seconds": elapsed}
+        coverage = self.cpu_coverage
+        if elapsed <= 0:
+            coverage["error_intervals"] += 1
+            record["errors"].append(self.error("vm.cpu_ticks_delta", ValueError("nonpositive sample interval")))
+            return
+        coverage["observed_seconds"] += elapsed
+        previous = self.previous["vm"].get("cpu_ticks")
+        current = vm.get("cpu_ticks")
+        if previous is None or current is None:
+            coverage["error_intervals"] += 1
+            interval["reason"] = "missing_cpu_sample"
+            return  # The corresponding read error is retained in its sample.
+        changes = {key: current[key] - previous[key] for key in CPU_FIELDS}
+        decreased = {key for key, value in changes.items() if value < 0}
+        if decreased - {"iowait"}:
+            coverage["error_intervals"] += 1
+            interval.update(status="invalid", reason="counter_decreased")
+            record["errors"].append(self.error("vm.cpu_ticks_delta", ValueError("CPU counter other than iowait decreased")))
+            return
+        reason = "iowait_nonmonotonic" if decreased else ("no_progress" if sum(changes.values()) == 0 else None)
+        if reason:
+            coverage["warning_intervals"] += 1
+            interval.update(status="invalid", reason=reason)
+            record["warnings"].append({"source": "vm.cpu_ticks_delta", "code": reason,
+                                       "interval_seconds": elapsed})
+            # Never clamp a negative iowait delta or emit fabricated zero usage.
+            return
+        coverage["valid_intervals"] += 1
+        coverage["valid_seconds"] += elapsed
+        interval["status"] = "valid"
+        vm["cpu_ticks_delta"] = changes
+        total = sum(changes.values())
+        vm["cpu_percent"] = {key: 100 * changes[key] / total for key in ("idle", "iowait", "steal")}
+        vm["cpu_percent"]["usage"] = 100 * sum(changes[key] for key in ("user", "nice", "system", "irq", "softirq")) / total
+
+
+def next_deadline(sampled_at: float, finished_at: float) -> float:
+    """Skip elapsed one-second slots; never catch up with burst samples.
+
+    Anchor on the actual sampling time, including late wakeups, so two samples
+    cannot be squeezed together by an old deadline after VM scheduling delay.
+    """
+    return sampled_at + max(1, int(finished_at - sampled_at) + 1)
 
 
 def atomic_json(path: Path, data: dict) -> None:
@@ -251,6 +302,8 @@ def main(argv=None) -> int:
     signal.signal(signal.SIGTERM, terminate)
     signal.signal(signal.SIGINT, terminate)
     errors = 0
+    warnings = 0
+    collector = None
     returncode = 1
     try:
         args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -262,25 +315,29 @@ def main(argv=None) -> int:
             emit({"type": "start", "time": time.time(), "monotonic": time.monotonic(),
                   "pid": os.getpid(), "builder_pid": collector.pid,
                   "builder_cgroup": str(collector.cgroup) if collector.cgroup else None,
+                  "vm_cpu_count": os.cpu_count(), "monitor_affinity": sorted(os.sched_getaffinity(0)),
+                  "clock_ticks_per_second": os.sysconf("SC_CLK_TCK"),
                   "interval_seconds": 1, "disk_scope": "leaf_whole_block_devices",
                   "network_scope": "initial_default_route_interfaces", "errors": collector.errors})
-            deadline = time.monotonic()
             while not stopped.is_set() and not args.stop_file.exists():
                 sample = collector.sample()
                 errors += len(sample["errors"])
+                warnings += len(sample["warnings"])
                 emit(sample)
-                deadline += 1
+                deadline = next_deadline(sample["monotonic"], time.monotonic())
                 stopped.wait(max(0, deadline - time.monotonic()))
             returncode = int(errors > 0)
             emit({"type": "stop", "time": time.time(), "monotonic": time.monotonic(),
-                  "reason": reason, "error_count": errors, "returncode": returncode})
+                  "reason": reason, "error_count": errors, "warning_count": warnings,
+                  "cpu_coverage": collector.cpu_coverage, "returncode": returncode})
     except Exception as exc:
         errors += 1
         returncode = 1
         print("Telemetry failed: " + type(exc).__name__ + ": " + str(exc), file=sys.stderr)
     finally:
         atomic_json(args.output.with_suffix(".exit.json"),
-                    {"returncode": returncode, "error_count": errors, "finished": time.time()})
+                    {"returncode": returncode, "error_count": errors, "warning_count": warnings,
+                     "cpu_coverage": collector.cpu_coverage if collector else None, "finished": time.time()})
     if errors:
         print(f"Telemetry retained {errors} errors; inspect {args.output}", file=sys.stderr)
     return returncode

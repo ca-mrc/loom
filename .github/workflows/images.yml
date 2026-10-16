@@ -416,7 +416,7 @@ jobs:
       actions: read
       checks: read
     strategy:
-      fail-fast: false
+      fail-fast: true
       max-parallel: 2
       matrix:
         block: ${{ fromJSON(inputs.blocks) }}

@@ -18,9 +18,11 @@ BuildKit and fresh analysis cache. Different block jobs can have different VM
 load/DB refreshes; compare arms paired by block, retain DB metadata and runner
 identity. `max-parallel: 2` bounds experiment VM demand.
 
-`blocks` is JSON selecting from `[1,2,3,4,5,6]`. Start `[1]` first to verify native
-resource sampling and the real phase boundary, then run remaining blocks on the
-same workflow commit. No samples are discarded to choose a faster result.
+`blocks` is JSON selecting from `[1,2,3,4,5,6]`. The initial pilot exposed a sampling-infrastructure defect and is retained
+separately. After fixing and replaying its exact counter sequences, run all six
+blocks on one corrected immutable workflow commit. Fail-fast aborts the cohort
+on a real build/validation/measurement failure to avoid repeating an unfixed
+problem. No samples are discarded to choose a faster result.
 
 `download_buildctl.py` gates the three early-export commands using OS file locks.
 During native transfer only the treatment's 1/2/3 command slots are available.
@@ -44,8 +46,11 @@ probes. The loopback registry is not a surrogate for Nebius WAN/deployment cost.
 Read-only telemetry samples procfs/cgroupfs once per second. It includes VM CPU,
 steal/iowait, memory, CPU/I/O/memory PSI, disk and default-route network counters,
 plus BuildKit CPU use/throttling, memory peak/events and I/O. Docker inspect runs
-once per case. Sampling errors are retained and fail the measurement rather than
-silently substituting zero; normal collector completion is joined before builder
+once per case. Structural/read errors are retained and fail the measurement. Documented
+iowait-only decreases and non-advancing CPU intervals preserve raw values with
+warnings/coverage and omit invalid derived CPU rates; they never become zero
+measurements. Missed sampling deadlines are skipped rather than producing
+catch-up bursts. Normal collector completion is joined before builder
 cleanup. Collector overhead is common to all arms. VM signals cannot prove what
 the shared physical OLDLAB host was doing.
 
