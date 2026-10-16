@@ -83,6 +83,15 @@ class SharedPoolHandoffPlan:
     input_digest: str
     preactivation: CompletedPreactivationCatalog | None = None
 
+    @property
+    def effective_runtime_resources(self) -> dict[str, dict[str, Any]]:
+        """Current catalog/manager overlay; original installation stays intact."""
+        resources = copy.deepcopy(self.development.runtime.resources)
+        if self.preactivation is not None:
+            for row in (self.preactivation.resources.manager, self.preactivation.resources.catalog):
+                resources[_key(row)] = copy.deepcopy(row)
+        return resources
+
 
 def prepare_staging_forward(*, registration: PoolRegistrationRequest, observation: dict[str, Any],
         legacy: CompletedPoolCutover, repo_root: Path) -> StagingForwardPlan:

@@ -133,7 +133,7 @@ def _gateway_history_target(bindings: SharedPoolGuardBindings, credential: dict[
         _uid(document)
         resources[document['kind']] = document
     return PoolManagementHistoryTarget(namespace=binding.namespace, namespace_uid=UUID(binding.namespace_uid),
-        controller=copy.deepcopy(completed.resources['Deployment:' + binding.namespace + ':loom-service']),
+        controller=bindings.plan.effective_runtime_resources['Deployment:' + binding.namespace + ':loom-service'],
         database=PoolGuardDatabase(statefulset=resources['StatefulSet'], service=resources['Service'],
             credential_uid=UUID(uid), credential_resource_version=version))
 

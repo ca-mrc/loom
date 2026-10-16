@@ -264,7 +264,7 @@ class HTTPSSharedPoolOperationAPI(HTTPSSharedPoolRuntimeProbes):
             await qualify_runtime_publication(request=self.request, http=http)
             await qualify_staging_publication(request=self.request, staging=self._captured.plan.staging, http=http)
         observed = await observe_shared_pool_provider(**self._arguments(), development=development,
-            operator_credentials=self.operator_credentials)
+            operator_credentials=self.operator_credentials, preactivation=self._captured.plan.preactivation)
         if observed.plan != self._captured.plan:
             raise ValueError('shared parent provider scope differs')
         self._scope()
@@ -282,12 +282,15 @@ class HTTPSSharedPoolOperationAPI(HTTPSSharedPoolRuntimeProbes):
             if path.exists() or path.is_symlink():
                 raise ValueError('shared preflight cannot replay an anchored operation')
         with HTTPSDevelopmentRuntimeProbes(request=self.request, api_server=self.api_server,
-                ssl_context=self.context, token=self.token, private_files=self.private_files) as initial:
+                ssl_context=self.context, token=self.token, private_files=self.private_files,
+                preactivation=self._captured.plan.preactivation) as initial:
             asyncio.run(self._external(initial))
-            writers = observe_shared_pool_writers(**self._arguments(), transport=self)
+            writers = observe_shared_pool_writers(**self._arguments(), transport=self,
+                preactivation=self._captured.plan.preactivation)
             self._absent()
             processes = observe_shared_pool_processes(**self._arguments(), development=initial,
-                kubeconfig=self.guards.kubeconfig, executable=Path(self.prefix[0]))
+                kubeconfig=self.guards.kubeconfig, executable=Path(self.prefix[0]),
+                preactivation=self._captured.plan.preactivation)
             if writers.plan != self._captured.plan or processes.bindings != self._captured:
                 raise ValueError('shared preflight scope differs')
         self._absent()
