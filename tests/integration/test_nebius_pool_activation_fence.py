@@ -13,8 +13,10 @@ from sqlalchemy import select, text, update
 from sqlalchemy.engine import make_url
 
 from loom.db.nebius_pool_schema import NebiusPoolBinding
-from tests.integration.test_nebius_pool_registry import sessions as sessions
+from tests.integration.conftest import retained_pool_sessions
 from tests.integration.test_nebius_pool_startup_capacity import prepare_startup_capacity
+
+sessions = retained_pool_sessions
 
 
 def read_sql(url, query, *, application_name='pool-fence-test'):

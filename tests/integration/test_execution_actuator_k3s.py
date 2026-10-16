@@ -760,7 +760,9 @@ async def test_attempt_network_policy_allows_only_dns_and_gateway(built_images: 
     try:
         with tempfile.TemporaryDirectory(prefix="loom-network-k3s-") as temporary:
             root = Path(temporary)
-            container = await asyncio.to_thread(_start_k3s)
+            # Match the other disposable networking fixtures: a large host disk
+            # can have ample free space while breaching kubelet's percentage floor.
+            container = await asyncio.to_thread(_start_k3s, ephemeral_storage_floor="1Gi")
             _, core, _ = await asyncio.to_thread(_load_client, container)
             dns_pods = await _wait_for_dns_pods(core)
             await asyncio.to_thread(

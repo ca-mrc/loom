@@ -1,5 +1,6 @@
 """Exercise the real actuator command/trigger path with its bootstrap DB role."""
 
+import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
@@ -23,7 +24,6 @@ from loom.db.schema import (
     TeamQuota,
     Trial,
 )
-from loom.db.schema_startup import service_schema_head
 from loom.execution_runtime_contract import ExecutionRuntimeResultV1
 from loom_control_plane.execution_admission import upsert_execution_admission_policy
 from loom_control_plane.service_execution import (
@@ -200,6 +200,10 @@ async def test_global_handoff_runs_as_restricted_actuator_after_guarded_role_sta
         monkeypatch.setenv("LOOM_DB_" + role + "_PASSWORD", "restricted-role-password-" + "a" * 32)
     bootstrap.bootstrap_database({"namespace": "loom-nebius-platform"})
     url = make_url(global_role_database).set(drivername="postgresql+psycopg")
+    from tests.integration.conftest import retain_pool_schema
+
+    # This protected role transition belongs to the retained pool protocol.
+    await asyncio.to_thread(retain_pool_schema, url.render_as_string(hide_password=False))
     admin = create_async_engine(url)
     worker = create_async_engine(url.set(username="loom_actuator", password="restricted-role-password-" + "a" * 32))
     scheduler = create_async_engine(url.set(username="loom_control_plane", password="restricted-role-password-" + "a" * 32))
@@ -226,7 +230,7 @@ async def test_global_handoff_runs_as_restricted_actuator_after_guarded_role_sta
                 with pytest.raises(psycopg.errors.RaiseException, match="not closed and idle"):
                     db.execute(migration.pool_runtime_role_sql(owner=owner, candidate=candidate, action="stage"), prepare=False)
                 db.rollback()
-                db.execute("INSERT INTO alembic_version(version_num) VALUES(%s)", (service_schema_head(),))
+                db.execute("INSERT INTO alembic_version(version_num) VALUES(%s)", ('0176',))
             with db.cursor() as cursor:
                 cursor.execute(migration.pool_runtime_role_sql(owner=owner, candidate=candidate, action="stage"), prepare=False)
                 reports = []

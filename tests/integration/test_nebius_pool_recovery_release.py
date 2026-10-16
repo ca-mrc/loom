@@ -12,8 +12,10 @@ from sqlalchemy.engine import make_url
 
 from loom.nebius_rollout_guard import LOCK_KEY, admission_open
 from tests.integration import test_service_execution_leases as execution
+from tests.integration.conftest import retained_pool_sessions
 from tests.integration.test_nebius_pool_activation_fence import read_sql
-from tests.integration.test_nebius_pool_registry import sessions as sessions
+
+sessions = retained_pool_sessions
 
 
 def database_url(sessions):

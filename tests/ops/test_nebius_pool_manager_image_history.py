@@ -674,6 +674,22 @@ def test_new_tooling_continues_anchored_image_without_replacing_binding_or_histo
     assert {path: path.read_bytes() for path in paths} == before
 
 
+@pytest.mark.parametrize('revision', ['0175', '0177'])
+def test_image_only_repair_rejects_incompatible_source_schema(private_image_repair, revision):
+    import json
+
+    from scripts.ops import nebius_certificates as private_state
+    from scripts.ops.nebius_management_entry import EntryError
+    from scripts.ops.nebius_pool_image_entry import load_image_repair_inputs
+
+    operation, _, proof, _ = private_image_repair
+    document = json.loads(proof.read_bytes())
+    document['revision'] = revision
+    private_state._atomic_json(proof, document)
+    with pytest.raises(EntryError):
+        load_image_repair_inputs(operation)
+
+
 @pytest.mark.parametrize("damage", ["unanchored", "recursive", "private_drift", "same_id", "same_source",
     "other_parent", "injected_binding", "old_schema_proof"])
 def test_tooling_continuation_rejects_unbound_or_replaced_repair(

@@ -23,9 +23,11 @@ from loom_service.pool_management.auth import (
     resolve_pool_machine,
 )
 from loom_service.pool_management.installation import PoolInstallation, register_installation
+from tests.integration.conftest import retained_pool_sessions
 from tests.integration.test_nebius_pool_activation_fence import read_sql
 from tests.integration.test_nebius_pool_installation import installation
-from tests.integration.test_nebius_pool_registry import sessions as sessions
+
+sessions = retained_pool_sessions
 
 
 async def registered(sessions):

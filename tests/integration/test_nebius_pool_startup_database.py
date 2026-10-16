@@ -22,9 +22,11 @@ from loom.db.nebius_pool_schema import (
 from loom.db.schema import Token
 from loom_service.pool_management.capacity import digest
 from loom_service.pool_management.installation import PoolInstallation, register_installation
+from tests.integration.conftest import retained_pool_sessions
 from tests.integration.test_nebius_pool_installation import add_application_builder, installation
-from tests.integration.test_nebius_pool_registry import sessions as sessions
 from tests.unit.test_nebius_application_image_renderer import build_inputs as build_inputs
+
+sessions = retained_pool_sessions
 
 
 async def test_participant_registry_reader_follows_real_refresh_without_writes_or_mutation_lock(sessions):

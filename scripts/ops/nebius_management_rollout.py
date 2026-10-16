@@ -21,7 +21,6 @@ from scripts.ops.nebius_management_gateway import (
     IMAGE_REPAIR_SCHEMAS,
     LIMITS,
     MANAGER_SCHEMA_PROOF,
-    MANAGER_SCHEMA_REVISION,
     MAX_WHEEL,
     SOURCES,
     safe_report,
@@ -70,9 +69,11 @@ def build_bundle(config: dict[str, Any], *, uv: Path, requirements: Path, wheels
                 raise RolloutError("management bundle member exceeds bound")
         files["operation.json"] = json.dumps(config, sort_keys=True).encode()
         if config['schema'] in IMAGE_REPAIR_SCHEMAS:
+            from loom.db.schema_startup import service_schema_head
+
             files[MANAGER_SCHEMA_PROOF] = json.dumps({'schema': 'loom.nebius-manager-schema.v1',
                 'source_sha': config['source_sha'],
-                'revision': MANAGER_SCHEMA_REVISION}, sort_keys=True).encode()
+                'revision': service_schema_head(ROOT / 'database/migrations/alembic.ini')}, sort_keys=True).encode()
         files["manifest.json"] = json.dumps({name: hashlib.sha256(value).hexdigest() for name, value in files.items()},
                                            sort_keys=True).encode()
         buffer = io.BytesIO()

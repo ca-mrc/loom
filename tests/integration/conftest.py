@@ -10,6 +10,7 @@ pgbouncer integration tests (#609).
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -692,6 +693,31 @@ def isolated_migration_postgres_url(migration_template_postgres_url: str) -> Ite
     yield from _isolated_migration_database(
         migration_template_postgres_url, template_name=template_name, prepare_template=False
     )
+
+
+def retain_pool_schema(postgres_url: str) -> None:
+    """Prepare an owned test database for the protected, retained 0176 protocol.
+
+    Run the real downgrade rather than relabeling a current-head database. This
+    must only be used by historical pool tests on their isolated databases.
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    cfg = AlembicConfig(str(repo_root / "database" / "migrations" / "alembic.ini"))
+    cfg.set_main_option("script_location", str(repo_root / "database" / "migrations"))
+    url = make_url(postgres_url).set(drivername="postgresql+psycopg").render_as_string(hide_password=False)
+    cfg.set_main_option("sqlalchemy.url", url.replace("%", "%%"))
+    command.downgrade(cfg, "0176")
+
+
+@pytest.fixture
+async def retained_pool_sessions(isolated_migration_postgres_url: str):
+    """Retained installation guards keep their explicit schema boundary."""
+    await asyncio.to_thread(retain_pool_schema, isolated_migration_postgres_url)
+    engine = create_async_engine(isolated_migration_postgres_url)
+    try:
+        yield async_sessionmaker(engine, expire_on_commit=False)
+    finally:
+        await engine.dispose()
 
 
 def _isolated_migration_database(

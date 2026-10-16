@@ -15,7 +15,6 @@ from sqlalchemy import create_engine, insert, select
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
-from loom.db.schema_startup import service_schema_head
 from loom.nebius_rollout_guard import acquire, admission_open, release
 from tests.integration.test_nebius_application_schema import migration_access as migration_access
 from tests.ops.test_nebius_pool_database_guard import database_guard as database_guard
@@ -27,6 +26,9 @@ from tests.unit.test_nebius_platform_render import platform_inputs as platform_i
 
 @pytest.fixture
 def cutover_database(database_guard, isolated_migration_postgres_url):
+    from tests.integration.conftest import retain_pool_schema
+
+    retain_pool_schema(isolated_migration_postgres_url)
     api, state = database_guard
     url = make_url(isolated_migration_postgres_url).set(drivername='postgresql').render_as_string(hide_password=False)
     with psycopg.connect(url, autocommit=True) as connection:
@@ -76,7 +78,7 @@ def test_cutover_reads_actual_schema_and_empty_backlog_without_database_changes(
     api, state, connection, _ = cutover_database
     before = connection.execute('SELECT * FROM public.nebius_rollout_guard').fetchall()
     assert api.cutover_readiness_page(state.target, after=None) == {
-        'status': 'observed', 'schema_revision': service_schema_head(), 'rows': []}
+        'status': 'observed', 'schema_revision': '0176', 'rows': []}
     assert connection.execute('SELECT * FROM public.nebius_rollout_guard').fetchall() == before
 
 
@@ -159,7 +161,7 @@ def test_cutover_qualifies_schema_guard_and_disconnected_application_credentials
     else:
         # No personal application session exists. A still-valid key can create
         # one later, so stopping application Pods is not credential retirement.
-        migration_access[2].grant(uuid4(), uuid4(), 1, token_urlsafe(48), schema_revision=service_schema_head())
+        migration_access[2].grant(uuid4(), uuid4(), 1, token_urlsafe(48), schema_revision='0176')
     with pytest.raises(PoolMigrationError):
         api.cutover_readiness_page(state.target, after=None)
 
@@ -168,7 +170,7 @@ def test_cutover_accepts_retired_and_drained_application_access_without_erasing_
     api, state, connection, _ = cutover_database
     access = migration_access[2]
     application, incarnation = uuid4(), uuid4()
-    access.grant(application, incarnation, 1, token_urlsafe(48), schema_revision=service_schema_head())
+    access.grant(application, incarnation, 1, token_urlsafe(48), schema_revision='0176')
     access.revoke(application, incarnation, 1)
     assert access.drain(application, incarnation, 1)
     history = connection.execute('SELECT * FROM loom_application_access.generations').fetchall()
@@ -201,7 +203,7 @@ def test_cutover_does_not_trust_a_replaced_application_readiness_routine(cutover
     from scripts.ops.nebius_pool_migration import PoolMigrationError
 
     api, state, connection, _ = cutover_database
-    migration_access[2].grant(uuid4(), uuid4(), 1, token_urlsafe(48), schema_revision=service_schema_head())
+    migration_access[2].grant(uuid4(), uuid4(), 1, token_urlsafe(48), schema_revision='0176')
     connection.execute("""CREATE OR REPLACE FUNCTION loom_application_access.migration_ready() RETURNS boolean
         LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS 'BEGIN RETURN TRUE; END'""")
     assert connection.execute('SELECT loom_application_access.migration_ready()').fetchone() == (True,)

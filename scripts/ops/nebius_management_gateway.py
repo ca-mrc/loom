@@ -64,10 +64,6 @@ COMMANDS = {"loom-nebius-management-preflight-v1": "preflight", "loom-nebius-man
 IMAGE_REPAIR_SCHEMAS = frozenset({'loom.nebius-pool-startup-repair-operation.v2', 'loom.nebius-pool-startup-repair-operation.v3', 'loom.nebius-pool-startup-repair-operation.v4'})
 POOL_REPAIR_SCHEMAS = frozenset({'loom.nebius-pool-startup-repair-operation.v1', *IMAGE_REPAIR_SCHEMAS})
 MANAGER_SCHEMA_PROOF = 'manager-schema.json'
-# Pool-management images are still bound to the independently installed 0176
-# database protocol.  This must not follow the service migration head: source
-# publication migrations advance that head without migrating the retained pool.
-MANAGER_SCHEMA_REVISION = '0176'
 POOL_PHASES = frozenset({'cutover', 'startup', 'startup-repair', 'manager-image', 'activation', 'startup-fence', 'shutdown', 'machine-retirement',
     'gateway-retirement', 'template-restoration', 'role-restoration', 'legacy-restart', 'legacy-reopening'})
 POOL_SHUTDOWN_PENDING_REASONS = frozenset({'pending_pool_cleanup', 'pending_shutdown_update',
