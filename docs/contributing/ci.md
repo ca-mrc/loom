@@ -243,6 +243,16 @@ The dev-only candidate test job saves uv caches under the same checksum-pinned,
 locked-workspace policy as candidate publication. PR and merge-group jobs retain
 their existing cache-write restrictions.
 
+CI test jobs restore a full, unpruned uv wheel cache (`cache-suffix:
+ci-wheels-v1`, ~200 MB compressed) and never save it. setup-uv's default pruning
+kept only locally built packages (~180 KB), so every job downloaded about 150
+wheels from PyPI again: ~5 seconds on GitHub VMs, but 4-5 minutes with timeouts
+on OLDLAB guests, whose GitHub cache downloads are fast. The only writer is
+`ci-dependency-cache.yml`, which runs on protected dev when `uv.lock` changes and
+daily, syncs the superset of every reader's extras and groups, and saves once
+per lock. `test_ci_wheel_cache_has_one_trusted_writer_and_complete_contents`
+keeps readers read-only and covered by that superset.
+
 The shared worker pool is not in use (dev deploys with `NEBIUS_ROLLOUT_MODE`
 unset, i.e. standalone), so `tests/ops/test_nebius_shared_pool_*.py` are skipped
 by `tests/ops/conftest.py` unless `LOOM_RUN_SHARED_POOL_TESTS=1`. Participant,

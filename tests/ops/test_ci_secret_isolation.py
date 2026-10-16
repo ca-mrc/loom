@@ -182,9 +182,10 @@ def test_untrusted_workflows_disable_setup_uv_cache_writes(workflow_path: str) -
     for step in setup_steps:
         inputs = step.get("with", {})
         assert inputs.get("enable-cache") is True
-        assert inputs.get("save-cache") == (
-            "${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}"
-        )
+        assert inputs.get("save-cache") in {
+            "${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}",
+            False,
+        }
     for job in workflow["jobs"].values():
         assert job.get("continue-on-error") is not True
         for step in job.get("steps", []):
