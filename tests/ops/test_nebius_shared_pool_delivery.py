@@ -87,15 +87,17 @@ def test_shared_preparation_rejects_unbound_identity_or_location(tmp_path, damag
         module('command').validate_operation(selected)
 
 
-def test_shared_preparation_installs_separate_grants_without_overwriting_history(tmp_path):
+@pytest.mark.parametrize('new_first', [False, True])
+def test_shared_preparation_installs_separate_grants_without_overwriting_history(tmp_path, new_first):
     (tmp_path / '.loom').mkdir(mode=0o700)
     (tmp_path / '.ssh').mkdir(mode=0o700)
     keys = tmp_path / '.ssh/authorized_keys'
     keys.write_bytes(b'# original operator grants\n')
     keys.chmod(0o600)
     frozen = {}
-    for index, selected in enumerate((operation(tmp_path), preparation_operation(tmp_path),
-            preparation_operation(tmp_path, '83a53ef9-beb4-432c-826f-28c9170751bf'))):
+    selections = [operation(tmp_path), preparation_operation(tmp_path),
+        preparation_operation(tmp_path, '83a53ef9-beb4-432c-826f-28c9170751bf')]
+    for index, selected in enumerate(reversed(selections) if new_first else selections):
         files = members(tmp_path)
         files['operation.json'] = json.dumps(selected, sort_keys=True).encode()
         raw = archive(files)
