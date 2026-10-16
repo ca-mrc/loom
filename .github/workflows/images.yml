@@ -35,7 +35,7 @@ jobs:
   producer:
     name: producer / ${{ inputs.provider }}
     if: github.ref == 'refs/heads/codex/candidate-artifact-transfer-20261016' && inputs.role == 'producer'
-    runs-on: ${{ inputs.provider == 'oldlab' && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1","oldlab-3"]')
+    runs-on: ${{ inputs.provider == 'oldlab' && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1","ephemeral-kvm"]')
       || 'ubuntu-24.04' }}
     timeout-minutes: 60
     env:
@@ -79,7 +79,7 @@ jobs:
 
         root=pathlib.Path(os.environ[''PROBE_ROOT''])
 
-        (root/''metrics/runner.json'').write_text(json.dumps({''runner'':os.environ.get(''RUNNER_NAME''),''environment'':os.environ.get(''RUNNER_ENVIRONMENT''),''cpus'':os.cpu_count(),''arch'':platform.machine(),''disk_free'':shutil.disk_usage(root).free,''source_sha'':os.environ[''PROBE_SOURCE_SHA''],''workflow_sha'':os.environ[''GITHUB_SHA''],''run_id'':os.environ[''GITHUB_RUN_ID'']},indent=2)+''\n'')
+        (root/''metrics/runner.json'').write_text(json.dumps({''runner'':os.environ.get(''RUNNER_NAME''),''environment'':os.environ.get(''RUNNER_ENVIRONMENT''),''cpus'':os.cpu_count(),''arch'':platform.machine(),''disk_free'':shutil.disk_usage(root).free,''source_sha'':os.environ[''PROBE_SOURCE_SHA''],''workflow_sha'':os.environ[''GITHUB_SHA''],''run_id'':os.environ[''GITHUB_RUN_ID'']},indent=2))
 
         PY'
     - name: configure-disposable-runner-mirror
@@ -139,19 +139,19 @@ jobs:
       if: always()
       run: 'python3 - <<''PY''
 
-        import os,pathlib,shutil
+        import os,pathlib,subprocess
 
         p=pathlib.Path(os.environ["PROBE_ROOT"])
 
         assert p==pathlib.Path("/tmp")/("loom-artifact-probe-"+os.environ["GITHUB_RUN_ID"]) and not p.is_symlink()
 
-        if p.exists(): shutil.rmtree(p)
+        if p.exists(): subprocess.run(["sudo","rm","-rf","--",str(p)],check=True)
 
         PY'
   consumer:
     name: consumer / ${{ inputs.provider }}
     if: github.ref == 'refs/heads/codex/candidate-artifact-transfer-20261016' && inputs.role == 'consumer'
-    runs-on: ${{ inputs.provider == 'oldlab' && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1","oldlab-3"]')
+    runs-on: ${{ inputs.provider == 'oldlab' && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1","ephemeral-kvm"]')
       || 'ubuntu-24.04' }}
     timeout-minutes: 60
     env:
@@ -258,12 +258,12 @@ jobs:
       if: always()
       run: 'python3 - <<''PY''
 
-        import os,pathlib,shutil
+        import os,pathlib,subprocess
 
         p=pathlib.Path(os.environ["PROBE_ROOT"])
 
         assert p==pathlib.Path("/tmp")/("loom-artifact-probe-"+os.environ["GITHUB_RUN_ID"]) and not p.is_symlink()
 
-        if p.exists(): shutil.rmtree(p)
+        if p.exists(): subprocess.run(["sudo","rm","-rf","--",str(p)],check=True)
 
         PY'
