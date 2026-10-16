@@ -9,9 +9,9 @@ import pytest
 
 from loom.nebius_application_render import render_application
 from loom.nebius_platform_render import NebiusPlatformError, build_platform, write_platform
+from tests.support.nebius_platform import ROOT
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_application_render import inputs, named
-from tests.unit.test_nebius_platform_render import ROOT
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
 @pytest.fixture

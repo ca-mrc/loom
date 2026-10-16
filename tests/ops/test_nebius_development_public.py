@@ -117,7 +117,7 @@ def test_public_defaulting_cannot_expand_the_fixed_route(installation, tmp_path,
     from scripts.ops.nebius_development_management_install import _setup
     from scripts.ops.nebius_management_material import ManagementBinding
     from scripts.ops.nebius_management_stage import ManagementStageError
-    from tests.ops.test_nebius_management_stage import PhaseAPI
+    from tests.support.nebius_phase_api import PhaseAPI as PhaseAPI
 
     request = public_request(installation[0])
     binding = ManagementBinding(request.binding.installation_id, request.binding.namespace,

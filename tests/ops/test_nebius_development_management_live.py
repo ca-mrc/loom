@@ -16,11 +16,11 @@ from tests.ops.test_nebius_development_management_install import run, to_admissi
 from tests.ops.test_nebius_development_management_tls import tls_material as tls_material
 from tests.ops.test_nebius_management_live import Checks
 from tests.ops.test_nebius_management_supplied import material as material
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_management_render import (
     application_management_inputs as application_management_inputs,
 )
 from tests.unit.test_nebius_management_render import management_inputs as management_inputs
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
 def make_live(request, checks):

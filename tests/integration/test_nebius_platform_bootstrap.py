@@ -26,7 +26,8 @@ from sqlalchemy.engine import make_url
 from testcontainers.postgres import PostgresContainer
 
 from loom import nebius_platform_bootstrap as bootstrap
-from tests.unit.test_nebius_platform_render import platform_inputs, regional_inputs  # noqa: F401
+from tests.support.nebius_platform import platform_inputs as platform_inputs
+from tests.support.nebius_platform import regional_inputs as regional_inputs
 
 
 async def _exercise_gateway_dispatch_role(database: str) -> None:

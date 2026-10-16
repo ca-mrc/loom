@@ -12,7 +12,6 @@ import httpx
 import pytest
 from scripts.ops import nebius_pool_participant_operation as operation
 from scripts.ops.nebius_ingress_stage import _key
-from tests.ops.test_nebius_management_stage import PhaseAPI
 from tests.ops.test_nebius_pool_participant_operation import catalog_inputs as catalog_inputs
 from tests.ops.test_nebius_pool_participant_operation import management_inputs as management_inputs
 from tests.ops.test_nebius_pool_participant_operation import operation_inputs as operation_inputs
@@ -21,6 +20,7 @@ from tests.ops.test_nebius_pool_participant_operation import release_inputs as r
 from tests.ops.test_nebius_pool_participant_operation import (
     staging_attachment_inputs as staging_attachment_inputs,
 )
+from tests.support.nebius_phase_api import PhaseAPI as PhaseAPI
 
 
 def module():

@@ -12,8 +12,8 @@ import pytest
 
 from loom.nebius_environment_contract import EnvironmentRegistrationV1
 from loom.nebius_platform_render import build_platform, validate_environment
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_environment_contract import BOB, foundation_from, registration_for
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 ROOT = Path(__file__).resolve().parents[2]
 

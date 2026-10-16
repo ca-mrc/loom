@@ -11,8 +11,8 @@ from uuid import uuid4
 import httpx
 import pytest
 import rfc8785
-from tests.ops.test_nebius_management_stage import PhaseAPI
 from tests.ops.test_nebius_pool_registration import request
+from tests.support.nebius_phase_api import PhaseAPI as PhaseAPI
 
 
 @pytest.fixture

@@ -11,7 +11,7 @@ from scripts.ops.nebius_ingress_gateway import TLSBinding
 from scripts.ops.nebius_ingress_image import DIGEST
 from tests.ops import test_nebius_ingress_cutover as routing
 from tests.ops.test_nebius_ingress_operation import inventory as inventory
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 
 
 def module():

@@ -8,7 +8,7 @@ from uuid import UUID
 import pytest
 from pydantic import ValidationError
 
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 
 ALICE = UUID("10000000-0000-4000-8000-000000000001")
 BOB = UUID("10000000-0000-4000-8000-000000000002")

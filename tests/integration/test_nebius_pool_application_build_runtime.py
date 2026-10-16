@@ -23,8 +23,8 @@ from tests.integration.test_nebius_pool_control import action, operate
 from tests.integration.test_nebius_pool_native_runtime import readback
 from tests.integration.test_nebius_pool_observation_registry import capture_scope
 from tests.integration.test_nebius_pool_registry import machine, publish_placement
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_application_image_renderer import build_inputs as build_inputs
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
 async def test_application_gateway_lost_reply_native_readback_capture_and_drain_hold_one_charge(environment_registry, build_inputs):

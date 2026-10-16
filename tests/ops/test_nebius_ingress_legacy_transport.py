@@ -11,7 +11,7 @@ import pytest
 from tests.ops.test_nebius_ingress_live_binding import live as live
 from tests.ops.test_nebius_ingress_operation import inventory as inventory
 from tests.ops.test_nebius_ingress_probe import endpoint as endpoint
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 
 
 @pytest.mark.parametrize("change", ["bookkeeping_added", "bookkeeping_changed", "uid", "owner", "label",

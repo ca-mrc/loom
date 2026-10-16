@@ -195,8 +195,10 @@ jobs:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
           enable-cache: true
-          prune-cache: true
-          save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+          # Read-only full wheel cache; only ci-dependency-cache.yml saves it.
+          save-cache: false
+          prune-cache: false
+          cache-suffix: ci-wheels-v1
           cache-dependency-glob: uv.lock
 
       - name: Sync system-smoke dependencies

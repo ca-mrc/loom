@@ -18,8 +18,8 @@ from tests.ops.test_nebius_pool_participant_release import release_inputs as rel
 from tests.ops.test_nebius_staging_pool_attachment import (
     staging_attachment_inputs as staging_attachment_inputs,
 )
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_management_render import management_inputs as management_inputs
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
 async def test_real_candidate_release_stages_and_opens_only_its_participant(sessions, release_inputs):

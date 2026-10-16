@@ -14,7 +14,8 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from scripts.ops import deploy_nebius_platform as deploy
 from scripts.ops import nebius_candidate as candidate
-from tests.unit.test_nebius_platform_render import platform_inputs, regional_inputs  # noqa: F401
+from tests.support.nebius_platform import platform_inputs as platform_inputs
+from tests.support.nebius_platform import regional_inputs as regional_inputs
 
 from loom.nebius_platform_render import build_platform, write_platform
 

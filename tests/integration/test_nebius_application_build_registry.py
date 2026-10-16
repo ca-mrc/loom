@@ -14,8 +14,8 @@ from tests.integration.test_nebius_application_source_upload import intent, uplo
 from tests.integration.test_nebius_environment_management import (
     environment_registry as environment_registry,
 )
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_application_image_renderer import build_inputs as build_inputs
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
 def build_registry(factory, sources, claim, **changes):

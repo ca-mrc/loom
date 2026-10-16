@@ -8,7 +8,7 @@ from uuid import uuid4
 
 import pytest
 from tests.ops.test_nebius_certificates import NOW, material
-from tests.ops.test_nebius_management_stage import PhaseAPI
+from tests.support.nebius_phase_api import PhaseAPI as PhaseAPI
 
 
 @pytest.fixture

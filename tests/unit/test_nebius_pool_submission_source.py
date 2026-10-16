@@ -7,8 +7,8 @@ from uuid import UUID, uuid4
 import pytest
 
 from loom_service.config import LoomServiceSettings
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_application_render import inputs, named
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
 def source(kind="application"):

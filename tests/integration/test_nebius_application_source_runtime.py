@@ -24,11 +24,11 @@ from tests.integration.test_nebius_application_installation import (
 from tests.integration.test_nebius_management_installation import (
     installation_file as installation_file,
 )
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_application_source_archive import archive_bytes
 from tests.unit.test_application_source_archive import source as source
 from tests.unit.test_nebius_kubernetes import FakeSDK
 from tests.unit.test_nebius_kubernetes import connection as connection
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
 @pytest.fixture

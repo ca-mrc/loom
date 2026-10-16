@@ -62,8 +62,8 @@ from tests.support.execution_image_admission import (
     IMAGE_ADMISSION_KEYRING,
     signed_image_admission_bundle,
 )
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_management_render import management_inputs as base_management_inputs
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
 @pytest.fixture
@@ -475,7 +475,7 @@ def test_connected_startup_reuses_the_exact_parent_transport_without_mutations(c
 @pytest.mark.parametrize("failure", [None, "before", "after"])
 def test_connected_registration_stages_once_and_does_not_confuse_creation_with_success(connected_cutover_entry, failure):
     from scripts.ops import nebius_pool_cutover_entry as entry
-    from tests.ops.test_nebius_management_stage import PhaseAPI
+    from tests.support.nebius_phase_api import PhaseAPI as PhaseAPI
 
     context, _, observed = connected_cutover_entry
     state = Path(context.operation["state_dir"]) / "writers" / "registration"

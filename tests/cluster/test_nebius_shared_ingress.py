@@ -24,8 +24,8 @@ from loom.nebius_environment_render import render_environment
 from loom.nebius_platform_render import _namespace, build_platform
 from loom.nebius_shared_ingress import SharedIngressInstallation, render_shared_ingress
 from tests.integration.test_execution_actuator_k3s import _load_client, _start_k3s
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_environment_contract import BOB, registration_for
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 from tests.unit.test_nebius_shared_ingress import ingress_input as ingress_input
 
 # Qualified upstream versions; production inputs require their native registry mirrors.

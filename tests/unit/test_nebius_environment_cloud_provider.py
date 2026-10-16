@@ -7,8 +7,8 @@ import copy
 import pytest
 
 from loom_service.environment_management.steps import ProvisioningStep, creation_steps
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_environment_kubernetes_provider import context
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
 def cloud_context():
@@ -154,8 +154,8 @@ def test_plan_records_each_iam_effect_before_bucket_and_secret_publication(platf
 
     from loom.nebius_environment_contract import new_environment_registration
     from loom.nebius_environment_render import render_environment
+    from tests.support.nebius_platform import ROOT
     from tests.unit.test_nebius_environment_contract import foundation_from
-    from tests.unit.test_nebius_platform_render import ROOT
 
     foundation = foundation_from(platform_inputs[0])
     row = new_environment_registration(foundation, environment_id=uuid4(), incarnation=uuid4(),

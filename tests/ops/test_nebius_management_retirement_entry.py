@@ -19,11 +19,11 @@ from tests.ops.test_nebius_management_retirement import retirement_request as re
 from tests.ops.test_nebius_management_supplied import material as material
 from tests.ops.test_nebius_management_upgrade import UpgradeAPI
 from tests.ops.test_nebius_management_upgrade_entry import private_upgrade as private_upgrade
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_management_render import (
     application_management_inputs as application_management_inputs,
 )
 from tests.unit.test_nebius_management_render import management_inputs as management_inputs
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
 @pytest.fixture
@@ -90,7 +90,7 @@ def test_protected_entry_runs_only_fixed_retirement_and_reports_completed_job(pr
 
     from scripts.ops import nebius_management_entry as entry
     from scripts.ops import nebius_management_retirement_entry as retirement
-    from tests.ops.test_nebius_management_stage import PhaseAPI
+    from tests.support.nebius_phase_api import PhaseAPI as PhaseAPI
 
     metadata, _, path, _ = private_retirement
     context = retirement.load_retirement_inputs(metadata)

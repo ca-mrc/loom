@@ -1,0 +1,56 @@
+name: ci-dependency-cache
+
+# setup-uv prunes downloaded wheels before saving by default, so CI's cache held
+# only locally built packages (~180 KB) and every job re-downloaded ~150 wheels
+# from PyPI: ~5s on GitHub VMs but 4-5 minutes, with timeouts, on OLDLAB guests.
+# This is the only writer of the full, unpruned wheel cache (~200 MB compressed)
+# that CI jobs restore read-only. It runs on protected dev or on a schedule,
+# never on PR code, and saves once per uv.lock (an existing key is not
+# overwritten). PRs and merge groups read dev's caches.
+
+on:
+  push:
+    branches: [dev]
+    paths: [uv.lock, .github/workflows/ci-dependency-cache.yml]
+  # Backstop for an evicted or never-written key.
+  schedule:
+    - cron: "41 7 * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: ci-dependency-cache-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  wheel-cache:
+    name: Save full CI wheel cache
+    # GitHub-hosted for fast PyPI downloads; same OS/arch key as OLDLAB guests.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.11.26"
+          checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
+          enable-cache: true
+          save-cache: true
+          prune-cache: false
+          cache-suffix: ci-wheels-v1
+          cache-dependency-glob: uv.lock
+
+      - name: Install Python 3.11
+        run: uv python install 3.11
+
+      # Superset of every CI reader's sync, so no reader misses a wheel.
+      - name: Download every CI dependency
+        run: |
+          uv sync --locked --all-packages --extra dev --extra cluster --extra rollout \
+            --group ci-coverage --python 3.11

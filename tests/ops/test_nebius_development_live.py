@@ -26,10 +26,10 @@ from tests.ops.test_nebius_development_preflight import (
     retained_namespace,
 )
 from tests.ops.test_nebius_ingress_operation import inventory as inventory
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_candidate_catalog import github_transport
 from tests.unit.test_nebius_candidate_catalog import publication as publication
 from tests.unit.test_nebius_development_foundation import development_inputs as development_inputs
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
 def module():
@@ -126,7 +126,7 @@ def installed(live, monkeypatch):
         stage_development_resources,
     )
     from tests.ops.test_nebius_development_install import storage_ready
-    from tests.ops.test_nebius_management_stage import PhaseAPI
+    from tests.support.nebius_phase_api import PhaseAPI as PhaseAPI
 
     ns = retained_namespace(live.preflight, live.request.bootstrap.installation_id)
     binding = DevelopmentResourceBinding(live.request.bootstrap, ns["metadata"]["uid"],

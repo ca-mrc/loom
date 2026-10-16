@@ -40,9 +40,9 @@ from tests.integration.test_nebius_environment_management import (
 from tests.integration.test_nebius_pool_direct_origins import BODY, configure, public_submit, stored
 from tests.integration.test_nebius_pool_direct_origins import direct_stack as direct_stack
 from tests.integration.test_nebius_pool_direct_origins import fwd_setup as fwd_setup
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_application_image_renderer import build_inputs as build_inputs
 from tests.unit.test_nebius_application_render import inputs
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
 async def test_release_requires_cleanup_and_survives_restart_without_current_recipe(

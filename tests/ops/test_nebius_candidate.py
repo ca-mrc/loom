@@ -15,7 +15,7 @@ import yaml
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from scripts.ops import nebius_candidate as candidate
-from tests.unit.test_nebius_platform_render import platform_inputs  # noqa: F401
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 
 from loom.nebius_platform_render import build_platform
 from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1

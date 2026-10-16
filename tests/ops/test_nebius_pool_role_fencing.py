@@ -15,8 +15,8 @@ from scripts.ops.nebius_pool_runtime import participant_readonly_roles
 from tests.ops.test_nebius_pool_retirement import initialize
 from tests.ops.test_nebius_pool_retirement import retirement_inputs as retirement_inputs
 from tests.ops.test_nebius_pool_runtime import runtime_inputs as runtime_inputs
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_management_render import management_inputs as management_inputs
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
 @pytest.fixture
