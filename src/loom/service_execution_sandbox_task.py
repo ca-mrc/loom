@@ -892,6 +892,34 @@ def main() -> None:
         raise
 
 
+_VALIDATION_SUMMARY_ERRORS = 8
+_VALIDATION_LOC_LIMIT = 80
+_VALIDATION_TYPE_LIMIT = 64
+
+
+def _bounded_schema_token(value: object, limit: int) -> str:
+    """Keep a schema path printable and single-line. Never the error input."""
+    text: list[str] = []
+    for char in str(value):
+        text.append(char if char.isprintable() and char not in "\r\n\t " else "_")
+        if len(text) >= limit:
+            break
+    return "".join(text)
+
+
+def _validation_error_summary(exc: ValidationError) -> str:
+    """Location and type only. ``input``, ``msg``, and ``ctx`` can carry secrets."""
+    parts: list[str] = []
+    for error in exc.errors()[:_VALIDATION_SUMMARY_ERRORS]:
+        loc = ".".join(
+            _bounded_schema_token(part, _VALIDATION_LOC_LIMIT) for part in error.get("loc", ())
+        )[:_VALIDATION_LOC_LIMIT]
+        kind = _bounded_schema_token(error.get("type", ""), _VALIDATION_TYPE_LIMIT)
+        if loc or kind:
+            parts.append(f"{loc}:{kind}" if loc else kind)
+    return "; ".join(parts)
+
+
 if __name__ == "__main__":
     try:
         main()
@@ -905,5 +933,9 @@ if __name__ == "__main__":
             message += f": {exc}"
         elif isinstance(exc, AgentError) and exc.args == (TASK_IMAGE_TOOLS_REQUIRED,):
             message += f": {TASK_IMAGE_TOOLS_REQUIRED}"
+        elif isinstance(exc, ValidationError):
+            summary = _validation_error_summary(exc)
+            if summary:
+                message += f": {summary}"
         print(message, file=sys.stderr)
         raise SystemExit(1) from None

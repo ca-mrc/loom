@@ -52,7 +52,10 @@ only and must never receive local or live credentials.
 
 `FailureSink.expectDiagnostic` is an exact, consumed diagnostic ledger for
 browser-generated console and expected same-origin network events. An
-unconsumed declaration fails teardown; recovery boundary errors must not be
+unconsumed declaration fails teardown. Teardown waits for the exact expected
+HTTP diagnostics within the existing assertion timeout because Chromium can
+deliver a console event just after the final page assertion; missing or excess
+diagnostics still fail. Recovery boundary errors must not be
 allowlisted. Unexpected console and page errors retain only event kind,
 route-relative location, and a bounded reference while message content is
 redacted. All same-origin browser assets fail on non-success status, with

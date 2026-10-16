@@ -94,18 +94,15 @@ def test_trial_override_is_frozen_across_agent_and_deferred_verifier_plans() -> 
     assert shared.effective_network_policy == PublicWeb()
 
 
-def test_unsupported_override_and_response_only_web_topology_are_rejected() -> None:
+def test_hosted_override_is_accepted_and_response_only_web_topology_is_rejected() -> None:
     task, trial, _ = _inputs()
     override = PublicWeb()
-    unsupported = trial.model_copy(update={"baseline_network_policy_override": override})
-    assert "network_policy_override_not_supported" in automatic_service_execution_rejections(
-        task, unsupported, source_provenance=_provenance(),
+    hosted = trial.model_copy(update={"baseline_network_policy_override": override})
+    assert "network_policy_override_not_supported" not in automatic_service_execution_rejections(
+        task, hosted, source_provenance=_provenance(),
     )
 
-    task = task.model_copy(update={"environment": task.environment.model_copy(update={
-        "network_policies_supported": frozenset({"gateway-only", "public-web"}),
-    })})
-    response_only = unsupported.model_copy(update={"agent_name": "direct-completion"})
+    response_only = hosted.model_copy(update={"agent_name": "direct-completion"})
     assert "task_network_consumer_unavailable" in automatic_service_execution_rejections(
         task, response_only, source_provenance=_provenance(),
     )

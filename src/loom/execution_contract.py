@@ -588,7 +588,6 @@ def workload_requirements_from_task(
 
     effective_policy = resolve_effective_network_policy(
         baseline=env.baseline_network_policy,
-        supported=env.network_policies_supported,
         override=trial.baseline_network_policy_override if trial is not None else None,
     )
     policy_kind = effective_policy.kind

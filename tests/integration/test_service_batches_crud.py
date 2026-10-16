@@ -2921,7 +2921,7 @@ async def test_network_policy_preview_reports_every_incompatible_task(
                     "subset_kind": "explicit",
                     "task_ids": ["local/mit-0", "local/mit-1"],
                 },
-                "baseline_network_policy_override": {"kind": "gateway-only"},
+                "baseline_network_policy_override": {"kind": "public"},
                 "agent_names": ["terminus-2"],
             },
         )
