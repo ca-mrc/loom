@@ -760,10 +760,25 @@ evidence that a grant or multi-owner environment is installed. Complete ordinary
 rollout continuity and qualify all installation prerequisites before invoking a
 live handoff; do not acquire a staging guard while waiting for these prerequisites.
 
-The fixed operation schema is `loom.nebius-shared-pool-operation.v1`. It selects
+The original operation schema is `loom.nebius-shared-pool-operation.v1`. It selects
 the exact integrated `source_sha`, management `installation_id`, registered pool
 `operation_id`, namespace `loom-nebius-management-dev`, and the SHA-256 of
 `OPERATOR_HOME/.loom/nebius-shared-pool/INSTALLATION_UUID/POOL_OPERATION_UUID/inputs.json`.
+
+If staging advances before the handoff starts, preserve that preparation and use
+`loom.nebius-shared-pool-operation.v2`. It has the same fields plus a nonzero,
+canonical UUID `preparation_id`, with inputs at
+`OPERATOR_HOME/.loom/nebius-shared-pool/INSTALLATION_UUID/POOL_OPERATION_UUID/preparations/PREPARATION_UUID/inputs.json`.
+Capture and qualify the current staging publication into this new immutable
+preparation, then build its exact-source bundle and separate digest-bound grant.
+Do not overwrite older inputs, grants, releases or receipts, and do not reinstall
+the runtime or roll staging back to match an old preparation. Both versions use
+the same registered pool and manager-owned handoff lock, journal and recovery
+anchors. Once a handoff has anchored its intent, an incompatible preparation is
+rejected: resume or recover the anchored operation rather than selecting new
+inputs. A new directory does not bypass live preflight, writer, drain, publication
+or recovery qualification, and is not a second independent handoff.
+
 The `loom.nebius-shared-pool-inputs.v1` private document contains:
 
 - `runtime`: the completed runtime operation path and SHA-256. Its archived source

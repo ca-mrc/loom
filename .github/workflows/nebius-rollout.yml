@@ -1175,7 +1175,8 @@ jobs:
               raise SystemExit('Fixed shared pool operation required')
           value = json.loads(os.environ['NEBIUS_SHARED_POOL_OPERATION_JSON'])
           sha = value['source_sha']
-          if (value['schema'] != 'loom.nebius-shared-pool-operation.v1' or value['namespace'] != 'loom-nebius-management-dev' or
+          if (value['schema'] not in {'loom.nebius-shared-pool-operation.v1', 'loom.nebius-shared-pool-operation.v2'} or
+              value['namespace'] != 'loom-nebius-management-dev' or
               not isinstance(sha, str) or not re.fullmatch(r'[0-9a-f]{40}', sha)):
               raise SystemExit('Exact shared pool source and namespace required')
           subprocess.run(['git', 'merge-base', '--is-ancestor', sha, 'refs/remotes/origin/dev'], check=True)

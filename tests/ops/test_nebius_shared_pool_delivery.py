@@ -250,12 +250,15 @@ def test_shared_report_checks_direction_and_truthful_admission_without_exporting
             gateway.safe_report(json.dumps(report(tmp_path, status, opened=opened)).encode(), operation(tmp_path), action)
 
 
-def test_shared_release_preparation_and_acknowledgement_preserve_pending_and_blocked(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize('version', [1, 2])
+def test_shared_release_preparation_and_acknowledgement_preserve_pending_and_blocked(tmp_path, monkeypatch, capsys, version):
     gateway = module()
-    selected = operation(tmp_path)
+    selected = operation(tmp_path) if version == 1 else preparation_operation(tmp_path)
     root = Path(selected['inputs_path']).parent
     root.mkdir(mode=0o700, parents=True)
-    raw, calls = archive(members(tmp_path)), []
+    files = members(tmp_path)
+    files['operation.json'] = json.dumps(selected, sort_keys=True).encode()
+    raw, calls = archive(files), []
     output = {'status': 'tooling_qualified'}
 
     def run(argv, **kwargs):

@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 from tests.ops.test_nebius_development_management_gateway import archive
 from tests.ops.test_nebius_pool_participant_gateway import members
-from tests.ops.test_nebius_shared_pool_delivery import operation
+from tests.ops.test_nebius_shared_pool_delivery import operation, preparation_operation
 
 
 def module():
@@ -23,8 +23,8 @@ def module():
     return importlib.import_module(name)
 
 
-@pytest.fixture
-def installation(tmp_path, monkeypatch):
+@pytest.fixture(params=[1, 2])
+def installation(tmp_path, monkeypatch, request):
     from scripts.ops import nebius_pool_participant_gateway as gateway
 
     for name in ('.loom', '.ssh'):
@@ -32,7 +32,7 @@ def installation(tmp_path, monkeypatch):
     keys = tmp_path / '.ssh/authorized_keys'
     keys.write_bytes(b'# retained staging and handoff authority\nrestrict,command="staging" ssh-ed25519 FOREIGN\n')
     keys.chmod(0o600)
-    original = operation(tmp_path)
+    original = operation(tmp_path) if request.param == 1 else preparation_operation(tmp_path)
     path = Path(original['inputs_path']).parent / 'operation.json'
     path.parent.mkdir(mode=0o700, parents=True)
     path.write_text(json.dumps(original))
