@@ -76,6 +76,65 @@ def native_trial(*, timed_out=False, identity=None, team=None, reward=0):
     return trial, _FakeS3({("artifacts", prefix+path): body for path, body in bodies.items()})
 
 
+def separate_native_trial(*, identity=None, team=None, reward=0):
+    """Parent attempt is agent-only; child files live under verifier-execution/."""
+    identity, team, bundle = identity or uuid4(), team or uuid4(), uuid4()
+    prefix = f"trials/{team}/{identity}/attempts/1/bundles/{bundle}/files/"
+    output = json.dumps({"rewards": {"passed": reward}}).encode()
+    child_logs = {"01-verifier.stdout": b"one failed test\n", "01-verifier.stderr": b""}
+    child = legacy_result().model_dump(mode="json")
+    phase = child["phases"][0]
+    phase.update(ordinal=1, exit_code=0)
+    for name, body in child_logs.items():
+        stream = name.split(".", 1)[1]
+        phase[stream].update(
+            path=name, sha256="sha256:" + hashlib.sha256(body).hexdigest(),
+            bytes_seen=len(body), bytes_saved=len(body),
+        )
+    child.update(
+        status="succeeded", partial_evidence=False, execution_role="verifier",
+        container_roles=["execution", "verifier"], verifier_rewards={"passed": reward},
+        phases=[phase], outputs=[child["outputs"][1]],
+    )
+    child["outputs"][0].update(size_bytes=len(output), sha256="sha256:"+hashlib.sha256(output).hexdigest())
+    child_bodies = {**child_logs, "verifier/output.json": output, "result.json": json.dumps(child).encode()}
+
+    agent = deepcopy(phase)
+    agent.update(role="agent", ordinal=1, exit_code=0, timed_out=False)
+    for name in ("stdout", "stderr"):
+        agent[name]["path"] = f"01-agent.{name}"
+    attempt = legacy_result().model_dump(mode="json")
+    attempt.update(
+        status="succeeded", partial_evidence=False, execution_role="attempt",
+        container_roles=["execution", "agent"], verifier_rewards=None,
+        phases=[agent], outputs=[],
+    )
+    attempt_bodies = {"result.json": json.dumps(attempt).encode()}
+    index, objects = [], {}
+    for path, body in attempt_bodies.items():
+        index.append({"relative_path": path, "key": prefix+path, "bucket": "artifacts",
+                      "size_bytes": len(body), "sha256": "sha256:"+hashlib.sha256(body).hexdigest()})
+        objects[("artifacts", prefix+path)] = body
+    for path, body in child_bodies.items():
+        namespaced = "verifier-execution/" + path
+        index.append({"relative_path": namespaced, "key": prefix+namespaced, "bucket": "artifacts",
+                      "size_bytes": len(body), "sha256": "sha256:"+hashlib.sha256(body).hexdigest()})
+        objects[("artifacts", prefix+namespaced)] = body
+    trial = Trial(
+        id=identity, team_id=team, task_id="task", batch_id=uuid4(),
+        state="succeeded", attempt_count=1,
+        config={"agent_name": "terminus-2", "verifier_env_mode": "separate"},
+        result={
+            "runtime_result": attempt, "reward": {"passed": reward},
+            "verifier_execution": {
+                "state": "committed", "lease_id": str(uuid4()), "runtime_result": child,
+            },
+        },
+        trajectory_index={"attempt": 1, "artifacts": index},
+    )
+    return trial, _FakeS3(objects)
+
+
 @pytest.mark.parametrize("timed_out", [False, True])
 def test_native_verifier_exports_original_logs_result_and_zero_reward(timed_out):
     trial, s3 = native_trial(timed_out=timed_out)
@@ -121,5 +180,67 @@ def test_native_verifier_rejects_missing_corrupt_or_unrelated_evidence(damage):
         body = json.dumps(result).encode()
         s3._objects[("artifacts", row["key"])] = body
         row.update(size_bytes=len(body), sha256="sha256:"+hashlib.sha256(body).hexdigest())
+    with pytest.raises(Tb2V2ExportError):
+        resolve_verifier_artifacts(trial, client=s3, artifacts_bucket="artifacts")
+
+
+def test_native_verifier_packs_separate_child_namespace():
+    trial, s3 = separate_native_trial()
+    before = deepcopy(trial.result)
+    files = resolve_verifier_artifacts(trial, client=s3, artifacts_bucket="artifacts")
+    contents = {f.archive_path: f.data for f in files}
+    assert contents["verifier/01-verifier.stdout"] == b"one failed test\n"
+    assert json.loads(contents["verifier/output.json"])["rewards"] == {"passed": 0}
+    packed = json.loads(contents["verifier/runtime-result.json"])
+    assert packed["execution_role"] == "verifier"
+    assert packed["status"] == "succeeded"
+    assert [phase["role"] for phase in packed["phases"]] == ["verifier"]
+    assert trial.result == before
+
+
+def test_native_verifier_sts_shared_still_uses_in_attempt_result():
+    trial, s3 = native_trial()
+    trial.config = {
+        **trial.config,
+        "multi_model": {
+            "policy": "student_teacher_student",
+            "switch_episode": 2,
+            "teacher_episodes": 1,
+        },
+    }
+    files = resolve_verifier_artifacts(trial, client=s3, artifacts_bucket="artifacts")
+    packed = json.loads(next(f.data for f in files if f.archive_path == "verifier/runtime-result.json"))
+    assert packed["execution_role"] == "attempt"
+    assert {phase["role"] for phase in packed["phases"]} == {"agent", "verifier"}
+
+
+def test_skip_verifier_does_not_require_native_child_or_in_attempt_phase():
+    trial, s3 = native_trial()
+    trial.config = {**trial.config, "skip_verifier": True}
+    assert resolve_verifier_artifacts(trial, client=s3, artifacts_bucket="artifacts") == []
+
+
+@pytest.mark.parametrize("damage", ["missing_child_result", "pending_handoff", "wrong_child_role", "child_vs_attempt"])
+def test_native_verifier_rejects_incomplete_or_wrong_separate_evidence(damage):
+    trial, s3 = separate_native_trial()
+    if damage == "missing_child_result":
+        trial.trajectory_index["artifacts"] = [
+            row for row in trial.trajectory_index["artifacts"]
+            if row["relative_path"] != "verifier-execution/result.json"
+        ]
+    elif damage == "pending_handoff":
+        trial.result["verifier_execution"]["state"] = "pending"
+    elif damage == "wrong_child_role":
+        child = trial.result["verifier_execution"]["runtime_result"]
+        child["execution_role"] = "attempt"
+        row = next(
+            item for item in trial.trajectory_index["artifacts"]
+            if item["relative_path"] == "verifier-execution/result.json"
+        )
+        body = json.dumps(child).encode()
+        s3._objects[("artifacts", row["key"])] = body
+        row.update(size_bytes=len(body), sha256="sha256:"+hashlib.sha256(body).hexdigest())
+    else:
+        trial.result["verifier_execution"]["runtime_result"] = trial.result["runtime_result"]
     with pytest.raises(Tb2V2ExportError):
         resolve_verifier_artifacts(trial, client=s3, artifacts_bucket="artifacts")
