@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -185,6 +186,118 @@ async def test_preactivation_rejects_cancellation_only_history_without_changing_
         await asyncio.to_thread(read_sql, url, reader.refresh_closed_pool_sql(refresh))
     assert await snapshot(sessions) == before
     assert await cancellations() == tombstones
+
+
+@pytest.mark.parametrize('failure', [None, 'lost-after', 'lost-before', 'read-after'])
+async def test_preactivation_registry_journal_reads_uncertain_commit_without_redispatch(sessions, tmp_path, failure):
+    import importlib
+
+    name = 'scripts.ops.nebius_pool_preactivation_registry'
+    assert importlib.util.find_spec(name) is not None, 'preactivation registry journal is missing'
+    journal = importlib.import_module(name)
+    reader = preactivation_module()
+    from tests.integration.test_nebius_pool_activation_fence import read_sql
+    from tests.integration.test_nebius_pool_participant_refresh import snapshot
+
+    refresh, url = await preactivation_setup(sessions)
+    state = tmp_path / 'registry'
+    dispatches = []
+
+    class Database:
+        fail_read = False
+
+        def observe(self, request):
+            assert request == refresh
+            if self.fail_read:
+                raise ValueError('private transport diagnostic')
+            return read_sql(url, reader.pool_preactivation_state_sql(request))
+
+        def commit(self, request):
+            assert request == refresh
+            assert json.loads((state / 'registry.json').read_text())['status'] == 'intent'
+            dispatches.append(request.after.operation_id)
+            if failure == 'lost-before':
+                raise ValueError('private transport diagnostic')
+            result = read_sql(url, reader.refresh_closed_pool_sql(request))
+            self.fail_read = failure == 'read-after'
+            if failure == 'lost-after':
+                raise ValueError('private transport diagnostic')
+            return result
+
+    api = Database()
+
+    def qualify():
+        pass  # Source/publication and stopped gateway belong to the protected parent.
+
+    def advance():
+        return journal.advance_preactivation_registry(request=refresh, api=api, state_dir=state, qualify=qualify)
+
+    if failure in {'lost-before', 'read-after'}:
+        with pytest.raises(ValueError, match='preserve evidence') as error:
+            await asyncio.to_thread(advance)
+        assert 'private transport diagnostic' not in str(error.value)
+        assert json.loads((state / 'registry.json').read_text())['status'] == 'intent'
+    else:
+        assert await asyncio.to_thread(advance) is True
+    before = await snapshot(sessions)
+    api.fail_read = False
+    for _ in range(2):
+        if failure == 'lost-before':
+            with pytest.raises(ValueError, match='preserve evidence'):
+                await asyncio.to_thread(advance)
+        else:
+            assert await asyncio.to_thread(advance) is True
+    assert dispatches == [refresh.after.operation_id]
+    assert await snapshot(sessions) == before
+    record = journal.validate_preactivation_registry(request=refresh, state_dir=state,
+        complete=failure != 'lost-before')
+    assert record['status'] == ('intent' if failure == 'lost-before' else 'complete')
+
+
+@pytest.mark.parametrize('damage', ['parent', 'record', 'unrecorded-successor', 'changed-request'])
+async def test_preactivation_registry_refuses_unqualified_or_changed_authority(sessions, tmp_path, damage):
+    import importlib
+
+    name = 'scripts.ops.nebius_pool_preactivation_registry'
+    assert importlib.util.find_spec(name) is not None, 'preactivation registry journal is missing'
+    journal = importlib.import_module(name)
+    reader = preactivation_module()
+    from scripts.ops import nebius_certificates as private_state
+
+    from tests.integration.test_nebius_pool_activation_fence import read_sql
+    from tests.integration.test_nebius_pool_participant_refresh import snapshot
+
+    refresh, url = await preactivation_setup(sessions)
+    state = tmp_path / 'registry'
+    dispatches = []
+
+    class Database:
+        def observe(self, request):
+            return read_sql(url, reader.pool_preactivation_state_sql(request))
+
+        def commit(self, request):
+            dispatches.append(request.after.operation_id)
+            return read_sql(url, reader.refresh_closed_pool_sql(request))
+
+    def qualify():
+        if damage == 'parent':
+            raise ValueError('gateway no longer stopped')
+
+    if damage == 'unrecorded-successor':
+        await asyncio.to_thread(read_sql, url, reader.refresh_closed_pool_sql(refresh))
+    elif damage in {'record', 'changed-request'}:
+        journal.prepare_preactivation_registry(request=refresh, state_dir=state)
+        if damage == 'record':
+            record = json.loads((state / 'registry.json').read_text())
+            record['status'] = 'complete'
+            private_state._atomic_json(state / 'registry.json', record)
+        else:
+            refresh = refresh.model_copy(update={'after': refresh.after.model_copy(update={'operation_id': uuid4()})})
+    before = await snapshot(sessions)
+    with pytest.raises(ValueError):
+        await asyncio.to_thread(journal.advance_preactivation_registry,
+            request=refresh, api=Database(), state_dir=state, qualify=qualify)
+    assert dispatches == [] and await snapshot(sessions) == before
 
 
 async def test_participant_registry_reader_follows_real_refresh_without_writes_or_mutation_lock(sessions):
