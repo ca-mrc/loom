@@ -405,6 +405,82 @@ def _shared_entry_inputs(args, bindings, *, preparation_id=None):
     return shared_root, operation, inputs, root, retired
 
 
+def _advanced_staging_source(args, tmp_path):
+    """A real signed standalone release after the CLOSED registration was frozen."""
+    from scripts.ops.nebius_candidate import create_candidate
+
+    from loom.nebius_platform_render import build_platform
+
+    source = copy.deepcopy(args['observation'])
+    candidate = copy.deepcopy(source['candidate'])
+    configmap, = (row for row in source['observation']['resources']
+        if row['kind'] == 'ConfigMap' and row['metadata']['name'] == 'loom-platform-config')
+    config, profile = (json.loads(configmap['data'][key]) for key in ('environment.json', 'profile.json'))
+    candidate.update(candidate_sha='e' * 40, runtime_binary_sha256=profile['runtime_binary_sha256'],
+        policy_sha256='sha256:' + 'a' * 64)
+    for item in candidate['images'].values():
+        item.update(image_ref=item['image_ref'].split('@')[0] + '@sha256:' + 'd' * 64,
+            sbom_sha256='sha256:' + 'd' * 64, vulnerability_report_sha256='sha256:' + 'f' * 64,
+            highest_vulnerability_severity='high')
+    keyring = args['runtime'].database.manager.retained.request.registration.spec.profiles.image_admission_keyring
+    candidate, profile = create_candidate(candidate, signing_key=tmp_path / 'signer.pem', signing_key_id='publisher',
+        keyring_json=json.dumps(keyring), supports_task_identity=True, guest_runtime='qemu-tcg-v1',
+        guest_runtime_volume_mib=1024, guest_max_artifact_bytes=6 * 1024**3, supports_emulated_pkcs11=True)
+    rendered = build_platform(config, candidate, profile, keyring, repo_root=ROOT)
+    documents = {_key(row): row for group in rendered.values() for row in group}
+    for row in source['observation']['resources']:
+        replacement = copy.deepcopy(documents[_key(row)])
+        replacement['metadata'].update({key: value for key, value in row['metadata'].items()
+            if key in {'uid', 'resourceVersion', 'annotations'}})
+        row.clear()
+        row.update(replacement)
+    source.update(candidate=candidate, publication={**source['publication'], 'source_sha': candidate['candidate_sha']})
+    source['observation']['candidate_sha'] = candidate['candidate_sha']
+    return source
+
+
+@pytest.mark.parametrize('staging_observation', ['independent'], indirect=True)
+@pytest.mark.timeout(180)
+def test_preactivation_preparation_preserves_completed_runtime_and_is_immutable(shared_operation, tmp_path):
+    import importlib
+
+    name = 'scripts.ops.nebius_pool_preactivation_operation'
+    assert importlib.util.find_spec(name) is not None, 'retained preactivation parent is missing'
+    parent = importlib.import_module(name)
+    from scripts.ops.nebius_development_runtime_retained import load_completed_runtime
+    from scripts.ops.nebius_shared_pool_entry import RetainedRuntimeReference
+
+    args, bindings = shared_operation
+    _, _, inputs, _, _ = _shared_entry_inputs(args, bindings)
+    reference = RetainedRuntimeReference.model_validate(inputs['runtime'])
+    original = load_completed_runtime(args['runtime'])
+    source = _advanced_staging_source(args, tmp_path)
+    parameters = dict(runtime=reference, source=source, operation_id=uuid4(), repo_root=ROOT)
+    retained = parent.retain_preactivation_catalog(**parameters)
+    assert retained.runtime == args['runtime']
+    assert retained.inputs.refresh.before == args['runtime'].database.manager.retained.request.registration.spec
+    assert retained.inputs.refresh.after.policy_revision == retained.inputs.refresh.before.policy_revision + 1
+    assert retained.inputs.source.candidate['candidate_sha'] == 'e' * 40
+    assert parent.retain_preactivation_catalog(**parameters) == retained
+    assert parent.load_preactivation_catalog(runtime=reference, reference=retained.reference, repo_root=ROOT) == retained
+    assert load_completed_runtime(args['runtime']) == original
+    assert all(path.read_bytes() == raw for path, raw in original.files.items())
+    with pytest.raises(ValueError):
+        parent.load_completed_preactivation(runtime=reference, reference=retained.reference, repo_root=ROOT)
+    for damage in ('source', 'operation', 'history'):
+        changed = dict(parameters)
+        if damage == 'source':
+            changed['source'] = copy.deepcopy(source)
+            changed['source']['publication']['run_id'] += 1
+        elif damage == 'operation':
+            changed['operation_id'] = retained.inputs.refresh.before.operation_id
+        else:
+            changed['predecessor'] = retained.reference  # Prepared is not completed ancestry.
+            changed['operation_id'] = uuid4()
+        with pytest.raises(ValueError):
+            parent.retain_preactivation_catalog(**changed)
+
+
 @pytest.mark.parametrize('preparation_id', [None, '335c9f82-6f9a-43de-ab0c-a312034b9efe'])
 def test_shared_tooling_can_advance_without_reinstalling_runtime(shared_operation, monkeypatch, preparation_id):
     from scripts.ops import nebius_certificates as private_state
