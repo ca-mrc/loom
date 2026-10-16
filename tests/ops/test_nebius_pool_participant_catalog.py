@@ -162,6 +162,7 @@ def advance(api, state):
 
 def test_catalog_receipt_loader_retains_successor_identity_and_original_history(connection):
     from scripts.ops.nebius_ingress_stage import _snapshot
+    from scripts.ops.nebius_management_switch import _matches
 
     api, state = connection
     original = copy.deepcopy(state.request)
@@ -170,7 +171,8 @@ def test_catalog_receipt_loader_retains_successor_identity_and_original_history(
         assert advance(api, state) is True
     observed = module().read_applied_catalog(request=state.request, state_dir=state.directory)
     assert observed.manager['metadata']['uid'] == original.manager['metadata']['uid']
-    assert _snapshot(observed.manager) == _snapshot(state.manager)
+    # The transition journal normalizes exact API-equivalent resource quantities.
+    assert _matches(state.manager, observed.manager, original.manager['metadata']['uid'])
     assert observed.catalog['metadata']['uid'] == state.config['metadata']['uid']
     assert _snapshot(observed.catalog) == _snapshot(state.config)
     assert set(observed.files) == {state.directory / 'catalog/stage.json', state.directory / 'manager/transition.json'}
