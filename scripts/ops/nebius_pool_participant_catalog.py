@@ -31,7 +31,9 @@ from scripts.ops.nebius_management_stage import (
 from scripts.ops.nebius_management_switch import _matches
 from scripts.ops.nebius_management_transport import ManagementKubernetesTransport
 from scripts.ops.nebius_pool_participant_release import (
+    PoolCatalogRefresh,
     PreparedParticipantRelease,
+    catalog_binding,
     prepare_manager_catalog_refresh,
 )
 
@@ -40,7 +42,7 @@ from loom.nebius_platform_render import digest
 
 @dataclass(frozen=True, repr=False)
 class ParticipantCatalogRequest:
-    release: PreparedParticipantRelease
+    release: PreparedParticipantRelease | PoolCatalogRefresh
     manager: dict[str, Any]
     catalog: dict[str, Any]
 
@@ -48,7 +50,7 @@ class ParticipantCatalogRequest:
 def _projection(request: ParticipantCatalogRequest) -> tuple[dict[str, Any], dict[str, Any], str]:
     projected = prepare_manager_catalog_refresh(release=request.release, manager=request.manager, catalog=request.catalog)
     identity = digest({'refresh': request.release.refresh.model_dump(mode='json'),
-        'binding': asdict(request.release.migration.registration.binding),
+        'binding': asdict(catalog_binding(request.release)),
         'manager': request.manager, 'catalog': request.catalog})
     return projected['catalog'], projected['manager'], identity
 
@@ -58,7 +60,7 @@ def stage_participant_catalog(*, request: ParticipantCatalogRequest, api: Manage
     try:
         request = copy.deepcopy(request)
         catalog, _, _ = _projection(request)
-        binding = request.release.migration.registration.binding
+        binding = catalog_binding(request.release)
         documents = {_key(catalog): catalog}
         with private_state._locked_state(state_dir):
             return _stage_fixed_documents(documents=documents,
@@ -84,7 +86,7 @@ class HTTPSParticipantCatalogAPI(HTTPSDevelopmentRuntimeWorkloads, HTTPSManageme
             ssl_context: ssl.SSLContext, token: str | None = None):
         self.catalog_request = copy.deepcopy(request)
         catalog, manager, self.input_digest = _projection(self.catalog_request)
-        self.binding = self.catalog_request.release.migration.registration.binding
+        self.binding = catalog_binding(self.catalog_request.release)
         self.documents = {_key(catalog): catalog}
         self.originals = {_key(self.catalog_request.manager): self.catalog_request.manager}
         self.targets = {_key(manager): manager}
