@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Literal, cast
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_development_entry import _transport
 from scripts.ops.nebius_development_preflight import PreparedDevelopmentSource
@@ -30,6 +30,9 @@ from scripts.ops.nebius_development_runtime_operation import (
     validate_operation as validate_runtime_operation,
 )
 from scripts.ops.nebius_development_runtime_render import DevelopmentRuntimePublication
+from scripts.ops.nebius_development_runtime_retained import (
+    RetainedRuntimeReference as RetainedRuntimeReference,
+)
 from scripts.ops.nebius_development_runtime_retained import load_completed_runtime
 from scripts.ops.nebius_development_runtime_setup import prepare_database_runtime
 from scripts.ops.nebius_pool_cutover_entry import load_pool_cutover_inputs
@@ -60,19 +63,6 @@ from loom_service.environment_management.manager import CandidateBundle
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE_RECORD = ROOT / 'shared-pool-source.json'
-
-
-class RetainedRuntimeReference(BaseModel):
-    model_config = ConfigDict(extra='forbid', frozen=True, hide_input_in_errors=True)
-    operation_path: Path
-    operation_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
-
-    @field_validator('operation_path')
-    @classmethod
-    def canonical_operation(cls, value: Path) -> Path:
-        if not value.is_absolute() or value != value.resolve() or value.name != 'operation.json':
-            raise ValueError('retained runtime operation path differs')
-        return value
 
 
 class SharedPoolPrivateInputs(BaseModel):
