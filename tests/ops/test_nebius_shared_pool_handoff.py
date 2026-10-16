@@ -405,7 +405,7 @@ def _shared_entry_inputs(args, bindings, *, preparation_id=None):
     return shared_root, operation, inputs, root, retired
 
 
-def _advanced_staging_source(args, tmp_path):
+def _advanced_staging_source(args, tmp_path, *, candidate_sha='e' * 40, image_digest='d' * 64):
     """A real signed standalone release after the CLOSED registration was frozen."""
     from scripts.ops.nebius_candidate import create_candidate
 
@@ -416,10 +416,10 @@ def _advanced_staging_source(args, tmp_path):
     configmap, = (row for row in source['observation']['resources']
         if row['kind'] == 'ConfigMap' and row['metadata']['name'] == 'loom-platform-config')
     config, profile = (json.loads(configmap['data'][key]) for key in ('environment.json', 'profile.json'))
-    candidate.update(candidate_sha='e' * 40, runtime_binary_sha256=profile['runtime_binary_sha256'],
+    candidate.update(candidate_sha=candidate_sha, runtime_binary_sha256=profile['runtime_binary_sha256'],
         policy_sha256='sha256:' + 'a' * 64)
     for item in candidate['images'].values():
-        item.update(image_ref=item['image_ref'].split('@')[0] + '@sha256:' + 'd' * 64,
+        item.update(image_ref=item['image_ref'].split('@')[0] + '@sha256:' + image_digest,
             sbom_sha256='sha256:' + 'd' * 64, vulnerability_report_sha256='sha256:' + 'f' * 64,
             highest_vulnerability_severity='high')
     keyring = args['runtime'].database.manager.retained.request.registration.spec.profiles.image_admission_keyring
@@ -479,6 +479,111 @@ def test_preactivation_preparation_preserves_completed_runtime_and_is_immutable(
             changed['operation_id'] = uuid4()
         with pytest.raises(ValueError):
             parent.retain_preactivation_catalog(**changed)
+
+
+class PreactivationAPI:
+    """Only remote boundaries are doubled; real journals and history are used."""
+
+    def __init__(self, retained):
+        from tests.ops.test_nebius_development_runtime_transition import RuntimeAPI
+        from tests.ops.test_nebius_management_stage import PhaseAPI
+
+        self.retained = retained
+        self.catalog = PhaseAPI(retained.registration.binding)
+        self.manager = RuntimeAPI({_key(retained.inputs.manager): retained.inputs.manager})
+        self.registry = self
+        self.registry_state = 'ready'
+        self.commits = 0
+        self.settings_checks = 0
+        self.process_ready = True
+        self.failure = None
+        self.qualifications = []
+
+    def qualify(self, retained, phase):
+        from scripts.ops import nebius_certificates as private_state
+
+        assert retained == self.retained
+        # Every connected observation must run under the existing handoff lock.
+        with pytest.raises(private_state.CertificateError):
+            with private_state._locked_state(retained.anchor_dir / 'shared-pool-handoff-lock'):
+                pytest.fail('preactivation did not hold the handoff lock')
+        self.qualifications.append(phase)
+        if self.failure == phase:
+            raise ValueError('simulated source/gateway/authority drift')
+
+    def qualify_manager(self, retained, resources):
+        from scripts.ops.nebius_management_switch import _matches
+
+        assert retained == self.retained
+        manager = self.manager.rows[_key(resources.manager)]
+        assert _matches(manager, resources.manager, manager['metadata']['uid'])
+        assert self.manager.ready
+        if not self.process_ready:
+            raise ValueError('simulated manager process mismatch')
+        self.settings_checks += 1
+
+    def observe(self, refresh):
+        from scripts.ops.nebius_pool_preactivation_database import _identity
+
+        assert refresh == self.retained.inputs.refresh
+        return {**_identity(refresh), 'state': self.registry_state, 'read_only': True}
+
+    def commit(self, refresh):
+        from scripts.ops.nebius_pool_preactivation_registry import validate_preactivation_registry
+
+        assert self.settings_checks > 0 and self.manager.ready
+        record = validate_preactivation_registry(request=refresh, state_dir=self.retained.state_dir / 'registry')
+        assert record['status'] == 'intent'
+        self.commits += 1
+        if self.failure == 'registry-before':
+            raise OSError('lost before commit')
+        self.registry_state = 'complete'
+        if self.failure == 'registry-after':
+            raise OSError('lost after commit')
+        return {**self.observe(refresh), 'read_only': False}
+
+
+@pytest.mark.parametrize('staging_observation', ['independent'], indirect=True)
+@pytest.mark.timeout(300)
+def test_preactivation_parent_orders_readiness_commit_and_completed_successors(shared_operation, tmp_path):
+    from scripts.ops import nebius_pool_preactivation_operation as parent
+    from scripts.ops.nebius_shared_pool_entry import RetainedRuntimeReference
+
+    args, bindings = shared_operation
+    _, _, inputs, _, _ = _shared_entry_inputs(args, bindings)
+    runtime = RetainedRuntimeReference.model_validate(inputs['runtime'])
+    retained = parent.retain_preactivation_catalog(runtime=runtime, source=_advanced_staging_source(args, tmp_path),
+        operation_id=uuid4(), repo_root=ROOT)
+    api = PreactivationAPI(retained)
+
+    def run():
+        return parent.run_preactivation_catalog(retained=retained, api=api, repo_root=ROOT)
+
+    assert run() is False  # Applied manager is not yet ready.
+    assert len(api.catalog.creates) == len(api.manager.patches) == 1
+    assert api.commits == api.settings_checks == 0
+    with pytest.raises(ValueError):
+        parent.load_completed_preactivation(runtime=runtime, reference=retained.reference, repo_root=ROOT)
+    api.manager.ready = True
+    api.process_ready = False
+    with pytest.raises(ValueError):
+        run()
+    assert api.commits == 0  # Kubernetes readiness cannot substitute for actual settings.
+    api.process_ready = True
+    api.failure = 'registry-after'
+    assert run() is True  # Lost commit reply is reconciled, never dispatched twice.
+    completed = parent.load_completed_preactivation(runtime=runtime, reference=retained.reference, repo_root=ROOT)
+    assert all(path.read_bytes() == raw for path, raw in retained.files.items())
+    assert run() is True
+    assert len(api.catalog.creates) == len(api.manager.patches) == api.commits == 1
+    assert all(path.read_bytes() == raw for path, raw in completed.files.items())
+    successor = parent.retain_preactivation_catalog(runtime=runtime,
+        source=_advanced_staging_source(args, tmp_path, candidate_sha='f' * 40, image_digest='5' * 64),
+        operation_id=uuid4(), predecessor=retained.reference, repo_root=ROOT)
+    assert successor.inputs.refresh.before == retained.inputs.refresh.after
+    assert successor.inputs.manager == completed.resources.manager
+    assert successor.inputs.catalog == completed.resources.catalog
+    assert completed.files.items() <= successor.files.items()
 
 
 @pytest.mark.parametrize('preparation_id', [None, '335c9f82-6f9a-43de-ab0c-a312034b9efe'])
