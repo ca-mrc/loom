@@ -797,7 +797,8 @@ registration, a new input directory alone is insufficient. Before handoff:
    digest-bound shared tooling grant as above.
 3. Dispatch protected `shared-pool-refresh-catalog`. Its separate intake accepts
    the prepared selector; ordinary handoff intake still requires a completed
-   selector. The operation requalifies publication and current staging, proves
+   selector. The operation requalifies publication and, before the first durable
+   catalog intent, current staging; it proves
    the pool is never-used and CLOSED, and proves the gateway has no live Pods.
    Under the common handoff lock it creates the immutable catalog, changes only
    the manager's catalog mount, proves actual manager readiness/settings, and
@@ -807,8 +808,14 @@ registration, a new input directory alone is insufficient. Before handoff:
 4. `catalog_pending` means the exact manager rollout is not yet ready.
    `shared_pool_catalog_refreshed` means the catalog transition completed, not
    activation: both admission and writer-migration flags remain false. Preserve
-   all child receipts and the dispatch anchor. An uncertain SQL result is read
-   back, never blindly retried. Missing or damaged dispatched history blocks
+   all child receipts and the dispatch anchor. If staging advances after durable
+   catalog intent, finish that exact CLOSED successor, then capture staging again
+   and prepare a new refresh from the completed predecessor. Finishing the old
+   refresh does not qualify its stale catalog for handoff. A proven local failure
+   before the SQL write transport restores only its intact intent to prepared;
+   a later invocation must requalify everything. Once the write transport has
+   been invoked, an uncertain SQL result is read back, never blindly retried.
+   Missing or damaged dispatched history blocks
    further effects; do not delete it or create another operation to bypass it.
 5. Run fresh protected `shared-pool-preflight`, then the existing bounded handoff
    and acceptance procedure. Handoff, recovery and the first ordinary participant

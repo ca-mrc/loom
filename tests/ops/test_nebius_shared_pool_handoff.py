@@ -512,6 +512,10 @@ class PreactivationAPI:
         self.qualifications.append(phase)
         if self.failure == phase:
             raise ValueError('simulated source/gateway/authority drift')
+        journal = retained.state_dir / 'registry/registry.json'
+        if (self.failure == 'registry-intent' and journal.exists()
+                and json.loads(journal.read_bytes())['status'] == 'intent'):
+            raise OSError('read-only qualification interrupted before commit')
 
     def qualify_manager(self, retained, resources):
         from scripts.ops.nebius_management_switch import _matches
@@ -572,6 +576,11 @@ def test_preactivation_parent_orders_readiness_commit_and_completed_successors(s
         run()
     assert api.commits == 0  # Kubernetes readiness cannot substitute for actual settings.
     api.process_ready = True
+    api.failure = 'registry-intent'
+    with pytest.raises(ValueError):
+        run()
+    assert api.commits == 0
+    assert json.loads((retained.state_dir / 'registry/registry.json').read_bytes())['status'] == 'prepared'
     api.failure = 'registry-after'
     assert run() is True  # Lost commit reply is reconciled, never dispatched twice.
     completed = parent.load_completed_preactivation(runtime=runtime, reference=retained.reference, repo_root=ROOT)
@@ -1088,8 +1097,46 @@ def test_connected_preactivation_preserves_staging_and_qualifies_actual_closed_s
                     parent.run_preactivation_catalog(retained=retained, api=api, repo_root=ROOT)
                 assert events == []
             state['failure'] = None
-            state['lose_commit'] = True
+            documents.update(copy.deepcopy(next_staging))
+            with pytest.raises(ValueError):
+                parent.run_preactivation_catalog(retained=retained, api=api, repo_root=ROOT)
+            assert events == []  # Before intent, stale staging cannot authorize even catalog creation.
+            documents.update(copy.deepcopy(original_staging))
+
+            real_commit, real_sql, real_database = api.commit, api._sql, api.probes._database
+            dispatch_phase = {'value': None}
+
+            def commit(request):
+                dispatch_phase['value'] = 'commit'
+                try:
+                    return real_commit(request)
+                finally:
+                    dispatch_phase['value'] = None
+
+            def sql(request, *, writing):
+                if writing:
+                    dispatch_phase['value'] = 'sql'
+                return real_sql(request, writing=writing)
+
+            def database(namespace):
+                if dispatch_phase['value'] == state['failure']:
+                    raise OSError('database qualification read failed before write transport')
+                return real_database(namespace)
+
             state['advance_staging'] = True
+            with patch.context() as preflight_failures:
+                preflight_failures.setattr(api, 'commit', commit)
+                preflight_failures.setattr(api, '_sql', sql)
+                preflight_failures.setattr(api.probes, '_database', database)
+                for failure in ('commit', 'sql'):
+                    state['failure'] = failure
+                    with pytest.raises(ValueError):
+                        parent.run_preactivation_catalog(retained=retained, api=api, repo_root=ROOT)
+                    assert json.loads((retained.state_dir / 'registry/registry.json').read_bytes())['status'] == 'prepared'
+                    assert [event for event in events if event != 'settings'] == ['catalog', 'manager']
+            state['failure'] = None
+            state['lose_commit'] = True
+            assert {path: documents[path] for path in staging_paths} == next_staging
             try:
                 assert parent.run_preactivation_catalog(retained=retained, api=api, repo_root=ROOT)
             except Exception as error:
