@@ -678,8 +678,9 @@ Hosted Terminus-2 admits only `student_teacher_student`. The same two LiteLLM
 delegates share one Harbor session; `--combinations-json` and combination
 fan-out stay independent. The selected runtime profile must list
 `student_teacher_student` in `terminus2_multi_model_policies` (default empty,
-so merged code stays inert until the broker and controller images are
-published). Frozen K1/K2 remain inside `LOOM_TASK_TRIAL_JSON`. The trusted
+so merged code stays inert until publication sets
+`NEBIUS_TERMINUS2_MULTI_MODEL_READY=true` on the same candidate that
+publishes the broker and Terminus controller images). Frozen K1/K2 remain inside `LOOM_TASK_TRIAL_JSON`. The trusted
 broker derives trial identity from the active attempt lease, reclaims the
 Terminus execution/run attempt, and accepts bounded episode checkpoints.
 Missing reclaim identity fails closed instead of emitting uncorrelated

@@ -188,6 +188,7 @@ jobs:
           NEBIUS_TASK_WEB_EGRESS_READY: ${{ vars.NEBIUS_TASK_WEB_EGRESS_READY || 'false' }}
           NEBIUS_SERVICE_LIFECYCLE_READY: ${{ vars.NEBIUS_SERVICE_LIFECYCLE_READY || 'false' }}
           NEBIUS_TASK_IDENTITY_READY: ${{ vars.NEBIUS_TASK_IDENTITY_READY || 'false' }}
+          NEBIUS_TERMINUS2_MULTI_MODEL_READY: ${{ vars.NEBIUS_TERMINUS2_MULTI_MODEL_READY || 'false' }}
           NEBIUS_GUEST_RUNTIME_READY: ${{ vars.NEBIUS_GUEST_RUNTIME_READY || 'false' }}
           NEBIUS_EMULATED_PKCS11_READY: ${{ vars.NEBIUS_EMULATED_PKCS11_READY || 'false' }}
           NEBIUS_GUEST_RUNTIME_VOLUME_MIB: ${{ vars.NEBIUS_GUEST_RUNTIME_VOLUME_MIB }}
@@ -241,7 +242,8 @@ jobs:
           fi
           if [[ "$PUBLICATION_MODE" == platform ]]; then
             : "${NEBIUS_EMULATED_PKCS11_READY:=false}"
-            for setting in NEBIUS_TASK_WEB_EGRESS_READY NEBIUS_SERVICE_LIFECYCLE_READY NEBIUS_TASK_IDENTITY_READY NEBIUS_GUEST_RUNTIME_READY NEBIUS_EMULATED_PKCS11_READY; do
+            : "${NEBIUS_TERMINUS2_MULTI_MODEL_READY:=false}"
+            for setting in NEBIUS_TASK_WEB_EGRESS_READY NEBIUS_SERVICE_LIFECYCLE_READY NEBIUS_TASK_IDENTITY_READY NEBIUS_TERMINUS2_MULTI_MODEL_READY NEBIUS_GUEST_RUNTIME_READY NEBIUS_EMULATED_PKCS11_READY; do
               case "${!setting}" in
                 true|false) ;;
                 *) echo "Invalid runtime readiness setting: $setting" >&2; exit 1 ;;
@@ -250,6 +252,7 @@ jobs:
             if [[ "$NEBIUS_TASK_WEB_EGRESS_READY" == true ]]; then publication_args+=(--supports-task-web-egress); fi
             if [[ "$NEBIUS_SERVICE_LIFECYCLE_READY" == true ]]; then publication_args+=(--service-lifecycle-ready); fi
             if [[ "$NEBIUS_TASK_IDENTITY_READY" == true ]]; then publication_args+=(--supports-task-identity); fi
+            if [[ "$NEBIUS_TERMINUS2_MULTI_MODEL_READY" == true ]]; then publication_args+=(--supports-terminus2-multi-model); fi
             if [[ "$NEBIUS_GUEST_RUNTIME_READY" == true ]]; then
               test -n "$NEBIUS_GUEST_RUNTIME_VOLUME_MIB"
               test -n "$NEBIUS_GUEST_MAX_ARTIFACT_BYTES"

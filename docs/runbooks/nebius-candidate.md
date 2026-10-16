@@ -82,7 +82,8 @@ through IAM as needed, without editing pipeline code. See the
 
 Runtime readiness is explicit and remains disabled by default. The publication
 workflow accepts the persistent variables `NEBIUS_TASK_WEB_EGRESS_READY`,
-`NEBIUS_SERVICE_LIFECYCLE_READY` and `NEBIUS_TASK_IDENTITY_READY`, each exactly
+`NEBIUS_SERVICE_LIFECYCLE_READY`, `NEBIUS_TASK_IDENTITY_READY` and
+`NEBIUS_TERMINUS2_MULTI_MODEL_READY`, each exactly
 `true` or `false`. Configure them in the protected publication environment only
 after the corresponding runtime and deployment path has been qualified. They
 persist the matching profile fields on later platform publications; they do not
@@ -91,9 +92,12 @@ platform profile. Invalid values fail publication.
 
 For the equivalent local preparation path, `nebius_candidate.py create` and
 `build`, and `prepare_nebius_runtime_profile.py`, accept the optional flags
-`--supports-task-web-egress`, `--service-lifecycle-ready` and
-`--supports-task-identity`. Without them, the corresponding fields remain
-omitted from the canonical profile. Web egress still requires the matching
+`--supports-task-web-egress`, `--service-lifecycle-ready`,
+`--supports-task-identity` and `--supports-terminus2-multi-model`. Without them, the corresponding fields remain
+omitted from the canonical profile. `NEBIUS_TERMINUS2_MULTI_MODEL_READY=true`
+writes `terminus2_multi_model_policies: ["student_teacher_student"]` so hosted
+Terminus-2 STS can admit; leave it false until the same candidate's
+execution-runtime and Harbor controller images are the #2503 bind. Web egress still requires the matching
 [deployment policy](nebius-platform.md); the renderer rejects missing or
 unmatched configuration. Identity readiness requires the explicit
 [`task_identity_policy` deployment contract](nebius-platform.md#private-task-identity-policy).

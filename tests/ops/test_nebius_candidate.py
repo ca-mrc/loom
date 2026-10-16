@@ -145,7 +145,8 @@ def test_publication_workflow_passes_only_explicit_readiness(ready: str) -> None
         capture_output=True, text=True,
         env={**os.environ, "PUBLICATION_MODE": "platform", "AGENT_VERSION": "",
              "NEBIUS_TASK_WEB_EGRESS_READY": ready, "NEBIUS_SERVICE_LIFECYCLE_READY": ready,
-             "NEBIUS_TASK_IDENTITY_READY": ready, "NEBIUS_REGISTRY_PREFIX": "fixture",
+             "NEBIUS_TASK_IDENTITY_READY": ready, "NEBIUS_TERMINUS2_MULTI_MODEL_READY": ready,
+             "NEBIUS_REGISTRY_PREFIX": "fixture",
              "NEBIUS_GUEST_RUNTIME_READY": "false", "NEBIUS_GUEST_RUNTIME_VOLUME_MIB": "",
              "NEBIUS_GUEST_MAX_ARTIFACT_BYTES": "",
              "NEBIUS_IMAGE_UPLOAD_TIMEOUT_SECONDS": "900", "NEBIUS_SIGNING_KEY_ID": "fixture",
@@ -155,7 +156,10 @@ def test_publication_workflow_passes_only_explicit_readiness(ready: str) -> None
         assert result.returncode != 0
     else:
         assert result.returncode == 0, result.stderr
-        for flag in ("--supports-task-web-egress", "--service-lifecycle-ready", "--supports-task-identity"):
+        for flag in (
+            "--supports-task-web-egress", "--service-lifecycle-ready",
+            "--supports-task-identity", "--supports-terminus2-multi-model",
+        ):
             assert (flag in result.stdout.splitlines()) is (ready == "true")
 
 
@@ -275,7 +279,8 @@ def test_cli_create_plain_candidate_and_check_shape(
             str(trust),
             "--output",
             str(output),
-            *(["--supports-task-web-egress", "--service-lifecycle-ready", "--supports-task-identity"] if enabled else []),
+            *(["--supports-task-web-egress", "--service-lifecycle-ready",
+               "--supports-task-identity", "--supports-terminus2-multi-model"] if enabled else []),
             *(["--guest-runtime", "qemu-tcg-v1", "--guest-runtime-volume-mib", "1024",
                "--guest-max-artifact-bytes", "6442450944", "--supports-emulated-pkcs11"] if enabled else []),
         ],
@@ -299,6 +304,10 @@ def test_cli_create_plain_candidate_and_check_shape(
             assert profile[capability] is True
         else:
             assert capability not in profile
+    if enabled:
+        assert profile["terminus2_multi_model_policies"] == ["student_teacher_student"]
+    else:
+        assert "terminus2_multi_model_policies" not in profile
     verify = [
         *command,
         "check-shape",
@@ -593,7 +602,8 @@ def test_publication_builds_selected_images_and_reuses_platform_admission(
         upload_timeout_seconds=1200, mode=mode, agent_version="test-1" if mode == "harness-only" else None, output=output,
         registry_prefix=document["registry_prefix"], signing_key=private,
         signing_key_id="publisher", trusted_keyring=trust,
-        supports_task_web_egress=enabled, service_lifecycle_ready=enabled, supports_task_identity=enabled,
+        supports_task_web_egress=enabled, service_lifecycle_ready=enabled,
+        supports_task_identity=enabled, supports_terminus2_multi_model=enabled,
     ))
     builds = [call for call in calls if len(call) > 1 and call[1] == "build"]
     expected = 1 if mode == "harness-only" else len(candidate.COMPONENTS)
@@ -628,6 +638,10 @@ def test_publication_builds_selected_images_and_reuses_platform_admission(
                 assert profile[capability] is True
             else:
                 assert capability not in profile
+        if enabled:
+            assert profile["terminus2_multi_model_policies"] == ["student_teacher_student"]
+        else:
+            assert "terminus2_multi_model_policies" not in profile
 
 
 def test_duplicate_input_fields_rejected(tmp_path: Path) -> None:
