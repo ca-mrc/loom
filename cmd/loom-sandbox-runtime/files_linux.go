@@ -21,12 +21,12 @@ func fileParent(path string, create bool) (int, string, error) {
 
 func openFileParent(path string, create bool, directoryFlags int) (int, string, error) {
 	if !strings.HasPrefix(path, "/") || strings.ContainsRune(path, '\x00') {
-		return -1, "", errors.New("absolute path required")
+		return -1, "", errInvalidFileTarget
 	}
 	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
 	for _, p := range parts {
 		if p == "" || p == "." || p == ".." {
-			return -1, "", errors.New("invalid path component")
+			return -1, "", errInvalidFileTarget
 		}
 	}
 	fd, err := syscall.Open("/", directoryFlags|syscall.O_DIRECTORY|syscall.O_CLOEXEC, 0)
@@ -64,7 +64,7 @@ func readFile(path string) (*os.File, error) {
 	info, err := f.Stat()
 	if err != nil || !info.Mode().IsRegular() {
 		f.Close()
-		return nil, errors.New("regular file required")
+		return nil, errInvalidFileTarget
 	}
 	return f, nil
 }
@@ -107,7 +107,7 @@ func writeFile(path string, body io.Reader, mode uint32) error {
 		info, statErr := f.Stat()
 		f.Close()
 		if statErr != nil || !info.Mode().IsRegular() {
-			return errors.New("regular file required")
+			return errInvalidFileTarget
 		}
 	} else if !errors.Is(err, syscall.ENOENT) {
 		return err

@@ -38,6 +38,12 @@ def prepare_harbor_bundle(bundle: Path, config: dict[str, Any]) -> None:
     if compose:
         environment["compose_files"] = compose
         project_single_service_compose(bundle, environment)
+        environment.pop("image_workdir", None)
+    else:
+        # Harbor runs as the image USER (root when the image omits USER) and
+        # keeps ENTRYPOINT initializers. Never substitute Loom's controller UID.
+        environment.setdefault("user", "image")
+        environment.setdefault("image_entrypoint", "entrypoint" not in environment)
     if (bundle / "tests/Dockerfile").is_file():
         env = dict(verifier.get("environment") or environment)
         env.pop("docker_image", None)

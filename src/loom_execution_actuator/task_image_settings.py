@@ -33,8 +33,9 @@ class NativeTaskImageSettings(BaseModel):
     max_processes: int = Field(default=512, ge=64, le=4096)
     active_deadline_seconds: int = Field(default=1800, ge=60, le=7200)
     max_concurrent: int = Field(default=1, ge=1, le=16)
-    # OverlayFS is the measured Nebius default; set "native" to roll back.
-    snapshotter: Literal["overlayfs", "native"] = "overlayfs"
+    # Preserve filesystem semantics for unchanged authored Dockerfiles. The
+    # faster OverlayFS backend is opt-in after qualifying the task workload.
+    snapshotter: Literal["overlayfs", "native"] = "native"
     # When "same_task", prepare may import BuildKit cache from a prior ready
     # revision of the same task_id+cpu_arch. Results still use this mat key.
     compatible_revision_cache: Literal["off", "same_task"] = "off"

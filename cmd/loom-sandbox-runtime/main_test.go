@@ -195,6 +195,33 @@ func TestTransferBoundaries(t *testing.T) {
 	}
 }
 
+func TestUploadPermissionFailureIsDiagnosableWithoutPrivatePaths(t *testing.T) {
+	if runtime.GOOS != "linux" || os.Geteuid() == 0 {
+		t.Skip("requires unprivileged Linux file permissions")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0755) })
+	req, _ := http.NewRequest("PUT", "http://sandbox/file", strings.NewReader("private-payload"))
+	q := req.URL.Query()
+	q.Set("path", filepath.Join(dir, "private-filename"))
+	req.URL.RawQuery = q.Encode()
+	response, err := testClient(t).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, _ := io.ReadAll(response.Body)
+	if response.StatusCode != 400 || response.Header.Get("X-Loom-Sandbox-Error") != "file_permission_denied" {
+		t.Fatalf("permission failure lost: status=%d headers=%v", response.StatusCode, response.Header)
+	}
+	if string(body) != "file upload rejected\n" || strings.Contains(fmt.Sprint(response.Header), "private-") {
+		t.Fatal("upload failure exposed private path or content")
+	}
+}
+
 func TestStopProcessesPreservesRPCAndRejectsHostProcess(t *testing.T) {
 	c := testClient(t)
 	if runtime.GOOS != "linux" || os.Getpid() != 1 {

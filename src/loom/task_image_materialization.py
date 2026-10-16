@@ -12,6 +12,7 @@ from uuid import UUID, uuid4
 from pydantic import (
     BaseModel,
     ConfigDict,
+    Field,
     StringConstraints,
     field_validator,
     model_validator,
@@ -30,6 +31,7 @@ from loom.db.schema import (
 )
 from loom.execution_architecture import execution_cpu_arch
 from loom.models.task import TaskConfig
+from loom.task_image_metadata import TaskImageRuntimeMetadataV1
 
 if TYPE_CHECKING:
     from loom.task_bundle_source import TaskBundleSourceSpecV1
@@ -65,6 +67,7 @@ class TaskImageExecutionGrantV1(BaseModel):
     task_source: str | None
     task_source_provenance: dict[str, Any]
     registry_images: dict[str, ImmutableRegistryImage]
+    image_runtime_metadata: dict[str, TaskImageRuntimeMetadataV1] = Field(default_factory=dict, exclude_if=lambda value: not value)
 
     @field_validator("registry_images")
     @classmethod
@@ -81,6 +84,9 @@ class TaskImageExecutionGrantV1(BaseModel):
         expected = required_task_image_components(task)
         if set(self.registry_images) != expected:
             raise ValueError("registry_images do not match the frozen task snapshot")
+        for component, metadata in self.image_runtime_metadata.items():
+            if metadata.image_ref != self.registry_images.get(component):
+                raise ValueError("OCI runtime metadata does not match the published image")
         manifest_digest = task_bundle_content_manifest_digest(self.task_source_provenance)
         if manifest_digest and self.materialization_key != task_image_materialization_key(
             task_id=task.task.id,
@@ -114,6 +120,20 @@ def resolve_prepared_task(task: TaskConfig, grant: TaskImageExecutionGrantV1) ->
             dockerfile=None, docker_build_context=None, docker_build_args={},
             docker_build_target=None, docker_image=grant.registry_images["task"],
         )
+    if task.environment.user == "image" or task.environment.image_entrypoint or task.environment.image_workdir:
+        metadata = grant.image_runtime_metadata.get("task")
+        if metadata is None:
+            raise ValueError("task image OCI runtime metadata is unavailable; rebuild before execution")
+        environment["environment"] = {**metadata.environment, **environment["environment"]}
+        if task.environment.user == "image":
+            environment["user"] = f"{metadata.uid}:{metadata.gid}"
+            environment["environment"].setdefault("HOME", metadata.home)
+        if task.environment.image_workdir:
+            environment["workdir"] = metadata.workdir
+        if task.environment.image_entrypoint:
+            environment["entrypoint"] = list(metadata.entrypoint)
+        environment["image_entrypoint"] = False
+        environment["image_workdir"] = False
     for sidecar in environment["sidecars"]:
         if sidecar["dockerfile"] is not None:
             sidecar.update(dockerfile=None, docker_build_context=None,
@@ -514,6 +534,10 @@ async def get_trial_task_image_execution_grant(
         await admit_task_image_source(session, row=row)
     except ValueError as error:
         raise RuntimeError(str(error)) from error
+    attempt = await session.scalar(select(TaskImageMaterializationAttempt).where(
+        TaskImageMaterializationAttempt.materialization_id == row.id,
+        TaskImageMaterializationAttempt.lease_epoch == row.lease_epoch,
+    ))
     return TaskImageExecutionGrantV1(
         schema_version="loom.task-image-execution-grant.v1",
         materialization_id=row.id,
@@ -524,4 +548,5 @@ async def get_trial_task_image_execution_grant(
         task_source=row.task_source,
         task_source_provenance=row.task_source_provenance,
         registry_images=row.registry_images,
+        image_runtime_metadata=(attempt.native_build or {}).get("image_runtime_metadata", {}) if attempt else {},
     )

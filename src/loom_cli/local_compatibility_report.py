@@ -387,6 +387,8 @@ def _dockerfile_runtime_requirements(
             continue
         value = effective.arguments.strip()
         if key != "USER":
+            if key == "ENTRYPOINT" and task.environment.image_entrypoint:
+                continue
             if not value or re.fullmatch(r"\[\s*\]", value):
                 continue
             if key == "CMD" and harbor_input and _bare_shell_cmd(value):
@@ -586,6 +588,8 @@ def _image_script_private_test_diagnostics(
 
 
 def _prepared_user_matches(source_user: str, task: TaskConfig) -> bool:
+    if task.environment.user == "image":
+        return True
     try:
         identity = resolve_sandbox_identity(task.environment.user, task.environment.environment.get("HOME"))
     except ValueError:

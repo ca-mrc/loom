@@ -60,6 +60,10 @@ from loom.service_execution_task import (
 )
 from loom.service_execution_terminus2 import TASK_IMAGE_TOOLS_REQUIRED, run_terminus2
 from loom.service_execution_terminus_trace import parse_terminus_events, terminus_usage
+from loom.task_environment_handoff import (
+    RESOLVED_TASK_ENVIRONMENT,
+    decode_resolved_task_environment,
+)
 from loom.trial.mutable_snapshot import export_mutable_paths, import_mutable_paths
 from loom.trial.workspace import (
     WorkspaceStagingPolicy,
@@ -464,7 +468,13 @@ class AgentTimeoutFinalizedError(TimeoutError):
     """Agent deadline reached; quiescence and verifier handoff completed safely."""
 
 
-async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> None:
+async def run_agent(
+    workspace: Path, task: TaskConfig, trial: TrialConfig, *, original_task: TaskConfig | None = None,
+) -> None:
+    # Build hints belong to the immutable submitted source, while identity and
+    # workdir belong to the resolved runtime environment. Freeze exclusions
+    # before the sandbox can return a task-controlled replacement task.toml.
+    input_exclusions = _agent_input_exclusions(original_task if original_task is not None else task)
     raw_deadline = os.environ.get("LOOM_EXECUTION_PHASE_DEADLINE")
     deadline = AttemptDeadline.from_wall_deadline(float(raw_deadline)) if raw_deadline else None
     grace = float(os.environ.get("LOOM_EXECUTION_TERMINATION_GRACE_SECONDS", "30"))
@@ -510,7 +520,7 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
                 solution_staged = spec.stages_solution
                 await materialize_workspace(
                     driver=driver, task_dir=workspace, dst=task.environment.workdir, policy=_POLICY,
-                    excluded_paths=_agent_input_exclusions(task),
+                    excluded_paths=input_exclusions,
                     trusted_private_paths=ORACLE_SOLUTION_PATHS if spec.stages_solution else (),
                 )
                 if task.environment.preserve_acls:
@@ -872,6 +882,13 @@ def main() -> None:
     # add cwd to their import path or load .env; never chdir into task inputs.
     with (workspace / "task.toml").open("rb") as stream:
         task = normalize_steps(TaskConfig.model_validate(tomllib.load(stream)))
+    original_task = task
+    if RESOLVED_TASK_ENVIRONMENT in os.environ:
+        # The source bundle remains immutable. Only the controller's runtime
+        # view adopts the environment frozen beside the prepared image grant.
+        task = task.model_copy(update={"environment": decode_resolved_task_environment(
+            os.environ[RESOLVED_TASK_ENVIRONMENT],
+        )})
     trial = TrialConfig.model_validate_json(os.environ["LOOM_TASK_TRIAL_JSON"])
     setup_phase = args.phase == HARNESS_SETUP_PHASE
     agent_phase = args.phase not in {HARNESS_SETUP_PHASE, "verify-sandbox"}
@@ -879,7 +896,10 @@ def main() -> None:
         raise ServiceExecutionTaskError("execution phase does not match the selected agent")
     phase = run_setup if setup_phase else run_agent if agent_phase else run_verifier
     try:
-        asyncio.run(phase(workspace, task, trial))
+        if agent_phase and RESOLVED_TASK_ENVIRONMENT in os.environ:
+            asyncio.run(run_agent(workspace, task, trial, original_task=original_task))
+        else:
+            asyncio.run(phase(workspace, task, trial))
     except AgentTimeoutFinalizedError:
         raise
     except Exception as exc:

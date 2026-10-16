@@ -9,7 +9,7 @@ from pathlib import Path
 from tests.support.minio_images import selected_fixture_images
 
 # Preserve the references already used by the PostgreSQL and sandbox fixtures.
-FIXTURE_IMAGES = ("postgres:16", "python:3.11-slim")
+FIXTURE_IMAGES = ("postgres:16", "postgres:17", "python:3.11-slim")
 
 
 def selected_images(paths: list[str], *, root: Path | None = None) -> tuple[str, ...]:
