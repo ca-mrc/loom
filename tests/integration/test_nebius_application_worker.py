@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -333,6 +334,17 @@ async def test_stalled_database_attempt_boundaries_preserve_uncertain_state(appl
     worker = ApplicationWorker(registry, coordinator, lease_seconds=3)
     stalled = asyncio.Event()
 
+    # Prepare real durable state before applying the deliberately short worker
+    # budget. Otherwise an unrelated claim/plan query can exhaust its 0.5s
+    # budget before this test even reaches the injected database boundary.
+    if method != 'claim':
+        lease = await registry.claim(operation.operation_id, lease_seconds=worker.lease_seconds)
+        assert lease is not None
+        monkeypatch.setattr(registry, 'claim', AsyncMock(return_value=lease))
+        if method == 'finish_attempt':
+            plan = await registry.frozen_plan(lease)
+            monkeypatch.setattr(registry, 'frozen_plan', AsyncMock(return_value=plan))
+
     async def stall(*args, **kwargs):
         stalled.set()
         await asyncio.Event().wait()
@@ -340,7 +352,12 @@ async def test_stalled_database_attempt_boundaries_preserve_uncertain_state(appl
     monkeypatch.setattr(registry, method, stall)
     task = asyncio.create_task(worker.reconcile_once(operation.operation_id))
     try:
-        await asyncio.wait_for(stalled.wait(), 2)
+        try:
+            await asyncio.wait_for(stalled.wait(), 2)
+        except TimeoutError:
+            if task.done():
+                task.result()  # Report an early worker failure instead of hiding it.
+            raise
         done, _ = await asyncio.wait({task}, timeout=1)
         assert task in done, f'{method} must have a bounded database wait'
         error = task.exception()
