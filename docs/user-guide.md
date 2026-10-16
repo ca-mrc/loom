@@ -392,8 +392,13 @@ source trial has only provider-log-based execution data.
 Native verifier evidence is delivered under `verifier/`: original output,
 phase stdout/stderr, and `runtime-result.json` containing exit status, timing
 and truncation metadata. Legacy verifier log/metadata pairs remain supported.
-Missing or inconsistent evidence rejects the export. Scored timeouts preserve
-their original failed state; exporting them does not change their outcome.
+Shared and in-attempt verification still pack the parent attempt. When
+`trial.result.verifier_execution` is committed (separate verification), the
+packer reads the `verifier-execution/` child namespace and compares it to that
+committed runtime result (`execution_role=verifier`, one verifier phase). Skip
+still exports with no verifier files. Missing or inconsistent evidence rejects
+the export. Scored timeouts preserve their original failed state; exporting
+them does not change their outcome.
 
 Use `--mode openhands-export` when selected trials ran with the `openhands-sdk`
 agent and the trajectory contains `openhands_sdk_*` typed events plus a
