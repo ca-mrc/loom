@@ -714,6 +714,57 @@ def test_shared_v2_uses_completed_catalog_but_preserves_original_runtime_roots(s
         entry.load_inputs({**operation, 'inputs_sha256': hashlib.sha256((root / 'inputs.json').read_bytes()).hexdigest()})
 
 
+@pytest.mark.parametrize('staging_observation', ['independent'], indirect=True)
+@pytest.mark.timeout(240)
+def test_completed_catalog_runtime_inventory_keeps_original_roots_and_exact_successors(
+        shared_operation, shared_runtime, completed_pool, handoff, tmp_path):
+    import ssl
+
+    import httpx
+    from scripts.ops import nebius_pool_preactivation_operation as parent
+    from scripts.ops.nebius_development_runtime_observation import HTTPSDevelopmentRuntimeObserver
+    from scripts.ops.nebius_management_switch import _matches
+    from scripts.ops.nebius_shared_pool_entry import RetainedRuntimeReference
+    from tests.ops.test_nebius_development_pool_retained import runtime_http_inventory
+
+    args, bindings = shared_operation
+    _, _, inputs, _, _ = _shared_entry_inputs(args, bindings)
+    runtime = RetainedRuntimeReference.model_validate(inputs['runtime'])
+    retained = parent.retain_preactivation_catalog(runtime=runtime, source=_advanced_staging_source(args, tmp_path),
+        operation_id=uuid4(), repo_root=ROOT)
+    api = PreactivationAPI(retained)
+    api.manager.ready = True
+    assert parent.run_preactivation_catalog(retained=retained, api=api, repo_root=ROOT)
+    selected = parent.load_completed_preactivation(runtime=runtime, reference=retained.reference, repo_root=ROOT)
+    _, documents, handle = runtime_http_inventory(args['runtime'], shared_runtime[1], completed_pool[3].server, handoff[2])
+    namespace = retained.registration.binding.namespace
+    manager_path = '/apis/apps/v1/namespaces/' + namespace + '/deployments/loom-service'
+    catalog_path = '/api/v1/namespaces/' + namespace + '/configmaps/' + selected.resources.catalog['metadata']['name']
+    old_catalog_path = '/api/v1/namespaces/' + namespace + '/configmaps/' + retained.inputs.catalog['metadata']['name']
+    documents[manager_path] = copy.deepcopy(api.manager.rows[_key(selected.resources.manager)])
+    documents[catalog_path] = copy.deepcopy(selected.resources.catalog)
+    with HTTPSDevelopmentRuntimeObserver(request=args['runtime'], preactivation=selected,
+            api_server=args['runtime'].database.foundation.inputs.config['kubernetes_api_server'],
+            ssl_context=ssl.create_default_context()) as observer:
+        for connection in (observer, observer.manager, observer.foundation):
+            connection.client.close()
+            connection.client = httpx.Client(base_url=connection.api_server, transport=httpx.MockTransport(handle))
+        state = bindings.plan.development.runtime.state_dir
+        actual = observer.inspect(state_dir=state)
+        assert _matches(actual[_key(selected.resources.manager)], selected.resources.manager,
+            selected.resources.manager['metadata']['uid'])
+        assert _key(selected.resources.catalog) in actual
+        for path in (manager_path, catalog_path, old_catalog_path):
+            original = copy.deepcopy(documents[path])
+            documents[path]['metadata']['uid'] = str(uuid4())
+            with pytest.raises(ValueError):
+                observer.inspect(state_dir=state)
+            documents[path] = original
+        documents[manager_path] = copy.deepcopy(retained.inputs.manager)
+        with pytest.raises(ValueError):
+            observer.inspect(state_dir=state)
+
+
 @pytest.mark.parametrize('preparation_id', [None, '335c9f82-6f9a-43de-ab0c-a312034b9efe'])
 def test_shared_tooling_can_advance_without_reinstalling_runtime(shared_operation, monkeypatch, preparation_id):
     from scripts.ops import nebius_certificates as private_state
