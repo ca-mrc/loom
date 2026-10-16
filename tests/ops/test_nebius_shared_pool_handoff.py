@@ -674,6 +674,46 @@ def test_preactivation_parent_refuses_handoff_and_never_recreates_dispatched_jou
     assert all(path.read_bytes() == raw for path, raw in retained.files.items())
 
 
+@pytest.mark.parametrize('staging_observation', ['independent'], indirect=True)
+@pytest.mark.timeout(300)
+def test_shared_v2_uses_completed_catalog_but_preserves_original_runtime_roots(shared_operation, tmp_path, monkeypatch):
+    from scripts.ops import nebius_certificates as private_state
+    from scripts.ops import nebius_pool_preactivation_operation as parent
+    from scripts.ops import nebius_shared_pool_entry as entry
+
+    args, bindings = shared_operation
+    root, operation, inputs, _, _ = _shared_entry_inputs(args, bindings, preparation_id=str(uuid4()))
+    runtime = entry.RetainedRuntimeReference.model_validate(inputs['runtime'])
+    source = _advanced_staging_source(args, tmp_path)
+    retained = parent.retain_preactivation_catalog(runtime=runtime, source=source, operation_id=uuid4(), repo_root=ROOT)
+    api = PreactivationAPI(retained)
+    api.manager.ready = True
+    assert parent.run_preactivation_catalog(retained=retained, api=api, repo_root=ROOT)
+    completed = parent.load_completed_preactivation(runtime=runtime, reference=retained.reference, repo_root=ROOT)
+    private_state._atomic_json(root / 'staging.json', source)
+    inputs.update(schema_version='loom.nebius-shared-pool-inputs.v2', preactivation=retained.reference.model_dump(mode='json'),
+        staging_observation_sha256=hashlib.sha256((root / 'staging.json').read_bytes()).hexdigest())
+    private_state._atomic_json(root / 'inputs.json', inputs)
+    operation['inputs_sha256'] = hashlib.sha256((root / 'inputs.json').read_bytes()).hexdigest()
+    private_state._atomic_json(root / 'operation.json', operation)
+    monkeypatch.setattr(entry, 'SOURCE_RECORD', root / 'shared-pool-source.json')
+    context = entry.load_inputs(operation)
+    assert context.runtime == args['runtime']
+    assert context.operation['operation_id'] == str(retained.inputs.refresh.before.operation_id)
+    assert context.bindings.migration.registration.spec == retained.inputs.refresh.after
+    assert context.bindings.plan.preactivation == completed
+    assert all(context.files[path] == raw for path, raw in completed.files.items())
+    assert context.bindings.plan.development.runtime == bindings.plan.development.runtime
+    history = entry.load_historical_inputs(operation_path=root / 'operation.json',
+        operation_sha256=hashlib.sha256((root / 'operation.json').read_bytes()).hexdigest())
+    assert history.runtime == context.runtime and history.bindings == context.bindings
+    # V1 must not silently acquire a new selector meaning.
+    inputs['schema_version'] = 'loom.nebius-shared-pool-inputs.v1'
+    private_state._atomic_json(root / 'inputs.json', inputs)
+    with pytest.raises(ValueError):
+        entry.load_inputs({**operation, 'inputs_sha256': hashlib.sha256((root / 'inputs.json').read_bytes()).hexdigest()})
+
+
 @pytest.mark.parametrize('preparation_id', [None, '335c9f82-6f9a-43de-ab0c-a312034b9efe'])
 def test_shared_tooling_can_advance_without_reinstalling_runtime(shared_operation, monkeypatch, preparation_id):
     from scripts.ops import nebius_certificates as private_state
