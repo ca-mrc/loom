@@ -54,16 +54,22 @@ jobs:
         path: source
         persist-credentials: false
     - &id003
+      uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39
+      with:
+        version: 0.11.26
+        checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
+        enable-cache: false
+    - &id004
       name: prepare-isolated-tools
       run: 'set -euo pipefail
 
         mkdir -p "$PROBE_ROOT/metrics"
 
-        python3 -m venv "$RUNNER_TEMP/probe-venv"
+        uv venv --python python3 "$RUNNER_TEMP/probe-venv"
 
-        "$RUNNER_TEMP/probe-venv/bin/pip" install --disable-pip-version-check ''pydantic>=2.6,<3'' ''cryptography>=50,<51''
-        httpx pyyaml python-dotenv ''sqlalchemy[asyncio]>=2,<3'' pydantic-settings ''rfc8785>=0.1.4,<0.2'' structlog zstandard
-        boto3 aiofiles tenacity alembic
+        uv pip install --python "$RUNNER_TEMP/probe-venv/bin/python" ''pydantic>=2.6,<3'' ''cryptography>=50,<51'' httpx pyyaml
+        python-dotenv ''sqlalchemy[asyncio]>=2,<3'' pydantic-settings ''rfc8785>=0.1.4,<0.2'' structlog zstandard boto3 aiofiles
+        tenacity alembic
 
         echo "PROBE_PYTHON=$RUNNER_TEMP/probe-venv/bin/python" >> "$GITHUB_ENV"
 
@@ -156,6 +162,7 @@ jobs:
     - *id001
     - *id002
     - *id003
+    - *id004
     - name: before-download-images-0
       run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py mark --root "$PROBE_ROOT" --label before-download-images-0'
     - name: download-probe-images-0
