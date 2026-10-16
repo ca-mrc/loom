@@ -198,25 +198,35 @@ def test_profile_readiness_cannot_be_granted_by_task_or_prepared_image(change, r
         _compile(task, trial, profile, task_image_grant=grant)
 
 
-@pytest.mark.parametrize("section,change", [
-    ("environment", {"user": "agent"}),
-    ("verifier", {"user": None}),
-    ("verifier", {"user": "1001:1001"}),
-])
-def test_guest_coerces_authored_sandbox_users_to_root(section, change):
+def test_guest_inherits_omitted_verifier_user_from_root_task():
     task, trial, profile = _guest_inputs()
     raw = task.model_dump(mode="json")
-    raw[section].update(change)
+    raw["verifier"]["user"] = None
     task = TaskConfig.model_validate(raw)
+    assert task.environment.user == "root" and task.verifier.user is None
     reasons = automatic_service_execution_rejections(
         task, trial, source_provenance=_provenance(),
         supported_capabilities=GUEST_EXECUTION_CAPABILITIES,
     )
     assert "guest_root_identity_required" not in reasons
-    assert "unsupported_task_identity" not in reasons
     for sidecar in _compile(task, trial, profile).sidecars:
         assert sidecar.identity is not None
         assert (sidecar.identity.run_as_user, sidecar.identity.run_as_group) == (0, 0)
+
+
+@pytest.mark.parametrize("section,change", [
+    ("environment", {"user": "agent"}),
+    ("verifier", {"user": "1001:1001"}),
+])
+def test_guest_rejects_nonroot_identities_instead_of_rewriting_them(section, change):
+    task, trial, _ = _guest_inputs()
+    raw = task.model_dump(mode="json")
+    raw[section].update(change)
+    reasons = automatic_service_execution_rejections(
+        TaskConfig.model_validate(raw), trial, source_provenance=_provenance(),
+        supported_capabilities=GUEST_EXECUTION_CAPABILITIES,
+    )
+    assert "guest_root_identity_required" in reasons
 
 
 @pytest.mark.parametrize("section,change,reason", [
