@@ -676,6 +676,51 @@ def test_preactivation_parent_refuses_handoff_and_never_recreates_dispatched_jou
 
 @pytest.mark.parametrize('staging_observation', ['independent'], indirect=True)
 @pytest.mark.timeout(300)
+def test_preactivation_refuses_active_journal_damage_during_qualification(shared_operation, tmp_path):
+    """A remote qualification cannot erase or replace the intent authorizing PATCH."""
+    from scripts.ops import nebius_pool_preactivation_operation as parent
+    from scripts.ops.nebius_shared_pool_entry import RetainedRuntimeReference
+
+    args, bindings = shared_operation
+    _, _, inputs, _, _ = _shared_entry_inputs(args, bindings)
+    runtime = RetainedRuntimeReference.model_validate(inputs['runtime'])
+    source = _advanced_staging_source(args, tmp_path)
+    for damage in ('delete', 'replace'):
+        retained = parent.retain_preactivation_catalog(runtime=runtime, source=source,
+            operation_id=uuid4(), repo_root=ROOT)
+        api = PreactivationAPI(retained)
+        api.manager.ready = True
+        original_qualify = api.qualify
+        journal = retained.state_dir / 'manager/transition.json'
+        damaged = []
+
+        def qualify(current, phase):
+            original_qualify(current, phase)
+            if phase != 'manager' or damaged or not journal.exists():
+                return
+            raw = journal.read_bytes()
+            record = json.loads(raw)
+            if not any(item['status'] == 'intent' for item in record['resources'].values()):
+                return
+            damaged.append(raw + b' ')
+            if damage == 'delete':
+                journal.unlink()
+            else:
+                journal.write_bytes(damaged[0])
+
+        api.qualify = qualify
+        with pytest.raises(ValueError, match='preactivation incomplete'):
+            parent.run_preactivation_catalog(retained=retained, api=api, repo_root=ROOT)
+        assert damaged, 'qualification must reach the actual recorded PATCH intent'
+        assert not api.manager.patches and api.commits == 0
+        if damage == 'delete':
+            assert not journal.exists()
+        else:
+            assert journal.read_bytes() == damaged[0]
+
+
+@pytest.mark.parametrize('staging_observation', ['independent'], indirect=True)
+@pytest.mark.timeout(300)
 def test_shared_v2_uses_completed_catalog_but_preserves_original_runtime_roots(shared_operation, tmp_path, monkeypatch):
     from scripts.ops import nebius_certificates as private_state
     from scripts.ops import nebius_pool_preactivation_operation as parent
