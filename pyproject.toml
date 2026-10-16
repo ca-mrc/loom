@@ -89,9 +89,9 @@ vllm = [
 # `protobuf>=6`, which conflicts with `google-generativeai`'s
 # `protobuf<6` pin. Rather than crippling the main project's
 # uv-resolution by adding an incompatible extra, those deps live in
-# the standalone `deploy/Dockerfile.egress-xds` requirements (added
-# in PR-C1b). This PR's code (config_builder + watcher) has no
-# Envoy/gRPC imports — they live in the gRPC server module only.
+# the standalone `deploy/Dockerfile.egress-xds` requirements. The gRPC
+# server and Envoy translator own those imports; config_builder and
+# watcher remain usable without those dependencies.
 dev = [
   "dnspython>=2.8,<3.0",
   "hypothesis>=6.100,<7.0",
@@ -330,17 +330,12 @@ norecursedirs = [
 # tests/system require docker-compose + built service images and take
 # minutes to run; opt in explicitly with `pytest tests/system`.
 addopts = "--ignore=tests/system"
-# Per-test wall-clock cap from pytest-timeout. A single hanging test
-# A hang in `test_claim_endpoint::test_claim_rejects_unauth` can otherwise
-# block the whole CI for about 20 minutes. It becomes a single failed test,
-# letting the rest of the suite finish. Docker-tier tests can override
-# with `@pytest.mark.timeout(N)` on the test/class.
+# Per-test wall-clock cap from pytest-timeout. A hanging test becomes a
+# single failure so the rest of the suite can finish. Docker-tier tests
+# can override with `@pytest.mark.timeout(N)` on the test/class.
 timeout = 60
-# `signal` (SIGALRM) is more aggressive than `thread` — interrupts
-# the test even when it's blocked in a C-level extension. Required to
-# interrupt `test_claim_endpoint::test_claim_rejects_unauth` when it blocks on
-# `starlette.TestClient.__exit__` and
-# `anyio` portal shutdown that the thread-method timer can't interrupt.
+# `signal` (SIGALRM) can interrupt TestClient/anyio shutdown even when
+# blocked in a C-level extension, unlike the thread-method timer.
 timeout_method = "signal"
 markers = [
   "legacy_pool: Historical platform coverage; included by manual compatibility CI, excluded from daily Nebius CI.",

@@ -1,226 +1,116 @@
 # Local-LLM execution path
 
-How `loom run` dispatches to a local OpenAI-compatible server (vLLM,
-ollama, llama.cpp, lm-studio), and how the optional local CLI vLLM
-launcher fits in.
+`loom run` can connect to an existing OpenAI-compatible server or launch vLLM
+for a Hugging Face model or local weights. This is a local CLI lifecycle.
+Hosted teams run their own inference endpoint and register it as a provider
+connection; Loom does not host model inference for them.
 
-This document is about laptop/CLI execution. Loom service mode does not
-host model inference for users; service-mode teams provide their own hosted or
-self-hosted OpenAI-compatible endpoint and register it as a provider
-connection.
+The [user guide](../user-guide.md#local-llms-vllm-ollama-llamacpp-lm-studio)
+provides commands and records the current local subprocess-agent provider
+wiring limitation.
 
-User-facing reference: [`../user-guide.md#local-llms`](../user-guide.md).
+## Four entry points
 
-## Three entry points
+| Selection | Server owner | Provider registration |
+| --- | --- | --- |
+| `--local-server URL --model org/model` | User | Transient `_inline` entry |
+| `--model local/<server>/<model_id>` | User | Persisted `local_providers.<server>` entry |
+| `--model hf:<org>/<name>` | CLI | Transient `_auto_vllm` entry |
+| `--model /path/` (also `~/`, `./`, `../`) | CLI | Transient `_auto_vllm` entry |
 
-```
-  --local-server URL --model ID         inline: user manages the server
-  --model local/<server>/<model_id>     persisted: user managed + registered
-  --model hf:<org>/<name>               local CLI helper starts vLLM
-  --model /path/ (or ~/path/, ./path/)  local CLI helper starts vLLM
-```
-
-All four converge on the same `local` provider dispatch inside
-`UpstreamDirectGatewayClient._call_local` — they differ only in
-**who owns the server lifecycle** and **how the provider entry is
-populated**.
-
-```
-   --local-server URL              local/<server>/...
-   --model ID                                │
-        │                                    │
-register cfg.local_providers       cfg.local_providers[server]
-   ["_inline"] = LocalProvider                │   (persisted via
-   (base_url=URL, api_key=...)                │    `loom config set
-        │                                    │     local.<name>...`)
-        │                                    │
-rewrite model →                              │
-   ModelSpec(                                │
-     provider="local",                       │
-     name="_inline/<ID>")                    │
-        ▼                                    │
-                                              │
-   --model hf:<id>                            │
-   --model /path/                             │
-        │                                    │
-launch_vllm(spec) → VLLMServerInfo            │
-        │                                    │
-register cfg.local_providers["_auto_vllm"]    │
-   = LocalProvider(...)                       │
-        │                                    │
-rewrite model →                              │
-   ModelSpec(                                │
-     provider="local",                       │
-     name="_auto_vllm/<served>")             │
-        ▼                                    ▼
-                _call_local(request)
-                       │
-                       ▼
-            POST <base_url>/chat/completions
-               (OpenAI-compatible HTTP)
-                       │
-                       ▼
-            GatewayCallResponse  ── token-usage + cost-attribution
-                                    computed locally from rate cards
-```
+Each resolves to `ModelSpec(provider="local", name="<server>/<model_id>")`.
+`UpstreamDirectGatewayClient._call_local` splits off the registered server name,
+then sends the remaining model ID to its OpenAI-compatible Chat Completions
+endpoint. It records token usage and computes local cost from rate cards.
+Ollama, llama.cpp and LM Studio use an existing endpoint; vLLM is the only
+managed launcher.
 
 ## Model-spec parsing
 
-`src/loom_cli/run_cmd.py:_parse_model` recognises four shapes:
+[`parse_model`](../../src/loom_cli/model_spec.py) recognizes these forms:
 
-| Spec                               | Provider | Notes                                                                 |
-|------------------------------------|----------|-----------------------------------------------------------------------|
-| `anthropic/claude-opus-4-7`        | `anthropic` | Direct provider SDK                                                |
-| `local/vllm/meta-llama/Llama-3.1-8B` | `local` | First path segment is the server name; rest is the model id     |
-| `hf:meta-llama/Llama-3.1-8B`       | `hf`     | Triggers local CLI vLLM launch; must contain `/`                     |
-| `/data/checkpoints/my-tune/` (also `~/…`, `./…`, `../…`) | `file` | Triggers local CLI vLLM launch; detected by leading filesystem marker |
+| Spec | Parsed provider | Meaning |
+| --- | --- | --- |
+| `anthropic/claude-opus-4-7` | `anthropic` | Direct provider SDK |
+| `local/vllm/meta-llama/Llama-3.1-8B` | `local` | Registered server name followed by model ID |
+| `hf:meta-llama/Llama-3.1-8B` | `hf` | Managed vLLM launch; requires `org/name` |
+| `/data/checkpoints/my-tune/` | `file` | Managed vLLM launch from local weights |
 
-The `--local-server URL` flag bypasses `_parse_model` entirely:
-`--model` is treated as the raw upstream model id, and `_run_async`
-synthesises `ModelSpec(provider="local", name="_inline/<id>")` after
-registering a transient `LocalProvider` for `_inline`.
+[`run_cmd.py`](../../src/loom_cli/run_cmd.py) parses every model before
+`_run_one_model` configures its provider. With `--local-server`, that function
+reassembles the parsed `provider/name` as the upstream model ID and registers
+`_inline`. Consequently, slashless IDs are currently rejected before inline
+rewriting. To use one, register the endpoint and select
+`local/<server>/<model_id>`. Managed `hf:` and path specs cannot be combined
+with `--local-server`.
 
-For `hf:` / path specs, `_run_async` calls `launch_vllm(...)` *before*
-the trial starts, registers a transient local provider under
-`_auto_vllm`, then rewrites `model` so the rest of the pipeline sees
-`local/_auto_vllm/<served>`. Nothing downstream (gateway client,
-trial state machine, ATIF projection) knows the launcher exists.
-
-## Why `_inline` and `_auto_vllm` as the server names
-
-Both are leading-underscore on purpose:
-
-1. `LOCAL_NAME_RE` in `loom_cli.config` rejects names starting with
-   `_`, so users can't accidentally collide via `loom config set
-   local._inline.base_url ...` or `loom config set
-   local._auto_vllm.base_url ...`.
-2. Reserved stable names so multiple trials in one `loom run` share
-   the same transient provider (the launch / registration is gated
-   per invocation — only one per `loom run`).
-3. The names appear in `cfg.local_providers` mutated in-process only;
-   they are never persisted to `~/.config/loom/config.toml`.
-
-`_inline` is for `--local-server` (no subprocess); `_auto_vllm` is
-for the local CLI vLLM helper path (the `loom run` process owns the
-subprocess).
+For managed specs, `_run_one_model` calls `launch_vllm`, registers `_auto_vllm`,
+and uses the model ID returned by `/v1/models`. These transient entries stay
+in that model run's in-memory configuration. `loom config set` rejects server
+names starting with `_`; the launcher uses these names for transient providers.
 
 ## Subprocess lifecycle
 
-`src/loom_cli/vllm_runner.py` owns the vLLM subprocess. Public
-surface:
+[`vllm_runner.py`](../../src/loom_cli/vllm_runner.py) owns process startup and
+cleanup. `VLLMLaunchSpec` carries the model, host, starting port, GPU memory,
+tensor-parallel, context-length and eager-execution settings.
 
-```python
-@dataclass(frozen=True)
-class VLLMLaunchSpec:
-    model: str
-    port: int = 0                # 0 → autopick from 8234
-    host: str = "127.0.0.1"      # loopback-by-default; opt in to LAN
-    gpu_memory_utilization: float = 0.90
-    tensor_parallel_size: int = 1
-    max_model_len: int | None = None
-    enforce_eager: bool = False
-    extra_args: tuple[str, ...] = ()
-    keep_alive: bool = False     # don't tear down at trial end
+1. Check that `vllm` is on `PATH`, install process-exit and SIGTERM cleanup,
+   and resolve local weight paths.
+2. Start `vllm serve` at the requested port, or 8234 when it is zero.
+   There is no separate free-port probe. An early nonzero exit after the
+   two-second settling interval retries the next port, for up to 1,000 ports;
+   the implementation does not distinguish bind failures from other early exits.
+3. Poll `/v1/models` for up to 300 seconds, failing when the process exits.
+4. Read the first advertised model ID and return its base URL and process ID.
 
-@dataclass
-class VLLMServerInfo:
-    base_url: str                # http://localhost:<port>/v1
-    served_model_name: str       # what /v1/models advertises
-    pid: int
+The subprocess inherits stdout and stderr. Health-check or model-query failures
+stop the process and remove it from the registry. Shutdown attempts TERM,
+waits up to 30 seconds, then uses KILL if needed.
 
-def launch_vllm(spec: VLLMLaunchSpec) -> VLLMServerInfo: ...
-def stop_all() -> None: ...
-```
-
-Sequence for one `launch_vllm` call:
-
-1. **Dep check** — `shutil.which("vllm")`. Missing → raise
-   `MissingVLLMDependencyError` with a copy-paste `pip install
-   loom[vllm]` hint.
-2. **Cleanup handlers** — install atexit + SIGTERM exactly once per
-   process (see below).
-3. **Port** — `spec.port` if pinned, else first free TCP port ≥ 8234
-   (probed on 127.0.0.1 to match the bind).
-4. **Model path** — for local-path specs, resolve + assert exists;
-   for HF ids, pass through.
-5. **subprocess.Popen** with `vllm serve <model> --host <host> --port
-   <port> --gpu-memory-utilization ... --tensor-parallel-size ...`.
-   stdout/stderr inherit the parent's fds (avoids 64KB-pipe-fill
-   deadlock).
-6. **Health probe** — poll `GET <base_url>/models` until 200 OK,
-   timeout 300s. Fail fast if `proc.poll()` returns a non-None code:
-   surface "exited prematurely with code N" rather than wait for the
-   full timeout.
-7. **Canonical model id** — read `data[0].id` from `/v1/models`. vLLM
-   sometimes shortens HF org/name into something different; using the
-   canonical name ensures the chat-completions request resolves.
-8. Return `VLLMServerInfo`.
-
-On any exception in steps 6–7, the partial subprocess is stopped
-(graceful TERM → 30s wait → KILL fallback) and removed from
-`_LIVE_PROCESSES` before re-raising.
+vLLM binds to `127.0.0.1` by default. `--vllm-host 0.0.0.0` explicitly exposes
+it on the LAN.
 
 ## Cleanup model
 
-Two layers, deliberately partitioned by signal type:
+| Trigger | Behavior |
+| --- | --- |
+| Model run finishes or its trial gathering fails | `_run_one_model` calls `stop_one` in `finally`, unless `--keep-alive` was supplied |
+| Ctrl-C | Python's `KeyboardInterrupt` follows the normal asynchronous cleanup path |
+| CLI process exits | `atexit` calls `stop_all` for remaining registered processes |
+| SIGTERM | The signal handler calls `stop_all`, then restores and raises the default signal behavior |
+| Startup health or model query fails | `launch_vllm` stops and unregisters that process |
 
-| Trigger             | Mechanism                                   | Notes                                                           |
-|---------------------|---------------------------------------------|-----------------------------------------------------------------|
-| Normal exit         | `atexit.register(stop_all)`                  | Also fires on `KeyboardInterrupt`-induced exit                  |
-| Ctrl-C (SIGINT)     | Python default → `KeyboardInterrupt`         | Propagates through `asyncio.run` to `_run_async`'s `try/finally` |
-| SIGTERM             | Custom handler → `stop_all()` then `SIG_DFL` | `atexit` does not fire on SIGTERM, so the custom handler performs cleanup |
-| Happy-path teardown | `try/finally` around `asyncio.gather` calls `stop_all()` | Closes the GPU-reclaim window before process exit |
-| Crash mid-launch    | `launch_vllm` except path stops + removes from registry  | No orphan if step 6/7 raises                       |
-
-**SIGINT behavior:** the default handler lets `asyncio.run` raise
-`KeyboardInterrupt`, so the surrounding `try/finally` also tears down Docker
-containers and cloud sandboxes. A custom SIGINT handler would intercept
-Ctrl-C before that shared cleanup path runs.
-
-## Security defaults
-
-vLLM binds `127.0.0.1` by default. Loom is the only client (via the
-locally-launched chat-completions HTTP); LAN exposure of model
-weights + inference would be a surprise on an untrusted network. Opt
-in with `--vllm-host 0.0.0.0` if you actually want LAN access.
+Per-model cleanup stops only its own process so parallel model runs keep their
+servers. `--keep-alive` skips that cleanup in both single- and multiple-model
+runs; process-exit cleanup still applies. Use foreground `loom serve` when a
+server should outlive individual `loom run` commands.
 
 ## Concurrency
 
-`--concurrency N` runs N parallel trials under one `asyncio.Semaphore`.
-The vLLM launch happens *once*, before the gather — all trials share
-the same server. `_LIVE_PROCESSES` is module-level and tracks every
-launcher process owned by the current CLI process.
+`--concurrency N` bounds simultaneous trials for each model. All trials for one
+managed model share its vLLM process. Repeated `--model` selections run
+sequentially by default; `--parallel-models` allows overlapping model runs.
+Without `--keep-alive`, sequential execution stops each managed server before
+starting the next. Parallel runs require enough GPU capacity for all selected
+models; Loom does not partition GPU memory automatically.
 
-## What this is NOT
+See [multiple local model servers](multi-server-local-llm.md) for output
+grouping and foreground server registration.
 
-- **Not a multi-launcher abstraction.** Only vLLM is wired.
-  ollama / llama.cpp / lm-studio users go through the manual
-  `local/<server>/<model_id>` path.
-- **Not service-mode-aware.** Service-mode operators register local
-  providers via `LOOM_GW_LOCAL_<NAME>_BASE_URL` env vars, dispatched
-  inside the LLM Gateway. The launcher only runs in CLI mode
-  (`loom_cli` package); the service-mode Gateway has no equivalent.
-- **Not batch scheduler-aware.** The launcher supports only a local subprocess;
-  it does not submit vLLM servers to an external batch scheduler.
+## Service-mode boundary
 
-For comparing N models in one run / pre-launching a server with
-`loom serve`, see [`multi-server-local-llm.md`](multi-server-local-llm.md).
+The launcher runs only in the CLI and does not submit servers to an external
+scheduler. Service-mode operators can configure Gateway upstreams through
+`gateway_local_providers`, which renders `LOOM_GW_LOCAL_<NAME>_BASE_URL` and
+optional API-key settings. Hosted users normally register a team-owned
+provider connection. Neither path starts model-serving processes.
 
-## Test strategy
+## Verification coverage
 
-`tests/loom_cli/test_vllm_runner.py` mocks `subprocess.Popen` and
-`httpx.get` end-to-end. The vLLM dep itself is never imported during
-tests — `shutil.which` is monkey-patched. Coverage targets:
-
-- Dep-check + install hint
-- Model-path resolution (HF id passthrough, missing file rejection,
-  existing directory acceptance)
-- Cmd construction (all flags forwarded)
-- Free-port autopick (skips bound ports)
-- Health probe: 200-OK path, dead-subprocess fail-fast,
-  timeout-and-still-running
-- `/v1/models` query: happy path, empty-data error
-- Stop-process: graceful → kill fallback, no-op when already exited
-- Stop-all: drains `_LIVE_PROCESSES`
-- End-to-end launch with mocks
-- Startup-failure cleanup (process removed from registry)
+[`test_vllm_runner.py`](../../tests/loom_cli/test_vllm_runner.py) covers dependency
+checks, path resolution, command construction, early-exit port retries, health
+and model probes, and process cleanup using mocked subprocesses and HTTP.
+[`test_multi_model_run.py`](../../tests/loom_cli/test_multi_model_run.py) covers
+output grouping and per-model cleanup, including preservation of sibling servers.
+These tests do not establish live GPU or agent/provider compatibility.

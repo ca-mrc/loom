@@ -69,8 +69,9 @@ This is an explicit operator repair, not an automatic migration backfill. It
 preserves lifecycle states, ordinals, and timestamps. It neither settles costs nor
 reallocates previously imported bills. Preview and repair the affected leases
 before importing their provider bills. Missing termination evidence and existing
-misallocated bills require separate reconciliation. Downgrading `0169` restores
-the prior mutation guard while retaining recovered node values and audit records.
+misallocated bills require separate reconciliation. Downgrading migration `0170`
+to `0169` restores the prior mutation guard while retaining recovered node values
+and audit records.
 
 ## Durability and recovery
 

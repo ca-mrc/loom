@@ -3,8 +3,10 @@
 Hosted Loom runs on Nebius. Its current deployment contract is the
 [Nebius deployment procedure](../runbooks/nebius-deployment.md), driven by the
 Nebius renderer and deployer. `loom cluster up` is limited to disposable
-local development. `loom service up --environment local` manages Docker
-Compose. Shared remote workers and personal hosted environments are retired.
+local development. `loom service up` without `--environment` manages Docker
+Compose. Shared remote workers and legacy shared-cluster personal environments
+are retired. Current personal frontend/API development uses the
+[personal application workflow](../runbooks/personal-development.md).
 
 The generic cluster renderer remains useful for disposable test clusters;
 its topology options do not represent additional supported hosted platforms.

@@ -128,11 +128,6 @@ if TYPE_CHECKING:
         enabled: bool = False
 
     @dataclass(frozen=True)
-    class _PipelineStage1SmokeAuthorityConfig:
-        enabled: bool = False
-        public_key_secret_name: str = "loom-stage1-smoke-authority"
-
-    @dataclass(frozen=True)
     class _NebiusExecutionConfig:
         enabled: bool = False
         source_secret_name: str = ""

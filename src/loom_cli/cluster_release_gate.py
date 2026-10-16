@@ -25,12 +25,6 @@ from loom_cli.cluster_workload_trust import (
 
 _Outcome = Literal["pass", "fail"]
 _SAFE_WORKLOAD_CONTRACT_ENV_VALUES = frozenset({"internal_trusted", "True", "False"})
-_RAW_SECRET_RE = re.compile(
-    r"(?i)\b(?:HF_TOKEN|TOKEN|SECRET|API_KEY|ACCESS_KEY|SECRET_KEY)\s*[:=]\s*"
-    r"(?!<redacted>|redacted|false|none|null|absent|isolated)[^\s,\"']{8,}"
-    r"|\bhf_[A-Za-z0-9_]{20,}\b"
-    r"|\b(?:sk|ghp|github_pat)_[A-Za-z0-9_]{20,}\b",
-)
 
 
 @dataclass(frozen=True)

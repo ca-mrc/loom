@@ -1280,18 +1280,6 @@ def _batch_artifact_filter_predicate(
     return or_(typed_match, legacy_match)
 
 
-async def _batch_trials(session: Any, batch_id: UUID) -> list[Trial]:
-    return list(
-        (
-            await session.execute(
-                select(Trial).where(Trial.batch_id == batch_id),
-            )
-        )
-        .scalars()
-        .all()
-    )
-
-
 async def _batch_trial_projections(
     session: Any,
     batch_id: UUID,

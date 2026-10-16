@@ -175,7 +175,7 @@ export function useNewBatch() {
     });
   }, [tagSchema, benchmarkIdsSorted, settledBenchmarkIds, tagQuery.isSuccess]);
 
-  // PR-2 backend takes the candidate count from a real query; the SPA
+  // The backend takes the candidate count from a real query; the SPA
   // gets a "good enough" estimate by summing per-benchmark task_count
   // from /benchmarks. When tag_filters are active the estimate is a
   // pure upper bound, so we now also issue a real count via

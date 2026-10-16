@@ -44,7 +44,7 @@ docker compose --env-file .env -f deploy/docker-compose.dev.yml logs --tail=200
 Use `loom service up --help` and `loom service status --help` for the exact
 options supported by the installed candidate.
 
-No target, or `--environment local`, selects this local workflow explicitly.
+Omitting `--environment` selects this local workflow.
 `--environment dev-<slug> --candidate <approved-candidate-uuid>` instead sends a
 request to the logged-in management server; it never falls back to Compose and
 cannot be combined with local-only flags. The
@@ -68,7 +68,7 @@ reach the stack. For example, with PostgreSQL on `15432` and the Control Plane
 on `28080`:
 
 ```bash
-loom service up --environment local \
+loom service up \
   --db-url 'postgresql+psycopg://loom:loom@localhost:15432/loom' \
   --cp-url http://localhost:28080
 ```
@@ -98,7 +98,7 @@ dc run --rm --no-deps control-plane sh -ec '
 '
 
 dc restart control-plane
-loom service up --environment local
+loom service up
 dc ps
 ```
 
@@ -141,16 +141,6 @@ npm run build
 
 Docker-touching changes also require the relevant integration or system tests.
 The shared CI planner selects the required lanes from changed paths.
-
-Keep integration fixtures isolated while removing costs unrelated to their
-assertions. The frozen global autoscaling harness creates fresh EC P-256 TLS
-identities for its algorithm-independent lifecycle scenarios, avoiding repeated
-RSA private-key validation costs during readback. It still exercises real
-certificate, issuer, private-key matching, file-permission, and Linux descriptor
-checks. The shared bootstrap helper defaults to RSA; credential metadata,
-mismatched private-key, and wrong-issuer tests explicitly cover both RSA and EC.
-This fixture choice does not change production cryptography or cache validated
-credentials between reads or test cases.
 
 ## Stop or reset
 

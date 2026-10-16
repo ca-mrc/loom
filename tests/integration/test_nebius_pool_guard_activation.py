@@ -9,8 +9,26 @@ import pytest
 from sqlalchemy import text
 
 from loom.nebius_rollout_guard import LOCK_KEY, acquire, admission_open, observe, release
+from tests.integration.conftest import retained_pool_sessions
 from tests.integration.test_nebius_pool_activation_fence import read_sql
-from tests.integration.test_nebius_pool_registry import sessions as sessions
+
+sessions = retained_pool_sessions
+
+
+@pytest.mark.parametrize('action', ['observe', 'fence', 'release'])
+async def test_retained_guard_rejects_current_service_schema_before_mutation(
+        isolated_migration_postgres_url, action):
+    from scripts.ops.nebius_pool_guard_activation import pool_guard_activation_sql
+    from sqlalchemy.engine import make_url
+
+    url = make_url(isolated_migration_postgres_url).set(drivername='postgresql').render_as_string(hide_password=False)
+    owner, participant = uuid4(), uuid4()
+    with psycopg.connect(url, autocommit=True) as db:
+        assert db.execute('SELECT version_num FROM alembic_version').fetchall() == [('0177',)]
+        with pytest.raises(psycopg.errors.RaiseException, match='pool activation schema unqualified'):
+            db.execute(pool_guard_activation_sql(owner, participant, 'a' * 40, action=action), prepare=False)
+        db.rollback()
+        assert db.execute('SELECT count(*) FROM nebius_rollout_guard').fetchone() == (0,)
 
 
 @pytest.mark.parametrize('released', [False, True])
