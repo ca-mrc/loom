@@ -17,12 +17,17 @@ from uuid import UUID, uuid5
 from scripts.ops.deploy_nebius_platform import validate_render
 from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
 from scripts.ops.nebius_pool_migration import PoolMigrationRequest, migration_contract
+from scripts.ops.nebius_pool_registration import PoolRegistrationRequest
 from scripts.ops.nebius_pool_runtime import (
     _environment,
     participant_readonly_roles,
     wire_participant,
 )
-from scripts.ops.nebius_staging_pool_attachment import _exact_pod, derive_staging_profiles
+from scripts.ops.nebius_staging_pool_attachment import (
+    _exact_pod,
+    derive_staging_profiles,
+    prepare_staging_pool_attachment,
+)
 
 from loom.nebius_platform_render import _obj, build_platform
 from loom.nebius_pool_contract import PoolParticipantV1
@@ -50,6 +55,56 @@ class PreparedParticipantRelease:
 
 def _body(document: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in document.items() if key not in {'metadata', 'status'}}
+
+
+def _release_participant(selected: PoolParticipantV1, operation_id: UUID) -> PoolParticipantV1:
+    successor = selected.model_dump(mode='json')
+    successor['binding_revision'] += 1
+    for target in successor['targets']:
+        target['profile_id'] = str(uuid5(operation_id, target['profile_id']))
+    return PoolParticipantV1.model_validate(successor)
+
+
+def _catalog_refresh(spec: PoolInstallation, participant: PoolParticipantV1,
+        profiles: PoolProfileCatalog, operation_id: UUID) -> PoolParticipantRefresh:
+    selected, = (row for row in spec.participants if row.participant_id == participant.participant_id)
+    if profiles.image_admission_keyring != spec.profiles.image_admission_keyring or profiles.application_images:
+        raise ValueError
+    after = spec.model_dump(mode='json')
+    after.update(operation_id=str(operation_id), policy_revision=spec.policy_revision + 1)
+    after['participants'] = [participant.model_dump(mode='json')
+        if row['participant_id'] == str(selected.participant_id) else row for row in after['participants']]
+    replacements = {old.profile_id: new.profile_id for old, new in zip(selected.targets, participant.targets, strict=True)}
+    for kind in ('execution', 'task_images'):
+        fresh = {row['profile_id']: row for row in profiles.model_dump(mode='json')[kind]}
+        after['profiles'][kind] = [fresh[str(replacements[UUID(row['profile_id'])])]
+            if UUID(row['profile_id']) in replacements else row for row in after['profiles'][kind]]
+    return PoolParticipantRefresh(schema_version='loom.pool-participant-refresh.v1', participant_id=selected.participant_id,
+        before=spec, after=PoolInstallation.model_validate(after))
+
+
+def prepare_staging_preactivation_refresh(*, registration: PoolRegistrationRequest,
+        observation: dict[str, Any], candidate: dict[str, Any], operation_id: UUID,
+        repo_root: Path) -> PoolParticipantRefresh:
+    """Project a release-only successor from current standalone staging.
+
+    This does not qualify publication, CLOSED state or completed ancestry and
+    grants no mutation authority. The protected preactivation parent owns those
+    barriers. Registration remains immutable; the ordinary global refresh entry
+    point must not be used to apply this projection to a closed pool.
+    """
+    try:
+        spec = PoolInstallation.model_validate(registration.spec.model_dump())
+        if (not isinstance(operation_id, UUID) or not operation_id.int
+                or registration.binding.installation_id != str(spec.installation_id)):
+            raise ValueError
+        selected, = (row for row in spec.participants if row.environment_class == 'staging')
+        participant = _release_participant(selected, operation_id)
+        attachment = prepare_staging_pool_attachment(participant=participant, observation=observation,
+            candidate=candidate, cluster_id=spec.cluster_id, node_group_id=spec.node_group_id, repo_root=repo_root)
+        return _catalog_refresh(spec, participant, attachment.profiles, operation_id)
+    except Exception:
+        raise ValueError('staging preactivation refresh unqualified') from None
 
 
 def _prepare(*, previous: PoolMigrationRequest, current: tuple[dict[str, Any], ...],
@@ -111,11 +166,7 @@ def _prepare(*, previous: PoolMigrationRequest, current: tuple[dict[str, Any], .
         if runtime.participant != selected or runtime.management_origin != management_origin:
             raise ValueError
 
-    successor = selected.model_dump(mode='json')
-    successor['binding_revision'] += 1
-    for target in successor['targets']:
-        target['profile_id'] = str(uuid5(operation_id, target['profile_id']))
-    participant = PoolParticipantV1.model_validate(successor)
+    participant = _release_participant(selected, operation_id)
     files = (build_platform(copy.deepcopy(config), candidate, runtime_profile.model_dump(mode='json'),
         spec.profiles.image_admission_keyring, repo_root=repo_root)
         if rendered_files is None else copy.deepcopy(rendered_files))
@@ -130,17 +181,7 @@ def _prepare(*, previous: PoolMigrationRequest, current: tuple[dict[str, Any], .
         runtime_profile=runtime_profile, node_group_id=spec.node_group_id,
         deployments={row['metadata']['name']: row for row in desired.values()
             if row['kind'] == 'Deployment' and row['metadata']['namespace'] == selected.execution_namespace.name})
-    after = spec.model_dump(mode='json')
-    after.update(operation_id=str(operation_id), policy_revision=spec.policy_revision + 1)
-    after['participants'] = [successor if row['participant_id'] == str(selected.participant_id) else row
-        for row in after['participants']]
-    replacements = {old.profile_id: new.profile_id for old, new in zip(selected.targets, participant.targets, strict=True)}
-    for kind in ('execution', 'task_images'):
-        fresh = {row['profile_id']: row for row in profiles.model_dump(mode='json')[kind]}
-        after['profiles'][kind] = [fresh[str(replacements[UUID(row['profile_id'])])]
-            if UUID(row['profile_id']) in replacements else row for row in after['profiles'][kind]]
-    refresh = PoolParticipantRefresh(schema_version='loom.pool-participant-refresh.v1', participant_id=selected.participant_id,
-        before=spec, after=PoolInstallation.model_validate(after))
+    refresh = _catalog_refresh(spec, participant, profiles, operation_id)
 
     def retained_identity(document: dict[str, Any]) -> dict[str, Any]:
         """Attach the retained identity to a desired template, never call it observed."""
