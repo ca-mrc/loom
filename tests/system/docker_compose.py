@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -40,7 +41,6 @@ from tests.support.minio_images import prepare_test_image
 REPO_ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_FILE = REPO_ROOT / "deploy" / "docker-compose.test.yml"
 ALEMBIC_CONFIG = REPO_ROOT / "database" / "migrations" / "alembic.ini"
-DB_URL = "postgresql+psycopg://loom:loom@localhost:55432/loom"
 CONTROL_PLANE_URL = "http://localhost:58080"
 DIAGNOSTICS_ENV = "LOOM_SYSTEM_SMOKE_DIAGNOSTICS"
 _CANARY_MAX_TIMEOUT_SEC = 30.0
@@ -70,6 +70,9 @@ def _compose(
     # in compose only triggers when the service is selected.
     env.setdefault("LOOM_WORKER_TOKEN", "unused-no-profile")
     env.setdefault("LOOM_TASK_IMAGE_BUILDER_TOKEN", "unused-no-profile")
+    # Let Docker allocate the host database port atomically; other local
+    # fixtures or services may already own the manual-compose default 55432.
+    env.setdefault("LOOM_SYSTEM_POSTGRES_PORT", "0")
     if env_extra:
         env.update(env_extra)
     return subprocess.run(
@@ -81,6 +84,15 @@ def _compose(
         env=env,
         timeout=timeout_sec,
     )
+
+
+def database_url() -> str:
+    """Resolve this stack's loopback database binding for host-side clients."""
+    result = _compose("port", "postgres", "5432", timeout_sec=_COMPOSE_INSPECT_TIMEOUT_SEC)
+    binding = re.fullmatch(r"127\.0\.0\.1:([0-9]+)", result.stdout.strip())
+    if binding is None or not 1 <= int(binding[1]) <= 65535:
+        raise RuntimeError("system-smoke database port must have one valid loopback binding")
+    return f"postgresql+psycopg://loom:loom@127.0.0.1:{binding[1]}/loom"
 
 
 def _wait_services_healthy(
@@ -142,8 +154,9 @@ def _stack_up(
     # auto-migrate, so they must not be started against a blank database.
     _compose("up", "-d", "postgres", "minio", "registry", env_extra=minio_env)
     _wait_services_healthy(["postgres", "minio", "registry"], timeout_sec=timeout_sec)
+    db_url = database_url()
     migration_env = os.environ.copy()
-    migration_env["LOOM_DB_URL"] = DB_URL
+    migration_env["LOOM_DB_URL"] = db_url
     subprocess.run(
         [
             sys.executable,
@@ -168,7 +181,16 @@ def _stack_up(
 
     # Stage 3: mint a team + worker token (and seed the fixture).
     seed = subprocess.run(
-        [sys.executable, "scripts/seed_test_data.py", "--task-id", task_id, "--print", "system"],
+        [
+            sys.executable,
+            "scripts/seed_test_data.py",
+            "--task-id",
+            task_id,
+            "--db-url",
+            db_url,
+            "--print",
+            "system",
+        ],
         check=True,
         cwd=REPO_ROOT,
         capture_output=True,
@@ -188,7 +210,7 @@ def _stack_up(
         "task-image-builder",
         env_extra={**minio_env, "LOOM_TASK_IMAGE_BUILDER_TOKEN": builder_token},
     )
-    _wait_task_image_materialization_ready(task_id, timeout_sec=timeout_sec)
+    _wait_task_image_materialization_ready(task_id, timeout_sec=timeout_sec, db_url=db_url)
 
     # Stage 5: start the worker with the ordinary trial token wired in.
     _compose(
@@ -211,12 +233,13 @@ def _wait_task_image_materialization_ready(
     task_id: str,
     *,
     timeout_sec: float,
+    db_url: str,
 ) -> None:
     # Local compose publishes the supported execution architecture (x86_64),
     # including on Apple Silicon hosts that cross-build via Docker Desktop.
     cpu_arch = "x86_64"
 
-    engine = create_engine(DB_URL)
+    engine = create_engine(db_url)
     deadline = time.monotonic() + timeout_sec
     next_builder_probe = 0.0
     try:
@@ -646,7 +669,16 @@ def run_seed(task_id: str = "hello-world", which: str = "team") -> str:
     token (stripped). `which` is forwarded to --print.
     """
     out = subprocess.run(
-        [sys.executable, "scripts/seed_test_data.py", "--task-id", task_id, "--print", which],
+        [
+            sys.executable,
+            "scripts/seed_test_data.py",
+            "--task-id",
+            task_id,
+            "--db-url",
+            database_url(),
+            "--print",
+            which,
+        ],
         check=True,
         cwd=REPO_ROOT,
         capture_output=True,

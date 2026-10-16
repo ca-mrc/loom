@@ -278,6 +278,13 @@ passes `LOOM_SYSTEM_MINIO_IMAGE` to every startup phase. This override belongs t
 `docker-compose.test.yml`; ordinary developer Compose and its existing storage
 volumes keep their current image and are not modified by fixture preparation.
 
+The system-test harness requests a Docker-allocated Postgres host port on
+`127.0.0.1` and uses the reported binding for migrations, seeding, and test queries.
+Direct manual use of `docker-compose.test.yml` defaults to loopback port `55432`;
+set `LOOM_SYSTEM_POSTGRES_PORT` to override it (`0` requests an allocated port).
+Use `docker compose -f deploy/docker-compose.test.yml port postgres 5432` to find
+the running stack's database port. Other system-stack service ports remain fixed.
+
 On GitHub, selected non-Docker integration tests are split into four disjoint,
 contiguous ranges of the manifest-owned filename order. Contiguous ordering
 preserves the suite's session-scoped Postgres setup/cleanup contract while the
