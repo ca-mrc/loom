@@ -9,6 +9,7 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime,timezone
 import importlib.util
+import itertools
 import json
 import os
 from pathlib import Path
@@ -138,8 +139,20 @@ def setup():
     wrapper.chmod(0o700)
     run('docker','pull','mirror.gcr.io/library/registry:3')
     image=run('docker','image','inspect','mirror.gcr.io/library/registry:3','--format','{{.Id}}')
+    metadata=ROOT/'db-seed/db/metadata.json'
     save(ROOT/'setup.json',{'source_sha':SHA,'workflow_sha':os.environ['GITHUB_SHA'],'runner':os.environ['RUNNER_NAME'],'cpus':cpus,'scanner':str(scanner),
-         'registry_image':image,'setup_seconds':time.monotonic()-t,'created_at':now(),'workers':WORKERS,'memory_bytes':9611563008})
+         'registry_image':image,'setup_seconds':time.monotonic()-t,'created_at':now(),'workers':WORKERS,'memory_bytes':9611563008,
+         'trivy_db_metadata':json.loads(metadata.read_text()) if metadata.exists() else None})
+
+def schedule(block):
+    if block not in range(1,7):raise ValueError('block must be1..6')
+    order=list(itertools.permutations([1,2,3]))[block-1]
+    scenarios=['partial-hit','full-fallback'] if block%2 else ['full-fallback','partial-hit']
+    cases=[{'case':f'r{block}-{scenario}-w{w}','scenario':scenario,'workers':w} for scenario in scenarios for w in order]
+    save(ROOT/'metrics/schedule.json',{'block':block,'worker_order':order,'scenario_order':scenarios,'cases':cases})
+    with open(os.environ['GITHUB_OUTPUT'],'a') as output:
+        for index,row in enumerate(cases):
+            for key,value in row.items():output.write(f'{key}_{index}={value}\n')
 
 def producer():
     info,p,old,rows=context();output=ROOT/'metrics/producer';output.mkdir()
@@ -170,18 +183,30 @@ def producer():
              'bytes':{c:Path(x['archive']).stat().st_size for c,x in prepared.items()},'validation':{'trivy_commands':42,'policy_checks':14,'harbor_probes':4,'digest_checks':7},'finished_at':now()})
     finally:stop_builder(name)
 
-def case_init(case):
+def case_init(case, scenario=None, download_workers=3):
+    if scenario is not None and (scenario not in {'partial-hit','full-fallback'} or download_workers not in {1,2,3}):
+        raise ValueError('invalid worker experiment treatment')
     info,p,old,rows=context();output=ROOT/'metrics'/case;output.mkdir()
     started=time.time();name,host=start_builder(info,output)
     from scripts.ops.nebius_image_artifacts import plan
     lookup_started=time.monotonic();hint=plan(SHA);lookup_seconds=time.monotonic()-lookup_started
     os.environ.pop('GH_TOKEN',None)  # The unsigned worker does not inherit the API token.
     save(output/'metadata-lookup.json',{'seconds':lookup_seconds,'actual_plan':hint,'experiment_cache_plan_is_explicit_fixture':True})
-    scenario,mode=case.rsplit('-',1)
+    if scenario is None:
+        scenario,mode=case.rsplit('-',1)
+    else:
+        mode='new'
     available=list(p.COMPONENTS) if scenario=='all-hit' else PARTIAL
     state={'case':case,'scenario':scenario,'mode':mode,'source_sha':SHA,'started':started,'builder_name':name,'builder_host':host,'available':available,
-           'expected_built':[c for c in p.COMPONENTS if c not in available],'work':str(ROOT/case),'ready':time.time(),'metadata_lookup_seconds':lookup_seconds}
+           'expected_built':[c for c in p.COMPONENTS if c not in available],'work':str(ROOT/case),'ready':time.time(),'metadata_lookup_seconds':lookup_seconds,
+           'download_workers':download_workers,'block':os.environ.get('AB_BLOCK','legacy'),'position':os.environ.get('AB_POSITION','legacy')}
     work=Path(state['work']);work.mkdir()
+    if os.environ.get('AB_WORKER_EXPERIMENT')=='1':
+        (output/'gate').mkdir()
+        with (output/'telemetry.log').open('w') as log:
+            monitor=subprocess.Popen([sys.executable,str(Path(__file__).with_name('telemetry.py')),'--output',str(output/'telemetry.jsonl'),
+                '--builder',name,'--stop-file',str(output/'telemetry.stop')],stdout=log,stderr=subprocess.STDOUT,stdin=subprocess.DEVNULL,start_new_session=True)
+        state['telemetry_pid']=monitor.pid
     if mode=='new':
         with (output/'worker.log').open('w') as log:
             process=subprocess.Popen([sys.executable,str(Path(__file__).resolve()),'worker','--case',case],stdout=log,stderr=subprocess.STDOUT,stdin=subprocess.DEVNULL,start_new_session=True,
@@ -192,6 +217,9 @@ def case_init(case):
 def worker(case):
     state=json.loads(os.environ['AB_STATE']);info,p,old,rows=context();p._diagnostic_dir=ROOT/'metrics'/case
     os.environ['BUILDKIT_HOST']=state['builder_host'];start=time.time();result=1
+    if os.environ.get('AB_WORKER_EXPERIMENT')=='1':
+        os.environ.update({'AB_REAL_BUILDCTL':str(ROOT/'tools/buildctl'),'AB_DOWNLOAD_WORKERS':str(state['download_workers']),
+            'AB_GATE_DIR':str(ROOT/'metrics'/case/'gate'),'BUILDKIT_CLIENT':str(Path(__file__).with_name('download_buildctl.py'))})
     try:
         images=p.export_missing_images(SOURCE,SHA,'nebius-'+SHA,rows,Path(state['work'])/'early',available_components=state['available'],workers=WORKERS)
         save(ROOT/'metrics'/case/'early.json',{'started':start,'finished':time.time(),'images':{c:{k:str(v) if isinstance(v,Path) else v for k,v in x.items()} for c,x in images.items()}})
@@ -199,6 +227,11 @@ def worker(case):
     finally:save(ROOT/'metrics'/case/'worker-exit.json',{'returncode':result,'finished':time.time()})
 
 def case_finish(case,outcome):
+    # Native download has ended. Release queued early exports back to the same
+    # three-worker bound before importing/initializing the finish process.
+    output=ROOT/'metrics'/case
+    if os.environ.get('AB_WORKER_EXPERIMENT')=='1':
+        save(output/'gate/download-done.json',{'time':time.time(),'outcome':outcome})
     info,p,old,rows=context();output=ROOT/'metrics'/case;state=json.loads((output/'state.json').read_text());after=time.time()
     work=Path(state['work']);download=work/'download';os.environ['BUILDKIT_HOST']=state['builder_host']
     for module in [p,old]:module._diagnostic_dir=output
@@ -229,8 +262,16 @@ def case_finish(case,outcome):
                 'images':{c:{k:str(v) if isinstance(v,Path) else v for k,v in x.items()} for c,x in prepared.items()},'stages':stages,
                 'validation':{'trivy_commands':21,'policy_checks':7,'digest_checks':7},'finished_at':now()}
     save(output/'result.json',record)
+    if state.get('telemetry_pid'):
+        (output/'telemetry.stop').touch()
+        deadline=time.monotonic()+15
+        while not (output/'telemetry.exit.json').exists():
+            if time.monotonic()>deadline:raise TimeoutError('telemetry did not stop')
+            time.sleep(.1)
+        if json.loads((output/'telemetry.exit.json').read_text())['returncode']:
+            raise RuntimeError('resource sampling failed; retained telemetry diagnostics')
     t=time.monotonic();stop_builder(state['builder_name']);shutil.rmtree(work)
-    record['cleanup_seconds']=time.monotonic()-t;record['total_including_cleanup_seconds']=record['total_seconds']+record['cleanup_seconds'];save(output/'result.json',record)
+    record['cleanup_seconds']=time.monotonic()-t;record['total_including_cleanup_seconds']=time.time()-state['started'];save(output/'result.json',record)
     print(json.dumps({'case':case,'total_seconds':record['total_seconds'],'transport_prepare_seconds':record['transport_prepare_seconds'],'overlap_seconds':record['overlap_seconds']}),flush=True)
 
 def mark(label):
@@ -242,6 +283,11 @@ def cleanup():
         if pid and not (path.parent/'worker-exit.json').is_file():
             try:os.killpg(pid,signal.SIGTERM);time.sleep(.2);os.killpg(pid,signal.SIGKILL)
             except ProcessLookupError:pass
+        pid=state.get('telemetry_pid')
+        if pid and not (path.parent/'telemetry.exit.json').exists():
+            (path.parent/'telemetry.stop').touch()
+            try:os.killpg(pid,signal.SIGTERM)
+            except ProcessLookupError:pass
     names=run('docker','ps','-aq','--filter','name=loom-candidate-ab-').split()
     names+=run('docker','ps','-aq','--filter','name=loom-ab-reg-').split()
     if names:run('docker','rm','-fv',*names)
@@ -249,14 +295,17 @@ def cleanup():
     if ROOT.exists():subprocess.run(['sudo','rm','-rf','--',str(ROOT)],check=True)
 
 parser=argparse.ArgumentParser(description=__doc__)
-parser.add_argument('operation',choices=['setup','producer','init','finish','worker','mark','cleanup'])
+parser.add_argument('operation',choices=['setup','producer','init','finish','worker','mark','cleanup','schedule'])
 parser.add_argument('--case');parser.add_argument('--outcome',default='success');parser.add_argument('--label')
+parser.add_argument('--scenario',choices=['partial-hit','full-fallback']);parser.add_argument('--download-workers',type=int,choices=[1,2,3],default=3)
+parser.add_argument('--block',type=int)
 args=parser.parse_args()
 if not SHA or len(SHA)!=40 or any(c not in '0123456789abcdef' for c in SHA):raise ValueError('exactSHA required')
 if args.operation=='setup':setup()
 elif args.operation=='producer':producer()
-elif args.operation=='init':case_init(args.case)
+elif args.operation=='init':case_init(args.case,args.scenario,args.download_workers)
 elif args.operation=='finish':case_finish(args.case,args.outcome)
 elif args.operation=='worker':worker(args.case)
 elif args.operation=='mark':mark(args.label)
 elif args.operation=='cleanup':cleanup()
+elif args.operation=='schedule':schedule(args.block)

@@ -1,5 +1,5 @@
-name: candidate Actions AB experiment
-run-name: candidate-ab / ${{ inputs.role }} / source=${{ inputs.source_sha }} / cohort=${{ inputs.cohort }}
+name: candidate worker concurrency experiment
+run-name: candidate-workers / ${{ inputs.role }} / source=${{ inputs.source_sha }} / cohort=${{ inputs.cohort }}
 'on':
   workflow_dispatch:
     inputs:
@@ -7,7 +7,7 @@ run-name: candidate-ab / ${{ inputs.role }} / source=${{ inputs.source_sha }} / 
         type: choice
         options:
         - producer
-        - consumer
+        - workers
         required: true
         default: producer
       source_sha:
@@ -20,7 +20,11 @@ run-name: candidate-ab / ${{ inputs.role }} / source=${{ inputs.source_sha }} / 
       cohort:
         type: string
         required: true
-        default: native-v1
+        default: workers-v2
+      blocks:
+        type: string
+        default: '[1,2,3,4,5,6]'
+        description: Balanced blocks1..6 as JSON; use [1] for initial runtime verification
 permissions:
   contents: read
   actions: read
@@ -38,24 +42,20 @@ jobs:
       PROBE_SOURCE_SHA: ${{ inputs.source_sha }}
       PYTHONDONTWRITEBYTECODE: '1'
     steps:
-    - &id001
-      uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+    - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
       with:
         persist-credentials: false
-    - &id002
-      uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+    - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
       with:
         ref: ${{ inputs.source_sha }}
         path: source
         persist-credentials: false
-    - &id003
-      uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
+    - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
       with:
         version: 0.11.26
         checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
         enable-cache: false
-    - &id004
-      name: Install bounded experiment tooling
+    - name: Install bounded experiment tooling
       shell: bash
       run: 'set -euo pipefail
 
@@ -186,89 +186,71 @@ jobs:
     - name: Remove only experiment resources
       if: always()
       run: if [[ -n "${PROBE_PYTHON:-}" && -d "$PROBE_ROOT" ]]; then "$PROBE_PYTHON" experiments/candidate_ab/run.py cleanup; fi
-  consumer:
-    name: native-ab / consumer
-    if: github.ref == 'refs/heads/codex/candidate-artifact-transfer-20261016' && inputs.role == 'consumer'
+  workers:
+    name: native-workers / block ${{ matrix.block }}
+    if: github.ref == 'refs/heads/codex/candidate-artifact-transfer-20261016' && inputs.role == 'workers'
     runs-on: ${{ fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1","ephemeral-kvm"]') }}
-    timeout-minutes: 90
+    timeout-minutes: 60
     env:
       PROBE_ROOT: /tmp/loom-candidate-ab-${{ github.run_id }}
       PROBE_SOURCE_SHA: ${{ inputs.source_sha }}
       PYTHONDONTWRITEBYTECODE: '1'
+      AB_WORKER_EXPERIMENT: '1'
+      AB_BLOCK: ${{ matrix.block }}
     steps:
-    - *id001
-    - *id002
-    - *id003
-    - *id004
-    - name: Start all-hit-old
-      env:
-        GH_TOKEN: ${{ github.token }}
-      run: '"$PROBE_PYTHON" experiments/candidate_ab/run.py init --case all-hit-old'
-    - name: Native download all-hit-old
-      id: all_hit_old
-      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
-      continue-on-error: true
-      timeout-minutes: 3
+    - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
       with:
-        github-token: ${{ github.token }}
-        repository: ${{ github.repository }}
-        run-id: ${{ inputs.producer_run_id }}
-        pattern: '*.tar'
-        merge-multiple: true
-        digest-mismatch: error
-        path: ${{ env.PROBE_ROOT }}/all-hit-old/download
-    - name: Validate and publish all-hit-old
-      env:
-        NATIVE_DOWNLOAD_OUTCOME: ${{ steps.all_hit_old.outcome }}
-      run: '"$PROBE_PYTHON" experiments/candidate_ab/run.py finish --case all-hit-old --outcome "$NATIVE_DOWNLOAD_OUTCOME"'
-    - name: Start all-hit-new
-      env:
-        GH_TOKEN: ${{ github.token }}
-      run: '"$PROBE_PYTHON" experiments/candidate_ab/run.py init --case all-hit-new'
-    - name: Native download all-hit-new
-      id: all_hit_new
-      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
-      continue-on-error: true
-      timeout-minutes: 3
+        persist-credentials: false
+    - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
       with:
-        github-token: ${{ github.token }}
-        repository: ${{ github.repository }}
-        run-id: ${{ inputs.producer_run_id }}
-        pattern: '*.tar'
-        merge-multiple: true
-        digest-mismatch: error
-        path: ${{ env.PROBE_ROOT }}/all-hit-new/download
-    - name: Validate and publish all-hit-new
-      env:
-        NATIVE_DOWNLOAD_OUTCOME: ${{ steps.all_hit_new.outcome }}
-      run: '"$PROBE_PYTHON" experiments/candidate_ab/run.py finish --case all-hit-new --outcome "$NATIVE_DOWNLOAD_OUTCOME"'
-    - name: Start partial-hit-old
-      env:
-        GH_TOKEN: ${{ github.token }}
-      run: '"$PROBE_PYTHON" experiments/candidate_ab/run.py init --case partial-hit-old'
-    - name: Native download partial-hit-old
-      id: partial_hit_old
-      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
-      continue-on-error: true
-      timeout-minutes: 3
+        ref: ${{ inputs.source_sha }}
+        path: source
+        persist-credentials: false
+    - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
       with:
-        github-token: ${{ github.token }}
-        repository: ${{ github.repository }}
-        run-id: ${{ inputs.producer_run_id }}
-        pattern: '{service,control_plane,gateway,execution_runtime}.tar'
-        merge-multiple: true
-        digest-mismatch: error
-        path: ${{ env.PROBE_ROOT }}/partial-hit-old/download
-    - name: Validate and publish partial-hit-old
-      env:
-        NATIVE_DOWNLOAD_OUTCOME: ${{ steps.partial_hit_old.outcome }}
-      run: '"$PROBE_PYTHON" experiments/candidate_ab/run.py finish --case partial-hit-old --outcome "$NATIVE_DOWNLOAD_OUTCOME"'
-    - name: Start partial-hit-new
+        version: 0.11.26
+        checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
+        enable-cache: false
+    - name: Install bounded experiment tooling
+      shell: bash
+      run: 'set -euo pipefail
+
+        uv venv --python python3 "$RUNNER_TEMP/candidate-ab-venv"
+
+        uv pip install --python "$RUNNER_TEMP/candidate-ab-venv/bin/python" -r experiments/candidate_ab/requirements.txt
+
+        export PROBE_PYTHON="$RUNNER_TEMP/candidate-ab-venv/bin/python"
+
+        echo "PROBE_PYTHON=$PROBE_PYTHON" >> "$GITHUB_ENV"
+
+        test -s /etc/apt/sources.list.d/ubuntu.sources
+
+        apt_sources=(-o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=-)
+
+        sudo apt-get "${apt_sources[@]}" update
+
+        sudo apt-get "${apt_sources[@]}" install -y --no-install-recommends skopeo=1.13.3+ds1-2ubuntu0.24.04.3
+
+        # This runner is an owned ephemeral VM, never the shared OLDLAB host daemon.
+
+        python3 source/scripts/configure_ci_registry_mirror.py
+
+        "$PROBE_PYTHON" experiments/candidate_ab/run.py setup
+
+        '
+    - name: Plan balanced block
+      id: plan
+      run: '"$PROBE_PYTHON" experiments/candidate_ab/run.py schedule --block "$AB_BLOCK"'
+    - name: Start position1 / ${{ steps.plan.outputs.case_0 }}
       env:
         GH_TOKEN: ${{ github.token }}
-      run: '"$PROBE_PYTHON" experiments/candidate_ab/run.py init --case partial-hit-new'
-    - name: Native download partial-hit-new
-      id: partial_hit_new
+        CASE_NAME: ${{ steps.plan.outputs.case_0 }}
+        CASE_SCENARIO: ${{ steps.plan.outputs.scenario_0 }}
+        DOWNLOAD_WORKERS: ${{ steps.plan.outputs.workers_0 }}
+        AB_POSITION: '1'
+      run: '"$PROBE_PYTHON" experiments/candidate_ab/run.py init --case "$CASE_NAME" --scenario "$CASE_SCENARIO" --download-workers "$DOWNLOAD_WORKERS"'
+    - name: Native download position1 / ${{ steps.plan.outputs.case_0 }}
+      id: download_0
       uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
       continue-on-error: true
       timeout-minutes: 3
@@ -279,17 +261,22 @@ jobs:
         pattern: '{service,control_plane,gateway,execution_runtime}.tar'
         merge-multiple: true
         digest-mismatch: error
-        path: ${{ env.PROBE_ROOT }}/partial-hit-new/download
-    - name: Validate and publish partial-hit-new
+        path: ${{ env.PROBE_ROOT }}/${{ steps.plan.outputs.case_0 }}/download
+    - name: Validate and publish position1 / ${{ steps.plan.outputs.case_0 }}
       env:
-        NATIVE_DOWNLOAD_OUTCOME: ${{ steps.partial_hit_new.outcome }}
-      run: '"$PROBE_PYTHON" experiments/candidate_ab/run.py finish --case partial-hit-new --outcome "$NATIVE_DOWNLOAD_OUTCOME"'
-    - name: Start full-fallback-old
+        CASE_NAME: ${{ steps.plan.outputs.case_0 }}
+        NATIVE_DOWNLOAD_OUTCOME: ${{ steps.download_0.outcome }}
+      run: '"$PROBE_PYTHON" experiments/candidate_ab/run.py finish --case "$CASE_NAME" --outcome "$NATIVE_DOWNLOAD_OUTCOME"'
+    - name: Start position2 / ${{ steps.plan.outputs.case_1 }}
       env:
         GH_TOKEN: ${{ github.token }}
-      run: '"$PROBE_PYTHON" experiments/candidate_ab/run.py init --case full-fallback-old'
-    - name: Native download full-fallback-old
-      id: full_fallback_old
+        CASE_NAME: ${{ steps.plan.outputs.case_1 }}
+        CASE_SCENARIO: ${{ steps.plan.outputs.scenario_1 }}
+        DOWNLOAD_WORKERS: ${{ steps.plan.outputs.workers_1 }}
+        AB_POSITION: '2'
+      run: '"$PROBE_PYTHON" experiments/candidate_ab/run.py init --case "$CASE_NAME" --scenario "$CASE_SCENARIO" --download-workers "$DOWNLOAD_WORKERS"'
+    - name: Native download position2 / ${{ steps.plan.outputs.case_1 }}
+      id: download_1
       uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
       continue-on-error: true
       timeout-minutes: 3
@@ -300,17 +287,22 @@ jobs:
         pattern: '{service,control_plane,gateway,execution_runtime}.tar'
         merge-multiple: true
         digest-mismatch: error
-        path: ${{ env.PROBE_ROOT }}/full-fallback-old/download
-    - name: Validate and publish full-fallback-old
+        path: ${{ env.PROBE_ROOT }}/${{ steps.plan.outputs.case_1 }}/download
+    - name: Validate and publish position2 / ${{ steps.plan.outputs.case_1 }}
       env:
-        NATIVE_DOWNLOAD_OUTCOME: ${{ steps.full_fallback_old.outcome }}
-      run: '"$PROBE_PYTHON" experiments/candidate_ab/run.py finish --case full-fallback-old --outcome "$NATIVE_DOWNLOAD_OUTCOME"'
-    - name: Start full-fallback-new
+        CASE_NAME: ${{ steps.plan.outputs.case_1 }}
+        NATIVE_DOWNLOAD_OUTCOME: ${{ steps.download_1.outcome }}
+      run: '"$PROBE_PYTHON" experiments/candidate_ab/run.py finish --case "$CASE_NAME" --outcome "$NATIVE_DOWNLOAD_OUTCOME"'
+    - name: Start position3 / ${{ steps.plan.outputs.case_2 }}
       env:
         GH_TOKEN: ${{ github.token }}
-      run: '"$PROBE_PYTHON" experiments/candidate_ab/run.py init --case full-fallback-new'
-    - name: Native download full-fallback-new
-      id: full_fallback_new
+        CASE_NAME: ${{ steps.plan.outputs.case_2 }}
+        CASE_SCENARIO: ${{ steps.plan.outputs.scenario_2 }}
+        DOWNLOAD_WORKERS: ${{ steps.plan.outputs.workers_2 }}
+        AB_POSITION: '3'
+      run: '"$PROBE_PYTHON" experiments/candidate_ab/run.py init --case "$CASE_NAME" --scenario "$CASE_SCENARIO" --download-workers "$DOWNLOAD_WORKERS"'
+    - name: Native download position3 / ${{ steps.plan.outputs.case_2 }}
+      id: download_2
       uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
       continue-on-error: true
       timeout-minutes: 3
@@ -321,16 +313,95 @@ jobs:
         pattern: '{service,control_plane,gateway,execution_runtime}.tar'
         merge-multiple: true
         digest-mismatch: error
-        path: ${{ env.PROBE_ROOT }}/full-fallback-new/download
-    - name: Validate and publish full-fallback-new
+        path: ${{ env.PROBE_ROOT }}/${{ steps.plan.outputs.case_2 }}/download
+    - name: Validate and publish position3 / ${{ steps.plan.outputs.case_2 }}
       env:
-        NATIVE_DOWNLOAD_OUTCOME: ${{ steps.full_fallback_new.outcome }}
-      run: '"$PROBE_PYTHON" experiments/candidate_ab/run.py finish --case full-fallback-new --outcome "$NATIVE_DOWNLOAD_OUTCOME"'
+        CASE_NAME: ${{ steps.plan.outputs.case_2 }}
+        NATIVE_DOWNLOAD_OUTCOME: ${{ steps.download_2.outcome }}
+      run: '"$PROBE_PYTHON" experiments/candidate_ab/run.py finish --case "$CASE_NAME" --outcome "$NATIVE_DOWNLOAD_OUTCOME"'
+    - name: Start position4 / ${{ steps.plan.outputs.case_3 }}
+      env:
+        GH_TOKEN: ${{ github.token }}
+        CASE_NAME: ${{ steps.plan.outputs.case_3 }}
+        CASE_SCENARIO: ${{ steps.plan.outputs.scenario_3 }}
+        DOWNLOAD_WORKERS: ${{ steps.plan.outputs.workers_3 }}
+        AB_POSITION: '4'
+      run: '"$PROBE_PYTHON" experiments/candidate_ab/run.py init --case "$CASE_NAME" --scenario "$CASE_SCENARIO" --download-workers "$DOWNLOAD_WORKERS"'
+    - name: Native download position4 / ${{ steps.plan.outputs.case_3 }}
+      id: download_3
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      continue-on-error: true
+      timeout-minutes: 3
+      with:
+        github-token: ${{ github.token }}
+        repository: ${{ github.repository }}
+        run-id: ${{ inputs.producer_run_id }}
+        pattern: '{service,control_plane,gateway,execution_runtime}.tar'
+        merge-multiple: true
+        digest-mismatch: error
+        path: ${{ env.PROBE_ROOT }}/${{ steps.plan.outputs.case_3 }}/download
+    - name: Validate and publish position4 / ${{ steps.plan.outputs.case_3 }}
+      env:
+        CASE_NAME: ${{ steps.plan.outputs.case_3 }}
+        NATIVE_DOWNLOAD_OUTCOME: ${{ steps.download_3.outcome }}
+      run: '"$PROBE_PYTHON" experiments/candidate_ab/run.py finish --case "$CASE_NAME" --outcome "$NATIVE_DOWNLOAD_OUTCOME"'
+    - name: Start position5 / ${{ steps.plan.outputs.case_4 }}
+      env:
+        GH_TOKEN: ${{ github.token }}
+        CASE_NAME: ${{ steps.plan.outputs.case_4 }}
+        CASE_SCENARIO: ${{ steps.plan.outputs.scenario_4 }}
+        DOWNLOAD_WORKERS: ${{ steps.plan.outputs.workers_4 }}
+        AB_POSITION: '5'
+      run: '"$PROBE_PYTHON" experiments/candidate_ab/run.py init --case "$CASE_NAME" --scenario "$CASE_SCENARIO" --download-workers "$DOWNLOAD_WORKERS"'
+    - name: Native download position5 / ${{ steps.plan.outputs.case_4 }}
+      id: download_4
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      continue-on-error: true
+      timeout-minutes: 3
+      with:
+        github-token: ${{ github.token }}
+        repository: ${{ github.repository }}
+        run-id: ${{ inputs.producer_run_id }}
+        pattern: '{service,control_plane,gateway,execution_runtime}.tar'
+        merge-multiple: true
+        digest-mismatch: error
+        path: ${{ env.PROBE_ROOT }}/${{ steps.plan.outputs.case_4 }}/download
+    - name: Validate and publish position5 / ${{ steps.plan.outputs.case_4 }}
+      env:
+        CASE_NAME: ${{ steps.plan.outputs.case_4 }}
+        NATIVE_DOWNLOAD_OUTCOME: ${{ steps.download_4.outcome }}
+      run: '"$PROBE_PYTHON" experiments/candidate_ab/run.py finish --case "$CASE_NAME" --outcome "$NATIVE_DOWNLOAD_OUTCOME"'
+    - name: Start position6 / ${{ steps.plan.outputs.case_5 }}
+      env:
+        GH_TOKEN: ${{ github.token }}
+        CASE_NAME: ${{ steps.plan.outputs.case_5 }}
+        CASE_SCENARIO: ${{ steps.plan.outputs.scenario_5 }}
+        DOWNLOAD_WORKERS: ${{ steps.plan.outputs.workers_5 }}
+        AB_POSITION: '6'
+      run: '"$PROBE_PYTHON" experiments/candidate_ab/run.py init --case "$CASE_NAME" --scenario "$CASE_SCENARIO" --download-workers "$DOWNLOAD_WORKERS"'
+    - name: Native download position6 / ${{ steps.plan.outputs.case_5 }}
+      id: download_5
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      continue-on-error: true
+      timeout-minutes: 3
+      with:
+        github-token: ${{ github.token }}
+        repository: ${{ github.repository }}
+        run-id: ${{ inputs.producer_run_id }}
+        pattern: '{service,control_plane,gateway,execution_runtime}.tar'
+        merge-multiple: true
+        digest-mismatch: error
+        path: ${{ env.PROBE_ROOT }}/${{ steps.plan.outputs.case_5 }}/download
+    - name: Validate and publish position6 / ${{ steps.plan.outputs.case_5 }}
+      env:
+        CASE_NAME: ${{ steps.plan.outputs.case_5 }}
+        NATIVE_DOWNLOAD_OUTCOME: ${{ steps.download_5.outcome }}
+      run: '"$PROBE_PYTHON" experiments/candidate_ab/run.py finish --case "$CASE_NAME" --outcome "$NATIVE_DOWNLOAD_OUTCOME"'
     - name: Retain small and validation evidence
       if: always()
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
-        name: candidate-ab-evidence-${{ inputs.role }}-${{ github.run_id }}
+        name: candidate-workers-evidence-block${{ matrix.block }}-${{ github.run_id }}
         path: '${{ env.PROBE_ROOT }}/metrics/
 
           ${{ env.PROBE_ROOT }}/setup.json'
@@ -344,3 +415,8 @@ jobs:
       contents: read
       actions: read
       checks: read
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        block: ${{ fromJSON(inputs.blocks) }}
