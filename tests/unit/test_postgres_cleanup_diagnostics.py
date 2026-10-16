@@ -21,15 +21,17 @@ def _module():
 @pytest.mark.parametrize("failure", [psycopg.OperationalError, RuntimeError])
 def test_observer_failure_returns_only_closed_category(monkeypatch, failure):
     module = _module()
+
     def fail(*args, **kwargs):
         raise failure("PRIVATE DATABASE PASSWORD AND QUERY TEXT")
+
     monkeypatch.setattr(psycopg, "connect", fail)
     result = module.snapshot_database_waits("postgresql://PRIVATE@localhost/database", 123)
     assert result == {"status": "unavailable"}
     assert "PRIVATE" not in str(result)
 
 
-@pytest.mark.parametrize("failure_point", ["connection", "thread_start"])
+@pytest.mark.parametrize("failure_point", ["connection", "thread_construct", "thread_start"])
 def test_diagnostic_setup_failure_does_not_replace_cleanup_outcome(monkeypatch, failure_point):
     module = _module()
 
@@ -37,13 +39,22 @@ def test_diagnostic_setup_failure_does_not_replace_cleanup_outcome(monkeypatch, 
         raise RuntimeError("PRIVATE diagnostic setup error")
 
     connection = SimpleNamespace(
-        connection=SimpleNamespace(driver_connection=SimpleNamespace(info=SimpleNamespace(backend_pid=123))),
-        engine=SimpleNamespace(url=SimpleNamespace(set=lambda **kwargs: SimpleNamespace(
-            render_as_string=lambda **kwargs: "postgresql://PRIVATE@localhost/database"))),
+        connection=SimpleNamespace(
+            driver_connection=SimpleNamespace(info=SimpleNamespace(backend_pid=123))
+        ),
+        engine=SimpleNamespace(
+            url=SimpleNamespace(
+                set=lambda **kwargs: SimpleNamespace(
+                    render_as_string=lambda **kwargs: "postgresql://PRIVATE@localhost/database"
+                )
+            )
+        ),
         exec_driver_sql=fail,
     )
     if failure_point == "connection":
         connection.connection = None
+    elif failure_point == "thread_construct":
+        monkeypatch.setattr(threading, "Thread", fail)
     else:
         monkeypatch.setattr(threading.Thread, "start", fail)
     original = ValueError("original cleanup failure")
@@ -77,9 +88,16 @@ def test_inflight_snapshot_is_killed_and_reaped_before_exit(monkeypatch, capsys,
     monkeypatch.setattr(module, "INITIAL_DELAY_SECONDS", 0)
     monkeypatch.setattr(module, "SNAPSHOT_TIMEOUT_SECONDS", 0.5, raising=False)
     connection = SimpleNamespace(
-        connection=SimpleNamespace(driver_connection=SimpleNamespace(info=SimpleNamespace(backend_pid=123))),
-        engine=SimpleNamespace(url=SimpleNamespace(set=lambda **kwargs: SimpleNamespace(
-            render_as_string=lambda **kwargs: "postgresql://PRIVATE@localhost/database"))),
+        connection=SimpleNamespace(
+            driver_connection=SimpleNamespace(info=SimpleNamespace(backend_pid=123))
+        ),
+        engine=SimpleNamespace(
+            url=SimpleNamespace(
+                set=lambda **kwargs: SimpleNamespace(
+                    render_as_string=lambda **kwargs: "postgresql://PRIVATE@localhost/database"
+                )
+            )
+        ),
         exec_driver_sql=lambda _: SimpleNamespace(scalar_one=lambda: 123),
     )
     original = ValueError("original cleanup failure")
@@ -96,7 +114,9 @@ def test_inflight_snapshot_is_killed_and_reaped_before_exit(monkeypatch, capsys,
             assert not fails
         assert time.monotonic() - before < 3
         assert children and all(child.poll() is not None for child in children)
-        assert not any(thread.name == "loom-test-database-cleanup-observer" for thread in threading.enumerate())
+        assert not any(
+            thread.name == "loom-test-database-cleanup-observer" for thread in threading.enumerate()
+        )
         assert "PRIVATE" not in capsys.readouterr().err
     finally:
         for child in children:
