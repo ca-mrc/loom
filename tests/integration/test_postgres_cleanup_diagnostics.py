@@ -19,7 +19,9 @@ def _module():
 
 
 @pytest.mark.parametrize("fails", [False, True])
-def test_slow_operation_reports_server_wait_and_preserves_outcome(postgres_url, monkeypatch, capsys, fails):
+def test_slow_operation_reports_server_wait_and_preserves_outcome(
+    postgres_url, monkeypatch, capsys, fails
+):
     module = _module()
     monkeypatch.setattr(module, "INITIAL_DELAY_SECONDS", 0.05)
     monkeypatch.setattr(module, "SAMPLE_INTERVAL_SECONDS", 0.05)
@@ -41,20 +43,38 @@ def test_slow_operation_reports_server_wait_and_preserves_outcome(postgres_url, 
     captured = capsys.readouterr().err
     reports = [json.loads(line) for line in captured.splitlines()]
     assert reports and len(reports) <= 6
-    assert any(row["role"] == "cleanup" and row["wait_event_type"] == "Timeout" and row["wait_event"] == "PgSleep"
-               for report in reports for row in report["database"]["waits"])
-    assert all(report["phase"] == "drop_database" and report["elapsed_seconds"] >= 0 for report in reports)
-    assert all(set(row) == {"role", "backend_type", "state", "wait_event_type", "wait_event"}
-               for report in reports for row in report["database"]["waits"])
+    assert any(
+        row["role"] == "cleanup"
+        and row["wait_event_type"] == "Timeout"
+        and row["wait_event"] == "PgSleep"
+        for report in reports
+        for row in report["database"]["waits"]
+    )
+    assert all(
+        report["phase"] == "drop_database" and report["elapsed_seconds"] >= 0 for report in reports
+    )
+    assert all(
+        set(row) == {"role", "backend_type", "state", "wait_event_type", "wait_event"}
+        for report in reports
+        for row in report["database"]["waits"]
+    )
     assert "PRIVATE" not in captured and postgres_url not in captured
-    assert not any(thread.name == "loom-test-database-cleanup-observer" for thread in threading.enumerate())
+    assert not any(
+        thread.name == "loom-test-database-cleanup-observer" for thread in threading.enumerate()
+    )
 
 
-def test_healthy_cleanup_and_early_failure_do_not_open_observer_connection(postgres_url, monkeypatch, capsys):
+def test_healthy_cleanup_and_early_failure_do_not_open_observer_connection(
+    postgres_url, monkeypatch, capsys
+):
     module = _module()
+    samples = []
+
     def unexpected(*args, **kwargs):
-        raise AssertionError("healthy cleanup opened an unnecessary diagnostic connection")
-    monkeypatch.setattr(module, "snapshot_database_waits", unexpected)
+        samples.append(True)
+        return {"status": "unavailable"}
+
+    monkeypatch.setattr(module, "_bounded_snapshot_database_waits", unexpected)
     engine = create_engine(postgres_url, isolation_level="AUTOCOMMIT")
     failure = RuntimeError("original failure")
     try:
@@ -68,4 +88,7 @@ def test_healthy_cleanup_and_early_failure_do_not_open_observer_connection(postg
     finally:
         engine.dispose()
     assert capsys.readouterr().err == ""
-    assert not any(thread.name == "loom-test-database-cleanup-observer" for thread in threading.enumerate())
+    assert samples == []
+    assert not any(
+        thread.name == "loom-test-database-cleanup-observer" for thread in threading.enumerate()
+    )
