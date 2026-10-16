@@ -771,7 +771,7 @@ def test_shared_v2_uses_completed_catalog_but_preserves_original_runtime_roots(s
 @pytest.mark.parametrize('staging_observation', ['independent'], indirect=True)
 @pytest.mark.timeout(240)
 def test_completed_catalog_runtime_inventory_keeps_original_roots_and_exact_successors(
-        shared_operation, shared_runtime, completed_pool, handoff, tmp_path):
+        shared_operation, shared_runtime, completed_pool, handoff, tmp_path, monkeypatch):
     import ssl
 
     import httpx
@@ -779,6 +779,7 @@ def test_completed_catalog_runtime_inventory_keeps_original_roots_and_exact_succ
     from scripts.ops.nebius_development_runtime_observation import HTTPSDevelopmentRuntimeObserver
     from scripts.ops.nebius_management_switch import _matches
     from scripts.ops.nebius_shared_pool_entry import RetainedRuntimeReference
+    from scripts.ops.nebius_shared_pool_handoff_live import observe_shared_pool_guard_bindings
     from tests.ops.test_nebius_development_pool_retained import runtime_http_inventory
 
     args, bindings = shared_operation
@@ -797,17 +798,27 @@ def test_completed_catalog_runtime_inventory_keeps_original_roots_and_exact_succ
     old_catalog_path = '/api/v1/namespaces/' + namespace + '/configmaps/' + retained.inputs.catalog['metadata']['name']
     documents[manager_path] = copy.deepcopy(api.manager.rows[_key(selected.resources.manager)])
     documents[catalog_path] = copy.deepcopy(selected.resources.catalog)
+    for row in documents.values():
+        if row['kind'] == 'Secret':
+            row['metadata'].setdefault('resourceVersion', '501')
     with HTTPSDevelopmentRuntimeObserver(request=args['runtime'], preactivation=selected,
             api_server=args['runtime'].database.foundation.inputs.config['kubernetes_api_server'],
             ssl_context=ssl.create_default_context()) as observer:
         for connection in (observer, observer.manager, observer.foundation):
             connection.client.close()
-            connection.client = httpx.Client(base_url=connection.api_server, transport=httpx.MockTransport(handle))
+            # The predecessor fixture patches httpx.Client to its registration
+            # server. Keep this inventory on its own captured real transport.
+            connection.client = type(completed_pool[3].api.client)(
+                base_url=connection.api_server, transport=httpx.MockTransport(handle))
         state = bindings.plan.development.runtime.state_dir
         actual = observer.inspect(state_dir=state)
         assert _matches(actual[_key(selected.resources.manager)], selected.resources.manager,
             selected.resources.manager['metadata']['uid'])
         assert _key(selected.resources.catalog) in actual
+        bound = observe_shared_pool_guard_bindings(**{**args, 'observation': retained.inputs.source.model_dump(mode='json')},
+            development=observer, preactivation=selected)
+        assert bound.migration.registration.spec == retained.inputs.refresh.after
+        assert bound.plan.preactivation == selected
         for path in (manager_path, catalog_path, old_catalog_path):
             original = copy.deepcopy(documents[path])
             documents[path]['metadata']['uid'] = str(uuid4())
@@ -817,6 +828,74 @@ def test_completed_catalog_runtime_inventory_keeps_original_roots_and_exact_succ
         documents[manager_path] = copy.deepcopy(retained.inputs.manager)
         with pytest.raises(ValueError):
             observer.inspect(state_dir=state)
+        documents[manager_path] = copy.deepcopy(api.manager.rows[_key(selected.resources.manager)])
+    _exercise_preactivated_probes(args['runtime'], selected, documents, handle,
+        type(completed_pool[3].api.client), state, monkeypatch)
+
+
+def _exercise_preactivated_probes(request, selected, documents, handle, client_type, state, monkeypatch):
+    """Real SQL/process probe construction with only remote HTTP/exec doubled."""
+    import hashlib
+    import hmac
+    import ssl
+    from types import SimpleNamespace
+
+    import httpx
+    from scripts.ops import nebius_development_runtime_probes as module
+    from scripts.ops.nebius_pool_startup_database import pool_startup_closed_sql
+    from tests.ops.test_nebius_development_pool_retained import (
+        populate_database_backends,
+        populate_runtime_pods,
+    )
+
+    from loom_service.pool_management.capacity import digest
+
+    populate_runtime_pods(documents)
+    populate_database_backends(documents)
+    spec = selected.retained.inputs.refresh.after
+    manager_key = _key(selected.resources.manager)
+    manager_path = '/apis/apps/v1/namespaces/' + selected.retained.registration.binding.namespace + '/deployments/loom-service'
+    executions = []
+
+    def read(message):
+        response = handle(message)
+        selector = message.url.params.get('labelSelector')
+        if selector is not None and response.status_code == 200:
+            label, value = selector.split('=', 1)
+            content = response.json()
+            content['items'] = [row for row in content['items'] if row['metadata']['labels'].get(label) == value]
+            return httpx.Response(200, json=content)
+        return response
+
+    def execute(argv, **kwargs):
+        executions.append(argv)
+        command = argv[argv.index('--') + 1:]
+        if command[0] == 'psql':
+            assert command[-1] == pool_startup_closed_sql(spec)
+            report = {'schema': 'loom.pool-startup-closed.v1', 'operation_id': str(spec.operation_id),
+                'installation_sha256': digest(spec.model_dump(mode='json')), 'read_only': True, 'qualified': True}
+        else:
+            assert command[:4] == ['python', '-c', module.BOUND_POOL_SETTINGS_COMMAND, 'manager']
+            wanted = module.expected_pool_runtime_settings('manager', documents[manager_path],
+                catalog_sha256=hashlib.sha256(spec.profiles.model_dump_json().encode()).hexdigest())
+            expected = hmac.new(bytes.fromhex(command[4]), json.dumps(wanted, sort_keys=True,
+                separators=(',', ':')).encode(), 'sha256').hexdigest()
+            assert command[5] == expected, 'process challenge must bind the effective catalog'
+            report = {'status': 'qualified'}
+        return SimpleNamespace(returncode=0, stdout=json.dumps(report).encode(), stderr=b'')
+
+    with monkeypatch.context() as patch:
+        patch.setattr(module.subprocess, 'run', execute)
+        with module.HTTPSDevelopmentRuntimeProbes(request=request, preactivation=selected,
+                api_server=request.database.foundation.inputs.config['kubernetes_api_server'],
+                ssl_context=ssl.create_default_context(cadata=request.database.foundation.bootstrap['material']['loom-platform-db']['ca.crt']),
+                token='operator-test') as probes:
+            for connection in (probes, probes.manager, probes.foundation):
+                connection.client.close()
+                connection.client = client_type(base_url=connection.api_server, transport=httpx.MockTransport(read))
+            probes.qualify_closed_pool()
+            probes.qualify_runtime_settings(key=manager_key, state_dir=state)
+    assert len(executions) == 2
 
 
 @pytest.mark.parametrize('preparation_id', [None, '335c9f82-6f9a-43de-ab0c-a312034b9efe'])
