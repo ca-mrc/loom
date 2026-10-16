@@ -60,6 +60,11 @@ and before transport. Audit admission failure returns a secret-free
 Admission failure logs contain the opaque request ID and only a fixed error
 category (`timeout`, `database`, or `other`), never driver messages, SQL binds,
 or exception tracebacks. The category diagnoses failure without relaxing admission.
+Observation failure logs use the same fixed categories and identify the
+`provider` or `gateway` write and its unfinished phase (`session`, `execute`,
+`commit`, or `session_exit`). The execute phase includes connection checkout;
+these fields locate the failed boundary without establishing a physical cause.
+The existing one-second audit budget and durable unknown outcomes still apply.
 
 The internal join is `trial_id / step_id / agent_attempt_id / step_jwt_id`.
 The worker supervisor creates a new opaque attempt UUID for each real agent
