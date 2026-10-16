@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import importlib
+import io
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
@@ -21,6 +23,33 @@ from loom.trajectory.storage import MinioObjectStore
 from tests.support.minio_tls import minio_tls  # noqa: F401
 
 pytestmark = [pytest.mark.docker, pytest.mark.timeout(120)]
+
+
+async def test_exact_version_reader_keeps_original_after_replacement_and_delete(minio_tls):  # noqa: F811
+    module = importlib.import_module("loom.trajectory.immutable_object")
+    admin = minio_tls[3]
+    bucket = "exact-reader-" + uuid4().hex
+    admin.create_bucket(Bucket=bucket)
+    admin.put_bucket_versioning(Bucket=bucket, VersioningConfiguration={"Status": "Enabled"})
+    original = admin.put_object(Bucket=bucket, Key="file", Body=b"abc")["VersionId"]
+    admin.put_object(Bucket=bucket, Key="file", Body=b"replacement")
+    admin.delete_object(Bucket=bucket, Key="file")
+    before = admin.list_object_versions(Bucket=bucket)
+    destination = io.BytesIO()
+    await asyncio.to_thread(
+        module.read_verified_object_version,
+        admin,
+        module.ImmutableObjectVersion(
+            bucket=bucket, object_key="file", version_id=original,
+            content_sha256="ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            size_bytes=3,
+        ),
+        max_bytes=3, destination=destination,
+    )
+    assert destination.getvalue() == b"abc"
+    after = admin.list_object_versions(Bucket=bucket)
+    assert after["Versions"] == before["Versions"]
+    assert after["DeleteMarkers"] == before["DeleteMarkers"]
 
 
 def _intent(bucket, key):

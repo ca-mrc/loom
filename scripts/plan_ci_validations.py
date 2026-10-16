@@ -76,6 +76,7 @@ DOCS_STATIC_SUFFIXES = {
 
 PLANNER_PATHS = {
     "scripts/plan_ci_validations.py",
+    "scripts/ops/nebius_pool_test_plan.py",
     "tests/ops/test_plan_ci_validations.py",
 }
 
@@ -129,6 +130,69 @@ NEBIUS_PLATFORM_EXACT = {
 }
 NEBIUS_PLATFORM_PREFIXES = ("deploy/nebius/",)
 
+# These tools are invoked by operators, not imported by application services,
+# the virtual runtime payloads or package unit tests. Root regressions own their
+# lifecycle/idle/backup contracts; the pool lane independently selects consumers.
+# New/unclassified tools still take the unknown-runtime fallback.
+OPERATOR_COMPONENT_PREFIXES = (
+    "scripts/ops/nebius_pool_", "scripts/ops/nebius_shared_pool_",
+    "scripts/ops/nebius_development_", "scripts/ops/nebius_management_",
+    "scripts/ops/install_nebius",
+)
+OPERATOR_COMPONENT_EXACT = {
+    "scripts/ops/nebius_archive_recovery.py",
+    "scripts/ops/nebius_terminal_archive_recovery.py",
+    "scripts/ops/nebius_terminal_cleanup_recovery.py",
+    "scripts/ops/nebius_idle_rollout.py",
+}
+RUNTIME_PAYLOAD_TOOLS = {
+    "scripts/runtime_payload_conformance.py", "scripts/runtime_payload_dispatch.py",
+}
+
+
+def _is_operator_component(path: str) -> bool:
+    return path in OPERATOR_COMPONENT_EXACT or path.startswith(OPERATOR_COMPONENT_PREFIXES)
+
+
+GO_ALL_PACKAGES = ("./cmd/...", "./internal/...")
+IAC_ALL_TARGETS = ("modules/execution-target", "stack", "modules/platform",
+                   "modules/regional-execution", "platform")
+
+
+def go_packages_for_changes(paths: tuple[str, ...], *, full: bool) -> tuple[str, ...]:
+    if full or any(path in {"go.mod", "go.sum"} | GO_CROSSLANGUAGE_CONTRACTS for path in paths):
+        return GO_ALL_PACKAGES
+    selected: set[str] = set()
+    for path in paths:
+        if path.startswith("internal/guestchannel/"):
+            selected.update(("./internal/guestchannel/...", "./cmd/loom-guest-runtime/...",
+                             "./cmd/loom-sandbox-runtime/..."))
+        elif _is_go_input(path):
+            selected.add("./" + "/".join(path.split("/")[:2]) + "/...")
+    return tuple(sorted(selected)) or GO_ALL_PACKAGES
+
+
+def iac_targets_for_changes(paths: tuple[str, ...], *, full: bool) -> tuple[str, ...]:
+    if full:
+        return IAC_ALL_TARGETS
+    consumers = {
+        "modules/execution-target/": ("modules/execution-target", "stack"),
+        "stack/": ("modules/execution-target", "stack"),
+        "modules/platform/": ("modules/platform", "platform"),
+        "modules/regional-execution/": ("modules/regional-execution", "platform"),
+        "platform/": ("modules/platform", "modules/regional-execution", "platform"),
+    }
+    selected: set[str] = set()
+    for path in paths:
+        if not path.startswith(NEBIUS_IAC_PREFIXES):
+            continue
+        relative = path.removeprefix(NEBIUS_IAC_PREFIXES[0])
+        matches = [targets for prefix, targets in consumers.items() if relative.startswith(prefix)]
+        if not matches:
+            return IAC_ALL_TARGETS
+        selected.update(matches[0])
+    return tuple(target for target in IAC_ALL_TARGETS if target in selected) or IAC_ALL_TARGETS
+
 PROTECTED_DEPLOYMENT_EXACT = {
     ".github/workflows/release-promotion-gate.yml",
     "scripts/ops/release_gate.py",
@@ -166,11 +230,16 @@ class ValidationPlan:
     test_changes: tuple[str, ...] = ()
     lint_and_static: bool = True
     tests_root: bool = True
+    # Pool operator lane: eligible with tests-root; its own matrix decides the final selection.
+    nebius_pool: bool = True
     tests_packages: bool = True
     go_checks: bool = True
     runtime_payload: bool = True
     nebius_iac: bool = True
     locked_environments: bool = True
+    web_runtime: bool = True
+    go_packages: tuple[str, ...] = GO_ALL_PACKAGES
+    iac_targets: tuple[str, ...] = IAC_ALL_TARGETS
 
 
     def selected_heavy_checks(self) -> set[str]:
@@ -186,11 +255,15 @@ class ValidationPlan:
                 "unowned_runtime",
                 *HEAVY_CHECKS,
                 *BASELINE_CHECKS,
+                "nebius_pool",
                 "coverage_summary",
                 "web_checks",
+                "web_runtime",
             )
         }
         outputs["gate_mode"] = self.gate_mode
+        outputs["go_packages"] = json.dumps(self.go_packages, separators=(",", ":"))
+        outputs["iac_targets"] = json.dumps(self.iac_targets, separators=(",", ":"))
         test_changes = json.dumps(self.test_changes, separators=(",", ":"))
         # This optional narrowing hint becomes one job environment variable.
         # Stay below Linux's per-string exec limit; an empty hint retains the
@@ -345,6 +418,7 @@ def plan_validations(
         "tests/integration/",
     )
     image_exact = {
+        "config/ci-buildkit.toml",
         ".dockerignore",
         ".github/workflows/images.yml",
         "pyproject.toml",
@@ -437,6 +511,7 @@ def plan_validations(
             continue
         test_owner_lanes = _test_owner_lanes(path)
         policy_tool = path in REPOSITORY_POLICY_TOOLS
+        operator_tool = _is_operator_component(path)
         go_input = _is_go_input(path)
         matched_owner = (
             path in PLANNER_PATHS
@@ -445,16 +520,13 @@ def plan_validations(
             or _matches(path, exact=NEBIUS_PLATFORM_EXACT, prefixes=NEBIUS_PLATFORM_PREFIXES)
             or _is_protected_deployment_path(path)
             or bool(test_owner_lanes)
-            or policy_tool or go_input
+            or policy_tool or go_input or operator_tool
         )
         for lane in test_owner_lanes:
             reason = f"test-owner:{lane}:{path}"
             if lane == "integration":
                 select("integration", reason)
             elif lane == "integration-docker":
-                # Retain the existing tests/integration contract: changes to a
-                # Docker-owned module exercise both integration tiers.
-                select("integration", reason)
                 select("integration_docker", reason)
             elif lane == "cluster-smoke":
                 select("cluster_smoke", reason)
@@ -492,7 +564,9 @@ def plan_validations(
             exact=image_exact,
             prefixes=image_prefixes,
         ) and not path.startswith("src/loom_cli/templates/k8s/")
-        if image_match and not (go_input and path.endswith("_test.go")):
+        image_payload = any(owner.execution_policy is not None
+                            for owner in _component_ownership_manifest().test_owners_for_path(path))
+        if image_match and (not test_owner_lanes or image_payload) and not (go_input and path.endswith("_test.go")):
             select("images", f"path:{path}")
             matched_owner = True
         if not _is_frontend_input(path) and _matches(path, exact=cluster_exact, prefixes=cluster_prefixes):
@@ -561,7 +635,15 @@ def plan_validations(
     )
     baseline["tests_root"] = bool(python_paths) or any(path in REPOSITORY_POLICY_TOOLS for path in backend_paths)
     baseline["tests_packages"] = bool(python_paths)
-    baseline["runtime_payload"] = bool(python_paths)
+    # Virtual payloads mount only the declared case, dispatcher and fixtures;
+    # they do not import the server/operator checkout. Dependency and manifest
+    # changes still force the complete baseline below.
+    baseline["runtime_payload"] = any(
+        path in RUNTIME_PAYLOAD_TOOLS or "runtime-payload" in _test_owner_lanes(path)
+        for path in backend_paths
+    ) or bool(test_inputs and independent_tests is None)
+    if python_paths and all(_is_operator_component(path) for path in python_paths):
+        baseline["tests_packages"] = False
     baseline["go_checks"] = any(_is_go_input(path) or path in GO_CROSSLANGUAGE_CONTRACTS
                                 for path in backend_paths)
     # Every Python validation job already syncs/checks the locked workspace.
@@ -577,13 +659,16 @@ def plan_validations(
             and not force_baseline and not set(labels) & LABEL_TO_CHECK.keys()):
         owners = {lane for path in independent_tests for lane in _test_owner_lanes(path)}
         crosslanguage_contract = any(path in GO_CROSSLANGUAGE_CONTRACTS for path in independent_tests)
-        baseline.update(tests_root="tests-root" in owners,
+        baseline.update(tests_root=bool(owners & {"tests-root", "nebius-pool"}),
                         tests_packages="tests-packages" in owners,
                         go_checks="go-checks" in owners or crosslanguage_contract,
                         runtime_payload="runtime-payload" in owners,
                         locked_environments=False)
     if force_baseline:
         baseline = dict.fromkeys(BASELINE_CHECKS, True)
+    web_runtime = force_baseline or any(_is_frontend_input(path) or path in web_quality_exact for path in paths)
+    if force_baseline:
+        select("web_checks", "full-regression-or-shared-authority")
 
     return ValidationPlan(
         event_relevant=event_relevant,
@@ -600,7 +685,12 @@ def plan_validations(
         web_checks=selected["web_checks"],
         reasons={name: tuple(values) for name, values in reasons.items()},
         # Explicit selector labels and manual runs retain full regression.
-        test_changes=paths if event_name in {"pull_request", "merge_group"} and not set(labels) & LABEL_TO_CHECK.keys() else (),
+        test_changes=paths if event_name in {"pull_request", "merge_group"}
+        and not force_baseline and not set(labels) & LABEL_TO_CHECK.keys() else (),
+        nebius_pool=baseline["tests_root"],
+        web_runtime=web_runtime,
+        go_packages=go_packages_for_changes(paths, full=force_baseline),
+        iac_targets=iac_targets_for_changes(paths, full=force_baseline),
         **baseline,
     )
 
@@ -642,6 +732,9 @@ def main() -> int:
     tracked_paths = _tracked_paths(REPO_ROOT)
     for lane, selected_name, matrix_name in (
         ("tests-root", "tests_root", "tests_root_matrix"),
+        # Its eligibility is fixed before tests-root narrows, so an empty
+        # tests-root matrix never suppresses a selected pool matrix.
+        ("nebius-pool", "nebius_pool", "nebius_pool_matrix"),
         ("integration", "integration", "integration_matrix"),
         ("integration-docker", "integration_docker", "integration_docker_matrix"),
         ("cluster-smoke", "cluster_smoke", "cluster_smoke_matrix"),
@@ -654,7 +747,14 @@ def main() -> int:
         # A compatibility-only edit has no tests in the daily Nebius scope.
         # Jobs and the final gate must agree on that deliberate empty selection.
         outputs[selected_name] = str(bool(matrix)).lower()
-        plan = replace(plan, **{selected_name: bool(matrix)})
+        plan = replace(
+            plan,
+            tests_root=bool(matrix) if selected_name == "tests_root" else plan.tests_root,
+            nebius_pool=bool(matrix) if selected_name == "nebius_pool" else plan.nebius_pool,
+            integration=bool(matrix) if selected_name == "integration" else plan.integration,
+            integration_docker=bool(matrix) if selected_name == "integration_docker" else plan.integration_docker,
+            cluster_smoke=bool(matrix) if selected_name == "cluster_smoke" else plan.cluster_smoke,
+        )
     with args.github_output.open("a", encoding="utf-8") as handle:
         for name, value in outputs.items():
             handle.write(f"{name}={value}\n")

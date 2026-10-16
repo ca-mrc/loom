@@ -93,10 +93,11 @@ env:
 jobs:
   plan:
     name: staging smoke plan
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-latest' }}
     outputs:
       required: ${{ steps.plan.outputs.staging_smoke || steps.event.outputs.required }}
       gate_mode: ${{ steps.plan.outputs.gate_mode || steps.event.outputs.gate_mode }}
+      test_changes: ${{ steps.plan.outputs.test_changes || '[]' }}
     steps:
       - name: Classify filtered event before checkout
         id: event
@@ -178,7 +179,7 @@ jobs:
     if: >-
       needs.plan.outputs.gate_mode == 'full' &&
       needs.plan.outputs.required == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-24.04' }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
@@ -207,11 +208,13 @@ jobs:
         shell: bash
         env:
           LOOM_SYSTEM_SMOKE_DIAGNOSTICS: ${{ runner.temp }}/system-smoke-compose.log
+          TEST_CHANGED_PATHS: ${{ needs.plan.outputs.test_changes }}
         run: |
           set -euo pipefail
-          mapfile -t test_paths < <(
-            uv run --no-sync python scripts/component_ownership.py test-paths --lane system-smoke --test-scope "${CI_TEST_SCOPE:-all}"
-          )
+          manifest_paths_file="$RUNNER_TEMP/system-smoke-tests.txt"
+          uv run --no-sync python scripts/component_ownership.py test-paths --lane system-smoke --test-scope "${CI_TEST_SCOPE:-all}" \
+            --changed-paths-json "$TEST_CHANGED_PATHS" > "$manifest_paths_file"
+          mapfile -t test_paths < "$manifest_paths_file"
           [[ ${#test_paths[@]} -gt 0 ]]
           uv run --no-sync pytest -m "${CI_PYTEST_MARKERS:-not legacy_pool}" --timeout=1200 "${test_paths[@]}"
 
@@ -253,7 +256,7 @@ jobs:
           github.event_name == 'push' && 'staging-smoke-gate-push' ||
           needs.plan.outputs.gate_mode == 'full' && 'staging-smoke-gate' ||
           'staging-smoke-gate-filtered' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-latest' }}
     if: always() && needs.plan.outputs.gate_mode != 'filtered'
     needs: [plan, system-smoke]
     steps:

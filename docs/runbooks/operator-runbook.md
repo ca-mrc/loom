@@ -31,6 +31,36 @@ Release promotion still requires candidate evidence and production approval.
 Evidence may contain safe secret references, never credentials,
 bearer tokens, signed URLs, object-store keys, or provider API keys.
 
+## Administrator Trial and Batch cancellation
+
+`POST /api/v1/trials/{id}/cancel` and `POST /api/v1/batches/{id}/cancel`
+accept an optional JSON body `{"reason": "operator explanation"}` (at most
+1024 characters). Bodyless cancellation remains supported; its audit reason is
+null. Include a reason for operational interventions and `X-Request-ID` when
+correlating the Batch request with its Trial cancellations.
+
+A platform administrator needs no represented team context. Personal credentials
+record `user:<username>` from the authenticated account; a supplied
+`X-Loom-Admin-Actor` cannot override it. Singleton break-glass requests require
+that header, using a nonempty operator identifier of at most 128 characters.
+Ordinary team, worker and family cancellation retain their existing authority.
+
+Each accepted administrator Trial request, including a successful replay, writes
+`trial.cancel` to `admin_audit_events` in the same transaction as cancellation
+and execution fencing. Batch requests write `batch.cancel` with the Batch state,
+even when a replay has no active Trials. Active children pass through the same
+Trial authority and receive their own events. Batch fanout spans transactions;
+if a later child fails, earlier accepted child cancellations and their audits
+remain durable, while the Batch request does not record success. Audit writes
+must succeed before their owning transaction commits. Reasons are redacted
+before persistence; never put credentials in operator context or evidence.
+
+Cancellation acceptance records a request, not proof that execution stopped.
+Check `cancellation_observed_at` and the owning lease cleanup evidence separately;
+a running Trial keeps its observation timestamp unset until teardown is confirmed.
+Inspect `GET /api/v1/admin/audit-events` for the exact Trial/Batch target IDs,
+actor, reason and request ID when verifying administrator cancellation.
+
 ## Locked operator environment
 
 Use the repository lock and workspace packages for release commands:

@@ -3592,6 +3592,11 @@ export interface components {
             /** Verifier */
             verifier?: string | null;
         };
+        /** CancellationRequest */
+        CancellationRequest: {
+            /** Reason */
+            reason?: string | null;
+        };
         /** CatalogCreate */
         CatalogCreate: {
             /** Aliases */
@@ -6549,7 +6554,7 @@ export interface components {
                 [key: string]: unknown;
             } | null;
             /** Verification */
-            verification: ("shared" | "separate") | null;
+            verification: ("shared" | "separate" | "skipped") | null;
         } & {
             [key: string]: unknown;
         };
@@ -6640,7 +6645,7 @@ export interface components {
              * Verification
              * @enum {string}
              */
-            verification: "shared" | "separate";
+            verification: "shared" | "separate" | "skipped";
         } & {
             [key: string]: unknown;
         };
@@ -10743,7 +10748,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["CancellationRequest"] | null;
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -14929,7 +14938,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["CancellationRequest"] | null;
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {

@@ -304,14 +304,16 @@ module = [
 ignore_missing_imports = true
 
 [tool.coverage.paths]
-# Normalize local and GitHub-hosted checkout roots for coverage aggregation.
+# Normalize local, GitHub-hosted, and isolated JIT checkout roots for aggregation.
 source = [
   "src",
   "/home/runner/work/*/*/src",
+  "*/_work/*/*/src",
 ]
 packages = [
   "packages",
   "/home/runner/work/*/*/packages",
+  "*/_work/*/*/packages",
 ]
 
 [tool.pytest.ini_options]

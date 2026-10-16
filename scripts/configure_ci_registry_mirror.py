@@ -12,6 +12,27 @@ from pathlib import Path
 from typing import Any
 
 MIRROR = "https://mirror.gcr.io"
+EPHEMERAL_MARKER = Path("/etc/loom-ci-ephemeral-runner")
+
+
+def disposable_runner() -> bool:
+    if os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted":
+        return True
+    if os.environ.get("RUNNER_ENVIRONMENT") != "self-hosted":
+        return False
+    try:
+        stat = EPHEMERAL_MARKER.lstat()
+        if EPHEMERAL_MARKER.is_symlink() or stat.st_uid != 0 or stat.st_mode & 0o022:
+            return False
+        if stat.st_size > 1024:
+            return False
+        marker = json.loads(EPHEMERAL_MARKER.read_text())
+        return marker == {"schema_version": 1, "provider": "oldlab"} or marker == {
+            "schema_version": 1,
+            "provider": "github",
+        }
+    except (OSError, ValueError):
+        return False
 
 
 def with_mirror(config: object) -> dict[str, Any]:
@@ -67,12 +88,15 @@ def require_local_context() -> None:
 def main() -> int:
     if (
         os.environ.get("GITHUB_ACTIONS") != "true"
-        or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted"
+        or not disposable_runner()
         or os.environ.get("RUNNER_OS") != "Linux"
         or os.environ.get("DOCKER_HOST")
         or os.environ.get("DOCKER_CONTEXT")
     ):
-        print("Requires a GitHub-hosted Linux runner with its local Docker daemon", file=sys.stderr)
+        print(
+            "Requires a GitHub-hosted Linux runner with its local Docker daemon, or a marked disposable CI guest",
+            file=sys.stderr,
+        )
         return 1
     try:
         require_local_context()

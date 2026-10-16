@@ -1,0 +1,246 @@
+from __future__ import annotations
+
+import copy
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+import yaml
+from scripts.ops import nebius_pool_test_plan as planner
+
+ROOT = Path(__file__).resolve().parents[2]
+SHA, BASE = "a" * 40, "b" * 40
+
+
+class Actions:
+    def __init__(self, sha=SHA, base=BASE):
+        self.run = dict(
+            id=10,
+            run_attempt=1,
+            check_suite_id=20,
+            head_sha=sha,
+            event="merge_group",
+            status="completed",
+            conclusion="success",
+            path=".github/workflows/ci.yml",
+            repository={"id": 1281629473},
+            head_repository={"id": 1281629473},
+            head_branch="gh-readonly-queue/dev/pr-1-base",
+            display_title=f"gate=full / head={sha} / base={base} / updated=none",
+        )
+        self.suite = dict(head_sha=sha, app={"id": 15368})
+        self.jobs = [
+            dict(name=f"nebius-pool ({i + 1}-of-20)", status="completed", conclusion="success")
+            for i in range(20)
+        ]
+        self.fail = False
+
+    def read(self, endpoint):
+        if self.fail:
+            raise subprocess.CalledProcessError(1, ["gh", "api"])
+        if endpoint.startswith("actions/workflows/"):
+            return [dict(total_count=1, workflow_runs=[self.run])]
+        if endpoint.startswith("check-suites/"):
+            return [self.suite]
+        assert endpoint == "actions/runs/10/jobs?filter=latest&per_page=100"
+        return [dict(total_count=len(self.jobs), jobs=self.jobs)]
+
+
+@pytest.fixture
+def actions(monkeypatch):
+    monkeypatch.setattr(
+        planner, "candidate_changes", lambda *_: ("scripts/ops/deploy_nebius_platform.py",)
+    )
+    monkeypatch.setattr(
+        planner, "source_changes", lambda *_: ("scripts/ops/deploy_nebius_platform.py",)
+    )
+    return Actions()
+
+
+def pending(value):
+    return {path for row in value["matrix"]["include"] for path in row["paths"]}
+
+
+def test_complete_native_coverage_schedules_no_duplicate_tests(actions):
+    value = planner.plan(ROOT, SHA, read=actions.read)
+    assert value["required"] is False and value["matrix"] == {"include": []}
+    assert value["required_files"] == value["reused_files"] > 0
+    assert value["missing_files"] == 0 and value["reused_runs"] == [10]
+
+
+def test_job_only_retry_retains_other_successful_jobs_on_same_commit(actions):
+    actions.run["run_attempt"] = 2
+    assert planner.plan(ROOT, SHA, read=actions.read)["required"] is False
+
+
+@pytest.mark.parametrize("conclusion", ["failure", "cancelled", "skipped", None])
+def test_only_files_of_unproven_jobs_are_scheduled(actions, conclusion):
+    actions.jobs[0]["conclusion"] = conclusion
+    value = planner.plan(ROOT, SHA, read=actions.read)
+    manifest = planner.load_manifest(ROOT / "config/component-ownership.toml")
+    expected = set(
+        planner.selected_test_paths(
+            manifest,
+            tracked_paths=planner._tracked_paths(ROOT),
+            lane="nebius-pool",
+            repo_root=ROOT,
+            test_scope="nebius",
+            suite="nebius-pool-ops",
+            shard_index=0,
+            shard_count=20,
+        )
+    )
+    assert pending(value) == expected
+    assert value["missing_files"] == len(expected)
+    assert value["reused_files"] + len(expected) == value["required_files"]
+
+
+def test_narrow_ci_coverage_does_not_rerun_covered_siblings(actions, monkeypatch):
+    # This module has no executable test-helper consumers; construct its name
+    # without adding a false fixture reference to the ownership selector.
+    path = "tests/ops/" + "_".join(("test_nebius_pool", "activation_transport")) + ".py"
+    monkeypatch.setattr(planner, "source_changes", lambda *_: (path,))
+    full = planner.plan(ROOT, SHA, read=lambda _: [])
+    value = planner.plan(ROOT, SHA, read=actions.read)
+    assert value["reused_files"] == 1
+    assert pending(value) == pending(full) - {path}
+    assert all(path not in row["paths"] for row in value["matrix"]["include"])
+    # The rest of its original shard still runs: reuse is by complete module,
+    # not a broad passing shard name or a subset of individual test cases.
+    assert any(row["shard_index"] == 1 for row in value["matrix"]["include"])
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("head_sha", "c" * 40),
+        ("event", "pull_request"),
+        ("conclusion", "failure"),
+        ("status", "in_progress"),
+        ("path", ".github/workflows/images.yml"),
+        ("repository", {"id": 1}),
+        ("head_repository", {"id": 1}),
+        ("head_branch", "gh-readonly-queue/main/pr-1-base"),
+        ("display_title", f"gate=filtered / head={SHA} / base={BASE} / "),
+    ],
+)
+def test_unqualified_run_is_missing_coverage(actions, key, value):
+    actions.run[key] = value
+    result = planner.plan(ROOT, SHA, read=actions.read)
+    assert result["reused_files"] == 0
+    assert len(pending(result)) == result["required_files"]
+
+
+@pytest.mark.parametrize(
+    "suite", [dict(head_sha=SHA, app={"id": 1}), dict(head_sha=BASE, app={"id": 15368})]
+)
+def test_check_suite_must_be_native_actions_and_exact_head(actions, suite):
+    actions.suite = suite
+    assert planner.plan(ROOT, SHA, read=actions.read)["reused_files"] == 0
+
+
+def test_unavailable_api_retains_tests(actions):
+    actions.fail = True
+    value = planner.plan(ROOT, SHA, read=actions.read)
+    assert value["required"] and value["evidence_unavailable"]
+    assert len(pending(value)) == value["required_files"]
+
+
+def test_partial_job_listing_retains_proven_files_and_fills_only_missing(actions):
+    good = actions.read
+
+    def incomplete(endpoint):
+        pages = copy.deepcopy(good(endpoint))
+        if "/jobs?" in endpoint:
+            pages[0]["jobs"] = pages[0]["jobs"][1:]
+        return pages
+
+    value = planner.plan(ROOT, SHA, read=incomplete)
+    assert 0 < value["reused_files"] < value["required_files"]
+    assert [row["shard_index"] for row in value["matrix"]["include"]] == [0]
+
+
+def test_cli_uses_read_only_actions_and_emits_skip_for_real_fixed_checkout(tmp_path):
+    head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    base = subprocess.check_output(["git", "rev-parse", "HEAD^"], cwd=ROOT, text=True).strip()
+    actions = Actions(head, base)
+    fixture = tmp_path / "actions.json"
+    fixture.write_text(json.dumps(dict(run=actions.run, suite=actions.suite, jobs=actions.jobs)))
+    shim = tmp_path / "gh"
+    shim.write_text("""#!/usr/bin/env python3
+import json,os,sys
+d=json.load(open(os.environ['ACTIONS_FIXTURE']));p=sys.argv[-1]
+assert sys.argv[1:5]==['api','--paginate','--slurp',p]
+assert p.startswith('repos/ca-mrc/loom/')
+if '/workflows/' in p: out=[dict(total_count=1,workflow_runs=[d['run']])]
+elif '/check-suites/' in p: out=[d['suite']]
+else: out=[dict(total_count=len(d['jobs']),jobs=d['jobs'])]
+print(json.dumps(out))
+""")
+    shim.chmod(0o700)
+    output = tmp_path / "github-output"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/ops/nebius_pool_test_plan.py",
+            "--candidate",
+            head,
+            "--github-output",
+            str(output),
+        ],
+        cwd=ROOT,
+        env={
+            **os.environ,
+            "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+            "ACTIONS_FIXTURE": str(fixture),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["missing_files"] == 0
+    assert "required=false\n" in output.read_text()
+
+
+def test_publication_shell_executes_only_missing_modules(actions, monkeypatch, tmp_path):
+    path = "tests/ops/" + "_".join(("test_nebius_pool", "activation_transport")) + ".py"
+    monkeypatch.setattr(planner, "source_changes", lambda *_: (path,))
+    value = planner.plan(ROOT, SHA, read=actions.read)
+    row = next(item for item in value["matrix"]["include"] if item["shard_index"] == 1)
+    job = yaml.safe_load((ROOT / ".github/workflows/nebius-candidate.yml").read_text())["jobs"][
+        "pool-ops-tests"
+    ]
+    select = next(step for step in job["steps"] if step.get("id") == "manifest")
+    execute = next(
+        step for step in job["steps"] if step.get("name") == "Pytest — pool operator shard"
+    )
+    output, recorded = tmp_path / "github-output", tmp_path / "pytest-argv.json"
+    uv = tmp_path / "uv"
+    uv.write_text("""#!/usr/bin/env python3
+import json,os,sys
+if sys.argv[1]=='run':
+ json.dump(sys.argv[2:],open(os.environ['PYTEST_ARGV'],'w'))
+""")
+    uv.chmod(0o700)
+    env = {
+        **os.environ,
+        "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+        "TEST_PATHS_JSON": json.dumps(row["paths"]),
+        "RUNNER_TEMP": str(tmp_path),
+        "GITHUB_OUTPUT": str(output),
+        "PYTEST_ARGV": str(recorded),
+    }
+    subprocess.run(
+        ["bash", "-c", select["run"]], cwd=ROOT, env=env, check=True, capture_output=True
+    )
+    selected = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    script = execute["run"].replace(
+        "${{ steps.manifest.outputs.paths_file }}", selected["paths_file"]
+    )
+    subprocess.run(["bash", "-c", script], cwd=ROOT, env=env, check=True, capture_output=True)
+    executed = {arg for arg in json.loads(recorded.read_text()) if arg.startswith("tests/")}
+    assert executed == set(row["paths"]) and path not in executed
+    assert "-x" in json.loads(recorded.read_text())

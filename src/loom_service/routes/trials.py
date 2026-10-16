@@ -50,6 +50,7 @@ from loom.execution_diagnosis_store import execution_failure_groups, read_trial_
 from loom.execution_resource_allocation import resource_allocation_summary
 from loom.execution_selection import execution_selection_readback
 from loom.model_switch_store import load_model_switch_plan, plan_snapshot_from_row
+from loom.models.cancellation import CancellationRequest
 from loom.models.types import ModelSpec
 from loom.resource_usage_store import resource_usage_response
 from loom.service_execution_backend import NEBIUS_BACKEND, local_execution_enabled
@@ -1524,6 +1525,7 @@ async def cancel_trial(
     sc: SessionAndCtx,
     trial_id: UUID,
     authorization: Annotated[str | None, Header()] = None,
+    payload: CancellationRequest | None = None,
 ) -> JSONResponse:
     """Same-team check happens BEFORE the forward so we don't burn
     a CP round-trip when the caller is unauthorized."""
@@ -1546,5 +1548,6 @@ async def cancel_trial(
         path=f"/trials/{trial_id}/cancel",
         authorization=authorization,
         cancellation_request=request,
+        json_body=payload.model_dump() if payload else None,
     )
     return propagate(resp)

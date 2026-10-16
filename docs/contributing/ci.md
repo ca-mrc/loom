@@ -7,7 +7,7 @@ boundary while retaining the four protected admission contexts.
 
 ## Workflow inventory
 
-The repository retains eleven workflows. Low run frequency or no recorded runs
+The repository retains twelve workflows. Low run frequency or no recorded runs
 does not make an operator entry point obsolete: promotion, retry, and catalog
 publication run when needed. In particular, `main-promotion-gate` remains the
 required check protecting promotion into `main`. The GitHub-managed Dependency
@@ -17,10 +17,11 @@ Graph entry has no workflow YAML in this repository and is maintained separately
 | --- | --- | --- |
 | Required CI | `ci.yml` | Repository checks on PRs, merge groups, and `main` pushes; full daily regression at 08:23 UTC; manual validation and compatibility checks. |
 | Required CI | `images.yml` | Read-only Nebius AMD64 image builds and scans on PRs, merge groups, and manual dispatch. |
-| Required CI | `cluster-smoke.yml` | Credential-free Kubernetes and pinned-Skopeo disposable TLS-registry contract checks on PRs, merge groups, manual dispatch, and selected cluster-path pushes to `dev`. |
+| Required CI | `cluster-smoke.yml` | Credential-free Kubernetes and pinned-Skopeo disposable TLS-registry contracts on PRs, merge groups and manual dispatch. The merged SHA does not repeat on a dev push. |
 | Required CI | `staging-smoke.yml` | Credential-free Compose system checks on PRs, merge groups, and manual dispatch. |
 | Contributor compatibility | `macos-locked-environment.yml` | macOS ARM64 locked workspace installation, daily at 09:17 UTC or manually. |
-| CI operations | `ci-retry.yml` | Manual bounded retry of a failed/cancelled required-source run, with root-cause classification and evidence. |
+| CI operations | `ci-retry.yml` | Manual bounded, classified retry by default; an explicit read-only capacity branch supplies disposable single-job hosted workers. |
+| Maintenance | `nebius-image-retention.yml` | Scheduled/manual bounded image maintenance with separate concurrency and idle protection. |
 | Production promotion | `release-promotion-gate.yml` | Manual validation of release evidence for an exact candidate SHA and image. |
 | Production promotion | `main-promotion-gate.yml` | Manual verification that the open `dev` to `main` PR, current candidate SHA, and successful release evidence agree. |
 | Nebius publication | `nebius-candidate.yml` | Automatic `dev` push publication or manual platform/Harbor runtime publication, controlled by `NEBIUS_RELEASE_ENABLED`. |
@@ -32,6 +33,11 @@ group runs; manual validation reports separate `*-manual` contexts. Their
 changed-path planner controls which expensive jobs run. Candidate publication,
 live rollout, and release promotion each retain their own authorization and
 evidence checks.
+
+The four development validation workflows can share a native execution queue
+across isolated OLDLAB guests and disposable GitHub VMs. See
+[runner supply and shared-host limits](ci-unified-runners.md); this execution
+placement is independent of affected-test selection and protected admission.
 
 The same protected rollout concurrency also serializes manager installation,
 one-time upgrade, retained-operation recovery and
@@ -149,9 +155,10 @@ measurement; the removed instrumentation and artifact work is deterministic.
 
 ## Test-only changes
 
-An edit consisting only of independent Python test modules runs those files in
-their owning lanes. Imports, executable references and ambiguous references to an
-edited test module retain its consumer coverage. Exact path literals in the
+An edit consisting only of Python test modules runs those files and their known
+transitive test-module consumers in their owning lanes. Imports and string
+references retain consumer coverage; runtime, shared-helper and unknown consumers
+retain the complete lane. Exact path literals in the
 audited CI metadata tests do not make a test a shared fixture. Shared or deleted
 test inputs select their possible consumer jobs as well as retaining all files
 inside those jobs, including when mixed with source changes. Runtime,
@@ -160,23 +167,77 @@ unless a suite explicitly declares an audited unaffected component.
 CI selector labels and manual runs request full regression within the active scope; ordinary labels such
 as `bug` do not change test selection. Sharding happens before filtering,
 so ownership and paired-fixture ordering remain stable. The planner emits only
-nonempty root/integration/Docker/cluster shards before runners are allocated. Each
+nonempty root/pool/integration/Docker/cluster shards before runners are allocated. Each
 runner writes its selected-path manifest before dependency or fixture setup;
 selector errors fail the job. Empty selections do not invoke pytest.
 
+## Component selection across CI
+
+The October 15 audit covered all 12 workflows and 49 job definitions, including
+the seven scheduled/manual release, maintenance and retry entry points outside
+the four source workflows and candidate publication. The GitHub-managed
+Dependency Graph has no repository YAML.
+
+| Changed inputs | Selected work |
+| --- | --- |
+| Documentation | Planning and the four stable gate reports; no image build for README-only metadata. |
+| Python unit/integration/browser test modules | Owning validation and transitive test consumers; no product-image rebuild. Declared runtime payloads still own their conformance images. |
+| Archive/lease/Trial recovery CLI | Root and integration lifecycle/archive/idle regressions; no unrelated pool transitions, Go, Terraform or image wave. |
+| Component-local pool operator | Owning pool consumers; shared helpers, generators, dependencies and selection changes retain full regression. |
+| API-only change | Backend regressions, actual Docker COPY consumers and generated API verification. Unchanged frontend inputs do not repeat Vitest/build/browser work after the schema check passes. |
+| Frontend/runtime dependency | Existing TypeScript, global coverage, production build, browser and relevant image checks. |
+| Go command | Its package with vet/race tests; guest-channel changes include both importing commands. Shared module or cross-language contracts retain all Go packages. |
+| Terraform module | Its mock tests and consuming stack/platform validation. Shared/provider/unknown inputs retain every target. |
+| Unknown or shared authority | Complete applicable regression, with a full file-selection hint. |
+
+All selected source results still feed the same four app-bound required gates.
+Nightly/manual and explicit full requests preserve stronger coverage. Global
+Python type checks, frontend coverage populations and broad Docker COPY inputs
+are real dependencies; ownership globs cannot make those inputs disappear.
+Selection failures propagate before pytest or toolchain execution. The audit's
+native CI sample took 41m06s (109.47 runner-minutes, longest job 12m20s), with a
+30m08s ready-to-start delay for one root shard. These are baseline measurements,
+not a claimed post-change hosted speedup.
+
 ## Pool operator tests run before deployment
 
-The `nebius-pool-ops` suite (`tests/ops/test_nebius*pool*.py`) takes about 450 of
-the ~500 tests-root runner-minutes. A PR or merge group runs it only when a change
+The `nebius-pool-ops` suite (`tests/ops/test_nebius*pool*.py`) took about 450 of
+the ~500 tests-root runner-minutes. It runs in its own `nebius-pool` lane with 20
+shards sized for its 15-30 minute lifecycle modules, so `tests-root` needs only 4
+shards (~7 minutes of pytest each). A PR or merge group runs it only when a change
 touches its `affected_paths` (operator scripts, Kubernetes and Nebius deploy
 inputs, CI authority files, dependencies), its own tests, or a test helper they
 import. Selection is made once for the whole lane and then sharded, so planned
 shards and job manifests always run the same set. Other changes skip it before
-merge. `nebius-candidate.yml` runs the whole active suite (shared-pool
-simulations stay skipped, below) on every platform candidate from `dev`, and
-publishes nothing unless it passes, so a regression from a shared module is
-caught before deployment. Scheduled and manual full runs still include it. A
-`ci:*` selector label also runs it on a PR.
+merge. Component-local pool scripts use `component_sources` to follow their
+operator and test-helper consumers. Common operator mechanisms, generators,
+dependencies and selection authority retain the full suite. The three standalone
+archive/terminal-recovery CLIs use their dedicated lifecycle, archive and idle
+regressions without the legacy pool transition suite.
+Every platform candidate selects affected modules against its immutable first
+parent; an unavailable boundary retains the whole suite. Shared-pool simulations
+stay skipped, below.
+`nebius-candidate.yml` reuses successful native `CI` pool jobs on that exact
+commit, with GitHub Actions app 15368 and the same manifest, scope and marker
+selection. The planner reconstructs the native group's changed-path selection;
+a passing narrowed shard covers only its complete selected test modules.
+Only missing modules run before publication, grouped by the existing shard
+policy; covered siblings are omitted and empty jobs are not allocated. Wrong
+heads/workflows and failed or missing jobs cannot supply coverage. A partial job
+listing retains proven successful modules and schedules the unseen modules;
+without usable evidence every required affected module runs.
+There is no cross-commit reuse or per-test-case cache. This is test scheduling,
+not an additional branch-admission gate. Image building, scanning and artifact
+qualification remain required, as do rollout idle protection, backup and rollback.
+Scheduled and manual full runs still include the pool suite. Selector labels
+retain full file selection in the validation lanes they request.
+
+The October 15 rebalance moves three complete modules off measured 26-30 minute
+shards onto 35-58 second shards (candidate run 38793279887). The participant
+delivery module keeps its existing lifecycle-isolation placement. All test paths,
+legacy/shared-pool selection and time budgets stay unchanged. The slow-25 logs
+give lower bounds for moved costs, not a measured speedup; compare subsequent
+hosted execution and queue time before claiming an end-to-end improvement.
 
 The dev-only candidate test job saves uv caches under the same checksum-pinned,
 locked-workspace policy as candidate publication. PR and merge-group jobs retain

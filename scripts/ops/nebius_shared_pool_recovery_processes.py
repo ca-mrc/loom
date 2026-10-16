@@ -8,6 +8,7 @@ does not replace the parent's independent SQL, writer and provider barriers.
 from __future__ import annotations
 
 import copy
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -37,7 +38,8 @@ class SharedPoolRecoveryProcessObservation:
 
 
 def observe_shared_pool_recovery_processes(*, bindings: SharedPoolGuardBindings, state_dir: Path,
-        kubeconfig: Path, executable: Path) -> SharedPoolRecoveryProcessObservation:
+        kubeconfig: Path, executable: Path,
+        recheck_application_scopes: Callable[[], None] | None = None) -> SharedPoolRecoveryProcessObservation:
     """Observe only fixed source roots under the current recovery's exact receipts.
 
 The census owns the full-cluster writer inventory, including retired legacy
@@ -136,6 +138,8 @@ and installed dev roots plus gateway; no backup or database root is stopped.
                 if not intent:
                     raise ValueError
                 pending.append(key)
+        if recheck_application_scopes is not None:
+            recheck_application_scopes()
         if {key: identity(row) for key, row in roots().items()} != {key: identity(row) for key, row in before.items()}:
             raise ValueError
         after = {path: guards._run(['get', '--raw', path + '?limit=1000']) for path in collections}

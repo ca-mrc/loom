@@ -1,0 +1,18 @@
+[Unit]
+Description=Supply single-job GitHub VM workers for the native Loom CI queue
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/lib/loom-ci-runner-expansion/ci_runner_supply.py --config /etc/loom-ci-runner-pool/hosted-supply.json --token-file /etc/loom-ci-runner-pool/github-token --state-root /var/lib/loom-ci-runner-supply --execute
+TimeoutStartSec=180
+UMask=0077
+Nice=10
+CPUWeight=10
+MemoryMax=256M
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/loom-ci-runner-supply

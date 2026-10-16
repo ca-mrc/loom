@@ -168,6 +168,7 @@ async def test_trial_appends_llm_calls_before_finalize(tmp_path: Path) -> None:
         object_store=store,
         local_trajectory_path=local_path,
         llm_calls_fetcher=fetcher,
+        verifier_driver_factory=FakeDriver,
     )
 
     trial = Trial(ctx=ctx)
@@ -302,6 +303,7 @@ async def test_trial_does_not_duplicate_litellm_agent_llm_calls(
         object_store=FakeObjectStore(),
         local_trajectory_path=local_path,
         llm_calls_fetcher=fetcher,
+        verifier_driver_factory=FakeDriver,
     )
 
     result = await Trial(ctx=ctx).run()
@@ -362,6 +364,7 @@ async def test_trial_skips_fetcher_when_none(tmp_path: Path) -> None:
         object_store=FakeObjectStore(),
         local_trajectory_path=local_path,
         # No llm_calls_fetcher.
+        verifier_driver_factory=FakeDriver,
     )
 
     trial = Trial(ctx=ctx)

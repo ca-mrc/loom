@@ -19,19 +19,16 @@ from botocore.exceptions import ClientError
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from loom.task_image_build_plan import MAX_TASK_IMAGE_BUILD_BUNDLE_BYTES
+from loom.trajectory.immutable_object import (
+    ImmutableObjectVersion,
+    read_verified_object_version,
+    validate_object_version_id,
+)
 from loom.trajectory.storage import ObjectStore, ObjectWriteResult
 
 
 def _version(value: object) -> str:
-    if (
-        type(value) is not str
-        or not 1 <= len(value) <= 1024
-        or value == "null"
-        or value != value.strip()
-        or any(not 33 <= ord(char) <= 126 for char in value)
-    ):
-        raise ValueError("source requires an exact immutable object version")
-    return value
+    return validate_object_version_id(value)
 
 
 class TaskBundleObjectIntentV1(BaseModel):
@@ -202,24 +199,20 @@ class S3TaskBundleVersionInventory:
         if intent.size_bytes > remaining_bytes:
             raise ValueError("source inventory read budget exceeded")
         try:
-            response = self._client.get_object(**params)
+            read_verified_object_version(
+                self._client,
+                ImmutableObjectVersion(
+                    bucket=intent.bucket, object_key=intent.object_key,
+                    version_id=version, content_sha256=intent.content_sha256,
+                    size_bytes=intent.size_bytes,
+                ),
+                max_bytes=remaining_bytes,
+                expected_metadata=intent.metadata,
+            )
         except ClientError as error:
             if _absent(error):
                 return None
             raise
-        body = response["Body"]
-        try:
-            check(response)
-            digest, count = hashlib.sha256(), 0
-            while chunk := body.read(min(1024 * 1024, intent.size_bytes - count + 1)):
-                count += len(chunk)
-                if count > intent.size_bytes:
-                    raise ValueError("source version byte size drifted")
-                digest.update(chunk)
-            if count != intent.size_bytes or digest.hexdigest() != intent.content_sha256:
-                raise ValueError("source version bytes drifted")
-        finally:
-            body.close()
         return ObjectWriteResult(uri=intent.uri, version_id=version)
 
     def scan_batch(

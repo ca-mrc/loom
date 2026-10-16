@@ -59,7 +59,7 @@ class ResolvedHarness(TypedDict):
 class ResolvedExecutionSelection(TypedDict):
     harness: ResolvedHarness
     network_policy: dict[str, Any] | None
-    verification: Literal["shared", "separate"]
+    verification: Literal["shared", "separate", "skipped"]
     isolation: Literal["container", "guest"]
 
 
@@ -542,7 +542,7 @@ class RequestedExecutionSelection(TypedDict):
     harness: ResolvedHarness | None
     harnesses: NotRequired[list[ResolvedHarness]]
     network_policy: dict[str, Any] | None
-    verification: Literal["shared", "separate"] | None
+    verification: Literal["shared", "separate", "skipped"] | None
     isolation: Literal["auto", "container", "guest"]
 
 

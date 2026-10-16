@@ -16,7 +16,17 @@ from fastapi import FastAPI
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from loom.db.schema import Batch, Task, Team, TeamMembership, Token, Trial, User, UserSession
+from loom.db.schema import (
+    AdminAuditEvent,
+    Batch,
+    Task,
+    Team,
+    TeamMembership,
+    Token,
+    Trial,
+    User,
+    UserSession,
+)
 from loom_control_plane.routes.trials import router as cp_trials_router
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
@@ -117,6 +127,9 @@ async def cancel_stack(postgres_url: str, request: pytest.FixtureRequest) -> Asy
     finally:
         await cp_client.aclose()
         async with sessions() as session:
+            await session.execute(delete(AdminAuditEvent).where(AdminAuditEvent.target_id.in_(
+                [str(trial_id), str(other_trial_id), str(batch_id), str(other_batch_id)],
+            )))
             await session.execute(delete(Trial).where(Trial.id.in_([trial_id, other_trial_id])))
             await session.execute(delete(Batch).where(Batch.id.in_([batch_id, other_batch_id])))
             await session.execute(delete(Token).where(Token.created_by_user_id == user_id))
@@ -354,3 +367,147 @@ async def test_control_plane_revalidates_cookie_authority(
         trial = await session.get(Trial, trial_id)
         assert trial is not None and trial.state == "queued"
         assert trial.cancellation_requested_at is None
+
+
+@pytest.mark.parametrize("resource", ["trials", "batches"])
+@pytest.mark.parametrize("auth_kind", ["cookie", "secret"])
+@pytest.mark.parametrize("trial_state", ["queued", "running"])
+async def test_admin_cancel_audits_identity_reason_and_replays(cancel_stack, resource, auth_kind, trial_state):
+    from loom.admin_secret import AdminSecretVerifier
+
+    stack = cancel_stack
+    secret = "loom_admin_" + "Z" * 43
+    verifier = AdminSecretVerifier.from_token(secret)
+    stack.service.state.admin_secret_verifier = verifier
+    stack.control_plane.state.admin_secret_verifier = verifier
+    async with stack.sessions() as session:
+        await session.execute(update(Trial).where(Trial.id == stack.trial_id).values(state=trial_state))
+        user = await session.get(User, stack.user_id)
+        user.is_platform_admin = True
+        user_session = (await session.execute(select(UserSession).where(
+            UserSession.user_id == stack.user_id,
+        ))).scalar_one()
+        user_session.current_team_id = None
+        await session.commit()
+        expected_actor = f"user:{user.username}" if auth_kind == "cookie" else "break-glass-operator"
+    headers = {"X-Loom-Admin-Actor": "spoofed" if auth_kind == "cookie" else expected_actor,
+               "X-Request-ID": "cancel-audit-regression"}
+    cookies = {}
+    if auth_kind == "cookie":
+        cookies = {"test_session": stack.session_cookie}
+        headers["X-Test-CSRF"] = stack.csrf
+    else:
+        headers["Authorization"] = f"Bearer {secret}"
+    identifier = stack.trial_id if resource == "trials" else stack.batch_id
+    path = f"/api/v1/{resource}/{identifier}/cancel"
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=stack.service),
+                                 base_url="http://svc", cookies=cookies) as client:
+        for reason in ["operator acceptance", "idempotent replay"]:
+            response = await asyncio.wait_for(client.post(path, headers=headers, json={"reason": reason}), 5)
+            assert response.status_code == 200, response.text
+    async with stack.sessions() as session:
+        events = (await session.execute(select(AdminAuditEvent).where(
+            AdminAuditEvent.target_id == str(identifier),
+            AdminAuditEvent.action == ("trial.cancel" if resource == "trials" else "batch.cancel"),
+        ))).scalars().all()
+        assert len(events) == 2
+        assert {event.actor for event in events} == {expected_actor}
+        assert {event.event_metadata["reason"] for event in events} == {"operator acceptance", "idempotent replay"}
+        assert {event.request_id for event in events} == {"cancel-audit-regression"}
+        assert all(secret not in json.dumps(event.event_metadata) for event in events)
+        trial = await session.get(Trial, stack.trial_id)
+        assert trial.state == ("cancelled" if trial_state == "queued" else "running")
+        assert trial.cancellation_requested_at is not None
+        assert (trial.cancellation_observed_at is not None) == (trial_state == "queued")
+        if resource == "batches":
+            children = (await session.execute(select(AdminAuditEvent).where(
+                AdminAuditEvent.target_id == str(stack.trial_id),
+            ))).scalars().all()
+            assert len(children) == (1 if trial_state == "queued" else 2)
+            assert {event.actor for event in children} == {expected_actor}
+            assert children[0].event_metadata["reason"] in {"operator acceptance", "idempotent replay"}
+        assert (await session.get(Trial, stack.other_trial_id)).state == "queued"
+
+
+@pytest.mark.parametrize("resource", ["trials", "batches"])
+@pytest.mark.parametrize("failure", ["missing-actor", "long-actor", "long-reason", "audit-write"])
+async def test_admin_cancel_rejects_invalid_context_and_rolls_back(cancel_stack, resource, failure, monkeypatch):
+    from loom.admin_secret import AdminSecretVerifier
+
+    stack = cancel_stack
+    secret = "loom_admin_" + "Z" * 43
+    stack.service.state.admin_secret_verifier = AdminSecretVerifier.from_token(secret)
+    stack.control_plane.state.admin_secret_verifier = AdminSecretVerifier.from_token(secret)
+    headers = {"Authorization": f"Bearer {secret}"}
+    if failure != "missing-actor":
+        headers["X-Loom-Admin-Actor"] = "x" * 129 if failure == "long-actor" else "operator"
+    if failure == "audit-write":
+        async def fail_audit(*args, **kwargs):
+            raise RuntimeError("audit unavailable")
+        monkeypatch.setattr("loom_control_plane.trial_cancellation.write_admin_audit_event", fail_audit)
+    identifier = stack.trial_id if resource == "trials" else stack.batch_id
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=stack.service, raise_app_exceptions=False),
+                                 base_url="http://svc") as client:
+        response = await client.post(f"/api/v1/{resource}/{identifier}/cancel", headers=headers,
+                                    json={"reason": "x" * 1025 if failure == "long-reason" else "acceptance"})
+    assert response.status_code == (500 if failure == "audit-write" else 422 if failure == "long-reason" else 400)
+    async with stack.sessions() as session:
+        trial = await session.get(Trial, stack.trial_id)
+        assert trial.state == "queued"
+        assert trial.cancellation_requested_at is None
+        assert (await session.get(Batch, stack.batch_id)).state != "cancelled"
+        assert not (await session.execute(select(AdminAuditEvent).where(
+            AdminAuditEvent.target_id.in_([str(stack.trial_id), str(stack.batch_id)]),
+        ))).scalars().all()
+
+
+@pytest.mark.parametrize("resource", ["trials", "batches"])
+async def test_cancel_reason_is_redacted_before_audit(cancel_stack, resource):
+    from loom.admin_secret import AdminSecretVerifier
+
+    stack = cancel_stack
+    secret = "loom_admin_" + "Z" * 43
+    stack.service.state.admin_secret_verifier = AdminSecretVerifier.from_token(secret)
+    stack.control_plane.state.admin_secret_verifier = AdminSecretVerifier.from_token(secret)
+    identifier = stack.trial_id if resource == "trials" else stack.batch_id
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=stack.service), base_url="http://svc") as client:
+        response = await client.post(f"/api/v1/{resource}/{identifier}/cancel",
+            headers={"Authorization": f"Bearer {secret}", "X-Loom-Admin-Actor": "operator"},
+            json={"reason": f"revoke credential {secret}"})
+    assert response.status_code == 200, response.text
+    async with stack.sessions() as session:
+        events = (await session.execute(select(AdminAuditEvent).where(
+            AdminAuditEvent.target_id.in_([str(stack.trial_id), str(stack.batch_id)]),
+        ))).scalars().all()
+        assert events
+        assert all(secret not in json.dumps(event.event_metadata) for event in events)
+        assert all("revoke credential" in event.event_metadata["reason"] for event in events)
+
+
+async def test_bodyless_admin_cancel_and_batch_audit_failure(cancel_stack, monkeypatch):
+    from loom.admin_secret import AdminSecretVerifier
+
+    stack = cancel_stack
+    secret = "loom_admin_" + "Z" * 43
+    stack.service.state.admin_secret_verifier = AdminSecretVerifier.from_token(secret)
+    stack.control_plane.state.admin_secret_verifier = AdminSecretVerifier.from_token(secret)
+
+    async def fail_batch_audit(*args, **kwargs):
+        raise RuntimeError("batch audit unavailable")
+
+    monkeypatch.setattr("loom_service.routes.batches.write_admin_audit_event", fail_batch_audit)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=stack.service, raise_app_exceptions=False),
+                                 base_url="http://svc") as client:
+        response = await client.post(f"/api/v1/batches/{stack.batch_id}/cancel",
+            headers={"Authorization": f"Bearer {secret}", "X-Loom-Admin-Actor": "operator"})
+    assert response.status_code == 500
+    async with stack.sessions() as session:
+        # Fanout already committed its own cancellation and audit; only Batch rolls back.
+        assert (await session.get(Trial, stack.trial_id)).state == "cancelled"
+        assert (await session.get(Batch, stack.batch_id)).state != "cancelled"
+        events = (await session.execute(select(AdminAuditEvent).where(
+            AdminAuditEvent.target_id.in_([str(stack.trial_id), str(stack.batch_id)]),
+        ))).scalars().all()
+        assert len(events) == 1
+        assert events[0].action == "trial.cancel"
+        assert events[0].event_metadata["reason"] is None

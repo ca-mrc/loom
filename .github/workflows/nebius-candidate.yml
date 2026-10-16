@@ -29,40 +29,72 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # PRs and merge groups run the pool operator suite only when operator inputs
-  # change (component-ownership.toml: nebius-pool-ops). Every platform candidate
-  # runs the whole suite here, without protected credentials, before publishing.
-  pool-ops-tests:
-    name: pool-ops-tests (${{ matrix.shard_index }})
+  # A successful native CI job on this exact commit already owns its selected
+  # coverage. Reconstruct that selection and run only missing complete modules.
+  # Missing/unreadable evidence retains tests; image qualification stays below.
+  pool-ops-plan:
+    name: Plan missing pool operator tests
     if: >-
       github.repository_id == '1281629473' &&
       github.ref == 'refs/heads/dev' &&
       vars.NEBIUS_RELEASE_ENABLED == 'true' &&
       (inputs.mode || 'platform') == 'platform'
+    # The metadata reader uses the GitHub CLI supplied by the hosted image.
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+    outputs:
+      required: ${{ steps.plan.outputs.required }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ github.sha }}
+          # Native single-entry squash groups compare the candidate to its parent.
+          # An unavailable base leaves coverage missing and runs the tests.
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Reuse exact-commit native CI coverage
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ops/nebius_pool_test_plan.py --candidate "$GITHUB_SHA" --github-output "$GITHUB_OUTPUT"
+
+  pool-ops-tests:
+    name: pool-ops-tests (${{ matrix.shard_index }})
+    needs: [pool-ops-plan]
+    if: needs.pool-ops-plan.outputs.required == 'true'
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-24.04' }}
     timeout-minutes: 40
     strategy:
       fail-fast: false
-      matrix:
-        # The tests-root shard policy; shards without pool tests finish at once.
-        shard_index: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+      matrix: ${{ fromJSON(needs.pool-ops-plan.outputs.matrix) }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Select pool operator tests
+      - name: Select missing pool operator tests
         id: manifest
         shell: bash
         env:
-          SHARD_INDEX: ${{ matrix.shard_index }}
+          TEST_PATHS_JSON: ${{ toJSON(matrix.paths) }}
         run: |
           set -euo pipefail
-          paths_file="${RUNNER_TEMP}/pool-ops-tests.txt"
-          python3 scripts/component_ownership.py test-paths --lane tests-root --test-scope nebius \
-            --suite nebius-pool-ops --shard-index "$SHARD_INDEX" --shard-count 20 > "$paths_file"
-          echo "paths_file=$paths_file" >> "$GITHUB_OUTPUT"
-          echo "selected=$([[ -s "$paths_file" ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          paths = json.loads(os.environ["TEST_PATHS_JSON"])
+          if not paths or not all(isinstance(path, str) and "\n" not in path for path in paths):
+              raise SystemExit("Missing-test matrix must contain complete test paths")
+          paths_file = Path(os.environ["RUNNER_TEMP"]) / "pool-ops-tests.txt"
+          paths_file.write_text("\n".join(paths) + "\n")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as stream:
+              stream.write(f"paths_file={paths_file}\nselected=true\n")
+          PY
       - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         if: steps.manifest.outputs.selected == 'true'
         with:
@@ -81,15 +113,17 @@ jobs:
           uv run --no-sync pytest -m "not legacy_pool" -p no:cov "${test_paths[@]}" -x --durations=25
 
   publish:
-    needs: [pool-ops-tests]
+    needs: [pool-ops-plan, pool-ops-tests]
     if: >-
       !cancelled() &&
       github.repository_id == '1281629473' &&
       github.ref == 'refs/heads/dev' &&
       vars.NEBIUS_RELEASE_ENABLED == 'true' &&
-      (needs.pool-ops-tests.result == 'success' ||
-       (needs.pool-ops-tests.result == 'skipped' && inputs.mode == 'harness-only'))
-    runs-on: ubuntu-24.04
+      ((needs.pool-ops-plan.result == 'success' &&
+        (needs.pool-ops-tests.result == 'success' ||
+         (needs.pool-ops-tests.result == 'skipped' && needs.pool-ops-plan.outputs.required == 'false'))) ||
+       (needs.pool-ops-plan.result == 'skipped' && needs.pool-ops-tests.result == 'skipped' && inputs.mode == 'harness-only'))
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && !inputs.qualify_tb21_images && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-24.04' }}
     environment:
       name: nebius-integration
       deployment: false

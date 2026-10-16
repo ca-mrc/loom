@@ -10,20 +10,34 @@ import pytest
 from sqlalchemy import create_engine, delete, select
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import TaskImageMaterialization, TeamMembership, Token, User
+from loom.db.schema import TaskImageMaterialization, Team, TeamMembership, TeamQuota, Token, User
 
 
 @pytest.fixture(autouse=True)
-def _cleanup_seeded_task_image_materializations(postgres_url: str) -> Iterator[None]:
-    yield
+def _cleanup_seeded_rows(postgres_url: str) -> Iterator[None]:
+    # Each seed run adds a team with a team token. Later modules on the same
+    # integration shard delete every team, which that token would block.
     engine = create_engine(postgres_url)
     session_factory = sessionmaker(engine)
+    seeded_team = Team.name.like("e2e-%")
+    with session_factory() as session:
+        existing = set(session.scalars(select(Team.id).where(seeded_team)))
+    yield
     with session_factory() as session:
         session.execute(
             delete(TaskImageMaterialization).where(
                 TaskImageMaterialization.task_id == "hello-world"
             )
         )
+        teams = [team for team in session.scalars(select(Team.id).where(seeded_team)) if team not in existing]
+        users = list(session.scalars(
+            select(TeamMembership.user_id).where(TeamMembership.team_id.in_(teams))
+        ))
+        session.execute(delete(Token).where(Token.team_id.in_(teams)))
+        session.execute(delete(TeamMembership).where(TeamMembership.team_id.in_(teams)))
+        session.execute(delete(TeamQuota).where(TeamQuota.team_id.in_(teams)))
+        session.execute(delete(Team).where(Team.id.in_(teams)))
+        session.execute(delete(User).where(User.id.in_(users)))
         session.commit()
     engine.dispose()
 

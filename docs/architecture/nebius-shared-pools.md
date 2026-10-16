@@ -884,7 +884,11 @@ authority, process readiness or an operational shared pool.
 
 The initial writer census reads all RBAC and built-in workload collections at one
 API-server revision, including terminal Pods. Its retained roots include current
-staging, completed dev, and the retired old manager/gateway. It rejects changed
+staging, the still-live staging manager PostgreSQL StatefulSet and Service from
+the exact hash-bound original `database/stage.json` journal, completed dev, and
+the retired old manager/gateway. That database exception is identity-bound to
+the completed predecessor; a name, namespace or PostgreSQL account alone never
+qualifies a root. It rejects changed
 root identities/templates, detached processes using their ServiceAccounts,
 undeclared schedules in worker namespaces (even suspended schedules), and
 additional named, group, or cross-namespace writer grants. Old gateway Roles
@@ -899,6 +903,21 @@ Native controllers and operator groups require the existing explicit, UID-bound
 platform trust. This does not prove external-credential/provider exclusivity,
 effective post-fencing permissions or process drain; it cannot be replayed
 unchanged after an intentional handoff transition.
+
+Personal application lifecycle RoleBindings are a separate qualification class,
+not generic readers. Their exact manager subject and fixed resource role must
+belong to a completed installation. The census verifies the retained role and
+fail-closed admission policies against their renderer, and reads each personal
+namespace at the same API-server revision. Installation, data, application and
+incarnation identities, restricted Pod Security and a non-deleting namespace
+must match; shared, management, worker, build and ingress namespaces are excluded.
+Cluster-wide bindings receive no personal exception. Repeated handoff and normal
+participant-release checks also compare namespace and admission-policy identities,
+so replacing a namespace with the same labels cannot preserve stale qualification.
+The shared process barriers recheck captured personal namespace/admission objects
+before their closing process/backend identities; they do not append a full
+inventory after those final database checks.
+No personal grant means no additional scope inventory reads.
 
 The shared preflight reuses the runtime's authenticated provider read with the
 installed collector identity, bracketed by current runtime/material and retained

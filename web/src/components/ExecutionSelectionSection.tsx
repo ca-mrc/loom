@@ -12,7 +12,12 @@ function harnessLabel(requested: Requested): string {
 }
 
 function effectiveLabel(item: Effective): string {
-  const grading = item.fresh_sandbox_grading ? "graded in a fresh sandbox" : "graded in the attempt";
+  const grading =
+    item.verification === "skipped"
+      ? "verifier skipped"
+      : item.fresh_sandbox_grading
+        ? "graded in a fresh sandbox"
+        : "graded in the attempt";
   const count = item.trial_count != null ? ` · ${item.trial_count} trial${item.trial_count === 1 ? "" : "s"}` : "";
   return `${executionClassLabel(item.execution_class_id)} · ${item.verification} (${grading}) · ${item.execution_class_id}${count}`;
 }

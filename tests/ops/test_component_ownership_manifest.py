@@ -1397,7 +1397,7 @@ def test_behavior_frontend_sources_are_excluded_from_coverage_gate() -> None:
     assert '"src/components/artifacts/useBoundedJson.ts"' in vite_config
 
 
-@pytest.mark.parametrize("lane", ["tests-root", "integration", "integration-docker", "cluster-smoke"])
+@pytest.mark.parametrize("lane", ["tests-root", "nebius-pool", "integration", "integration-docker", "cluster-smoke"])
 def test_manifest_lane_shards_are_disjoint_and_complete(lane: str) -> None:
     manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
     policy = manifest.test_shard_policy(lane)
@@ -1426,13 +1426,13 @@ def test_manifest_lane_shards_are_disjoint_and_complete(lane: str) -> None:
     assert set().union(*shards) == set(paths)
 
 
-def test_root_shards_distribute_shared_handoff_phases_and_observation() -> None:
+def test_pool_shards_distribute_shared_handoff_phases_and_observation() -> None:
     """Run 38159584210 exceeded 40m with the new lifecycle suites collocated."""
     manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
-    policy = manifest.test_shard_policy("tests-root")
+    policy = manifest.test_shard_policy("nebius-pool")
     assert policy is not None
     paths = component_ownership.test_paths_for_lane(
-        manifest, tracked_paths=component_ownership._tracked_paths(REPO_ROOT), lane="tests-root",
+        manifest, tracked_paths=component_ownership._tracked_paths(REPO_ROOT), lane="nebius-pool",
     )
     placement = {
         path: index
@@ -1497,10 +1497,10 @@ def test_root_shards_distribute_shared_handoff_phases_and_observation() -> None:
 def test_exhaustive_shared_lifecycle_scenarios_have_independent_shards() -> None:
     """Run 38176447484 cannot fit all recovery/process variants in two jobs."""
     manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
-    policy = manifest.test_shard_policy("tests-root")
+    policy = manifest.test_shard_policy("nebius-pool")
     assert policy is not None
     paths = component_ownership.test_paths_for_lane(
-        manifest, tracked_paths=component_ownership._tracked_paths(REPO_ROOT), lane="tests-root",
+        manifest, tracked_paths=component_ownership._tracked_paths(REPO_ROOT), lane="nebius-pool",
     )
     placement = {
         path: index

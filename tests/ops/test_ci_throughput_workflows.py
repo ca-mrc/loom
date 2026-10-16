@@ -153,11 +153,14 @@ def test_hosted_workflows_do_not_depend_on_a_private_uv_mirror() -> None:
             assert "manifest-file" not in step["with"]
 
 
-def test_planners_gates_publish_and_aggregation_stay_github_hosted() -> None:
+def test_control_jobs_keep_hosted_fallback_and_use_the_same_optional_queue() -> None:
     for workflow_path, job_ids in GITHUB_HOSTED_CONTROL_JOBS.items():
         jobs = _workflow(workflow_path)["jobs"]
         for job_id in job_ids:
-            assert jobs[job_id]["runs-on"] == "ubuntu-latest"
+            placement = jobs[job_id]["runs-on"]
+            assert placement.endswith("|| 'ubuntu-latest' }}")
+            assert "LOOM_CI_UNIFIED_RUNNERS" in placement
+            assert "loom-ci-exec" in placement
 
 
 def test_coverage_artifacts_map_hosted_checkout_roots() -> None:
@@ -168,6 +171,7 @@ def test_coverage_artifacts_map_hosted_checkout_roots() -> None:
         assert paths[path_group] == [
             source_root,
             f"/home/runner/work/*/*/{source_root}",
+            f"*/_work/*/*/{source_root}",
         ]
 
 
@@ -452,20 +456,6 @@ def test_frontend_security_policy_change_selects_only_web_image(tmp_path: Path) 
     ]
 
 
-def test_manifest_owned_markdown_build_input_requires_images(tmp_path: Path) -> None:
-    result, output = _run_image_matrix_plan(
-        tmp_path,
-        required="false",
-        unowned_runtime="false",
-        changed_paths=("README.md",),
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert _github_output_value(output, "required") == "true"
-    matrix = json.loads(_github_output_value(output, "images"))
-    assert {entry["image"] for entry in matrix} == {'service', 'execution-runtime', 'control-plane', 'llm-gateway'}
-
-
 def test_unowned_static_documentation_does_not_require_images(tmp_path: Path) -> None:
     result, output = _run_image_matrix_plan(
         tmp_path,
@@ -575,7 +565,7 @@ def test_candidate_images_use_verified_trivy_binaries_and_complete_scans() -> No
 
     assert trivy_binary["needs"] == ["plan"]
     assert trivy_binary["permissions"] == {"contents": "read"}
-    assert trivy_binary["runs-on"] == "ubuntu-24.04"
+    assert trivy_binary["runs-on"].endswith("|| 'ubuntu-24.04' }}")
     assert "strategy" not in trivy_binary
     install = next(
         step
@@ -857,6 +847,7 @@ REPOSITORY_SELECTED_RESULTS = {
     "LINT_SELECTED": "LINT_RESULT",
     "LOCKED_SELECTED": "LOCKED_RESULT",
     "ROOT_SELECTED": "ROOT_RESULT",
+    "POOL_SELECTED": "POOL_RESULT",
     "PACKAGES_SELECTED": "PACKAGES_RESULT",
     "PAYLOAD_SELECTED": "PAYLOAD_RESULT",
     "IAC_SELECTED": "IAC_RESULT",
@@ -991,7 +982,7 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
     assert "repository-checks" in jobs["repository-checks"]["name"]
     assert set(jobs["repository-checks"]["needs"]) == {
         "workflow-plan", "locked-environments", "lint-and-static", "runtime-payload", "nebius-iac",
-        "tests-root", "tests-packages", "fast-coverage", "go-checks", "integration",
+        "tests-root", "nebius-pool", "tests-packages", "fast-coverage", "go-checks", "integration",
         "integration-docker", "coverage-summary", "web-checks",
     }
     assert "always()" in jobs["repository-checks"]["if"]
@@ -1057,21 +1048,6 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
     assert "npm run test:coverage" in web_script
     assert "npm run build" in web_script
     assert "npm run test:e2e" in web_script
-
-
-def test_nebius_iac_validates_aliased_provider_through_module_tests() -> None:
-    workflow = _workflow(".github/workflows/ci.yml")
-    steps = workflow["jobs"]["nebius-iac"]["steps"]
-    script = next(
-        step["run"]
-        for step in steps
-        if step.get("name") == "Validate pinned Nebius module and stack"
-    )
-
-    module_command = "terraform -chdir=deploy/terraform/nebius/modules/execution-target"
-    assert f"{module_command} test" in script
-    assert f"{module_command} validate" not in script
-    assert "terraform -chdir=deploy/terraform/nebius/stack validate" in script
 
 
 @pytest.mark.parametrize("lane,output", [

@@ -536,7 +536,8 @@ class HTTPSParticipantResourceObserver(ManagementKubernetesTransport):
                         or snapshot.autoscaler_state not in {'ready', 'scaling'}):
                     raise ValueError
                 final = self.observe_writers(bindings=bound, shared_state=shared_state, preparing=preparing)
-                for before, after in ((current.workloads, final.workloads), (current.authority, final.authority)):
+                for before, after in ((current.workloads, final.workloads), (current.authority, final.authority),
+                        (current.application_scopes, final.application_scopes)):
                     if before.keys() != after.keys() or any(not _matches(after[key], row, _uid(row))
                             for key, row in before.items()):
                         raise ValueError
@@ -854,9 +855,11 @@ class HTTPSParticipantResourceObserver(ManagementKubernetesTransport):
                     api.qualify_runtime_telemetry(target, original=prior, expected=row)
                 unchanged()
             final = self.observe_writers(bindings=bound, shared_state=shared_state, preparing=preparing)
-            if (final.workloads.keys() != current.workloads.keys()
-                    or any(not _matches(final.workloads[key], row, _uid(row)) for key, row in current.workloads.items())):
-                raise ValueError
+            for before, after in ((current.workloads, final.workloads), (current.authority, final.authority),
+                    (current.application_scopes, final.application_scopes)):
+                if before.keys() != after.keys() or any(not _matches(after[key], row, _uid(row))
+                        for key, row in before.items()):
+                    raise ValueError
             for key, process in processes.items():
                 ready(final.workloads[key])
                 if identity(api._runtime(owners[key], original=originals[key], expected=final.workloads[key])) != process:
@@ -1030,9 +1033,11 @@ class HTTPSParticipantResourceObserver(ManagementKubernetesTransport):
             process = identity(history._runtime(target, original=original, expected=workload))
             history.qualify_gateway_process(original=original, expected=workload)
             final = self.observe_writers(bindings=bound, shared_state=shared_state, preparing=preparing)
-            if (final.workloads.keys() != current.workloads.keys()
-                    or any(not _matches(final.workloads[name], row, _uid(row)) for name, row in current.workloads.items())):
-                raise ValueError
+            for before, after in ((current.workloads, final.workloads), (current.authority, final.authority),
+                    (current.application_scopes, final.application_scopes)):
+                if before.keys() != after.keys() or any(not _matches(after[key], row, _uid(row))
+                        for key, row in before.items()):
+                    raise ValueError
             ready()
             credential = self._request('GET', secret_path)
             if (credential is None or _gateway_history_target(bound, credential) != original_target
@@ -1201,9 +1206,15 @@ class HTTPSParticipantResourceObserver(ManagementKubernetesTransport):
             self._review_writer_permissions(result)
             # An effective-rule review is not a snapshot lock. Re-run the full
             # census after it so a late writer/grant cannot hide in that gap.
-            result = _observe_shared_writer_options(plan=bound.plan, transport=self,
+            final = _observe_shared_writer_options(plan=bound.plan, transport=self,
                 workload_options=roots, authority_options=authority,
                 historical_jobs={_key(row): row for row in retained.inputs.current if row['kind'] == 'Job'})
+            for before_scope, after_scope in ((result.authority, final.authority),
+                    (result.application_scopes, final.application_scopes)):
+                if (before_scope.keys() != after_scope.keys()
+                        or any(not _matches(after_scope[key], row, _uid(row)) for key, row in before_scope.items())):
+                    raise ValueError
+            result = final
             after = self.observe(preparing=preparing)
             if (bindings != bound or self.retained != retained or after.keys() != current.keys()
                     or any(not _matches(after[key], row, _uid(row)) for key, row in current.items())

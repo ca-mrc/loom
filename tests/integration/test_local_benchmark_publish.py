@@ -809,4 +809,15 @@ async def test_adapter_publication_preserves_catalog_and_execution_contract(
             assert await asyncio.to_thread(dispatch, command) == 1
             assert "immutable TB2.1 physical profile drift" in capsys.readouterr().err
     finally:
-        await engine.dispose()
+        # Keep the published profile out of the shared database; later modules
+        # insert the same TB2.1 profile id.
+        try:
+            async with sessions() as session:
+                await session.execute(delete(TaskImageMaterialization).where(
+                    TaskImageMaterialization.task_id == task_id,
+                ))
+                await session.execute(delete(TaskRow).where(TaskRow.benchmark_id == benchmark_id))
+                await session.execute(delete(Benchmark).where(Benchmark.id == benchmark_id))
+                await session.commit()
+        finally:
+            await engine.dispose()

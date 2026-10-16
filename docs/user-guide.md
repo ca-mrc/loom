@@ -262,11 +262,10 @@ loom eval batch create \
   --n-per-task 1
 
 # Harbor-shaped packs that ship solution/tests/verifier (e.g. strict-pass /
-# path-tracing) should select the TB21 private-path staging policy so the
-# agent cannot read the oracle:
+# path-tracing) withhold those paths for every task-sandbox trial. Shared
+# verification injects them after the agent; separate grades in verifier-sandbox.
 loom eval batch create \
   --purpose trajectory_generation \
-  --workspace-staging-policy tb21 \
   --agent terminus-2 \
   --provider smoke-openai \
   --model gpt-4o-mini \
@@ -382,9 +381,9 @@ loom eval batch delivery-bundle <batch-id> \
 
 `raw-harbor-tb2-v2` fails closed (HTTP 409, `forbidden_path_keystrokes`) if any
 selected trial’s packed agent `tool_calls` keystrokes reference private Harbor
-paths (`/app/solution`, `/app/tests`, `/app/verifier`). Use
-`--workspace-staging-policy tb21` at batch create to prevent that leak at
-runtime.
+paths (`/app/solution`, `/app/tests`, `/app/verifier`). Task-sandbox verification
+already withholds those paths from the agent; shared mode still fails closed if
+the agent plants one of them.
 
 Use `raw-harbor-tb2-v2` only when selected trials contain typed checkpoint
 events and hash-verified native artifacts. Use `raw-harbor-tb2-v1` when the
@@ -577,6 +576,14 @@ submitting. Unset fields keep the task's own value:
   "isolation": "guest"
 }
 ```
+
+`verification` is `shared`, `separate`, or `skipped`. `skipped` is only valid
+with `--purpose trajectory_generation`; the CLI stores it as
+`trial_config.skip_verifier=true` and leaves `verifier_env_mode` unset. There
+is no `--skip-verifier` flag; use `"verification": "skipped"` or
+`--verifier-env-mode skipped`. Delivery export and canonical archive already
+accept a succeeded trial without a numeric reward when that boolean is true.
+Hosted Nebius still rejects skip at admission (`verifier_mode_required`).
 
 ```bash
 loom eval batch create --purpose evaluation \
@@ -1836,10 +1843,10 @@ agent runtime/image provenance independently. Numeric reward `0` is a valid
 scored outcome; missing, malformed, non-finite, or timed-out reward evidence is
 a platform/verifier failure.
 
-Harbor-shaped tasks outside the `terminal-bench-2@tb2.1-r6/` prefix do not get
-that isolation automatically. Select it at batch create with
-`--workspace-staging-policy tb21` so model agents cannot read
-`solution/` / `tests/` / `verifier/` from the sandbox.
+Harbor-shaped tasks outside the `terminal-bench-2@tb2.1-r6/` prefix use the
+same verification-lifecycle withholding: the agent never receives `solution/`,
+`tests/`, `verifier/`, or `upstream-task.toml`. There is no batch switch that
+opens those paths. TB2.1-r6 still requires the canonical provenance policy.
 
 Hosted acceptance must use an explicit audited physical task ID such as
 `terminal-bench-2@tb2.1-r6/<task>`. Follow the

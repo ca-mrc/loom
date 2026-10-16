@@ -51,6 +51,7 @@ from loom.execution_diagnosis_store import execution_failure_groups
 from loom.execution_selection import execution_selection_readback
 from loom.hosted_harness import harnesses_supporting, hosted_harness
 from loom.models.batch import Combination
+from loom.models.cancellation import CancellationRequest
 from loom.models.networking import (
     NetworkPolicy,
     UnsupportedNetworkPolicyOverrideError,
@@ -503,16 +504,19 @@ def _multi_model_episode_ceiling(trial_config: dict[str, Any] | None) -> int | N
 def _reject_invalid_workspace_staging_policy_name(
     trial_config: dict[str, Any],
 ) -> None:
-    """#1263: early reject unknown named staging policies at batch accept."""
-    policy_name = trial_config.get("workspace_staging_policy_name")
-    if policy_name is None:
+    """#2418: the named staging switch is retired. Historical rows may still
+    contain the field; new batch writes must not set it.
+    """
+    if "workspace_staging_policy_name" not in trial_config:
         return
-    if not isinstance(policy_name, str) or policy_name not in {"tb21", "none"}:
-        reject_submission(
-            reason="invalid_input",
-            status_code=400,
-            detail=("trial_config.workspace_staging_policy_name must be 'tb21' or 'none'"),
-        )
+    reject_submission(
+        reason="invalid_input",
+        status_code=400,
+        detail=(
+            "trial_config.workspace_staging_policy_name is retired; "
+            "private-path withholding is verification-lifecycle behavior"
+        ),
+    )
 
 
 def _extract_family_run_override(
@@ -3204,6 +3208,7 @@ async def cancel_batch(
     sc: SessionAndCtx,
     batch_id: UUID,
     authorization: Annotated[str | None, Header()] = None,
+    payload: CancellationRequest | None = None,
 ) -> Any:
     s, ctx = sc
     require_scope(ctx, "submit")
@@ -3218,6 +3223,9 @@ async def cancel_batch(
             detail="batch not found",
         )
     require_team_or_admin(ctx, b.team_id)
+    actor = None
+    if is_admin(ctx):
+        actor = await actor_from_context(s, ctx, request.headers.get("X-Loom-Admin-Actor"))
     now = datetime.now(UTC)
     active_trial_ids = (
         await s.execute(
@@ -3240,6 +3248,7 @@ async def cancel_batch(
             path=f"/trials/{trial_id}/cancel",
             authorization=authorization,
             cancellation_request=request,
+            json_body=payload.model_dump() if payload else None,
         )
         if response.status_code not in {200, 409}:
             return propagate(response)
@@ -3247,5 +3256,12 @@ async def cancel_batch(
     await s.execute(
         update(Batch).where(Batch.id == batch_id).values(state="cancelled", finished_at=now),
     )
+    if actor is not None:
+        await write_admin_audit_event(
+            s, actor=actor, action="batch.cancel", target_type="batch",
+            target_id=str(batch_id), request=request,
+            metadata={"reason": redact_text(payload.reason) if payload and payload.reason else None,
+                      "team_id": str(b.team_id)},
+        )
     await s.commit()
     return {"batch_id": str(batch_id), "state": "cancelled"}

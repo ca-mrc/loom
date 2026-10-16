@@ -14,7 +14,13 @@ from loom.execution_runtime_contract import (
     ExecutionRuntimePlanV1,
     validate_runtime_plan_requirements,
 )
-from loom.execution_selection import execution_selection_readback
+from loom.execution_selection import (
+    ExecutionSelectionV1,
+    apply_verification_selection,
+    execution_selection_readback,
+    requested_verification,
+    resolved_execution_selection,
+)
 from loom.models.networking import PublicWeb
 from loom.models.task import TaskConfig
 from loom.models.trial import TrialConfig
@@ -24,6 +30,7 @@ from loom.service_execution_materialization import (
     compile_service_execution_plan,
     execution_selection_rejections,
 )
+from loom.terminal_result_semantics import explicit_skip_verifier
 from tests.unit.test_service_execution_materialization import _REVISION, _provenance
 from tests.unit.test_service_execution_terminus_plan import _inputs
 
@@ -179,3 +186,30 @@ def test_readback_reports_requested_axes_beside_the_frozen_plan():
         trial.model_dump(mode="json", exclude_defaults=True), _compile(*_inputs()))
     assert ordinary["requested"]["isolation"] == "auto"
     assert ordinary["effective"]["isolation"] == "container"
+
+
+def test_skipped_is_a_verification_axis_and_maps_to_skip_verifier():
+    selected = ExecutionSelectionV1.model_validate({
+        "schema_version": "loom.execution-selection.v1",
+        "verification": "skipped",
+        "network_policy": {"mode": "gateway-only"},
+    })
+    trial_config: dict[str, object] = {}
+    assert apply_verification_selection(
+        trial_config, selected.verification, purpose="trajectory_generation",
+    ) is None
+    assert trial_config == {"skip_verifier": True}
+    assert requested_verification(trial_config) == "skipped"
+    assert explicit_skip_verifier(trial_config) is True
+    assert apply_verification_selection(
+        {}, "skipped", purpose="evaluation",
+    ) == "verification skipped is only allowed with --purpose trajectory_generation."
+
+
+def test_resolved_selection_reports_skipped_without_resolving_shared_or_separate():
+    task, trial, _ = _inputs()
+    skipped = trial.model_copy(update={"skip_verifier": True, "verifier_env_mode": None})
+    assert resolved_execution_selection(task, skipped)["verification"] == "skipped"
+    assert execution_selection_readback(
+        skipped.model_dump(mode="json", exclude_defaults=True), None,
+    )["requested"]["verification"] == "skipped"
