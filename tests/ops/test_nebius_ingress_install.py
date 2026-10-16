@@ -13,7 +13,7 @@ from tests.ops import test_nebius_ingress_cutover as routing
 from tests.ops import test_nebius_ingress_stage as staging
 from tests.ops.test_nebius_ingress_gateway import inputs as inputs
 from tests.ops.test_nebius_ingress_operation import inventory as inventory
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 
 from loom.nebius_environment_contract import FoundationBinding
 

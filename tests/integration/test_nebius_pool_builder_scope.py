@@ -15,8 +15,8 @@ from tests.integration.test_nebius_pool_application_build_admission import (
 )
 from tests.integration.test_nebius_pool_control import action, operate
 from tests.integration.test_nebius_pool_registry import machine, prepare
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_application_image_renderer import build_inputs as build_inputs
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
 @pytest.mark.parametrize("operation", ["prepare", "status", "activate", "cancel"])

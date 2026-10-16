@@ -9,9 +9,9 @@ import httpx
 import pytest
 
 from loom_service.environment_management.provider import ProviderBlockedError, ProviderWaitingError
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_application_render import inputs
 from tests.unit.test_nebius_environment_contract import foundation_from
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
 def scoped_verifier(http, protected_scope):

@@ -110,9 +110,13 @@ def test_shared_recovery_selects_original_publication_not_another_success_for_sa
 
 
 @pytest.mark.timeout(120)
-@pytest.mark.parametrize('recover,file_writes', [(False, False), (False, True), (True, False), (True, True),
-    ('pre-upgrade-backup', True), ('30-migrate.yaml', True), ('50-configure.yaml', True), ('guard-release', True),
-    ('release-before-commit', True), ('completion-prepare', True), ('completion-ack', True)])
+# Failed deploy jobs and completion faults run this same lifecycle from
+# test_nebius_pool_participant_delivery_{job_failures,completion}.py so the
+# complete-roster fault cases stay separate from cross-roster success.
+@pytest.mark.parametrize('staging_attachment_inputs,recover,file_writes', [
+    (0, False, True), (1, False, True),
+    (2, False, False), (2, False, True), (2, True, False), (2, True, True),
+], indirect=['staging_attachment_inputs'])
 def test_retained_shared_release_uses_actual_idle_and_deploy_lifecycle(operation_inputs, connection, tmp_path, monkeypatch, recover, file_writes,
         host_delivery=False):
     """Real pool effects and deployment lifecycle; external I/O/qualification doubled."""

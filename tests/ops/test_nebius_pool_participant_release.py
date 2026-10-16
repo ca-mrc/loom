@@ -21,9 +21,9 @@ from tests.ops.test_nebius_staging_pool_attachment import (
     staging_attachment_inputs as staging_attachment_inputs,
 )
 from tests.support.execution_image_admission import signed_image_admission_bundle
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_management_render import management_inputs as management_inputs
 from tests.unit.test_nebius_management_render import render as render_manager
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 from loom.nebius_platform_render import build_platform
 from loom.nebius_pool_contract import PoolParticipantV1
@@ -403,8 +403,11 @@ def test_refresh_mutation_identity_cannot_be_rotated_to_retry(catalog_inputs, ac
             action=action, observation_id=identity)
 
 
-@pytest.mark.parametrize('retained_writes', [False, True])
-@pytest.mark.parametrize('failure', [None, 'migrate', 'configure', 'actuator', 'https', 'readback'])
+@pytest.mark.parametrize('staging_attachment_inputs,retained_writes,failure', [
+    (0, True, None), (1, True, None),
+    *[(2, writes, fault) for writes in (False, True)
+      for fault in (None, 'migrate', 'configure', 'actuator', 'https', 'readback')],
+], indirect=['staging_attachment_inputs'])
 def test_shared_candidate_uses_full_normal_rollout_without_restoring_local_writers(release_inputs, tmp_path, monkeypatch, failure, retained_writes):
     """Missing schema/config phases or restoring the collector must break this path.
 

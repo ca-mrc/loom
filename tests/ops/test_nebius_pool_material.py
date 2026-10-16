@@ -12,8 +12,8 @@ import httpx
 import pytest
 from scripts.ops.nebius_ingress_stage import _key
 from tests.integration.test_nebius_pool_installation import add_application_builder
-from tests.ops.test_nebius_management_stage import PhaseAPI
 from tests.ops.test_nebius_pool_migration import migration_request
+from tests.support.nebius_phase_api import PhaseAPI as PhaseAPI
 from tests.unit.test_nebius_application_image_renderer import build_inputs as build_inputs
 
 

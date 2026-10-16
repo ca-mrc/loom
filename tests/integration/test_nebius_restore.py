@@ -42,7 +42,7 @@ from loom_service.config import LoomServiceSettings
 from loom_service.password_auth import hash_password
 from tests.support.minio import MINIO_TEST_IMAGE
 from tests.support.minio_images import prepare_test_image
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 
 pytestmark = pytest.mark.docker
 

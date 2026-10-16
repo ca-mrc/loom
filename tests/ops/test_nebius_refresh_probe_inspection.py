@@ -16,6 +16,7 @@ from tests.ops.test_nebius_management_refresh_resources import (
 from tests.ops.test_nebius_management_refresh_resources import (
     resources_request as resources_request,
 )
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_management_refresh_probe import db_url
 from tests.unit.test_nebius_management_render import (
     application_management_inputs as application_management_inputs,
@@ -23,7 +24,6 @@ from tests.unit.test_nebius_management_render import (
 from tests.unit.test_nebius_management_render import (
     management_inputs as management_inputs,
 )
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 from loom.nebius_management_refresh_probe import RefreshProbeSettings
 

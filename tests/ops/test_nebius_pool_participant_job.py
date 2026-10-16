@@ -12,7 +12,6 @@ from uuid import uuid4
 
 import httpx
 import pytest
-from tests.ops.test_nebius_management_stage import PhaseAPI
 from tests.ops.test_nebius_pool_participant_release import (
     catalog_inputs as catalog_inputs,
 )
@@ -28,6 +27,7 @@ from tests.ops.test_nebius_pool_participant_release import (
 from tests.ops.test_nebius_pool_participant_release import (
     staging_attachment_inputs as staging_attachment_inputs,
 )
+from tests.support.nebius_phase_api import PhaseAPI as PhaseAPI
 
 from loom_service.pool_management.capacity import digest
 

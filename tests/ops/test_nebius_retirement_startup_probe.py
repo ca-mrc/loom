@@ -14,11 +14,11 @@ import httpx
 import pytest
 from tests.ops.test_nebius_application_setup import setup_request as setup_request
 from tests.ops.test_nebius_management_retirement import retirement_request as retirement_request
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_management_render import (
     application_management_inputs as application_management_inputs,
 )
 from tests.unit.test_nebius_management_render import management_inputs as management_inputs
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
 @pytest.fixture

@@ -6,9 +6,9 @@ from uuid import uuid4
 
 import pytest
 
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_application_authority import INSTALLATION, authority_for
 from tests.unit.test_nebius_application_render import DATA_ID, inputs
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
 def test_shared_ingress_ands_managed_namespace_and_api_pod_on_exact_ports(platform_inputs):

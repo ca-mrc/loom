@@ -12,10 +12,10 @@ import pytest
 from tests.integration.test_nebius_pool_installation import add_application_builder
 from tests.ops.test_nebius_pool_migration import migration_request
 from tests.support.execution_image_admission import signed_image_admission_bundle
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_application_image_renderer import build_inputs as build_inputs
 from tests.unit.test_nebius_management_render import management_inputs as management_inputs
 from tests.unit.test_nebius_management_render import render as render_manager
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
 def env(document):

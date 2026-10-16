@@ -20,7 +20,7 @@ from tests.integration.test_nebius_environment_isolation import (
 from tests.integration.test_nebius_environment_management import (
     environment_registry as environment_registry,
 )
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 
 
 async def test_full_provider_recovers_bucket_reply_loss_and_readies_owner_without_enabling_execution(

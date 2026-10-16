@@ -17,7 +17,7 @@ from tests.integration.test_nebius_environment_management import (
     environment_registry as environment_registry,
 )
 from tests.integration.test_nebius_environment_retirement import prepare_retirement
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 
 
 @pytest.mark.parametrize("changed", [False, True])

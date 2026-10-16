@@ -13,9 +13,9 @@ import pytest
 import yaml
 
 from tests.integration.test_execution_actuator_k3s import _load_client, _start_k3s
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_application_authority import authority_for
 from tests.unit.test_nebius_application_render import inputs, named
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 pytestmark = pytest.mark.skipif(os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1",
                                 reason="requires explicitly disposable Kubernetes")

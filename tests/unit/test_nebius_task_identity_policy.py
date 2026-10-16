@@ -6,19 +6,19 @@ from pathlib import Path
 import pytest
 
 from loom.nebius_platform_render import NebiusPlatformError, build_platform
-from tests.unit.test_nebius_platform_render import platform_inputs  # noqa: F401
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_identity_profile_cannot_claim_readiness_in_restricted_namespace(platform_inputs):  # noqa: F811
+def test_identity_profile_cannot_claim_readiness_in_restricted_namespace(platform_inputs):
     config, candidate, profile = platform_inputs
     profile["supports_task_identity"] = True
     with pytest.raises(NebiusPlatformError, match=r"identity.*policy"):
         build_platform(config, candidate, profile, {}, repo_root=ROOT)
 
 
-def test_identity_policy_is_target_bound_and_can_prepare_without_enabling_execution(platform_inputs):  # noqa: F811
+def test_identity_policy_is_target_bound_and_can_prepare_without_enabling_execution(platform_inputs):
     config, candidate, profile = platform_inputs
     config["task_identity_policy"] = {
         "mode": "private-root-v1", "target_id": config["target_id"],
@@ -41,7 +41,7 @@ def test_identity_policy_is_target_bound_and_can_prepare_without_enabling_execut
         build_platform(different, candidate, profile, {}, repo_root=ROOT)
 
 
-def test_deployment_requires_exact_policy_artifact_before_namespace_exception(platform_inputs, tmp_path):  # noqa: F811
+def test_deployment_requires_exact_policy_artifact_before_namespace_exception(platform_inputs, tmp_path):
     from scripts.ops.deploy_nebius_platform import DeploymentError, load_render
 
     from loom.nebius_platform_render import write_platform

@@ -20,8 +20,8 @@ from tests.integration.test_nebius_application_schema import migration_access as
 from tests.ops.test_nebius_pool_database_guard import database_guard as database_guard
 from tests.ops.test_nebius_pool_migration_guard import guard_runtime as guard_runtime
 from tests.ops.test_nebius_pool_runtime import runtime_inputs as runtime_inputs
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_management_render import management_inputs as management_inputs
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
 @pytest.fixture

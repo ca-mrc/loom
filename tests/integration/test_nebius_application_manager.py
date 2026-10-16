@@ -20,8 +20,8 @@ from tests.integration.test_nebius_application_ready import ready_context as rea
 from tests.integration.test_nebius_environment_management import (
     environment_registry as environment_registry,
 )
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_application_render import inputs
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
 def manager(registry, platform_inputs, *, plan=None, releases=None, authority=None):

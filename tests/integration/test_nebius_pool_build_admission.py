@@ -23,7 +23,7 @@ from tests.integration.test_nebius_environment_management import (
 from tests.integration.test_nebius_pool_observation_registry import capture_scope
 from tests.integration.test_nebius_pool_registry import prepare, publish_placement, setup
 from tests.integration.test_nebius_pool_registry import sessions as sessions
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_pool_task_image_render import build_inputs
 
 

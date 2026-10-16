@@ -253,7 +253,7 @@ def test_candidate_file_writer_cannot_claim_job_or_admission_bootstrap_authority
 
 def test_candidate_file_writer_stages_new_objects_in_renderer_order(operation_inputs):
     from scripts.ops.nebius_management_stage import _qualified_defaulted
-    from tests.ops.test_nebius_management_stage import PhaseAPI
+    from tests.support.nebius_phase_api import PhaseAPI as PhaseAPI
 
     # Database file has an existing Service and StatefulSet; add a fixed new
     # ConfigMap. Only external API I/O is doubled; use both real journal engines.

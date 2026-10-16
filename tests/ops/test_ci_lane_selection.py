@@ -103,6 +103,9 @@ def test_schema_component_scope_retains_database_and_unknown_inputs(changes, ret
     (("src/loom/config.py",), False),
     (("src/loom_service/app.py", "web/src/main.tsx"), False),
     (("docs/contributing/ci.md",), False),
+    (("scripts/ops/inventory_legacy_structures.py",), False),
+    (("tests/support/nebius_platform.py",), True),
+    (("tests/support/nebius_phase_api.py",), True),
     (("scripts/ops/nebius_shared_pool_api.py",), True),
     (("scripts/ops/deploy_nebius_platform.py",), True),
     (("deploy/k8s/control-plane.yaml",), True),
@@ -113,8 +116,8 @@ def test_schema_component_scope_retains_database_and_unknown_inputs(changes, ret
     ((), True),
 ])
 def test_pool_operator_suite_runs_on_operator_inputs_only(changes, retained):
-    # Pool operator tests are ~90% of tests-root time. Deployment runs them on
-    # every dev head (nebius-candidate.yml); a PR runs them only for its inputs.
+    # Operator inputs and imported fixtures retain their pool consumers. The
+    # candidate reuses exact-commit native coverage instead of repeating it.
     from pathlib import Path
 
     from scripts.component_ownership import load_manifest, select_affected_test_suites

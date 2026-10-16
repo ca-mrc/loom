@@ -13,7 +13,7 @@ from scripts.ops.nebius_ingress_stage import KubectlStageAPI, StageError, stage_
 
 from loom.nebius_shared_ingress import SharedIngressInstallation
 from tests.integration.test_execution_actuator_k3s import _load_client, _start_k3s
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_shared_ingress import ingress_input as ingress_input
 
 pytestmark = pytest.mark.skipif(os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1",

@@ -6,7 +6,7 @@ from uuid import uuid4
 import pytest
 from scripts.ops.nebius_management_material import ManagementBinding
 from tests.integration.test_nebius_pool_installation import installation
-from tests.ops.test_nebius_management_stage import PhaseAPI
+from tests.support.nebius_phase_api import PhaseAPI as PhaseAPI
 
 
 def request(environments=("production", "staging", "development")):

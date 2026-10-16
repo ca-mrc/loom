@@ -12,8 +12,8 @@ import pytest
 from tests.ops.test_nebius_pool_database_guard import database_guard as database_guard
 from tests.ops.test_nebius_pool_gateway_probe import projected_gateway as projected_gateway
 from tests.ops.test_nebius_pool_runtime import runtime_inputs as runtime_inputs
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_management_render import management_inputs as management_inputs
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 from loom.nebius_pool_priority import PoolWorkOriginV1
 

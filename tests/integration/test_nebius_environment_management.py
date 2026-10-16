@@ -14,9 +14,9 @@ from loom.auth import AuthContext
 from loom.db.schema import Team, User
 from loom.nebius_environment_contract import EnvironmentRegistrationV1, new_environment_registration
 from loom.nebius_environment_render import render_environment
+from tests.support.nebius_platform import ROOT
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_environment_contract import foundation_from
-from tests.unit.test_nebius_platform_render import ROOT
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
 @pytest.fixture
