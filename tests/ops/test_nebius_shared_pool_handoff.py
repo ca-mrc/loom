@@ -972,6 +972,13 @@ def test_connected_preactivation_preserves_staging_and_qualifies_actual_closed_s
     manager_ns = retained.registration.binding.namespace
     manager_path = '/apis/apps/v1/namespaces/' + manager_ns + '/deployments/loom-service'
     original_staging = {path: copy.deepcopy(documents[path]) for path in staging_paths}
+    next_source = _advanced_staging_source(args, tmp_path, candidate_sha='f' * 40, image_digest='e' * 64)
+    next_staging = {}
+    for row in next_source['observation']['resources']:
+        prefix = '/api/v1' if row['apiVersion'] == 'v1' else '/apis/' + row['apiVersion']
+        namespace = row['metadata'].get('namespace')
+        path = prefix + ('/namespaces/' + namespace if namespace else '') + '/' + plurals[row['kind']] + '/' + row['metadata']['name']
+        next_staging[path] = copy.deepcopy(row)
     events, state = [], {'registry': 'ready', 'failure': None}
 
     def respond(message):
@@ -1016,14 +1023,19 @@ def test_connected_preactivation_preserves_staging_and_qualifies_actual_closed_s
                 owner[parts[-1]] = item['value']
         if not preview:
             events.append('manager')
-            value['metadata'].update(resourceVersion='503', generation=2)
-            value['status']['observedGeneration'] = 2
+            value['metadata'].update(resourceVersion='503', generation=current['metadata']['generation'] + 1)
+            value['status']['observedGeneration'] = value['metadata']['generation']
             documents[path] = value
             replicas, pods = live_children(value)
             documents['/apis/apps/v1/namespaces/' + manager_ns + '/replicasets'] = replicas
             pod_path = '/api/v1/namespaces/' + manager_ns + '/pods'
             pods['items'] += [row for row in documents[pod_path]['items'] if row['metadata']['name'] == 'loom-postgres-0']
             documents[pod_path] = pods
+            if state.pop('advance_staging', False):
+                # Ordinary staging rollout proceeds independently while the
+                # CLOSED manager update is in flight. The old operation must
+                # finish safely so a new qualified successor can follow it.
+                documents.update(copy.deepcopy(next_staging))
         return httpx.Response(200, json=value)
 
     def execute(argv, **kwargs):
@@ -1077,6 +1089,7 @@ def test_connected_preactivation_preserves_staging_and_qualifies_actual_closed_s
                 assert events == []
             state['failure'] = None
             state['lose_commit'] = True
+            state['advance_staging'] = True
             try:
                 assert parent.run_preactivation_catalog(retained=retained, api=api, repo_root=ROOT)
             except Exception as error:
@@ -1092,7 +1105,8 @@ def test_connected_preactivation_preserves_staging_and_qualifies_actual_closed_s
                     cause = cause.__context__
                 pytest.fail(repr(locations), pytrace=False)
             assert parent.load_completed_preactivation(runtime=runtime, reference=retained.reference, repo_root=ROOT)
-            assert {path: documents[path] for path in staging_paths} == original_staging
+            assert {path: documents[path] for path in staging_paths} == next_staging
+            assert next_staging != original_staging
             assert [event for event in events if event != 'settings'] == ['catalog', 'manager', 'registry']
             assert events.index('settings') < events.index('registry')
             count = len(events)
@@ -1114,6 +1128,26 @@ def test_connected_preactivation_preserves_staging_and_qualifies_actual_closed_s
         assert result['preactivation_id'] == str(retained.reference.operation_id)
         assert result['admission_open'] is False and result['writer_migration_complete'] is False
         assert [event for event in events if event != 'settings'] == ['catalog', 'manager', 'registry']
+        selected = parent.load_completed_preactivation(runtime=runtime, reference=retained.reference, repo_root=ROOT)
+        from scripts.ops.nebius_shared_pool_handoff import prepare_shared_pool_handoff
+
+        with pytest.raises(ValueError):
+            prepare_shared_pool_handoff(runtime=args['runtime'], observation=next_source,
+                legacy=args['legacy'], preactivation=selected, repo_root=ROOT)
+        retained = parent.retain_preactivation_catalog(runtime=runtime, source=next_source,
+            predecessor=selected.retained.reference, operation_id=uuid4(), repo_root=ROOT)
+        refresh = retained.inputs.refresh
+        assert refresh.before == selected.retained.inputs.refresh.after
+        state['registry'] = 'ready'
+        with module.HTTPSPreactivationOperationAPI(retained=retained, repo_root=ROOT,
+                api_server=args['runtime'].database.foundation.inputs.config['kubernetes_api_server'],
+                ssl_context=ssl.create_default_context(cadata=args['runtime'].database.foundation.bootstrap['material']['loom-platform-db']['ca.crt']),
+                token='operator-test') as api:
+            assert parent.run_preactivation_catalog(retained=retained, api=api, repo_root=ROOT)
+        completed = parent.load_completed_preactivation(runtime=runtime, reference=retained.reference, repo_root=ROOT)
+        assert prepare_shared_pool_handoff(runtime=args['runtime'], observation=next_source,
+            legacy=args['legacy'], preactivation=completed, repo_root=ROOT)
+        assert [event for event in events if event != 'settings'] == ['catalog', 'manager', 'registry'] * 2
 
 
 @pytest.mark.parametrize('preparation_id', [None, '335c9f82-6f9a-43de-ab0c-a312034b9efe'])
