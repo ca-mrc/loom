@@ -22,6 +22,10 @@ class PreactivationRegistryAPI(Protocol):
     def commit(self, request: PoolParticipantRefresh) -> dict[str, Any]: ...
 
 
+class PreactivationNotDispatchedError(ValueError):
+    """Only a proven failure before the write transport may raise this signal."""
+
+
 def _journal_identity(request: PoolParticipantRefresh) -> dict[str, str]:
     request = PoolParticipantRefresh.model_validate(request.model_dump())
     return {**_identity(request), 'schema': 'loom.pool-preactivation-registry.v1'}
@@ -86,9 +90,28 @@ def advance_preactivation_registry(*, request: PoolParticipantRefresh, api: Prea
                     raise ValueError  # No journaled intent can explain this successor.
                 record['status'] = 'intent'
                 private_state._atomic_json(path, record)
-                scope(record)
+                intent = private_state._private_read(path)
+
+                def undispatched() -> None:
+                    # Restore only this exact, intact intent. Never recreate
+                    # lost evidence or clear the protected parent's failure
+                    # latch. A later invocation must requalify from scratch.
+                    if (_journal_identity(original) != identity
+                            or private_state._private_read(path) != intent
+                            or validate_preactivation_registry(request=request, state_dir=state_dir) != record):
+                        raise ValueError
+                    private_state._atomic_json(path, {**record, 'status': 'prepared'})
+
+                try:
+                    scope(record)
+                except Exception:
+                    undispatched()  # commit has conclusively not been called.
+                    raise
                 try:
                     api.commit(request.model_copy(deep=True))
+                except PreactivationNotDispatchedError:
+                    undispatched()
+                    raise
                 except Exception:
                     pass  # Commit may have succeeded; read the exact closed authority.
                 scope(record)

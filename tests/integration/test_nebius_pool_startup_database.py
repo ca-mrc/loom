@@ -278,7 +278,7 @@ async def test_preactivation_registry_releases_only_proven_undispatched_intent(s
             damaged.append(path.read_bytes() + b' ')
             path.write_bytes(damaged[0])
         if failure == 'adapter-preflight':
-            raise journal.PreactivationNotDispatched('private qualification failure')
+            raise journal.PreactivationNotDispatchedError('private qualification failure')
         raise ValueError('private qualification failure')
 
     class Database:

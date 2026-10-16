@@ -45,7 +45,10 @@ from scripts.ops.nebius_pool_preactivation_operation import (
     RetainedPreactivationCatalog,
     load_preactivation_catalog,
 )
-from scripts.ops.nebius_pool_preactivation_registry import validate_preactivation_registry
+from scripts.ops.nebius_pool_preactivation_registry import (
+    PreactivationNotDispatchedError,
+    validate_preactivation_registry,
+)
 from scripts.ops.nebius_pool_retirement import qualify_closed_workload_drain
 from scripts.ops.nebius_pool_runtime_settings import (
     BOUND_POOL_SETTINGS_COMMAND,
@@ -206,7 +209,11 @@ class HTTPSPreactivationOperationAPI:
         if phase == 'preflight' or frame != self.external_frame:
             asyncio.run(self._external())
             self.external_frame = copy.deepcopy(frame)
-        self._staging()
+        # After durable intent, finish this exact CLOSED successor even if an
+        # independent staging rollout advances. Handoff still requires a fresh
+        # source/catalog match; another refresh can follow this completed one.
+        if frame['phases']['catalog'] == 'prepared':
+            self._staging()
         self.probes.inspect(state_dir=self.completed.state_dir, _preactivation_catalog=retained)
         self._gateway()
         state = qualify_preactivation_report(retained.inputs.refresh, self.observe(retained.inputs.refresh), read_only=True)
@@ -217,13 +224,21 @@ class HTTPSPreactivationOperationAPI:
         self._scope(retained)
 
     def _sql(self, request: PoolParticipantRefresh, *, writing: bool) -> dict[str, Any]:
-        self._scope(self.retained)
-        if request != self.retained.inputs.refresh:
-            raise ValueError('preactivation SQL selection differs')
-        namespace = self.retained.registration.binding.namespace
-        before = self.probes._database(namespace)
-        report = self.probes._exec(before, 'loom-postgres', ['psql', '-X', '-qAt', '-v', 'ON_ERROR_STOP=1',
-            '-U', 'postgres', '-d', 'loom', '-c', refresh_closed_pool_sql(request) if writing else pool_preactivation_state_sql(request)])
+        try:
+            self._scope(self.retained)
+            if request != self.retained.inputs.refresh:
+                raise ValueError('preactivation SQL selection differs')
+            namespace = self.retained.registration.binding.namespace
+            before = self.probes._database(namespace)
+            command = ['psql', '-X', '-qAt', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', 'loom', '-c',
+                refresh_closed_pool_sql(request) if writing else pool_preactivation_state_sql(request)]
+        except Exception:
+            if writing:
+                raise PreactivationNotDispatchedError('preactivation SQL preflight failed') from None
+            raise
+        # Once the transport is invoked, every failure is uncertain, including
+        # a lost response or a failed backend/authority check afterward.
+        report = self.probes._exec(before, 'loom-postgres', command)
         qualify_preactivation_report(request, report, read_only=not writing)
         if _uid(self.probes._database(namespace)) != _uid(before):
             raise ValueError('preactivation SQL backend changed')
@@ -234,14 +249,17 @@ class HTTPSPreactivationOperationAPI:
         return self._sql(request, writing=False)
 
     def commit(self, request: PoolParticipantRefresh) -> dict[str, Any]:
-        if request != self.retained.inputs.refresh:
-            raise ValueError
-        record = validate_preactivation_registry(request=request, state_dir=self.retained.state_dir / 'registry')
-        if record['status'] != 'intent':
-            raise ValueError('preactivation SQL dispatch has no intent')
-        self.qualify(self.retained, 'registry')
-        self.qualify_manager(self.retained, read_applied_catalog(request=self.retained.catalog_request,
-            state_dir=self.retained.state_dir))
+        try:
+            if request != self.retained.inputs.refresh:
+                raise ValueError
+            record = validate_preactivation_registry(request=request, state_dir=self.retained.state_dir / 'registry')
+            if record['status'] != 'intent':
+                raise ValueError('preactivation SQL dispatch has no intent')
+            self.qualify(self.retained, 'registry')
+            self.qualify_manager(self.retained, read_applied_catalog(request=self.retained.catalog_request,
+                state_dir=self.retained.state_dir))
+        except Exception:
+            raise PreactivationNotDispatchedError('preactivation commit preflight failed') from None
         return self._sql(request, writing=True)
 
     def _running_manager(self, resources: AppliedCatalogResources) -> tuple[dict[str, Any], dict[str, Any]]:
