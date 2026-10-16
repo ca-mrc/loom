@@ -19,6 +19,7 @@ from scripts.ops.nebius_development_runtime_readiness import qualify_started_dep
 from scripts.ops.nebius_development_runtime_transition import (
     DevelopmentRuntimeWorkloadAPI,
     advance_runtime_workloads,
+    validate_runtime_transition,
 )
 from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
 from scripts.ops.nebius_management_stage import (
@@ -31,7 +32,9 @@ from scripts.ops.nebius_management_stage import (
 from scripts.ops.nebius_management_switch import _matches
 from scripts.ops.nebius_management_transport import ManagementKubernetesTransport
 from scripts.ops.nebius_pool_participant_release import (
+    PoolCatalogRefresh,
     PreparedParticipantRelease,
+    catalog_binding,
     prepare_manager_catalog_refresh,
 )
 
@@ -40,17 +43,72 @@ from loom.nebius_platform_render import digest
 
 @dataclass(frozen=True, repr=False)
 class ParticipantCatalogRequest:
-    release: PreparedParticipantRelease
+    release: PreparedParticipantRelease | PoolCatalogRefresh
     manager: dict[str, Any]
     catalog: dict[str, Any]
+
+
+@dataclass(frozen=True, repr=False)
+class AppliedCatalogResources:
+    """Applied identities only; the parent separately proves completed readiness."""
+
+    manager: dict[str, Any]
+    catalog: dict[str, Any]
+    files: dict[Path, bytes]
 
 
 def _projection(request: ParticipantCatalogRequest) -> tuple[dict[str, Any], dict[str, Any], str]:
     projected = prepare_manager_catalog_refresh(release=request.release, manager=request.manager, catalog=request.catalog)
     identity = digest({'refresh': request.release.refresh.model_dump(mode='json'),
-        'binding': asdict(request.release.migration.registration.binding),
+        'binding': asdict(catalog_binding(request.release)),
         'manager': request.manager, 'catalog': request.catalog})
     return projected['catalog'], projected['manager'], identity
+
+
+def read_applied_catalog(*, request: ParticipantCatalogRequest, state_dir: Path) -> AppliedCatalogResources:
+    """Read exact child successors without replaying either Kubernetes mutation.
+
+    An applied manager PATCH can still be waiting for Pod readiness. Callers
+    must require the completed parent receipt before treating this as a usable
+    successor, and independently recheck present process/catalog/SQL authority.
+    """
+    try:
+        request = copy.deepcopy(request)
+        catalog, manager, identity = _projection(request)
+        binding = catalog_binding(request.release)
+        files = {}
+        for suffix in ('catalog/stage.json', 'manager/transition.json'):
+            path = state_dir / suffix
+            if not path.is_absolute() or path != path.resolve():
+                raise ValueError
+            files[path] = private_state._private_read(path, limit=4 * 1024**2)
+        staged = json.loads(files[state_dir / 'catalog/stage.json'])
+        documents = {_key(catalog): catalog}
+        _validate_record(staged, {'schema': 'loom.nebius-management-stage.v1', 'binding': asdict(binding),
+            'revision': digest({'documents': documents, 'binding': asdict(binding)}),
+            'phase': 'participant-catalog'}, documents)
+        item = staged['resources'][_key(catalog)]
+        if item['status'] != 'created':
+            raise ValueError
+        observed_catalog = copy.deepcopy(item['observed'])
+        observed_catalog['metadata']['uid'] = item['uid']
+        _uid(observed_catalog)
+        if _qualified_defaulted(item['desired'], observed_catalog) != item['expected']:
+            raise ValueError
+        transition = json.loads(files[state_dir / 'manager/transition.json'])
+        key = _key(manager)
+        validate_runtime_transition(transition, originals={key: request.manager}, targets={key: manager},
+            input_digest=identity, phase='control')
+        successor = transition['resources'][key]
+        if successor['status'] != 'applied':
+            raise ValueError
+        observed_manager = copy.deepcopy(successor['expected'])
+        observed_manager['metadata']['uid'] = _uid(request.manager)
+        if any(private_state._private_read(path, limit=4 * 1024**2) != raw for path, raw in files.items()):
+            raise ValueError
+        return AppliedCatalogResources(observed_manager, observed_catalog, files)
+    except Exception:
+        raise ValueError('applied catalog history unqualified; preserve evidence') from None
 
 
 def stage_participant_catalog(*, request: ParticipantCatalogRequest, api: ManagementStageAPI,
@@ -58,7 +116,7 @@ def stage_participant_catalog(*, request: ParticipantCatalogRequest, api: Manage
     try:
         request = copy.deepcopy(request)
         catalog, _, _ = _projection(request)
-        binding = request.release.migration.registration.binding
+        binding = catalog_binding(request.release)
         documents = {_key(catalog): catalog}
         with private_state._locked_state(state_dir):
             return _stage_fixed_documents(documents=documents,
@@ -84,7 +142,7 @@ class HTTPSParticipantCatalogAPI(HTTPSDevelopmentRuntimeWorkloads, HTTPSManageme
             ssl_context: ssl.SSLContext, token: str | None = None):
         self.catalog_request = copy.deepcopy(request)
         catalog, manager, self.input_digest = _projection(self.catalog_request)
-        self.binding = self.catalog_request.release.migration.registration.binding
+        self.binding = catalog_binding(self.catalog_request.release)
         self.documents = {_key(catalog): catalog}
         self.originals = {_key(self.catalog_request.manager): self.catalog_request.manager}
         self.targets = {_key(manager): manager}

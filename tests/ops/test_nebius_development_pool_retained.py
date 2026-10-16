@@ -1345,6 +1345,9 @@ def runtime_private_reader(request, tmp_path):
     module, name = request.param
     cls = getattr(importlib.import_module('scripts.ops.' + module), name)
     reader = object.__new__(cls)
+    if name == 'HTTPSDevelopmentRuntimeObserver':
+        # Match the constructor's original-catalog selection for this file guard.
+        reader.preactivation = reader._preactivation_origin = None
     files = {}
     for name, raw in (('manager', b'manager'), ('foundation', b'foundation'), ('operator', b'')):
         path = tmp_path / name

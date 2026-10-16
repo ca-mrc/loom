@@ -162,9 +162,10 @@ def capture_participant_release(*, predecessor: ParticipantPredecessor,
                 _uid(row)
                 known[key] = copy.deepcopy(row)
             key = 'Deployment:' + binding.namespace + ':loom-service'
-            manager = copy.deepcopy(known.get(key, runtime.resources[key]))
+            resources = bindings.plan.effective_runtime_resources
+            manager = copy.deepcopy(known.get(key, resources[key]))
             key = 'ConfigMap:' + binding.namespace + ':loom-pool-profiles-' + spec.operation_id.hex
-            catalog = copy.deepcopy(runtime.resources[key])
+            catalog = copy.deepcopy(resources[key])
         if (config['namespace'] != guard.namespace
                 or config['execution_namespace'] != participant.execution_namespace.name
                 or config['cluster_id'] != spec.cluster_id or profile.candidate_sha != candidate['candidate_sha']

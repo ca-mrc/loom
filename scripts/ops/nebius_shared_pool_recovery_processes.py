@@ -53,8 +53,9 @@ and installed dev roots plus gateway; no backup or database root is stopped.
         if files != receipts:
             raise ValueError
         completed = retained.plan.development.runtime
+        resources = retained.plan.effective_runtime_resources
         originals = {**retained.plan.staging.originals,
-            **{key: completed.resources[key] for key in (*completed.plan.fixed['workloads'], *completed.plan.originals)},
+            **{key: resources[key] for key in (*completed.plan.fixed['workloads'], *completed.plan.originals)},
             _key(retained.plan.development.gateway_original): retained.plan.development.gateway_original}
         if not originals.keys() <= choices.keys():
             raise ValueError

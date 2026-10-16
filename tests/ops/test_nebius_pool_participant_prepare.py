@@ -62,6 +62,7 @@ def preparation(operation_inputs, monkeypatch):
         request=SimpleNamespace(database=SimpleNamespace(manager=SimpleNamespace(deployment=SimpleNamespace(
             public_host='manage.example.test')))))
     bindings = SimpleNamespace(plan=SimpleNamespace(development=SimpleNamespace(runtime=runtime),
+        effective_runtime_resources=copy.deepcopy(runtime.resources),
         staging=SimpleNamespace(source=None,
             attachment=SimpleNamespace(config=config, runtime_profile=profile, resources=originals))))
     selected = {key: (copy.deepcopy(row),) for key, row in current.items() if row['kind'] in {
@@ -107,6 +108,18 @@ def independent_manager(operation_inputs, preparation):
     options['predecessor'] = replace(previous, migration=replace(previous.migration, registration=registration))
     operation_inputs['predecessor'] = options['predecessor']
     options['bindings'].plan.staging.source = SimpleNamespace(candidate=staging)
+
+
+def test_first_release_uses_effective_catalog_not_original_installation(operation_inputs, preparation):
+    options, _ = preparation
+    original = options['bindings'].plan.development.runtime.resources
+    # The initial catalog remains in installation history, but the selected
+    # completed catalog is the one that exists in the current release view.
+    original.pop(_key(operation_inputs['catalog']))
+    original[_key(operation_inputs['manager'])]['spec']['template']['spec']['containers'][0]['image'] = 'old-manager'
+    captured = module().capture_participant_release(**options)
+    assert captured.catalog == operation_inputs['catalog']
+    assert captured.manager == operation_inputs['manager']
 
 
 @pytest.mark.parametrize('independent', [False, True])

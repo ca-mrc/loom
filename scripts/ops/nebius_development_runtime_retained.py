@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_development_runtime_install import (
     _PHASES,
@@ -27,6 +28,19 @@ from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
 from scripts.ops.nebius_management_stage import _comparison_snapshot
 
 from loom.nebius_platform_render import digest
+
+
+class RetainedRuntimeReference(BaseModel):
+    model_config = ConfigDict(extra='forbid', frozen=True, hide_input_in_errors=True)
+    operation_path: Path
+    operation_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
+
+    @field_validator('operation_path')
+    @classmethod
+    def canonical_operation(cls, value: Path) -> Path:
+        if not value.is_absolute() or value != value.resolve() or value.name != 'operation.json':
+            raise ValueError('retained runtime operation path differs')
+        return value
 
 
 @dataclass(frozen=True, repr=False)

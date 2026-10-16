@@ -189,6 +189,41 @@ async def test_active_capacity_probe_preserves_real_charged_work(sessions, tmp_p
     assert await retained_state() == before and before[0] == 'global' and before[3] == 'reserved'
 
 
+def _run_expiry_probe(command, *, environment, tmp_path, nonce, signature, timeout=35, traceback_after=30):
+    """Retain child timing/stacks without changing its protocol or time budget."""
+    diagnostic_path = tmp_path / 'startup-expiry-diagnostics.txt'
+    prelude = f'''import asyncio, atexit, faulthandler, time
+_diagnostic = open({str(diagnostic_path)!r}, "w")
+_started = time.monotonic()
+def _record(event):
+    print(f"{{time.monotonic() - _started:.6f}} {{event}}", file=_diagnostic, flush=True)
+_record("child_started")
+faulthandler.dump_traceback_later({traceback_after!r}, file=_diagnostic)
+atexit.register(lambda: _record("interpreter_exit"))
+_original_run = asyncio.run
+def _diagnosed_run(*args, **kwargs):
+    _record("run_started")
+    try:
+        return _original_run(*args, **kwargs)
+    except BaseException as exc:
+        _record("run_failed:" + type(exc).__name__)
+        raise
+    finally:
+        _record("run_finished")
+asyncio.run = _diagnosed_run
+'''
+    try:
+        result = subprocess.run([sys.executable, '-c', prelude + command, nonce, signature],
+            env=environment, cwd=tmp_path, capture_output=True, timeout=timeout, check=False)
+    except subprocess.TimeoutExpired as exc:
+        # subprocess.run has killed and reaped the child before this read.
+        evidence = (diagnostic_path.read_text() if diagnostic_path.exists()
+            else 'child did not create diagnostics')
+        exc.add_note('Startup expiry child diagnostics:\n' + evidence)
+        raise
+    return result, diagnostic_path.read_text()
+
+
 @pytest.mark.parametrize('expires', ['token', 'observation'])
 async def test_opening_rechecks_expiry_at_write_after_real_capacity_validation(sessions, tmp_path, expires):
     from scripts.ops.nebius_pool_startup_capacity import BOUND_POOL_ACTIVATION_COMMAND
@@ -205,21 +240,59 @@ from datetime import timedelta
 from sqlalchemy import select, func
 from loom.db.schema import Token
 from loom_service.pool_management import capacity
+_record("pause_imports_finished")
 original = capacity.read_connected_capacity
 async def delayed(session, pool_id, now):
+    _record("capacity_read_started")
     result = await original(session, pool_id, now)
+    _record("capacity_validated")
     print("validated", flush=True)
     current = result[pool_id]
     deadline = current.observed_at + timedelta(seconds=current.policy.observation_max_age_seconds)
     if {expires!r} == "token":
         deadline = await session.scalar(select(Token.expires_at).where(Token.token_hash == bytes.fromhex({gateway.token_sha256!r})))
+    database_now = await session.scalar(select(func.clock_timestamp()))
+    _record("expiry_remaining_seconds:" + str((deadline - database_now).total_seconds()))
     while await session.scalar(select(func.clock_timestamp())) <= deadline:
         await asyncio.sleep(0.02)
+    _record("expiry_reached")
     return result
 capacity.read_connected_capacity = delayed
 '''
-    result = await asyncio.to_thread(subprocess.run, [sys.executable, '-c', pause + BOUND_POOL_ACTIVATION_COMMAND, nonce, signature],
-        env=environment, cwd=tmp_path, capture_output=True, timeout=35, check=False)
-    assert (result.returncode, result.stdout, result.stderr) == (1, b'validated\n', b'Pool activation unconfirmed; preserve recovery evidence\n')
+    result, evidence = await asyncio.to_thread(_run_expiry_probe, pause + BOUND_POOL_ACTIVATION_COMMAND,
+        environment=environment, tmp_path=tmp_path, nonce=nonce, signature=signature)
+    assert (result.returncode, result.stdout, result.stderr) == (
+        1, b'validated\n', b'Pool activation unconfirmed; preserve recovery evidence\n'), evidence
+    # A generic refusal also covers timeouts. Prove the write's expiry guard
+    # rejected its row instead of accepting an unrelated failure as success.
+    assert 'expiry_reached' in evidence and 'run_failed:NoResultFound' in evidence, evidence
     async with sessions() as session:
         assert (await session.get(NebiusPoolBinding, spec.pool_id)).mode == 'closed'
+
+
+def test_expiry_probe_timeout_retains_child_stack_and_phase(tmp_path):
+    command = 'import time\nprint("validated", flush=True)\ntime.sleep(60)\n'
+    with pytest.raises(subprocess.TimeoutExpired) as caught:
+        _run_expiry_probe(command, environment=dict(os.environ), tmp_path=tmp_path,
+            nonce='ab' * 32, signature='cd' * 32, timeout=5, traceback_after=0.1)
+    evidence = '\n'.join(getattr(caught.value, '__notes__', ()))
+    assert 'child_started' in evidence
+    assert 'Timeout (' in evidence and 'File "<string>"' in evidence
+    assert 'ab' * 32 not in evidence and 'cd' * 32 not in evidence
+
+
+def test_expiry_probe_records_exception_type_without_private_message(tmp_path):
+    command = '''async def probe():
+    raise RuntimeError("private-probe-database-value")
+try:
+    asyncio.run(probe())
+except Exception:
+    raise SystemExit(1)
+'''
+    result, evidence = _run_expiry_probe(command, environment=dict(os.environ), tmp_path=tmp_path,
+        nonce='ab' * 32, signature='cd' * 32)
+    assert result.returncode == 1
+    assert result.stdout == result.stderr == b''
+    assert 'run_failed:RuntimeError' in evidence
+    assert 'interpreter_exit' in evidence
+    assert 'private-probe-database-value' not in evidence
