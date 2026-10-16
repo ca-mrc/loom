@@ -65,8 +65,8 @@ from tests.ops.test_nebius_pool_cutover_entry import (
 from tests.ops.test_nebius_pool_cutover_entry import (
     save_private,
 )
+from tests.support.nebius_platform import platform_inputs as original_platform_inputs
 from tests.unit.test_nebius_application_image_renderer import build_inputs as build_inputs
-from tests.unit.test_nebius_platform_render import platform_inputs as original_platform_inputs
 
 
 @pytest.fixture

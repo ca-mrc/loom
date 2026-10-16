@@ -15,11 +15,11 @@ from tests.ops.test_nebius_management_supplied import material as material
 from tests.ops.test_nebius_management_upgrade import run as run_upgrade
 from tests.ops.test_nebius_management_upgrade import to_retirement
 from tests.ops.test_nebius_management_upgrade import upgrade as upgrade
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_management_render import (
     application_management_inputs as application_management_inputs,
 )
 from tests.unit.test_nebius_management_render import management_inputs as management_inputs
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
 class Checks:

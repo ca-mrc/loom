@@ -9,9 +9,9 @@ import os
 import pytest
 
 from loom.nebius_platform_render import NebiusPlatformError, write_platform
+from tests.support.nebius_platform import ROOT
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_development_foundation import development_inputs as development_inputs
-from tests.unit.test_nebius_platform_render import ROOT
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
 def render(development_inputs):

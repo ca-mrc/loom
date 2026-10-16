@@ -21,7 +21,7 @@ from tests.integration.test_nebius_application_runtime import runtime_context as
 from tests.integration.test_nebius_environment_management import (
     environment_registry as environment_registry,
 )
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 
 
 def unfence(plan, *, uid="fence-uid", rv="9"):

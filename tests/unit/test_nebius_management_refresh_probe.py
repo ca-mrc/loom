@@ -7,8 +7,8 @@ import pytest
 from sqlalchemy.engine import URL
 
 from loom import nebius_management_refresh_probe as probe
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_application_render import inputs
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
 def config(platform_inputs, mode='manager'):

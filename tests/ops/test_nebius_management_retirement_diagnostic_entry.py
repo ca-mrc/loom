@@ -36,7 +36,7 @@ def private_diagnostic(private_retirement, tmp_path):
     from scripts.ops.nebius_ingress_stage import _key
     from scripts.ops.nebius_management_retirement import install_retirement
     from scripts.ops.nebius_management_retirement_entry import load_retirement_inputs
-    from tests.ops.test_nebius_management_stage import PhaseAPI
+    from tests.support.nebius_phase_api import PhaseAPI as PhaseAPI
 
     original, _, _, _ = private_retirement
     context = load_retirement_inputs(original)

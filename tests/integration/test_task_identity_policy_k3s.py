@@ -10,7 +10,7 @@ from loom.nebius_platform_render import build_platform
 from loom.nebius_task_identity_policy import identity_namespace_labels, identity_policy_documents
 from loom_execution_actuator.renderer import ExecutionTargetRuntime, _sidecar, render_execution_job
 from tests.integration.test_execution_actuator_k3s import _lease, _load_client, _start_k3s
-from tests.unit.test_nebius_platform_render import platform_inputs  # noqa: F401
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_service_execution_materialization import _provenance
 from tests.unit.test_task_sandbox_identity import _identity_task
 
@@ -45,7 +45,7 @@ def _pod(namespace: str, *, user: str = "root", home: str | None = None, deferre
 
 
 @pytest.mark.timeout(240)
-def test_private_root_policy_accepts_only_the_constrained_pod_shape(tmp_path: Path, platform_inputs):  # noqa: F811
+def test_private_root_policy_accepts_only_the_constrained_pod_shape(tmp_path: Path, platform_inputs):
     import json
     import os
     import subprocess

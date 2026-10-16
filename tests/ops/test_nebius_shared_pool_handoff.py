@@ -123,7 +123,7 @@ pytestmark = [
 
 @pytest.fixture
 def original_platform_inputs():
-    from tests.unit.test_nebius_platform_render import platform_inputs
+    from tests.support.nebius_platform import platform_inputs as platform_inputs
 
     config, candidate, profile = platform_inputs.__wrapped__()
     config['cluster_id'] = 'mk8scluster-e00fixture'

@@ -8,12 +8,12 @@ from uuid import uuid4
 import pytest
 from tests.ops.test_nebius_management_retirement import retirement_request as retirement_request
 from tests.ops.test_nebius_management_retirement import setup_request as setup_request
-from tests.ops.test_nebius_management_stage import PhaseAPI
+from tests.support.nebius_phase_api import PhaseAPI as PhaseAPI
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_management_render import (
     application_management_inputs as application_management_inputs,
 )
 from tests.unit.test_nebius_management_render import management_inputs as management_inputs
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
 def test_recovery_adds_only_a_new_bound_job_and_its_dns_permission(retirement_request):

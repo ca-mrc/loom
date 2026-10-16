@@ -21,7 +21,7 @@ from tests.integration.test_nebius_environment_management import (
     environment_registry as environment_registry,
 )
 from tests.integration.test_nebius_platform_bootstrap import platform_database as platform_database
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 
 # These fixtures bootstrap the current source tree, not a historical release.
 CURRENT_REVISION = ScriptDirectory.from_config(

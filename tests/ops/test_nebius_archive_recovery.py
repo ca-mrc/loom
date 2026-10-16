@@ -161,7 +161,7 @@ def test_remote_create_keeps_context_and_transmits_exact_manifest(monkeypatch, t
 def test_recovery_uses_real_rendered_ca_projection():
     from pathlib import Path
 
-    from tests.unit.test_nebius_platform_render import platform_inputs
+    from tests.support.nebius_platform import platform_inputs as platform_inputs
 
     from loom.nebius_platform_render import build_platform
 

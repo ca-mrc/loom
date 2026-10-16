@@ -14,9 +14,9 @@ from tests.ops.test_nebius_development_live import live as live
 from tests.ops.test_nebius_development_preflight import preflight as preflight
 from tests.ops.test_nebius_development_preflight import published_source as published_source
 from tests.ops.test_nebius_ingress_operation import inventory as inventory
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_candidate_catalog import publication as publication
 from tests.unit.test_nebius_development_foundation import development_inputs as development_inputs
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
 def module():

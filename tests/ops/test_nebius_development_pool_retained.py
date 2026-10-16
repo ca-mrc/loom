@@ -620,7 +620,7 @@ class RuntimeParentAPI:
     def __init__(self, request, plan):
         from scripts.ops.nebius_ingress_stage import _key
         from tests.ops.test_nebius_development_runtime_transition import RuntimeAPI
-        from tests.ops.test_nebius_management_stage import PhaseAPI
+        from tests.support.nebius_phase_api import PhaseAPI as PhaseAPI
 
         self.request, self.plan = request, plan
         self.store = PhaseAPI(request.database.manager.retained.request.retained.binding)
@@ -979,48 +979,6 @@ def runtime_github_transport(published_source):
     return httpx.MockTransport(public_read)
 
 
-@pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
-@pytest.mark.parametrize('retained', [False], indirect=True)
-@pytest.mark.parametrize('domain', ['manager', 'data'])
-async def test_runtime_publication_resolves_protected_bytes_and_rejects_changed_bundle(
-        completed_pool, publisher_cloud, published_source, domain):
-    from dataclasses import replace
-
-    from httpx._client import AsyncClient
-    from scripts.ops import nebius_development_runtime_external as module
-
-    request = protected_runtime_request(completed_pool, publisher_cloud, published_source)
-    if domain == 'data':
-        request = replace(request, database=replace(request.database,
-            data_publication=copy.deepcopy(request.database.manager.publication)))
-        baseline = '5781389317608cedf95be68590505c96257aa6c7'
-        comparison = {'base_commit': {'sha': baseline}, 'merge_base_commit': {'sha': baseline},
-            'ahead_by': 10, 'behind_by': 0, 'status': 'ahead'}
-        published_source.responses['compare/' + baseline + '...' + published_source.reference['source_sha']] = comparison
-    transport = runtime_github_transport(published_source)
-    # Real GitHub approval, digest and signature validation; only HTTPS is replaced.
-    async with AsyncClient(transport=transport) as http:
-        await module.qualify_runtime_publication(request=request, http=http)
-        target = request.database.data_publication if domain == 'data' else request.database.manager.publication
-        original_image = target.bundle.candidate['images']['service']['image_ref']
-        target.bundle.candidate['images']['service']['image_ref'] += '-changed'
-        with pytest.raises(ValueError, match='development runtime publication unqualified'):
-            await module.qualify_runtime_publication(request=request, http=http)
-        if domain == 'data':
-            target.bundle.candidate['images']['service']['image_ref'] = original_image
-            comparison.update(status='behind', ahead_by=0, behind_by=1,
-                merge_base_commit={'sha': published_source.reference['source_sha']})
-            with pytest.raises(ValueError, match='development runtime publication unqualified'):
-                await module.qualify_runtime_publication(request=request, http=http)
-    # Same immutable selection cannot become approved merely because its local
-    # candidate was once resolved: a now-failed protected check is re-read.
-    request = protected_runtime_request(completed_pool, publisher_cloud, published_source)
-    checks = published_source.responses['commits/' + 'b' * 40 + '/check-runs']['check_runs']
-    checks[0]['conclusion'] = 'failure'
-    async with AsyncClient(transport=transport) as http:
-        with pytest.raises(ValueError, match='development runtime publication unqualified') as error:
-            await module.qualify_runtime_publication(request=request, http=http)
-    assert 'test-github-secret' not in str(error.value)
 
 
 def runtime_cloud_transport(request, publisher_cloud, monkeypatch, tmp_path):
@@ -1108,6 +1066,435 @@ def runtime_cloud_transport(request, publisher_cloud, monkeypatch, tmp_path):
     return operator, sessions, reads, closed, mode
 
 
+
+
+
+
+@pytest.fixture(params=[
+    ('nebius_development_runtime_observation', 'HTTPSDevelopmentRuntimeObserver'),
+    ('nebius_development_runtime_live', 'HTTPSDevelopmentRuntimeResources'),
+    ('nebius_development_runtime_live', 'HTTPSDevelopmentRuntimeWorkloads'),
+])
+def runtime_private_reader(request, tmp_path):
+    from types import SimpleNamespace
+
+    module, name = request.param
+    cls = getattr(importlib.import_module('scripts.ops.' + module), name)
+    reader = object.__new__(cls)
+    files = {}
+    for name, raw in (('manager', b'manager'), ('foundation', b'foundation'), ('operator', b'')):
+        path = tmp_path / name
+        path.write_bytes(raw)
+        path.chmod(0o600)
+        files[name] = {path: raw}
+    reader.request = SimpleNamespace(database=SimpleNamespace(
+        manager=SimpleNamespace(retained=SimpleNamespace(files=files['manager'])),
+        foundation=SimpleNamespace(files=files['foundation'])))
+    reader.private_files = files['operator']
+    return reader, files
+
+
+
+
+
+
+
+
+
+
+
+
+def populate_runtime_pods(documents):
+    """API-shaped running controller collections, without replacing production checks."""
+    for current in list(documents.values()):
+        if current['kind'] != 'Deployment' or current['spec']['replicas'] != 1:
+            continue
+        generation = current['metadata'].setdefault('generation', 1)
+        current['status'] = {'observedGeneration': generation, 'replicas': 1, 'updatedReplicas': 1,
+            'readyReplicas': 1, 'availableReplicas': 1}
+        namespace, name = current['metadata']['namespace'], current['metadata']['name']
+        template = copy.deepcopy(current['spec']['template'])
+        labels = {**template['metadata']['labels'], 'pod-template-hash': 'a12b34'}
+        template['metadata']['labels'] = labels
+        replica = {'apiVersion': 'apps/v1', 'kind': 'ReplicaSet', 'metadata': {
+            'name': name + '-a12b34', 'namespace': namespace, 'uid': str(uuid4()), 'generation': 1,
+            'labels': labels, 'ownerReferences': [{'apiVersion': 'apps/v1', 'kind': 'Deployment',
+                'name': name, 'uid': current['metadata']['uid'], 'controller': True}]},
+            'spec': {'replicas': 1, 'selector': {'matchLabels': {
+                **current['spec']['selector']['matchLabels'], 'pod-template-hash': 'a12b34'}}, 'template': copy.deepcopy(template)},
+            'status': {'observedGeneration': 1, 'replicas': 1, 'readyReplicas': 1, 'availableReplicas': 1}}
+        pod = {'apiVersion': 'v1', 'kind': 'Pod', **copy.deepcopy(template), 'metadata': {
+            **template['metadata'], 'name': name + '-a12b34-test', 'namespace': namespace, 'uid': str(uuid4()),
+            'ownerReferences': [{'apiVersion': 'apps/v1', 'kind': 'ReplicaSet', 'name': replica['metadata']['name'],
+                'uid': replica['metadata']['uid'], 'controller': True}]},
+            'status': {'phase': 'Running', 'conditions': [{'type': 'Ready', 'status': 'True'}],
+                'containerStatuses': [{'name': row['name'], 'ready': True, 'restartCount': 0,
+                    'state': {'running': {'startedAt': '2026-10-09T00:00:00Z'}}} for row in template['spec']['containers']],
+                'initContainerStatuses': [{'name': row['name'], 'restartCount': 0,
+                    'state': {'terminated': {'exitCode': 0}}} for row in template['spec'].get('initContainers', [])]}}
+        for version, plural, kind, row in (('apps/v1', 'replicasets', 'ReplicaSet', replica), ('v1', 'pods', 'Pod', pod)):
+            prefix = '/api/v1' if version == 'v1' else '/apis/' + version
+            path = prefix + '/namespaces/' + namespace + '/' + plural
+            documents.setdefault(path, {'apiVersion': version, 'kind': kind + 'List',
+                'metadata': {'resourceVersion': '1'}, 'items': []})['items'].append(row)
+
+
+def populate_database_backends(documents):
+    for database in list(documents.values()):
+        if database['kind'] != 'StatefulSet' or database['metadata']['name'] != 'loom-postgres':
+            continue
+        namespace = database['metadata']['namespace']
+        database['metadata']['generation'] = 1
+        database['status'] = {'observedGeneration': 1, 'replicas': 1, 'readyReplicas': 1,
+            'currentReplicas': 1, 'updatedReplicas': 1, 'currentRevision': 'db-rev', 'updateRevision': 'db-rev'}
+        service = documents['/api/v1/namespaces/' + namespace + '/services/loom-postgres']
+        pod = {'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {'name': 'loom-postgres-0', 'namespace': namespace,
+            'uid': str(uuid4()), 'labels': {'app': 'loom-postgres', 'controller-revision-hash': 'db-rev'},
+            'ownerReferences': [{'apiVersion': 'apps/v1', 'kind': 'StatefulSet', 'name': 'loom-postgres',
+                'uid': database['metadata']['uid'], 'controller': True}]},
+            'spec': copy.deepcopy(database['spec']['template']['spec']), 'status': {'phase': 'Running',
+                'podIP': '10.20.0.2', 'podIPs': [{'ip': '10.20.0.2'}],
+                'containerStatuses': [{'name': 'loom-postgres', 'ready': True, 'restartCount': 0}]}}
+        pod['spec'].setdefault('volumes', []).append({'name': 'data',
+            'persistentVolumeClaim': {'claimName': 'data-loom-postgres-0'}})
+        documents.setdefault('/api/v1/namespaces/' + namespace + '/pods', {'apiVersion': 'v1', 'kind': 'PodList',
+            'metadata': {'resourceVersion': '1'}, 'items': []})['items'].append(pod)
+        documents['/apis/discovery.k8s.io/v1/namespaces/' + namespace + '/endpointslices'] = {
+            'apiVersion': 'discovery.k8s.io/v1', 'kind': 'EndpointSliceList', 'metadata': {'resourceVersion': '1'},
+            'items': [{'metadata': {'namespace': namespace, 'name': 'loom-postgres-test', 'uid': str(uuid4()),
+                'labels': {'kubernetes.io/service-name': 'loom-postgres'}, 'ownerReferences': [
+                    {'apiVersion': 'v1', 'kind': 'Service', 'name': 'loom-postgres',
+                        'uid': service['metadata']['uid'], 'controller': True}]},
+                'addressType': 'IPv4', 'ports': [{'name': service['spec']['ports'][0]['name'], 'port': 5432}],
+                'endpoints': [{'addresses': ['10.20.0.2'], 'conditions': {'ready': True}, 'targetRef': {
+                    'kind': 'Pod', 'namespace': namespace, 'name': 'loom-postgres-0', 'uid': pod['metadata']['uid']}}]}]}
+
+
+
+
+def runtime_resources_api(request, phase, qualifier):
+    name = 'scripts.ops.nebius_development_runtime_live'
+    if importlib.util.find_spec(name) is None:
+        pytest.fail('phase-bound development runtime HTTPS resources are missing')
+    return importlib.import_module(name).HTTPSDevelopmentRuntimeResources(
+        request=request, phase=phase, api_server=request.database.foundation.inputs.config['kubernetes_api_server'],
+        ssl_context=ssl.create_default_context(), token='operator-test', qualify_runtime=qualifier)
+
+
+
+
+
+
+def runtime_workloads_api(request, qualifier, readiness):
+    name = 'scripts.ops.nebius_development_runtime_live'
+    module = importlib.import_module(name)
+    if not hasattr(module, 'HTTPSDevelopmentRuntimeWorkloads'):
+        pytest.fail('phase-bound development runtime workload HTTPS is missing')
+    return module.HTTPSDevelopmentRuntimeWorkloads(request=request, phase='stop',
+        api_server=request.database.foundation.inputs.config['kubernetes_api_server'],
+        ssl_context=ssl.create_default_context(), token='operator-test',
+        qualify_runtime=qualifier, observe_ready=readiness)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def runtime_database_stage(request, api, state):
+    from scripts.ops import nebius_development_runtime_setup as setup
+
+    if not hasattr(setup, 'stage_database_runtime'):
+        pytest.fail('fixed development runtime database stage is missing')
+    return setup.stage_database_runtime(request=request, api=api, state_dir=state)
+
+
+def runtime_database_api(request):
+    from tests.support.nebius_phase_api import PhaseAPI as PhaseAPI
+
+    class NamespacedAPI(PhaseAPI):
+        @staticmethod
+        def key(doc):
+            return ':'.join((doc['kind'], doc['metadata']['namespace'], doc['metadata']['name']))
+
+    return NamespacedAPI(request.manager.retained.request.retained.binding)
+
+
+
+
+
+
+
+
+
+
+@pytest.fixture
+def runtime_database_live(completed_pool, handoff, monkeypatch):
+    from types import SimpleNamespace
+
+    request = database_runtime(completed_pool)
+    store = runtime_database_api(request)
+    foundation, pool = handoff[2], completed_pool[3].server
+    original = pool.handle
+    state = SimpleNamespace(request=request, store=store, foundation=foundation, pool=pool,
+        calls=[], complete=False, pod=None, report=None, on_log=None,
+        job_name='loom-dev-runtime-aecc7407b7b84c388d1fbca5dca9840f')
+    kinds = {'secrets': 'Secret', 'configmaps': 'ConfigMap', 'serviceaccounts': 'ServiceAccount',
+        'services': 'Service', 'networkpolicies': 'NetworkPolicy', 'statefulsets': 'StatefulSet',
+        'deployments': 'Deployment', 'jobs': 'Job', 'persistentvolumeclaims': 'PersistentVolumeClaim',
+        'persistentvolumes': 'PersistentVolume'}
+
+    def handle(message):
+        path, method = message.url.path, message.method
+        state.calls.append(message)
+        name = path.rsplit('/', 1)[-1]
+        if method == 'POST':
+            document = json.loads(message.content)
+            assert document['metadata']['name'] == state.job_name
+            assert document['kind'] in {'Secret', 'ConfigMap', 'Job'}
+            if message.url.params.get('dryRun') == 'All':
+                return httpx.Response(201, json=store.default_resource(document))
+            try:
+                store.create_resource(document)
+            except OSError:
+                raise httpx.ReadTimeout('response lost') from None
+            return httpx.Response(201, json=store.get_resource(document))
+        assert method == 'GET'
+        if '/namespaces/loom-dev/pods' in path:
+            job, = [row for row in store.resources.values() if row['kind'] == 'Job']
+            if state.pod is None:
+                state.pod = {'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {
+                    **copy.deepcopy(job['spec']['template']['metadata']), 'namespace': 'loom-dev',
+                    'name': job['metadata']['name'] + '-abc', 'uid': str(uuid4()),
+                    'ownerReferences': [{'apiVersion': 'batch/v1', 'kind': 'Job', 'controller': True,
+                        'name': job['metadata']['name'], 'uid': job['metadata']['uid']}]},
+                    'spec': copy.deepcopy(job['spec']['template']['spec']), 'status': {'phase': 'Succeeded',
+                        'containerStatuses': [{'name': job['spec']['template']['spec']['containers'][0]['name'],
+                            'restartCount': 0, 'state': {'terminated': {'exitCode': 0}}}],
+                        'initContainerStatuses': [{'name': row['name'], 'restartCount': 0,
+                            'state': {'terminated': {'exitCode': 0}}}
+                            for row in job['spec']['template']['spec'].get('initContainers', [])]}}
+            if name == 'pods':
+                return httpx.Response(200, json={'apiVersion': 'v1', 'kind': 'PodList', 'metadata': {}, 'items': [state.pod]})
+            if name == 'log':
+                if state.on_log:
+                    state.on_log()
+                report = state.report or {'status': 'development_runtime_database_installed',
+                    'operation_id': str(request.operation_id), 'role': 'loom_actuator', 'role_oid': 17000,
+                    'token_sha256': hashlib.sha256(('loom_br_' + 'r' * 64).encode()).hexdigest()}
+                return httpx.Response(200, json=report)
+            assert name == state.pod['metadata']['name']
+            return httpx.Response(200, json=state.pod)
+        if name == state.job_name:
+            collection = path.split('/')[-2]
+            namespace = path.split('/namespaces/', 1)[1].split('/', 1)[0]
+            value = store.resources.get(':'.join((kinds[collection], namespace, name)))
+            value = copy.deepcopy(value)
+            if value is not None and value['kind'] == 'Job' and state.complete:
+                value['status'] = {'conditions': [{'type': 'Complete', 'status': 'True'}], 'succeeded': 1}
+            return httpx.Response(404) if value is None else httpx.Response(200, json=value)
+        if path == '/api/v1/namespaces/loom-dev':
+            return httpx.Response(200, json=foundation.bootstrap.namespace)
+        if '/namespaces/loom-dev/' in path or '/persistentvolumes/' in path:
+            kind = kinds[path.split('/')[-2]]
+            value = foundation.bootstrap.secrets.get(name) if kind == 'Secret' else None
+            if value is None:
+                value = foundation.stage.resources.get(kind + ':' + name)
+            if value is not None:
+                return httpx.Response(200, json=value)
+        return original(message)
+
+    monkeypatch.setattr(pool, 'handle', handle)
+    return state
+
+
+def runtime_database_https(live, **options):
+    name = 'scripts.ops.nebius_development_runtime_database_live'
+    if importlib.util.find_spec(name) is None:
+        pytest.fail('fixed development runtime database HTTPS adapter is missing')
+    return importlib.import_module(name).HTTPSDevelopmentRuntimeDatabaseAPI(request=live.request,
+        api_server=live.request.foundation.inputs.config['kubernetes_api_server'], ssl_context=ssl.create_default_context(), **options)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def catalog_runtime_stage(request, api, state):
+    from scripts.ops import nebius_development_catalog_runtime as catalog
+
+    if not hasattr(catalog, 'stage_catalog_runtime'):
+        pytest.fail('fixed development catalog stage is missing')
+    return catalog.stage_catalog_runtime(request=request, api=api, state_dir=state)
+
+
+
+
+
+
+
+
+
+
+def runtime_catalog_https(live):
+    from scripts.ops import nebius_development_catalog_runtime as catalog
+
+    name = 'scripts.ops.nebius_development_catalog_live'
+    if importlib.util.find_spec(name) is None:
+        pytest.fail('fixed development catalog HTTPS adapter is missing')
+    live.job_name = 'loom-dev-catalog-aecc7407b7b84c388d1fbca5dca9840f'
+    config, _ = catalog.prepare_catalog_runtime(live.request).documents
+    from loom.pipeline.keys import canonical_digest
+
+    raw = json.loads(config['data']['catalog.json'])
+    live.report = {'operation_id': str(live.request.operation_id),
+        'target_id': raw['topology']['targets'][0]['target_id'], 'catalog_sha256': canonical_digest(raw)}
+    live.catalog_checks = 0
+    live.catalog_allowed = True
+
+    def qualify(request):
+        assert request == live.request
+        live.catalog_checks += 1
+        if not live.catalog_allowed:
+            raise ValueError('runtime phase not qualified')
+        # Child transport qualification is composed with the existing real
+        # history/live reader. The new closed CP's transition and phase ordering
+        # are the connected runtime parent's responsibility, not this fixture.
+        with runtime_database_https(live) as original:
+            original.verify_identity(original.binding)
+
+    return importlib.import_module(name).HTTPSDevelopmentCatalogAPI(request=live.request,
+        api_server=live.request.foundation.inputs.config['kubernetes_api_server'],
+        ssl_context=ssl.create_default_context(), qualify_runtime=qualify)
+
+
+
+
+
+
+
+
+
+
+def network_runtime(request):
+    name = 'scripts.ops.nebius_development_network_runtime'
+    if importlib.util.find_spec(name) is None:
+        pytest.fail('fresh development runtime network delivery is missing')
+    return importlib.import_module(name).prepare_network_runtime(request)
+
+
+
+
+
+
+def build_policy(request):
+    value = importlib.import_module('scripts.ops.nebius_development_build_policy')
+    if not hasattr(value, 'prepare_build_policy'):
+        pytest.fail('closed development build admission request binding is missing')
+    return value.prepare_build_policy(request)
+
+
+@pytest.fixture
+def system_kubectl(monkeypatch, tmp_path):
+    """Mount the trusted tool directories without depending on the host install.
+
+    These tests double the subprocess transport. Keep real executable lookup,
+    explicit trusted search paths, and the untrusted/missing-tool refusal cases.
+    """
+    from scripts.ops import nebius_development_runtime_probes as module
+
+    system = tmp_path / 'local-bin'
+    untrusted = tmp_path / 'untrusted-bin'
+    empty = tmp_path / 'empty-bin'
+    for directory in (system, untrusted, empty):
+        directory.mkdir()
+    for directory in (system, untrusted):
+        executable = directory / 'kubectl'
+        executable.write_text('#!/bin/sh\nexit 0\n')
+        executable.chmod(0o700)
+    real_which = module.shutil.which
+
+    def mounted_which(command, mode=module.os.F_OK | module.os.X_OK, path=None):
+        # Map system directories into the test sandbox; retain real executable
+        # lookup and any untrusted ambient directory selected by the caller.
+        mounts = {'/usr/local/bin': str(system), '/bin': str(empty), '/usr/bin': str(empty)}
+        search = module.os.environ['PATH'] if path is None else path
+        return real_which(command, mode=mode, path=module.os.pathsep.join(
+            mounts.get(directory, directory) for directory in search.split(module.os.pathsep)))
+
+    monkeypatch.setattr(module.shutil, 'which', mounted_which)
+    return system, untrusted
+
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
+@pytest.mark.parametrize('retained', [False], indirect=True)
+@pytest.mark.parametrize('domain', ['manager', 'data'])
+async def test_runtime_publication_resolves_protected_bytes_and_rejects_changed_bundle(
+        completed_pool, publisher_cloud, published_source, domain):
+    from dataclasses import replace
+
+    from httpx._client import AsyncClient
+    from scripts.ops import nebius_development_runtime_external as module
+
+    request = protected_runtime_request(completed_pool, publisher_cloud, published_source)
+    if domain == 'data':
+        request = replace(request, database=replace(request.database,
+            data_publication=copy.deepcopy(request.database.manager.publication)))
+        baseline = '5781389317608cedf95be68590505c96257aa6c7'
+        comparison = {'base_commit': {'sha': baseline}, 'merge_base_commit': {'sha': baseline},
+            'ahead_by': 10, 'behind_by': 0, 'status': 'ahead'}
+        published_source.responses['compare/' + baseline + '...' + published_source.reference['source_sha']] = comparison
+    transport = runtime_github_transport(published_source)
+    # Real GitHub approval, digest and signature validation; only HTTPS is replaced.
+    async with AsyncClient(transport=transport) as http:
+        await module.qualify_runtime_publication(request=request, http=http)
+        target = request.database.data_publication if domain == 'data' else request.database.manager.publication
+        original_image = target.bundle.candidate['images']['service']['image_ref']
+        target.bundle.candidate['images']['service']['image_ref'] += '-changed'
+        with pytest.raises(ValueError, match='development runtime publication unqualified'):
+            await module.qualify_runtime_publication(request=request, http=http)
+        if domain == 'data':
+            target.bundle.candidate['images']['service']['image_ref'] = original_image
+            comparison.update(status='behind', ahead_by=0, behind_by=1,
+                merge_base_commit={'sha': published_source.reference['source_sha']})
+            with pytest.raises(ValueError, match='development runtime publication unqualified'):
+                await module.qualify_runtime_publication(request=request, http=http)
+    # Same immutable selection cannot become approved merely because its local
+    # candidate was once resolved: a now-failed protected check is re-read.
+    request = protected_runtime_request(completed_pool, publisher_cloud, published_source)
+    checks = published_source.responses['commits/' + 'b' * 40 + '/check-runs']['check_runs']
+    checks[0]['conclusion'] = 'failure'
+    async with AsyncClient(transport=transport) as http:
+        with pytest.raises(ValueError, match='development runtime publication unqualified') as error:
+            await module.qualify_runtime_publication(request=request, http=http)
+    assert 'test-github-secret' not in str(error.value)
+
+
+
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
 @pytest.mark.parametrize('retained', [False], indirect=True)
 @pytest.mark.parametrize('connected', [None, True], indirect=True, ids=['dev-only', 'common-catalog'])
@@ -1132,12 +1519,13 @@ async def test_runtime_cloud_uses_observer_credentials_and_rejects_authority_or_
         assert sessions == closed
 
 
+
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
 @pytest.mark.parametrize('retained', [False], indirect=True)
 @pytest.mark.parametrize('completion', ['lost-history', 'complete'])
 @pytest.mark.timeout(300)  # Complete parent with real history/crypto, HTTP boundary only.
 def test_concrete_runtime_parent_qualifies_before_writes_and_resumes_pending_sql(
-        completed_pool, publisher_cloud, published_source, handoff, monkeypatch, tmp_path, completion):
+        completed_pool, publisher_cloud, published_source, handoff, monkeypatch, tmp_path, completion, system_kubectl):
     import hmac
     from types import SimpleNamespace
 
@@ -1334,29 +1722,6 @@ def test_concrete_runtime_parent_qualifies_before_writes_and_resumes_pending_sql
     assert all('staging' not in row['metadata'].get('namespace', '') for row in writes)
 
 
-@pytest.fixture(params=[
-    ('nebius_development_runtime_observation', 'HTTPSDevelopmentRuntimeObserver'),
-    ('nebius_development_runtime_live', 'HTTPSDevelopmentRuntimeResources'),
-    ('nebius_development_runtime_live', 'HTTPSDevelopmentRuntimeWorkloads'),
-])
-def runtime_private_reader(request, tmp_path):
-    from types import SimpleNamespace
-
-    module, name = request.param
-    cls = getattr(importlib.import_module('scripts.ops.' + module), name)
-    reader = object.__new__(cls)
-    files = {}
-    for name, raw in (('manager', b'manager'), ('foundation', b'foundation'), ('operator', b'')):
-        path = tmp_path / name
-        path.write_bytes(raw)
-        path.chmod(0o600)
-        files[name] = {path: raw}
-    reader.request = SimpleNamespace(database=SimpleNamespace(
-        manager=SimpleNamespace(retained=SimpleNamespace(files=files['manager'])),
-        foundation=SimpleNamespace(files=files['foundation'])))
-    reader.private_files = files['operator']
-    return reader, files
-
 
 def test_runtime_private_input_reads_are_bounded_by_retained_material(runtime_private_reader, monkeypatch):
     from scripts.ops import nebius_certificates
@@ -1372,6 +1737,7 @@ def test_runtime_private_input_reads_are_bounded_by_retained_material(runtime_pr
     # The reader already adds one byte to detect growth. Repeated guards must
     # not allocate the 4 MiB maximum for each tiny retained journal or key.
     assert calls == [(path, len(raw)) for group in files.values() for path, raw in group.items()]
+
 
 
 @pytest.mark.parametrize('change', ['same-length', 'growth', 'truncated', 'mode', 'symlink', 'hardlink', 'oversize'])
@@ -1401,6 +1767,7 @@ def test_runtime_private_input_rechecks_reject_drift(runtime_private_reader, tmp
         files['manager'][path] = raw
     with pytest.raises((ValueError, OSError, CertificateError)):
         reader._private_inputs()
+
 
 
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
@@ -1468,250 +1835,3 @@ def test_runtime_observer_checks_retained_data_and_successors_without_replaying_
                 observer.inspect(state_dir=state)
             documents[path] = original
     assert calls and all(row.method == 'GET' for row in calls)
-
-
-def populate_runtime_pods(documents):
-    """API-shaped running controller collections, without replacing production checks."""
-    for current in list(documents.values()):
-        if current['kind'] != 'Deployment' or current['spec']['replicas'] != 1:
-            continue
-        generation = current['metadata'].setdefault('generation', 1)
-        current['status'] = {'observedGeneration': generation, 'replicas': 1, 'updatedReplicas': 1,
-            'readyReplicas': 1, 'availableReplicas': 1}
-        namespace, name = current['metadata']['namespace'], current['metadata']['name']
-        template = copy.deepcopy(current['spec']['template'])
-        labels = {**template['metadata']['labels'], 'pod-template-hash': 'a12b34'}
-        template['metadata']['labels'] = labels
-        replica = {'apiVersion': 'apps/v1', 'kind': 'ReplicaSet', 'metadata': {
-            'name': name + '-a12b34', 'namespace': namespace, 'uid': str(uuid4()), 'generation': 1,
-            'labels': labels, 'ownerReferences': [{'apiVersion': 'apps/v1', 'kind': 'Deployment',
-                'name': name, 'uid': current['metadata']['uid'], 'controller': True}]},
-            'spec': {'replicas': 1, 'selector': {'matchLabels': {
-                **current['spec']['selector']['matchLabels'], 'pod-template-hash': 'a12b34'}}, 'template': copy.deepcopy(template)},
-            'status': {'observedGeneration': 1, 'replicas': 1, 'readyReplicas': 1, 'availableReplicas': 1}}
-        pod = {'apiVersion': 'v1', 'kind': 'Pod', **copy.deepcopy(template), 'metadata': {
-            **template['metadata'], 'name': name + '-a12b34-test', 'namespace': namespace, 'uid': str(uuid4()),
-            'ownerReferences': [{'apiVersion': 'apps/v1', 'kind': 'ReplicaSet', 'name': replica['metadata']['name'],
-                'uid': replica['metadata']['uid'], 'controller': True}]},
-            'status': {'phase': 'Running', 'conditions': [{'type': 'Ready', 'status': 'True'}],
-                'containerStatuses': [{'name': row['name'], 'ready': True, 'restartCount': 0,
-                    'state': {'running': {'startedAt': '2026-10-09T00:00:00Z'}}} for row in template['spec']['containers']],
-                'initContainerStatuses': [{'name': row['name'], 'restartCount': 0,
-                    'state': {'terminated': {'exitCode': 0}}} for row in template['spec'].get('initContainers', [])]}}
-        for version, plural, kind, row in (('apps/v1', 'replicasets', 'ReplicaSet', replica), ('v1', 'pods', 'Pod', pod)):
-            prefix = '/api/v1' if version == 'v1' else '/apis/' + version
-            path = prefix + '/namespaces/' + namespace + '/' + plural
-            documents.setdefault(path, {'apiVersion': version, 'kind': kind + 'List',
-                'metadata': {'resourceVersion': '1'}, 'items': []})['items'].append(row)
-
-
-def populate_database_backends(documents):
-    for database in list(documents.values()):
-        if database['kind'] != 'StatefulSet' or database['metadata']['name'] != 'loom-postgres':
-            continue
-        namespace = database['metadata']['namespace']
-        database['metadata']['generation'] = 1
-        database['status'] = {'observedGeneration': 1, 'replicas': 1, 'readyReplicas': 1,
-            'currentReplicas': 1, 'updatedReplicas': 1, 'currentRevision': 'db-rev', 'updateRevision': 'db-rev'}
-        service = documents['/api/v1/namespaces/' + namespace + '/services/loom-postgres']
-        pod = {'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {'name': 'loom-postgres-0', 'namespace': namespace,
-            'uid': str(uuid4()), 'labels': {'app': 'loom-postgres', 'controller-revision-hash': 'db-rev'},
-            'ownerReferences': [{'apiVersion': 'apps/v1', 'kind': 'StatefulSet', 'name': 'loom-postgres',
-                'uid': database['metadata']['uid'], 'controller': True}]},
-            'spec': copy.deepcopy(database['spec']['template']['spec']), 'status': {'phase': 'Running',
-                'podIP': '10.20.0.2', 'podIPs': [{'ip': '10.20.0.2'}],
-                'containerStatuses': [{'name': 'loom-postgres', 'ready': True, 'restartCount': 0}]}}
-        pod['spec'].setdefault('volumes', []).append({'name': 'data',
-            'persistentVolumeClaim': {'claimName': 'data-loom-postgres-0'}})
-        documents.setdefault('/api/v1/namespaces/' + namespace + '/pods', {'apiVersion': 'v1', 'kind': 'PodList',
-            'metadata': {'resourceVersion': '1'}, 'items': []})['items'].append(pod)
-        documents['/apis/discovery.k8s.io/v1/namespaces/' + namespace + '/endpointslices'] = {
-            'apiVersion': 'discovery.k8s.io/v1', 'kind': 'EndpointSliceList', 'metadata': {'resourceVersion': '1'},
-            'items': [{'metadata': {'namespace': namespace, 'name': 'loom-postgres-test', 'uid': str(uuid4()),
-                'labels': {'kubernetes.io/service-name': 'loom-postgres'}, 'ownerReferences': [
-                    {'apiVersion': 'v1', 'kind': 'Service', 'name': 'loom-postgres',
-                        'uid': service['metadata']['uid'], 'controller': True}]},
-                'addressType': 'IPv4', 'ports': [{'name': service['spec']['ports'][0]['name'], 'port': 5432}],
-                'endpoints': [{'addresses': ['10.20.0.2'], 'conditions': {'ready': True}, 'targetRef': {
-                    'kind': 'Pod', 'namespace': namespace, 'name': 'loom-postgres-0', 'uid': pod['metadata']['uid']}}]}]}
-
-
-def runtime_resources_api(request, phase, qualifier):
-    name = 'scripts.ops.nebius_development_runtime_live'
-    if importlib.util.find_spec(name) is None:
-        pytest.fail('phase-bound development runtime HTTPS resources are missing')
-    return importlib.import_module(name).HTTPSDevelopmentRuntimeResources(
-        request=request, phase=phase, api_server=request.database.foundation.inputs.config['kubernetes_api_server'],
-        ssl_context=ssl.create_default_context(), token='operator-test', qualify_runtime=qualifier)
-
-
-def runtime_workloads_api(request, qualifier, readiness):
-    name = 'scripts.ops.nebius_development_runtime_live'
-    module = importlib.import_module(name)
-    if not hasattr(module, 'HTTPSDevelopmentRuntimeWorkloads'):
-        pytest.fail('phase-bound development runtime workload HTTPS is missing')
-    return module.HTTPSDevelopmentRuntimeWorkloads(request=request, phase='stop',
-        api_server=request.database.foundation.inputs.config['kubernetes_api_server'],
-        ssl_context=ssl.create_default_context(), token='operator-test',
-        qualify_runtime=qualifier, observe_ready=readiness)
-
-
-def runtime_database_stage(request, api, state):
-    from scripts.ops import nebius_development_runtime_setup as setup
-
-    if not hasattr(setup, 'stage_database_runtime'):
-        pytest.fail('fixed development runtime database stage is missing')
-    return setup.stage_database_runtime(request=request, api=api, state_dir=state)
-
-
-def runtime_database_api(request):
-    from tests.ops.test_nebius_management_stage import PhaseAPI
-
-    class NamespacedAPI(PhaseAPI):
-        @staticmethod
-        def key(doc):
-            return ':'.join((doc['kind'], doc['metadata']['namespace'], doc['metadata']['name']))
-
-    return NamespacedAPI(request.manager.retained.request.retained.binding)
-
-
-@pytest.fixture
-def runtime_database_live(completed_pool, handoff, monkeypatch):
-    from types import SimpleNamespace
-
-    request = database_runtime(completed_pool)
-    store = runtime_database_api(request)
-    foundation, pool = handoff[2], completed_pool[3].server
-    original = pool.handle
-    state = SimpleNamespace(request=request, store=store, foundation=foundation, pool=pool,
-        calls=[], complete=False, pod=None, report=None, on_log=None,
-        job_name='loom-dev-runtime-aecc7407b7b84c388d1fbca5dca9840f')
-    kinds = {'secrets': 'Secret', 'configmaps': 'ConfigMap', 'serviceaccounts': 'ServiceAccount',
-        'services': 'Service', 'networkpolicies': 'NetworkPolicy', 'statefulsets': 'StatefulSet',
-        'deployments': 'Deployment', 'jobs': 'Job', 'persistentvolumeclaims': 'PersistentVolumeClaim',
-        'persistentvolumes': 'PersistentVolume'}
-
-    def handle(message):
-        path, method = message.url.path, message.method
-        state.calls.append(message)
-        name = path.rsplit('/', 1)[-1]
-        if method == 'POST':
-            document = json.loads(message.content)
-            assert document['metadata']['name'] == state.job_name
-            assert document['kind'] in {'Secret', 'ConfigMap', 'Job'}
-            if message.url.params.get('dryRun') == 'All':
-                return httpx.Response(201, json=store.default_resource(document))
-            try:
-                store.create_resource(document)
-            except OSError:
-                raise httpx.ReadTimeout('response lost') from None
-            return httpx.Response(201, json=store.get_resource(document))
-        assert method == 'GET'
-        if '/namespaces/loom-dev/pods' in path:
-            job, = [row for row in store.resources.values() if row['kind'] == 'Job']
-            if state.pod is None:
-                state.pod = {'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {
-                    **copy.deepcopy(job['spec']['template']['metadata']), 'namespace': 'loom-dev',
-                    'name': job['metadata']['name'] + '-abc', 'uid': str(uuid4()),
-                    'ownerReferences': [{'apiVersion': 'batch/v1', 'kind': 'Job', 'controller': True,
-                        'name': job['metadata']['name'], 'uid': job['metadata']['uid']}]},
-                    'spec': copy.deepcopy(job['spec']['template']['spec']), 'status': {'phase': 'Succeeded',
-                        'containerStatuses': [{'name': job['spec']['template']['spec']['containers'][0]['name'],
-                            'restartCount': 0, 'state': {'terminated': {'exitCode': 0}}}],
-                        'initContainerStatuses': [{'name': row['name'], 'restartCount': 0,
-                            'state': {'terminated': {'exitCode': 0}}}
-                            for row in job['spec']['template']['spec'].get('initContainers', [])]}}
-            if name == 'pods':
-                return httpx.Response(200, json={'apiVersion': 'v1', 'kind': 'PodList', 'metadata': {}, 'items': [state.pod]})
-            if name == 'log':
-                if state.on_log:
-                    state.on_log()
-                report = state.report or {'status': 'development_runtime_database_installed',
-                    'operation_id': str(request.operation_id), 'role': 'loom_actuator', 'role_oid': 17000,
-                    'token_sha256': hashlib.sha256(('loom_br_' + 'r' * 64).encode()).hexdigest()}
-                return httpx.Response(200, json=report)
-            assert name == state.pod['metadata']['name']
-            return httpx.Response(200, json=state.pod)
-        if name == state.job_name:
-            collection = path.split('/')[-2]
-            namespace = path.split('/namespaces/', 1)[1].split('/', 1)[0]
-            value = store.resources.get(':'.join((kinds[collection], namespace, name)))
-            value = copy.deepcopy(value)
-            if value is not None and value['kind'] == 'Job' and state.complete:
-                value['status'] = {'conditions': [{'type': 'Complete', 'status': 'True'}], 'succeeded': 1}
-            return httpx.Response(404) if value is None else httpx.Response(200, json=value)
-        if path == '/api/v1/namespaces/loom-dev':
-            return httpx.Response(200, json=foundation.bootstrap.namespace)
-        if '/namespaces/loom-dev/' in path or '/persistentvolumes/' in path:
-            kind = kinds[path.split('/')[-2]]
-            value = foundation.bootstrap.secrets.get(name) if kind == 'Secret' else None
-            if value is None:
-                value = foundation.stage.resources.get(kind + ':' + name)
-            if value is not None:
-                return httpx.Response(200, json=value)
-        return original(message)
-
-    monkeypatch.setattr(pool, 'handle', handle)
-    return state
-
-
-def runtime_database_https(live, **options):
-    name = 'scripts.ops.nebius_development_runtime_database_live'
-    if importlib.util.find_spec(name) is None:
-        pytest.fail('fixed development runtime database HTTPS adapter is missing')
-    return importlib.import_module(name).HTTPSDevelopmentRuntimeDatabaseAPI(request=live.request,
-        api_server=live.request.foundation.inputs.config['kubernetes_api_server'], ssl_context=ssl.create_default_context(), **options)
-
-
-def catalog_runtime_stage(request, api, state):
-    from scripts.ops import nebius_development_catalog_runtime as catalog
-
-    if not hasattr(catalog, 'stage_catalog_runtime'):
-        pytest.fail('fixed development catalog stage is missing')
-    return catalog.stage_catalog_runtime(request=request, api=api, state_dir=state)
-
-
-def runtime_catalog_https(live):
-    from scripts.ops import nebius_development_catalog_runtime as catalog
-
-    name = 'scripts.ops.nebius_development_catalog_live'
-    if importlib.util.find_spec(name) is None:
-        pytest.fail('fixed development catalog HTTPS adapter is missing')
-    live.job_name = 'loom-dev-catalog-aecc7407b7b84c388d1fbca5dca9840f'
-    config, _ = catalog.prepare_catalog_runtime(live.request).documents
-    from loom.pipeline.keys import canonical_digest
-
-    raw = json.loads(config['data']['catalog.json'])
-    live.report = {'operation_id': str(live.request.operation_id),
-        'target_id': raw['topology']['targets'][0]['target_id'], 'catalog_sha256': canonical_digest(raw)}
-    live.catalog_checks = 0
-    live.catalog_allowed = True
-
-    def qualify(request):
-        assert request == live.request
-        live.catalog_checks += 1
-        if not live.catalog_allowed:
-            raise ValueError('runtime phase not qualified')
-        # Child transport qualification is composed with the existing real
-        # history/live reader. The new closed CP's transition and phase ordering
-        # are the connected runtime parent's responsibility, not this fixture.
-        with runtime_database_https(live) as original:
-            original.verify_identity(original.binding)
-
-    return importlib.import_module(name).HTTPSDevelopmentCatalogAPI(request=live.request,
-        api_server=live.request.foundation.inputs.config['kubernetes_api_server'],
-        ssl_context=ssl.create_default_context(), qualify_runtime=qualify)
-
-
-def network_runtime(request):
-    name = 'scripts.ops.nebius_development_network_runtime'
-    if importlib.util.find_spec(name) is None:
-        pytest.fail('fresh development runtime network delivery is missing')
-    return importlib.import_module(name).prepare_network_runtime(request)
-
-
-def build_policy(request):
-    value = importlib.import_module('scripts.ops.nebius_development_build_policy')
-    if not hasattr(value, 'prepare_build_policy'):
-        pytest.fail('closed development build admission request binding is missing')
-    return value.prepare_build_policy(request)

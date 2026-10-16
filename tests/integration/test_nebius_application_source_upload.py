@@ -17,9 +17,9 @@ from loom_service.environment_management.registry import ManagementError
 from tests.integration.test_nebius_environment_management import (
     environment_registry as environment_registry,
 )
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_application_source_archive import archive_bytes
 from tests.unit.test_application_source_archive import source as source
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
 def upload_registry(factory, **changes):

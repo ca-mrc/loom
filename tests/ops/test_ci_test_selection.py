@@ -177,8 +177,9 @@ def test_empty_selection_is_safe_and_selector_failure_still_fails_the_job(
 
 
 @pytest.mark.timeout(120)
-@pytest.mark.parametrize("lane", ["tests-root", "nebius-pool"])
-@pytest.mark.parametrize("scope", ["all", "nebius"])
+@pytest.mark.parametrize(("scope", "lane"), [
+    ("all", "tests-root"), ("nebius", "tests-root"), ("nebius", "nebius-pool"),
+])
 def test_shard_workflows_run_complete_disjoint_fail_fast_shards(tmp_path: Path, scope: str, lane: str) -> None:
     """Exercise the workflow/selector boundary, not a second shard algorithm."""
     root = Path(__file__).resolve().parents[2]
@@ -190,6 +191,16 @@ def test_shard_workflows_run_complete_disjoint_fail_fast_shards(tmp_path: Path, 
                                         lane=lane, repo_root=root, test_scope=scope)
     step = next(row for row in job["steps"] if row.get("name", "").startswith("Pytest"))
     selector_step = next(row for row in job["steps"] if row.get("id") == "manifest")
+    if lane == "nebius-pool":
+        # This lane contains only Nebius modules. Prove scope equivalence once
+        # instead of spawning the same 20 selector/workflow processes twice.
+        # A future scope difference must restore distinct execution coverage.
+        all_paths = ownership.test_paths_for_lane(
+            manifest, tracked_paths=ownership._tracked_paths(root), lane=lane,
+        )
+        assert ownership.select_test_scope(manifest, all_paths, scope="all") == (
+            ownership.select_test_scope(manifest, all_paths, scope="nebius")
+        )
     count = manifest.test_shard_policy(lane).shard_count
     assert sorted(row["shard_index"] for row in matrix) == list(range(count))
     complete = subprocess.run(

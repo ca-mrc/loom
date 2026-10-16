@@ -13,10 +13,10 @@ from uuid import uuid4
 
 import pytest
 
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_application_image_renderer import build_inputs as build_inputs
 from tests.unit.test_nebius_application_render import inputs as application_inputs
 from tests.unit.test_nebius_environment_contract import foundation_from
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 ROOT = Path(__file__).resolve().parents[2]
 

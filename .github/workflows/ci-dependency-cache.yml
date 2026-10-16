@@ -11,7 +11,7 @@ name: ci-dependency-cache
 on:
   push:
     branches: [dev]
-    paths: [uv.lock]
+    paths: [uv.lock, .github/workflows/ci-dependency-cache.yml]
   # Backstop for an evicted or never-written key.
   schedule:
     - cron: "41 7 * * *"

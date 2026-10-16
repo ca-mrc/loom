@@ -8,7 +8,7 @@ from uuid import uuid4
 
 import pytest
 from tests.support.execution_image_admission import signed_image_admission_bundle
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_pool_contract import participant
 from tests.unit.test_nebius_pool_profiles import document
 
@@ -16,9 +16,17 @@ from loom.nebius_pool_contract import PoolParticipantV1
 
 ROOT = Path(__file__).resolve().parents[2]
 
+pytestmark = pytest.mark.parametrize('staging_attachment_inputs', [0, 1, 2], indirect=True)
 
-@pytest.fixture(params=[0, 1, 2])
+
+@pytest.fixture
 def staging_attachment_inputs(platform_inputs, request):
+    """Use the richest roster unless a topology-owning test requests another.
+
+    Recovery, corruption and transport matrices do not depend on the number of
+    sibling targets. Their negative paths still exercise both guest and auth
+    targets; attachment and connected delivery tests explicitly cover 0/1/2.
+    """
     from loom.nebius_platform_render import build_platform
     from loom.service_execution_materialization import build_nebius_runtime_profile
 
@@ -26,7 +34,7 @@ def staging_attachment_inputs(platform_inputs, request):
     candidate.update(source_ref='refs/heads/dev', repository='ca-mrc/loom')
     config['task_image_builder'] = {'registry_repository': 'cr.eu-north1.nebius.cloud/test/task-images', 'max_concurrent': 2}
     siblings = []
-    for field, name in [('guest_execution_target', 'staging-guest'), ('emulated_auth_execution_target', 'staging-auth')][:request.param]:
+    for field, name in [('guest_execution_target', 'staging-guest'), ('emulated_auth_execution_target', 'staging-auth')][:getattr(request, 'param', 2)]:
         config[field] = {'target_id': name}
         siblings.append(name)
     images = candidate['images']

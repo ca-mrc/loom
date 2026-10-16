@@ -221,9 +221,11 @@ import. Selection is made once for the whole lane and then sharded, so planned
 shards and job manifests always run the same set. Other changes skip it before
 merge. Component-local pool scripts use `component_sources` to follow their
 operator and test-helper consumers. Common operator mechanisms, generators,
-dependencies and selection authority retain the full suite. The three standalone
-archive/terminal-recovery CLIs use their dedicated lifecycle, archive and idle
-regressions without the legacy pool transition suite.
+dependencies and selection authority retain the full suite. The standalone
+archive/terminal-recovery CLIs and read-only retired-structure inventory use their dedicated lifecycle/archive/idle or database-inventory
+regressions without the unrelated pool transition suite. Shared platform fixtures
+and the external phase API double live in `tests/support/`, so importing a
+fixture no longer imports unrelated renderer or management-stage test cases.
 Every platform candidate selects affected modules against its immutable first
 parent; an unavailable boundary retains the whole suite. Shared-pool simulations
 stay skipped, below.
@@ -242,25 +244,26 @@ qualification remain required, as do rollout idle protection, backup and rollbac
 Scheduled and manual full runs still include the pool suite. Selector labels
 retain full file selection in the validation lanes they request.
 
-The October 15 rebalance moves three complete modules off measured 26-30 minute
-shards onto 35-58 second shards (candidate run 38793279887). The participant
-delivery module keeps its existing lifecycle-isolation placement. All test paths,
-legacy/shared-pool selection and time budgets stay unchanged. The slow-25 logs
-give lower bounds for moved costs, not a measured speedup; compare subsequent
-hosted execution and queue time before claiming an end-to-end improvement.
+Participant attachment tests own the three supported target rosters: ordinary,
+ordinary + guest, and ordinary + guest + auth. Downstream recovery, corruption,
+and transport matrices use a fresh complete roster by default instead of
+multiplying every fault by all three subsets. Connected release success also
+runs with the two smaller rosters. Every original recovery fault, both candidate
+write implementations, current/private-material refusal, immutable history and
+exact-absence assertions remain before merge. No test is moved to candidate
+publication, nightly validation or deployment, and no mutable fixture is shared
+between cases.
 
-The October 16 rebalance splits the two single-module bottlenecks along their
-existing scenario boundaries. Pool tests run about twice as slowly on GitHub VMs
-as on OLDLAB guests, and there participant delivery took 24.4 minutes and
-development pool retained 19.5 minutes (runs 38842326680/38836780289). Delivery's
-failed deploy jobs and completion faults now run the same lifecycle from
-`test_nebius_pool_participant_delivery_{job_failures,completion}.py`; the
-retained module's runtime probe, HTTPS, database/catalog stage and network tests
-moved to `test_nebius_development_pool_retained_runtime_stages.py`, importing the
-same fixtures. Each part has its own near-empty shard, and recovery
-qualification moves off a 21-minute shard. Every case still runs exactly once
-with unchanged assertions and timeouts; the projected longest pool shard on a
-GitHub VM drops from ~25 to ~18 minutes, to be confirmed in CI.
+The October 16 rebalance keeps the measured scenario boundaries: deploy-job
+failures and completion faults run the same delivery lifecycle from
+`test_nebius_pool_participant_delivery_{job_failures,completion}.py`.
+The retained module's runtime probe, HTTPS, database/catalog stage and network
+checks live in `test_nebius_development_pool_retained_runtime_stages.py`.
+All 63 retained test functions and 182 parameter cases remain across the two
+files (79 and 103). After removing repeated topology products, module placements
+are recomputed across all 20 shards; placements chosen for the old counts are
+not a performance contract. The local comparison and its hosted-model limits
+are recorded in [pytest efficiency verification](pytest-efficiency-verification.md).
 
 The dev-only candidate test job saves uv caches under the same checksum-pinned,
 locked-workspace policy as candidate publication. PR and merge-group jobs retain
@@ -271,8 +274,8 @@ ci-wheels-v1`, ~200 MB compressed) and never save it. setup-uv's default pruning
 kept only locally built packages (~180 KB), so every job downloaded about 150
 wheels from PyPI again: ~5 seconds on GitHub VMs, but 4-5 minutes with timeouts
 on OLDLAB guests, whose GitHub cache downloads are fast. The only writer is
-`ci-dependency-cache.yml`, which runs on protected dev when `uv.lock` changes and
-daily, syncs the superset of every reader's extras and groups, and saves once
+`ci-dependency-cache.yml`, which runs on protected dev when `uv.lock` or the
+writer workflow changes (including its first introduction), and daily. It syncs the superset of every reader's extras and groups, and saves once
 per lock. `test_ci_wheel_cache_has_one_trusted_writer_and_complete_contents`
 keeps readers read-only and covered by that superset.
 
@@ -290,47 +293,34 @@ manual compatibility selection.
 
 ## Test shard balance
 
-The root Python lane uses twenty complete, non-overlapping file shards with the
-existing manifest-owned stable hash salt. Explicit pins distribute the slow
-connected recovery modules using the October 2026 duration sample. The expanded
-shared-pool handoff and participant-delivery suites have dedicated placements;
-the eight- and twelve-shard layouts exhausted multiple jobs' 40-minute limits.
-Recovery stop, gateway, template, role, restart and reopening scenarios are
-separate files, as are participant host/dispatch/runner and completed-release
-history matrices. These files
-retain every parameterized scenario and independent fixture. Connected
-parent and process-preflight matrices also use separate shards after their
-combined duration exhausted a job's budget. Recovery census, recovery-process
-preflight and forward process-observation scenarios have separate wrappers that
-invoke their unchanged assertion bodies and complete independent fixtures. These
-long scenarios remain in the original collected coverage, without being stacked
-with every variant of their lifecycle matrix. Participant resource observation
-runs beside the measured lighter forward shard, separate from the image
-cancellation and transport matrices that previously crowded its job. Recovery
-census and completed recovery release also run on separate shards to retain
-headroom below the job deadline. Connected
-transport tests retain independent fixtures and share only immutable
-inputs; full roster tests retain all environments. Duplicate mode-independent
-qualification cases run once, while mode-specific grants and failure cases remain.
-The root job limit is 50 minutes. A full shard passed all 1,144 tests in 39m38s
-but exhausted the former 40-minute deadline once setup and process shutdown were
-included. The extra bounded headroom changes neither coverage nor shard count;
-individual test deadlines remain enforced. Connected participant lifecycle tests have
-explicit 120-second budgets (180 seconds for two successive releases). The
-participant pool-to-observer catalog/Job lifecycle also has a 180-second budget.
-The complete workflow-selector integration also has a 120-second budget. Exhaustive
-shared census uses 1200 seconds, with 1500 seconds for the independently scheduled
-recovery matrix; process-preflight matrices use 1200 seconds. Recovery reopening
-uses 900 seconds. Delayed-stop commit outcomes use 1800 seconds each and run in separate file
-shards. These test-only limits include retained-chain setup and fault/replay
-validation; production deadlines and fresh authority checks are unchanged.
-Each shard stops on its first failing test to
-retain the underlying failure report before its deadline; successful shards run
-every selected test. Other shards are not cancelled, and `repository-checks`
-still requires the aggregate result. This repartitions the expanded lane without
-excluding tests; its new duration balance requires measurement on CI runners.
+The root Python lane has four complete, non-overlapping file shards; pool
+operators have twenty. Both use manifest-owned stable hashing. Explicit pool
+pins distribute complete modules according to completed source run 38921887321
+and merge-group run 38922178538 (October 16): retained image history, shutdown,
+origin history, recovery qualification, development installation and role
+restoration no longer crowd the same long shards. The retained development
+runtime module separates runtime stages from parent/publication/input checks
+into two independently scheduled files, preserving all 63 sets of assertions
+and all 182 parameter cases. Probe tests reuse a scoped trusted-tool
+fixture instead of requiring a host kubectl installation; real executable lookup
+and missing/untrusted-tool refusal remain covered. The shard count and runner
+capacity are unchanged. The selector/workflow tests enforce disjointness, full
+selected-file coverage, fail-fast failures and empty-selection refusal. Old tests
+that asserted exact historical placement of skipped handoff matrices were removed;
+a previous placement is not itself an operator behavior contract. The workflow
+execution test also proves that the pool lane has identical `all` and `nebius`
+module sets before exercising its 20 shards once, instead of repeating identical
+selector/subprocess coverage. Root scopes still execute independently.
 
-The fast integration lane uses four complete, non-overlapping file shards.
+The pool job limit remains 50 minutes; individual lifecycle and transport limits
+remain unchanged. Every selected successful shard runs all its tests, other
+shards are not cancelled, and `repository-checks` still requires their results.
+Measure execution, allocation wait and serialized merge-group time separately;
+local reductions are not a measured PR-to-deployment hosted speedup. Candidate
+publication continues reusing only successful native coverage on its exact commit,
+so a shorter PR wave does not create a delayed duplicate pool wave after merge.
+
+The fast integration lane uses six complete, non-overlapping file shards.
 `config/component-ownership.toml` owns the stable hash salt and the paired
 username/password fixture ordering. New files do not reshuffle existing files.
 Docker integration uses two non-overlapping file shards, with duration-based

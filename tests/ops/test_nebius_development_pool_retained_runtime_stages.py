@@ -1,4 +1,4 @@
-"""Runtime probes, HTTPS phases, database/catalog stages and network policy over closed pool evidence."""
+"""Runtime successors consume closed pool evidence without replaying installation."""
 from __future__ import annotations
 
 import base64
@@ -158,39 +158,21 @@ from tests.ops.test_nebius_development_pool_retained import (
 from tests.ops.test_nebius_development_pool_retained import (
     runtime_workloads_api as runtime_workloads_api,
 )
+from tests.ops.test_nebius_development_pool_retained import system_kubectl as system_kubectl
 
 
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
 @pytest.mark.parametrize('retained', [False], indirect=True)
 @pytest.mark.parametrize('ambient', ['protected', 'untrusted', 'missing-system-tool'])
 def test_runtime_probe_finds_system_kubectl_without_trusting_ambient_path(
-        completed_pool, publisher_cloud, monkeypatch, tmp_path, ambient):
+        completed_pool, publisher_cloud, monkeypatch, tmp_path, ambient, system_kubectl):
     from scripts.ops import nebius_development_runtime_probes as module
 
     _, request = runtime_install_request(completed_pool, publisher_cloud)
-    system = tmp_path / 'local-bin'
-    untrusted = tmp_path / 'untrusted-bin'
-    empty = tmp_path / 'empty-bin'
-    for directory in (system, untrusted, empty):
-        directory.mkdir()
-    for directory in (system, untrusted):
-        executable = directory / 'kubectl'
-        executable.write_text('#!/bin/sh\nexit 0\n')
-        executable.chmod(0o700)
+    system, untrusted = system_kubectl
     if ambient == 'missing-system-tool':
         (system / 'kubectl').unlink()
     monkeypatch.setenv('PATH', module.os.defpath if ambient == 'protected' else str(untrusted))
-    real_which = module.shutil.which
-
-    def mounted_which(command, mode=module.os.F_OK | module.os.X_OK, path=None):
-        # Map system directories into the test sandbox; retain real executable
-        # lookup and any untrusted ambient directory selected by the caller.
-        mounts = {'/usr/local/bin': str(system), '/bin': str(empty), '/usr/bin': str(empty)}
-        search = module.os.environ['PATH'] if path is None else path
-        return real_which(command, mode=mode, path=module.os.pathsep.join(
-            mounts.get(directory, directory) for directory in search.split(module.os.pathsep)))
-
-    monkeypatch.setattr(module.shutil, 'which', mounted_which)
     arguments = dict(request=request,
         api_server=request.database.foundation.inputs.config['kubernetes_api_server'],
         ssl_context=ssl.create_default_context(
@@ -208,10 +190,11 @@ def test_runtime_probe_finds_system_kubectl_without_trusting_ambient_path(
     assert not connection.exists()
 
 
+
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
 @pytest.mark.parametrize('retained', [False], indirect=True)
 def test_runtime_closed_database_probe_is_bound_readonly_and_independent_of_manager_process(
-        completed_pool, publisher_cloud, monkeypatch):
+        completed_pool, publisher_cloud, monkeypatch, system_kubectl):
     from types import SimpleNamespace
 
     from loom_service.pool_management.capacity import digest
@@ -309,12 +292,13 @@ def test_runtime_closed_database_probe_is_bound_readonly_and_independent_of_mana
     assert calls
 
 
+
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
 @pytest.mark.parametrize('retained', [False], indirect=True)
 @pytest.mark.parametrize('probe_kind', ['settings', 'database'])
 @pytest.mark.parametrize('connected', [None, True], indirect=True, ids=['dev-only', 'common-catalog'])
 def test_runtime_process_settings_challenge_uses_actual_owned_pod_and_rejects_drift(
-        completed_pool, publisher_cloud, handoff, monkeypatch, probe_kind):
+        completed_pool, publisher_cloud, handoff, monkeypatch, probe_kind, system_kubectl):
     import hmac
     from types import SimpleNamespace
 
@@ -413,12 +397,13 @@ def test_runtime_process_settings_challenge_uses_actual_owned_pod_and_rejects_dr
     assert calls and all(row.method == 'GET' for row in calls)
 
 
+
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
 @pytest.mark.parametrize('retained', [False], indirect=True)
 def test_runtime_https_fixed_phases_use_real_journal_and_never_emit_staging_or_writer_grants(completed_pool, publisher_cloud, tmp_path):
     from scripts.ops.nebius_ingress_stage import _key
     from scripts.ops.nebius_management_stage import _stage_fixed_documents
-    from tests.ops.test_nebius_management_stage import PhaseAPI
+    from tests.support.nebius_phase_api import PhaseAPI as PhaseAPI
 
     from loom.nebius_platform_render import digest
 
@@ -467,6 +452,7 @@ def test_runtime_https_fixed_phases_use_real_journal_and_never_emit_staging_or_w
     assert any('/apis/admissionregistration.k8s.io/v1/validatingadmissionpolicies' == call.url.path for call in calls)
 
 
+
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
 @pytest.mark.parametrize('retained', [False], indirect=True)
 @pytest.mark.parametrize('damage', ['other-phase', 'foreign-namespace', 'write-verb', 'missing-marker'])
@@ -493,6 +479,7 @@ def test_runtime_https_rejects_unbound_writes_before_transport(completed_pool, p
         with pytest.raises(ValueError, match='outside fixed development runtime phase'):
             api.create_resource(document)
     assert not calls
+
 
 
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
@@ -564,6 +551,7 @@ def test_runtime_workload_https_binds_uid_version_and_spec_before_patch(complete
     assert True in qualifications
 
 
+
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
 @pytest.mark.parametrize('retained', [False], indirect=True)
 @pytest.mark.parametrize('damage', ['target', 'uid', 'spec', 'foreign-key'])
@@ -590,6 +578,7 @@ def test_runtime_workload_https_refuses_unbound_transition_before_io(completed_p
         with pytest.raises(ValueError, match='development runtime workload update unconfirmed'):
             api.patch_workload(key, before, desired)
     assert not calls
+
 
 
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
@@ -631,6 +620,7 @@ def test_runtime_workload_https_only_explicit_rejection_is_retryable(completed_p
                 assert api.patch_workload(key, before, desired) is expected
             assert len(calls) == 1
             api.client.close()
+
 
 
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
@@ -734,6 +724,7 @@ def test_runtime_parent_connects_all_https_workload_phases_and_read_only_resume(
         assert len(calls) == before
 
 
+
 @pytest.mark.parametrize('manager_entry', ['foundation'], indirect=True)
 def test_runtime_database_delivery_keeps_old_data_identity_and_separates_credentials(completed_pool):
     import asyncio
@@ -792,6 +783,7 @@ def test_runtime_database_delivery_keeps_old_data_identity_and_separates_credent
     assert all(path.read_bytes() == raw for path, raw in foundation.files.items())
 
 
+
 @pytest.mark.parametrize('changes', [{'operation_id': UUID(int=0)},
     {'actuator_password': 'too-short'}, {'batch_runner_token': 'wrong-kind-' + 'r' * 64}])
 def test_runtime_database_delivery_refuses_invalid_material(completed_pool, changes):
@@ -803,6 +795,7 @@ def test_runtime_database_delivery_refuses_invalid_material(completed_pool, chan
         database_runtime(completed_pool, **changes)
 
 
+
 @pytest.mark.parametrize('manager_entry', ['foundation-old-schema', 'foundation-wrong-namespace',
     'foundation-wrong-ca_pem', 'foundation-wrong-secret_store_master_keys'], indirect=True)
 def test_runtime_database_delivery_rejects_manager_foundation_mismatch(completed_pool):
@@ -810,6 +803,7 @@ def test_runtime_database_delivery_rejects_manager_foundation_mismatch(completed
     with pytest.raises(ValueError, match='development runtime database delivery unqualified'):
         database_runtime(completed_pool)
     assert len(completed_pool[3].server.calls) == calls
+
 
 
 @pytest.mark.parametrize('manager_entry', ['foundation'], indirect=True)
@@ -829,6 +823,7 @@ def test_runtime_database_stage_retains_four_exact_creates_and_replays(completed
     assert 'runtime-actuator-' not in json.dumps(first)
 
 
+
 @pytest.mark.parametrize('manager_entry', ['foundation'], indirect=True)
 @pytest.mark.parametrize('failure', ['before', 'after'])
 def test_runtime_database_stage_never_retries_uncertain_create(completed_pool, tmp_path, failure):
@@ -846,6 +841,7 @@ def test_runtime_database_stage_never_retries_uncertain_create(completed_pool, t
         assert len(api.creates) == 1
 
 
+
 @pytest.mark.parametrize('manager_entry', ['foundation'], indirect=True)
 def test_runtime_database_stage_refuses_caller_modified_job_before_writes(completed_pool, tmp_path):
     request = database_runtime(completed_pool)
@@ -854,6 +850,7 @@ def test_runtime_database_stage_refuses_caller_modified_job_before_writes(comple
     with pytest.raises(ValueError, match='development runtime database stage unqualified'):
         runtime_database_stage(request, api, state)
     assert not api.creates and not state.exists()
+
 
 
 @pytest.mark.parametrize('manager_entry', ['foundation'], indirect=True)
@@ -883,6 +880,7 @@ def test_runtime_database_proof_binds_job_operation_role_and_token(completed_poo
             setup.validate_database_runtime_proof(request, state, {**proof, field: value})
 
 
+
 @pytest.mark.parametrize('manager_entry', ['foundation'], indirect=True)
 def test_runtime_database_https_waits_for_bound_sql_receipt_and_replays(runtime_database_live, tmp_path):
     live, state = runtime_database_live, tmp_path / 'runtime-database'
@@ -899,6 +897,7 @@ def test_runtime_database_https_waits_for_bound_sql_receipt_and_replays(runtime_
         assert live.store.creates == before and len(before) == 4
 
 
+
 @pytest.mark.parametrize('manager_entry', ['foundation'], indirect=True)
 @pytest.mark.parametrize('damage', ['database', 'execution-namespace'])
 def test_runtime_database_https_rejects_live_identity_drift_before_writes(runtime_database_live, tmp_path, damage):
@@ -911,6 +910,7 @@ def test_runtime_database_https_rejects_live_identity_drift_before_writes(runtim
         runtime_database_stage(live.request, api, tmp_path / 'runtime-database')
     assert not live.store.creates
     assert all(message.method == 'GET' for message in live.calls)
+
 
 
 @pytest.mark.parametrize('manager_entry', ['foundation'], indirect=True)
@@ -936,6 +936,7 @@ def test_runtime_database_https_rejects_receipt_and_late_drift(runtime_database_
         assert len(live.store.creates) == 4
 
 
+
 @pytest.mark.parametrize('manager_entry', ['foundation'], indirect=True)
 def test_runtime_database_https_private_inputs_cannot_shadow_retained_evidence(runtime_database_live):
     live = runtime_database_live
@@ -946,6 +947,7 @@ def test_runtime_database_https_private_inputs_cannot_shadow_retained_evidence(r
         with pytest.raises(ValueError, match='development runtime database prerequisites unqualified'):
             api.verify_identity(api.binding)
     assert not live.store.creates
+
 
 
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime'], indirect=True)
@@ -991,6 +993,7 @@ def test_shared_runtime_wires_real_predecessors_without_changing_artifact_proven
     assert len(completed_pool[3].server.calls) == before_calls
 
 
+
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-bad-keyring', 'foundation-runtime-bad-target', 'foundation-runtime-bad-broker'], indirect=True)
 def test_shared_runtime_rejects_incompatible_closed_catalog_before_writes(completed_pool):
     name = 'scripts.ops.nebius_development_shared_runtime'
@@ -1001,6 +1004,7 @@ def test_shared_runtime_rejects_incompatible_closed_catalog_before_writes(comple
     with pytest.raises(ValueError, match='development shared runtime unqualified'):
         importlib.import_module(name).prepare_shared_runtime(database)
     assert len(completed_pool[3].server.calls) == before_calls
+
 
 
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime'], indirect=True)
@@ -1056,12 +1060,14 @@ def test_fresh_actuator_uses_catalog_and_only_read_authority(completed_pool, mon
     assert len(completed_pool[3].server.calls) == before_calls
 
 
+
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-bad-account'], indirect=True)
 def test_fresh_actuator_rejects_foreign_task_service_account(completed_pool):
     from scripts.ops.nebius_development_actuator_runtime import prepare_actuator_runtime
     database = database_runtime(completed_pool)
     with pytest.raises(ValueError, match='development actuator runtime unqualified'):
         prepare_actuator_runtime(database)
+
 
 
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime'], indirect=True)
@@ -1108,6 +1114,7 @@ def test_catalog_job_binds_original_target_and_new_code_without_database_authori
     assert len(completed_pool[3].server.calls) == before_calls
 
 
+
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime'], indirect=True)
 def test_catalog_stage_creates_only_fixed_config_and_job_and_replays(completed_pool, tmp_path):
     request = database_runtime(completed_pool)
@@ -1121,6 +1128,7 @@ def test_catalog_stage_creates_only_fixed_config_and_job_and_replays(completed_p
     assert first['phase'] == 'development-runtime-catalog'
     assert first['status'] == 'management_phase_staged'
     assert len(first['resource_uids']) == 2
+
 
 
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime'], indirect=True)
@@ -1140,6 +1148,7 @@ def test_catalog_stage_never_retries_uncertain_create(completed_pool, tmp_path, 
         assert len(api.creates) == 1
 
 
+
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime'], indirect=True)
 def test_catalog_stage_refuses_modified_runtime_request_before_writes(completed_pool, tmp_path):
     request = database_runtime(completed_pool)
@@ -1148,6 +1157,7 @@ def test_catalog_stage_refuses_modified_runtime_request_before_writes(completed_
     with pytest.raises(ValueError, match='development catalog stage unqualified'):
         catalog_runtime_stage(request, api, state)
     assert not api.creates and not state.exists()
+
 
 
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime'], indirect=True)
@@ -1187,6 +1197,7 @@ def test_catalog_proof_binds_exact_job_request_and_operation(completed_pool, tmp
         catalog.validate_catalog_runtime_proof(request, state, proof)
 
 
+
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime'], indirect=True)
 def test_catalog_https_verifies_fixed_job_initializer_and_receipt(runtime_database_live, tmp_path):
     live, state = runtime_database_live, tmp_path / 'catalog'
@@ -1200,6 +1211,7 @@ def test_catalog_https_verifies_fixed_job_initializer_and_receipt(runtime_databa
         assert api.catalog_report(state) == proof
         assert len(live.store.creates) == 2
         assert live.catalog_checks > 2
+
 
 
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime'], indirect=True)
@@ -1217,6 +1229,7 @@ def test_catalog_https_requires_parent_qualification_and_rejects_extra_authority
         assert not live.store.creates
 
 
+
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime'], indirect=True)
 def test_catalog_https_late_prerequisite_loss_cannot_report_completion(runtime_database_live, tmp_path):
     live, state = runtime_database_live, tmp_path / 'catalog'
@@ -1227,6 +1240,7 @@ def test_catalog_https_late_prerequisite_loss_cannot_report_completion(runtime_d
         with pytest.raises(ValueError, match='development catalog execution unqualified'):
             api.catalog_report(state)
         assert len(live.store.creates) == 2
+
 
 
 @pytest.mark.parametrize('damage', ['anchor', 'parent', 'phase', 'incomplete', 'inputs', 'receipt'])
@@ -1264,6 +1278,7 @@ def test_missing_or_changed_completion_cannot_become_successor_authority(complet
     assert not any(token in str(caught.value) for token in connected.intent.tokens.values())
 
 
+
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime'], indirect=True)
 @pytest.mark.parametrize('retained', [False], indirect=True)
 def test_runtime_network_scopes_database_and_gateway_without_control_or_build_access(completed_pool):
@@ -1299,6 +1314,7 @@ def test_runtime_network_scopes_database_and_gateway_without_control_or_build_ac
         'podSelector': {'matchLabels': {'app': 'loom-llm-gateway'}}}], 'ports': [{'protocol': 'TCP', 'port': 9100}]}
 
 
+
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime'], indirect=True)
 @pytest.mark.parametrize('retained', [False], indirect=True)
 def test_runtime_network_refuses_changed_foundation_without_emitting_policy(completed_pool):
@@ -1306,6 +1322,7 @@ def test_runtime_network_refuses_changed_foundation_without_emitting_policy(comp
     request.foundation.inputs.config['namespace'] = 'loom-nebius-staging'
     with pytest.raises(ValueError, match='development runtime network unqualified'):
         network_runtime(request)
+
 
 
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-build'], indirect=True)
@@ -1321,6 +1338,7 @@ def test_runtime_build_policy_is_bound_to_retained_namespace_without_psa_change(
         'matchLabels': {'kubernetes.io/metadata.name': 'loom-nebius-dev-execution-build'}}}
     assert policy['metadata']['labels']['loom.nebius/development-runtime-operation'] == str(request.operation_id)
     assert all('namespace' not in row['metadata'] for row in policies)
+
 
 
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime'], indirect=True)

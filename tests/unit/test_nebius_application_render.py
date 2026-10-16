@@ -9,8 +9,8 @@ from uuid import UUID, uuid4
 import pytest
 
 from loom_service.config import LoomServiceSettings
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_environment_contract import foundation_from
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 from tests.unit.test_service_execution_materialization import _profile
 
 DATA_ID = UUID("20000000-0000-4000-8000-000000000009")

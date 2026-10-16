@@ -46,7 +46,7 @@ from tests.integration.test_execution_actuator_k3s import _load_client, _start_k
 from tests.ops import test_nebius_certificates as certificate_material
 from tests.ops.test_nebius_dns_publication import Provider
 from tests.ops.test_nebius_ingress_gateway import inputs as inputs
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 
 ROOT = Path(__file__).resolve().parents[2]
 POSTGRES = "docker.io/library/postgres@sha256:304ab813518754228f9f792f79d6da36359b82d8ecf418096c636725f8c930ad"

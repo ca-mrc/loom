@@ -34,7 +34,7 @@ from tests.ops.test_nebius_development_management_retained import provider_check
 from tests.ops.test_nebius_development_management_retained import retained as retained
 from tests.ops.test_nebius_development_management_retained import route as route
 from tests.ops.test_nebius_development_management_retained import tls_material as tls_material
-from tests.ops.test_nebius_management_stage import PhaseAPI
+from tests.support.nebius_phase_api import PhaseAPI as PhaseAPI
 
 
 def module():

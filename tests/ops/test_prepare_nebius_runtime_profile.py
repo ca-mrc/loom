@@ -8,7 +8,8 @@ from pathlib import Path
 
 import pytest
 from scripts.ops import prepare_nebius_runtime_profile as prepare
-from tests.unit.test_nebius_platform_render import ROOT, platform_inputs  # noqa: F401
+from tests.support.nebius_platform import ROOT as ROOT
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 
 from loom.execution_image_admission import (
     ImageAdmissionKeyring,
