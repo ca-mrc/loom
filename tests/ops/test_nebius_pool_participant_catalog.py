@@ -160,6 +160,53 @@ def advance(api, state):
     return module().refresh_participant_manager(request=state.request, api=api, state_dir=state.directory)
 
 
+def test_catalog_receipt_loader_retains_successor_identity_and_original_history(connection):
+    from scripts.ops.nebius_ingress_stage import _snapshot
+
+    api, state = connection
+    original = copy.deepcopy(state.request)
+    with api:
+        stage(api, state)
+        assert advance(api, state) is True
+    observed = module().read_applied_catalog(request=state.request, state_dir=state.directory)
+    assert observed.manager['metadata']['uid'] == original.manager['metadata']['uid']
+    assert _snapshot(observed.manager) == _snapshot(state.manager)
+    assert observed.catalog['metadata']['uid'] == state.config['metadata']['uid']
+    assert _snapshot(observed.catalog) == _snapshot(state.config)
+    assert set(observed.files) == {state.directory / 'catalog/stage.json', state.directory / 'manager/transition.json'}
+    assert all(path.read_bytes() == raw for path, raw in observed.files.items())
+    assert state.request == original
+
+
+@pytest.mark.parametrize('damage', ['missing-catalog', 'missing-manager', 'pending', 'image', 'catalog-body', 'catalog-uid'])
+def test_catalog_receipt_loader_rejects_incomplete_or_changed_children(connection, damage):
+    from scripts.ops import nebius_certificates as private_state
+
+    api, state = connection
+    with api:
+        stage(api, state)
+        assert advance(api, state) is True
+    catalog_path = state.directory / 'catalog/stage.json'
+    manager_path = state.directory / 'manager/transition.json'
+    if damage.startswith('missing-'):
+        (catalog_path if damage == 'missing-catalog' else manager_path).unlink()
+    else:
+        path = catalog_path if damage.startswith('catalog-') else manager_path
+        record = json.loads(path.read_text())
+        item, = record['resources'].values()
+        if damage == 'pending':
+            item['status'] = 'intent'
+        elif damage == 'image':
+            item['expected']['spec']['template']['spec']['containers'][0]['image'] = 'foreign@sha256:' + 'a' * 64
+        elif damage == 'catalog-body':
+            item['observed']['data']['profiles.json'] = '{}'
+        else:
+            item['uid'] = 'invalid-uid'
+        private_state._atomic_json(path, record)
+    with pytest.raises(ValueError):
+        module().read_applied_catalog(request=state.request, state_dir=state.directory)
+
+
 @pytest.mark.parametrize('failure', [None, 'lost-after', 'unready', 'init-unready', 'old-pod', 'conflict'])
 def test_catalog_update_changes_only_mount_and_replays_without_duplicate_patch(connection, failure):
     api, state = connection
