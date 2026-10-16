@@ -57,6 +57,7 @@ from tests.integration.minio_test_images import MINIO_TEST_IMAGE
 from tests.integration.pipeline_orchestrator_fixtures import orchestrator_seed  # noqa: F401
 from tests.integration.taskset_fixtures import tasksets_minio, tasksets_setup  # noqa: F401
 from tests.support.minio_images import prepare_test_image
+from tests.support.postgres_cleanup_diagnostics import observe_database_cleanup
 
 
 @pytest.fixture(autouse=True)
@@ -758,18 +759,22 @@ def _isolated_migration_database(
         try:
             if created:
                 with admin_engine.connect() as conn:
-                    conn.exec_driver_sql(
-                        f"ALTER DATABASE {quoted_database} ALLOW_CONNECTIONS false"
-                    )
-                    conn.execute(
-                        text(
-                            "SELECT pg_terminate_backend(pid) "
-                            "FROM pg_stat_activity "
-                            "WHERE datname = :database_name AND pid <> pg_backend_pid()",
-                        ),
-                        {"database_name": database_name},
-                    )
-                    conn.exec_driver_sql(f"DROP DATABASE IF EXISTS {quoted_database}")
+                    with observe_database_cleanup(conn) as phase:
+                        phase("prevent_connections")
+                        conn.exec_driver_sql(
+                            f"ALTER DATABASE {quoted_database} ALLOW_CONNECTIONS false"
+                        )
+                        phase("terminate_backends")
+                        conn.execute(
+                            text(
+                                "SELECT pg_terminate_backend(pid) "
+                                "FROM pg_stat_activity "
+                                "WHERE datname = :database_name AND pid <> pg_backend_pid()",
+                            ),
+                            {"database_name": database_name},
+                        )
+                        phase("drop_database")
+                        conn.exec_driver_sql(f"DROP DATABASE IF EXISTS {quoted_database}")
         finally:
             admin_engine.dispose()
 
