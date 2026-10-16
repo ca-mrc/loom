@@ -275,9 +275,14 @@ def retain_preactivation_catalog(*, runtime: RetainedRuntimeReference, source: d
 
 
 class PreactivationOperationAPI(Protocol):
-    catalog: ManagementStageAPI
-    manager: DevelopmentRuntimeWorkloadAPI
-    registry: PreactivationRegistryAPI
+    @property
+    def catalog(self) -> ManagementStageAPI: ...
+
+    @property
+    def manager(self) -> DevelopmentRuntimeWorkloadAPI: ...
+
+    @property
+    def registry(self) -> PreactivationRegistryAPI: ...
 
     def qualify(self, retained: RetainedPreactivationCatalog, phase: str) -> None:
         """Fresh publication, CLOSED registry, stopped gateway and fixed live scope."""

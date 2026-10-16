@@ -28,7 +28,7 @@ from loom_service.environment_management.candidates import (
 )
 
 if TYPE_CHECKING:
-    from scripts.ops.nebius_shared_pool_handoff import StagingForwardPlan
+    from scripts.ops.nebius_shared_pool_handoff import StagingForwardPlan, StagingPoolSource
 
 # #2443 introduced the protected shared handoff and its participant protocol.
 # This is an ancestry floor, not approval; exact publication is still resolved.
@@ -79,12 +79,19 @@ async def qualify_staging_publication(*, request: DevelopmentRuntimeInstallReque
     """
     if staging.source is None:
         return
+    await qualify_staging_source_publication(request=request, source=staging.source,
+        runtime_profile=staging.attachment.runtime_profile, http=http)
+
+
+async def qualify_staging_source_publication(*, request: DevelopmentRuntimeInstallRequest,
+        source: StagingPoolSource, runtime_profile: ServiceExecutionRuntimeProfileV1, http: httpx.AsyncClient) -> None:
+    """The same exact publication proof before catalog refresh and before handoff."""
     try:
-        selected = staging.source
+        selected = source
         catalog = _publication_catalog(request=request, http=http, publications=[selected.publication])
         bundle = await catalog.resolve(selected.publication.candidate_id)
         if (bundle.candidate != selected.candidate
-                or ServiceExecutionRuntimeProfileV1.model_validate(bundle.profile) != staging.attachment.runtime_profile
+                or ServiceExecutionRuntimeProfileV1.model_validate(bundle.profile) != runtime_profile
                 or not await catalog.candidate_follows(candidate_id=selected.publication.candidate_id,
                     current_sha=_SHARED_PROTOCOL_BASELINE)):
             raise ValueError

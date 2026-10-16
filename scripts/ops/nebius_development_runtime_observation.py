@@ -36,7 +36,10 @@ from scripts.ops.nebius_management_transport import ManagementKubernetesTranspor
 from loom_service.environment_management.candidates import _json
 
 if TYPE_CHECKING:
-    from scripts.ops.nebius_pool_preactivation_operation import CompletedPreactivationCatalog
+    from scripts.ops.nebius_pool_preactivation_operation import (
+        CompletedPreactivationCatalog,
+        RetainedPreactivationCatalog,
+    )
     from scripts.ops.nebius_shared_pool_handoff_live import SharedPoolGuardBindings
 
 _READ_PATHS = {**_PATHS, 'Namespace': ('v1', 'namespaces', True), 'Service': ('v1', 'services', False),
@@ -116,7 +119,8 @@ class HTTPSDevelopmentRuntimeObserver(ManagementKubernetesTransport):
 
     def inspect(self, *, state_dir: Path, _prechild_phase: str | None = None,
                 _expected_record: dict[str, Any] | None = None,
-                _shared_handoff: SharedPoolGuardBindings | None = None) -> dict[str, dict[str, Any]]:
+                _shared_handoff: SharedPoolGuardBindings | None = None,
+                _preactivation_catalog: RetainedPreactivationCatalog | None = None) -> dict[str, dict[str, Any]]:
         """Exact namespace/storage/material roots with recorded workload successors.
 
         Never require a replaced API/manager to equal its old template. All
@@ -131,6 +135,16 @@ class HTTPSDevelopmentRuntimeObserver(ManagementKubernetesTransport):
             record, choices, _ = view
             if _expected_record is not None and record != _expected_record:
                 raise ValueError
+            preactivation_view = None
+            if _preactivation_catalog is not None:
+                from scripts.ops.nebius_pool_preactivation_live import preactivation_runtime_view
+
+                if (self.preactivation is not None or _shared_handoff is not None or _prechild_phase is not None
+                        or _preactivation_catalog.runtime != self.request
+                        or any(item['status'] != 'complete' for item in record['phases'].values())):
+                    raise ValueError
+                preactivation_view = preactivation_runtime_view(_preactivation_catalog)
+                choices = {**choices, **preactivation_view[1]}
             if self.preactivation is not None:
                 if _prechild_phase is not None or any(item['status'] != 'complete' for item in record['phases'].values()):
                     raise ValueError
@@ -212,6 +226,8 @@ class HTTPSDevelopmentRuntimeObserver(ManagementKubernetesTransport):
                 raise ValueError
             if _shared_handoff is not None and shared_runtime_view(
                     bindings=_shared_handoff, state_dir=shared_state) != shared_view:
+                raise ValueError
+            if _preactivation_catalog is not None and preactivation_runtime_view(_preactivation_catalog) != preactivation_view:
                 raise ValueError
             self._private_inputs()
             return observed

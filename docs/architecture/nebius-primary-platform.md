@@ -43,6 +43,19 @@ releases must descend from the shared protocol baseline introduced by #2443;
 matching publication approval alone is not protocol compatibility. The handoff
 preserves staging images and retains the dev registration identity for guards
 and recovery. New protected tooling does not require reinstalling either runtime.
+Before initial handoff, a newer staging release can advance the never-used CLOSED
+pool's effective catalog through a separately retained preactivation successor.
+The original installation remains immutable evidence. The successor preserves
+participant, machine, credential, namespace and quota identities; only the
+selected release profiles and their binding revisions advance. Its protected
+operation shares the handoff lock, changes only an immutable catalog and the
+manager's catalog mount, proves the actual manager process, and commits one
+fixed CLOSED registry transaction. It requires no staging guard or staging write.
+Explicit completed ancestry is then consumed consistently by preflight, handoff,
+recovery and the first ordinary participant release. A prepared or interrupted
+successor is not activation authority, and ambiguous writes are reconciled from
+retained intent and readback rather than retried. See the
+[catalog refresh procedure](../runbooks/nebius-deployment.md#shared-pool-handoff-delivery).
 Staging also selects seven-day ephemeral lifecycle authority and mandatory fresh
 storage-capacity admission. The standalone Nebius renderer does not qualify that
 evidence or retention/cleanup path; rendering and deployment smoke are not proof

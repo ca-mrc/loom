@@ -39,7 +39,10 @@ from scripts.ops.nebius_pool_cutover_entry import load_pool_cutover_inputs
 from scripts.ops.nebius_pool_migration import PoolGuardTarget, migration_contract
 from scripts.ops.nebius_pool_preactivation_operation import (
     PreactivationReference,
+    RetainedPreactivationCatalog,
     load_completed_preactivation,
+    load_preactivation_catalog,
+    run_preactivation_catalog,
 )
 from scripts.ops.nebius_pool_predecessor import (
     CompletedPoolCutover,
@@ -51,7 +54,10 @@ from scripts.ops.nebius_shared_pool_api import (
     SharedPoolPhaseEvidence,
 )
 from scripts.ops.nebius_shared_pool_command import operator_home, validate_operation
-from scripts.ops.nebius_shared_pool_handoff import prepare_shared_pool_handoff
+from scripts.ops.nebius_shared_pool_handoff import (
+    prepare_shared_pool_handoff,
+    prepare_staging_forward,
+)
 from scripts.ops.nebius_shared_pool_handoff_live import SharedPoolGuardBindings
 from scripts.ops.nebius_shared_pool_operation import (
     CompletedSharedPoolOperation,
@@ -95,6 +101,24 @@ class SharedPoolEntryContext:
     legacy: CompletedPoolCutover
     observation: dict[str, Any]
     bindings: SharedPoolGuardBindings
+    files: dict[Path, bytes]
+
+
+@dataclass(frozen=True, repr=False)
+class _SharedPoolInputRoots:
+    inputs: SharedPoolPrivateInputs
+    runtime: DevelopmentRuntimeInstallRequest
+    legacy: CompletedPoolCutover
+    observation: dict[str, Any]
+    files: dict[Path, bytes]
+
+
+@dataclass(frozen=True, repr=False)
+class PreactivationEntryContext:
+    operation: dict[str, Any]
+    inputs: SharedPoolPrivateInputs
+    runtime: DevelopmentRuntimeInstallRequest
+    retained: RetainedPreactivationCatalog
     files: dict[Path, bytes]
 
 
@@ -175,7 +199,7 @@ def load_inputs(operation: dict[str, Any]) -> SharedPoolEntryContext:
     return _load_inputs(operation, source_record=SOURCE_RECORD, include_operator=True)
 
 
-def _load_inputs(operation: dict[str, Any], *, source_record: Path, include_operator: bool) -> SharedPoolEntryContext:
+def _load_input_roots(operation: dict[str, Any], *, source_record: Path, include_operator: bool) -> _SharedPoolInputRoots:
     try:
         validate_operation(operation)
         path = Path(operation['inputs_path'])
@@ -211,6 +235,17 @@ def _load_inputs(operation: dict[str, Any], *, source_record: Path, include_oper
             if hashlib.sha256(raw).hexdigest() != checksum or (historical in files and files[historical] != raw):
                 raise ValueError
             files[historical] = raw
+        if any(_private(item) != raw for item, raw in files.items()):
+            raise ValueError
+        return _SharedPoolInputRoots(inputs, runtime, legacy, observation, files)
+    except Exception:
+        raise ValueError('shared pool private input roots unqualified') from None
+
+
+def _load_inputs(operation: dict[str, Any], *, source_record: Path, include_operator: bool) -> SharedPoolEntryContext:
+    try:
+        roots = _load_input_roots(operation, source_record=source_record, include_operator=include_operator)
+        inputs, runtime, legacy, observation, files = roots.inputs, roots.runtime, roots.legacy, roots.observation, roots.files
         preactivation = None
         if inputs.preactivation is not None:
             preactivation = load_completed_preactivation(runtime=inputs.runtime, reference=inputs.preactivation, repo_root=ROOT)
@@ -232,6 +267,31 @@ def _load_inputs(operation: dict[str, Any], *, source_record: Path, include_oper
         return SharedPoolEntryContext(dict(operation), inputs, runtime, legacy, observation, bindings, files)
     except Exception:
         raise ValueError('shared pool private inputs unqualified') from None
+
+
+def load_preactivation_inputs(operation: dict[str, Any]) -> PreactivationEntryContext:
+    """Separate pending intake: never manufacture completed handoff authority."""
+    try:
+        roots = _load_input_roots(operation, source_record=SOURCE_RECORD, include_operator=True)
+        inputs, files = roots.inputs, roots.files
+        if inputs.preactivation is None:
+            raise ValueError('catalog refresh requires an explicit selection')
+        retained = load_preactivation_catalog(runtime=inputs.runtime, reference=inputs.preactivation, repo_root=ROOT)
+        if retained.runtime != roots.runtime or retained.inputs.source.model_dump(mode='json') != roots.observation:
+            raise ValueError('catalog refresh source differs from captured handoff')
+        # Prove this selected successor can satisfy the same pure staging
+        # identity/catalog contract that the subsequent handoff will consume.
+        prepare_staging_forward(registration=retained.registration, observation=roots.observation,
+            legacy=roots.legacy, repo_root=ROOT)
+        for path, raw in retained.files.items():
+            if path in files and files[path] != raw:
+                raise ValueError
+            files[path] = raw
+        if any(_private(path) != raw for path, raw in files.items()):
+            raise ValueError
+        return PreactivationEntryContext(dict(operation), inputs, roots.runtime, retained, files)
+    except Exception:
+        raise ValueError('shared pool preactivation inputs unqualified') from None
 
 
 def load_historical_inputs(*, operation_path: Path, operation_sha256: str) -> SharedPoolHistoricalContext:
@@ -307,7 +367,7 @@ def main(operation_path: str, action: str) -> int:
     """Dispatch one fixed parent action and export only bounded, non-secret state."""
     stage = 'operation'
     try:
-        if action not in {'qualify', 'preflight', 'install', 'recover'}:
+        if action not in {'qualify', 'preflight', 'install', 'recover', 'refresh-catalog'}:
             raise ValueError
         path = Path(operation_path)
         raw = _private(path)
@@ -317,6 +377,29 @@ def main(operation_path: str, action: str) -> int:
             print(json.dumps({'status': 'tooling_qualified'}))
             return 0
         stage = 'inputs'
+        if action == 'refresh-catalog':
+            from scripts.ops.nebius_pool_preactivation_live import HTTPSPreactivationOperationAPI
+
+            prepared = load_preactivation_inputs(operation)
+            if path in prepared.files or _private(path) != raw:
+                raise ValueError
+            prepared.files[path] = raw
+            stage = 'connection'
+            connection = prepared.inputs.operator_connection
+            context, token = asyncio.run(_transport(connection))
+            if any(_private(item) != before for item, before in prepared.files.items()):
+                raise ValueError
+            with HTTPSPreactivationOperationAPI(retained=prepared.retained, repo_root=ROOT,
+                    api_server=connection.endpoint, ssl_context=context, token=token, private_files=prepared.files) as catalog_api:
+                stage = 'catalog'
+                complete = run_preactivation_catalog(retained=prepared.retained, api=catalog_api, repo_root=ROOT)
+            result = {'status': 'shared_pool_catalog_refreshed' if complete else 'catalog_pending',
+                'pool_id': str(prepared.retained.inputs.refresh.after.pool_id),
+                'preactivation_id': str(prepared.retained.reference.operation_id),
+                'admission_open': False, 'writer_migration_complete': False}
+            identity = {key: operation[key] for key in ('source_sha', 'installation_id', 'namespace', 'operation_id')}
+            print(json.dumps({**result, **identity}, sort_keys=True))
+            return 0
         inputs = load_inputs(operation)
         if path in inputs.files or _private(path) != raw:
             raise ValueError
