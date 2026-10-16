@@ -56,6 +56,12 @@ recovery and the first ordinary participant release. A prepared or interrupted
 successor is not activation authority, and ambiguous writes are reconciled from
 retained intent and readback rather than retried. See the
 [catalog refresh procedure](../runbooks/nebius-deployment.md#shared-pool-handoff-delivery).
+Management catalog/startup SQL remains pinned to the retained `0176` database.
+Participant handoff and recovery separately support the audited `0176` and `0177`
+layouts; the latter adds publication retention without changing pool guards or
+outboxes. The actuator receives no access to that publication journal. Readiness
+reports the actual participant revision, and unreviewed revisions remain blocked;
+handoff never upgrades or relabels a database to satisfy these checks.
 Staging also selects seven-day ephemeral lifecycle authority and mandatory fresh
 storage-capacity admission. The standalone Nebius renderer does not qualify that
 evidence or retention/cleanup path; rendering and deployment smoke are not proof

@@ -34,6 +34,10 @@ from scripts.ops.nebius_management_gateway import (
 from scripts.ops.nebius_management_prerequisites import inventory_resources
 from scripts.ops.nebius_management_stage import _canonical_quantities
 from scripts.ops.nebius_management_switch import _matches, _stable
+from scripts.ops.nebius_pool_activation_database import (
+    PARTICIPANT_SCHEMA_REVISIONS,
+    _participant_schema_unqualified_sql,
+)
 from scripts.ops.nebius_pool_guard_activation import pool_guard_activation_sql
 from scripts.ops.nebius_pool_legacy_settings import (
     BOUND_LEGACY_SETTINGS_COMMAND,
@@ -347,7 +351,7 @@ SET LOCAL statement_timeout='10s'; SET LOCAL lock_timeout='2s'; SET LOCAL search
 DO $pool_cutover_readiness$
 DECLARE access_ready BOOLEAN;
 BEGIN
-    IF (SELECT version_num FROM public.alembic_version) IS DISTINCT FROM '0176'
+    IF {_participant_schema_unqualified_sql()}
     THEN RAISE EXCEPTION 'pool cutover schema unqualified'; END IF;
     IF NOT pg_try_advisory_xact_lock({LOCK_KEY}) OR EXISTS (
         SELECT 1 FROM public.nebius_rollout_guard
@@ -392,7 +396,7 @@ WITH pending AS (
     SELECT key,origin,source_matches FROM pending WHERE key COLLATE "C">'{cursor}' COLLATE "C"
      ORDER BY key COLLATE "C" LIMIT 128
 )
-SELECT json_build_object('status','observed','schema_revision','0176',
+SELECT json_build_object('status','observed','schema_revision',(SELECT version_num FROM public.alembic_version),
     'rows',COALESCE(json_agg(page ORDER BY key COLLATE "C"),'[]'::json)) FROM page;
 ROLLBACK;
 """
@@ -406,7 +410,7 @@ def qualify_cutover_readiness_page(report: Any, *, participant: PoolParticipantV
     """
     cursor = _backlog_cursor(after)
     if (not isinstance(report, dict) or set(report) != {"status", "schema_revision", "rows"}
-            or report["status"] != "observed" or report["schema_revision"] != "0176"
+            or report["status"] != "observed" or report["schema_revision"] not in PARTICIPANT_SCHEMA_REVISIONS
             or not isinstance(report["rows"], list) or len(report["rows"]) > 128):
         raise ValueError("pool_cutover_database_report_unqualified")
     origins = []
@@ -470,7 +474,7 @@ DO $pool_runtime_role$
 DECLARE item RECORD;
 BEGIN
     {closure}
-    IF (SELECT version_num FROM alembic_version) IS DISTINCT FROM '0176'
+    IF {_participant_schema_unqualified_sql()}
     THEN RAISE EXCEPTION 'pool runtime role database is not closed and idle'; END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='loom_actuator' AND rolcanlogin
         AND NOT (rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls))
@@ -513,7 +517,9 @@ BEGIN
           OR (item.name<>'task_bundle_sources' AND has_any_column_privilege('loom_actuator',item.name,'UPDATE'))
         THEN RAISE EXCEPTION 'pool runtime source journal authority unqualified'; END IF;
     END LOOP;
-    FOR item IN SELECT unnest(ARRAY['task_bundle_source_writes','task_bundle_source_versions']) AS name LOOP
+    FOR item IN SELECT unnest(ARRAY['task_bundle_source_writes','task_bundle_source_versions','task_source_publications']) AS name LOOP
+        IF item.name='task_source_publications' AND (SELECT version_num FROM public.alembic_version)='0176'
+          AND to_regclass('public.task_source_publications') IS NULL THEN CONTINUE; END IF;
         IF has_table_privilege('loom_actuator',item.name,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
           OR has_any_column_privilege('loom_actuator',item.name,'SELECT,INSERT,UPDATE,REFERENCES')
         THEN RAISE EXCEPTION 'pool runtime source publication authority unqualified'; END IF;

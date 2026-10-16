@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from scripts.ops.nebius_pool_activation_database import _header
+from scripts.ops.nebius_pool_activation_database import _participant_header
 from scripts.ops.nebius_pool_recovery_database import (
     _participant_drain_counts_sql,
     _participant_scope,
@@ -19,7 +19,7 @@ from loom.nebius_rollout_guard import LOCK_KEY
 
 def pool_guard_recovery_release_sql(operation_id: UUID, participant_id: UUID, candidate: str) -> str:
     _participant_scope(operation_id, participant_id, candidate)
-    return _header(read_only=False) + f"""DO $pool_recovery_release$
+    return _participant_header(read_only=False) + f"""DO $pool_recovery_release$
 DECLARE current_guard public.nebius_rollout_guard%ROWTYPE; counts jsonb;
 BEGIN
     PERFORM pg_advisory_xact_lock({LOCK_KEY});
