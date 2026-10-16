@@ -213,7 +213,8 @@ def test_shared_unauthenticated_or_foreign_commands_never_prepare_release(tmp_pa
     raw = archive(members(tmp_path))
     gateway = module()
     monkeypatch.setattr(gateway, 'prepare_release', lambda *_: pytest.fail('unauthorized release preparation'))
-    for command in ('id', 'loom-nebius-development-runtime-install-v1', 'loom-nebius-shared-pool-forward-guards-v1'):
+    for command in ('id', 'loom-nebius-development-runtime-install-v1', 'loom-nebius-shared-pool-forward-guards-v1',
+            'loom-nebius-participant-prepare-v1', 'loom-nebius-participant-execute-v1', 'loom-nebius-participant-recover-v1'):
         monkeypatch.setattr(sys, 'stdin', SimpleNamespace(buffer=io.BytesIO(raw)))
         monkeypatch.setenv('SSH_ORIGINAL_COMMAND', command)
         assert gateway.authorized_main(hashlib.sha256(raw).hexdigest()) == 126
