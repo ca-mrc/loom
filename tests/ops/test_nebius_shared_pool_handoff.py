@@ -694,7 +694,8 @@ def test_preactivation_refuses_active_journal_damage_during_qualification(shared
         journal = retained.state_dir / 'manager/transition.json'
         damaged = []
 
-        def qualify(current, phase):
+        def qualify(current, phase, *, original_qualify=original_qualify,
+                damaged=damaged, journal=journal, damage=damage):
             original_qualify(current, phase)
             if phase != 'manager' or damaged or not journal.exists():
                 return
@@ -749,6 +750,14 @@ def test_shared_v2_uses_completed_catalog_but_preserves_original_runtime_roots(s
     assert context.bindings.plan.preactivation == completed
     assert all(context.files[path] == raw for path, raw in completed.files.items())
     assert context.bindings.plan.development.runtime == bindings.plan.development.runtime
+    from scripts.ops.nebius_shared_pool_handoff_live import _resource_roots
+
+    # Writer qualification must follow the effective manager, not the immutable
+    # original installation template. Keep the old catalog as retained history.
+    roots = _resource_roots(context.bindings.plan, frozenset({'Deployment', 'ConfigMap'}))
+    assert roots[_key(completed.resources.manager)] == completed.resources.manager
+    assert roots[_key(completed.resources.catalog)] == completed.resources.catalog
+    assert _key(retained.inputs.catalog) in roots
     history = entry.load_historical_inputs(operation_path=root / 'operation.json',
         operation_sha256=hashlib.sha256((root / 'operation.json').read_bytes()).hexdigest())
     assert history.runtime == context.runtime and history.bindings == context.bindings
