@@ -56,7 +56,8 @@ tasks retain their existing nonroot identity. Only concrete root private task
 containers receive bounded installation capabilities; host/network privileges,
 filesystem sharing, process sharing and service-account tokens remain forbidden.
 Guest/Compose workbenches retain their separately admitted explicit root path;
-image-default startup is not supported inside a guest.
+inherited or explicit ENTRYPOINT startup is not supported inside a guest and
+is rejected at admission with `guest_image_entrypoint_unsupported`.
 This metadata path currently requires a Dockerfile build. A prebuilt-only image
 requesting image defaults is rejected with `task_image_runtime_metadata_required`;
 it needs a supported inspected-image binding before those defaults can execute.

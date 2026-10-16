@@ -45,7 +45,8 @@ The final image ENTRYPOINT may prefix the canonical bounded sandbox command;
 both are frozen into the image-bound execution plan. Trusted containers retain
 their own fixed command and identity; the Pod's nonroot defaults remain intact.
 Ordinary Loom tasks keep their existing nonroot defaults. Guest launchers require
-the existing explicit root identity and do not accept image-default startup.
+the existing explicit root identity and reject inherited or explicit ENTRYPOINT
+startup at admission.
 A prepared service fixture is a separate untrusted native sidecar with no volume
 mounts. Its reserved `fixture-` role runs as UID/GID 65532, drops all capabilities,
 has a read-only root filesystem and receives no environment-based identity or

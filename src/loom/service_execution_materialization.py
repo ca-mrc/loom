@@ -472,7 +472,7 @@ def automatic_service_execution_rejections(
         # A task that needs a guest kernel cannot run safely in a shared kernel.
         reasons.append("isolation_container_unsatisfiable")
     if effective_guest_capabilities(task, trial) is not None:
-        if env.image_entrypoint:
+        if env.image_entrypoint or env.entrypoint:
             reasons.append("guest_image_entrypoint_unsupported")
         if not controller:
             reasons.append("isolation_guest_response_only" if trial.isolation == "guest"
