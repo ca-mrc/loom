@@ -45,7 +45,7 @@ from loom.hosted_harness import (
 from loom.models.networking import NetworkPolicy, WebAllowlist, WebDestination, hosted_http_egress
 from loom.models.task import TaskConfig
 from loom.models.trial import TrialConfig
-from loom.sandbox_identity import resolve_sandbox_identity
+from loom.sandbox_identity import resolve_sandbox_identity, sandbox_identity_for_guest
 from loom.verifier_runtime import resolve_verifier_env_mode
 
 if TYPE_CHECKING:
@@ -176,14 +176,19 @@ def _sandbox_sidecars(
                          if topology.guest_execution is not None else probe)
         user = (task.verifier.user if role == VERIFIER_SANDBOX and task.verifier.user is not None
                 else env.user)
+        identity = (
+            sandbox_identity_for_guest(env.environment.get("HOME"))
+            if topology.guest_execution is not None
+            else resolve_sandbox_identity(
+                user, env.environment.get("HOME"),
+                default_uid=profile.run_as_user, default_gid=profile.run_as_group,
+            )
+        )
         sidecars.append(SidecarContainerV1(
             role_name=role, image_ref=env.docker_image,
             argv=(SANDBOX_RUNTIME_BINARY, "--socket", socket, "--exec-timeout-seconds", exec_limit),
             resources=resources, startup_probe=startup_probe, readiness_probe=probe, private_sandbox=True,
-            identity=resolve_sandbox_identity(
-                user, env.environment.get("HOME"),
-                default_uid=profile.run_as_user, default_gid=profile.run_as_group,
-            ),
+            identity=identity,
             guest_execution=topology.guest_execution,
         ))
     return sidecars
@@ -378,9 +383,13 @@ def compile_deferred_verifier_plan(
         raise ValueError("only a separate-execution attempt defers its verifier")
     task_sandbox = next(sidecar for sidecar in agent_plan.sidecars if sidecar.role_name == TASK_SANDBOX)
     user = task.verifier.user if task.verifier.user is not None else task.environment.user
-    identity = resolve_sandbox_identity(
-        user, task.environment.environment.get("HOME"),
-        default_uid=agent_plan.run_as_user, default_gid=agent_plan.run_as_group,
+    identity = (
+        sandbox_identity_for_guest(task.environment.environment.get("HOME"))
+        if task_sandbox.guest_execution is not None
+        else resolve_sandbox_identity(
+            user, task.environment.environment.get("HOME"),
+            default_uid=agent_plan.run_as_user, default_gid=agent_plan.run_as_group,
+        )
     )
     def verifier_argv(argv: tuple[str, ...]) -> tuple[str, ...]:
         return tuple(

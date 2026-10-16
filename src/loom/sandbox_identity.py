@@ -52,3 +52,16 @@ def resolve_sandbox_identity(
             raise ValueError("numeric task UID:GID requires explicit environment.environment.HOME")
         return SandboxIdentityV1(run_as_user=uid, run_as_group=gid, home=home)
     raise ValueError("unsupported task identity: use agent, root, or explicit numeric UID:GID with HOME")
+
+
+def sandbox_identity_for_guest(
+    home: str | None = None,
+) -> SandboxIdentityV1:
+    """QEMU private sandboxes always run as root.
+
+    Batch ``isolation=guest`` (or a task that already selects a guest class)
+    must not fail admit because ``task.toml`` omitted ``verifier.user`` or
+    authored ``agent``. The runtime contract is uid/gid 0; HOME stays the
+    task's ``environment.HOME`` when set, otherwise ``/root``.
+    """
+    return resolve_sandbox_identity("root", home)

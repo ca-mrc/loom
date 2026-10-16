@@ -63,7 +63,7 @@ from loom.models.trial import TrialConfig
 from loom.mutable_paths import validate_task_workdir
 from loom.pipeline.keys import canonical_digest
 from loom.prebuilt_task_images import resolve_prebuilt_task_image, validate_prebuilt_image_pins
-from loom.sandbox_identity import resolve_sandbox_identity
+from loom.sandbox_identity import resolve_sandbox_identity, sandbox_identity_for_guest
 from loom.task_image_materialization import TaskImageExecutionGrantV1, resolve_prepared_task
 from loom.task_sandbox_planner import (
     TaskSandboxPlanRequest,
@@ -487,13 +487,12 @@ def automatic_service_execution_rejections(
             reasons.append("isolation_guest_shared_unsupported")
         if env.sidecars:
             reasons.append("guest_sidecars_unsupported")
-        for user in (env.user, task.verifier.user):
-            try:
-                identity = resolve_sandbox_identity(user, env.environment.get("HOME")) if user is not None else None
-            except ValueError:
-                identity = None
-            if identity is None or identity.run_as_user != 0 or identity.run_as_group != 0:
-                reasons.append("guest_root_identity_required")
+        try:
+            identity = sandbox_identity_for_guest(env.environment.get("HOME"))
+        except ValueError:
+            identity = None
+        if identity is None or identity.run_as_user != 0 or identity.run_as_group != 0:
+            reasons.append("guest_root_identity_required")
         admission = evaluate_execution_admission(
             workload_requirements_from_task(task, trial if network_override_supported else trial.model_copy(
                 update={"baseline_network_policy_override": None})),
@@ -542,9 +541,10 @@ def automatic_service_execution_rejections(
         except ValueError:
             reasons.append("standard_workspace_identity_required")
         try:
-            resolve_sandbox_identity(env.user, env.environment.get("HOME"))
-            if task.verifier.user is not None:
-                resolve_sandbox_identity(task.verifier.user, env.environment.get("HOME"))
+            if effective_guest_capabilities(task, trial) is None:
+                resolve_sandbox_identity(env.user, env.environment.get("HOME"))
+                if task.verifier.user is not None:
+                    resolve_sandbox_identity(task.verifier.user, env.environment.get("HOME"))
         except ValueError:
             reasons.append("unsupported_task_identity")
     if effective_network_policy.kind not in {"no-network", "gateway-only", "web-allowlist", "public-web"}:

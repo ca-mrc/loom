@@ -10,6 +10,7 @@ from loom.execution_runtime_contract import (
     RuntimeHandoffInputV1,
 )
 from loom.models.task import TaskConfig
+from loom.sandbox_identity import sandbox_identity_for_guest
 from loom.service_execution_materialization import (
     automatic_service_execution_rejections,
     compile_service_execution_plan,
@@ -18,6 +19,13 @@ from loom.service_execution_materialization import (
 from loom_execution_actuator.renderer import _sidecar
 from tests.unit.test_service_execution_materialization import _provenance
 from tests.unit.test_service_execution_terminus_plan import _inputs
+
+
+def test_guest_sandbox_identity_is_always_root():
+    assert sandbox_identity_for_guest(None).model_dump() == {
+        "run_as_user": 0, "run_as_group": 0, "home": "/root",
+    }
+    assert sandbox_identity_for_guest("/home/agent").home == "/home/agent"
 
 
 def _identity_task(user, home=None, verifier_user=None):

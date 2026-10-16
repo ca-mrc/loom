@@ -42,8 +42,10 @@ commands expose `--supports-shared-guest`. Without readiness, an explicit shared
 request remains `isolation_guest_shared_unsupported`. With readiness, one resident
 task guest retains system files, processes and kernel state between agent and
 verifier controllers. Private verifier inputs are staged only after the agent ends.
-Separate grading retains two private guests. Both modes require explicit root
-task/verifier identities. Unresolved prerequisites and external
+Separate grading retains two private guests. Guest sandboxes always run as
+root; a missing or non-root ``task.toml`` user is coerced when the trial
+selects QEMU, so batch ``isolation=guest`` is not rejected for an omitted
+``verifier.user``. Unresolved prerequisites and external
 cluster, general PKCS#11 or DPDK requirements remain admission rejections.
 Emulated authentication additionally requires the deployment profile's explicit
 `supports_emulated_pkcs11 = true`. Only a task declaring that capability selects
@@ -60,7 +62,8 @@ capabilities. A plain guest carries an empty list; Go rejects a missing
 setup. Python and Go both validate the exact class, the matching one or two private roles,
 matching task images/resources, root identities, private socket/probe paths,
 timeouts and payload reservation. Historical requirements cannot silently
-upgrade into a guest. Nonroot guest identities are currently rejected.
+upgrade into a guest. Authored nonroot users are coerced to root on the
+compiled guest plan; a nonroot identity on that plan is still rejected.
 
 ## Isolation and lifetime
 
