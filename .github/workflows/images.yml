@@ -10,6 +10,8 @@ run-name: artifact-probe / ${{ inputs.role }} / ${{ inputs.provider }} / source=
         options:
         - producer
         - consumer
+        - split-producer
+        - split-consumer
         default: producer
       provider:
         type: choice
@@ -245,6 +247,226 @@ jobs:
     - name: verify-cache-rebuild
       run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py verify --root "$PROBE_ROOT" --label cache-rebuild
         --input "$PROBE_ROOT/rebuilt-images" --source "$GITHUB_WORKSPACE/source" --sha "$PROBE_SOURCE_SHA" --scan'
+    - name: upload-small-evidence
+      if: always()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: probe-metrics-${{ inputs.role }}-${{ inputs.provider }}-${{ github.run_id }}
+        path: ${{ env.PROBE_ROOT }}/metrics/
+        compression-level: 6
+        retention-days: 3
+        if-no-files-found: warn
+    - name: cleanup-only-probe-root
+      if: always()
+      run: 'python3 - <<''PY''
+
+        import os,pathlib,subprocess
+
+        p=pathlib.Path(os.environ["PROBE_ROOT"])
+
+        assert p==pathlib.Path("/tmp")/("loom-artifact-probe-"+os.environ["GITHUB_RUN_ID"]) and not p.is_symlink()
+
+        if p.exists(): subprocess.run(["sudo","rm","-rf","--",str(p)],check=True)
+
+        PY'
+  split-producer:
+    name: split-producer / ${{ inputs.provider }}
+    if: github.ref == 'refs/heads/codex/candidate-artifact-transfer-20261016' && inputs.role == 'split-producer'
+    runs-on: ${{ inputs.provider == 'oldlab' && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1","ephemeral-kvm"]')
+      || 'ubuntu-24.04' }}
+    timeout-minutes: 60
+    env:
+      PROBE_ROOT: /tmp/loom-artifact-probe-${{ github.run_id }}
+      PROBE_SOURCE_SHA: ${{ inputs.source_sha }}
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+    - *id001
+    - *id002
+    - *id003
+    - *id004
+    - name: before-download-split-carrier
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py mark --root "$PROBE_ROOT" --label before-download-split-carrier'
+    - name: download-probe-images-0
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        name: probe-images-0
+        path: ${{ env.PROBE_ROOT }}/images
+        run-id: ${{ inputs.producer_run_id }}
+        repository: ${{ github.repository }}
+        github-token: ${{ github.token }}
+        skip-decompress: false
+        digest-mismatch: error
+    - name: after-download-split-carrier
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py mark --root "$PROBE_ROOT" --label after-download-split-carrier'
+    - name: verify-split-carrier
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py verify --root "$PROBE_ROOT" --label split-carrier
+        --input "$PROBE_ROOT/images" --source "$GITHUB_WORKSPACE/source" --sha "$PROBE_SOURCE_SHA"'
+    - name: before-upload-split
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py mark --root "$PROBE_ROOT" --label before-upload-split'
+    - name: before-upload-split-service
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py mark --root "$PROBE_ROOT" --label before-upload-split-service'
+    - name: upload-raw-service.tar
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: service.tar
+        path: ${{ env.PROBE_ROOT }}/images/service.tar
+        archive: false
+        if-no-files-found: error
+        retention-days: 1
+    - name: after-upload-split-service
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py mark --root "$PROBE_ROOT" --label after-upload-split-service'
+    - name: before-upload-split-control_plane
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py mark --root "$PROBE_ROOT" --label before-upload-split-control_plane'
+    - name: upload-raw-control_plane.tar
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: control_plane.tar
+        path: ${{ env.PROBE_ROOT }}/images/control_plane.tar
+        archive: false
+        if-no-files-found: error
+        retention-days: 1
+    - name: after-upload-split-control_plane
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py mark --root "$PROBE_ROOT" --label after-upload-split-control_plane'
+    - name: before-upload-split-web
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py mark --root "$PROBE_ROOT" --label before-upload-split-web'
+    - name: upload-raw-web.tar
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: web.tar
+        path: ${{ env.PROBE_ROOT }}/images/web.tar
+        archive: false
+        if-no-files-found: error
+        retention-days: 1
+    - name: after-upload-split-web
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py mark --root "$PROBE_ROOT" --label after-upload-split-web'
+    - name: before-upload-split-gateway
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py mark --root "$PROBE_ROOT" --label before-upload-split-gateway'
+    - name: upload-raw-gateway.tar
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: gateway.tar
+        path: ${{ env.PROBE_ROOT }}/images/gateway.tar
+        archive: false
+        if-no-files-found: error
+        retention-days: 1
+    - name: after-upload-split-gateway
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py mark --root "$PROBE_ROOT" --label after-upload-split-gateway'
+    - name: before-upload-split-execution_runtime
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py mark --root "$PROBE_ROOT" --label before-upload-split-execution_runtime'
+    - name: upload-raw-execution_runtime.tar
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: execution_runtime.tar
+        path: ${{ env.PROBE_ROOT }}/images/execution_runtime.tar
+        archive: false
+        if-no-files-found: error
+        retention-days: 1
+    - name: after-upload-split-execution_runtime
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py mark --root "$PROBE_ROOT" --label after-upload-split-execution_runtime'
+    - name: before-upload-split-execution_actuator
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py mark --root "$PROBE_ROOT" --label before-upload-split-execution_actuator'
+    - name: upload-raw-execution_actuator.tar
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: execution_actuator.tar
+        path: ${{ env.PROBE_ROOT }}/images/execution_actuator.tar
+        archive: false
+        if-no-files-found: error
+        retention-days: 1
+    - name: after-upload-split-execution_actuator
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py mark --root "$PROBE_ROOT" --label after-upload-split-execution_actuator'
+    - name: before-upload-split-harbor_runtime
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py mark --root "$PROBE_ROOT" --label before-upload-split-harbor_runtime'
+    - name: upload-raw-harbor_runtime.tar
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: harbor_runtime.tar
+        path: ${{ env.PROBE_ROOT }}/images/harbor_runtime.tar
+        archive: false
+        if-no-files-found: error
+        retention-days: 1
+    - name: after-upload-split-harbor_runtime
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py mark --root "$PROBE_ROOT" --label after-upload-split-harbor_runtime'
+    - name: after-upload-split
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py mark --root "$PROBE_ROOT" --label after-upload-split'
+    - name: before-upload-split-manifest
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py mark --root "$PROBE_ROOT" --label before-upload-split-manifest'
+    - name: upload-raw-manifest.json
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: manifest.json
+        path: ${{ env.PROBE_ROOT }}/images/manifest.json
+        archive: false
+        if-no-files-found: error
+        retention-days: 1
+    - name: after-upload-split-manifest
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py mark --root "$PROBE_ROOT" --label after-upload-split-manifest'
+    - name: upload-small-evidence
+      if: always()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: probe-metrics-${{ inputs.role }}-${{ inputs.provider }}-${{ github.run_id }}
+        path: ${{ env.PROBE_ROOT }}/metrics/
+        compression-level: 6
+        retention-days: 3
+        if-no-files-found: warn
+    - name: cleanup-only-probe-root
+      if: always()
+      run: 'python3 - <<''PY''
+
+        import os,pathlib,subprocess
+
+        p=pathlib.Path(os.environ["PROBE_ROOT"])
+
+        assert p==pathlib.Path("/tmp")/("loom-artifact-probe-"+os.environ["GITHUB_RUN_ID"]) and not p.is_symlink()
+
+        if p.exists(): subprocess.run(["sudo","rm","-rf","--",str(p)],check=True)
+
+        PY'
+  split-consumer:
+    name: split-consumer / ${{ inputs.provider }}
+    if: github.ref == 'refs/heads/codex/candidate-artifact-transfer-20261016' && inputs.role == 'split-consumer'
+    runs-on: ${{ inputs.provider == 'oldlab' && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1","ephemeral-kvm"]')
+      || 'ubuntu-24.04' }}
+    timeout-minutes: 60
+    env:
+      PROBE_ROOT: /tmp/loom-artifact-probe-${{ github.run_id }}
+      PROBE_SOURCE_SHA: ${{ inputs.source_sha }}
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+    - *id001
+    - *id002
+    - *id003
+    - *id004
+    - name: before-download-split
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py mark --root "$PROBE_ROOT" --label before-download-split'
+    - name: download-split-images
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        pattern: '*.tar'
+        merge-multiple: true
+        path: ${{ env.PROBE_ROOT }}/split-images
+        run-id: ${{ inputs.producer_run_id }}
+        repository: ${{ github.repository }}
+        github-token: ${{ github.token }}
+        digest-mismatch: error
+    - name: after-download-split
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py mark --root "$PROBE_ROOT" --label after-download-split'
+    - name: download-manifest.json
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        name: manifest.json
+        path: ${{ env.PROBE_ROOT }}/split-images
+        run-id: ${{ inputs.producer_run_id }}
+        repository: ${{ github.repository }}
+        github-token: ${{ github.token }}
+        skip-decompress: false
+        digest-mismatch: error
+    - name: after-manifest
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py mark --root "$PROBE_ROOT" --label after-manifest'
+    - name: verify-split-consumer
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py verify --root "$PROBE_ROOT" --label split-consumer
+        --input "$PROBE_ROOT/split-images" --source "$GITHUB_WORKSPACE/source" --sha "$PROBE_SOURCE_SHA" --scan'
     - name: upload-small-evidence
       if: always()
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
