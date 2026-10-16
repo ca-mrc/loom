@@ -732,10 +732,6 @@ def test_shared_v2_uses_completed_catalog_but_preserves_original_runtime_roots(s
     runtime = entry.RetainedRuntimeReference.model_validate(inputs['runtime'])
     source = _advanced_staging_source(args, tmp_path)
     retained = parent.retain_preactivation_catalog(runtime=runtime, source=source, operation_id=uuid4(), repo_root=ROOT)
-    api = PreactivationAPI(retained)
-    api.manager.ready = True
-    assert parent.run_preactivation_catalog(retained=retained, api=api, repo_root=ROOT)
-    completed = parent.load_completed_preactivation(runtime=runtime, reference=retained.reference, repo_root=ROOT)
     private_state._atomic_json(root / 'staging.json', source)
     inputs.update(schema_version='loom.nebius-shared-pool-inputs.v2', preactivation=retained.reference.model_dump(mode='json'),
         staging_observation_sha256=hashlib.sha256((root / 'staging.json').read_bytes()).hexdigest())
@@ -743,6 +739,15 @@ def test_shared_v2_uses_completed_catalog_but_preserves_original_runtime_roots(s
     operation['inputs_sha256'] = hashlib.sha256((root / 'inputs.json').read_bytes()).hexdigest()
     private_state._atomic_json(root / 'operation.json', operation)
     monkeypatch.setattr(entry, 'SOURCE_RECORD', root / 'shared-pool-source.json')
+    assert hasattr(entry, 'load_preactivation_inputs'), 'pending catalog needs a separate protected intake'
+    prepared = entry.load_preactivation_inputs(operation)
+    assert prepared.retained == retained and prepared.runtime == args['runtime']
+    with pytest.raises(ValueError):
+        entry.load_inputs(operation)  # A prepared selector never authorizes handoff.
+    api = PreactivationAPI(retained)
+    api.manager.ready = True
+    assert parent.run_preactivation_catalog(retained=retained, api=api, repo_root=ROOT)
+    completed = parent.load_completed_preactivation(runtime=runtime, reference=retained.reference, repo_root=ROOT)
     context = entry.load_inputs(operation)
     assert context.runtime == args['runtime']
     assert context.operation['operation_id'] == str(retained.inputs.refresh.before.operation_id)
@@ -901,21 +906,28 @@ def _exercise_preactivated_probes(request, selected, documents, handle, client_t
 @pytest.mark.parametrize('staging_observation', ['independent'], indirect=True)
 @pytest.mark.timeout(600)
 def test_connected_preactivation_preserves_staging_and_qualifies_actual_closed_successor(
-        shared_operation, shared_runtime, completed_pool, handoff, tmp_path, monkeypatch):
+        shared_operation, shared_runtime, completed_pool, handoff, tmp_path, monkeypatch, capsys):
     """Catch a transport using old catalog settings or dispatching outside CLOSED scope."""
     import hmac
     import importlib
+    import os
     import ssl
     from types import SimpleNamespace
 
     import httpx
+    from scripts.ops import nebius_certificates as private_state
+    from scripts.ops import nebius_development_runtime_probes as probes_module
     from scripts.ops import nebius_pool_preactivation_operation as parent
+    from scripts.ops import nebius_shared_pool_entry as entry_module
     from scripts.ops.nebius_pool_preactivation_database import (
         _identity,
         pool_preactivation_state_sql,
         refresh_closed_pool_sql,
     )
-    from scripts.ops.nebius_pool_runtime_settings import BOUND_POOL_SETTINGS_COMMAND, expected_pool_runtime_settings
+    from scripts.ops.nebius_pool_runtime_settings import (
+        BOUND_POOL_SETTINGS_COMMAND,
+        expected_pool_runtime_settings,
+    )
     from scripts.ops.nebius_shared_pool_entry import RetainedRuntimeReference
     from tests.ops.test_nebius_development_pool_retained import (
         populate_database_backends,
@@ -928,10 +940,16 @@ def test_connected_preactivation_preserves_staging_and_qualifies_actual_closed_s
     assert importlib.util.find_spec(name) is not None, 'connected preactivation adapter is missing'
     module = importlib.import_module(name)
     args, bindings = shared_operation
-    _, _, inputs, _, _ = _shared_entry_inputs(args, bindings)
+    root, operation, inputs, _, _ = _shared_entry_inputs(args, bindings, preparation_id=str(uuid4()))
     runtime = RetainedRuntimeReference.model_validate(inputs['runtime'])
     retained = parent.retain_preactivation_catalog(runtime=runtime, source=_advanced_staging_source(args, tmp_path),
         operation_id=uuid4(), repo_root=ROOT)
+    private_state._atomic_json(root / 'staging.json', retained.inputs.source.model_dump(mode='json'))
+    inputs.update(schema_version='loom.nebius-shared-pool-inputs.v2', preactivation=retained.reference.model_dump(mode='json'),
+        staging_observation_sha256=hashlib.sha256((root / 'staging.json').read_bytes()).hexdigest())
+    private_state._atomic_json(root / 'inputs.json', inputs)
+    operation['inputs_sha256'] = hashlib.sha256((root / 'inputs.json').read_bytes()).hexdigest()
+    private_state._atomic_json(root / 'operation.json', operation)
     refresh = retained.inputs.refresh
     _, documents, fallback = runtime_http_inventory(args['runtime'], shared_runtime[1], completed_pool[3].server, handoff[2])
     plurals = {'Namespace': 'namespaces', 'ConfigMap': 'configmaps', 'Service': 'services',
@@ -1009,7 +1027,7 @@ def test_connected_preactivation_preserves_staging_and_qualifies_actual_closed_s
         return httpx.Response(200, json=value)
 
     def execute(argv, **kwargs):
-        assert kwargs['env'] == {'PATH': module.os.defpath, 'LANG': 'C.UTF-8'}
+        assert kwargs['env'] == {'PATH': os.defpath, 'LANG': 'C.UTF-8'}
         command = argv[argv.index('--') + 1:]
         if command[0] == 'psql':
             assert command[:-1] == ['psql', '-X', '-qAt', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', 'loom', '-c']
@@ -1020,6 +1038,8 @@ def test_connected_preactivation_preserves_staging_and_qualifies_actual_closed_s
                 assert events[-1] == 'settings' and state['registry'] == 'ready'
                 events.append('registry')
                 state['registry'] = 'complete'
+                if state.pop('lose_commit', False):
+                    raise OSError('connection lost after fixed transaction committed')
             report = {**_identity(refresh), 'read_only': not writing, 'state': state['registry']}
             if state['failure'] == 'registry':
                 report['state'] = None
@@ -1041,12 +1061,12 @@ def test_connected_preactivation_preserves_staging_and_qualifies_actual_closed_s
 
     with monkeypatch.context() as patch:
         patch.setattr(module.HTTPSPreactivationOperationAPI, '_external', external)
-        patch.setattr(module.subprocess, 'run', execute)
+        patch.setattr(probes_module.subprocess, 'run', execute)
         with module.HTTPSPreactivationOperationAPI(retained=retained, repo_root=ROOT,
                 api_server=args['runtime'].database.foundation.inputs.config['kubernetes_api_server'],
                 ssl_context=ssl.create_default_context(cadata=args['runtime'].database.foundation.bootstrap['material']['loom-platform-db']['ca.crt']),
                 token='operator-test') as api:
-            for connection in (api, api.manager, api.foundation, api.catalog):
+            for connection in (api.probes, api.probes.manager, api.probes.foundation, api.catalog):
                 connection.client.close()
                 connection.client = type(completed_pool[3].api.client)(base_url=connection.api_server,
                     transport=httpx.MockTransport(respond))
@@ -1056,7 +1076,21 @@ def test_connected_preactivation_preserves_staging_and_qualifies_actual_closed_s
                     parent.run_preactivation_catalog(retained=retained, api=api, repo_root=ROOT)
                 assert events == []
             state['failure'] = None
-            assert parent.run_preactivation_catalog(retained=retained, api=api, repo_root=ROOT)
+            state['lose_commit'] = True
+            try:
+                assert parent.run_preactivation_catalog(retained=retained, api=api, repo_root=ROOT)
+            except Exception as error:
+                # Safe locations only: production deliberately hides private
+                # exception messages; the test must still locate a failed path.
+                locations = []
+                cause = error
+                while cause is not None:
+                    trace = cause.__traceback__
+                    while trace is not None:
+                        locations.append((Path(trace.tb_frame.f_code.co_filename).name, trace.tb_lineno))
+                        trace = trace.tb_next
+                    cause = cause.__context__
+                pytest.fail(repr(locations), pytrace=False)
             assert parent.load_completed_preactivation(runtime=runtime, reference=retained.reference, repo_root=ROOT)
             assert {path: documents[path] for path in staging_paths} == original_staging
             assert [event for event in events if event != 'settings'] == ['catalog', 'manager', 'registry']
@@ -1064,6 +1098,22 @@ def test_connected_preactivation_preserves_staging_and_qualifies_actual_closed_s
             count = len(events)
             assert parent.run_preactivation_catalog(retained=retained, api=api, repo_root=ROOT)
             assert all(event == 'settings' for event in events[count:])
+        client_type = type(completed_pool[3].api.client)
+        patch.setattr(httpx, 'Client', lambda *args, **kwargs: client_type(*args,
+            **{**kwargs, 'transport': httpx.MockTransport(respond)}))
+        patch.setattr(entry_module, 'SOURCE_RECORD', root / 'shared-pool-source.json')
+
+        async def authenticate(connection):
+            assert connection == entry_module.NebiusKubernetesConnection.model_validate(inputs['operator_connection'])
+            return ssl.create_default_context(cadata=args['runtime'].database.foundation.bootstrap['material']['loom-platform-db']['ca.crt']), 'operator-test'
+
+        patch.setattr(entry_module, '_transport', authenticate)
+        assert entry_module.main(str(root / 'operation.json'), 'refresh-catalog') == 0
+        result = json.loads(capsys.readouterr().out)
+        assert result['status'] == 'shared_pool_catalog_refreshed'
+        assert result['preactivation_id'] == str(retained.reference.operation_id)
+        assert result['admission_open'] is False and result['writer_migration_complete'] is False
+        assert [event for event in events if event != 'settings'] == ['catalog', 'manager', 'registry']
 
 
 @pytest.mark.parametrize('preparation_id', [None, '335c9f82-6f9a-43de-ab0c-a312034b9efe'])
