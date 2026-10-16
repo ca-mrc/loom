@@ -14,10 +14,10 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal, Self, cast
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_development_entry import _transport
 from scripts.ops.nebius_development_preflight import PreparedDevelopmentSource
@@ -37,6 +37,10 @@ from scripts.ops.nebius_development_runtime_retained import load_completed_runti
 from scripts.ops.nebius_development_runtime_setup import prepare_database_runtime
 from scripts.ops.nebius_pool_cutover_entry import load_pool_cutover_inputs
 from scripts.ops.nebius_pool_migration import PoolGuardTarget, migration_contract
+from scripts.ops.nebius_pool_preactivation_operation import (
+    PreactivationReference,
+    load_completed_preactivation,
+)
 from scripts.ops.nebius_pool_predecessor import (
     CompletedPoolCutover,
     PoolPredecessorV1,
@@ -67,13 +71,20 @@ SOURCE_RECORD = ROOT / 'shared-pool-source.json'
 
 class SharedPoolPrivateInputs(BaseModel):
     model_config = ConfigDict(extra='forbid', frozen=True, hide_input_in_errors=True)
-    schema_version: Literal['loom.nebius-shared-pool-inputs.v1']
+    schema_version: Literal['loom.nebius-shared-pool-inputs.v1', 'loom.nebius-shared-pool-inputs.v2']
+    preactivation: PreactivationReference | None = None
     runtime: RetainedRuntimeReference
     legacy: PoolPredecessorV1
     staging_observation_file: Path
     staging_observation_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
     development_guard: PoolGuardTarget
     operator_connection: NebiusKubernetesConnection
+
+    @model_validator(mode='after')
+    def catalog_selection(self) -> Self:
+        if (self.schema_version.endswith('.v2')) != (self.preactivation is not None):
+            raise ValueError('shared pool catalog selection differs from input version')
+        return self
 
 
 @dataclass(frozen=True, repr=False)
@@ -200,7 +211,15 @@ def _load_inputs(operation: dict[str, Any], *, source_record: Path, include_oper
             if hashlib.sha256(raw).hexdigest() != checksum or (historical in files and files[historical] != raw):
                 raise ValueError
             files[historical] = raw
-        plan = prepare_shared_pool_handoff(runtime=runtime, observation=observation, legacy=legacy, repo_root=ROOT)
+        preactivation = None
+        if inputs.preactivation is not None:
+            preactivation = load_completed_preactivation(runtime=inputs.runtime, reference=inputs.preactivation, repo_root=ROOT)
+            for historical, raw in preactivation.files.items():
+                if historical in files and files[historical] != raw:
+                    raise ValueError
+                files[historical] = raw
+        plan = prepare_shared_pool_handoff(runtime=runtime, observation=observation, legacy=legacy, repo_root=ROOT,
+            preactivation=preactivation)
         dev, = (row for row in plan.migration.guards if row.namespace == 'loom-dev')
         guard = inputs.development_guard
         if (guard.participant_id, guard.namespace, guard.namespace_uid) != (dev.participant_id, dev.namespace, dev.namespace_uid):

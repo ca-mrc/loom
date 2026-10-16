@@ -11,7 +11,7 @@ import copy
 import hashlib
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
@@ -40,6 +40,9 @@ from scripts.ops.nebius_staging_pool_attachment import (
 from loom.nebius_platform_render import digest
 from loom_service.environment_management.candidates import ProtectedPublication
 from loom_service.pool_management.installation import PoolInstallation
+
+if TYPE_CHECKING:
+    from scripts.ops.nebius_pool_preactivation_operation import CompletedPreactivationCatalog
 
 MARKER = 'loom.nebius/shared-pool-handoff-operation'
 _LEGACY_MARKERS = {'loom.nebius/pool-retirement-operation', 'loom.nebius/pool-cutover-operation',
@@ -78,6 +81,7 @@ class SharedPoolHandoffPlan:
     staging_reader_authority: dict[str, dict[str, Any]]
     history: dict[Path, str]
     input_digest: str
+    preactivation: CompletedPreactivationCatalog | None = None
 
 
 def prepare_staging_forward(*, registration: PoolRegistrationRequest, observation: dict[str, Any],
@@ -196,7 +200,8 @@ def prepare_staging_forward(*, registration: PoolRegistrationRequest, observatio
 
 
 def prepare_shared_pool_handoff(*, runtime: DevelopmentRuntimeInstallRequest,
-        observation: dict[str, Any], legacy: CompletedPoolCutover, repo_root: Path) -> SharedPoolHandoffPlan:
+        observation: dict[str, Any], legacy: CompletedPoolCutover, repo_root: Path,
+        preactivation: CompletedPreactivationCatalog | None = None) -> SharedPoolHandoffPlan:
     """Compose completed CLOSED dev and current staging without replaying either.
 
     The complete migration contract is used only for fixed staging projection.
@@ -210,6 +215,14 @@ def prepare_shared_pool_handoff(*, runtime: DevelopmentRuntimeInstallRequest,
         database = completed.request.database
         pool = database.manager.retained.request
         registration = pool.registration
+        if preactivation is not None:
+            from scripts.ops.nebius_pool_preactivation_operation import load_completed_preactivation
+
+            selected = load_completed_preactivation(runtime=preactivation.retained.inputs.runtime,
+                reference=preactivation.retained.reference, repo_root=repo_root)
+            if selected != preactivation or selected.retained.runtime != runtime:
+                raise ValueError
+            registration = selected.retained.registration
         participant = retained_development_participant(pool)
         # The completed dev runtime retains its own verified registration source.
         # Staging can independently retain a different approved publication.
@@ -280,7 +293,10 @@ def prepare_shared_pool_handoff(*, runtime: DevelopmentRuntimeInstallRequest,
         if len(originals) != 2 or len(readers) != 2:
             raise ValueError
         history = dict(legacy.history)
-        for path, raw in completed.files.items():
+        catalog_files = {} if preactivation is None else preactivation.files
+        if any(path in completed.files and completed.files[path] != raw for path, raw in catalog_files.items()):
+            raise ValueError
+        for path, raw in {**completed.files, **catalog_files}.items():
             checksum = hashlib.sha256(raw).hexdigest()
             if path in history and history[path] != checksum:
                 raise ValueError
@@ -294,6 +310,6 @@ def prepare_shared_pool_handoff(*, runtime: DevelopmentRuntimeInstallRequest,
             'staging_reader_authority': readers,
             'history': {str(path): value for path, value in history.items()}})
         return SharedPoolHandoffPlan(development, staging, migration, targets, material, originals, role_targets,
-            readers, history, checksum)
+            readers, history, checksum, preactivation)
     except Exception:
         raise ValueError('shared pool handoff intent unqualified') from None
