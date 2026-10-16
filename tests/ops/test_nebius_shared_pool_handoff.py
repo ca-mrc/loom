@@ -491,6 +491,8 @@ class PreactivationAPI:
         self.retained = retained
         self.catalog = PhaseAPI(retained.registration.binding)
         self.manager = RuntimeAPI({_key(retained.inputs.manager): retained.inputs.manager})
+        # Historical snapshots omit volatile metadata; a live API read has it.
+        self.manager.rows[_key(retained.inputs.manager)]['metadata']['resourceVersion'] = '1'
         self.registry = self
         self.registry_state = 'ready'
         self.commits = 0
@@ -584,6 +586,41 @@ def test_preactivation_parent_orders_readiness_commit_and_completed_successors(s
     assert successor.inputs.manager == completed.resources.manager
     assert successor.inputs.catalog == completed.resources.catalog
     assert completed.files.items() <= successor.files.items()
+
+
+@pytest.mark.parametrize('staging_observation', ['independent'], indirect=True)
+@pytest.mark.timeout(240)
+def test_preactivation_completion_requires_dispatch_anchor_and_unchanged_children(shared_operation, tmp_path):
+    from scripts.ops import nebius_pool_preactivation_operation as parent
+    from scripts.ops.nebius_shared_pool_entry import RetainedRuntimeReference
+
+    args, bindings = shared_operation
+    _, _, inputs, _, _ = _shared_entry_inputs(args, bindings)
+    runtime = RetainedRuntimeReference.model_validate(inputs['runtime'])
+    retained = parent.retain_preactivation_catalog(runtime=runtime, source=_advanced_staging_source(args, tmp_path),
+        operation_id=uuid4(), repo_root=ROOT)
+    api = PreactivationAPI(retained)
+    api.manager.ready = True
+    assert parent.run_preactivation_catalog(retained=retained, api=api, repo_root=ROOT)
+    dispatch = retained.anchor_dir / (str(retained.reference.operation_id) + '-pool-preactivation-dispatch.json')
+    original = dispatch.read_bytes()
+    dispatch.unlink()
+    with pytest.raises(ValueError):
+        parent.load_completed_preactivation(runtime=runtime, reference=retained.reference, repo_root=ROOT)
+    from scripts.ops import nebius_certificates as private_state
+
+    private_state._write_private(dispatch, original)
+    completed = parent.load_completed_preactivation(runtime=runtime, reference=retained.reference, repo_root=ROOT)
+    assert completed.files[dispatch] == original
+    child = retained.state_dir / 'registry/registry.json'
+    original = child.read_bytes()
+    child.write_bytes(original + b' ')
+    with pytest.raises(ValueError):
+        parent.load_completed_preactivation(runtime=runtime, reference=retained.reference, repo_root=ROOT)
+    with pytest.raises(ValueError):
+        parent.run_preactivation_catalog(retained=retained, api=api, repo_root=ROOT)
+    assert api.commits == 1
+    child.write_bytes(original)
 
 
 @pytest.mark.parametrize('preparation_id', [None, '335c9f82-6f9a-43de-ab0c-a312034b9efe'])
