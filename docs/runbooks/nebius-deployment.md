@@ -824,6 +824,15 @@ registration, a new input directory alone is insufficient. Before handoff:
    successor while still CLOSED; never weaken catalog equality or roll staging
    backward to make an earlier preparation pass.
 
+Schema compatibility is separate from release/catalog identity. The retained
+management database must still be exactly `0176`. Participant readiness,
+guard/role handoff and recovery accept the audited `0176` and `0177` layouts;
+readiness reports the actual revision. The `0177` publication journal remains
+inaccessible to the actuator. An unknown revision, missing journal or excessive
+role grants blocks qualification. No handoff command migrates a database or
+changes its version marker. Protected read-only lease census also supports
+`0177`; a successful census is not handoff authority.
+
 The `loom.nebius-shared-pool-inputs.v1` private document contains:
 
 - `runtime`: the completed runtime operation path and SHA-256. Its archived source

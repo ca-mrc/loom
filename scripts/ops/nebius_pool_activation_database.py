@@ -15,6 +15,10 @@ from loom_service.pool_management.capacity import digest
 from loom_service.pool_management.installation import PoolInstallation
 
 PoolActivationState = Literal["closed", "global", "fenced"]
+# Participant databases advance independently of the retained manager. 0177
+# adds publication retention, not a new handoff/outbox/guard layout. This is an
+# audited compatibility set, never the automatically discovered migration head.
+PARTICIPANT_SCHEMA_REVISIONS = ("0176", "0177")
 
 
 def _binding_hex(spec: PoolInstallation) -> str:
@@ -28,16 +32,31 @@ def _binding_hex(spec: PoolInstallation) -> str:
     return json.dumps(immutable, sort_keys=True, separators=(",", ":")).encode().hex()
 
 
-def _header(*, read_only: bool) -> str:
+def _participant_schema_unqualified_sql() -> str:
+    revisions = ','.join("'" + value + "'" for value in PARTICIPANT_SCHEMA_REVISIONS)
+    return f"NOT COALESCE((SELECT version_num FROM public.alembic_version) IN ({revisions}),FALSE)"
+
+
+def _transaction_header(*, read_only: bool, schema_unqualified: str) -> str:
     transaction = "REPEATABLE READ READ ONLY" if read_only else "READ COMMITTED"
     return f"""BEGIN TRANSACTION ISOLATION LEVEL {transaction};
 SET LOCAL statement_timeout='10s'; SET LOCAL lock_timeout='2s'; SET LOCAL search_path=pg_catalog,public,pg_temp;
 DO $pool_activation_schema$
 BEGIN
-    IF (SELECT version_num FROM public.alembic_version) IS DISTINCT FROM '0176'
+    IF {schema_unqualified}
     THEN RAISE EXCEPTION 'pool activation schema unqualified'; END IF;
 END $pool_activation_schema$;
 """
+
+
+def _header(*, read_only: bool) -> str:
+    """Management SQL stays pinned to its immutable installed image/schema."""
+    return _transaction_header(read_only=read_only,
+        schema_unqualified="(SELECT version_num FROM public.alembic_version) IS DISTINCT FROM '0176'")
+
+
+def _participant_header(*, read_only: bool) -> str:
+    return _transaction_header(read_only=read_only, schema_unqualified=_participant_schema_unqualified_sql())
 
 
 def _report_sql(spec: PoolInstallation) -> str:
