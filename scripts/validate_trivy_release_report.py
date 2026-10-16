@@ -183,7 +183,12 @@ def _validate_artifact_identity(
     component: str,
     architecture: str,
     artifact_name: str,
+    expected_artifact: Path | None = None,
 ) -> None:
+    if expected_artifact is not None:
+        if not expected_artifact.is_absolute() or artifact_name != str(expected_artifact):
+            raise TrivyReportError("report artifact is inconsistent")
+        return
     expected_artifacts = {
         f"/tmp/{component}-{architecture}.docker.tar",
         f"/tmp/{component}-{architecture}.release.docker.tar",
@@ -280,6 +285,7 @@ def validate_trivy_release_report(
     ignore_file: Path,
     *,
     use_exceptions: bool = True,
+    expected_artifact: Path | None = None,
 ) -> None:
     """Reject active vulnerabilities and any suppression outside its reviewed scope."""
 
@@ -307,7 +313,7 @@ def validate_trivy_release_report(
     if _object(payload.get("Trivy")).get("Version") != "0.74.0":
         raise TrivyReportError("unsupported Trivy version")
     artifact_name = _required_string(payload, "ArtifactName")
-    _validate_artifact_identity(component, architecture, artifact_name)
+    _validate_artifact_identity(component, architecture, artifact_name, expected_artifact)
 
     metadata = _object(payload.get("Metadata"))
     image_config = _object(metadata.get("ImageConfig"))

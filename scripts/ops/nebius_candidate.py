@@ -17,6 +17,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -65,6 +66,7 @@ SHA = re.compile(r"[0-9a-f]{40}\Z")
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 REGISTRY = re.compile(r"cr\.[a-z0-9-]+\.nebius\.cloud/[a-z0-9]+\Z")
 _diagnostic_dir: Path | None = None
+_build_diagnostic = threading.local()
 
 
 def encoded(value: Any) -> bytes:
@@ -388,15 +390,16 @@ def _run(*command: str) -> str:
         text = sanitize_diagnostic(result.stderr or result.stdout)
         if _diagnostic_dir is not None:
             write_json(
-                _diagnostic_dir / "failed-command.json",
+                _diagnostic_dir / getattr(_build_diagnostic, "filename", "failed-command.json"),
                 {
                     "operation": operation,
                     "returncode": result.returncode,
                     "diagnostic": text,
                 },
             )
+        filename = getattr(_build_diagnostic, "filename", "failed-command.json")
         raise ValueError(
-            f"{operation} failed with exit code {result.returncode}; inspect failed-command.json"
+            f"{operation} failed with exit code {result.returncode}; inspect {filename}"
         )
     return result.stdout.strip()
 
@@ -485,9 +488,18 @@ def _copy_image(archive: Path, tag: str, *, timeout_seconds: float = 900) -> Non
 def inspect_oci_archive(
     archive: Path, *, candidate: str, runtime: bool = False,
     runtime_metadata: dict[str, str] | None = None,
+    component: str | None = None, source_ref: str | None = None,
+    verify_layers: bool = False,
 ) -> tuple[str, str | None]:
     """Bind the exact scanned OCI bytes; never execute an image to inspect it."""
     with tarfile.open(archive) as bundle:
+        if verify_layers:
+            # Optional cache archives must be safe for the same native data
+            # filter used by the scan-layout extractor. Preflight without
+            # writing files so unsafe cache members rebuild this component.
+            layout = archive.parent / f".{archive.name}.scan-layout"
+            for member in bundle.getmembers():
+                tarfile.data_filter(member, str(layout))
 
         def blob(descriptor: dict[str, Any]) -> bytes:
             digest = descriptor["digest"]
@@ -519,8 +531,15 @@ def inspect_oci_archive(
             != candidate
         ):
             raise ValueError("built OCI image source/platform mismatch")
+        labels = config.get("config", {}).get("Labels", {})
+        if component is not None and labels.get("io.loom.component") != component:
+            raise ValueError("OCI image component mismatch")
+        if source_ref is not None and labels.get("io.loom.source-ref") != source_ref:
+            raise ValueError("OCI image source ref mismatch")
+        if verify_layers and not runtime:
+            for layer in manifest["layers"]:
+                blob(layer)
         if runtime_metadata is not None:
-            labels = config.get("config", {}).get("Labels", {})
             for field in ("agent_name", "agent_version", "runtime_contract", "harbor_version",
                           "harbor_source_revision", "loom_bridge_revision"):
                 runtime_metadata[field] = labels.get("io.loom." + field, "")
@@ -558,6 +577,213 @@ def oci_scan_layout(archive: Path, layout: Path) -> Iterator[Path]:
         yield layout
     finally:
         shutil.rmtree(layout)
+
+
+def default_build_workers() -> int:
+    """Bound shared-builder pressure using the process CPU/memory allowance."""
+    cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
+    try:
+        quota, period = Path("/sys/fs/cgroup/cpu.max").read_text().split()
+        if quota != "max":
+            cpus = min(cpus, max(1, int(quota) // int(period)))
+    except (OSError, ValueError, ZeroDivisionError):
+        pass
+    memory = None
+    for limit_path, usage_path in (
+        (Path("/sys/fs/cgroup/memory.max"), Path("/sys/fs/cgroup/memory.current")),
+        (Path("/sys/fs/cgroup/memory/memory.limit_in_bytes"),
+         Path("/sys/fs/cgroup/memory/memory.usage_in_bytes")),
+    ):
+        try:
+            value = int(limit_path.read_text().strip())
+        except (OSError, ValueError):
+            continue
+        if 0 <= value < 1 << 60:
+            try:
+                used = int(usage_path.read_text().strip())
+                if used >= 0:
+                    value = max(0, value - used)
+            except (OSError, ValueError):
+                pass
+            memory = value if memory is None else min(memory, value)
+    try:
+        available = next(
+            int(line.split()[1]) * 1024 for line in Path("/proc/meminfo").read_text().splitlines()
+            if line.startswith("MemAvailable:")
+        )
+        memory = available if memory is None else min(memory, available)
+    except (OSError, StopIteration, ValueError):
+        pass
+    # Reserve 2 GiB for the runner/scanner and allow roughly 2 GiB per build.
+    memory_workers = max(1, (memory - 2 * 1024**3) // (2 * 1024**3)) if memory is not None else 4
+    return min(4, max(1, cpus), memory_workers)
+
+
+def build_image_command(
+    root: Path, candidate: str, version: str, owner: dict[str, Any],
+    component: str, tag: str, archive: Path,
+) -> list[str]:
+    """One producer/consumer image contract; identity is the final source SHA."""
+    return [
+        os.environ.get("BUILDKIT_CLIENT", os.environ.get("BUILDKIT_BIN", "/opt/buildkit/buildctl")),
+        "build", "--frontend", "dockerfile.v0",
+        "--local", f"context={root / owner['context']}",
+        "--local", f"dockerfile={(root / owner['dockerfile']).parent}",
+        "--opt", f"filename={Path(owner['dockerfile']).name}",
+        "--opt", "platform=linux/amd64",
+        "--opt", f"label:org.opencontainers.image.revision={candidate}",
+        "--opt", f"label:io.loom.component={component}",
+        "--opt", f"label:io.loom.source-ref={SOURCE_REF}",
+        "--opt", f"build-arg:LOOM_BUILD_SHA={candidate}",
+        "--opt", f"build-arg:LOOM_SOURCE_REF={SOURCE_REF}",
+        *(["--opt", f"build-arg:LOOM_AGENT_VERSION={version}"] if component == "harbor_runtime" else []),
+        "--output", f"type=oci,oci-mediatypes=true,name={tag},dest={archive}",
+    ]
+
+
+def export_missing_images(
+    root: Path, candidate: str, version: str, rows: list[dict[str, Any]], outputdir: Path,
+    *, available_components: list[str], workers: int | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Export known cache misses while native Actions downloads the other images.
+
+    No image is inspected, scanned, signed or published here. The caller must
+    join this operation successfully before final preparation and validation.
+    """
+    if SHA.fullmatch(candidate) is None or AGENT_VERSION.fullmatch(version) is None:
+        raise ValueError("invalid image source SHA or agent version")
+    if (not isinstance(available_components, list)
+            or any(not isinstance(component, str) or component not in COMPONENTS for component in available_components)
+            or len(set(available_components)) != len(available_components)):
+        raise ValueError("invalid available image components")
+    workers = default_build_workers() if workers is None else workers
+    if isinstance(workers, bool) or not isinstance(workers, int) or not 1 <= workers <= 7:
+        raise ValueError("build workers must be between 1 and 7")
+    ownership = {row["image_name"]: row for row in rows}
+    outputdir.mkdir(parents=True, exist_ok=False)
+    missing = {component: name for component, name in COMPONENTS.items() if component not in available_components}
+
+    def export(component: str, name: str) -> tuple[str, dict[str, Any]]:
+        started = time.monotonic()
+        _build_diagnostic.filename = f"failed-command-{component}.json"
+        archive = outputdir / f"{component}.tar"
+        _run(*build_image_command(root, candidate, version, ownership[name], component,
+                                 f"{name}:candidate-{candidate}", archive))
+        if archive.is_symlink() or not archive.is_file():
+            if _diagnostic_dir is not None:
+                write_json(_diagnostic_dir / f"failed-command-{component}.json", {
+                    "operation": f"BuildKit export {component}", "returncode": 0,
+                    "diagnostic": "successful builder did not produce the expected regular archive",
+                })
+            raise ValueError(f"new build did not export a regular {component} archive")
+        return component, {"archive": archive, "elapsed_seconds": time.monotonic() - started}
+
+    if not missing:
+        return {}
+    with ThreadPoolExecutor(max_workers=min(workers, len(missing))) as pool:
+        futures = [pool.submit(export, component, name) for component, name in missing.items()]
+        # No fallback pool may start until every active export has ended.
+        return dict(future.result() for future in futures)
+
+
+def prepare_images(
+    root: Path, candidate: str, version: str, rows: list[dict[str, Any]], outputdir: Path,
+    *, artifacts_dir: Path | None = None, workers: int | None = None,
+    built_dir: Path | None = None, built_components: list[str] | None = None,
+    components: dict[str, str] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Prepare independent final-SHA OCI images with bounded concurrency.
+
+    Optional artifacts are untrusted cache inputs, never admission evidence.
+    Copy into this invocation's owned work directory before inspecting/scanning;
+    missing or invalid inputs rebuild, while any new-build failure is fatal.
+    All returned images still pass the existing scans and publication checks.
+    """
+    if SHA.fullmatch(candidate) is None or AGENT_VERSION.fullmatch(version) is None:
+        raise ValueError("invalid image source SHA or agent version")
+    workers = default_build_workers() if workers is None else workers
+    if isinstance(workers, bool) or not isinstance(workers, int) or not 1 <= workers <= 7:
+        raise ValueError("build workers must be between 1 and 7")
+    components = COMPONENTS if components is None else components
+    if not components or any(COMPONENTS.get(component) != name for component, name in components.items()):
+        raise ValueError("unknown candidate image component")
+    if built_dir is not None:
+        if (not isinstance(built_components, list)
+                or any(not isinstance(component, str) or component not in components for component in built_components)
+                or len(set(built_components)) != len(built_components)):
+            raise ValueError("locally built images require explicit expected component names")
+    elif built_components:
+        raise ValueError("expected locally built images require their build directory")
+    ownership = {row["image_name"]: row for row in rows}
+    outputdir.mkdir(parents=True, exist_ok=False)
+    local_images: dict[str, dict[str, Any]] = {}
+
+    def inspect_image(archive: Path, component: str, *, reused: bool) -> dict[str, Any]:
+        metadata: dict[str, str] = {}
+        digest, runtime_digest = inspect_oci_archive(
+            archive, candidate=candidate, runtime=component == "execution_runtime",
+            runtime_metadata=metadata if component == "harbor_runtime" else None,
+            component=component, source_ref=SOURCE_REF, verify_layers=reused,
+        )
+        if component == "harbor_runtime":
+            validate_runtime_metadata(metadata)
+            if metadata["agent_version"] != version:
+                raise ValueError("runtime agent version does not match publication")
+        return {"scanned_digest": digest, "runtime_digest": runtime_digest, "runtime_metadata": metadata}
+
+    def prepare_local(component: str) -> tuple[str, dict[str, Any]]:
+        started = time.monotonic()
+        assert built_dir is not None
+        source = built_dir / f"{component}.tar"
+        if source.is_symlink() or not source.is_file():
+            raise ValueError(f"expected new build is missing a regular {component} archive")
+        archive = outputdir / f"{component}.tar"
+        shutil.copyfile(source, archive)
+        image = inspect_image(archive, component, reused=False)
+        return component, {
+            **image, "archive": archive, "origin": "rebuilt", "reuse_reason": "known missing before download",
+            "elapsed_seconds": time.monotonic() - started,
+        }
+
+    def prepare(component: str, name: str) -> tuple[str, dict[str, Any]]:
+        if component in local_images:
+            return component, local_images[component]
+        started = time.monotonic()
+        _build_diagnostic.filename = f"failed-command-{component}.json"
+        archive = outputdir / f"{component}.tar"
+        reason = "no artifact directory"
+        if artifacts_dir is not None:
+            source = artifacts_dir / f"{component}.tar"
+            try:
+                if source.is_symlink() or not source.is_file():
+                    raise ValueError("artifact missing or not a regular non-symlink file")
+                shutil.copyfile(source, archive)
+                image = inspect_image(archive, component, reused=True)
+            except (OSError, ValueError, KeyError, TypeError, AttributeError, IndexError, EOFError, tarfile.TarError) as exc:
+                reason = f"{type(exc).__name__}: {sanitize_diagnostic(str(exc))}"
+                archive.unlink(missing_ok=True)
+                print(f"Rebuilding {component}: {reason}", flush=True)
+            else:
+                return component, {
+                    **image, "archive": archive, "origin": "reused", "reuse_reason": "exact final SHA/component/ref",
+                    "elapsed_seconds": time.monotonic() - started,
+                }
+        owner = ownership[name]
+        _run(*build_image_command(root, candidate, version, owner, component, f"{name}:candidate-{candidate}", archive))
+        image = inspect_image(archive, component, reused=False)
+        return component, {
+            **image, "archive": archive, "origin": "rebuilt", "reuse_reason": reason,
+            "elapsed_seconds": time.monotonic() - started,
+        }
+
+    with ThreadPoolExecutor(max_workers=min(workers, len(components))) as pool:
+        # Local worker failures are real build failures, never cache misses.
+        # Validate them first, once, before launching any late fallback builds.
+        built_futures = [pool.submit(prepare_local, component) for component in built_components or []]
+        local_images.update(future.result() for future in built_futures)
+        futures = [pool.submit(prepare, component, name) for component, name in components.items()]
+        # Await all work on failure before this invocation's temporary root is removed.
+        return dict(future.result() for future in futures)
 
 
 def build(args: argparse.Namespace) -> None:
@@ -612,58 +838,34 @@ def build(args: argparse.Namespace) -> None:
         write_release_policy(policy, exceptions, use_exceptions=False)
         document["policy_sha256"] = sha256(policy.read_bytes() + exceptions.read_bytes())
         components = {"harbor_runtime": COMPONENTS["harbor_runtime"]} if mode == "harness-only" else COMPONENTS
+        prepared = prepare_images(
+            ROOT, candidate, version, rows, work / "images",
+            artifacts_dir=getattr(args, "image_artifacts_dir", None),
+            workers=getattr(args, "build_workers", None), components=components,
+            built_dir=getattr(args, "built_images_dir", None),
+            built_components=(json.loads(getattr(args, "built_components_json", None) or "null")
+                              if getattr(args, "built_images_dir", None) is not None else None),
+        )
+        write_json(args.output / "image-preparation.json", {
+            component: {key: value for key, value in image.items() if key != "archive"}
+            for component, image in prepared.items()
+        })
         for component, name in components.items():
             owner = ownership[name]
             tag_label = f"runtime-{candidate}-{document['run_id']}" if mode == "harness-only" else f"candidate-{candidate}"
             tag = f"{args.registry_prefix}/{name}:{tag_label}"
-            archive = Path(f"/tmp/{owner['image']}-amd64.release.docker.tar")
-            if archive.exists():
-                raise ValueError("release archive already exists; use a clean ephemeral runner")
+            prepared_image = prepared[component]
+            archive = prepared_image["archive"]
+            scanned_digest = prepared_image["scanned_digest"]
+            runtime_digest = prepared_image["runtime_digest"]
+            if component == "harbor_runtime":
+                document["runtime_metadata"] = prepared_image["runtime_metadata"]
             report = args.output / f"{component}.vulnerability.json"
             policy_report = args.output / f"{component}.policy.json"
             sbom = args.output / f"{component}.sbom.cdx.json"
-            print(f"Building and scanning {component}", flush=True)
-            _run(
-                os.environ.get(
-                    "BUILDKIT_CLIENT", os.environ.get("BUILDKIT_BIN", "/opt/buildkit/buildctl")
-                ),
-                "build",
-                "--frontend",
-                "dockerfile.v0",
-                "--local",
-                f"context={ROOT / owner['context']}",
-                "--local",
-                f"dockerfile={(ROOT / owner['dockerfile']).parent}",
-                "--opt",
-                f"filename={Path(owner['dockerfile']).name}",
-                "--opt",
-                "platform=linux/amd64",
-                "--opt",
-                f"label:org.opencontainers.image.revision={candidate}",
-                "--opt",
-                f"build-arg:LOOM_BUILD_SHA={candidate}",
-                # #2009: displayed frontend/backend version detail reuses this
-                # same candidate identity. A Dockerfile that doesn't declare
-                # the ARG silently ignores it — safe to pass unconditionally.
-                "--opt",
-                f"build-arg:LOOM_SOURCE_REF={SOURCE_REF}",
-                *(["--opt", f"build-arg:LOOM_AGENT_VERSION={version}"]
-                  if component == "harbor_runtime" else []),
-                "--output",
-                f"type=oci,oci-mediatypes=true,name={tag},dest={archive}",
-            )
-            metadata: dict[str, str] = {}
-            scanned_digest, runtime_digest = inspect_oci_archive(
-                archive, candidate=candidate, runtime=component == "execution_runtime",
-                runtime_metadata=metadata if component == "harbor_runtime" else None,
-            )
-            if component == "harbor_runtime":
-                validate_runtime_metadata(metadata)
-                if metadata["agent_version"] != version:
-                    raise ValueError("built runtime agent version does not match publication")
-                document["runtime_metadata"] = metadata
+            print(f"Scanning and publishing {component} ({prepared_image['origin']})", flush=True)
             with oci_scan_layout(
-                archive, Path(f"/tmp/{owner['image']}-amd64.release.oci")
+                archive, work / f"{component}.oci"
             ) as layout:
                 _run(
                     str(scanner),
@@ -682,6 +884,7 @@ def build(args: argparse.Namespace) -> None:
                 )
                 validate_trivy_release_report(
                     owner["image"], "amd64", policy_report, exceptions, use_exceptions=False,
+                    expected_artifact=layout,
                 )
                 _run(
                     str(scanner),
@@ -768,6 +971,7 @@ def build(args: argparse.Namespace) -> None:
 
 
 def main() -> int:
+    global _diagnostic_dir
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     inspect = commands.add_parser("check-shape")
@@ -776,12 +980,26 @@ def main() -> int:
     create.add_argument("--build-record", type=Path, required=True)
     release = commands.add_parser("create-runtime-release")
     release.add_argument("--build-record", type=Path, required=True)
+    prebuild = commands.add_parser("prebuild-images", help="Unsigned local export of known cache misses")
+    prebuild.add_argument("--candidate", required=True)
+    prebuild.add_argument("--available-components-json", required=True)
+    prebuild.add_argument("--agent-version")
+    prebuild.add_argument("--build-workers", type=int, choices=range(1, 8))
+    prebuild.add_argument("--output", type=Path, required=True)
     builder = commands.add_parser("build")
     builder.add_argument("--mode", choices=("platform", "harness-only"), default="platform")
     builder.add_argument("--agent-version")
     builder.add_argument("--prebuilt-images-json", type=Path)
     builder.add_argument("--prebuilt-crane", type=Path, default=Path("crane"))
     builder.add_argument("--registry-prefix", required=True)
+    builder.add_argument("--image-artifacts-dir", type=Path,
+                         help="Optional per-component OCI archives; invalid/missing inputs rebuild at final SHA")
+    builder.add_argument("--built-images-dir", type=Path,
+                         help="Joined unsigned prebuild outputs, validated as new builds rather than cache inputs")
+    builder.add_argument("--built-components-json",
+                         help="Expected new-build component names; missing or invalid outputs fail publication")
+    builder.add_argument("--build-workers", type=int, choices=range(1, 8),
+                         help="Concurrent image preparations (default: resource-aware, at most 4)")
     builder.add_argument("--upload-timeout-seconds", type=int, default=900,
                          help="Total per-image upload budget, including one transient-network retry (default: 900)")
     for command in (create, builder, release):
@@ -803,7 +1021,22 @@ def main() -> int:
                         help="Only for a build record whose runtime supports node-share-v1")
     args = parser.parse_args()
     try:
-        if args.command == "check-shape":
+        if args.command == "prebuild-images":
+            if SHA.fullmatch(args.candidate) is None or _run("git", "rev-parse", "HEAD") != args.candidate:
+                raise ValueError("unsigned image export requires the exact source checkout")
+            if _run("uname", "-m") != "x86_64":
+                raise ValueError("image export requires a native AMD64 runner")
+            rows = release_image_matrix(load_manifest(ROOT / "config/component-ownership.toml"), image_set="nebius")
+            _diagnostic_dir = args.output
+            exported = export_missing_images(
+                ROOT, args.candidate, args.agent_version or "nebius-" + args.candidate, rows, args.output,
+                available_components=json.loads(args.available_components_json), workers=args.build_workers,
+            )
+            write_json(args.output / "prebuild-timing.json", {
+                component: {key: value for key, value in image.items() if key != "archive"}
+                for component, image in exported.items()
+            })
+        elif args.command == "check-shape":
             validate_identity(read_json(args.candidate))
         elif args.command == "create-runtime-release":
             result = create_runtime_release(
