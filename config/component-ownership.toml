@@ -242,6 +242,7 @@ pins = [
   { path = "tests/integration/test_nebius_restore.py", shard_index = 1 },
   { path = "tests/integration/test_nebius_terminus_compat.py", shard_index = 1 },
   { path = "tests/integration/test_terminus2_continuation_docker.py", shard_index = 1 },
+  { path = "tests/integration/test_terminus2_direct_provider_docker.py", shard_index = 1 },
 ]
 
 [[test_sharding]]
@@ -1058,6 +1059,7 @@ exclude_paths = [
   "tests/integration/test_nebius_restore.py",
   "tests/integration/test_nebius_terminus_compat.py",
   "tests/integration/test_terminus2_continuation_docker.py",
+  "tests/integration/test_terminus2_direct_provider_docker.py",
   "tests/integration/test_packaged_agent_runtime_docker.py",
   "tests/integration/test_pipeline_multipart_minio.py",
   "tests/integration/test_pipeline_core_fixture_image.py",
@@ -1130,6 +1132,7 @@ include_paths = [
   "tests/integration/test_nebius_restore.py",
   "tests/integration/test_nebius_terminus_compat.py",
   "tests/integration/test_terminus2_continuation_docker.py",
+  "tests/integration/test_terminus2_direct_provider_docker.py",
   "tests/integration/test_packaged_agent_runtime_docker.py",
   "tests/integration/test_pipeline_multipart_minio.py",
   "tests/integration/test_pipeline_core_fixture_image.py",

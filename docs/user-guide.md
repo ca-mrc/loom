@@ -78,12 +78,12 @@ ls /tmp/loom-smoke/<trial-id>/
   atif.json          # ATIF v1.7 projection
 ```
 
-The installed-agent commands below describe the CLI options, but their local
-provider wiring currently needs the repair in
-[#2489](https://github.com/ca-mrc/loom/issues/2489). Local Google SDK calls also
-need the migration in [#2486](https://github.com/ca-mrc/loom/issues/2486).
-Use the hosted submission workflow for supported, deployment-qualified agents;
-these local examples are not successful-run acceptance evidence.
+Local agents connect directly to the selected configured provider. The task
+sandbox receives the selected key for installed agents, so use trusted task
+images and agents. See the [local connection matrix](architecture/cli-mode.md#stateless-agent-factory)
+for compatible providers and endpoint reachability. Direct-completion Google
+calls use `google-genai` with a Gemini Developer API key. These examples describe
+the interface; live provider/agent-version acceptance remains separate.
 
 Installed-agent command shape:
 
@@ -111,11 +111,11 @@ Per-trial outputs land at `./runs/<trial-id>/{events.jsonl,atif.json}`.
 With `--json`, each trial's result also prints as a JSON line on stdout
 for piping (e.g. `loom run ... --json | jq '.state'`).
 
-Local-server command shape (subject to the installed-agent limitation above):
+Local-server command shape using direct completion from the CLI host:
 
 ```bash
 loom run --task humaneval/HumanEval/0 \
-  --agent claude-code \
+  --agent direct-completion \
   --local-server http://localhost:8000/v1 \
   --model meta-llama/Llama-3.1-8B-Instruct \
   --backend docker
@@ -978,13 +978,12 @@ endpoint as an OpenAI-compatible Provider Connection instead. The standalone
 
 ### Local LLMs (vLLM, ollama, llama.cpp, lm-studio)
 
-The three paths below describe local-server selection for `loom run`.
-Subprocess adapters such as `claude-code` and local `terminus-2` currently
-do not receive working provider wiring; their repair is tracked in
-[#2489](https://github.com/ca-mrc/loom/issues/2489). This limitation applies
-to inline, auto-vLLM, and registered local-server examples below. Starting
-a server or registering its configuration does not establish a working
-agent connection.
+The three paths below configure local-server connections for `loom run`.
+These examples use `direct-completion`, which sends model requests from the
+CLI host. Installed agents need a compatible provider dialect and an endpoint
+reachable from their task sandbox; `127.0.0.1` inside that sandbox refers to the
+sandbox itself. See the [local connection matrix](architecture/cli-mode.md#stateless-agent-factory)
+for supported agents and local Terminus runtime requirements.
 
 #### Path A: inline — your server is already running
 
@@ -992,7 +991,7 @@ Pass the server URL on the command line. No config, no state.
 
 ```bash
 loom run --task humaneval/HumanEval/0 \
-         --agent claude-code \
+         --agent direct-completion \
          --local-server http://localhost:8000/v1 \
          --model meta-llama/Llama-3.1-8B-Instruct \
          --backend docker
@@ -1027,13 +1026,13 @@ uv sync --locked --all-packages --extra vllm --python 3.11  # one-time; vLLM has
 
 # HuggingFace model id
 loom run --task humaneval/HumanEval/0 \
-         --agent claude-code \
+         --agent direct-completion \
          --model hf:meta-llama/Llama-3.1-8B-Instruct \
          --backend docker
 
 # Local weights directory — pass the path directly
 loom run --task humaneval/HumanEval/0 \
-         --agent claude-code \
+         --agent direct-completion \
          --model /data/checkpoints/my-llama-3.1-tune/ \
          --backend docker
 ```
@@ -1936,18 +1935,18 @@ loom run
   --concurrency N         # parallel trials (default 1)
   --output-dir DIR        # default ./runs
   --json                  # JSON-line output instead of text
-  --server-url URL        # unsupported local-result upload; see limitation below
+  --server-url URL        # deprecated; results remain local (see below)
   --tb2-report PATH       # also write a TB2 report with profile provenance
 ```
 
 `--dataset` and `--task` are mutually exclusive (one required).
 
-Local result upload is currently ineffective: `--server-url` or `LOOM_SERVER_URL`
-triggers a best-effort POST to `/api/v1/cli/results`, but the service has no such
-intake route and the CLI ignores HTTP failures. Results remain in the local
-output directory. The compatibility disposition is tracked in
-[#2490](https://github.com/ca-mrc/loom/issues/2490); this does not affect the
-authenticated hosted commands or remote catalog lookup.
+Local result upload is unsupported. The run-only `--server-url` option is
+deprecated and accepted for compatibility. Setting it or `LOOM_SERVER_URL`
+prints one notice on stderr; no results are uploaded. Results remain in
+`--output-dir`, and `--json` continues to emit only result JSON on stdout.
+Authenticated hosted commands and remote catalog lookup retain their server URL
+behavior. Use hosted commands to submit new hosted trials.
 
 `--agent`:
 - `oracle` — runs `solution/solve.sh` from the task bundle (reference
@@ -1962,9 +1961,10 @@ authenticated hosted commands or remote catalog lookup.
   Loom's private sandbox driver. Requires a provider + model; does not use
   `loom-launcher` or per-trial `install_script`. See
   [`architecture/terminus2-runtime.md`](architecture/terminus2-runtime.md).
-  Local `loom run --agent terminus-2` has unresolved provider wiring tracked
-  in [#2489](https://github.com/ca-mrc/loom/issues/2489); this local path is
-  not a supported substitute for hosted execution.
+  Local `loom run --agent terminus-2` requires Python >=3.12 and the pinned Harbor
+  runtime in the CLI environment. It supports a single direct provider/model
+  connection and records usage through a local ledger. Local student/teacher
+  switching is rejected; the options below apply to hosted batch submission.
 
   Optional student/teacher mix (#1380): default remains a **single-model**
   trial. Opt in on `loom eval batch create` with **one** of the two

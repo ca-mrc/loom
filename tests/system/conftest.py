@@ -13,7 +13,7 @@ from collections.abc import Iterator
 
 import pytest
 
-from tests.system.docker_compose import stack_down_with_diagnostics, stack_up
+from tests.system.docker_compose import database_url, stack_down_with_diagnostics, stack_up
 
 
 @pytest.fixture(scope="session")
@@ -31,10 +31,10 @@ def compose_stack(request: pytest.FixtureRequest) -> Iterator[dict[str, str]]:
             # Plan 16 smoke tests drive `run_import` directly, which
             # needs DB + MinIO creds. The compose file fixes these to
             # static test values — see deploy/docker-compose.test.yml
-            # for `POSTGRES_USER/PASSWORD/DB`, the `55432:5432` mapping,
-            # and `MINIO_ROOT_USER/PASSWORD`. Keep this block in sync
-            # if the compose file's test creds ever change.
-            "db_url": "postgresql+psycopg://loom:loom@localhost:55432/loom",
+            # for `POSTGRES_USER/PASSWORD/DB` and `MINIO_ROOT_USER/PASSWORD`.
+            # Docker allocates the host DB port; use the actual binding.
+            # Keep this block in sync if the test creds ever change.
+            "db_url": database_url(),
             "minio_access_key": "loomtest",
             "minio_secret_key": "loomtest",
         }

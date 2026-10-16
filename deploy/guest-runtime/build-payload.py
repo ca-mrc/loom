@@ -49,7 +49,7 @@ def download(item: dict[str, object], directory: Path) -> Path:
                     file=sys.stderr,
                     flush=True,
                 )
-                if error.code not in {502, 503, 504} or attempt == 3:
+                if error.code not in {500, 502, 503, 504} or attempt == 3:
                     raise
                 time.sleep(attempt)
             else:

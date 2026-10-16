@@ -27,7 +27,7 @@ without executing package installation hooks. An unavailable pinned archive
 fails the build. Updating dependencies requires updating the lock and running
 the full payload verification and guest capability tests.
 
-For HTTP 502, 503 or 504, the downloader makes at most three attempts, waiting
+For HTTP 500, 502, 503 or 504, the downloader makes at most three attempts, waiting
 one and then two seconds between attempts. Each attempt retains the 120-second
 network timeout. Diagnostics identify the locked archive by SHA256, HTTP status
 and attempt count, without logging URLs or response bodies. Other HTTP errors,

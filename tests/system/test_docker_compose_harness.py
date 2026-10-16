@@ -15,9 +15,59 @@ from tests.integration.minio_test_images import MINIO_TEST_IMAGE
 from tests.system import docker_compose
 
 
+@pytest.mark.parametrize("requested_port", [None, "61234"])
+def test_compose_database_uses_docker_allocated_loopback_port(
+    monkeypatch: Any, requested_port: str | None
+) -> None:
+    def run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        assert command[-3:] == ["port", "postgres", "5432"]
+        assert kwargs["env"]["LOOM_SYSTEM_POSTGRES_PORT"] == (requested_port or "0")
+        assert 0 < kwargs["timeout"] <= 5
+        return subprocess.CompletedProcess(command, 0, stdout="127.0.0.1:61234\n", stderr="")
+
+    monkeypatch.delenv("LOOM_SYSTEM_POSTGRES_PORT", raising=False)
+    if requested_port is not None:
+        monkeypatch.setenv("LOOM_SYSTEM_POSTGRES_PORT", requested_port)
+    monkeypatch.setattr(docker_compose.subprocess, "run", run)
+    assert docker_compose.database_url() == "postgresql+psycopg://loom:loom@127.0.0.1:61234/loom"
+
+
+@pytest.mark.parametrize(
+    "binding",
+    ["", "0.0.0.0:61234", "127.0.0.1:0", "127.0.0.1:65536", "127.0.0.1:61234\n127.0.0.1:61235"],
+)
+def test_compose_database_rejects_missing_or_ambiguous_binding(
+    monkeypatch: Any, binding: str
+) -> None:
+    monkeypatch.setattr(
+        docker_compose,
+        "_compose",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout=binding, stderr=""),
+    )
+    with pytest.raises(RuntimeError, match="database port"):
+        docker_compose.database_url()
+
+
+def test_additional_fixture_seed_uses_running_stack_database(monkeypatch: Any) -> None:
+    allocated_database = "postgresql+psycopg://loom:loom@127.0.0.1:61234/loom"
+
+    def run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        assert command[command.index("--db-url") + 1] == allocated_database
+        assert command[command.index("--task-id") + 1] == "multi-step-3"
+        assert command[command.index("--print") + 1] == "team"
+        return subprocess.CompletedProcess(command, 0, stdout="team-token\n", stderr="")
+
+    monkeypatch.setattr(docker_compose, "database_url", lambda: allocated_database)
+    monkeypatch.setattr(docker_compose.subprocess, "run", run)
+    assert docker_compose.run_seed(task_id="multi-step-3") == "team-token"
+
+
 def test_compose_uses_available_pinned_minio_fixture() -> None:
     compose = yaml.safe_load(docker_compose.COMPOSE_FILE.read_text(encoding="utf-8"))
-    assert compose["services"]["minio"]["image"] == "${LOOM_SYSTEM_MINIO_IMAGE:-" + MINIO_TEST_IMAGE + "}"
+    assert (
+        compose["services"]["minio"]["image"]
+        == "${LOOM_SYSTEM_MINIO_IMAGE:-" + MINIO_TEST_IMAGE + "}"
+    )
 
 
 def test_compose_uses_one_test_only_step_jwt_signing_key() -> None:
@@ -99,6 +149,7 @@ def test_stack_up_migrates_blank_database_before_starting_services(
 ) -> None:
     events: list[tuple[Any, ...]] = []
     compose_envs: list[tuple[tuple[str, ...], dict[str, str] | None]] = []
+    allocated_database = "postgresql+psycopg://loom:loom@127.0.0.1:61234/loom"
 
     def fake_compose(*args: str, **kwargs: Any) -> subprocess.CompletedProcess[str]:
         events.append(("compose", *args))
@@ -123,13 +174,15 @@ def test_stack_up_migrates_blank_database_before_starting_services(
             stderr="",
         )
 
-    def fake_wait_for_materialization(task_id: str, *, timeout_sec: float) -> None:
+    def fake_wait_for_materialization(task_id: str, *, timeout_sec: float, db_url: str) -> None:
+        assert db_url == allocated_database
         events.append(("materialization-ready", task_id, timeout_sec))
 
     def fake_canary(team_token: str, *, timeout_sec: float) -> None:
         events.append(("claim-canary", team_token, timeout_sec))
 
     monkeypatch.setattr(docker_compose, "prepare_test_image", lambda image: "local-minio-source")
+    monkeypatch.setattr(docker_compose, "database_url", lambda: allocated_database)
     monkeypatch.setattr(docker_compose, "_compose", fake_compose)
     monkeypatch.setattr(docker_compose, "_wait_services_healthy", fake_wait)
     monkeypatch.setattr(
@@ -147,7 +200,7 @@ def test_stack_up_migrates_blank_database_before_starting_services(
     assert events[1] == ("wait", ("postgres", "minio", "registry"), 17)
     assert events[2][0] == "migrate"
     assert events[2][1][0:3] == (sys.executable, "-m", "alembic")
-    assert events[2][2] == docker_compose.DB_URL
+    assert events[2][2] == allocated_database
     assert events[3] == ("compose", "up", "-d", "--build")
     assert events[4] == (
         "wait",
@@ -156,6 +209,8 @@ def test_stack_up_migrates_blank_database_before_starting_services(
     )
     assert events[5][0] == "seed"
     assert events[5][1][0] == sys.executable
+    seed_command = events[5][1]
+    assert seed_command[seed_command.index("--db-url") + 1] == allocated_database
     assert events[6] == (
         "compose",
         "--profile",
@@ -183,13 +238,21 @@ def test_stack_up_migrates_blank_database_before_starting_services(
         "team-token",
         docker_compose._CANARY_MAX_TIMEOUT_SEC,
     )
-    assert all(env and env["LOOM_SYSTEM_MINIO_IMAGE"] == "local-minio-source" for _, env in compose_envs)
+    assert all(
+        env and env["LOOM_SYSTEM_MINIO_IMAGE"] == "local-minio-source" for _, env in compose_envs
+    )
     builder_env = next(
         env for args, env in compose_envs if args and args[-1] == "task-image-builder"
     )
     worker_env = next(env for args, env in compose_envs if args and args[-1] == "worker")
-    assert builder_env == {"LOOM_TASK_IMAGE_BUILDER_TOKEN": "builder-token", "LOOM_SYSTEM_MINIO_IMAGE": "local-minio-source"}
-    assert worker_env == {"LOOM_WORKER_TOKEN": "worker-token", "LOOM_SYSTEM_MINIO_IMAGE": "local-minio-source"}
+    assert builder_env == {
+        "LOOM_TASK_IMAGE_BUILDER_TOKEN": "builder-token",
+        "LOOM_SYSTEM_MINIO_IMAGE": "local-minio-source",
+    }
+    assert worker_env == {
+        "LOOM_WORKER_TOKEN": "worker-token",
+        "LOOM_SYSTEM_MINIO_IMAGE": "local-minio-source",
+    }
 
 
 def test_wait_services_healthy_bounds_compose_inspection(monkeypatch: Any) -> None:
@@ -253,6 +316,7 @@ def test_wait_materialization_fails_fast_when_builder_container_exits(
         docker_compose._wait_task_image_materialization_ready(
             "hello-world",
             timeout_sec=1.0,
+            db_url="postgresql+psycopg://loom:loom@127.0.0.1:61234/loom",
         )
 
 
@@ -658,4 +722,7 @@ def test_system_stack_uses_shared_digest_pinned_minio() -> None:
     from tests.integration.minio_test_images import MINIO_TEST_IMAGE
 
     config = yaml.safe_load(docker_compose.COMPOSE_FILE.read_text())
-    assert config["services"]["minio"]["image"] == "${LOOM_SYSTEM_MINIO_IMAGE:-" + MINIO_TEST_IMAGE + "}"
+    assert (
+        config["services"]["minio"]["image"]
+        == "${LOOM_SYSTEM_MINIO_IMAGE:-" + MINIO_TEST_IMAGE + "}"
+    )

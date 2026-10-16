@@ -5,8 +5,7 @@ Lives at `$XDG_CONFIG_HOME/loom/config.toml` (default
 
 - `tokens` — upstream LLM provider API keys (anthropic / openai /
   google)
-- `server_url` — optional Control Plane URL for additive
-  result-posting from `loom run`
+- `server_url` — service URL for authenticated hosted commands
 - `local_providers` — registered locally-served OpenAI-compatible
   LLM servers (vLLM, ollama, llama.cpp, lm-studio). Each server has
   a name + base_url + optional api_key. The name disambiguates

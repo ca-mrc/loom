@@ -12,10 +12,14 @@ from uuid import uuid4
 
 import pytest
 
+from loom.driver.base import ExecHandle
 from loom.driver.fake import FakeDriver
+from loom.errors import AgentError
 from loom.models.exec import ExecResult
 from loom.models.result import TrialState
 from loom.models.task import TaskConfig
+from loom.models.trial import MultiModelSwitchSpec, TrialConfig
+from loom.models.types import ModelSpec
 from loom_cli.local_object_store import LocalDiskObjectStore
 from loom_cli.local_runner import LocalRunner
 from tests._trial_config_defaults import stub_trial_config
@@ -63,6 +67,48 @@ def _runner(
 
 
 _PASSING_JUNIT = b'<testsuites><testsuite><testcase name="smoke"/></testsuite></testsuites>'
+
+
+@pytest.mark.asyncio
+async def test_local_multimodel_fails_before_sandbox_start(tmp_path: Path) -> None:
+    driver = FakeDriver()
+    runner = _runner(tmp_path, {"name": "pytest"}, driver)
+    model = ModelSpec(provider="anthropic", name="claude-model")
+    runner.task_config = runner.task_config.model_copy(update={
+        "agent": runner.task_config.agent.model_copy(update={"name": "terminus-2", "model": model}),
+    })
+    runner.trial_config = TrialConfig(
+        agent_name="terminus-2", agent_model=model,
+        multi_model=MultiModelSwitchSpec(enabled=True, secondary_model=model),
+    )
+    with pytest.raises(AgentError, match="multi_model"):
+        await runner.run()
+    assert driver.state == "constructed"
+
+
+@pytest.mark.asyncio
+async def test_local_runner_rejects_gateway_only_controls_for_direct_codex(tmp_path: Path) -> None:
+    captured: list[dict[str, str]] = []
+
+    def capture(argv: list[str], env_vars: dict[str, str], cwd: PurePosixPath,
+                user: str | int | None) -> ExecHandle:
+        captured.append(env_vars)
+        raise AgentError("stop before process launch")
+
+    driver = FakeDriver(streaming_handler=capture)
+    runner = _runner(tmp_path, {"name": "pytest"}, driver)
+    model = ModelSpec(provider="openai", name="gpt-model")
+    runner.task_config = runner.task_config.model_copy(update={
+        "agent": runner.task_config.agent.model_copy(update={"name": "codex", "model": model}),
+    })
+    runner.upstream_gateway_tokens = {"openai": "synthetic-direct-key"}
+    runner.trial_config = TrialConfig(
+        agent_name="codex", agent_model=model, request_params={"temperature": 0.2, "api_key": "ignored"},
+    )
+    with pytest.raises(AgentError, match="request_params"):
+        await runner.run()
+    assert not captured
+    assert driver.state == "constructed"
 
 
 @pytest.mark.asyncio

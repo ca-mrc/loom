@@ -164,6 +164,10 @@ def test_workflows_use_checksum_verified_uv_locked_sync_and_safe_caches() -> Non
         checksum = inputs.get("checksum")
         assert checksum in {UV_CHECKSUMS["linux-x86_64"], MATRIX_CHECKSUM_EXPRESSION}, path
         assert inputs.get("enable-cache") is True, path
+        # The dedicated full-wheel cache retains downloaded distributions;
+        # all other caches preserve the setup-uv upgrade's prior pruning policy.
+        expected_pruning = inputs.get("cache-suffix") != CI_WHEEL_CACHE_SUFFIX
+        assert inputs.get("prune-cache") is expected_pruning, path
         triggers = workflows[path].get("on", workflows[path].get(True, {}))
         untrusted_events = {"pull_request", "pull_request_target", "merge_group", "workflow_call"}
         if untrusted_events.intersection(triggers):

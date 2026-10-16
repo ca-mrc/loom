@@ -1,14 +1,7 @@
-"""CLI-local agent factory. Mirrors `loom_worker.main_loop._default_agent_factory`
-but takes no Control Plane client — in stateless mode, the SubprocessAgent's
-CP-related hooks are replaced by no-ops, and the Gateway URL is irrelevant
-because the SubprocessAgent will pass it through to the launched adapter
-(adapter then talks to an upstream provider directly using the env-var
-API key the CLI puts in the sandbox).
-"""
+"""CLI-local agents use explicit direct connections without Control Plane grants."""
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
@@ -19,44 +12,10 @@ from loom.agent.oracle import OracleAgent
 from loom.agent.terminus2.runtime import LoomTerminus2Runtime
 from loom.errors import AgentError
 from loom.models.types import ModelSpec
-from loom_worker.control_plane_client import StepTokenGrant
+from loom_cli.agent_connection import resolve_agent_connection
+from loom_cli.terminus_ledger import LocalHarborLedger
+from loom_cli.upstream_gateway import UpstreamDirectGatewayClient
 from loom_worker.trial_runner import AgentFactory
-
-
-class _NoopCPClient:
-    """SubprocessAgent needs a step token provider.
-
-    In CLI-local mode there is no Control Plane, so use a deterministic
-    placeholder token for the adapter environment.
-    """
-
-    async def mint_step_token(
-        self,
-        *,
-        team_id: UUID,
-        trial_id: UUID,
-        step_id: str,
-        ttl_sec: int,
-    ) -> str:
-        return "loom_step_cli-token"
-
-    async def mint_attempt_step_token(
-        self,
-        *,
-        team_id: UUID,
-        trial_id: UUID,
-        step_id: str,
-        ttl_sec: int,
-        attempt_deadline_wall_clock: datetime,
-        agent_attempt_id: UUID | None = None,
-    ) -> StepTokenGrant:
-        del team_id, trial_id, step_id, ttl_sec
-        return StepTokenGrant(
-            token="loom_step_cli-token",
-            expires_at=attempt_deadline_wall_clock + timedelta(seconds=300),
-            attempt_deadline_wall_clock=attempt_deadline_wall_clock,
-            local_only=True,
-        )
 
 
 def build_agent_factory(
@@ -98,12 +57,17 @@ def build_agent_factory(
                 raise AgentError(
                     "terminus-2 agent requires task.agent.model to be set",
                 )
+            if not isinstance(gateway, UpstreamDirectGatewayClient):
+                raise AgentError("local Terminus requires an upstream-direct provider client")
+            connection = resolve_agent_connection(gateway, model)
             agent = LoomTerminus2Runtime(  # type: ignore[assignment]
                 model=model,
                 team_id=str(team_id),
                 trial_id=trial_id,
-                cp_client=_NoopCPClient(),
-                gateway_url="http://localhost/openai/v1",
+                cp_client=None,
+                gateway_url="",
+                direct_provider=connection,
+                direct_ledger=LocalHarborLedger(trial_id=trial_id, model=model, connection=connection),
             )
         else:
             from loom_launcher import get_adapter
@@ -120,13 +84,16 @@ def build_agent_factory(
                 raise AgentError(
                     f"{agent_name} requires task.agent.model to be set",
                 )
+            if not isinstance(gateway, UpstreamDirectGatewayClient):
+                raise AgentError("local subprocess requires an upstream-direct provider client")
             agent = SubprocessAgent(  # type: ignore[assignment]
                 adapter=adapter,
                 model=model,
-                cp_client=_NoopCPClient(),
+                cp_client=None,
                 gateway_url="",
                 team_id=team_id,
                 trial_id=trial_id,
+                direct_provider=resolve_agent_connection(gateway, model, dialect=adapter.endpoint_dialect),
             )
         return agent
 

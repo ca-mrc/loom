@@ -118,13 +118,18 @@ def test_manager_source_initializer_starts_on_actual_fsgroup_emptydir(tmp_path, 
         namespace = 'source-spool'
         core.create_namespace({'metadata': {'name': namespace,
             'labels': {'pod-security.kubernetes.io/enforce': 'restricted'}}})
+        # Pod admission still requires an account when token mounting is off.
+        # Own this prerequisite instead of racing the default-account controller.
+        core.create_namespaced_service_account(namespace, {'metadata': {'name': 'source-spool'},
+            'automountServiceAccountToken': False})
         image = _import_image(cluster, tag=tag, root=tmp_path, ordinal=0)
         core.create_namespaced_secret(namespace, {'metadata': {'name': 'source-credentials'},
             'stringData': {'credentials.json': '{}'}})
         # Execute the actual emitted initializer in the actual service image;
         # the main process proves the private spool and builder SDK transport
         # work without the developer environment's optional dependencies.
-        pod = {'restartPolicy': 'Never', 'automountServiceAccountToken': False,
+        pod = {'restartPolicy': 'Never', 'serviceAccountName': 'source-spool',
+            'automountServiceAccountToken': False,
             'securityContext': {'seccompProfile': {'type': 'RuntimeDefault'}},
             'containers': [{'name': 'spool-user', 'image': image,
                 'securityContext': {'allowPrivilegeEscalation': False, 'readOnlyRootFilesystem': True,

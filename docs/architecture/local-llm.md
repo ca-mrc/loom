@@ -6,8 +6,11 @@ Hosted teams run their own inference endpoint and register it as a provider
 connection; Loom does not host model inference for them.
 
 The [user guide](../user-guide.md#local-llms-vllm-ollama-llamacpp-lm-studio)
-provides commands and records the current local subprocess-agent provider
-wiring limitation.
+provides local-model commands.
+
+The optional GPU stack has remaining dependency advisories and requires a
+qualified runtime migration. See [Python dependency qualification](../contributing/python-dependencies.md#optional-gpu-graph)
+for its compatibility constraints and affected boundaries.
 
 ## Four entry points
 
@@ -85,6 +88,13 @@ Per-model cleanup stops only its own process so parallel model runs keep their
 servers. `--keep-alive` skips that cleanup in both single- and multiple-model
 runs; process-exit cleanup still applies. Use foreground `loom serve` when a
 server should outlive individual `loom run` commands.
+
+For installed subprocess agents, provider requests originate inside the task
+sandbox. A registered `127.0.0.1` URL therefore targets that sandbox, not the
+CLI host. Configure an endpoint reachable from the sandbox. Direct completion
+and local Terminus issue their model requests from the CLI host. Codex requires
+a Responses endpoint; other chat adapters use Chat Completions. See the
+[local connection matrix](cli-mode.md#stateless-agent-factory).
 
 ## Concurrency
 
