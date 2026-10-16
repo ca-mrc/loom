@@ -116,12 +116,22 @@ def identity_policy_documents(
     )
     private = (
         "has(c.restartPolicy) && c.restartPolicy == 'Always' && "
-        "size(c.command) == 5 && c.command[0] == '/loom/bin/loom-sandbox-runtime' && "
-        "c.command[1] == '--socket' && c.command[2] == '/loom/sandboxes/' + c.name + '/sandbox.sock' && "
-        "c.command[3] == '--exec-timeout-seconds' && c.command[4].matches('^[0-9]+$') && "
+        # Frozen image ENTRYPOINT arguments may precede the runtime. The
+        # controller still supplies the complete canonical runtime suffix.
+        "size(c.command) >= 5 && size(c.command) <= 128 && "
+        "c.command.all(a, size(a) > 0 && size(bytes(a)) <= 4096) && "
+        "c.command[size(c.command)-5] == '/loom/bin/loom-sandbox-runtime' && "
+        "c.command[size(c.command)-4] == '--socket' && "
+        "c.command[size(c.command)-3] == '/loom/sandboxes/' + c.name + '/sandbox.sock' && "
+        "c.command[size(c.command)-2] == '--exec-timeout-seconds' && "
+        "c.command[size(c.command)-1].matches('^[0-9]+$') && "
         "(!has(c.args) || size(c.args) == 0) && !has(c.lifecycle) && "
         "(!has(c.envFrom) || size(c.envFrom) == 0) && "
         "(!has(c.env) || c.env.all(e, !has(e.valueFrom))) && "
+        "has(c.startupProbe) && has(c.startupProbe.exec) && "
+        "has(c.readinessProbe) && has(c.readinessProbe.exec) && "
+        "c.startupProbe.exec.command == ['/loom/bin/loom-sandbox-runtime','--check-socket','/loom/sandboxes/' + c.name + '/sandbox.sock'] && "
+        "c.readinessProbe.exec.command == c.startupProbe.exec.command && "
         "size(c.volumeMounts) == 4 && c.volumeMounts.all(m, "
         "!has(m.subPathExpr) && !has(m.mountPropagation) && "
         "((m.name == c.name + '-socket' && m.mountPath == '/loom/sandboxes/' + c.name && !has(m.subPath)) || "

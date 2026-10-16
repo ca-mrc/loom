@@ -381,14 +381,26 @@ async def test_execution_grant_rejects_cross_task_link_and_keeps_original_revisi
         try:
             await session.execute(insert(Team).values(id=team_id, name=f"image-grant-{team_id}"))
             for current_id in (task_id, other_task_id):
-                await session.execute(insert(Task).values(**_task_values(
-                    task_id=current_id, checksum="6" * 64,
-                )))
+                values = _task_values(task_id=current_id, checksum="6" * 64)
+                if current_id == task_id:
+                    values["config"]["environment"].update(user="image", image_workdir=True, image_entrypoint=True)
+                await session.execute(insert(Task).values(**values))
             task = (await session.execute(select(Task).where(Task.id == task_id))).scalar_one()
             rows = await ensure_task_image_materializations(session, task_row=task)
             ready = next(row for row in rows if row.cpu_arch == "x86_64")
             ready.state = "ready"
             ready.registry_images = {"task": "registry.example/task@sha256:" + "7" * 64}
+            ready.lease_epoch, ready.attempt_count = 2, 2
+            for epoch, uid in ((1, 1001), (2, 0)):
+                session.add(TaskImageMaterializationAttempt(
+                    id=uuid4(), materialization_id=ready.id, attempt_number=epoch, lease_epoch=epoch,
+                    builder_id="native-metadata-test", claimed_at=datetime.now(UTC),
+                    native_build={"image_runtime_metadata": {"task": {
+                        "image_ref": ready.registry_images["task"], "user": str(uid), "uid": uid,
+                        "gid": uid, "home": "/root", "workdir": "/app/database",
+                        "entrypoint": ["/entrypoint.sh"], "environment": {"PATH": "/usr/bin"},
+                    }}},
+                ))
             await session.execute(insert(Trial).values(
                 id=trial_id, team_id=team_id, task_id=other_task_id, config={}, requires_caps={},
                 state="queued",
@@ -412,6 +424,13 @@ async def test_execution_grant_rejects_cross_task_link_and_keeps_original_revisi
             assert grant.materialization_id == ready.id
             assert grant.task_checksum == "6" * 64
             assert grant.task_source != "s3://loom-tasks/new-version"
+            assert grant.image_runtime_metadata["task"].uid == 0
+            from loom.models.task import TaskConfig
+            from loom.task_image_materialization import resolve_prepared_task
+            resolved = resolve_prepared_task(TaskConfig.model_validate(grant.task_config), grant)
+            assert resolved.environment.user == "0:0"
+            assert str(resolved.environment.workdir) == "/app/database"
+            assert resolved.environment.entrypoint == ("/entrypoint.sh",)
         finally:
             await session.rollback()
             await session.execute(delete(Trial).where(Trial.id == trial_id))

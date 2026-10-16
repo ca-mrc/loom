@@ -309,7 +309,7 @@ def _safe_log(value: str) -> str:
     return redact_text(value, limit=16384)
 
 
-def publication_receipt(observation: dict[str, Any], *, materialization_id: UUID, lease_epoch: int) -> dict[str, str]:
+def _publication_document(observation: dict[str, Any], *, materialization_id: UUID, lease_epoch: int) -> dict[str, Any]:
     pods = _owned_pods(observation, observation.get("metadata", {}).get("uid"))
     if len(pods) != 1:
         raise ValueError("native build must have exactly one owned Pod")
@@ -327,7 +327,20 @@ def publication_receipt(observation: dict[str, Any], *, materialization_id: UUID
     images = receipt.get("registry_images")
     if not isinstance(images, dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in images.items()):
         raise ValueError("publication receipt has invalid images")
-    return images
+    from loom.task_image_metadata import TaskImageRuntimeMetadataV1
+
+    metadata = receipt.get("image_runtime_metadata", {})
+    if not isinstance(metadata, dict):
+        raise ValueError("publication receipt has invalid OCI metadata")
+    for component, value in metadata.items():
+        parsed = TaskImageRuntimeMetadataV1.model_validate(value)
+        if parsed.image_ref != images.get(component):
+            raise ValueError("OCI runtime metadata differs from the published image")
+    return receipt
+
+
+def publication_receipt(observation: dict[str, Any], *, materialization_id: UUID, lease_epoch: int) -> dict[str, str]:
+    return dict(_publication_document(observation, materialization_id=materialization_id, lease_epoch=lease_epoch)["registry_images"])
 
 
 def _phase_error(observation: dict[str, Any], name: str) -> str:
@@ -744,10 +757,16 @@ async def record_native_build_result(session: AsyncSession, row: TaskImageMateri
     images: dict[str, str] = {}
     invalid = False
     try:
-        images = publication_receipt(observed, materialization_id=row.id, lease_epoch=attempt.lease_epoch)
+        receipt = _publication_document(observed, materialization_id=row.id, lease_epoch=attempt.lease_epoch)
+        images = receipt["registry_images"]
         if any(not re.fullmatch(re.escape(registry_repository) + r"@sha256:[a-f0-9]{64}", ref) for ref in images.values()):
             raise ValueError("publication outside the frozen task repository")
         if status.get("succeeded"):
+            metadata = receipt.get("image_runtime_metadata", {})
+            environment = row.task_config.get("environment", {})
+            if (environment.get("user") == "image" or environment.get("image_entrypoint") or environment.get("image_workdir")) and "task" not in metadata:
+                raise ValueError("required task OCI runtime metadata is missing")
+            attempt.native_build = {**native, "image_runtime_metadata": metadata}
             await complete_task_image_materialization(session, materialization_id=row.id,
                 builder_id=builder_id, lease_epoch=attempt.lease_epoch, registry_images=images)
             return

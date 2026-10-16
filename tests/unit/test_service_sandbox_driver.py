@@ -217,6 +217,36 @@ def test_unrecognized_exec_reason_is_not_published() -> None:
     assert str(error) == "sandbox exec failed (HTTP 400; http_error)"
 
 
+@pytest.mark.parametrize("reason", [
+    "file_permission_denied", "file_read_only_filesystem", "file_invalid_target", "file_io_error",
+])
+@pytest.mark.parametrize("path", ["/file", "/exec"])
+def test_file_failure_reason_is_allowlisted_without_private_diagnostics(reason: str, path: str) -> None:
+    import httpx
+
+    from loom.driver.service_sandbox import SandboxRPCError
+
+    request = httpx.Request("PUT", "http://sandbox" + path, params={"path": "/private-file"},
+                            content=b"private-payload")
+    response = httpx.Response(400, request=request, headers={
+        "X-Loom-Sandbox-Error": reason, "X-Loom-Sandbox-File": "private-details",
+    }, text="private-error-body")
+    error = SandboxRPCError(path, httpx.HTTPStatusError("private-error", request=request, response=response))
+    expected = reason if path == "/file" else "http_error"
+    assert str(error) == f"sandbox {'file_transfer' if path == '/file' else 'exec'} failed (HTTP 400; {expected})"
+
+
+def test_unrecognized_file_reason_is_not_published() -> None:
+    import httpx
+
+    from loom.driver.service_sandbox import SandboxRPCError
+
+    request = httpx.Request("PUT", "http://sandbox/file")
+    response = httpx.Response(400, request=request, headers={"X-Loom-Sandbox-Error": "private-value"})
+    error = SandboxRPCError("/file", httpx.HTTPStatusError("private-error", request=request, response=response))
+    assert str(error) == "sandbox file_transfer failed (HTTP 400; http_error)"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("headers", [
     {"Content-Length": "9"},

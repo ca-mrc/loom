@@ -320,3 +320,40 @@ def test_prepared_resolution_rejects_another_frozen_task() -> None:
     other = task.model_copy(update={"task": task.task.model_copy(update={"id": "another/task"})})
     with pytest.raises(ValueError, match="frozen task"):
         resolve_prepared_task(other, grant)
+
+
+@pytest.mark.parametrize("uid,gid,home", [(0, 0, "/root"), (1001, 1002, "/home/task")])
+def test_prepared_oci_defaults_freeze_concrete_identity_without_rewriting_source(uid, gid, home):
+    from uuid import uuid4
+
+    from loom.sandbox_identity import resolve_sandbox_identity
+
+    task = _task_config(dockerfile="environment/Dockerfile")
+    task = task.model_copy(update={"environment": task.environment.model_copy(update={
+        "user": "image", "image_entrypoint": True, "image_workdir": True,
+        "environment": {"KEPT": "task-value"},
+    })})
+    image = "registry.example/task@sha256:" + "a" * 64
+    payload = dict(schema_version="loom.task-image-execution-grant.v1", materialization_id=uuid4(),
+                   materialization_key="1" * 64, cpu_arch="x86_64", task_checksum="2" * 64,
+                   task_config=task.model_dump(mode="json"), task_source=None, task_source_provenance={},
+                   registry_images={"task": image})
+    with pytest.raises(ValueError, match="metadata is unavailable"):
+        resolve_prepared_task(task, TaskImageExecutionGrantV1(**payload))
+    payload["image_runtime_metadata"] = {"task": {
+        "image_ref": image, "user": "task", "uid": uid, "gid": gid, "home": home,
+        "workdir": "/app/database", "entrypoint": ["/entrypoint.sh"],
+        "environment": {"KEPT": "image-value", "IMAGE_DEFAULT": "present"},
+    }}
+    grant = TaskImageExecutionGrantV1(**payload)
+    resolved = resolve_prepared_task(task, grant)
+    identity = resolve_sandbox_identity(resolved.environment.user, resolved.environment.environment["HOME"])
+    assert (identity.run_as_user, identity.run_as_group) == (uid, gid)
+    assert resolved.environment.workdir.as_posix() == "/app/database"
+    assert resolved.environment.entrypoint == ("/entrypoint.sh",)
+    assert resolved.environment.environment == {"KEPT": "task-value", "IMAGE_DEFAULT": "present", "HOME": home}
+    assert task.environment.user == "image" and task.environment.entrypoint == ()
+    assert TaskImageExecutionGrantV1.model_validate_json(grant.model_dump_json()) == grant
+    payload["image_runtime_metadata"]["task"]["image_ref"] = image[:-1] + "b"
+    with pytest.raises(ValueError, match="published image"):
+        TaskImageExecutionGrantV1(**payload)

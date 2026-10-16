@@ -1158,7 +1158,7 @@ configuration; omission leaves native building disabled:
   "ephemeral_storage_mib": 16384,
   "max_processes": 512,
   "active_deadline_seconds": 1800,
-  "snapshotter": "overlayfs",
+  "snapshotter": "native",
   "compatible_revision_cache": "off",
   "export_cache_mode": "max",
   "cache_transfer": "blobs",
@@ -1167,10 +1167,22 @@ configuration; omission leaves native building disabled:
 ```
 
 `snapshotter` selects the BuildKit OCI worker snapshotter (`overlayfs` or
-`native`). It defaults to `overlayfs` (the measured Nebius improvement over the
-historical forced-native setting). Set `"snapshotter": "native"` to roll back
-without redeploying a prior actuator image. Omission uses the same OverlayFS
-default.
+`native`). It defaults to `native` so unchanged Dockerfiles can hardlink files
+from earlier layers. Rootless OverlayFS copy-up can change inode identity during
+`git clone --bare`, causing Git's `hardlink different from source` rejection.
+Do not disable that Git check or rewrite the task's Dockerfile. `overlayfs`
+remains an explicit performance opt-in for qualified workloads. Existing
+deployments that explicitly selected `overlayfs` must change that setting to
+`native`; upgrading the actuator alone does not override explicit configuration.
+
+After changing the builder configuration, requeue an exhausted failed image with
+the existing Control Plane admin endpoint
+`POST /admin/task-image-materializations/{materialization_id}/retry`. It retains
+the source and materialization key, resets the attempt budget, and advances the
+lease epoch. Then use the ordinary failed-case batch rerun. A batch rerun alone
+does not reset an exhausted image build. Leave ready images reusable unless
+their contents are independently suspect. BuildKit layer cache import/export
+and the existing bounded build deadline still apply to the native snapshotter.
 
 `compatible_revision_cache` controls whether prepare may import BuildKit layer
 cache from a **prior ready revision of the same `task_id` + `cpu_arch`**. Values

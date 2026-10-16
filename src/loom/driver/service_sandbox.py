@@ -50,6 +50,9 @@ _EXEC_REASONS = frozenset({
     "exec_environment_invalid",
 })
 _PROCESS_REASONS = _EXEC_REASONS | {"process_limit_reached", "process_offset_unavailable"}
+_FILE_REASONS = frozenset({
+    "file_permission_denied", "file_read_only_filesystem", "file_invalid_target", "file_io_error",
+})
 # Long-poll budget per process status/output request; the server caps it at 10s.
 _PROCESS_POLL_MS = 5000
 _PROCESS_DIAGNOSTIC = re.compile(
@@ -93,6 +96,7 @@ class SandboxRPCError(DriverError):
             allowed_reasons = (
                 _EXEC_REASONS if path == "/exec" else
                 _PROCESS_REASONS if process else
+                _FILE_REASONS if path == "/file" else
                 frozenset({"restore_request_invalid", "directory_restore_failed"})
                 if path == "/restore-directory" else
                 _CLEANUP_REASONS if path in {"/stop-processes", "/pause-processes", "/resume-processes"}

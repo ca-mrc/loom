@@ -93,7 +93,9 @@ def normalize_terminal_bench_task_toml(
         environment = {"os": "linux"}
         payload["environment"] = environment
     _normalize_resource_sizes(environment)
-    environment.setdefault("workdir", "/app")
+    if "workdir" not in environment:
+        environment["image_workdir"] = True
+        environment["workdir"] = "/app"
     if "dockerfile" not in environment and "docker_image" not in environment:
         environment["dockerfile"] = DEFAULT_HARBOR_DOCKERFILE
         environment.setdefault("docker_build_context", DEFAULT_HARBOR_DOCKER_BUILD_CONTEXT)

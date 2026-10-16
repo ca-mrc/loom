@@ -34,11 +34,18 @@ practice:
 
 The deployment-owned `supports_task_identity` opt-in permits a task to declare
 container-local root or explicit numeric UID/GID/HOME for its private Terminus
-task and verifier containers. The controller remains non-root. Only explicitly
-root private containers add `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETUID`, `SETGID`
+task and verifier containers. Image-default USER is resolved from the final OCI
+image before compilation; admission always receives concrete numeric identity.
+The controller remains non-root. Only explicitly root private containers add
+`CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETUID`, `SETGID`
 and `KILL` after dropping all capabilities; they retain no-new-privileges and
 private PID namespaces. This supports package installation and cleanup of
 task descendants that drop UID, without host/device/kernel privileges.
+The final image ENTRYPOINT may prefix the canonical bounded sandbox command;
+both are frozen into the image-bound execution plan. Trusted containers retain
+their own fixed command and identity; the Pod's nonroot defaults remain intact.
+Ordinary Loom tasks keep their existing nonroot defaults. Guest launchers require
+the existing explicit root identity and do not accept image-default startup.
 A prepared service fixture is a separate untrusted native sidecar with no volume
 mounts. Its reserved `fixture-` role runs as UID/GID 65532, drops all capabilities,
 has a read-only root filesystem and receives no environment-based identity or
