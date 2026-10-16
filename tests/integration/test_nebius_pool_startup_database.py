@@ -29,6 +29,127 @@ from tests.unit.test_nebius_application_image_renderer import build_inputs as bu
 sessions = retained_pool_sessions
 
 
+def preactivation_module():
+    import importlib
+
+    name = 'scripts.ops.nebius_pool_preactivation_database'
+    assert importlib.util.find_spec(name) is not None, 'CLOSED-only catalog transition is missing'
+    return importlib.import_module(name)
+
+
+async def preactivation_setup(sessions):
+    from loom_service.pool_management.participant_refresh import PoolParticipantRefresh
+    from tests.integration.test_nebius_pool_participant_refresh import selection
+
+    value, _ = selection()
+    refresh = PoolParticipantRefresh.model_validate(value)
+    async with sessions.begin() as session:
+        await register_installation(session, refresh.before)
+    return refresh, sessions.kw['bind'].url.render_as_string(hide_password=False)
+
+
+async def test_preactivation_catalog_commits_atomically_without_opening_pool_or_changing_neighbors(sessions):
+    reader = preactivation_module()
+    from loom_service.pool_management.locks import acquire_pool_mutation_lock
+    from tests.integration.test_nebius_pool_activation_fence import read_sql
+    from tests.integration.test_nebius_pool_participant_refresh import snapshot
+
+    refresh, url = await preactivation_setup(sessions)
+    before = await snapshot(sessions)
+    query = reader.pool_preactivation_state_sql(refresh)
+    async with sessions.begin() as session:
+        await acquire_pool_mutation_lock(session)
+        report = await asyncio.to_thread(read_sql, url, query)
+    assert reader.qualify_preactivation_report(refresh, report, read_only=True) == 'ready'
+    assert await snapshot(sessions) == before
+    applied = await asyncio.to_thread(read_sql, url, reader.refresh_closed_pool_sql(refresh))
+    assert reader.qualify_preactivation_report(refresh, applied, read_only=False) == 'complete'
+    after = await snapshot(sessions)
+    pool, = after['nebius_pool_bindings']
+    assert (pool['mode'], pool['policy_revision'], pool['admission_epoch']) == (
+        'closed', refresh.before.policy_revision + 1, refresh.before.admission_epoch)
+    assert pool['binding_json']['installation_sha256'] == digest(refresh.after.model_dump(mode='json'))
+    assert pool['binding_json']['profile_catalog_sha256'] == digest(refresh.after.profiles.model_dump(mode='json'))
+    for table in ('nebius_pool_machines', 'nebius_pool_machine_credentials', 'tokens', 'nebius_pool_requests'):
+        assert before[table] == after[table]
+    for old in before['nebius_pool_participants']:
+        new, = (row for row in after['nebius_pool_participants'] if row['participant_id'] == old['participant_id'])
+        if old['participant_id'] != refresh.participant_id:
+            assert new == old
+        else:
+            assert new['phase'] == 'active'
+            assert new['binding_revision'] == old['binding_revision'] + 1
+            assert new['binding_json'] == refresh.after.participants[0].model_dump(mode='json')
+    # A lost commit response is resolved by readback, not a second write dispatch.
+    observed = await asyncio.to_thread(read_sql, url, query)
+    assert reader.qualify_preactivation_report(refresh, observed, read_only=True) == 'complete'
+    with pytest.raises(psycopg.Error):
+        await asyncio.to_thread(read_sql, url, reader.refresh_closed_pool_sql(refresh))
+    assert await snapshot(sessions) == after
+    for field in ('operation_id', 'pool_id', 'before_sha256', 'after_sha256', 'read_only', 'extra'):
+        damaged = {**observed, field: 1 if field == 'read_only' else 'foreign'}
+        with pytest.raises(ValueError):
+            reader.qualify_preactivation_report(refresh, damaged, read_only=True)
+
+
+@pytest.mark.parametrize('damage', ['global', 'fenced', 'neighbor', 'binding', 'machine', 'credential',
+    'expired', 'waiting', 'reserved', 'neighbor-work', 'terminal-work'])
+async def test_preactivation_catalog_rejects_any_previous_work_or_authority_drift(sessions, damage):
+    reader = preactivation_module()
+    from tests.integration.test_nebius_pool_activation_fence import read_sql
+    from tests.integration.test_nebius_pool_participant_refresh import reserved, snapshot
+
+    refresh, url = await preactivation_setup(sessions)
+    if damage in {'waiting', 'reserved', 'neighbor-work', 'terminal-work'}:
+        participant = refresh.before.participants[1 if damage == 'neighbor-work' else 0]
+        await reserved(sessions, refresh, participant,
+            phase='waiting' if damage == 'waiting' else 'cancelled_unstarted' if damage == 'terminal-work' else 'reserved')
+    else:
+        async with sessions.begin() as session:
+            if damage in {'global', 'fenced', 'binding'}:
+                values = ({'mode': 'global'} if damage == 'global' else
+                    {'policy_revision': refresh.before.policy_revision + 1})
+                if damage == 'binding':
+                    values['binding_sha256'] = '0' * 64
+                await session.execute(update(NebiusPoolBinding).where(
+                    NebiusPoolBinding.pool_id == refresh.before.pool_id).values(**values))
+            elif damage == 'neighbor':
+                await session.execute(update(NebiusPoolParticipant).where(
+                    NebiusPoolParticipant.participant_id == refresh.before.participants[1].participant_id)
+                    .values(phase='fenced'))
+            elif damage == 'machine':
+                await session.execute(update(NebiusPoolMachine).where(
+                    NebiusPoolMachine.machine_id == refresh.before.machines[0].machine_id).values(phase='revoked'))
+            else:
+                values = ({'revoked_at': datetime.now(UTC)} if damage == 'credential'
+                    else {'expires_at': datetime.now(UTC) - timedelta(minutes=1)})
+                await session.execute(update(Token).where(Token.token_hash == bytes.fromhex(
+                    refresh.before.machines[0].token_sha256)).values(**values))
+    before = await snapshot(sessions)
+    report = await asyncio.to_thread(read_sql, url, reader.pool_preactivation_state_sql(refresh))
+    assert report['state'] is None
+    with pytest.raises(ValueError):
+        reader.qualify_preactivation_report(refresh, report, read_only=True)
+    with pytest.raises(psycopg.Error):
+        await asyncio.to_thread(read_sql, url, reader.refresh_closed_pool_sql(refresh))
+    assert await snapshot(sessions) == before
+
+
+async def test_preactivation_catalog_uses_the_admission_lock_and_leaves_timeout_unchanged(sessions):
+    reader = preactivation_module()
+    from loom_service.pool_management.locks import acquire_pool_mutation_lock
+    from tests.integration.test_nebius_pool_activation_fence import read_sql
+    from tests.integration.test_nebius_pool_participant_refresh import snapshot
+
+    refresh, url = await preactivation_setup(sessions)
+    before = await snapshot(sessions)
+    async with sessions.begin() as session:
+        await acquire_pool_mutation_lock(session)
+        with pytest.raises(psycopg.errors.LockNotAvailable):
+            await asyncio.to_thread(read_sql, url, reader.refresh_closed_pool_sql(refresh))
+    assert await snapshot(sessions) == before
+
+
 async def test_participant_registry_reader_follows_real_refresh_without_writes_or_mutation_lock(sessions):
     from scripts.ops import nebius_pool_startup_database as reader
 
