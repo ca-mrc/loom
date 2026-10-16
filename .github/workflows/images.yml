@@ -1,589 +1,262 @@
-name: images
-
-run-name: >-
-  ${{ github.event_name == 'workflow_dispatch' &&
-      format('gate=manual / head={0} / base={1} / updated={2} / action={3} / label={4} / labels={5} / pull={6}',
-             github.sha,
-             github.event.before || github.sha,
-             github.event.pull_request.updated_at || 'none',
-             github.event.action || github.event_name,
-             github.event.label.name || 'none',
-             format('{0}{1}{2}{3}{4}{5}',
-                    contains(github.event.pull_request.labels.*.name, 'ci:integration') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'ci:integration-docker') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'ci:images') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'cluster-smoke') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'staging-smoke') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'ci:coverage-summary') && '1' || '0'),
-             github.event.pull_request.number || 'none') ||
-      github.event_name == 'pull_request' &&
-      (github.event.pull_request.draft ||
-       github.event.action == 'converted_to_draft') &&
-      format('gate=filtered / head={0} / base={1} / updated={2} / action={3} / label={4} / labels={5} / pull={6}',
-             github.event.pull_request.head.sha,
-             github.event.pull_request.base.sha,
-             github.event.pull_request.updated_at,
-             github.event.action,
-             github.event.label.name || 'none',
-             format('{0}{1}{2}{3}{4}{5}',
-                    contains(github.event.pull_request.labels.*.name, 'ci:integration') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'ci:integration-docker') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'ci:images') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'cluster-smoke') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'staging-smoke') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'ci:coverage-summary') && '1' || '0'),
-             github.event.pull_request.number || 'none') ||
-      format('gate=full / head={0} / base={1} / updated={2} / action={3} / label={4} / labels={5} / pull={6}',
-             github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha,
-             github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before || github.sha,
-             github.event.pull_request.updated_at || 'none',
-             github.event.action || github.event_name,
-             github.event.label.name || 'none',
-             format('{0}{1}{2}{3}{4}{5}',
-                    contains(github.event.pull_request.labels.*.name, 'ci:integration') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'ci:integration-docker') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'ci:images') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'cluster-smoke') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'staging-smoke') && '1' || '0',
-                    contains(github.event.pull_request.labels.*.name, 'ci:coverage-summary') && '1' || '0'),
-             github.event.pull_request.number || 'none') }}
-
-# Read-only Nebius image validation for pull requests, merge groups, and manual runs.
-# config/component-ownership.toml owns image selection. Native AMD64 builds and
-# Trivy scans validate candidates; Nebius workflows own release publication.
-
-on:
-  pull_request:
-    # Every non-draft PR event reports the protected gate name. Drafts report
-    # a distinct filtered context until the PR becomes ready again.
-    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled]
-  merge_group:
-    types: [checks_requested]
+name: candidate artifact transfer probe
+run-name: artifact-probe / ${{ inputs.role }} / ${{ inputs.provider }} / source=${{ inputs.source_sha }} / producer=${{ inputs.producer_run_id
+  }}
+'on':
   workflow_dispatch:
-
+    inputs:
+      role:
+        type: choice
+        required: true
+        options:
+        - producer
+        - consumer
+        default: producer
+      provider:
+        type: choice
+        required: true
+        options:
+        - oldlab
+        - hosted
+        default: oldlab
+      source_sha:
+        type: string
+        required: true
+        default: 3cb457b280e57b6a6f6df85cadc4c57f59162d53
+      producer_run_id:
+        type: string
+        default: ''
 permissions:
   contents: read
-
+  actions: read
 concurrency:
-  group: >-
-    images-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{
-      github.event_name == 'pull_request' &&
-      (github.event.pull_request.draft ||
-       github.event.action == 'converted_to_draft') &&
-      format('filtered-{0}', github.run_id) || 'authoritative' }}
-  cancel-in-progress: >-
-    ${{ github.event_name == 'pull_request' &&
-        !(github.event.pull_request.draft ||
-          github.event.action == 'converted_to_draft') }}
-
+  group: candidate-artifact-probe-${{ github.ref }}
+  cancel-in-progress: false
 jobs:
-  plan:
-    name: image plan
-    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-latest' }}
-    outputs:
-      required: ${{ steps.plan.outputs.required || steps.event.outputs.required }}
-      gate_mode: ${{ steps.required.outputs.gate_mode || steps.event.outputs.gate_mode }}
-      images: ${{ steps.plan.outputs.images || steps.event.outputs.images }}
-      harbor_required: ${{ steps.plan.outputs.harbor_required || steps.event.outputs.harbor_required }}
-      ordinary_builds: ${{ steps.build-matrices.outputs.ordinary_builds || '[]' }}
+  producer:
+    name: producer / ${{ inputs.provider }}
+    if: github.ref == 'refs/heads/codex/candidate-artifact-transfer-20261016' && inputs.role == 'producer'
+    runs-on: ${{ inputs.provider == 'oldlab' && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1","oldlab-3"]')
+      || 'ubuntu-24.04' }}
+    timeout-minutes: 60
+    env:
+      PROBE_ROOT: /tmp/loom-artifact-probe-${{ github.run_id }}
+      PROBE_SOURCE_SHA: ${{ inputs.source_sha }}
+      PYTHONDONTWRITEBYTECODE: '1'
     steps:
-      - name: Classify filtered event before checkout
-        id: event
-        shell: bash
-        env:
-          FILTERED_EVENT: >-
-            ${{ github.event_name == 'pull_request' &&
-                (github.event.pull_request.draft ||
-                 github.event.action == 'converted_to_draft') }}
-        run: |
-          set -euo pipefail
-          if [[ "$FILTERED_EVENT" == "true" ]]; then
-            {
-              echo 'checkout_required=false'
-              echo 'gate_mode=filtered'
-              echo 'required=false'
-              echo 'harbor_required=false'
-              echo 'images=[]'
-              echo 'native_builds=[]'
-            } >> "$GITHUB_OUTPUT"
-          else
-            echo 'checkout_required=true' >> "$GITHUB_OUTPUT"
-          fi
+    - &id001
+      uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      with:
+        persist-credentials: false
+    - &id002
+      uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      with:
+        ref: ${{ inputs.source_sha }}
+        path: source
+        persist-credentials: false
+    - &id003
+      name: prepare-isolated-tools
+      run: 'set -euo pipefail
 
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-        if: steps.event.outputs.checkout_required == 'true'
-        with:
-          fetch-depth: 0
-          persist-credentials: false
+        mkdir -p "$PROBE_ROOT/metrics"
 
-      - name: Plan required image validation
-        id: required
-        if: steps.event.outputs.checkout_required == 'true'
-        shell: bash
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
-          PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
-          PR_ACTION: ${{ github.event.action }}
-          PR_ACTION_LABEL: ${{ github.event.label.name }}
-          PR_DRAFT: ${{ github.event.pull_request.draft || false }}
-          PR_BASE_CHANGED: ${{ github.event.changes.base != null }}
-        run: |
-          set -euo pipefail
-          case "$EVENT_NAME" in
-            pull_request)
-              git diff --name-only "$BASE_SHA...$HEAD_SHA" \
-                > /tmp/loom-changed-files.txt
-              ;;
-            merge_group)
-              git diff --name-only "$BASE_SHA" "$HEAD_SHA" \
-                > /tmp/loom-changed-files.txt
-              ;;
-            workflow_dispatch)
-              git show --pretty=format: --name-only "$HEAD_SHA" \
-                > /tmp/loom-changed-files.txt
-              PR_LABELS_JSON='["ci:images"]'
-              ;;
-            *)
-              echo "Unsupported event: $EVENT_NAME" >&2
-              exit 1
-              ;;
-          esac
-          sort -u -o /tmp/loom-changed-files.txt /tmp/loom-changed-files.txt
-          if [[ -z "$PR_LABELS_JSON" || "$PR_LABELS_JSON" == "null" ]]; then
-            PR_LABELS_JSON='[]'
-          fi
-          python3 scripts/plan_ci_validations.py \
-            --changed-files /tmp/loom-changed-files.txt \
-            --labels-json "$PR_LABELS_JSON" \
-            --event-name "$EVENT_NAME" \
-            --pull-request-action "$PR_ACTION" \
-            --pull-request-action-label "$PR_ACTION_LABEL" \
-            --pull-request-draft "$PR_DRAFT" \
-            --pull-request-base-changed "$PR_BASE_CHANGED" \
-            --github-output "$GITHUB_OUTPUT"
+        python3 -m venv "$RUNNER_TEMP/probe-venv"
 
-      - name: Select affected images
-        id: plan
-        if: steps.event.outputs.checkout_required == 'true'
-        env:
-          REQUIRED: ${{ steps.required.outputs.images }}
-          UNOWNED_RUNTIME: ${{ steps.required.outputs.unowned_runtime }}
-          EVENT_NAME: ${{ github.event_name }}
-          CHANGED_FILES: /tmp/loom-changed-files.txt
-        run: |
-          set -euo pipefail
-          for value in "$REQUIRED" "$UNOWNED_RUNTIME"; do
-            [[ "$value" == "true" || "$value" == "false" ]] || {
-              echo "FAIL: invalid planner boolean: $value" >&2
-              exit 1
-            }
-          done
-          args=(
-            plan-images
-            --image-set nebius
-            --changed-files "$CHANGED_FILES"
-            --github-output "$GITHUB_OUTPUT"
-          )
-          if [[ "$REQUIRED" == "false" && "$EVENT_NAME" != "workflow_dispatch" ]]; then
-            printf '%s\n' 'required=false' 'images=[]' 'native_builds=[]' 'harbor_required=false' >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if [[ "$EVENT_NAME" == "workflow_dispatch" || \
-                "$UNOWNED_RUNTIME" == "true" ]]; then
-            args+=(--force-all)
-          elif [[ "$REQUIRED" == "true" ]]; then
-            args+=(--fallback-all)
-          fi
-          python3 scripts/component_ownership.py "${args[@]}"
+        "$RUNNER_TEMP/probe-venv/bin/pip" install --disable-pip-version-check ''pydantic>=2.6,<3'' ''cryptography>=50,<51''
+        httpx pyyaml python-dotenv ''sqlalchemy[asyncio]>=2,<3'' pydantic-settings ''rfc8785>=0.1.4,<0.2'' structlog zstandard
+        boto3 aiofiles tenacity alembic
 
-      - name: Select ordinary native builds
-        id: build-matrices
-        if: steps.event.outputs.checkout_required == 'true'
-        env:
-          NATIVE_BUILDS: ${{ steps.plan.outputs.native_builds }}
-        run: |
-          set -euo pipefail
-          python3 - <<'PYTHON'
-          import json
-          import os
+        echo "PROBE_PYTHON=$RUNNER_TEMP/probe-venv/bin/python" >> "$GITHUB_ENV"
 
-          builds = json.loads(os.environ["NATIVE_BUILDS"])
-          if not isinstance(builds, list) or any(
-              not isinstance(item, dict) or not isinstance(item.get("image"), str)
-              or not item["image"] for item in builds
-          ):
-              raise SystemExit("FAIL: invalid native image matrix")
-          builds = [item for item in builds if item["architecture"] == "amd64"]
-          partitions = {
-              "ordinary_builds": [item for item in builds if item["image"] != "harbor-runtime"],
-          }
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              for name, rows in partitions.items():
-                  print(f"{name}={json.dumps(rows, separators=(',', ':'))}", file=output)
-          PYTHON
+        python3 - <<''PY''
 
-  trivy-binary:
-    name: prepare verified Trivy binaries
-    needs: [plan]
-    if: >-
-      needs.plan.outputs.gate_mode == 'full' &&
-      needs.plan.outputs.required == 'true' &&
-      needs.plan.outputs.images != '[]'
-    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-24.04' }}
-    timeout-minutes: 10
-    permissions:
-      contents: read
+        import json,os,pathlib,platform,shutil
+
+        root=pathlib.Path(os.environ[''PROBE_ROOT''])
+
+        (root/''metrics/runner.json'').write_text(json.dumps({''runner'':os.environ.get(''RUNNER_NAME''),''environment'':os.environ.get(''RUNNER_ENVIRONMENT''),''cpus'':os.cpu_count(),''arch'':platform.machine(),''disk_free'':shutil.disk_usage(root).free,''source_sha'':os.environ[''PROBE_SOURCE_SHA''],''workflow_sha'':os.environ[''GITHUB_SHA''],''run_id'':os.environ[''GITHUB_RUN_ID'']},indent=2)+''\n'')
+
+        PY'
+    - name: configure-disposable-runner-mirror
+      run: python3 source/scripts/configure_ci_registry_mirror.py
+    - name: build-cold-hot-and-export-cache
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/build_probe.py --source "$GITHUB_WORKSPACE/source" --root "$PROBE_ROOT"
+        --phase producer --workers 7'
+    - name: verify-producer
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py verify --root "$PROBE_ROOT" --label producer
+        --input "$PROBE_ROOT/images" --source "$GITHUB_WORKSPACE/source" --sha "$PROBE_SOURCE_SHA" --scan'
+    - name: before-upload-images-0
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py mark --root "$PROBE_ROOT" --label before-upload-images-0'
+    - name: upload-probe-images-0
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: probe-images-0
+        path: ${{ env.PROBE_ROOT }}/images/
+        compression-level: 0
+        if-no-files-found: error
+        retention-days: 1
+    - name: after-upload-images-0
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py mark --root "$PROBE_ROOT" --label after-upload-images-0'
+    - name: before-upload-images-6
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py mark --root "$PROBE_ROOT" --label before-upload-images-6'
+    - name: upload-probe-images-6
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: probe-images-6
+        path: ${{ env.PROBE_ROOT }}/images/
+        compression-level: 6
+        if-no-files-found: error
+        retention-days: 1
+    - name: after-upload-images-6
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py mark --root "$PROBE_ROOT" --label after-upload-images-6'
+    - name: before-upload-cache
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py mark --root "$PROBE_ROOT" --label before-upload-cache'
+    - name: upload-probe-cache-min
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: probe-cache-min
+        path: ${{ env.PROBE_ROOT }}/cache/
+        compression-level: 0
+        if-no-files-found: error
+        retention-days: 1
+    - name: after-upload-cache
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py mark --root "$PROBE_ROOT" --label after-upload-cache'
+    - name: upload-small-evidence
+      if: always()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: probe-metrics-${{ inputs.role }}-${{ inputs.provider }}-${{ github.run_id }}
+        path: ${{ env.PROBE_ROOT }}/metrics/
+        compression-level: 6
+        retention-days: 3
+        if-no-files-found: warn
+    - name: cleanup-only-probe-root
+      if: always()
+      run: 'python3 - <<''PY''
+
+        import os,pathlib,shutil
+
+        p=pathlib.Path(os.environ["PROBE_ROOT"])
+
+        assert p==pathlib.Path("/tmp")/("loom-artifact-probe-"+os.environ["GITHUB_RUN_ID"]) and not p.is_symlink()
+
+        if p.exists(): shutil.rmtree(p)
+
+        PY'
+  consumer:
+    name: consumer / ${{ inputs.provider }}
+    if: github.ref == 'refs/heads/codex/candidate-artifact-transfer-20261016' && inputs.role == 'consumer'
+    runs-on: ${{ inputs.provider == 'oldlab' && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1","oldlab-3"]')
+      || 'ubuntu-24.04' }}
+    timeout-minutes: 60
+    env:
+      PROBE_ROOT: /tmp/loom-artifact-probe-${{ github.run_id }}
+      PROBE_SOURCE_SHA: ${{ inputs.source_sha }}
+      PYTHONDONTWRITEBYTECODE: '1'
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
-          persist-credentials: false
+    - *id001
+    - *id002
+    - *id003
+    - name: before-download-images-0
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py mark --root "$PROBE_ROOT" --label before-download-images-0'
+    - name: download-probe-images-0
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        name: probe-images-0
+        path: ${{ env.PROBE_ROOT }}/images-0
+        run-id: ${{ inputs.producer_run_id }}
+        repository: ${{ github.repository }}
+        github-token: ${{ github.token }}
+        skip-decompress: false
+        digest-mismatch: error
+    - name: after-download-images-0
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py mark --root "$PROBE_ROOT" --label after-download-images-0'
+    - name: verify-images-0
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py verify --root "$PROBE_ROOT" --label images-0
+        --input "$PROBE_ROOT/images-0" --source "$GITHUB_WORKSPACE/source" --sha "$PROBE_SOURCE_SHA" --scan'
+    - name: remove-verified-images-0
+      run: rm "$PROBE_ROOT/images-0"/*.tar
+    - name: before-download-images-6
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py mark --root "$PROBE_ROOT" --label before-download-images-6'
+    - name: download-probe-images-6
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        name: probe-images-6
+        path: ${{ env.PROBE_ROOT }}/images-6
+        run-id: ${{ inputs.producer_run_id }}
+        repository: ${{ github.repository }}
+        github-token: ${{ github.token }}
+        skip-decompress: false
+        digest-mismatch: error
+    - name: after-download-images-6
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py mark --root "$PROBE_ROOT" --label after-download-images-6'
+    - name: verify-images-6
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py verify --root "$PROBE_ROOT" --label images-6
+        --input "$PROBE_ROOT/images-6" --source "$GITHUB_WORKSPACE/source" --sha "$PROBE_SOURCE_SHA"'
+    - name: remove-verified-images-6
+      run: rm "$PROBE_ROOT/images-6"/*.tar
+    - name: before-download-raw
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py mark --root "$PROBE_ROOT" --label before-download-raw'
+    - name: download-probe-images-0-raw
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        name: probe-images-0
+        path: ${{ env.PROBE_ROOT }}/raw-images
+        run-id: ${{ inputs.producer_run_id }}
+        repository: ${{ github.repository }}
+        github-token: ${{ github.token }}
+        skip-decompress: true
+        digest-mismatch: error
+    - name: after-download-raw
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py mark --root "$PROBE_ROOT" --label after-download-raw'
+    - name: extract-raw-diagnostic
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py extract --root "$PROBE_ROOT" --label raw-extracted
+        --input "$PROBE_ROOT/raw-images"'
+    - name: verify-raw-extracted
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py verify --root "$PROBE_ROOT" --label raw-extracted
+        --input "$PROBE_ROOT/raw-extracted" --source "$GITHUB_WORKSPACE/source" --sha "$PROBE_SOURCE_SHA"'
+    - name: remove-verified-diagnostic
+      run: rm "$PROBE_ROOT/raw-extracted"/*.tar
+    - name: before-download-cache
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py mark --root "$PROBE_ROOT" --label before-download-cache'
+    - name: download-probe-cache-min
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        name: probe-cache-min
+        path: ${{ env.PROBE_ROOT }}/cache
+        run-id: ${{ inputs.producer_run_id }}
+        repository: ${{ github.repository }}
+        github-token: ${{ github.token }}
+        skip-decompress: false
+        digest-mismatch: error
+    - name: after-download-cache
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py mark --root "$PROBE_ROOT" --label after-download-cache'
+    - name: configure-disposable-runner-mirror
+      run: python3 source/scripts/configure_ci_registry_mirror.py
+    - name: cross-task-hot-cache-parallel-rebuild
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/build_probe.py --source "$GITHUB_WORKSPACE/source" --root "$PROBE_ROOT"
+        --phase cache-rebuild --workers 7 --import-cache "$PROBE_ROOT/cache"'
+    - name: verify-cache-rebuild
+      run: '"$PROBE_PYTHON" experiments/artifact_transfer/transport_probe.py verify --root "$PROBE_ROOT" --label cache-rebuild
+        --input "$PROBE_ROOT/rebuilt-images" --source "$GITHUB_WORKSPACE/source" --sha "$PROBE_SOURCE_SHA" --scan'
+    - name: upload-small-evidence
+      if: always()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: probe-metrics-${{ inputs.role }}-${{ inputs.provider }}-${{ github.run_id }}
+        path: ${{ env.PROBE_ROOT }}/metrics/
+        compression-level: 6
+        retention-days: 3
+        if-no-files-found: warn
+    - name: cleanup-only-probe-root
+      if: always()
+      run: 'python3 - <<''PY''
 
-      - name: Install and record pinned Trivy binary
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(uname -m)" = x86_64
-          artifact_dir="/tmp/loom-trivy-binaries/amd64"
-          mkdir -p "$artifact_dir"
-          trivy_bin=$(python3 scripts/install_trivy.py \
-            --install-root "$RUNNER_TEMP" \
-            --architecture amd64)
-          cp "$trivy_bin" "$artifact_dir/trivy"
-          chmod 0555 "$artifact_dir/trivy"
-          (
-            cd "$artifact_dir"
-            sha256sum trivy > trivy.sha256
-          )
+        import os,pathlib,shutil
 
-      - name: Upload exact verified Trivy binary
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: trivy-binaries-run-${{ github.run_id }}
-          path: /tmp/loom-trivy-binaries
-          if-no-files-found: error
-          overwrite: true
-          retention-days: 1
+        p=pathlib.Path(os.environ["PROBE_ROOT"])
 
-  build:
-    name: ${{ matrix.image }} (${{ matrix.platform }})
-    needs: [plan, trivy-binary]
-    if: >-
-      needs.plan.outputs.gate_mode == 'full' &&
-      needs.plan.outputs.required == 'true' &&
-      needs.plan.outputs.ordinary_builds != '[]'
-    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-24.04' }}
-    timeout-minutes: 45
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJSON(needs.plan.outputs.ordinary_builds) }}
-    steps: &native-image-build-steps
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          persist-credentials: false
+        assert p==pathlib.Path("/tmp")/("loom-artifact-probe-"+os.environ["GITHUB_RUN_ID"]) and not p.is_symlink()
 
-      - name: Configure credential-free Docker Hub mirror
-        run: python3 scripts/configure_ci_registry_mirror.py
+        if p.exists(): shutil.rmtree(p)
 
-      - name: Download exact verified Trivy binary
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: trivy-binaries-run-${{ github.run_id }}
-          path: /tmp/loom-trivy-binaries
-
-      - name: Verify distributed Trivy binary
-        shell: bash
-        env:
-          ARCHITECTURE: ${{ matrix.architecture }}
-        run: |
-          set -euo pipefail
-          (
-            cd "/tmp/loom-trivy-binaries/${ARCHITECTURE}"
-            test -f trivy
-            test -f trivy.sha256
-            sha256sum --check trivy.sha256
-            chmod 0555 trivy
-          )
-
-      - name: Validate image build inputs
-        shell: bash
-        env:
-          IMAGE_NAME: ${{ matrix.image }}
-          IMAGE_SET: nebius
-          IMAGE_DIGEST_NAME: ${{ matrix.image_name }}
-          DOCKERFILE: ${{ matrix.dockerfile }}
-          BUILD_CONTEXT: ${{ matrix.context }}
-          EVENT_NAME: ${{ github.event_name }}
-          REF_NAME: ${{ github.ref_name }}
-          PR_NUMBER: ${{ github.event.pull_request.number || '' }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.sha }}
-          ARCHITECTURE: ${{ matrix.architecture }}
-          PLATFORM: ${{ matrix.platform }}
-        run: |
-          set -euo pipefail
-
-          python3 scripts/component_ownership.py validate-image --image-set "${IMAGE_SET}" \
-            --image "$IMAGE_NAME" \
-            --image-name "$IMAGE_DIGEST_NAME" \
-            --dockerfile "$DOCKERFILE" \
-            --build-context "$BUILD_CONTEXT"
-          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || {
-            echo "FAIL: invalid head SHA" >&2
-            exit 1
-          }
-          [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || {
-            echo "FAIL: invalid base SHA" >&2
-            exit 1
-          }
-          [[ "$REF_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,200}$ ]] \
-            && [[ "$REF_NAME" != *..* ]] || {
-            echo "FAIL: invalid ref name" >&2
-            exit 1
-          }
-          case "$EVENT_NAME" in
-            pull_request)
-              [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]] || {
-                echo "FAIL: invalid pull request number" >&2
-                exit 1
-              }
-              ;;
-            merge_group | workflow_dispatch)
-              [[ -z "$PR_NUMBER" ]] || {
-                echo "FAIL: unexpected pull request number" >&2
-                exit 1
-              }
-              ;;
-            *)
-              echo "FAIL: untrusted build event is not allowed" >&2
-              exit 1
-              ;;
-          esac
-          case "$(uname -m):$ARCHITECTURE:$PLATFORM" in
-            x86_64:amd64:linux/amd64 | aarch64:arm64:linux/arm64 | arm64:arm64:linux/arm64) ;;
-            *) echo "FAIL: runner architecture does not match the build platform" >&2; exit 1 ;;
-          esac
-
-      - name: Create native buildx builder
-        # `docker buildx create --use` is what docker/setup-buildx-action wraps.
-        # No marketplace action, privileged binfmt container, or QEMU emulator
-        # is needed because the runner CPU matches matrix.platform.
-        run: |
-          buildx_args=(
-            docker buildx create
-            --name loom-builder
-            --use
-            --bootstrap
-          )
-          if [[ -r /etc/buildkit/loom-ci.toml ]]; then
-            buildx_args+=(
-              --driver-opt network=host
-              --buildkitd-config /etc/buildkit/loom-ci.toml
-            )
-          else
-            buildx_args+=(--buildkitd-config config/ci-buildkit.toml)
-          fi
-          "${buildx_args[@]}"
-          docker buildx inspect
-
-      - name: Build without registry or cache write authority
-        # Each job builds exactly one platform on matching native hardware and
-        # always emits the exact local archive consumed by the vulnerability
-        # gate. The untrusted job has no registry, cache, or secret authority.
-        shell: bash
-        env:
-          IMAGE_NAME: ${{ matrix.image }}
-          IMAGE_DIGEST_NAME: ${{ matrix.image_name }}
-          DOCKERFILE: ${{ matrix.dockerfile }}
-          BUILD_CONTEXT: ${{ matrix.context }}
-          EVENT_NAME: ${{ github.event_name }}
-          PR_NUMBER: ${{ github.event.pull_request.number || '' }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.sha }}
-          ARCHITECTURE: ${{ matrix.architecture }}
-          PLATFORM: ${{ matrix.platform }}
-        run: |
-          set -euo pipefail
-
-          sha_short="${HEAD_SHA:0:12}"
-          case "$EVENT_NAME" in
-            pull_request) image_tag="pr-${PR_NUMBER}" ;;
-            merge_group) image_tag="merge-group-${sha_short}" ;;
-            workflow_dispatch) image_tag="manual-${sha_short}" ;;
-            *)
-              echo "FAIL: untrusted build event is not allowed" >&2
-              exit 1
-              ;;
-          esac
-          if [[ "$EVENT_NAME" == "pull_request" && -n "$PR_NUMBER" ]]; then
-            image_tag="candidate-${HEAD_SHA}-${ARCHITECTURE}"
-          fi
-          archive="/tmp/${IMAGE_NAME}-${ARCHITECTURE}.docker.tar"
-          build_args=(
-            docker buildx build
-            --platform "$PLATFORM"
-            --file "$DOCKERFILE"
-            --tag "loom-ci-${IMAGE_DIGEST_NAME}:${image_tag}"
-            --provenance=false
-            --label "org.opencontainers.image.revision=${HEAD_SHA}"
-            --build-arg "LOOM_BUILD_SHA=${HEAD_SHA}"
-            --output "type=docker,dest=${archive}"
-          )
-          build_args+=("$BUILD_CONTEXT")
-          "${build_args[@]}"
-
-      - name: Compare real Harbor and Loom agent behavior offline
-        if: matrix.image == 'harbor-runtime'
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 scripts/ops/harbor_upstream.py pins
-          docker load --input /tmp/harbor-runtime-amd64.docker.tar
-          image=$(docker image inspect --format '{{index .RepoTags 0}}' \
-            "$(python3 - <<'PY'
-          import json, tarfile
-          with tarfile.open('/tmp/harbor-runtime-amd64.docker.tar') as archive:
-              print(json.load(archive.extractfile('manifest.json'))[0]['RepoTags'][0])
-          PY
-          )")
-          for probe in terminus_conformance_probe.py terminus_continuation_probe.py; do
-            docker run --rm --network none --cap-drop ALL \
-              --security-opt no-new-privileges --memory 1g --cpus 1 \
-              -e LITELLM_LOCAL_MODEL_COST_MAP=True \
-              -v "$PWD/tests/support/$probe:/probe.py:ro" \
-              --entrypoint python "$image" -I -B /probe.py
-          done
-
-      - name: Generate controlled Trivy policy
-        run: |
-          python3 scripts/write_trivy_release_policy.py \
-            --config-file /tmp/loom-trivy-release.yaml \
-            --ignore-file /tmp/loom-trivy-release.ignore.yaml \
-            --no-exceptions
-
-      - name: Scan native image archive
-        shell: bash
-        env:
-          ARCHIVE: /tmp/${{ matrix.image }}-${{ matrix.architecture }}.docker.tar
-          REPORT: /tmp/${{ matrix.image }}-${{ matrix.architecture }}.trivy.json
-          IMAGE_NAME: ${{ matrix.image }}
-          ARCHITECTURE: ${{ matrix.architecture }}
-        run: |
-          set -euo pipefail
-          trivy_bin="/tmp/loom-trivy-binaries/${ARCHITECTURE}/trivy"
-          set +e
-          "$trivy_bin" --config /tmp/loom-trivy-release.yaml image \
-            --input "$ARCHIVE" \
-            --format json \
-            --output "$REPORT" \
-            --ignorefile /tmp/loom-trivy-release.ignore.yaml \
-            --show-suppressed \
-            --cache-dir "$RUNNER_TEMP/loom-trivy-cache"
-          scan_status=$?
-          set -e
-          if (( scan_status != 0 )); then
-            python3 scripts/summarize_trivy_report.py "$REPORT" || true
-            exit "$scan_status"
-          fi
-          python3 scripts/validate_trivy_release_report.py \
-            --component "$IMAGE_NAME" \
-            --architecture "$ARCHITECTURE" \
-            --report "$REPORT" \
-            --ignore-file /tmp/loom-trivy-release.ignore.yaml \
-            --no-exceptions
-
-  nebius-harness-build:
-    name: Harbor runtime (linux/amd64)
-    needs: [plan, trivy-binary]
-    if: >-
-      needs.plan.outputs.gate_mode == 'full' &&
-      needs.plan.outputs.required == 'true' &&
-      needs.plan.outputs.harbor_required == 'true'
-    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-24.04' }}
-    timeout-minutes: 45
-    permissions:
-      contents: read
-    strategy:
-      matrix:
-        include:
-          - image: harbor-runtime
-            image_name: loom-harbor-runtime
-            dockerfile: deploy/Dockerfile.harbor-runtime
-            context: .
-            architecture: amd64
-            platform: linux/amd64
-    steps: *native-image-build-steps
-
-  images-gate:
-    name: >-
-      ${{ github.event_name == 'workflow_dispatch' && 'images-gate-manual' ||
-          needs.plan.outputs.gate_mode == 'full' && 'images-gate' ||
-          'images-gate-filtered' }}
-    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-latest' }}
-    if: always() && needs.plan.outputs.gate_mode != 'filtered'
-    needs: [plan, build, nebius-harness-build]
-    steps:
-      - name: Enforce selected image result
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          PLAN_RESULT: ${{ needs.plan.result }}
-          GATE_MODE: ${{ needs.plan.outputs.gate_mode }}
-          REQUIRED: ${{ needs.plan.outputs.required }}
-          BUILD_RESULT: ${{ needs.build.result }}
-          HARBOR_REQUIRED: ${{ needs.plan.outputs.harbor_required }}
-          HARNESS_BUILD_RESULT: ${{ needs.nebius-harness-build.result }}
-          STANDARD_IMAGES: ${{ needs.plan.outputs.images }}
-        run: |
-          set -euo pipefail
-          STANDARD_IMAGES=${STANDARD_IMAGES:-'[{}]'}
-          [[ "$PLAN_RESULT" == "success" ]] || exit 1
-          case "$GATE_MODE" in
-            full|filtered) ;;
-            *) echo "FAIL: invalid gate mode ${GATE_MODE@Q}" >&2; exit 1 ;;
-          esac
-          if [[ "$GATE_MODE" == "filtered" ]]; then
-            [[ "$BUILD_RESULT" == "skipped" ]] || exit 1
-            [[ "$HARNESS_BUILD_RESULT" == "skipped" ]] || exit 1
-            exit 0
-          fi
-          case "$EVENT_NAME" in
-            pull_request|merge_group|workflow_dispatch) ;;
-            *) echo "FAIL: invalid event name" >&2; exit 1 ;;
-          esac
-          case "$HARBOR_REQUIRED" in
-            true|false) ;;
-            *) echo "FAIL: invalid Harbor selection" >&2; exit 1 ;;
-          esac
-          case "$REQUIRED" in
-            true|false) ;;
-            *) echo "FAIL: invalid planner boolean required=${REQUIRED@Q}" >&2; exit 1 ;;
-          esac
-          ordinary_selected=$(python3 -c '
-          import json, sys
-          images = json.load(sys.stdin)
-          if not isinstance(images, list) or any(not isinstance(item, dict) or
-              not isinstance(item.get("image"), str) or not item["image"] for item in images):
-              raise SystemExit("FAIL: invalid image matrix")
-          print("true" if any(item["image"] != "harbor-runtime" for item in images) else "false")
-          ' <<< "$STANDARD_IMAGES")
-          if [[ "$REQUIRED" == "true" ]]; then
-            if [[ "$ordinary_selected" == "true" ]]; then
-              [[ "$BUILD_RESULT" == "success" ]] || exit 1
-            else
-              [[ "$BUILD_RESULT" == "skipped" ]] || exit 1
-            fi
-            if [[ "$HARBOR_REQUIRED" == "true" ]]; then
-              [[ "$HARNESS_BUILD_RESULT" == "success" ]] || exit 1
-            else
-              [[ "$HARNESS_BUILD_RESULT" == "skipped" ]] || exit 1
-            fi
-          else
-            [[ "$BUILD_RESULT" == "skipped" ]] || exit 1
-            [[ "$HARNESS_BUILD_RESULT" == "skipped" ]] || exit 1
-          fi
+        PY'
