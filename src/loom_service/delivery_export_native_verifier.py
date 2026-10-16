@@ -20,11 +20,31 @@ from loom_service.delivery_export_tb2_v2 import (
     scan_members_for_secrets,
 )
 
+_SEPARATE_NAMESPACE = "verifier-execution/"
+
+
+def _committed_separate_handoff(trial: Trial) -> dict[str, Any] | None:
+    """Child runtime published by deferred separate verification, if committed."""
+
+    result = trial.result if isinstance(trial.result, dict) else {}
+    handoff = result.get("verifier_execution")
+    if not isinstance(handoff, dict) or handoff.get("state") != "committed":
+        return None
+    if not isinstance(handoff.get("runtime_result"), dict):
+        return None
+    return handoff
+
 
 def resolve_native_verifier_artifacts(
     trial: Trial, *, indexed: list[dict[str, Any]], client: Any, artifacts_bucket: str,
 ) -> list[VerifierDeliveryArtifact]:
-    """Keep native names and phase metadata; never fabricate legacy log pairs."""
+    """Keep native names and phase metadata; never fabricate legacy log pairs.
+
+    In-attempt / shared grading keeps ``result.json`` on the attempt
+    (``execution_role=attempt`` plus one verifier phase). Separate grading
+    copies the child bundle under ``verifier-execution/``; pack that child
+    against ``trial.result.verifier_execution.runtime_result``.
+    """
     def fail(code: str, message: str) -> None:
         raise Tb2V2ExportError(code, {"message": message, "trial_id": str(trial.id)})
 
@@ -34,6 +54,8 @@ def resolve_native_verifier_artifacts(
     prefix = f"trials/{trial.team_id}/{trial.id}/attempts/{trial.attempt_count}/bundles/"
     bundle_prefix: str | None = None
     resolved: list[VerifierDeliveryArtifact] = []
+    separate = _committed_separate_handoff(trial)
+    source_prefix = _SEPARATE_NAMESPACE if separate is not None else ""
 
     def read(path: str, archive_path: str, limit: int, *, truncated: bool | None = None) -> bytes:
         nonlocal bundle_prefix
@@ -80,28 +102,42 @@ def resolve_native_verifier_artifacts(
         ))
         return data
 
-    body = read("result.json", "verifier/runtime-result.json", 16 * 1024 * 1024)
+    body = read(source_prefix + "result.json", "verifier/runtime-result.json", 16 * 1024 * 1024)
     try:
         runtime = ExecutionRuntimeResultV1.model_validate_json(body)
     except ValidationError as exc:
         raise Tb2V2ExportError("invalid_verifier_artifact_metadata", {
             "message": "native verifier runtime result is invalid", "trial_id": str(trial.id),
         }) from exc
-    if (trial.result or {}).get("runtime_result") != runtime.model_dump(mode="json"):
+    expected = (
+        separate["runtime_result"] if separate is not None
+        else (trial.result or {}).get("runtime_result")
+    )
+    if expected != runtime.model_dump(mode="json"):
         fail("invalid_verifier_artifact_metadata", "native result differs from the persisted runtime outcome")
     phases = [phase for phase in runtime.phases if phase.role == "verifier"]
-    if len(phases) != 1 or runtime.execution_role != "attempt":
-        fail("missing_verifier_artifact", "native attempt requires one independent verifier phase")
+    expected_role = "verifier" if separate is not None else "attempt"
+    if len(phases) != 1 or runtime.execution_role != expected_role:
+        fail(
+            "missing_verifier_artifact",
+            "native separate verifier requires one child verifier phase"
+            if separate is not None
+            else "native attempt requires one independent verifier phase",
+        )
     phase = phases[0]
     for name in ("stdout", "stderr"):
         stream = getattr(phase, name)
         path = f"{phase.ordinal:02d}-verifier.{name}"
         if stream.path != path:
             fail("invalid_verifier_artifact_metadata", "verifier stream refers to another phase")
-        data = read(path, "verifier/" + path, MAX_VERIFIER_LOG_BYTES, truncated=stream.truncated)
+        data = read(
+            source_prefix + path, "verifier/" + path, MAX_VERIFIER_LOG_BYTES, truncated=stream.truncated,
+        )
         if len(data) != stream.bytes_saved or resolved[-1].content_hash != stream.sha256:
             fail("invalid_verifier_artifact_metadata", "verifier stream differs from runtime evidence")
-    output = read("verifier/output.json", "verifier/output.json", MAX_VERIFIER_OUTPUT_BYTES)
+    output = read(
+        source_prefix + "verifier/output.json", "verifier/output.json", MAX_VERIFIER_OUTPUT_BYTES,
+    )
     evidence = [item for item in runtime.outputs if item.relative_path == "verifier/output.json"]
     if (len(evidence) != 1 or evidence[0].kind != "verifier" or evidence[0].state != "captured"
             or evidence[0].size_bytes != len(output)
@@ -118,7 +154,9 @@ def resolve_native_verifier_artifacts(
     # Optional structured test reports are still original, declared evidence.
     for item in runtime.outputs:
         if item.relative_path == "artifacts/verifier/ctrf.json" and item.state == "captured":
-            data = read(item.relative_path, "verifier/ctrf.json", MAX_VERIFIER_OUTPUT_BYTES)
+            data = read(
+                source_prefix + item.relative_path, "verifier/ctrf.json", MAX_VERIFIER_OUTPUT_BYTES,
+            )
             if len(data) != item.size_bytes or resolved[-1].content_hash != item.sha256:
                 fail("invalid_verifier_artifact_metadata", "verifier test report differs from runtime evidence")
     scan_members_for_secrets({item.archive_path: item.data for item in resolved})
