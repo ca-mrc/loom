@@ -14,6 +14,7 @@ from sqlalchemy.exc import ProgrammingError
 
 from loom.db.nebius_pool_schema import (
     NebiusPoolBinding,
+    NebiusPoolCancellation,
     NebiusPoolEffect,
     NebiusPoolMachine,
     NebiusPoolParticipant,
@@ -152,6 +153,38 @@ async def test_preactivation_catalog_uses_the_admission_lock_and_leaves_timeout_
         with pytest.raises(psycopg.errors.LockNotAvailable):
             await asyncio.to_thread(read_sql, url, reader.refresh_closed_pool_sql(refresh))
     assert await snapshot(sessions) == before
+
+
+@pytest.mark.parametrize('participant_index', [0, 1], ids=['selected', 'neighbor'])
+@pytest.mark.parametrize('completed', [False, True], ids=['predecessor', 'successor'])
+async def test_preactivation_rejects_cancellation_only_history_without_changing_it(sessions, participant_index, completed):
+    reader = preactivation_module()
+    from tests.integration.test_nebius_pool_activation_fence import read_sql
+    from tests.integration.test_nebius_pool_participant_refresh import snapshot
+
+    refresh, url = await preactivation_setup(sessions)
+    if completed:
+        await asyncio.to_thread(read_sql, url, reader.refresh_closed_pool_sql(refresh))
+    participant = refresh.before.participants[participant_index]
+    async with sessions.begin() as session:
+        await session.execute(insert(NebiusPoolCancellation).values(cancellation_id=uuid4(),
+            pool_id=refresh.before.pool_id, participant_id=participant.participant_id, workload_kind='trial',
+            local_work_id=uuid4(), generation=1, admission_epoch=refresh.before.admission_epoch, request_sha256='a' * 64))
+
+    async def cancellations():
+        async with sessions() as session:
+            return [dict(row) for row in (await session.execute(select(NebiusPoolCancellation.__table__))).mappings()]
+
+    before, tombstones = await snapshot(sessions), await cancellations()
+    assert before['nebius_pool_requests'] == [] and len(tombstones) == 1
+    report = await asyncio.to_thread(read_sql, url, reader.pool_preactivation_state_sql(refresh))
+    assert report['state'] is None
+    with pytest.raises(ValueError):
+        reader.qualify_preactivation_report(refresh, report, read_only=True)
+    with pytest.raises(psycopg.Error):
+        await asyncio.to_thread(read_sql, url, reader.refresh_closed_pool_sql(refresh))
+    assert await snapshot(sessions) == before
+    assert await cancellations() == tombstones
 
 
 async def test_participant_registry_reader_follows_real_refresh_without_writes_or_mutation_lock(sessions):
