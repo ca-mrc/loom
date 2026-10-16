@@ -111,11 +111,11 @@ Per-trial outputs land at `./runs/<trial-id>/{events.jsonl,atif.json}`.
 With `--json`, each trial's result also prints as a JSON line on stdout
 for piping (e.g. `loom run ... --json | jq '.state'`).
 
-Local-server command shape (subject to the installed-agent limitation above):
+Local-server command shape using direct completion from the CLI host:
 
 ```bash
 loom run --task humaneval/HumanEval/0 \
-  --agent claude-code \
+  --agent direct-completion \
   --local-server http://localhost:8000/v1 \
   --model meta-llama/Llama-3.1-8B-Instruct \
   --backend docker
@@ -978,13 +978,12 @@ endpoint as an OpenAI-compatible Provider Connection instead. The standalone
 
 ### Local LLMs (vLLM, ollama, llama.cpp, lm-studio)
 
-The three paths below describe local-server selection for `loom run`.
-Subprocess adapters such as `claude-code` and local `terminus-2` currently
-do not receive working provider wiring; their repair is tracked in
-[#2489](https://github.com/ca-mrc/loom/issues/2489). This limitation applies
-to inline, auto-vLLM, and registered local-server examples below. Starting
-a server or registering its configuration does not establish a working
-agent connection.
+The three paths below configure local-server connections for `loom run`.
+These examples use `direct-completion`, which sends model requests from the
+CLI host. Installed agents need a compatible provider dialect and an endpoint
+reachable from their task sandbox; `127.0.0.1` inside that sandbox refers to the
+sandbox itself. See the [local connection matrix](architecture/cli-mode.md#stateless-agent-factory)
+for supported agents and local Terminus runtime requirements.
 
 #### Path A: inline — your server is already running
 
@@ -992,7 +991,7 @@ Pass the server URL on the command line. No config, no state.
 
 ```bash
 loom run --task humaneval/HumanEval/0 \
-         --agent claude-code \
+         --agent direct-completion \
          --local-server http://localhost:8000/v1 \
          --model meta-llama/Llama-3.1-8B-Instruct \
          --backend docker
@@ -1027,13 +1026,13 @@ uv sync --locked --all-packages --extra vllm --python 3.11  # one-time; vLLM has
 
 # HuggingFace model id
 loom run --task humaneval/HumanEval/0 \
-         --agent claude-code \
+         --agent direct-completion \
          --model hf:meta-llama/Llama-3.1-8B-Instruct \
          --backend docker
 
 # Local weights directory — pass the path directly
 loom run --task humaneval/HumanEval/0 \
-         --agent claude-code \
+         --agent direct-completion \
          --model /data/checkpoints/my-llama-3.1-tune/ \
          --backend docker
 ```
