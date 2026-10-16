@@ -35,7 +35,8 @@ def _state_sql(request: PoolParticipantRefresh) -> str:
     SELECT item->>'state' AS state, item->'expected' AS value
     FROM jsonb_array_elements(convert_from(decode('{_hex(alternatives)}','hex'),'UTF8')::jsonb) AS item
 ), matching AS (SELECT state FROM expected WHERE {_authority_condition(request.before.pool_id)}
-    AND NOT EXISTS (SELECT 1 FROM public.nebius_pool_requests WHERE pool_id='{request.before.pool_id}'::uuid))
+    AND NOT EXISTS (SELECT 1 FROM public.nebius_pool_requests WHERE pool_id='{request.before.pool_id}'::uuid)
+    AND NOT EXISTS (SELECT 1 FROM public.nebius_pool_cancellations WHERE pool_id='{request.before.pool_id}'::uuid))
 SELECT CASE WHEN count(*)=1 THEN min(state) ELSE NULL END AS state FROM matching"""
 
 
