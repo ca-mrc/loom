@@ -91,7 +91,9 @@ jobs:
   capacity:
     if: inputs.purpose == 'runner_capacity'
     runs-on: ubuntu-24.04
-    timeout-minutes: 75
+    # A normal candidate build owns 180 minutes; leave bootstrap/teardown room.
+    # Six-hour qualification runs directly on hosted capacity in the candidate workflow.
+    timeout-minutes: 195
     permissions:
       contents: read
     steps:
