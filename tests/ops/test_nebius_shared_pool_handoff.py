@@ -623,6 +623,57 @@ def test_preactivation_completion_requires_dispatch_anchor_and_unchanged_childre
     child.write_bytes(original)
 
 
+@pytest.mark.parametrize('staging_observation', ['independent'], indirect=True)
+@pytest.mark.timeout(300)
+def test_preactivation_parent_refuses_handoff_and_never_recreates_dispatched_journals(shared_operation, tmp_path):
+    from scripts.ops import nebius_certificates as private_state
+    from scripts.ops import nebius_pool_preactivation_operation as parent
+    from scripts.ops.nebius_shared_pool_entry import RetainedRuntimeReference
+
+    args, bindings = shared_operation
+    _, _, inputs, _, _ = _shared_entry_inputs(args, bindings)
+    runtime = RetainedRuntimeReference.model_validate(inputs['runtime'])
+    retained = parent.retain_preactivation_catalog(runtime=runtime, source=_advanced_staging_source(args, tmp_path),
+        operation_id=uuid4(), repo_root=ROOT)
+    api = PreactivationAPI(retained)
+
+    def run():
+        return parent.run_preactivation_catalog(retained=retained, api=api, repo_root=ROOT)
+
+    for name in ('shared-pool-handoff.json', 'shared-pool-recovery.json'):
+        marker = retained.anchor_dir / name
+        private_state._atomic_json(marker, {'foreign': True})
+        with pytest.raises(ValueError):
+            run()
+        assert not (retained.state_dir / 'operation.json').exists()
+        assert not api.catalog.creates and not api.manager.patches and api.commits == 0
+        marker.unlink()
+    api.failure = 'preflight'
+    with pytest.raises(ValueError):
+        run()
+    assert not api.catalog.creates and not api.manager.patches and api.commits == 0
+    api.failure = None
+    assert run() is False
+    for path in (retained.state_dir / 'manager/transition.json', retained.state_dir / 'operation.json'):
+        original = path.read_bytes()
+        path.unlink()
+        with pytest.raises(ValueError):
+            run()
+        assert not path.exists()
+        assert len(api.catalog.creates) == len(api.manager.patches) == 1
+        private_state._write_private(path, original)
+    api.manager.ready = True
+    api.failure = 'registry-before'
+    with pytest.raises(ValueError):
+        run()
+    api.failure = None
+    with pytest.raises(ValueError):
+        run()
+    assert api.commits == 1
+    assert api.registry_state == 'ready'
+    assert all(path.read_bytes() == raw for path, raw in retained.files.items())
+
+
 @pytest.mark.parametrize('preparation_id', [None, '335c9f82-6f9a-43de-ab0c-a312034b9efe'])
 def test_shared_tooling_can_advance_without_reinstalling_runtime(shared_operation, monkeypatch, preparation_id):
     from scripts.ops import nebius_certificates as private_state
