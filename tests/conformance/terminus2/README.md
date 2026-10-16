@@ -12,7 +12,10 @@ there is no optional-import skip in this lane.
   scripted. It checks full request histories, command batches, terminal
   observations, parser retries, completion confirmation, explicit turn limits,
   command timeouts, terminal model errors, usage and typed-event projection.
-  Deliberate prompt and command drift must be rejected.
+  Deliberate prompt, command and sampling drift must be rejected. A separate
+  case uses the real Harbor/LiteLLM constructors to check teacher options,
+  Gateway credential reuse and trajectory-metadata redaction without issuing
+  model requests.
 - [`terminus_continuation_probe.py`](../../support/terminus_continuation_probe.py)
   verifies Loom's explicit continuation extension, cancellation, concurrent
   instance isolation and trajectory size limits with the real Harbor loop.

@@ -18,6 +18,7 @@ from sqlalchemy import create_engine, delete, func, insert, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
+from loom.agent.terminus2.provenance import HARBOR_COMPAT_SHA
 from loom.db.schema import (
     Artifact,
     ArtifactLineageEdge,
@@ -1762,7 +1763,7 @@ def _tb2_v2_events_jsonl(
             "parser_name": "json",
             "prompt_hash": "abc",
             "template_hashes": {},
-            "harbor_compat_sha": "527d50deb63a5d279e8c20593c18a2cbc7f61f9e",
+            "harbor_compat_sha": HARBOR_COMPAT_SHA,
             "benchmark_provenance": None,
             "loom_runtime_revision": "1.0",
             "terminal_image_digest": None,
@@ -2005,7 +2006,7 @@ async def test_raw_harbor_tb2_v2_export_rejects_legacy_runtime_stream(
                             "parser_name": "json",
                             "prompt_hash": "abc",
                             "template_hashes": {},
-                            "harbor_compat_sha": ("527d50deb63a5d279e8c20593c18a2cbc7f61f9e"),
+                            "harbor_compat_sha": HARBOR_COMPAT_SHA,
                             "benchmark_provenance": None,
                             "loom_runtime_revision": "1.0",
                         }

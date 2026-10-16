@@ -429,6 +429,39 @@ class _ConstructAgent:
         return _FakeLLM(name=str(kwargs.get("model_name") or "teacher"))
 
 
+@dataclass
+class _HarborOptions:
+    """Harbor 0.24 stores constructor options separately from live LiteLLM."""
+
+    llm_kwargs: dict[str, Any] = field(
+        default_factory=lambda: {"api_key": "loom_step_dump", "timeout": 9},
+    )
+    temperature: float | None = 0.25
+    collect_rollout_details: bool = True
+    reasoning_effort: str | None = "high"
+    api_base: str | None = "http://gateway.test"
+    max_thinking_tokens: int | None = 2048
+    use_responses_api: bool = True
+
+
+@dataclass
+class _ConstructOptionsAgent:
+    _llm: Any
+    options: _HarborOptions = field(default_factory=_HarborOptions)
+    _model_name: str = "openai/student"
+    _n_episodes: int = 0
+    _session_id: str = "agent-sess"
+    captured_init: dict[str, Any] = field(default_factory=dict)
+
+    def _resolve_model_info(self, model_name: str, model_info: Any) -> None:
+        del model_name, model_info
+        return None
+
+    def _init_llm(self, **kwargs: Any) -> Any:
+        self.captured_init = dict(kwargs)
+        return _FakeLLM(name=str(kwargs.get("model_name") or "teacher"))
+
+
 @pytest.fixture
 def stub_harbor_llm_backend(monkeypatch: pytest.MonkeyPatch) -> None:
     """Unit tests do not install Harbor; stub the backend enum import."""
@@ -495,6 +528,41 @@ def test_construct_teacher_llm_survives_premature_redact(
     assert agent.captured_init["api_base"] == "http://gateway.test"
 
 
+@pytest.mark.parametrize("redact_first", [False, True])
+def test_options_teacher_preserves_auth_and_constructor_parameters(
+    redact_first: bool,
+    stub_harbor_llm_backend: None,
+) -> None:
+    student = _StudentLiteLLM("openai/student")
+    agent = _ConstructOptionsAgent(_llm=student)
+    if redact_first:
+        redact_agent_llm_kwargs(agent)
+    construct_teacher_llm(agent, teacher_model_name="openai/teacher")
+    assert agent.captured_init["llm_kwargs"] == {
+        "api_key": "loom_step_live" if redact_first else "loom_step_dump",
+        "timeout": 9,
+    }
+    assert agent.captured_init["temperature"] == 0.25
+    assert agent.captured_init["collect_rollout_details"] is True
+    assert agent.captured_init["reasoning_effort"] == "high"
+    assert agent.captured_init["api_base"] == "http://gateway.test"
+    assert agent.captured_init["session_id"] == "agent-sess"
+    assert agent.captured_init["max_thinking_tokens"] == 2048
+    assert agent.captured_init["use_responses_api"] is True
+
+
+def test_options_redaction_keeps_live_student_credentials() -> None:
+    # Even if the constructor shared the dictionary, replace the dump field;
+    # mutating it in place would revoke the student's live gateway credential.
+    kwargs = {"api_key": "loom_step_live", "timeout": 9}
+    student = _StudentLiteLLM("openai/student", _llm_kwargs=kwargs)
+    agent = _ConstructOptionsAgent(_llm=student, options=_HarborOptions(llm_kwargs=kwargs))
+    redact_agent_llm_kwargs(agent)
+    assert agent.options.llm_kwargs == {"timeout": 9}
+    assert student._llm_kwargs == kwargs
+    assert gateway_llm_kwargs_for_teacher(agent) == kwargs
+
+
 @pytest.mark.parametrize(
     "mix_kwargs",
     [
@@ -518,8 +586,10 @@ def test_construct_teacher_llm_survives_premature_redact(
         },
     ],
 )
+@pytest.mark.parametrize("options_api", [False, True])
 def test_install_role_router_passes_jwt_then_redacts_dump(
     mix_kwargs: dict[str, Any],
+    options_api: bool,
     stub_harbor_llm_backend: None,
 ) -> None:
     """Every mix policy constructs teacher with JWT, then scrubs dump kwargs."""
@@ -527,9 +597,11 @@ def test_install_role_router_passes_jwt_then_redacts_dump(
         "openai/student",
         _llm_kwargs={"api_key": "loom_step_live", "timeout": 1},
     )
-    agent = _ConstructAgent(
-        _llm=student,
-        _llm_kwargs={"api_key": "loom_step_dump", "timeout": 1},
+    kwargs = {"api_key": "loom_step_dump", "timeout": 1}
+    agent = (
+        _ConstructOptionsAgent(_llm=student, options=_HarborOptions(llm_kwargs=kwargs))
+        if options_api
+        else _ConstructAgent(_llm=student, _llm_kwargs=kwargs)
     )
     router = install_role_router(
         agent,
@@ -537,7 +609,8 @@ def test_install_role_router_passes_jwt_then_redacts_dump(
         **mix_kwargs,
     )
     assert agent.captured_init["llm_kwargs"]["api_key"] == "loom_step_dump"
-    assert "api_key" not in agent._llm_kwargs
+    dumped_kwargs = agent.options.llm_kwargs if options_api else agent._llm_kwargs
+    assert "api_key" not in dumped_kwargs
     assert agent._llm is router
     # Live student LiteLLM still holds JWT (Harbor dump field is separate).
     assert student._llm_kwargs["api_key"] == "loom_step_live"
