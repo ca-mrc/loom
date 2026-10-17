@@ -198,10 +198,38 @@ def test_profile_readiness_cannot_be_granted_by_task_or_prepared_image(change, r
         _compile(task, trial, profile, task_image_grant=grant)
 
 
+def test_guest_inherits_omitted_verifier_user_from_root_task():
+    task, trial, profile = _guest_inputs()
+    raw = task.model_dump(mode="json")
+    raw["verifier"]["user"] = None
+    task = TaskConfig.model_validate(raw)
+    assert task.environment.user == "root" and task.verifier.user is None
+    reasons = automatic_service_execution_rejections(
+        task, trial, source_provenance=_provenance(),
+        supported_capabilities=GUEST_EXECUTION_CAPABILITIES,
+    )
+    assert "guest_root_identity_required" not in reasons
+    for sidecar in _compile(task, trial, profile).sidecars:
+        assert sidecar.identity is not None
+        assert (sidecar.identity.run_as_user, sidecar.identity.run_as_group) == (0, 0)
+
+
+@pytest.mark.parametrize("section,change", [
+    ("environment", {"user": "agent"}),
+    ("verifier", {"user": "1001:1001"}),
+])
+def test_guest_rejects_nonroot_identities_instead_of_rewriting_them(section, change):
+    task, trial, _ = _guest_inputs()
+    raw = task.model_dump(mode="json")
+    raw[section].update(change)
+    reasons = automatic_service_execution_rejections(
+        TaskConfig.model_validate(raw), trial, source_provenance=_provenance(),
+        supported_capabilities=GUEST_EXECUTION_CAPABILITIES,
+    )
+    assert "guest_root_identity_required" in reasons
+
+
 @pytest.mark.parametrize("section,change,reason", [
-    ("environment", {"user": "agent"}, "guest_root_identity_required"),
-    ("verifier", {"user": None}, "guest_root_identity_required"),
-    ("verifier", {"user": "1001:1001"}, "guest_root_identity_required"),
     ("environment", {"cpus": 0.5}, "guest_cpu_limit_too_small"),
     ("environment", {"memory_mb": 511}, "guest_memory_limit_too_small"),
     ("environment", {"storage_mb": 159}, "guest_ephemeral_storage_limit_too_small"),
@@ -213,6 +241,31 @@ def test_guest_prerequisites_are_checked_before_admission(section, change, reaso
     reasons = automatic_service_execution_rejections(TaskConfig.model_validate(raw), trial,
         source_provenance=_provenance(), supported_capabilities=GUEST_EXECUTION_CAPABILITIES)
     assert reason in reasons
+
+
+@pytest.mark.parametrize("guest", [True, False], ids=["guest-rejected", "container-supported"])
+def test_resolved_image_entrypoint_is_rejected_only_for_guest_before_compilation(guest):
+    task, trial, profile = _guest_inputs("nested_docker")
+    task = task.model_copy(update={"environment": task.environment.model_copy(update={
+        "image_entrypoint": False, "entrypoint": ("/entrypoint.sh",),
+        **({"execution_requirements": None} if not guest else {}),
+    })})
+    if not guest:
+        trial = trial.model_copy(update={"isolation": "container"})
+    reasons = automatic_service_execution_rejections(
+        task, trial, source_provenance=_provenance(),
+        supported_capabilities=profile.supported_guest_capabilities,
+    )
+    if guest:
+        assert reasons == ("guest_image_entrypoint_unsupported",)
+        with pytest.raises(ValueError, match="guest_image_entrypoint_unsupported"):
+            _compile(task, trial, profile)
+    else:
+        assert not reasons
+        plan = _compile(task, trial, profile)
+        sandbox = next(sidecar for sidecar in plan.sidecars if sidecar.private_sandbox)
+        assert sandbox.argv[:2] == ("/entrypoint.sh", "/loom/bin/loom-sandbox-runtime")
+        assert sandbox.guest_execution is None
 
 
 def test_guest_requires_terminus_and_external_requirements_remain_rejected():

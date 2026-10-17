@@ -240,6 +240,7 @@ def test_prepare_readiness_round_trips_through_renderer(
     capabilities = ('supports_task_web_egress', 'service_lifecycle_ready', 'supports_task_identity')
     for name in capabilities:
         setattr(args, name, enabled)
+    args.supports_terminus2_multi_model = enabled
     prepare.prepare(args)
     profile = json.loads(args.output_profile.read_text())
     for name in capabilities:
@@ -247,6 +248,10 @@ def test_prepare_readiness_round_trips_through_renderer(
             assert profile[name] is True
         else:
             assert name not in profile
+    if enabled:
+        assert profile["terminus2_multi_model_policies"] == ["student_teacher_student"]
+    else:
+        assert "terminus2_multi_model_policies" not in profile
     config, candidate, _ = request.getfixturevalue("platform_inputs")
     candidate["candidate_sha"] = SHA
     candidate["images"]["service"]["image_ref"] = profile["task_image_ref"]

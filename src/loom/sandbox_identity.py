@@ -52,3 +52,19 @@ def resolve_sandbox_identity(
             raise ValueError("numeric task UID:GID requires explicit environment.environment.HOME")
         return SandboxIdentityV1(run_as_user=uid, run_as_group=gid, home=home)
     raise ValueError("unsupported task identity: use agent, root, or explicit numeric UID:GID with HOME")
+
+
+def inherited_sandbox_user(task_user: str | int, verifier_user: str | int | None) -> str | int:
+    """An omitted verifier user inherits the resolved task identity.
+
+    Isolation does not rewrite that identity. ``user="image"`` is not a
+    concrete identity; #2544 resolves it after publication metadata exists.
+    Guest still requires both *task* sandboxes to resolve to uid/gid 0 until
+    #2547/#2548 split the QEMU launcher from the in-guest process.
+    """
+    return task_user if verifier_user is None else verifier_user
+
+
+def concrete_sandbox_user(user: str | int | None) -> str | int | None:
+    """Return ``user`` only when it can be resolved without image metadata."""
+    return None if user is None or user == "image" else user

@@ -42,6 +42,30 @@ An explicitly selected non-script verifier (such as `pytest`) or a custom
 script path keeps its existing intake behavior and does not receive this bridge.
 
 The projected verifier defaults to `shared`; explicit modes are preserved.
+For container tasks, an omitted user becomes `environment.user = "image"` until
+the final OCI image is built. Publication resolves USER against the final image's
+passwd/group files and records concrete UID/GID/HOME, workdir, ENTRYPOINT and
+non-secret image environment alongside its immutable image reference. Scheduling
+binds this metadata into the existing image grant, then compiles one concrete
+execution plan. Explicit task users, workdirs and environment values take
+precedence. Missing or unsupported metadata fails before execution.
+The adapter also sets `environment.image_entrypoint = true`; the resolved image
+ENTRYPOINT prefixes the bounded sandbox command, replacing CMD, so initializers
+such as PostgreSQL startup still run. The trusted controller and ordinary Loom
+tasks retain their existing nonroot identity. Only concrete root private task
+containers receive bounded installation capabilities; host/network privileges,
+filesystem sharing, process sharing and service-account tokens remain forbidden.
+Guest/Compose workbenches retain their separately admitted explicit root path;
+inherited or explicit ENTRYPOINT startup is not supported inside a guest and
+is rejected at admission with `guest_image_entrypoint_unsupported`.
+This metadata path currently requires a Dockerfile build. A prebuilt-only image
+requesting image defaults is rejected with `task_image_runtime_metadata_required`;
+it needs a supported inspected-image binding before those defaults can execute.
+Identity files or their parent paths using links are explicitly unsupported by
+the bounded metadata reader. Unresolvable identities and unsupported inherited
+workdirs fail image publication. Original archives and historical trial inputs
+are retained throughout rebuild and validation.
+
 An independent verifier environment or `tests/Dockerfile` defaults to
 `separate` and remains an explicit runtime requirement. Compose files are
 retained byte-for-byte. A bounded single-service local-build workbench is
@@ -65,6 +89,12 @@ after deploying this change. Rebuild uses the retained archive and publishes a
 new materialization; it does not edit historical trial inputs. `ready` confirms
 materialization, not successful task execution or support for every declared
 runtime requirement.
+
+Sandbox file-transfer failures expose only fixed reason codes such as
+`file_permission_denied`, `file_read_only_filesystem`, `file_io_error`,
+or `file_invalid_target`. Raw filesystem errors, paths and uploaded contents
+are never included in the RPC error. An upload failure precedes Oracle/model
+execution and must not be counted as a verifier score of zero.
 
 ## Storage limits
 

@@ -63,7 +63,11 @@ from loom.models.trial import TrialConfig
 from loom.mutable_paths import validate_task_workdir
 from loom.pipeline.keys import canonical_digest
 from loom.prebuilt_task_images import resolve_prebuilt_task_image, validate_prebuilt_image_pins
-from loom.sandbox_identity import resolve_sandbox_identity
+from loom.sandbox_identity import (
+    concrete_sandbox_user,
+    inherited_sandbox_user,
+    resolve_sandbox_identity,
+)
 from loom.task_image_materialization import TaskImageExecutionGrantV1, resolve_prepared_task
 from loom.task_sandbox_planner import (
     TaskSandboxPlanRequest,
@@ -472,6 +476,8 @@ def automatic_service_execution_rejections(
         # A task that needs a guest kernel cannot run safely in a shared kernel.
         reasons.append("isolation_container_unsatisfiable")
     if effective_guest_capabilities(task, trial) is not None:
+        if env.image_entrypoint or env.entrypoint:
+            reasons.append("guest_image_entrypoint_unsupported")
         if not controller:
             reasons.append("isolation_guest_response_only" if trial.isolation == "guest"
                            else "guest_private_sandboxes_required")
@@ -487,9 +493,14 @@ def automatic_service_execution_rejections(
             reasons.append("isolation_guest_shared_unsupported")
         if env.sidecars:
             reasons.append("guest_sidecars_unsupported")
-        for user in (env.user, task.verifier.user):
+        for user in (env.user, inherited_sandbox_user(env.user, task.verifier.user)):
+            # ``user="image"`` waits for #2544 publication metadata. Do not
+            # resolve it here or treat the placeholder as a missing root uid.
+            concrete = concrete_sandbox_user(user)
+            if concrete is None:
+                continue
             try:
-                identity = resolve_sandbox_identity(user, env.environment.get("HOME")) if user is not None else None
+                identity = resolve_sandbox_identity(concrete, env.environment.get("HOME"))
             except ValueError:
                 identity = None
             if identity is None or identity.run_as_user != 0 or identity.run_as_group != 0:
@@ -534,17 +545,26 @@ def automatic_service_execution_rejections(
         reserve = GUEST_LAUNCHER_STORAGE_MIB if effective_guest_capabilities(task, trial) is not None else 0
         if env.storage_mb - reserve < spec.setup.disk_mib:
             reasons.append("harness_setup_storage_insufficient")
-    if not controller and (env.workdir != PurePosixPath("/workspace") or env.user != "agent"):
+    if not controller and (env.workdir != PurePosixPath("/workspace") or env.user != "agent" or env.image_entrypoint):
         reasons.append("standard_workspace_identity_required")
     if controller:
+        if (env.image_entrypoint or env.image_workdir) and not (
+            allow_task_image_preparation and env.dockerfile is not None
+        ):
+            reasons.append("task_image_runtime_metadata_required")
         try:
             validate_task_workdir(env.workdir)
         except ValueError:
             reasons.append("standard_workspace_identity_required")
         try:
-            resolve_sandbox_identity(env.user, env.environment.get("HOME"))
-            if task.verifier.user is not None:
-                resolve_sandbox_identity(task.verifier.user, env.environment.get("HOME"))
+            if env.user == "image":
+                if not (allow_task_image_preparation and env.dockerfile is not None):
+                    reasons.append("task_image_runtime_metadata_required")
+            for user in (env.user, inherited_sandbox_user(env.user, task.verifier.user)):
+                concrete = concrete_sandbox_user(user)
+                if concrete is None:
+                    continue
+                resolve_sandbox_identity(concrete, env.environment.get("HOME"))
         except ValueError:
             reasons.append("unsupported_task_identity")
     if effective_network_policy.kind not in {"no-network", "gateway-only", "web-allowlist", "public-web"}:
@@ -555,7 +575,7 @@ def automatic_service_execution_rejections(
     ):
         reasons.append("task_network_consumer_unavailable")
     if (
-        (set(env.environment) - ({"HOME"} if controller else set()))
+        (env.environment and not controller)
         or (env.sidecars and (not controller or not all(sidecar.fixture for sidecar in env.sidecars)))
         or env.extra_hosts
         or env.dns
@@ -565,6 +585,11 @@ def automatic_service_execution_rejections(
         or env.mcp_servers
     ):
         reasons.append("extended_environment_unsupported")
+    if controller:
+        try:
+            ProcessPhaseV1._environment_is_nonsecret(env.environment)
+        except ValueError:
+            reasons.append("task_environment_invalid")
     if any(sidecar.fixture for sidecar in env.sidecars):
         if allow_task_image_preparation:
             if env.dockerfile is None or any(sidecar.dockerfile is None for sidecar in env.sidecars):
@@ -699,6 +724,9 @@ def compile_service_execution_plan(
         raise ValueError("task_egress_runtime_unavailable")
     profile_reasons = runtime_profile_rejections(task, trial, profile)
     selected_agent_image = controller_image_for_trial(profile, trial)
+    has_resolved_task_environment = bool(task_image_grant and task_image_grant.image_runtime_metadata)
+    if has_resolved_task_environment and selected_agent_image != profile.agent_image_ref:
+        raise ValueError("resolved_task_environment_controller_unavailable")
     if task_image_grant is not None and selected_agent_image is not None:
         admitted = {item.statement.image_ref for item in profile.image_admission.admissions}
         if selected_agent_image in admitted:
@@ -744,6 +772,7 @@ def compile_service_execution_plan(
                 task_image_grant.materialization_id if task_image_grant else None
             ),
             resource_requests=resource_requests,
+            has_resolved_task_environment=has_resolved_task_environment,
         ))
     assert trial.agent_model is not None
     # The in-Pod runner targets Loom's attributed chat route.  It revalidates
@@ -935,7 +964,7 @@ def freeze_agent_runtime_releases(
 
 
 def _requires_task_identity(task: TaskConfig) -> bool:
-    return (task.environment.user != "agent" or "HOME" in task.environment.environment
+    return (task.environment.user != "agent" or task.environment.image_entrypoint or bool(task.environment.entrypoint) or "HOME" in task.environment.environment
             or task.verifier.user is not None)
 
 

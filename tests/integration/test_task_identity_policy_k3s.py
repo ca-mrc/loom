@@ -151,6 +151,19 @@ def test_private_root_policy_accepts_only_the_constrained_pod_shape(tmp_path: Pa
             *platform_pods, _pod(namespace, user="0:1001", home="/root"),
             _pod(namespace, deferred=True), _pod(namespace, user="1001:1002", home="/home/miles", deferred=True),
         ]
+        for user in ("root", "1001:1002"):
+            entrypoint_pod = _pod(namespace, user=user, home="/root" if user == "root" else "/home/miles")
+            for sandbox in entrypoint_pod["spec"]["initContainers"][1:]:
+                sandbox["command"] = ["/entrypoint.sh", *sandbox["command"]]
+            admitted_shapes.append(entrypoint_pod)
+        maximum_prefix = deepcopy(pod)
+        for sandbox in maximum_prefix["spec"]["initContainers"][1:]:
+            sandbox["command"] = ["/entrypoint.sh", *(["argument"] * 122), *sandbox["command"]]
+        admitted_shapes.append(maximum_prefix)
+        unicode_prefix = deepcopy(pod)
+        for sandbox in unicode_prefix["spec"]["initContainers"][1:]:
+            sandbox["command"] = ["/entrypoint.sh", "é" * 2048, *sandbox["command"]]
+        admitted_shapes.append(unicode_prefix)
         failures = []
         for admitted in admitted_shapes:
             result = apply([admitted], dry_run=True)
@@ -215,6 +228,24 @@ def test_private_root_policy_accepts_only_the_constrained_pod_shape(tmp_path: Pa
             lambda p: p["spec"]["initContainers"][1]["volumeMounts"][2].update(subPath="sandbox.sock"),
             lambda p: p["spec"]["initContainers"][1]["volumeMounts"][2].update(mountPath="/etc/shadow"),
             lambda p: p["spec"]["initContainers"][1]["volumeMounts"].pop(),
+            lambda p: p["spec"].update(automountServiceAccountToken=True),
+            lambda p: p["spec"]["securityContext"].pop("runAsUser"),
+            lambda p: p["spec"]["securityContext"].pop("runAsGroup"),
+            lambda p: p["spec"]["initContainers"][1].update(command=[
+                "/entrypoint.sh", *(["argument"] * 123), *p["spec"]["initContainers"][1]["command"],
+            ]),
+            lambda p: p["spec"]["initContainers"][1].update(command=[
+                "", *p["spec"]["initContainers"][1]["command"],
+            ]),
+            lambda p: p["spec"]["initContainers"][1].update(command=[
+                "x" * 4097, *p["spec"]["initContainers"][1]["command"],
+            ]),
+            lambda p: p["spec"]["initContainers"][1].update(command=[
+                "/entrypoint.sh", "é" * 2049, *p["spec"]["initContainers"][1]["command"],
+            ]),
+            lambda p: p["spec"]["initContainers"][1]["command"].append("unexpected"),
+            lambda p: p["spec"]["initContainers"][1]["startupProbe"]["exec"].update(command=["/bin/true"]),
+            lambda p: p["spec"]["initContainers"][1]["readinessProbe"]["exec"].update(command=["/bin/true"]),
         ]
         for mutate in mutations:
             bad = deepcopy(pod)

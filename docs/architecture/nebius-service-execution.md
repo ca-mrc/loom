@@ -247,7 +247,9 @@ rules live in
 Terminus-2 `student_teacher_student` is the only hosted multi-model policy
 ([#2396](https://github.com/ca-mrc/loom/issues/2396)). Admission stays inert
 until the selected runtime profile advertises
-`terminus2_multi_model_policies: ["student_teacher_student"]`. Deferred
+`terminus2_multi_model_policies: ["student_teacher_student"]` (publication
+flag `--supports-terminus2-multi-model` /
+`NEBIUS_TERMINUS2_MULTI_MODEL_READY`). Deferred
 policies (`beta_mixture`, `student_to_teacher_turns`), non-Terminus agents,
 extra MCP/skills, and `--combinations-json` stay rejected or independent. The
 frozen K1/K2 schedule travels in `LOOM_TASK_TRIAL_JSON`;

@@ -53,6 +53,22 @@ def test_bad_receipt_is_bounded_validation_error(message):
         publication_receipt(job, materialization_id=image_id, lease_epoch=2)
 
 
+def test_oci_runtime_metadata_is_bound_to_the_published_component():
+    image_id, job = receipt_job()
+    status = job["pods"][0]["status"]["containerStatuses"][0]["state"]["terminated"]
+    document = json.loads(status["message"])
+    document["image_runtime_metadata"] = {"task": {
+        "image_ref": document["registry_images"]["task"], "user": "root", "uid": 0, "gid": 0,
+        "home": "/root", "workdir": "/app", "entrypoint": ["/entrypoint.sh"], "environment": {},
+    }}
+    status["message"] = json.dumps(document)
+    assert publication_receipt(job, materialization_id=image_id, lease_epoch=2) == document["registry_images"]
+    document["image_runtime_metadata"]["task"]["image_ref"] = "other.example/task@sha256:" + "b" * 64
+    status["message"] = json.dumps(document)
+    with pytest.raises(ValueError, match="differs from the published image"):
+        publication_receipt(job, materialization_id=image_id, lease_epoch=2)
+
+
 def test_observation_excludes_raw_messages_and_redacts_bounded_builder_log():
     _, job = receipt_job(message="private receipt token")
     job["pods"][0]["status"]["initContainerStatuses"] = [{"name": "prepare", "state": {

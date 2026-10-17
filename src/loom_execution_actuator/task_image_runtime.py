@@ -22,7 +22,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Lock
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 import boto3
@@ -39,6 +39,7 @@ from loom.service_execution_materialization import (
 from loom.task_image_build_plan import derive_task_image_build_components
 from loom.task_image_bundle_manifest import capture_task_image_bundle_manifest
 from loom.task_image_materialization import task_bundle_content_manifest_digest
+from loom.task_image_metadata import TaskImageRuntimeMetadataV1
 from loom.trajectory.storage import (
     BUNDLE_FILE_METADATA_NAME,
     _parse_bundle_file_metadata,
@@ -942,6 +943,7 @@ def publish(
     receipt_path: Path = Path("/dev/termination-log"),
 ) -> dict[str, Any]:
     images: dict[str, str] = {}
+    runtime_metadata: dict[str, dict[str, Any]] = {}
     cache = _client(claim, secrets / "cache") if (secrets / "cache").is_dir() else None
     auth_directory = tempfile.TemporaryDirectory()
     export_format = _oci_export_format(claim)
@@ -957,18 +959,56 @@ def publish(
                 credentials, "/".join(claim["registry_repository"].split("/")[:2]), registry_auth
             )
         for index, component in enumerate(derive_task_image_build_components(claim["task_config"])):
+            environment = claim["task_config"]["environment"]
+            requires_metadata = component.name == "task" and (
+                environment.get("user") == "image" or environment.get("image_entrypoint") or environment.get("image_workdir")
+            )
+            architecture: Literal["amd64", "arm64"] = "arm64" if claim["cpu_arch"] == "arm64" else "amd64"
             if export_format == "directory":
                 # Plan schema still emits oci/NNNN.tar; directory Jobs rewrite dest.
                 relative = component.oci_output_path.removesuffix(".tar")
                 output = _output_path(work, relative, directory=True)
-                validate_native_oci_directory(output)
+                if not requires_metadata:
+                    validate_native_oci_directory(output, architecture=architecture)
                 skopeo_source = f"oci:{output}"
             else:
                 archive = _output_path(work, component.oci_output_path)
                 if archive.stat().st_size > 3 * _CACHE_BYTES:
                     raise BuildPreparationError("build output is not a bounded regular OCI archive")
-                validate_native_oci_archive(archive)
+                if not requires_metadata:
+                    validate_native_oci_archive(archive, architecture=architecture)
                 skopeo_source = f"oci-archive:{archive}"
+            metadata = None
+            if requires_metadata:
+                from loom_execution_actuator.task_image_metadata import (
+                    read_task_image_runtime_metadata,
+                )
+
+                metadata = read_task_image_runtime_metadata(
+                    output if export_format == "directory" else archive,
+                    architecture=architecture,
+                    directory=export_format == "directory",
+                )
+                if environment.get("image_workdir"):
+                    from loom.mutable_paths import validate_task_workdir
+
+                    try:
+                        validate_task_workdir(metadata["workdir"])
+                    except ValueError:
+                        raise BuildPreparationError("OCI image workdir is unsupported by the selected runtime") from None
+                try:
+                    preview = TaskImageRuntimeMetadataV1.model_validate({
+                        **metadata, "image_ref": claim["registry_repository"] + "@sha256:" + "0" * 64,
+                    }).model_dump(mode="json")
+                except ValueError:
+                    raise BuildPreparationError("OCI runtime metadata is unsupported") from None
+                preview_receipt = {
+                    "materialization_id": claim["id"], "lease_epoch": claim["lease_epoch"],
+                    "registry_images": {**images, component.name: preview["image_ref"]},
+                    "image_runtime_metadata": {**runtime_metadata, component.name: preview},
+                }
+                if len(json.dumps(preview_receipt).encode()) > 4000:
+                    raise BuildPreparationError("OCI runtime metadata exceeds publication receipt budget")
             tag = f"{claim['registry_repository']}:{claim['materialization_key']}-{claim['lease_epoch']}-{index}"
             with tempfile.TemporaryDirectory() as temporary:
                 digest_file = Path(temporary) / "digest"
@@ -996,12 +1036,17 @@ def publish(
                     if not _DIGEST.fullmatch(digest):
                         raise BuildPreparationError("registry did not return an OCI digest")
                     images[component.name] = f"{claim['registry_repository']}@{digest}"
+                    if metadata is not None:
+                        runtime_metadata[component.name] = TaskImageRuntimeMetadataV1.model_validate({
+                            **metadata, "image_ref": images[component.name],
+                        }).model_dump(mode="json")
                     receipt_path.write_text(
                         json.dumps(
                             {
                                 "materialization_id": claim["id"],
                                 "lease_epoch": claim["lease_epoch"],
                                 "registry_images": images,
+                                **({"image_runtime_metadata": runtime_metadata} if runtime_metadata else {}),
                             }
                         )
                     )
@@ -1036,6 +1081,7 @@ def publish(
         "materialization_id": claim["id"],
         "lease_epoch": claim["lease_epoch"],
         "registry_images": images,
+        **({"image_runtime_metadata": runtime_metadata} if runtime_metadata else {}),
     }
     if len(json.dumps(receipt).encode()) > 4000:
         raise BuildPreparationError(

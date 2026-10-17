@@ -27,11 +27,12 @@ from loom.trajectory.storage import (
 from loom_execution_actuator import task_image_runtime as runtime
 
 
-def _write_native_oci(path: Path, *, platform: str = "linux/amd64") -> None:
+def _write_native_oci(path: Path, *, platform: str = "linux/amd64", runtime_config=None) -> None:
     """Valid minimal local image, while subprocess tests retain a fake registry."""
     image_os, _, architecture = platform.partition("/")
     config = json.dumps(
-        {"architecture": architecture, "os": image_os, "rootfs": {"type": "layers", "diff_ids": []}}
+        {"architecture": architecture, "os": image_os, "rootfs": {"type": "layers", "diff_ids": []},
+         "config": runtime_config or {}}
     ).encode()
     manifest = json.dumps(
         {
@@ -159,6 +160,7 @@ def source_bundle(tmp_path):
             "bundle_file_metadata_sha256": bundle_file_metadata_sha256(original)
         },
         "registry_repository": "registry.example/tasks",
+        "cpu_arch": "x86_64",
         "lease_epoch": 3,
         "task_config": {
             "schema_version": "1",
@@ -731,6 +733,40 @@ def test_publisher_records_registry_digest_with_optional_cache(
     digest = manifest["files"][0]["sha256"]
     assert cache.objects[f"task-build-cache/v2/blobs/{digest}"] == b"cached layer"
     assert any(key.endswith(f"/blobs/{digest}") for _, key, _ in cache.uploads)
+
+
+@pytest.mark.parametrize("failure", [None, "secret", "workdir", "budget"])
+def test_publisher_binds_final_oci_defaults_and_rejects_unusable_metadata_before_push(
+    source_bundle, tmp_path, publisher, failure,
+):
+    claim, _ = source_bundle
+    _, calls = publisher
+    claim["task_config"]["environment"].update(user="image", image_entrypoint=True, image_workdir=True)
+    config = {"User": "0:0", "WorkingDir": "/app/database", "Entrypoint": ["/entrypoint.sh"],
+              "Env": ["HOME=/root", "PATH=/usr/bin"]}
+    if failure == "secret":
+        config["Env"].append("PROVIDER_API_KEY=private-value")
+    elif failure == "workdir":
+        config["WorkingDir"] = "/"
+    elif failure == "budget":
+        config["Env"].append("PUBLIC_DATA=" + "x" * 3980)
+    work = tmp_path / "work"
+    (work / "oci").mkdir(parents=True)
+    _write_native_oci(work / "oci/0000.tar", runtime_config=config)
+    receipt_file = tmp_path / "receipt.json"
+    if failure:
+        with pytest.raises(ValueError) as rejected:
+            runtime.publish(claim, work, tmp_path / "secrets", receipt_path=receipt_file)
+        assert "private-value" not in str(rejected.value)
+        assert calls == [] and not receipt_file.exists()
+        return
+    receipt = runtime.publish(claim, work, tmp_path / "secrets", receipt_path=receipt_file)
+    assert receipt == json.loads(receipt_file.read_text())
+    metadata = receipt["image_runtime_metadata"]["task"]
+    assert metadata["image_ref"] == receipt["registry_images"]["task"]
+    assert (metadata["uid"], metadata["gid"], metadata["home"]) == (0, 0, "/root")
+    assert metadata["workdir"] == "/app/database" and metadata["entrypoint"] == ["/entrypoint.sh"]
+    assert metadata["environment"] == {"HOME": "/root", "PATH": "/usr/bin"}
 
 
 @pytest.mark.parametrize("linked_directory", ["oci", "cache-out"])

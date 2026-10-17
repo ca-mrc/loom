@@ -38,6 +38,7 @@ var (
 	errCleanupProcRead     = errors.New("cannot inspect sandbox processes")
 	errCleanupSignalDenied = errors.New("sandbox cannot signal descendant")
 	errCleanupSignalFailed = errors.New("sandbox signal failed")
+	errInvalidFileTarget   = errors.New("invalid file target")
 )
 
 // Kernel identity for one descendant that cleanup could not reap. Command
@@ -362,6 +363,19 @@ func (s runtimeServer) upload(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "file too large", 413)
 			return
 		}
+		// Publish only fixed reason codes. Filesystem errors may contain private
+		// task paths or data and must never become response bodies or headers.
+		reason := "file_io_error"
+		switch {
+		case errors.Is(err, syscall.EACCES), errors.Is(err, syscall.EPERM):
+			reason = "file_permission_denied"
+		case errors.Is(err, syscall.EROFS):
+			reason = "file_read_only_filesystem"
+		case errors.Is(err, errInvalidFileTarget), errors.Is(err, syscall.ELOOP),
+			errors.Is(err, syscall.ENOTDIR), errors.Is(err, syscall.EISDIR):
+			reason = "file_invalid_target"
+		}
+		w.Header().Set("X-Loom-Sandbox-Error", reason)
 		http.Error(w, "file upload rejected", 400)
 		return
 	}

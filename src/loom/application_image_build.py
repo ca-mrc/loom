@@ -33,7 +33,7 @@ class ApplicationImageRecipeV1(BaseModel):
     schema_revision: str = Field(pattern=r"^[a-zA-Z0-9_]{1,64}$")
     trusted_image_ref: str = Field(pattern=_IMAGE)
     buildkit_image_ref: str = Field(pattern=r"^[^\s]+@sha256:[0-9a-f]{64}$")
-    snapshotter: Literal["overlayfs", "native"] = "overlayfs"
+    snapshotter: Literal["overlayfs", "native"] = "native"
     export_cache_mode: Literal["max", "min"] = "max"
     oci_export_format: Literal["archive", "directory"] = "archive"
 

@@ -78,20 +78,32 @@ def test_resolver_follows_the_selection_but_never_drops_declared_capabilities():
 
 def test_forced_guest_on_an_ordinary_task_compiles_a_plain_guest_plan():
     task, trial, profile = _inputs()
-    task, profile = _root(task), _guest_ready(profile)
+    raw = _root(task).model_dump(mode="json")
+    raw["verifier"]["user"] = None
+    task, profile = TaskConfig.model_validate(raw), _guest_ready(profile)
     trial = trial.model_copy(update={"isolation": "guest"})
+    assert task.environment.user == "root" and task.verifier.user is None
     assert _reasons(task, trial, profile) == ()
     plan = _compile(task, trial, profile)
     assert plan.execution_class_id == "linux-amd64-cpu-guest-v1"
     assert plan.verifier_execution == "in_attempt"
     for sidecar in plan.canonical_payload()["sidecars"]:
         assert sidecar["guest_execution"]["capabilities"] == []
+        assert sidecar["identity"]["run_as_user"] == sidecar["identity"]["run_as_group"] == 0
     requirements = workload_requirements_from_task(task, trial)
     assert requirements.isolation_level == IsolationLevel.DEDICATED_GUEST_KERNEL
     validate_runtime_plan_requirements(plan, requirements)
     with pytest.raises(ValueError, match="guest plan does not match"):
         validate_runtime_plan_requirements(plan, workload_requirements_from_task(task))
     assert ExecutionRuntimePlanV1.model_validate(plan.canonical_payload()) == plan
+
+
+def test_forced_guest_rejects_an_ordinary_nonroot_task():
+    task, trial, profile = _inputs()
+    profile = _guest_ready(profile)
+    trial = trial.model_copy(update={"isolation": "guest"})
+    assert task.environment.user == "agent" and task.verifier.user is None
+    assert "guest_root_identity_required" in _reasons(task, trial, profile)
 
 
 def test_forced_guest_is_admitted_and_accounted_only_on_the_guest_class():

@@ -63,6 +63,8 @@ def test_original_upload_is_admissible_and_bridge_preserves_zero_reward(tmp_path
         source_provenance=row.source_provenance, allow_task_image_preparation=True,
     ) == ()
     assert task.verifier.env_mode == "shared"
+    assert task.environment.user == "image"
+    assert task.environment.image_entrypoint is True
     prefix = row.source.removeprefix("s3://artifacts/")
     for name, content in files.items():
         target = "upstream-task.toml" if name == "task.toml" else name
@@ -107,6 +109,15 @@ def test_bridge_collision_fails_import_without_overwriting_source(tmp_path):
     result, _, _ = materialize(tmp_path, extra_files={"verifier/run.sh": b"custom verifier\n"})
     assert result.status == "failed"
     assert "reserved verifier/run.sh" in str(result.error_summary)
+
+
+def test_explicit_runtime_identity_workdir_and_entrypoint_override_image_defaults(tmp_path):
+    result, _, _ = materialize(tmp_path, environment='user = "root"\nworkdir = "/chosen"\nentrypoint = ["/chosen-start"]')
+    assert result.status == "ready", result.error_summary
+    environment = TaskConfig.model_validate(result.task_rows[0].config).environment
+    assert environment.user == "root" and str(environment.workdir) == "/chosen"
+    assert environment.entrypoint == ("/chosen-start",)
+    assert not environment.image_entrypoint and not environment.image_workdir
 
 
 def test_source_config_collision_fails_import(tmp_path):

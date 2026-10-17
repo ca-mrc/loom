@@ -761,6 +761,11 @@ def prepare_nebius_terminus_image(staged: Path, environment: dict[str, Any]) -> 
     if not source.is_file() or not test_script.is_file():
         raise ValueError("nebius-terminus: original Dockerfile and tests/test.sh are required")
     bootstrap = adapt_harbor_test_script(test_script.read_text())
+    if environment.get("user") == "image":
+        raise ValueError(
+            "nebius-terminus: legacy offline preparation requires an explicit numeric or root task identity; "
+            "image-default USER requires native task-image execution"
+        )
     identity = resolve_sandbox_identity(
         environment.get("user", "agent"), (environment.get("environment") or {}).get("HOME"),
     ) or SandboxIdentityV1(run_as_user=65532, run_as_group=65532, home="/home/agent")

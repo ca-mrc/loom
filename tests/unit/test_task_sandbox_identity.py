@@ -10,6 +10,7 @@ from loom.execution_runtime_contract import (
     RuntimeHandoffInputV1,
 )
 from loom.models.task import TaskConfig
+from loom.sandbox_identity import concrete_sandbox_user, inherited_sandbox_user
 from loom.service_execution_materialization import (
     automatic_service_execution_rejections,
     compile_service_execution_plan,
@@ -18,6 +19,14 @@ from loom.service_execution_materialization import (
 from loom_execution_actuator.renderer import _sidecar
 from tests.unit.test_service_execution_materialization import _provenance
 from tests.unit.test_service_execution_terminus_plan import _inputs
+
+
+def test_omitted_verifier_user_inherits_the_task_user():
+    assert inherited_sandbox_user("root", None) == "root"
+    assert inherited_sandbox_user("1001:1001", None) == "1001:1001"
+    assert inherited_sandbox_user("root", "1001:1001") == "1001:1001"
+    assert concrete_sandbox_user("image") is None
+    assert concrete_sandbox_user("root") == "root"
 
 
 def _identity_task(user, home=None, verifier_user=None):
@@ -75,6 +84,24 @@ def test_default_identity_preserves_legacy_plan_bytes_and_security():
             "allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]},
             "readOnlyRootFilesystem": False, "runAsNonRoot": True,
         }
+
+
+@pytest.mark.parametrize("user,home", [("root", "/root"), ("1001:1002", "/home/task")])
+def test_resolved_image_entrypoint_and_identity_reach_the_same_private_plan(user, home):
+    task, trial, profile = _identity_task(user, home)
+    task = task.model_copy(update={"environment": task.environment.model_copy(update={
+        "entrypoint": ("/entrypoint.sh",), "environment": {"HOME": home, "IMAGE_DEFAULT": "present"},
+    })})
+    profile = profile.model_copy(update={"supports_task_identity": True})
+    plan = compile_service_execution_plan(
+        task=task, trial=trial, profile=profile, source_provenance=_provenance(),
+        task_revision_sha256="sha256:" + "c" * 64,
+    )
+    container = _sidecar(plan.sidecars[-1])
+    assert container["command"][:2] == ["/entrypoint.sh", "/loom/bin/loom-sandbox-runtime"]
+    assert {"name": "IMAGE_DEFAULT", "value": "present"} in container["env"]
+    assert container["securityContext"]["runAsUser"] == (0 if user == "root" else 1001)
+    assert plan.run_as_user == 65532
 
 
 @pytest.mark.parametrize("user,home", [

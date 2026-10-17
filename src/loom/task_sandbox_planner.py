@@ -45,7 +45,12 @@ from loom.hosted_harness import (
 from loom.models.networking import NetworkPolicy, WebAllowlist, WebDestination, hosted_http_egress
 from loom.models.task import TaskConfig
 from loom.models.trial import TrialConfig
-from loom.sandbox_identity import resolve_sandbox_identity
+from loom.sandbox_identity import inherited_sandbox_user, resolve_sandbox_identity
+from loom.task_environment_handoff import (
+    RESOLVED_TASK_ENVIRONMENT,
+    decode_resolved_task_environment,
+    encode_resolved_task_environment,
+)
 from loom.verifier_runtime import resolve_verifier_env_mode
 
 if TYPE_CHECKING:
@@ -108,6 +113,7 @@ class TaskSandboxPlanRequest:
     controller_image: str
     task_image_materialization_id: UUID | None = None
     resource_requests: ExecutionResourceRequestsV1 | None = None
+    has_resolved_task_environment: bool = False
 
 
 @dataclass(frozen=True)
@@ -174,16 +180,21 @@ def _sandbox_sidecars(
         probe = ProbeV1(kind="exec", argv=(SANDBOX_RUNTIME_BINARY, "--check-socket", socket))
         startup_probe = (probe.model_copy(update={"failure_threshold": _GUEST_STARTUP_FAILURE_THRESHOLD})
                          if topology.guest_execution is not None else probe)
-        user = (task.verifier.user if role == VERIFIER_SANDBOX and task.verifier.user is not None
-                else env.user)
+        user = (
+            inherited_sandbox_user(env.user, task.verifier.user)
+            if role == VERIFIER_SANDBOX
+            else env.user
+        )
+        identity = resolve_sandbox_identity(
+            user, env.environment.get("HOME"),
+            default_uid=profile.run_as_user, default_gid=profile.run_as_group,
+        )
         sidecars.append(SidecarContainerV1(
             role_name=role, image_ref=env.docker_image,
-            argv=(SANDBOX_RUNTIME_BINARY, "--socket", socket, "--exec-timeout-seconds", exec_limit),
+            argv=(*env.entrypoint, SANDBOX_RUNTIME_BINARY, "--socket", socket, "--exec-timeout-seconds", exec_limit),
+            environment={key: value for key, value in env.environment.items() if key != "HOME"},
             resources=resources, startup_probe=startup_probe, readiness_probe=probe, private_sandbox=True,
-            identity=resolve_sandbox_identity(
-                user, env.environment.get("HOME"),
-                default_uid=profile.run_as_user, default_gid=profile.run_as_group,
-            ),
+            identity=identity,
             guest_execution=topology.guest_execution,
         ))
     return sidecars
@@ -304,6 +315,10 @@ def compile_task_sandbox_plan(request: TaskSandboxPlanRequest) -> ExecutionRunti
             request.effective_network_policy.model_dump(mode="json"), sort_keys=True, separators=(",", ":"),
         ),
     }
+    if request.has_resolved_task_environment:
+        if request.controller_image != profile.agent_image_ref:
+            raise ValueError("resolved_task_environment_controller_unavailable")
+        phase_env[RESOLVED_TASK_ENVIRONMENT] = encode_resolved_task_environment(env)
     # A frozen agent release may select an older controller than the candidate
     # qualified by the profile. Do not send that image a new input contract.
     if (profile.supports_task_artifact_inputs and request.controller_image == profile.agent_image_ref
@@ -376,8 +391,12 @@ def compile_deferred_verifier_plan(
     """
     if agent_plan.execution_role != "attempt" or agent_plan.verifier_execution != "separate_execution":
         raise ValueError("only a separate-execution attempt defers its verifier")
+    if RESOLVED_TASK_ENVIRONMENT in agent_plan.main.environment:
+        task = task.model_copy(update={"environment": decode_resolved_task_environment(
+            agent_plan.main.environment[RESOLVED_TASK_ENVIRONMENT],
+        )})
     task_sandbox = next(sidecar for sidecar in agent_plan.sidecars if sidecar.role_name == TASK_SANDBOX)
-    user = task.verifier.user if task.verifier.user is not None else task.environment.user
+    user = inherited_sandbox_user(task.environment.user, task.verifier.user)
     identity = resolve_sandbox_identity(
         user, task.environment.environment.get("HOME"),
         default_uid=agent_plan.run_as_user, default_gid=agent_plan.run_as_group,

@@ -33,7 +33,18 @@ def test_selection_follows_parent_and_transitive_relative_fixtures(tmp_path: Pat
     (tmp_path / "tests" / "conftest.py").write_text('PostgresContainer("postgres:16")\n')
     (package / "test_paths.py").write_text("from .fixtures import sandboxes\n")
     (package / "fixtures.py").write_text('IMAGE = "python:3.11-slim"\n')
-    assert selected_images(["tests/integration/test_paths.py"], root=tmp_path) == FIXTURE_IMAGES
+    assert selected_images(["tests/integration/test_paths.py"], root=tmp_path) == (
+        "postgres:16", "python:3.11-slim",
+    )
+
+
+@pytest.mark.parametrize("path,expected", [
+    ("tests/integration/test_legacy_feature_retirement.py", ("postgres:16", "postgres:17")),
+    ("tests/integration/test_task_identity_installation_docker.py", ("postgres:16", "python:3.11-slim")),
+    ("tests/unit/test_service_sandbox_driver.py", ("postgres:16",)),
+])
+def test_real_repository_selection_preserves_fixture_version_matrix(path: str, expected: tuple[str, ...]) -> None:
+    assert selected_images([path]) == expected
 
 
 def test_empty_and_unreadable_selection(tmp_path: Path) -> None:
@@ -45,7 +56,7 @@ def test_preparation_reuses_cached_image_and_pulls_only_cold_image(monkeypatch: 
     run = Mock(side_effect=[subprocess.CompletedProcess([], 0), subprocess.CompletedProcess([], 1),
                             subprocess.CompletedProcess([], 0)])
     monkeypatch.setattr("tests.support.docker_hub_images.subprocess.run", run)
-    prepare_images(FIXTURE_IMAGES)
+    prepare_images(("postgres:16", "python:3.11-slim"))
     pulls = [call for call in run.call_args_list if call.args[0][:2] == ["docker", "pull"]]
     assert len(pulls) == 1
     assert pulls[0].args[0] == ["docker", "pull", "python:3.11-slim"]
