@@ -263,10 +263,9 @@ async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact
                 assert command[3] in {'service', 'controller', 'actuator'}
                 assert 'private-' not in ' '.join(command)
                 commands.append(command[3])
-                if late_restart and command[3] == 'actuator':
-                    service_pod, = (row for row in remote.kubernetes['/api/v1/namespaces/app-red/pods']['items']
-                        if row['metadata']['name'].startswith('loom-service-'))
-                    service_pod['status']['containerStatuses'][0]['restartCount'] += 1
+                if late_restart and command[3] == 'service':
+                    actuator_pod, = remote.kubernetes['/api/v1/namespaces/work-red/pods']['items']
+                    actuator_pod['status']['containerStatuses'][0]['restartCount'] += 1
                 return {} if reject_process else {'status': 'qualified'}
             yield EnvironmentRuntimeProbes(read=read, execute=execute, qualify=qualify, region=region)
 
@@ -283,7 +282,7 @@ async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact
                 await readiness.observe_environment_runtime(**observe_inputs)
             assert len(changes) == 8
             reject_process, late_restart = False, True
-            # A later component's probe must not leave the earlier service's
+            # A later component's probe must not leave the earlier actuator's
             # successful, but superseded, process evidence in the ready bundle.
             with pytest.raises(ValueError, match='environment_runtime_readiness_unqualified'):
                 await readiness.observe_environment_runtime(**observe_inputs)
