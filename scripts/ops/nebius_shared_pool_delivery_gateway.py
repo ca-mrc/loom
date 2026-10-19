@@ -38,6 +38,7 @@ SOURCES = RUNTIME_SOURCES + tuple("scripts/ops/" + name + ".py" for name in (
     "nebius_pool_administration_dispatch",
     "nebius_pool_administration_job",
     "nebius_pool_enrollment_issuer",
+    "nebius_closed_registry",
     "nebius_pool_participant_catalog",
     "nebius_pool_participant_release",
     "nebius_pool_preactivation_database",
