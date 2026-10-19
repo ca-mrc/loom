@@ -42,11 +42,12 @@ from loom_service.pool_management.lifecycle_contracts import (
     PoolParticipantEnrollmentV2,
     PoolParticipantOperationV2,
     PoolPlatformInstallationV2,
+    PoolPlatformOperationV2,
 )
 
 _LABEL = r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?'
 _HASH = r'[0-9a-f]{64}'
-_STATES = {'enrolled', 'ready', 'active', 'suspended', 'releasing', 'retiring', 'retired'}
+_STATES = {'enrolled', 'ready', 'active', 'suspended', 'retiring', 'retired'}
 
 
 @dataclass(frozen=True, repr=False)
@@ -93,7 +94,7 @@ def _qualified(value: PoolAdministrationJobV2) -> PoolAdministrationJobV2:
                 or item.get('operator') not in {'Equal', 'Exists'}
                 or item.get('effect') not in {'NoSchedule', 'NoExecute', 'PreferNoSchedule'} for item in runtime.tolerations)):
         raise ValueError('pool_administration_runtime_unqualified')
-    if isinstance(request, (PoolPlatformInstallationV2, PoolLegacyAdoptionV2)):
+    if isinstance(request, (PoolPlatformInstallationV2, PoolPlatformOperationV2, PoolLegacyAdoptionV2)):
         target = request.before if isinstance(request, PoolLegacyAdoptionV2) else request
         if grant.authority != 'platform' or (grant.installation_id, grant.pool_id) != (target.installation_id, target.pool_id):
             raise ValueError('pool_administration_target_unqualified')
@@ -196,6 +197,13 @@ def validate_administration_report(request: PoolAdministrationJobV2, report: Any
     if isinstance(operation, PoolPlatformInstallationV2):
         if receipt != dict(schema_version='loom.pool-platform-installation-receipt.v2', operation_id=str(operation.operation_id),
                 pool_id=str(grant.pool_id), installation_sha256=grant.request_sha256, mode='closed', participants=0, machines=2):
+            raise ValueError('pool_administration_report_unqualified')
+    elif isinstance(operation, PoolPlatformOperationV2):
+        if (set(receipt) != {'schema_version', 'operation_id', 'pool_id', 'mode', 'pool_authority_sha256', 'policy_revision', 'admission_epoch'}
+                or receipt['schema_version'] != 'loom.pool-platform-operation-receipt.v2'
+                or receipt['mode'] != ('global' if operation.action == 'open' else 'closed')
+                or not isinstance(receipt['pool_authority_sha256'], str) or re.fullmatch(_HASH, receipt['pool_authority_sha256']) is None
+                or any(type(receipt[key]) is not int or receipt[key] < 1 for key in ('policy_revision', 'admission_epoch'))):
             raise ValueError('pool_administration_report_unqualified')
     elif isinstance(operation, PoolLegacyAdoptionV2):
         if (set(receipt) != {'schema_version', 'operation_id', 'pool_id', 'mode', 'admission_epoch', 'pool_authority_sha256', 'participants'}

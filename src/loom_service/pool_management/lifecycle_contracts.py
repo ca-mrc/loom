@@ -67,13 +67,11 @@ class PoolParticipantEnrollmentV2(_Strict):
         return self
 
 
-class PoolParticipantReadinessV2(_Strict):
+class PoolRuntimeReadinessV2(_Strict):
     """Protected installer's authenticated readback; no HTTP client can submit it."""
     observed_at: AwareDatetime
     valid_until: AwareDatetime
     pool_authority_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
-    participant_binding_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
-    catalog_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
     observer_machine_id: UUID
     gateway_machine_id: UUID
     observer_credential_epoch: int = Field(gt=0, strict=True)
@@ -81,10 +79,39 @@ class PoolParticipantReadinessV2(_Strict):
     capabilities: tuple[str, ...]
 
     @model_validator(mode='after')
-    def bounded(self) -> PoolParticipantReadinessV2:
+    def bounded(self) -> PoolRuntimeReadinessV2:
         if (not self.observer_machine_id.int or not self.gateway_machine_id.int
                 or not timedelta(0) < self.valid_until - self.observed_at <= timedelta(minutes=5)):
             raise ValueError('pool_participant_readiness_invalid')
+        return self
+
+
+class PoolParticipantReadinessV2(PoolRuntimeReadinessV2):
+    participant_binding_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
+    catalog_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
+
+
+class PoolPlatformReadinessV2(PoolRuntimeReadinessV2):
+    # Digest of the protected installer's exclusive writer/installed capability
+    # observation. A client-authored document is never proof of exclusivity.
+    exclusive_writer_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
+
+
+class PoolPlatformOperationV2(_Strict):
+    schema_version: Literal['loom.pool-platform-operation.v2']
+    operation_id: UUID
+    installation_id: UUID
+    pool_id: UUID
+    expected_head: UUID
+    pool_authority_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
+    action: Literal['open', 'close']
+    readiness: PoolPlatformReadinessV2 | None = None
+
+    @model_validator(mode='after')
+    def scope(self) -> PoolPlatformOperationV2:
+        if (not all(value.int for value in (self.operation_id, self.installation_id, self.pool_id, self.expected_head))
+                or (self.readiness is not None) != (self.action == 'open')):
+            raise ValueError('pool_platform_operation_invalid')
         return self
 
 

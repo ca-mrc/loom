@@ -5,19 +5,22 @@ import importlib
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
-import pytest
 import httpx
+import pytest
 from sqlalchemy import func, select
 
 from loom.db.nebius_pool_schema import NebiusPoolBinding, NebiusPoolParticipant
 from loom_execution_capacity_collector.contracts import CapacityPlacement
-from loom_service.pool_management.administration import PoolAdministrationAuthorizationV2, administer
+from loom_service.pool_management.administration import (
+    PoolAdministrationAuthorizationV2,
+    administer,
+)
 from loom_service.pool_management.auth import resolve_pool_machine
 from loom_service.pool_management.capacity import digest
 from loom_service.pool_management.observation_binding import physical_binding_digest
 from tests.execution_placement_fixtures import placement_fixture
-from tests.integration.test_nebius_pool_participant_lifecycle import platform, setup
 from tests.integration.test_nebius_pool_observation_continuity import workload
+from tests.integration.test_nebius_pool_participant_lifecycle import platform, setup
 from tests.integration.test_nebius_pool_registry import publish_placement
 from tests.integration.test_nebius_pool_registry import sessions as sessions
 
@@ -73,8 +76,11 @@ async def test_empty_platform_opens_without_any_environment_and_exact_old_replay
     result = await apply(sessions, request)
     assert result['receipt']['mode'] == 'global'
     from scripts.ops.nebius_pool_administration_job import (
-        PlatformNamespaceBindingV2, PoolAdministrationRuntimeV2, PoolAdministrationJobV2,
-        administration_documents, validate_administration_report,
+        PlatformNamespaceBindingV2,
+        PoolAdministrationJobV2,
+        PoolAdministrationRuntimeV2,
+        administration_documents,
+        validate_administration_report,
     )
     grant = PoolAdministrationAuthorizationV2(schema_version='loom.pool-administration-authorization.v2',
         authorization_id=result['authorization_id'], installation_id=spec.installation_id, pool_id=spec.pool_id,

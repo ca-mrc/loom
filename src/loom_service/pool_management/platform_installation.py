@@ -28,7 +28,7 @@ async def register_platform(session: AsyncSession, spec: PoolPlatformInstallatio
     binding = dict(node_selector=spec.node_selector, admission=spec.admission.model_dump(),
         quota_identities={key: list(value) for key, value in spec.quota_identities.items()},
         installation_sha256=digest(document), observation_binding='physical-v1',
-        profile_source='registry-v1', lifecycle_source='scoped-v1')
+        profile_source='registry-v1', lifecycle_source='scoped-v1', lifecycle_head_operation_id=str(spec.operation_id))
     await session.execute(insert(NebiusPoolBinding).values(pool_id=spec.pool_id, installation_id=spec.installation_id,
         cluster_id=spec.cluster_id, node_group_id=spec.node_group_id, policy_revision=spec.policy_revision,
         admission_epoch=spec.admission_epoch, mode='closed', binding_json=binding, binding_sha256=digest(binding)))

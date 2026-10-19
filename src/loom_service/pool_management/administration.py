@@ -36,6 +36,7 @@ from loom_service.pool_management.lifecycle_contracts import (
     PoolParticipantEnrollmentV2,
     PoolParticipantOperationV2,
     PoolPlatformInstallationV2,
+    PoolPlatformOperationV2,
 )
 from loom_service.pool_management.lifecycle_journal import replay, retain_operation
 from loom_service.pool_management.locks import acquire_pool_mutation_lock
@@ -44,9 +45,10 @@ from loom_service.pool_management.participant_lifecycle import (
     transition_participant,
 )
 from loom_service.pool_management.platform_installation import register_platform
+from loom_service.pool_management.platform_lifecycle import transition_platform
 from loom_service.pool_management.profiles import _object
 
-_Request = PoolPlatformInstallationV2 | PoolParticipantEnrollmentV2 | PoolParticipantOperationV2 | PoolLegacyAdoptionV2
+_Request = PoolPlatformInstallationV2 | PoolPlatformOperationV2 | PoolParticipantEnrollmentV2 | PoolParticipantOperationV2 | PoolLegacyAdoptionV2
 _REQUEST: TypeAdapter[_Request] = TypeAdapter(Annotated[_Request, Field(discriminator='schema_version')])
 _MAX_REQUEST = 4 * 1024 * 1024
 
@@ -79,7 +81,7 @@ class PoolAdministrationAuthorizationV2(BaseModel):
 
 
 async def _authorize(session: AsyncSession, request: _Request, grant: PoolAdministrationAuthorizationV2) -> UUID | None:
-    if isinstance(request, (PoolPlatformInstallationV2, PoolLegacyAdoptionV2)):
+    if isinstance(request, (PoolPlatformInstallationV2, PoolPlatformOperationV2, PoolLegacyAdoptionV2)):
         spec = request.before if isinstance(request, PoolLegacyAdoptionV2) else request
         if grant.authority != 'platform' or (grant.pool_id, grant.installation_id) != (spec.pool_id, spec.installation_id):
             raise ValueError('pool_administration_scope_unavailable')
@@ -134,6 +136,8 @@ async def administer(session: AsyncSession, content: bytes, authorization: PoolA
         receipt = await enroll_participant(session, request)
     elif isinstance(request, PoolParticipantOperationV2):
         receipt = await transition_participant(session, request)
+    elif isinstance(request, PoolPlatformOperationV2):
+        receipt = await transition_platform(session, request)
     else:
         receipt = await adopt_legacy_platform(session, request)
     current = None

@@ -71,7 +71,8 @@ async def adopt_legacy_platform(session: AsyncSession, request: PoolLegacyAdopti
     if pool.mode == 'closed' and await session.scalar(select(NebiusPoolRequest.request_id).where(
             NebiusPoolRequest.pool_id == pool.pool_id, NebiusPoolRequest.phase.in_(CHARGED_PHASES)).limit(1)) is not None:
         raise ValueError('pool_legacy_adoption_closed_work_requires_recovery')
-    binding = dict(pool.binding_json, observation_binding='physical-v1', profile_source='registry-v1', lifecycle_source='scoped-v1')
+    binding = dict(pool.binding_json, observation_binding='physical-v1', profile_source='registry-v1', lifecycle_source='scoped-v1',
+        lifecycle_head_operation_id=str(request.operation_id))
     await session.execute(update(NebiusPoolBinding).where(NebiusPoolBinding.pool_id == pool.pool_id).values(
         binding_json=binding, binding_sha256=digest(binding), policy_revision=pool.policy_revision + 1))
     children = []

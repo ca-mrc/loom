@@ -20,11 +20,9 @@ from loom.db.nebius_pool_lifecycle_schema import (
 from loom.db.nebius_pool_schema import (
     NebiusPoolBinding,
     NebiusPoolMachine,
-    NebiusPoolMachineCredential,
     NebiusPoolParticipant,
     NebiusPoolRequest,
 )
-from loom.db.schema import Token
 from loom.nebius_pool_contract import PoolParticipantV1
 from loom_service.pool_management.capacity import CHARGED_PHASES, digest, read_connected_capacity
 from loom_service.pool_management.control import _clock
@@ -52,6 +50,7 @@ from loom_service.pool_management.platform_installation import (
     register_platform as register_platform,
 )
 from loom_service.pool_management.profile_registry import store_participant_catalog
+from loom_service.pool_management.readiness import qualify_runtime_readiness
 from loom_service.pool_management.release_compatibility import qualify_release
 
 
@@ -105,26 +104,13 @@ async def _readiness(session: AsyncSession, pool: NebiusPoolBinding, selected: N
                      proof: PoolParticipantReadinessV2 | None) -> None:
     if proof is None:
         raise ValueError('pool_participant_readiness_missing')
-    now = await _clock(session)
+    await qualify_runtime_readiness(session, pool, proof)
     catalog = await session.get(NebiusPoolParticipantCatalog, (selected.participant_id, selected.binding_revision),
         populate_existing=True)
-    if (not proof.observed_at <= now < proof.valid_until or proof.pool_authority_sha256 != physical_binding_digest(pool)
-            or proof.participant_binding_sha256 != selected.binding_sha256 or catalog is None
+    if (proof.participant_binding_sha256 != selected.binding_sha256 or catalog is None
             or catalog.pool_id != pool.pool_id or catalog.document_sha256 != proof.catalog_sha256
-            or digest(catalog.document_json) != proof.catalog_sha256
-            or not {'physical-v1', 'registry-v1', 'scoped-lifecycle-v1'} <= set(proof.capabilities)):
+            or digest(catalog.document_json) != proof.catalog_sha256):
         raise ValueError('pool_participant_readiness_unqualified')
-    for role, machine_id, epoch in (('gateway', proof.gateway_machine_id, proof.gateway_credential_epoch),
-                                  ('observer', proof.observer_machine_id, proof.observer_credential_epoch)):
-        machine = await session.get(NebiusPoolMachine, machine_id, populate_existing=True)
-        token = await session.scalar(select(Token).join(NebiusPoolMachineCredential,
-            NebiusPoolMachineCredential.token_hash == Token.token_hash).where(
-                NebiusPoolMachineCredential.machine_id == machine_id,
-                NebiusPoolMachineCredential.credential_epoch == epoch,
-                Token.type == 'pool_machine', Token.revoked_at.is_(None), Token.issued_at <= now, Token.expires_at > now))
-        if (machine is None or machine.pool_id != pool.pool_id or machine.role != role or machine.participant_id is not None
-                or machine.phase != 'active' or machine.credential_epoch != epoch or token is None):
-            raise ValueError('pool_participant_readiness_machine_unqualified')
 
 
 async def transition_participant(session: AsyncSession, spec: PoolParticipantOperationV2) -> dict[str, Any]:
