@@ -104,9 +104,57 @@ async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact
         assert _load(policy.host, enrollment) == job
         assert resources.creates == creates and remote.writes == originals
         phase = policy.host.state_root / ('runtime-' + str(kwargs['operation_id'])) / 'material' / 'stage.json'
+        saved = phase.read_bytes()
         phase.unlink()
         with pytest.raises(ValueError, match='environment_runtime_retained_unqualified'):
             module.load_staged_environment_runtime(policy=policy, operation_id=kwargs['operation_id'])
         with pytest.raises(ValueError, match='environment_runtime_install_unqualified'):
             await module.stage_environment_runtime(**kwargs)
         assert resources.creates == creates
+        phase.write_bytes(saved)
+
+        # Continue through the actual startup journal, not a second enrollment
+        # or restaging operation. Only remote controller/HTTP effects are fake.
+        startup = importlib.import_module('scripts.ops.nebius_environment_runtime_start')
+        from scripts.ops.nebius_development_runtime_live import runtime_resource_path
+
+        from tests.ops.test_nebius_development_runtime_transition import RuntimeAPI
+
+        for doc in resources.resources.values():
+            remote.kubernetes[runtime_resource_path(doc) + '/' + doc['metadata']['name']] = copy.deepcopy(doc)
+        changes = []
+        reject = True
+
+        class Workloads(RuntimeAPI):
+            def patch_workload(self, key, before, desired):
+                try:
+                    return super().patch_workload(key, before, desired)
+                finally:
+                    actual = self.rows[key]
+                    remote.kubernetes[runtime_resource_path(actual) + '/' + actual['metadata']['name']] = actual
+                    changes.append(key)
+
+        @contextmanager
+        def workload_connection(before, targets, namespaces, qualify):
+            api = Workloads({key: remote.kubernetes[runtime_resource_path(doc) + '/' + doc['metadata']['name']]
+                for key, doc in before.items()})
+            api.ready, api.preview_rejected, api.failure = True, reject, 'after'
+            api.qualify = qualify
+            yield api
+
+        inputs = dict(policy=policy, operation_id=kwargs['operation_id'], workload_connection=workload_connection, **clients)
+        assert (await startup.start_environment_runtime(**inputs))['status'] == 'runtime_start_pending'
+        assert changes == []
+        reject = False
+        started = await startup.start_environment_runtime(**inputs)
+        assert started['status'] == 'runtime_started_closed'
+        assert started['admission_open'] is False
+        assert len(changes) == 8
+        assert all(key.split(':')[1] in {'app-red', 'work-red'} for key in changes)
+        assert await startup.start_environment_runtime(**inputs) == started
+        assert len(changes) == 8, 'completed phases must not stop or replace the new runtime again'
+        for name in ('loom-service', 'loom-control-plane'):
+            assert remote.kubernetes[f'/apis/apps/v1/namespaces/app-red/deployments/{name}']['spec']['replicas'] == 1
+        quota = remote.kubernetes['/api/v1/namespaces/work-red/resourcequotas/loom-execution-disabled']
+        assert quota['spec']['hard'] == {'pods': '1', 'count/jobs.batch': '0'}
+        assert remote.kubernetes['/api/v1/namespaces/build-red/resourcequotas/loom-execution-disabled']['spec']['hard'] == {'pods': '0'}
