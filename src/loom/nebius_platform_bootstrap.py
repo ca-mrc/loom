@@ -97,6 +97,11 @@ GATEWAY_TABLES = (
     "gateway_dispatch_receipts",
     "llm_call_intents",
     "model_switch_plans",
+    # Hosted student-teacher-student reclaim and episode checkpoints run inside
+    # the Gateway. The broker returns 502 when these writes are denied (#2565).
+    "terminus_agent_executions",
+    "terminus_agent_run_attempts",
+    "episode_checkpoints",
     "rate_cards",
     "price_catalogs",
     "provider_connections",
