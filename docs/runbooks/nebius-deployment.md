@@ -839,7 +839,7 @@ registration, a new input directory alone is insufficient. Before handoff:
    successor while still CLOSED; never weaken catalog equality or roll staging
    backward to make an earlier preparation pass.
 
-Schema compatibility is separate from release/catalog identity. The retained
+Schema compatibility is separate from release/catalog identity. The new active
 management database must still be exactly `0176`. Participant readiness,
 guard/role handoff and recovery accept the audited `0175`, `0176` and `0177` layouts;
 readiness reports the actual revision. The `0177` publication journal remains
@@ -854,6 +854,18 @@ This compatibility does not upgrade its application or permit a newer image
 against an unsupported database. The runtime's own exact schema check remains
 in force. `0177` publication retention, when present, remains inaccessible to
 the actuator; older layouts do not manufacture that journal.
+
+The historical manager is a separate read-only check. Its completed refresh
+receipt selects the exact `target_manager_revision` for retirement observation
+through preflight, forward handoff and recovery. Initial-upgrade history keeps
+the existing exact-`0176` contract. A live schema that differs from the selected
+completion fails; do not migrate history or broaden the new manager's schema
+contract to bypass that failure.
+
+If current workloads differ from the captured configuration's rendered revision,
+check for configuration updates made after the last completed rollout. Preserve
+the mismatch and reconcile through the protected rollout before capturing new
+inputs; do not erase annotations or substitute old configuration to pass preflight.
 
 The `loom.nebius-shared-pool-inputs.v1` private document contains:
 

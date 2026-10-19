@@ -286,11 +286,12 @@ writer workflow changes (including its first introduction), and daily. It syncs 
 per lock. `test_ci_wheel_cache_has_one_trusted_writer_and_complete_contents`
 keeps readers read-only and covered by that superset.
 
-The shared worker pool is not in use (dev deploys with `NEBIUS_ROLLOUT_MODE`
-unset, i.e. standalone), so `tests/ops/test_nebius_shared_pool_*.py` are skipped
-by `tests/ops/conftest.py` unless `LOOM_RUN_SHARED_POOL_TESTS=1`. Participant,
-legacy-completion and standalone rollout tests still run: normal rollout uses that
-code. Remove the skip before enabling `NEBIUS_ROLLOUT_MODE=shared`.
+Shared-pool handoff and recovery tests run whenever the existing test planner
+selects their files. They require no opt-in environment variable: source and
+candidate verification must cover activation before enabling
+`NEBIUS_ROLLOUT_MODE=shared`. The existing path selection and operator shards
+continue to control scope; no separate acceptance job is added. These simulations
+do not establish installed readiness or authorize a live handoff.
 
 Go checks validate the retained execution runtime, gateway sandbox, and sandbox
 runtime. JWT and execution-materialization producer contracts also retain Go

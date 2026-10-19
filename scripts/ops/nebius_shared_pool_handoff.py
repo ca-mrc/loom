@@ -22,6 +22,7 @@ from scripts.ops.nebius_development_activation import (
 )
 from scripts.ops.nebius_development_runtime_install import DevelopmentRuntimeInstallRequest
 from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
+from scripts.ops.nebius_management_refresh_predecessor import CompletedRefresh, CompletedUpgrade
 from scripts.ops.nebius_pool_material import machine_documents
 from scripts.ops.nebius_pool_migration import (
     PoolGuardTarget,
@@ -47,6 +48,24 @@ if TYPE_CHECKING:
 MARKER = 'loom.nebius/shared-pool-handoff-operation'
 _LEGACY_MARKERS = {'loom.nebius/pool-retirement-operation', 'loom.nebius/pool-cutover-operation',
     'loom.nebius/pool-startup-operation'}
+
+
+def retired_manager_revision(legacy: CompletedPoolCutover) -> str:
+    """Select the completed migration, not a guessed current database revision.
+
+    Callers qualify this completion chain before and after observing its old
+    manager. A completed refresh pins its target schema. Initial upgrades retain
+    the existing exact-0176 observation contract; this is no version fallback or
+    authority to start/migrate a historical manager.
+    """
+    if legacy.completion.outcome != 'legacy':
+        raise ValueError('historical manager requires completed legacy outcome')
+    predecessor = legacy.context.predecessor
+    if isinstance(predecessor, CompletedRefresh):
+        return predecessor.resources.target_manager_revision
+    if isinstance(predecessor, CompletedUpgrade):
+        return '0176'
+    raise ValueError('historical manager predecessor unqualified')
 
 
 class StagingPoolSource(BaseModel):

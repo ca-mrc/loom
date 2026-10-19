@@ -56,6 +56,7 @@ from scripts.ops.nebius_shared_pool_application_authority import (
 from scripts.ops.nebius_shared_pool_handoff import (
     SharedPoolHandoffPlan,
     prepare_shared_pool_handoff,
+    retired_manager_revision,
 )
 
 from loom.nebius_platform_render import digest
@@ -524,7 +525,7 @@ def observe_shared_pool_processes(*, runtime: DevelopmentRuntimeInstallRequest,
             predecessor=legacy.context.predecessor, credential=credential)
         history = KubectlPoolHistoryAPI(request=legacy.context.request.fencing.retirement.migration,
             target=history_target, kubeconfig=kubeconfig, executable=executable)
-        if history.machine_retirement('observe') != 'revoked':
+        if history.machine_retirement('observe', manager_revision=retired_manager_revision(legacy)) != 'revoked':
             raise ValueError
         development.qualify_closed_pool()
         participant = plan.staging.attachment.participant
@@ -575,7 +576,7 @@ def observe_shared_pool_processes(*, runtime: DevelopmentRuntimeInstallRequest,
         # A probe may take time: repeat ledger/guard and credential checks after
         # all remote reads, then requalify retained private history and dev binds.
         development.qualify_closed_pool()
-        if (history.machine_retirement('observe') != 'revoked'
+        if (history.machine_retirement('observe', manager_revision=retired_manager_revision(legacy)) != 'revoked'
                 or guards._get('secret', 'loom-platform-db', old_namespace) != credential
                 or open_guards() != states):
             raise ValueError

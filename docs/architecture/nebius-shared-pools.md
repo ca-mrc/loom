@@ -1124,6 +1124,12 @@ The new manager must have its exact closed registration and active credentials.
 The historical manager instead must pass the read-only retirement check: its
 fenced revision, exact revoked credentials and empty charged/uncertain-work
 journal. It must not satisfy startup readiness or renew retired credentials.
+For a manager with a completed refresh, preflight, forward handoff and recovery
+select the exact target schema from that hash-qualified completion. The read-only
+retirement SQL checks that single revision; it never tries a list of versions
+until one succeeds. Initial-upgrade history retains the existing exact-`0176`
+contract. These historical reads do not relax the new manager's `0176` startup
+or write requirements and do not migrate either database.
 The new manager and dev consumers undergo actual settings/database challenges;
 current staging service, controller and every actuator are checked against their
 source-qualified current templates, not obsolete rollback templates. Database
