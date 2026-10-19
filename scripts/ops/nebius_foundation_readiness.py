@@ -68,7 +68,8 @@ async def _public(http: httpx.AsyncClient, origin: str, token: str) -> dict[str,
 
 async def observe_foundation(*, state_dir: Path, reference: FoundationReferenceV2,
         kubernetes: KubernetesEnvironmentProvider, cloud: FoundationCloud,
-        public_http: httpx.AsyncClient) -> FoundationReadinessV2:
+        public_http: httpx.AsyncClient,
+        _runtime_successors: dict[str, tuple[dict[str, Any], ...]] | None = None) -> FoundationReadinessV2:
     """Re-observe completed intents, DB/Service lineage and exact public origin.
 
     Transport clients are created by the protected host with verified TLS and
@@ -77,7 +78,7 @@ async def observe_foundation(*, state_dir: Path, reference: FoundationReferenceV
     """
     try:
         before = await reconcile_foundation(state_dir=state_dir, reference=reference,
-            kubernetes=kubernetes, cloud=cloud, observe_only=True)
+            kubernetes=kubernetes, cloud=cloud, observe_only=True, _runtime_successors=_runtime_successors)
         plan = _load(state_dir, reference)
         namespace = reference.identity.application_namespace
         documents = {doc['kind']: doc for doc in plan['files']['20-database.yaml']}
@@ -118,7 +119,7 @@ async def observe_foundation(*, state_dir: Path, reference: FoundationReferenceV
                 'environment': reference.identity.kind, 'namespace': namespace, 'blockers': []}:
             raise ValueError('foundation_public_binding_unqualified')
         after = await reconcile_foundation(state_dir=state_dir, reference=reference,
-            kubernetes=kubernetes, cloud=cloud, observe_only=True)
+            kubernetes=kubernetes, cloud=cloud, observe_only=True, _runtime_successors=_runtime_successors)
         if (before.identities != after.identities or before.namespace_uids != after.namespace_uids
                 or not timedelta(0) <= datetime.now(UTC) - before.observed_at <= timedelta(minutes=5)):
             raise ValueError('foundation_readiness_stale')

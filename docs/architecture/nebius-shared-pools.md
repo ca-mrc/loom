@@ -65,6 +65,25 @@ Historical completion receipts are not current readiness. The source launcher
 and foundation adapters require a protected evidence issuer and installed workflow
 integration before operators can use this as an end-to-end deployment path.
 
+The independent runtime adapter consumes a committed closed enrollment and
+verified publication/foundation evidence. It stages scoped credentials, read-only
+actuators, build isolation and additive gateway grants, then journals stopping,
+replacing and starting only that environment's API/controller/readers. The
+execution quota permits reader Pods but still denies task Jobs; build Pods remain
+closed. UID/resource-version checks and anchored phase journals reconcile lost
+replies without repeating successful startup or accepting replacement resources.
+
+Read-only process qualification reconstructs those exact completed successors,
+rechecks the environment's database/storage/public route, and challenges each
+running image's typed settings, machine token and database URL. Full owned
+Deployment/ReplicaSet/Pod lineage is checked before and after the probes, with a
+final cross-component restart check. Probe commands use an ephemeral private,
+explicit-trust connection; no ambient kubeconfig or arbitrary command is accepted.
+`runtime_processes_verified_closed` is deliberately **not** activation: installed
+platform writer/observer/gateway/capacity qualification, worker/build boundaries,
+protected grant issuance and connected release/workflow delivery remain separate.
+These source adapters do not prove installed task or multi-owner acceptance.
+
 Explicit legacy adoption preserves qualified v1 authority, credentials and
 history. A completed global handoff is not repeated; standalone allocation cannot
 be adopted as global sole-writer authority. Ordinary v2 lifecycle operations do
