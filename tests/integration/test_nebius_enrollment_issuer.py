@@ -89,9 +89,12 @@ async def prepared(sessions, tmp_path, platform_inputs, publication):
             row.update(candidate_sha=candidate['candidate_sha'], runtime_image_ref=bundle.profile['runtime_image_ref'],
                 runtime_binary_sha256=bundle.profile['runtime_binary_sha256'])
             row['runtime']['namespace'] = selected.execution_namespace.name
+            row['runtime']['credential_broker_url'] = f'http://loom-llm-gateway.{identity.application_namespace}.svc.cluster.local:9100/internal/service-execution'
         for row in profiles['task_images']:
             row['target']['namespace'] = row['settings']['namespace'] = selected.build_namespace.name
             row['settings']['service_image'] = candidate['images']['service']['image_ref']
+            row['settings'].update(source_bucket=config['buckets']['artifacts'],
+                storage_endpoint=config['storage_endpoint'], storage_region=config['region'])
         runtime = PoolAdministrationRuntimeV2(binding=PlatformNamespaceBindingV2(
             installation_id=str(selected.installation_id), namespace='platform-services-east', namespace_uid=str(uuid4()),
             kube_system_uid=str(wanted.kube_system_uid)), service_image=candidate['images']['service']['image_ref'],
