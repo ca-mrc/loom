@@ -36,6 +36,7 @@ def declaration(platform_inputs, *, kind='development', suffix='red', backups=Fa
         config.pop(key, None)
     config['buckets'] = dict(artifacts=suffix + '-canonical', trajectories=suffix + '-canonical', source=suffix + '-source', backup=suffix + '-backup')
     return subject.EnvironmentFoundationDeclarationV2(schema_version='loom.environment-foundation.v2', operation_id=uuid4(),
+        kube_system_uid=uuid4(),
         registration=registration, platform_config_json=json.dumps(config), public_dns_zone='env.example.com',
         ingress_class_name='shared-https', ingress_namespace='platform-ingress', ingress_controller_label='edge',
         node_selector={'platform.example/role': 'applications'}, tolerations=(), backups_enabled=backups)

@@ -38,6 +38,10 @@ class Remote:
         if request.method == 'GET':
             if self.first_read is None:
                 self.first_read = datetime.now(UTC)
+            if path == '/api/v1/namespaces/kube-system' and path not in self.kubernetes:
+                expected = json.loads((self.state / 'plan.json').read_text())['declaration']['kube_system_uid']
+                return httpx.Response(200, json={'apiVersion': 'v1', 'kind': 'Namespace',
+                    'metadata': {'name': 'kube-system', 'uid': expected}})
             return httpx.Response(200, json=self.kubernetes[path]) if path in self.kubernetes else httpx.Response(404)
         assert request.method == 'POST', 'foundation creation cannot patch or delete'
         self.assert_journaled()
@@ -89,7 +93,7 @@ def prepare(state, inputs, *, kind='development'):
 
 
 async def run(state, reference, remote):
-    async with httpx.AsyncClient(base_url='https://kubernetes.test', transport=httpx.MockTransport(remote.http)) as http:
+    async with httpx.AsyncClient(base_url='https://api.cluster.test', transport=httpx.MockTransport(remote.http)) as http:
         return await module().reconcile_foundation(state_dir=state, reference=reference,
             kubernetes=KubernetesEnvironmentProvider(http), cloud=remote)
 
@@ -201,3 +205,18 @@ async def test_missing_completed_step_record_is_not_treated_as_permission_to_rec
     with pytest.raises(ValueError, match='journal'):
         await run(state, reference, remote)
     assert remote.writes == writes
+
+
+@pytest.mark.parametrize('damage', ['cluster_uid', 'api_origin'])
+async def test_wrong_authenticated_cluster_cannot_create_foundation(tmp_path, platform_inputs, damage):
+    state = tmp_path / 'foundation'
+    reference = prepare(state, platform_inputs)
+    remote = Remote(state)
+    remote.kubernetes['/api/v1/namespaces/kube-system'] = {'apiVersion': 'v1', 'kind': 'Namespace',
+        'metadata': {'name': 'kube-system', 'uid': str(uuid4())}}
+    origin = 'https://different.cluster.test' if damage == 'api_origin' else 'https://api.cluster.test'
+    async with httpx.AsyncClient(base_url=origin, transport=httpx.MockTransport(remote.http)) as http:
+        with pytest.raises(ProviderBlockedError, match='cluster'):
+            await module().reconcile_foundation(state_dir=state, reference=reference,
+                kubernetes=KubernetesEnvironmentProvider(http), cloud=remote)
+    assert remote.writes == []
