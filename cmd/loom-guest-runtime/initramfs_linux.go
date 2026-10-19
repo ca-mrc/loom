@@ -17,6 +17,11 @@ type guestBootConfig struct {
 	MaxTransfer  int64    `json:"max_transfer_bytes"`
 	ExecTimeout  int      `json:"exec_timeout_seconds"`
 	NestedDocker bool     `json:"nested_docker"`
+	TaskIdentity bool     `json:"task_identity,omitempty"`
+	TaskUID      uint32   `json:"task_uid,omitempty"`
+	TaskGID      uint32   `json:"task_gid,omitempty"`
+	TaskGroups   []uint32 `json:"task_groups,omitempty"`
+	TaskHome     string   `json:"task_home,omitempty"`
 }
 
 func (c guestConfig) writeInitramfs() error {
@@ -46,7 +51,15 @@ func (c guestConfig) writeInitramfs() error {
 	if err := entry("init", 0100755, binary); err != nil {
 		return err
 	}
-	config, err := json.Marshal(guestBootConfig{os.Environ(), c.MaxTransfer, c.ExecTimeout, c.NestedDocker})
+	boot := guestBootConfig{Environment: os.Environ(), MaxTransfer: c.MaxTransfer, ExecTimeout: c.ExecTimeout, NestedDocker: c.NestedDocker}
+	if c.TaskIdentity {
+		boot.TaskIdentity = true
+		boot.TaskUID = c.TaskUID
+		boot.TaskGID = c.TaskGID
+		boot.TaskGroups = c.TaskGroups
+		boot.TaskHome = c.TaskHome
+	}
+	config, err := json.Marshal(boot)
 	if err != nil {
 		return err
 	}

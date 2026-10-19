@@ -45,7 +45,12 @@ from loom.hosted_harness import (
 from loom.models.networking import NetworkPolicy, WebAllowlist, WebDestination, hosted_http_egress
 from loom.models.task import TaskConfig
 from loom.models.trial import TrialConfig
-from loom.sandbox_identity import inherited_sandbox_user, resolve_sandbox_identity
+from loom.sandbox_identity import (
+    groups_for_guest_user,
+    inherited_sandbox_user,
+    resolve_guest_task_identity,
+    resolve_sandbox_identity,
+)
 from loom.task_environment_handoff import (
     RESOLVED_TASK_ENVIRONMENT,
     decode_resolved_task_environment,
@@ -185,16 +190,27 @@ def _sandbox_sidecars(
             if role == VERIFIER_SANDBOX
             else env.user
         )
-        identity = resolve_sandbox_identity(
-            user, env.environment.get("HOME"),
-            default_uid=profile.run_as_user, default_gid=profile.run_as_group,
-        )
+        home = env.environment.get("HOME")
+        guest_identity = None
+        if topology.guest_execution is not None:
+            identity = resolve_sandbox_identity("root")
+            guest_identity = resolve_guest_task_identity(
+                user, home, default_uid=profile.run_as_user, default_gid=profile.run_as_group,
+                supplementary_groups=groups_for_guest_user(
+                    user, env.user, home, env.supplementary_groups,
+                    default_uid=profile.run_as_user, default_gid=profile.run_as_group,
+                ),
+            )
+        else:
+            identity = resolve_sandbox_identity(
+                user, home, default_uid=profile.run_as_user, default_gid=profile.run_as_group,
+            )
         sidecars.append(SidecarContainerV1(
             role_name=role, image_ref=env.docker_image,
             argv=(*env.entrypoint, SANDBOX_RUNTIME_BINARY, "--socket", socket, "--exec-timeout-seconds", exec_limit),
             environment={key: value for key, value in env.environment.items() if key != "HOME"},
             resources=resources, startup_probe=startup_probe, readiness_probe=probe, private_sandbox=True,
-            identity=identity,
+            identity=identity, guest_task_identity=guest_identity,
             guest_execution=topology.guest_execution,
         ))
     return sidecars
@@ -397,10 +413,21 @@ def compile_deferred_verifier_plan(
         )})
     task_sandbox = next(sidecar for sidecar in agent_plan.sidecars if sidecar.role_name == TASK_SANDBOX)
     user = inherited_sandbox_user(task.environment.user, task.verifier.user)
-    identity = resolve_sandbox_identity(
-        user, task.environment.environment.get("HOME"),
-        default_uid=agent_plan.run_as_user, default_gid=agent_plan.run_as_group,
-    )
+    home = task.environment.environment.get("HOME")
+    guest_identity = None
+    if task_sandbox.guest_execution is not None:
+        identity = resolve_sandbox_identity("root")
+        guest_identity = resolve_guest_task_identity(
+            user, home, default_uid=agent_plan.run_as_user, default_gid=agent_plan.run_as_group,
+            supplementary_groups=groups_for_guest_user(
+                user, task.environment.user, home, task.environment.supplementary_groups,
+                default_uid=agent_plan.run_as_user, default_gid=agent_plan.run_as_group,
+            ),
+        )
+    else:
+        identity = resolve_sandbox_identity(
+            user, home, default_uid=agent_plan.run_as_user, default_gid=agent_plan.run_as_group,
+        )
     def verifier_argv(argv: tuple[str, ...]) -> tuple[str, ...]:
         return tuple(
             f"/loom/sandboxes/{VERIFIER_SANDBOX}/sandbox.sock"
@@ -411,7 +438,7 @@ def compile_deferred_verifier_plan(
     # The renderer derives the mounted socket from role_name. Retarget the
     # runtime and both probes together while preserving the frozen attempt.
     verifier_sandbox = task_sandbox.model_copy(update={
-        "role_name": VERIFIER_SANDBOX, "identity": identity,
+        "role_name": VERIFIER_SANDBOX, "identity": identity, "guest_task_identity": guest_identity,
         "argv": verifier_argv(task_sandbox.argv),
         "startup_probe": task_sandbox.startup_probe.model_copy(update={
             "argv": verifier_argv(task_sandbox.startup_probe.argv),

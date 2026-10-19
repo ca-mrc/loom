@@ -344,6 +344,7 @@ def test_prepared_oci_defaults_freeze_concrete_identity_without_rewriting_source
         "image_ref": image, "user": "task", "uid": uid, "gid": gid, "home": home,
         "workdir": "/app/database", "entrypoint": ["/entrypoint.sh"],
         "environment": {"KEPT": "image-value", "IMAGE_DEFAULT": "present"},
+        "supplementary_groups": [100, 200],
     }}
     grant = TaskImageExecutionGrantV1(**payload)
     resolved = resolve_prepared_task(task, grant)
@@ -352,8 +353,37 @@ def test_prepared_oci_defaults_freeze_concrete_identity_without_rewriting_source
     assert resolved.environment.workdir.as_posix() == "/app/database"
     assert resolved.environment.entrypoint == ("/entrypoint.sh",)
     assert resolved.environment.environment == {"KEPT": "task-value", "IMAGE_DEFAULT": "present", "HOME": home}
+    assert resolved.environment.supplementary_groups == (100, 200)
     assert task.environment.user == "image" and task.environment.entrypoint == ()
     assert TaskImageExecutionGrantV1.model_validate_json(grant.model_dump_json()) == grant
     payload["image_runtime_metadata"]["task"]["image_ref"] = image[:-1] + "b"
     with pytest.raises(ValueError, match="published image"):
         TaskImageExecutionGrantV1(**payload)
+
+
+def test_explicit_identity_reuses_published_groups_only_for_the_image_uid():
+    from uuid import uuid4
+
+    task = _task_config(dockerfile="environment/Dockerfile")
+    image = "registry.example/task@sha256:" + "a" * 64
+
+    def resolved(user: str, *, agent_uid: int = 65532) -> tuple[int, ...]:
+        prepared = task.model_copy(update={"environment": task.environment.model_copy(update={"user": user})})
+        payload = dict(
+            schema_version="loom.task-image-execution-grant.v1", materialization_id=uuid4(),
+            materialization_key="1" * 64, cpu_arch="x86_64", task_checksum="2" * 64,
+            task_config=prepared.model_dump(mode="json"), task_source=None, task_source_provenance={},
+            registry_images={"task": image}, image_runtime_metadata={"task": {
+                "image_ref": image, "user": "task", "uid": 1001, "gid": 1002, "home": "/home/task",
+                "workdir": "/app", "entrypoint": [], "environment": {},
+                "supplementary_groups": [100, 200],
+            }},
+        )
+        return resolve_prepared_task(
+            prepared, TaskImageExecutionGrantV1(**payload), agent_uid=agent_uid,
+        ).environment.supplementary_groups
+
+    assert resolved("1001:1002") == (100, 200)
+    assert resolved("root") == ()
+    assert resolved("agent") == ()
+    assert resolved("agent", agent_uid=1001) == (100, 200)

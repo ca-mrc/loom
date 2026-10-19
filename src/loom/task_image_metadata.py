@@ -1,11 +1,12 @@
 """Resolved OCI defaults bound to the published task image digest."""
 
 from pathlib import PurePosixPath
+from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from loom.execution_runtime_contract import ProcessPhaseV1
-from loom.sandbox_identity import SandboxIdentityV1
+from loom.sandbox_identity import SandboxIdentityV1, canonical_supplementary_groups
 
 
 class TaskImageRuntimeMetadataV1(BaseModel):
@@ -15,10 +16,18 @@ class TaskImageRuntimeMetadataV1(BaseModel):
     user: str = Field(max_length=256)
     uid: int = Field(ge=0, le=2_147_483_647, strict=True)
     gid: int = Field(ge=0, le=2_147_483_647, strict=True)
+    supplementary_groups: tuple[Annotated[int, Field(strict=True, ge=0, le=2_147_483_647)], ...] = Field(
+        default=(), max_length=32, exclude_if=lambda value: not value,
+    )
     home: str
     workdir: str
     entrypoint: tuple[str, ...] = Field(default=(), max_length=123)
     environment: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("supplementary_groups")
+    @classmethod
+    def _groups(cls, value: tuple[int, ...]) -> tuple[int, ...]:
+        return canonical_supplementary_groups(value)
 
     @field_validator("home")
     @classmethod

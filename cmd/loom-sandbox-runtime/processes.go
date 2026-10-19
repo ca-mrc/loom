@@ -359,8 +359,8 @@ func (s runtimeServer) startProcess(w http.ResponseWriter, r *http.Request, tabl
 	ctx, cancel := context.WithTimeout(context.Background(), deadline)
 	cmd := exec.CommandContext(ctx, req.Argv[0], req.Argv[1:]...)
 	cmd.Dir = req.Cwd
-	cmd.Env = environment
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Env = s.prepareCommand(cmd, environment)
 	cmd.Cancel = func() error {
 		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		if errors.Is(err, syscall.ESRCH) {

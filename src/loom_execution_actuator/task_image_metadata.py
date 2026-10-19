@@ -120,6 +120,25 @@ def _records(data: bytes | None, columns: int) -> list[list[str]]:
     return result
 
 
+def _supplementary_groups(groups: list[list[str]], name: str, primary: int) -> tuple[int, ...]:
+    if not name:
+        return ()
+    found: list[int] = []
+    for row in groups:
+        members = {item for item in row[3].split(",") if item}
+        if name not in members:
+            continue
+        if not _NUMERIC.fullmatch(row[2]):
+            raise ValueError(_FAILURE)
+        gid = int(row[2])
+        if gid != primary:
+            found.append(gid)
+    unique = tuple(sorted(set(found)))
+    if len(unique) > 32 or any(item > 2_147_483_647 for item in unique):
+        raise ValueError(_FAILURE)
+    return unique
+
+
 def _resolve(config: dict[str, Any], state: dict[str, bytes]) -> dict[str, Any]:
     raw_user = config.get("User")
     user = "" if raw_user is None else raw_user
@@ -167,11 +186,13 @@ def _resolve(config: dict[str, Any], state: dict[str, bytes]) -> dict[str, Any]:
     entrypoint = [] if entrypoint is None else entrypoint
     if not isinstance(entrypoint, list) or any(not isinstance(value, str) for value in entrypoint):
         raise ValueError(_FAILURE)
+    member = record[0] if record is not None else account
     result = TaskImageRuntimeMetadataV1.model_validate({
         "image_ref": "validated-local-image@sha256:" + "0" * 64,
         "user": user, "uid": uid, "gid": gid, "home": home,
         "workdir": config.get("WorkingDir") or "/", "entrypoint": entrypoint,
         "environment": environment,
+        "supplementary_groups": _supplementary_groups(groups, member, gid),
     }).model_dump(mode="json")
     result.pop("image_ref")
     return result

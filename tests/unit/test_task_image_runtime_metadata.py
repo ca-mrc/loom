@@ -79,6 +79,18 @@ def test_final_config_identity_and_entrypoint(tmp_path, directory, compression, 
     assert not (tmp_path / "etc").exists()
 
 
+def test_supplementary_groups_follow_the_resolved_account(tmp_path):
+    group = (
+        b"root:x:0:\nworkers:x:1002:worker\nextra:x:1004:worker,other\n"
+        b"later:x:1005:worker\n"
+    )
+    image = _image(tmp_path / "image", [_layer({"etc/passwd": PASSWD, "etc/group": group})], {"User": "worker"})
+    value = read_task_image_runtime_metadata(image)
+    assert value["supplementary_groups"] == [1004, 1005]
+    numeric = _image(tmp_path / "numeric", [_layer({"etc/passwd": PASSWD, "etc/group": group})], {"User": "1001"})
+    assert read_task_image_runtime_metadata(numeric)["supplementary_groups"] == [1004, 1005]
+
+
 def test_last_layer_passwd_replaces_previous_identity(tmp_path):
     image = _image(tmp_path / "image", [_layer({"etc/passwd": PASSWD}),
                    _layer({"etc/passwd": b"worker:x:2001:2002::/home/final:/bin/sh\n"})], {"User": "worker"})

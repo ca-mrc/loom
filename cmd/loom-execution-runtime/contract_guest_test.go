@@ -175,6 +175,39 @@ func TestEmulatedAuthenticationRequiresExactGuestClass(t *testing.T) {
 	}
 }
 
+func TestGuestTaskIdentityIsConcreteAndOptional(t *testing.T) {
+	p := guestPlanPayload(t)
+	for _, sidecar := range p["sidecars"].([]any) {
+		sidecar.(map[string]any)["guest_task_identity"] = map[string]any{
+			"run_as_user": 1001, "run_as_group": 1002, "home": "/home/oci-user",
+			"supplementary_groups": []any{1004, 1005},
+		}
+	}
+	raw, _ := json.Marshal(p)
+	if _, err := decodePlan(raw); err != nil {
+		t.Fatal(err)
+	}
+	for _, damage := range []func(map[string]any){
+		func(identity map[string]any) { identity["home"] = "/proc/secret" },
+		func(identity map[string]any) { identity["supplementary_groups"] = []any{1005, 1004} },
+		func(identity map[string]any) { identity["run_as_user"] = -1 },
+	} {
+		p := guestPlanPayload(t)
+		for _, sidecar := range p["sidecars"].([]any) {
+			identity := map[string]any{
+				"run_as_user": 1001, "run_as_group": 1002, "home": "/home/oci-user",
+				"supplementary_groups": []any{1004, 1005},
+			}
+			damage(identity)
+			sidecar.(map[string]any)["guest_task_identity"] = identity
+		}
+		raw, _ := json.Marshal(p)
+		if _, err := decodePlan(raw); err == nil {
+			t.Fatal("unsafe guest task identity accepted")
+		}
+	}
+}
+
 func TestSharedGuestUsesExactlyOneTaskSandbox(t *testing.T) {
 	p := guestPlanPayload(t)
 	p["in_place_verifier"] = true
