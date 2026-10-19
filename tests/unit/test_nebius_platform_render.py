@@ -13,6 +13,45 @@ from tests.support.nebius_platform import regional_inputs as regional_inputs
 ROOT = Path(__file__).resolve().parents[2]
 
 
+@pytest.mark.parametrize("disk_type,quota_name", [
+    ("NETWORK_SSD", "compute.disk.size.network-ssd"),
+    ("NETWORK_SSD_NON_REPLICATED", "compute.disk.size.network-ssd-non-replicated"),
+])
+def test_execution_disk_type_selects_matching_provider_quota(
+    platform_inputs: tuple, disk_type: str, quota_name: str,
+) -> None:
+    config, candidate, profile = platform_inputs
+    config["execution_disk_type"] = disk_type
+    files = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    collector = next(doc for group in files.values() for doc in group
+                     if doc["kind"] == "ConfigMap"
+                     and "LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_STORAGE_NAME" in doc.get("data", {}))
+    assert collector["data"]["LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_STORAGE_NAME"] == quota_name
+
+
+def test_execution_disk_type_rejects_unknown_quota_class(platform_inputs: tuple) -> None:
+    config, candidate, profile = platform_inputs
+    config["execution_disk_type"] = "UNKNOWN"
+    with pytest.raises(NebiusPlatformError, match="execution_disk_type"):
+        build_platform(config, candidate, profile, {}, repo_root=ROOT)
+
+
+def test_primary_nrd_disk_does_not_change_regional_storage_quota(regional_inputs: tuple) -> None:
+    config, candidate, profile = regional_inputs
+    config["execution_disk_type"] = "NETWORK_SSD_NON_REPLICATED"
+    files = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    quota_by_group = {
+        doc["data"]["LOOM_EXECUTION_CAPACITY_COLLECTOR_NEBIUS_NODE_GROUP_ID"]:
+        doc["data"]["LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_STORAGE_NAME"]
+        for group in files.values() for doc in group
+        if doc["kind"] == "ConfigMap"
+        and "LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_STORAGE_NAME" in doc.get("data", {})
+    }
+    assert quota_by_group[config["execution_node_group_id"]] == "compute.disk.size.network-ssd-non-replicated"
+    regional = config["regional_execution_targets"][0]
+    assert quota_by_group[regional["execution_node_group_id"]] == "compute.disk.size.network-ssd"
+
+
 def test_private_foundation_does_not_project_absent_recovery_profile(platform_inputs: tuple) -> None:
     from loom.nebius_development_foundation import render_development_foundation
 

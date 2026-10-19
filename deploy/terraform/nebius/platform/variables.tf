@@ -25,6 +25,8 @@ variable "integration_platform" {
     system_max_pods            = optional(number, 64)
     system_create_before_drain = optional(bool, false)
     execution_max_nodes        = optional(number, 100)
+    execution_disk_type        = optional(string, "NETWORK_SSD")
+    execution_disk_gib         = optional(number, 80)
     native_builder_group_id    = optional(string)
   })
 }
