@@ -225,6 +225,7 @@ async def test_capacity_observer_dispatches_required_read_only_proof_without_cha
     async with prepared(sessions, tmp_path, platform_inputs, publication) as (_module, policy, inputs, _remote, api):
         api.pending = True
         directory = policy.host.state_root / 'capacity-observations'
+        policy.host.state_root.mkdir(mode=0o700)
         assert await asyncio.to_thread(_observe, policy, directory, inputs['connect'], require_capacity=True) is None
         configs = [row for row in api.resources.values() if row['kind'] == 'ConfigMap']
         config, = configs

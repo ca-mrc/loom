@@ -4,7 +4,7 @@ from __future__ import annotations
 import copy
 import importlib
 from dataclasses import replace
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
@@ -164,3 +164,14 @@ async def test_capacity_inspection_requires_authentic_observation_but_enrollment
     assert (await run(False))['snapshot']['participant'] is None
     with pytest.raises(ValueError, match='pool_observation_unavailable'):
         await run(True)
+
+
+@pytest.mark.parametrize('transaction', ['READ WRITE', 'READ ONLY'])
+async def test_unlocked_capacity_cannot_replace_serialized_admission_or_use_mixed_snapshots(sessions, transaction):
+    from loom_service.pool_management.capacity import observe_connected_capacity
+
+    _module, _job, selected, _change = await prepared(sessions)
+    async with sessions.begin() as session:
+        await session.execute(text('SET TRANSACTION ISOLATION LEVEL READ COMMITTED, ' + transaction))
+        with pytest.raises(ValueError, match='pool_inspection_requires_read_only_snapshot'):
+            await observe_connected_capacity(session, selected.pool_id, datetime.now(UTC))
