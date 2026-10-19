@@ -50,6 +50,60 @@ output IDs and readback beside deployment evidence. Reinitialize from the same
 versioned backend to recover local state; do not import resources from the
 execution state or force-unlock an active operation.
 
+### Execution build disk performance
+
+`integration_platform.execution_disk_type` and `execution_disk_gib` select only
+the execution group's boot/scratch disk. Defaults remain `NETWORK_SSD`/80 GiB.
+For an explicitly qualified high-I/O build node, use
+`NETWORK_SSD_NON_REPLICATED`/93 GiB (or a multiple of 93 GiB). NRD is ephemeral,
+non-redundant storage; canonical outputs, source recovery objects, PostgreSQL
+volumes and backups must remain on their existing durable stores. These inputs
+do not resize the system group, change the node ceiling, or alter task limits.
+
+The native snapshotter preserves authored hardlinks but copies parent filesystem
+trees. Concurrent builds can exhaust the I/O performance of a small network
+SSD even with idle CPU. Size alone is not a performance measurement: qualify
+the disk type/region/quota and replay concurrent cold builds. See the provider's
+[disk performance allocation units](https://docs.nebius.com/compute/storage/types#disk-performance).
+
+Apply through the existing platform state and saved-plan operator path above.
+Coordinate an idle execution window with dispatch closed through the existing
+rollout guard; do not drain active Trials or replace unrelated work. Review the
+plan for exactly the existing execution group's template update. Keep the node
+CPU/RAM shape, autoscaling bounds and system/storage/IAM resources unchanged.
+Do not use the application rollout as proof that Terraform has been applied.
+First install the merged collector code with the normal protected application
+rollout, retaining the existing SSD setting. Then acquire a separate owned guard
+for the disk/config update. Keep that same owner and candidate across the saved
+cloud plan and the narrowly reviewed collector/environment configuration update;
+the ordinary application rollout must not take over or release this guard.
+Render the collector ConfigMap and canonical `loom-platform-config` environment
+from that already installed candidate. Through the existing operator transport,
+apply only their reviewed quota/disk-type changes, preserving runtime profile,
+candidate, credentials and unrelated data. The collector is a CronJob: allow any
+old collector Job to finish and verify a subsequent cycle reads the new quota
+binding; no service or worker restart is needed.
+
+Before reopening dispatch, finish replacement of the old execution nodes and
+set the platform environment's `execution_disk_type` to the same native type.
+The renderer uses it to select the matching capacity-collector storage quota:
+`compute.disk.size.network-ssd` or
+`compute.disk.size.network-ssd-non-replicated`. The collector reads the raw disk
+size from the actual node-group template. Mixed old/new disk generations cannot
+be treated as one quota class. Read back both bindings, fresh quota observations
+and a Ready-node placement sample for the changed template; the old sample is
+invalidated by a disk change. Use the established bounded warmup procedure if
+the group has already scaled to zero. Preserve deliberate existing policy caps.
+
+For acceptance, run at least four concurrent cold native builds using the same
+unchanged task Dockerfiles and 600-second authored budget as the failed run.
+Record first-attempt completion, build/export timing and I/O/CPU/memory pressure
+on the actual new disk, then execute the original solvers/verifiers and verify
+canonical output and compute cleanup. Reuse neither ready catalog images nor
+warm cache as cold-build evidence. Do not raise timeouts, change task packages,
+switch away from native hardlink semantics, or count an automatic retry as a
+passing performance acceptance.
+
 One system node remains running (4-vCPU/16-GiB by default). Optional
 `integration_platform.system_max_pods` controls only its Pod limit: integer
 16–110, default 64. An unchanged input keeps the existing node template;
