@@ -42,6 +42,26 @@ class PlatformRuntimePolicyV2:
     catalog_key: str
 
 
+def recheck_platform_resources(*, policy: PlatformRuntimePolicyV2, probes: EnvironmentRuntimeProbes) -> None:
+    """Read pinned namespace and configuration identities without replacing proof."""
+    binding = policy.host.runtime.binding
+    for name, uid in (('kube-system', binding.kube_system_uid), (binding.namespace, binding.namespace_uid)):
+        row = probes.read('/api/v1/namespaces/' + name)
+        if (row.get('apiVersion') != 'v1' or row.get('kind') != 'Namespace' or row['metadata']['name'] != name
+                or _uid(row) != uid or row['metadata'].get('deletionTimestamp') or row['metadata'].get('ownerReferences')):
+            raise ValueError('platform_runtime_namespace_changed')
+    for key, document in policy.resources.items():
+        kind = document['kind']
+        if (key != _key(document) or document['metadata'].get('namespace') != binding.namespace
+                or kind not in {'Deployment', 'Secret', 'ConfigMap'}):
+            raise ValueError('platform_runtime_resource_unqualified')
+        base = '/apis/apps/v1' if kind == 'Deployment' else '/api/v1'
+        suffix = {'Deployment': 'deployments', 'Secret': 'secrets', 'ConfigMap': 'configmaps'}[kind]
+        actual = probes.read(base + '/namespaces/' + binding.namespace + '/' + suffix + '/' + document['metadata']['name'])
+        if not _matches(actual, document, _uid(document)):
+            raise ValueError('platform_runtime_resource_changed')
+
+
 def observe_platform_runtime(*, policy: PlatformRuntimePolicyV2, snapshot: PoolInspectionSnapshotV2,
         probes: EnvironmentRuntimeProbes) -> dict[str, Any]:
     """Read the installed platform; never renew or recreate its historical grant.
@@ -91,21 +111,7 @@ def observe_platform_runtime(*, policy: PlatformRuntimePolicyV2, snapshot: PoolI
         def current() -> None:
             if not snapshot.observed_at <= datetime.now(UTC) < snapshot.valid_until or _load(host, reference) != original:
                 raise ValueError
-            for name, uid in (('kube-system', binding.kube_system_uid), (binding.namespace, binding.namespace_uid)):
-                row = probes.read('/api/v1/namespaces/' + name)
-                if (row.get('apiVersion') != 'v1' or row.get('kind') != 'Namespace' or row['metadata']['name'] != name
-                        or _uid(row) != uid or row['metadata'].get('deletionTimestamp') or row['metadata'].get('ownerReferences')):
-                    raise ValueError
-            for key, document in policy.resources.items():
-                kind = document['kind']
-                if (key != _key(document) or document['metadata'].get('namespace') != binding.namespace
-                        or kind not in {'Deployment', 'Secret', 'ConfigMap'}):
-                    raise ValueError
-                base = '/apis/apps/v1' if kind == 'Deployment' else '/api/v1'
-                suffix = {'Deployment': 'deployments', 'Secret': 'secrets', 'ConfigMap': 'configmaps'}[kind]
-                actual = probes.read(base + '/namespaces/' + binding.namespace + '/' + suffix + '/' + document['metadata']['name'])
-                if not _matches(actual, document, _uid(document)):
-                    raise ValueError
+            recheck_platform_resources(policy=policy, probes=probes)
 
         current()
         processes = []

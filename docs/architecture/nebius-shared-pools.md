@@ -121,7 +121,9 @@ open participant admission.
 
 The protected activation issuer re-observes the application, platform, completed
 boundaries and empty task inventory before issuing an exact short-lived `ready`
-or `activate` operation. Activation selects the committed ready predecessor by its
+or `activate` operation. After boundary IO it rechecks the original application
+and platform process identities and pinned configuration; a newly healthy
+replacement cannot inherit an earlier process challenge. Activation selects the committed ready predecessor by its
 private administration reference, not a caller-provided state bypass. The existing
 fixed administration Job commits that operation with participant-head CAS and fresh
 physical accounting; issuance alone performs no database mutation. Re-reading an

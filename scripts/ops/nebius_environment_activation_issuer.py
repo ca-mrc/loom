@@ -10,8 +10,10 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+from collections.abc import Callable
 from dataclasses import asdict
 from datetime import UTC, datetime
+from functools import partial
 from typing import Any, Literal
 from uuid import UUID, uuid5
 
@@ -25,11 +27,21 @@ from scripts.ops.nebius_environment_runtime_boundaries import (
 )
 from scripts.ops.nebius_environment_runtime_readiness import (
     ProbeConnection,
+    _process_connection,
     observe_environment_pre_activation,
     qualify_readiness_predecessor,
 )
-from scripts.ops.nebius_environment_runtime_start import load_started_environment_runtime
-from scripts.ops.nebius_platform_runtime_readiness import PlatformRuntimePolicyV2
+from scripts.ops.nebius_environment_runtime_start import (
+    StartedEnvironmentRuntimeV2,
+    load_started_environment_runtime,
+    runtime_resource_path,
+)
+from scripts.ops.nebius_ingress_stage import _key, _uid
+from scripts.ops.nebius_management_switch import _matches
+from scripts.ops.nebius_platform_runtime_readiness import (
+    PlatformRuntimePolicyV2,
+    recheck_platform_resources,
+)
 from scripts.ops.nebius_pool_administration_dispatch import (
     Connection,
     PoolAdministrationReferenceV2,
@@ -53,6 +65,52 @@ from loom_service.pool_management.lifecycle_contracts import (
     PoolParticipantReadinessV2,
     PoolRuntimeReadinessV2,
 )
+
+
+async def _recheck_runtime(*, policy: PoolEnrollmentPolicyV2, started: StartedEnvironmentRuntimeV2,
+        platform_policy: PlatformRuntimePolicyV2, runtime: dict[str, Any], qualify: Callable[[], None],
+        kubernetes: KubernetesEnvironmentProvider, probe_connection: ProbeConnection | None,
+        platform_probe_connection: ProbeConnection | None) -> None:
+    """Close later boundary IO against the original process/configuration proof.
+
+    Do not observe a replacement process and bless it using the old settings/DB
+    challenge. The fixed administration transaction still checks current authority,
+    head and capacity; this readback does not promise atomic Kubernetes snapshots.
+    """
+    progress = load_environment_boundary_progress(policy=policy, started=started)
+    if runtime['environment']['boundary_state_sha256'] != progress.sha256:
+        raise ValueError('environment_activation_boundary_changed')
+    options = {key: (doc,) for key, doc in started.resources.items()} | progress.options
+    binding = platform_policy.host.runtime.binding
+    platform_factory: ProbeConnection = platform_probe_connection or partial(_process_connection, policy=policy,
+        resources=platform_policy.resources, namespaces={binding.namespace: binding.namespace_uid})
+    factory: ProbeConnection = probe_connection or partial(_process_connection, policy=policy,
+        resources=started.resources, namespaces=started.staged.plan['namespace_uids'])
+    def processes() -> None:
+        qualify()
+        original = _load(platform_policy.host, platform_policy.authority)
+        authority = runtime['platform']['authority']
+        if (authority['operation_id'] != str(original.request.operation_id)
+                or authority['authorization_id'] != str(original.authorization.authorization_id)
+                or authority['request_sha256'] != original.authorization.request_sha256
+                or authority['authorization_sha256'] != digest(original.authorization.model_dump(mode='json'))):
+            raise ValueError('environment_activation_platform_changed')
+        with platform_factory(qualify, policy.host.runtime.region) as probes:
+            recheck_platform_resources(policy=platform_policy, probes=probes)
+            for key, proof in zip((platform_policy.manager_key, platform_policy.gateway_key), runtime['platform']['processes'], strict=True):
+                probes.recheck_process(workload=platform_policy.resources[key], proof=proof)
+            recheck_platform_resources(policy=platform_policy, probes=probes)
+        with factory(qualify, policy.host.runtime.region) as probes:
+            for desired, proof in zip(started.staged.plan['workloads'].values(), runtime['environment']['processes'], strict=True):
+                probes.recheck_process(workload=started.resources[_key(desired)], proof=proof)
+        qualify()
+    for choices in options.values():
+        desired, = choices
+        actual = await kubernetes._request('GET', runtime_resource_path(desired) + '/' + desired['metadata']['name'])
+        if actual is None or not _matches(actual, desired, _uid(desired)):
+            raise ValueError('environment_activation_resource_changed')
+    await asyncio.to_thread(processes)
+    qualify()
 
 
 def _request(*, policy: PoolEnrollmentPolicyV2, transition_id: UUID, action: Literal['ready', 'activate'],
@@ -160,6 +218,9 @@ async def issue_environment_activation(*, policy: PoolEnrollmentPolicyV2, operat
             if not await asyncio.to_thread(verify_prepared_environment_boundaries, policy=policy, started=started,
                     progress=progress, qualify=qualify, boundary_connection=boundary_connection):
                 return None
+            await _recheck_runtime(policy=policy, started=started, platform_policy=platform_policy, runtime=runtime,
+                qualify=qualify, kubernetes=kubernetes, probe_connection=probe_connection,
+                platform_probe_connection=platform_probe_connection)
             evidence = dict(runtime=runtime, enrollment=started.staged.plan['enrollment'],
                 boundary_plan_sha256=digest(progress.plan), boundary_state_sha256=progress.sha256)
             request = _request(policy=policy, transition_id=transition_id, action=action, predecessor=predecessor, evidence=evidence)
