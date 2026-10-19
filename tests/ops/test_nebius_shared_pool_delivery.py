@@ -369,11 +369,18 @@ def test_shared_publisher_is_reproducible_and_uses_only_fixed_authenticated_tran
     files, _ = module().unpack_bundle(raw)
     assert 'inputs.json' not in files and not any(name.endswith('.pem') for name in files)
     calls = []
+    storage_status = None
 
     def ssh(argv, **options):
+        if argv == [str(uv), '--version']:
+            return SimpleNamespace(returncode=0, stdout=b'uv 0.11.26 (x86_64-unknown-linux-gnu)')
         calls.append((argv, options))
         status = 'staging_restored_dev_closed' if argv[-1].endswith('recover-v1') else 'shared_pool_preflight_qualified'
-        return SimpleNamespace(returncode=0, stdout=json.dumps(report(tmp_path, status)).encode())
+        result = report(tmp_path, storage_status or status)
+        if storage_status:
+            assert argv[-1] == 'loom-nebius-shared-pool-refresh-storage-v1'
+            result['storage_id'] = 'eeb13e53-05ac-4189-9934-4168ecb745b9'
+        return SimpleNamespace(returncode=0, stdout=json.dumps(result).encode())
 
     monkeypatch.setattr(publisher.subprocess, 'run', ssh)
     for action in ('preflight', 'recover'):
@@ -385,6 +392,25 @@ def test_shared_publisher_is_reproducible_and_uses_only_fixed_authenticated_tran
         with pytest.raises(publisher.RolloutError):
             publisher.transfer(raw, action=action, target='operator@host', key=tmp_path / 'key', known_hosts=tmp_path / 'hosts')
     assert len(calls) == 2
+    # A safe gateway report is not enough: the workflow executes this CLI and
+    # must not report a successful CLOSED correction as a failed rollout.
+    monkeypatch.setattr(publisher, 'verify_source', module('command').validate_operation)
+    monkeypatch.setattr(publisher, 'prepare_development_source',
+        lambda _: SimpleNamespace(model_dump=lambda **kwargs: source))
+    monkeypatch.setattr(publisher.shutil, 'which', lambda _: str(uv))
+    monkeypatch.setattr(publisher, 'build_wheels', lambda *args, **kwargs: wheels)
+    evidence = tmp_path / 'evidence'
+    monkeypatch.setattr(sys, 'argv', ['rollout', '--operation', 'refresh-storage',
+        '--requirements', str(requirements), '--evidence-dir', str(evidence)])
+    for key, value in {'NEBIUS_SHARED_POOL_OPERATION_JSON': json.dumps(operation(tmp_path)),
+            'LOOM_DEPLOY_SSH_TARGET': 'operator@host', 'LOOM_DEPLOY_SSH_KEY_FILE': str(tmp_path / 'key'),
+            'LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE': str(tmp_path / 'hosts')}.items():
+        monkeypatch.setenv(key, value)
+    for storage_status in ('storage_pending', 'shared_pool_storage_refreshed'):
+        assert publisher.main() == 0
+        result = json.loads((evidence / 'shared-pool-result.json').read_bytes())
+        assert result['status'] == storage_status
+        assert result['admission_open'] is False and result['writer_migration_complete'] is False
     monkeypatch.setattr(publisher.subprocess, 'run', lambda *args, **kwargs: (_ for _ in ()).throw(TimeoutError('lost reply')))
     with pytest.raises(publisher.RolloutError, match='reconcile before retry'):
         publisher.transfer(raw, action='install', target='operator@host', key=tmp_path / 'key', known_hosts=tmp_path / 'hosts')
