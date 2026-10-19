@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
+import httpx
 from sqlalchemy import func, select
 
 from loom.db.nebius_pool_schema import NebiusPoolBinding, NebiusPoolParticipant
@@ -15,7 +16,8 @@ from loom_service.pool_management.auth import resolve_pool_machine
 from loom_service.pool_management.capacity import digest
 from loom_service.pool_management.observation_binding import physical_binding_digest
 from tests.execution_placement_fixtures import placement_fixture
-from tests.integration.test_nebius_pool_participant_lifecycle import platform
+from tests.integration.test_nebius_pool_participant_lifecycle import platform, setup
+from tests.integration.test_nebius_pool_observation_continuity import workload
 from tests.integration.test_nebius_pool_registry import publish_placement
 from tests.integration.test_nebius_pool_registry import sessions as sessions
 
@@ -70,6 +72,22 @@ async def test_empty_platform_opens_without_any_environment_and_exact_old_replay
     request = opening(installed.operation_id, authority)
     result = await apply(sessions, request)
     assert result['receipt']['mode'] == 'global'
+    from scripts.ops.nebius_pool_administration_job import (
+        PlatformNamespaceBindingV2, PoolAdministrationRuntimeV2, PoolAdministrationJobV2,
+        administration_documents, validate_administration_report,
+    )
+    grant = PoolAdministrationAuthorizationV2(schema_version='loom.pool-administration-authorization.v2',
+        authorization_id=result['authorization_id'], installation_id=spec.installation_id, pool_id=spec.pool_id,
+        authority='platform', request_sha256=result['request_sha256'], issued_at=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(minutes=5))
+    runtime = PoolAdministrationRuntimeV2(binding=PlatformNamespaceBindingV2(installation_id=str(spec.installation_id),
+        namespace='platform-east', namespace_uid=str(uuid4()), kube_system_uid=str(uuid4())),
+        service_image='registry.example/service@sha256:' + 'e' * 64, database_secret='platform-db',
+        database_url_key='admin-url', database_ca_key='ca.crt', node_selector={'example.org/role': 'system'},
+        tolerations=(), region='eu-north1')
+    job = PoolAdministrationJobV2(runtime=runtime, request=request, authorization=grant, action='apply')
+    assert len(administration_documents(job)) == 2
+    validate_administration_report(job, result)
     async with sessions() as session:
         assert await session.scalar(select(func.count()).select_from(NebiusPoolParticipant)) == 0
         row = await session.get(NebiusPoolBinding, spec.pool_id)
@@ -92,6 +110,26 @@ async def test_empty_platform_opens_without_any_environment_and_exact_old_replay
         await apply(sessions, reopen)  # Opening needs fresh post-transition physical evidence.
     await observe()
     assert (await apply(sessions, reopen))['receipt']['mode'] == 'global'
+
+
+async def test_platform_close_refuses_to_strand_a_charged_create(sessions):
+    module = lifecycle()
+    _, spec, app, headers, _, _ = await setup(sessions)
+    selected = spec.participants[2]
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='https://manager.example') as http:
+        response = await http.post(f'/internal/pools/v1/{spec.pool_id}/prepare',
+            json=workload(selected).model_dump(mode='json'), headers=headers(selected))
+        assert response.status_code == 200 and response.json()['phase'] == 'reserved'
+    async with sessions() as session:
+        pool = await session.get(NebiusPoolBinding, spec.pool_id)
+        operation = module.PoolPlatformOperationV2(schema_version='loom.pool-platform-operation.v2', operation_id=uuid4(),
+            installation_id=spec.installation_id, pool_id=spec.pool_id,
+            expected_head=pool.binding_json['lifecycle_head_operation_id'],
+            pool_authority_sha256=physical_binding_digest(pool), action='close')
+    with pytest.raises(ValueError, match='outstanding'):
+        await apply(sessions, operation)
+    async with sessions() as session:
+        assert (await session.get(NebiusPoolBinding, spec.pool_id)).mode == 'global'
 
 
 @pytest.mark.parametrize('damage', ['expired', 'observer', 'gateway_epoch', 'capability', 'authority', 'predecessor', 'dev_grant', 'no_capture'])
