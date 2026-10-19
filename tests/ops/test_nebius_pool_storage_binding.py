@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import importlib
+import json
 from uuid import uuid4
 
 import pytest
@@ -129,3 +130,71 @@ def test_storage_parent_predispatch_failure_does_not_strand_registry_intent(tmp_
     assert run() is True
     assert run() is True
     assert effects == [refresh.operation_id]
+
+
+@pytest.mark.parametrize('kind', ['configuration', 'workload'])
+@pytest.mark.parametrize('damage', [None, 'delete', 'replace'])
+def test_storage_predispatch_read_failure_preserves_retry_or_damaged_evidence(tmp_path, kind, damage):
+    from dataclasses import asdict
+
+    from scripts.ops.nebius_development_runtime_transition import advance_runtime_workloads
+    from scripts.ops.nebius_ingress_stage import _key
+    from scripts.ops.nebius_management_material import ManagementBinding
+    from scripts.ops.nebius_management_stage import _stage_fixed_documents
+    from scripts.ops.nebius_pool_storage_operation import _StorageStage, _StorageWorkload
+
+    from loom.nebius_platform_render import digest
+    from tests.ops.test_nebius_development_runtime_transition import transition
+    from tests.support.nebius_phase_api import PhaseAPI
+
+    state, changed = tmp_path / 'child', []
+    path = state / ('stage.json' if kind == 'configuration' else 'transition.json')
+    failing = True
+
+    def qualify():
+        if failing and path.exists():
+            record = json.loads(path.read_bytes())
+            if any(item['status'] in {'intent', 'create_intent'} for item in record['resources'].values()):
+                if damage == 'delete':
+                    path.unlink()
+                elif damage == 'replace':
+                    changed.append(path.read_bytes() + b' ')
+                    path.write_bytes(changed[-1])
+                raise ValueError('read failed before selected transport was invoked')
+
+    if kind == 'configuration':
+        binding = ManagementBinding(str(uuid4()), 'loom-nebius-management-test', str(uuid4()), str(uuid4()))
+        document = {'apiVersion': 'v1', 'kind': 'ConfigMap', 'metadata': {
+            'name': 'collector-quota', 'namespace': binding.namespace}, 'immutable': True, 'data': {'quota': 'selected'}}
+        documents = {_key(document): document}
+        api = PhaseAPI(binding)
+        effects = api.creates
+
+        def run():
+            return _stage_fixed_documents(documents=documents, revision=digest({'documents': documents, 'binding': asdict(binding)}),
+                phase='closed-pool-storage', binding=binding,
+                api=_StorageStage(api, qualify, lambda: None), state_dir=state)
+    else:
+        originals, targets, api, _ = transition.__wrapped__(tmp_path)
+        api.ready = True
+        effects = api.patches
+
+        def run():
+            return advance_runtime_workloads(originals=originals, targets=targets,
+                input_digest='sha256:' + 'a' * 64, phase='stop',
+                api=_StorageWorkload(api, qualify, lambda: None), state_dir=state)
+
+    with pytest.raises((ValueError, RuntimeError)):
+        run()
+    assert effects == []
+    if damage == 'delete':
+        assert not path.exists()
+    elif damage == 'replace':
+        assert path.read_bytes() == changed[-1]
+    else:
+        assert all(item['status'] == 'prepared' for item in json.loads(path.read_bytes())['resources'].values())
+        failing = False
+        assert run()
+        applied = list(effects)
+        assert applied and run()
+        assert effects == applied
