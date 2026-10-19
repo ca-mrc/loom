@@ -142,10 +142,10 @@ def test_storage_predispatch_read_failure_preserves_retry_or_damaged_evidence(tm
     from scripts.ops.nebius_management_material import ManagementBinding
     from scripts.ops.nebius_management_stage import _stage_fixed_documents
     from scripts.ops.nebius_pool_storage_operation import _StorageStage, _StorageWorkload
-
-    from loom.nebius_platform_render import digest
     from tests.ops.test_nebius_development_runtime_transition import transition
     from tests.support.nebius_phase_api import PhaseAPI
+
+    from loom.nebius_platform_render import digest
 
     state, changed = tmp_path / 'child', []
     path = state / ('stage.json' if kind == 'configuration' else 'transition.json')

@@ -36,6 +36,7 @@ from scripts.ops.nebius_management_stage import (
     _stage_fixed_documents,
     _validate_record,
 )
+from scripts.ops.nebius_management_transport import ManagementNotDispatchedError
 from scripts.ops.nebius_pool_preactivation_operation import (
     PreactivationReference,
     _read,
@@ -374,8 +375,15 @@ class _StorageStage(_ScopedCatalog):
         self.dispatch = dispatch
 
     def create_resource(self, document: dict[str, Any]) -> None:
-        self.dispatch()
-        super().create_resource(document)
+        try:
+            self.dispatch()
+            self.check()
+        except Exception:
+            raise ManagementNotDispatchedError('storage configuration not dispatched') from None
+        try:
+            self.api.create_resource(document)
+        finally:
+            self.check()
 
 
 class _StorageWorkload(_ScopedManager):
@@ -384,8 +392,15 @@ class _StorageWorkload(_ScopedManager):
         self.dispatch = dispatch
 
     def patch_workload(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> bool:
-        self.dispatch()
-        return super().patch_workload(key, before, desired)
+        try:
+            self.dispatch()
+            self.check()
+        except Exception:
+            raise ManagementNotDispatchedError('storage collector not dispatched') from None
+        try:
+            return self.api.patch_workload(key, before, desired)
+        finally:
+            self.check()
 
 
 class _StorageRegistry:

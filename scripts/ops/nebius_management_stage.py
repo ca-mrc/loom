@@ -19,7 +19,10 @@ from uuid import UUID, uuid4
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
 from scripts.ops.nebius_management_material import ManagementBinding
-from scripts.ops.nebius_management_transport import ManagementKubernetesTransport
+from scripts.ops.nebius_management_transport import (
+    ManagementKubernetesTransport,
+    ManagementNotDispatchedError,
+)
 
 from loom_service.environment_management.deployment import RenderedManagement
 from loom_service.environment_management.kubernetes_provider import _contains
@@ -325,8 +328,15 @@ def _stage_fixed_documents(*, documents: dict[str, dict[str, Any]], revision: st
                         raise ManagementStageError("untracked management resource; refusing adoption")
                     item["status"] = "create_intent"
                     private_state._atomic_json(path, record)
+                    intent = private_state._private_read(path, limit=4 * 1024**2)
                     try:
                         api.create_resource(item["desired"])
+                    except ManagementNotDispatchedError:
+                        if private_state._private_read(path, limit=4 * 1024**2) != intent:
+                            raise ManagementStageError("management undispatched evidence changed") from None
+                        item["status"] = "prepared"
+                        private_state._atomic_json(path, record)
+                        raise
                     except Exception:
                         pass
                     actual = api.get_resource(item["desired"])
