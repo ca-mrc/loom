@@ -160,7 +160,8 @@ async def _prepare_request(session: AsyncSession, principal: PoolPrincipal, requ
         raise PoolAdmissionError
     priority = await qualify_pool_origin(session, principal, request.origin,
         target_id=request.target_id, workload_kind=request.key.workload_kind,
-        application_build=request if isinstance(request, PoolApplicationImagePrepareV1) else None)
+        application_build=request if isinstance(request, PoolApplicationImagePrepareV1) else None,
+        retained_revision=request.participant_revision if row is not None else None)
     now = (await session.execute(select(func.clock_timestamp()))).scalar_one()
     capacities = await read_connected_capacity(session, pool.pool_id, now)
     participant = next(value for value in capacities[pool.pool_id].participants
@@ -216,12 +217,12 @@ async def _prepare_request(session: AsyncSession, principal: PoolPrincipal, requ
                 if candidate.participant_id not in active_participants or capacities[candidate.pool_id].pool.mode != "global":
                     continue
                 prior = _WORKLOAD.validate_python(candidate.request_json)
-                if isinstance(prior, PoolApplicationImagePrepareV1):
-                    await qualify_retained_pool_origin(session, prior.origin, participant=binding,
-                        cluster_id=capacities[candidate.pool_id].pool.cluster_id,
-                        workload_kind=prior.key.workload_kind, lock_history=True, application_build=prior)
                 original_waiter, waiter_profiles = await resolve_profiles(session, capacities[candidate.pool_id].pool,
                     binding, prior.participant_revision, retained=True, fallback=profiles)
+                if isinstance(prior, PoolApplicationImagePrepareV1):
+                    await qualify_retained_pool_origin(session, prior.origin, participant=original_waiter,
+                        cluster_id=capacities[candidate.pool_id].pool.cluster_id,
+                        workload_kind=prior.key.workload_kind, lock_history=True, application_build=prior)
                 measured = _render(prior, original_waiter, waiter_profiles, candidate.request_id, now)
                 if measured.request_sha256 != candidate.request_sha256 or measured.resources != resources(candidate):
                     continue

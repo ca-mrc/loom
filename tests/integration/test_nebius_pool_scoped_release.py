@@ -13,16 +13,17 @@ from loom.nebius_pool_contract import PoolActivationV1
 from loom.nebius_pool_task_image import PoolTaskImagePrepareV1
 from loom_service.pool_management.capacity import digest
 from loom_service.pool_management.gateway_journal import PoolGatewayJournal
+from tests.integration.test_nebius_environment_management import (
+    environment_registry as environment_registry,
+)
 from tests.integration.test_nebius_pool_observation_continuity import workload
 from tests.integration.test_nebius_pool_participant_http import action
 from tests.integration.test_nebius_pool_participant_lifecycle import setup
 from tests.integration.test_nebius_pool_profile_registry import catalog
 from tests.integration.test_nebius_pool_registry import machine
 from tests.integration.test_nebius_pool_registry import sessions as sessions
-from tests.unit.test_nebius_pool_task_image_render import build_inputs
-from tests.integration.test_nebius_environment_management import environment_registry as environment_registry
 from tests.support.nebius_platform import platform_inputs as platform_inputs
-from tests.unit.test_nebius_application_image_renderer import build_inputs as application_build_inputs
+from tests.unit.test_nebius_pool_task_image_render import build_inputs
 
 
 def replacement(spec, selected):

@@ -105,7 +105,23 @@ async def read_pool_registration(session: AsyncSession, pool: NebiusPoolBinding)
         raise PoolObservationError
     bindings = []
     identities = []
+    from loom.db.nebius_pool_lifecycle_schema import NebiusPoolParticipantLifecycle
+    from loom_service.pool_management.intake import scoped_lifecycle
+
+    retired = set()
+    if scoped_lifecycle(pool):
+        retired = set(await session.scalars(select(NebiusPoolParticipantLifecycle.participant_id).where(
+            NebiusPoolParticipantLifecycle.pool_id == pool.pool_id, NebiusPoolParticipantLifecycle.state == 'retired')))
+        if retired and await session.scalar(select(NebiusPoolRequest.request_id).where(
+                NebiusPoolRequest.participant_id.in_(retired),
+                NebiusPoolRequest.phase.not_in(('released', 'cancelled_unstarted'))).limit(1)) is not None:
+            raise PoolObservationError
     for row in rows:
+        # Terminal retirement already proved no unresolved work. Historical
+        # captures retain the old UIDs; new inventory treats any old Pods as
+        # foreign. Reused names do not inherit a retired incarnation's authority.
+        if row.participant_id in retired:
+            continue
         binding = PoolParticipantV1.model_validate(row.binding_json)
         if (_digest(row.binding_json) != row.binding_sha256
                 or (binding.participant_id, binding.pool_id, binding.installation_id, binding.environment_id,

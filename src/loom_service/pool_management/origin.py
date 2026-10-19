@@ -101,12 +101,14 @@ def qualify_pool_history(origin: PoolWorkOriginV1, *, participant: PoolParticipa
 async def qualify_pool_origin(session: AsyncSession, principal: PoolPrincipal, origin: PoolWorkOriginV1, *,
                               target_id: str, workload_kind: PoolWorkloadKind,
                               application_build: PoolApplicationImagePrepareV1 | None = None,
-                              intake: bool = True) -> int:
+                              intake: bool = True, retained_revision: int | None = None) -> int:
     """Return class for a new request after locked current-authority readback.
 
     Call after the pool mutation lock, before persisting the immutable request.
-    Closed/fenced cleanup must use its separate reconciliation path, not this intake
-    qualifier. Historical source generations remain valid after lifecycle changes.
+    Closed/fenced cleanup uses its separate reconciliation path. Only activation
+    of an already-reserved row sets intake=False; it still requires current
+    execution authority. Only an exact retained SQL request supplies a historical
+    revision. New requests never use that path to acquire stale profile authority.
     """
     try:
         with session.no_autoflush:
@@ -131,6 +133,15 @@ async def qualify_pool_origin(session: AsyncSession, principal: PoolPrincipal, o
                     current.participant_id, current.pool_id, current.installation_id, current.environment_id,
                     current.incarnation, current.participant_revision, current.participant_epoch):
                 raise ValueError
+            if retained_revision is not None:
+                from loom_service.pool_management.profile_registry import (
+                    registry_enabled,
+                    resolve_profiles,
+                )
+
+                if registry_enabled(pool):
+                    binding, _ = await resolve_profiles(session, pool, binding, retained_revision,
+                        retained=True, fallback=None)
             binding.target(target_id, workload_kind)
             return await qualify_retained_pool_origin(session, origin, participant=binding,
                 cluster_id=pool.cluster_id, workload_kind=workload_kind, lock_history=True,

@@ -18,6 +18,8 @@ def scoped_lifecycle(pool: NebiusPoolBinding) -> bool:
 
 
 async def intake_open(session: AsyncSession, pool: NebiusPoolBinding, participant: NebiusPoolParticipant) -> bool:
+    if any(isinstance(row, NebiusPoolParticipantLifecycle) for row in session.new | session.dirty | session.deleted):
+        raise ValueError('pool_lifecycle_requires_clean_transaction')
     if not scoped_lifecycle(pool):
         return participant.phase == 'active'
     head = await session.get(NebiusPoolParticipantLifecycle, participant.participant_id, populate_existing=True)

@@ -13,7 +13,10 @@ from sqlalchemy import insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.nebius_pool_catalog_schema import NebiusPoolParticipantCatalog
-from loom.db.nebius_pool_lifecycle_schema import NebiusPoolParticipantLifecycle
+from loom.db.nebius_pool_lifecycle_schema import (
+    NebiusPoolLifecycleOperation,
+    NebiusPoolParticipantLifecycle,
+)
 from loom.db.nebius_pool_schema import (
     NebiusPoolBinding,
     NebiusPoolMachine,
@@ -34,6 +37,7 @@ from loom_service.pool_management.lifecycle_contracts import (
 )
 from loom_service.pool_management.lifecycle_contracts import (
     PoolParticipantReadinessV2,
+    PoolParticipantReleaseV2,
 )
 from loom_service.pool_management.lifecycle_contracts import (
     PoolPlatformInstallationV2 as PoolPlatformInstallationV2,
@@ -48,6 +52,7 @@ from loom_service.pool_management.platform_installation import (
     register_platform as register_platform,
 )
 from loom_service.pool_management.profile_registry import store_participant_catalog
+from loom_service.pool_management.release_compatibility import qualify_release
 
 
 async def _pool(session: AsyncSession, pool_id: UUID, sha: str) -> NebiusPoolBinding:
@@ -73,8 +78,10 @@ async def enroll_participant(session: AsyncSession, spec: PoolParticipantEnrollm
     wanted = (participant.execution_namespace, participant.build_namespace)
     for row in rows:
         peer = PoolParticipantV1.model_validate(row.binding_json)
-        if (row.environment_id == participant.environment_id
-                or any(left.name == right.name or left.uid == right.uid for left in wanted
+        history = await session.get(NebiusPoolParticipantLifecycle, row.participant_id)
+        retired = history is not None and history.state == 'retired'
+        if ((row.environment_id == participant.environment_id and (not retired or row.incarnation == participant.incarnation))
+                or any(left.uid == right.uid or (left.name == right.name and not retired) for left in wanted
                     for right in (peer.execution_namespace, peer.build_namespace))):
             raise ValueError('pool_participant_enrollment_conflict')
     binding = participant.model_dump(mode='json')
@@ -138,7 +145,8 @@ async def transition_participant(session: AsyncSession, spec: PoolParticipantOpe
         raise ValueError('pool_participant_predecessor_changed')
     allowed = {'ready': ({'enrolled', 'suspended'}, 'ready'), 'activate': ({'ready'}, 'active'),
         'resume': ({'suspended'}, 'active'), 'suspend': ({'active'}, 'suspended'),
-        'retire': ({'enrolled', 'ready', 'suspended'}, 'retiring'), 'complete_retirement': ({'retiring'}, 'retired')}
+        'retire': ({'enrolled', 'ready', 'suspended'}, 'retiring'), 'complete_retirement': ({'retiring'}, 'retired'),
+        'begin_release': ({'active'}, 'suspended'), 'commit_release': ({'suspended'}, 'ready')}
     sources, destination = allowed[spec.action]
     if head.state not in sources:
         raise ValueError('pool_participant_state_conflict')
@@ -147,7 +155,7 @@ async def transition_participant(session: AsyncSession, spec: PoolParticipantOpe
         NebiusPoolRequest.phase.in_((*CHARGED_PHASES, 'waiting'))).with_for_update())).all()
     charged = [row for row in outstanding if row.phase in CHARGED_PHASES]
     waiting = [row for row in outstanding if row.phase == 'waiting']
-    if spec.action in {'ready', 'complete_retirement'} and charged:
+    if spec.action in {'ready', 'complete_retirement', 'commit_release'} and charged:
         raise ValueError('pool_participant_outstanding_work')
     if spec.action == 'complete_retirement' and waiting:
         raise ValueError('pool_participant_waiting_work')
@@ -159,7 +167,20 @@ async def transition_participant(session: AsyncSession, spec: PoolParticipantOpe
             await session.execute(update(NebiusPoolRequest).where(
                 NebiusPoolRequest.request_id.in_([row.request_id for row in waiting]), NebiusPoolRequest.phase == 'waiting'
             ).values(phase='cancelled_unstarted'))
-    if spec.action in {'ready', 'activate', 'resume'}:
+    if spec.action == 'begin_release':
+        assert spec.replacement is not None
+        await qualify_release(session, pool, PoolParticipantV1.model_validate(selected.binding_json), spec.replacement)
+    if spec.action == 'commit_release':
+        predecessor = await session.get(NebiusPoolLifecycleOperation, head.head_operation_id)
+        if predecessor is None or predecessor.request_json.get('action') != 'begin_release':
+            raise ValueError('pool_release_predecessor_unqualified')
+        release = PoolParticipantReleaseV2.model_validate(predecessor.request_json['replacement'])
+        await qualify_release(session, pool, PoolParticipantV1.model_validate(selected.binding_json), release)
+        following = release.participant.model_dump(mode='json')
+        await session.execute(update(NebiusPoolParticipant).where(NebiusPoolParticipant.participant_id == selected.participant_id)
+            .values(binding_revision=release.participant.binding_revision, binding_json=following, binding_sha256=digest(following)))
+        await store_participant_catalog(session, release.participant, release.profiles)
+    if spec.action in {'ready', 'activate', 'resume', 'commit_release'}:
         await _readiness(session, pool, selected, spec.readiness)
     if spec.action in {'activate', 'resume'}:
         if pool.mode != 'global':
@@ -179,5 +200,6 @@ async def transition_participant(session: AsyncSession, spec: PoolParticipantOpe
     await session.execute(update(NebiusPoolParticipantLifecycle).where(
         NebiusPoolParticipantLifecycle.participant_id == selected.participant_id,
         NebiusPoolParticipantLifecycle.head_operation_id == spec.expected_head,
-    ).values(head_operation_id=spec.operation_id, generation=receipt['generation'], state=destination))
+    ).values(head_operation_id=spec.operation_id, generation=receipt['generation'], state=destination,
+        binding_sha256=selected.binding_sha256))
     return receipt

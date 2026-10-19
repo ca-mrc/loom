@@ -93,6 +93,12 @@ class PoolWaitingCancellationV2(_Strict):
     request_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
 
 
+class PoolParticipantReleaseV2(_Strict):
+    participant: PoolParticipantV1
+    profiles: PoolProfileCatalog
+    publication_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
+
+
 class PoolParticipantOperationV2(_Strict):
     schema_version: Literal['loom.pool-participant-operation.v2']
     operation_id: UUID
@@ -102,14 +108,16 @@ class PoolParticipantOperationV2(_Strict):
     expected_head: UUID
     expected_binding_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
     pool_authority_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
-    action: Literal['ready', 'activate', 'suspend', 'resume', 'retire', 'complete_retirement']
+    action: Literal['ready', 'activate', 'suspend', 'resume', 'retire', 'complete_retirement', 'begin_release', 'commit_release']
     readiness: PoolParticipantReadinessV2 | None = None
+    replacement: PoolParticipantReleaseV2 | None = None
     cancel_waiting: tuple[PoolWaitingCancellationV2, ...] = Field(default=(), max_length=10000)
 
     @model_validator(mode='after')
     def scope(self) -> PoolParticipantOperationV2:
         if (not all(value.int for value in (self.operation_id, self.pool_id, self.participant_id, self.incarnation, self.expected_head))
-                or (self.readiness is not None) != (self.action in {'ready', 'activate', 'resume'})
+                or (self.readiness is not None) != (self.action in {'ready', 'activate', 'resume', 'commit_release'})
+                or (self.replacement is not None) != (self.action == 'begin_release')
                 or (self.cancel_waiting and self.action != 'retire')
                 or len({row.request_id for row in self.cancel_waiting}) != len(self.cancel_waiting)):
             raise ValueError('pool_participant_operation_invalid')
