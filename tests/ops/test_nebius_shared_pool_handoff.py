@@ -997,8 +997,12 @@ def test_connected_closed_storage_requires_stopped_gateway_and_fresh_bound_publi
                 events.append('database')
             elif command[2] == BOUND_POOL_SETTINGS_COMMAND:
                 assert command[3] == 'manager'
+                # Physical correction preserves the mounted catalog's exact
+                # bytes, not a reserialization of semantically equal profiles.
+                catalog_name = 'loom-pool-profiles-' + refresh.before.operation_id.hex
+                catalog_bytes = documents['/api/v1/namespaces/' + manager_ns + '/configmaps/' + catalog_name]['data']['profiles.json'].encode()
                 wanted = expected_pool_runtime_settings('manager', documents[manager_path],
-                    catalog_sha256=hashlib.sha256(refresh.after.profiles.model_dump_json().encode()).hexdigest())
+                    catalog_sha256=hashlib.sha256(catalog_bytes).hexdigest())
                 assert command[5] == hmac.new(bytes.fromhex(command[4]), json.dumps(wanted, sort_keys=True,
                     separators=(',', ':')).encode(), 'sha256').hexdigest()
                 events.append('settings')
@@ -1272,7 +1276,7 @@ def test_closed_storage_catalog_and_handoff_follow_one_explicit_ancestry(
     assert physical.files.keys() <= plan.history.keys()
     # The catalog's explicit physical ancestry is authoritative, not a second
     # independently selected latest head. Following catalogs keep that ancestry.
-    next_source = _advanced_staging_source(args, tmp_path, candidate_sha='e' * 40, image_digest='d' * 64)
+    next_source = _advanced_staging_source(args, tmp_path, candidate_sha='f' * 40, image_digest='e' * 64)
     with pytest.raises(ValueError):
         catalog.retain_preactivation_catalog(runtime=runtime, source=next_source, operation_id=uuid4(),
             repo_root=ROOT, predecessor=refreshed.reference)
