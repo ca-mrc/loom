@@ -10,7 +10,7 @@ import sys
 import tomllib
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import replace
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 import httpx
 import pytest
@@ -25,6 +25,7 @@ from loom_service.environment_management.candidates import (
 )
 from loom_service.environment_management.kubernetes_provider import KubernetesEnvironmentProvider
 from loom_service.pool_management.administration import administer
+from loom_service.pool_management.capacity import digest
 from loom_service.pool_management.profiles import PoolProfileCatalog
 from tests.integration.test_nebius_pool_participant_lifecycle import platform
 from tests.integration.test_nebius_pool_profile_registry import catalog as profile_catalog
@@ -212,3 +213,45 @@ async def test_unfinished_inspection_remains_pending_and_recovers_original_job(s
         api.pending = False
         assert await module.issue_enrollment(policy=policy, operation_id=operation_id, **inputs) is not None
         assert len(api.creates) == 2, 'recovery must not make another inspection Job'
+
+
+async def test_published_runtime_cannot_gain_unpublished_execution_capabilities(sessions, tmp_path, platform_inputs, publication):
+    async with prepared(sessions, tmp_path, platform_inputs, publication) as (module, policy, inputs, _remote, _api):
+        profiles = policy.profiles.model_dump(mode='json')
+        profiles['execution'][0]['execution_class']['supports_task_web_egress'] = True
+        # Use a valid independently constructed capability class: image identity
+        # alone must not authorize capabilities absent from its publication.
+        from loom.execution_contract import nebius_cpu_execution_class
+
+        foreign = nebius_cpu_execution_class(supports_task_web_egress=True)
+        profiles['execution'][0].update(execution_class=foreign.model_dump(mode='json'), execution_class_id=foreign.class_id)
+        policy = replace(policy, profiles=PoolProfileCatalog.model_validate(profiles))
+        with pytest.raises(ValueError, match='enrollment'):
+            await module.issue_enrollment(policy=policy, operation_id=uuid4(), **inputs)
+        assert not policy.host.anchor_root.exists()
+
+
+async def test_lost_reply_before_grant_retention_recovers_only_the_original_qualified_intent(
+        sessions, tmp_path, platform_inputs, publication, monkeypatch):
+    async with prepared(sessions, tmp_path, platform_inputs, publication) as (module, policy, inputs, _remote, _api):
+        operation_id = uuid4()
+        original = module.retain_authorized_operation
+
+        def lose_reply(**kwargs):
+            raise OSError('injected-before-retention')
+
+        monkeypatch.setattr(module, 'retain_authorized_operation', lose_reply)
+        with pytest.raises(ValueError, match='enrollment'):
+            await module.issue_enrollment(policy=policy, operation_id=operation_id, **inputs)
+        monkeypatch.setattr(module, 'retain_authorized_operation', original)
+        issued = policy.host.state_root / ('enrollment-' + str(operation_id)) / 'issued.json'
+        retained = json.loads(issued.read_text())
+        retained['request']['operation_id'] = str(uuid4())
+        retained['authorization']['request_sha256'] = digest(retained['request'])
+        # A private journal must not silently retarget a prepared operation after
+        # a lost reply, even if the substituted grant is internally consistent.
+        assert retained['authorization']['authorization_id'] == str(uuid5(operation_id, 'enroll-authorization'))
+        issued.write_text(json.dumps(retained))
+        with pytest.raises(ValueError, match='enrollment'):
+            await module.issue_enrollment(policy=policy, operation_id=operation_id, **inputs)
+        assert not policy.host.anchor_root.exists()
