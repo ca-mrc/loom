@@ -16,10 +16,11 @@ def selection():
     before, _ = installation(('staging', 'development'))
     before['quota_identities']['storage'][3] = 'compute.disk.size.network-ssd'
     after = copy.deepcopy(before)
-    after.update(operation_id=str(uuid4()), policy_revision=before['policy_revision'] + 1)
+    after['policy_revision'] = before['policy_revision'] + 1
     after['quota_identities']['storage'][3] = 'compute.disk.size.network-ssd-non-replicated'
     return {'schema_version': 'loom.closed-pool-storage-refresh.v1',
-        'target_disk_type': 'NETWORK_SSD_NON_REPLICATED', 'before': before, 'after': after}
+        'operation_id': str(uuid4()), 'target_disk_type': 'NETWORK_SSD_NON_REPLICATED',
+        'before': before, 'after': after}
 
 
 def module():
@@ -35,9 +36,9 @@ def test_storage_successor_preserves_pool_workloads_credentials_and_original_inp
     assert payload == frozen
     assert selected.after.quota_identities['storage'][3] == 'compute.disk.size.network-ssd-non-replicated'
     assert selected.after.policy_revision == selected.before.policy_revision + 1
-    assert selected.after.operation_id != selected.before.operation_id
-    assert selected.before.model_dump(exclude={'operation_id', 'policy_revision', 'quota_identities'}) == (
-        selected.after.model_dump(exclude={'operation_id', 'policy_revision', 'quota_identities'}))
+    assert selected.operation_id != selected.before.operation_id
+    assert selected.before.model_dump(exclude={'policy_revision', 'quota_identities'}) == (
+        selected.after.model_dump(exclude={'policy_revision', 'quota_identities'}))
     # No active participant-release route may deserialize this closed-only scope.
     with pytest.raises(ValueError):
         PoolParticipantRefresh.model_validate(selected.model_dump(mode='json'))
@@ -45,7 +46,7 @@ def test_storage_successor_preserves_pool_workloads_credentials_and_original_inp
 
 @pytest.mark.parametrize('damage', ['quota-parent', 'quota-region', 'quota-unit', 'other-quota',
     'node-group', 'selector', 'admission', 'machine', 'participant', 'profile',
-    'wrong-quota', 'unknown-disk', 'unchanged-quota', 'operation', 'revision'])
+    'wrong-quota', 'unknown-disk', 'unchanged-quota', 'operation', 'installation-operation', 'revision'])
 def test_storage_successor_rejects_every_unrelated_or_ambiguous_authority_change(damage):
     payload = selection()
     before, after = payload['before'], payload['after']
@@ -56,6 +57,7 @@ def test_storage_successor_rejects_every_unrelated_or_ambiguous_authority_change
         after['quota_identities']['vcpu'][3] += '-changed'
     elif damage == 'node-group':
         after['node_group_id'] += '-changed'
+        after['node_selector']['nebius.com/node-group-id'] = after['node_group_id']
     elif damage == 'selector':
         after['node_selector']['foreign'] = 'true'
     elif damage == 'admission':
@@ -74,9 +76,15 @@ def test_storage_successor_rejects_every_unrelated_or_ambiguous_authority_change
         payload['target_disk_type'] = 'NETWORK_SSD'
         after['quota_identities']['storage'] = copy.deepcopy(before['quota_identities']['storage'])
     elif damage == 'operation':
-        after['operation_id'] = before['operation_id']
+        payload['operation_id'] = before['operation_id']
+    elif damage == 'installation-operation':
+        after['operation_id'] = str(uuid4())
     else:
         after['policy_revision'] += 1
+    if damage in {'node-group', 'selector'}:
+        for kind, field in (('execution', 'runtime'), ('task_images', 'target')):
+            for profile in after['profiles'][kind]:
+                profile[field]['node_selector'].update(after['node_selector'])
     # Individually valid installations do not authorize the delta between them.
     PoolInstallation.model_validate(before)
     PoolInstallation.model_validate(after)
