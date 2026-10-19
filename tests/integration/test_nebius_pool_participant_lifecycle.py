@@ -25,7 +25,7 @@ from loom_service.pool_management.capacity import digest
 from loom_service.pool_management.installation import PoolInstallation
 from loom_service.pool_management.observation_binding import physical_binding_digest
 from tests.execution_placement_fixtures import placement_fixture
-from tests.integration.test_nebius_pool_installation import installation
+from tests.integration.test_nebius_pool_installation import add_application_builder, installation
 from tests.integration.test_nebius_pool_observation_continuity import workload
 from tests.integration.test_nebius_pool_participant_http import action
 from tests.integration.test_nebius_pool_profile_registry import catalog
@@ -39,9 +39,16 @@ def lifecycle():
     return importlib.import_module(name)
 
 
-async def platform(sessions):
+async def platform(sessions, *, application_recipe=None):
     module = lifecycle()
     config, tokens = installation(('production', 'staging', 'development', 'staging'))
+    if application_recipe is not None:
+        config, machine_id, token = add_application_builder(config, application_recipe)
+        tokens[machine_id] = token
+        config['profiles']['application_images'][0]['settings'].update(
+            registry_repository='cr.eu-north1.nebius.cloud/registryid/personal-apps',
+            storage_endpoint='https://storage.eu-north1.nebius.cloud',
+            registry_auth_kind='nebius', cache_bucket=None, cache_secret_name=None)
     config['node_selector'] = copy.deepcopy(config['profiles']['execution'][0]['runtime']['node_selector'])
     spec = PoolInstallation.model_validate(config)
     body = spec.model_dump(mode='json', exclude={'participants', 'profiles'})
@@ -55,8 +62,8 @@ async def platform(sessions):
     return module, spec, platform_spec, tokens, receipt, authority
 
 
-async def setup(sessions, *, active=True):
-    module, spec, _, tokens, _, authority = await platform(sessions)
+async def setup(sessions, *, active=True, application_recipe=None):
+    module, spec, _, tokens, _, authority = await platform(sessions, application_recipe=application_recipe)
     heads = {}
     for participant in spec.participants:
         request = module.PoolParticipantEnrollmentV2(
@@ -74,8 +81,8 @@ async def setup(sessions, *, active=True):
         db_url='postgresql+asyncpg://unused:unused@localhost/unused'))
     app.state.session_factory = sessions
 
-    def headers(participant):
-        machine, = (row for row in spec.machines if row.participant_id == participant.participant_id)
+    def headers(participant, scope='environment'):
+        machine, = (row for row in spec.machines if row.participant_id == participant.participant_id and row.workload_scope == scope)
         return {'Authorization': 'Bearer ' + tokens[machine.machine_id]}
 
     async def observe(*, full=False):
@@ -300,3 +307,82 @@ async def test_suspended_high_priority_waiter_does_not_hold_peer_capacity_and_ca
         await change(selected, 'resume')
         resumed = await http.post(path, json=request.model_dump(mode='json'), headers=headers(selected))
         assert resumed.status_code == 200 and resumed.json()['phase'] == 'reserved'
+
+
+async def test_pending_intake_state_cannot_be_erased_or_flushed_by_runtime_admission(sessions):
+    from loom.db.nebius_pool_lifecycle_schema import NebiusPoolParticipantLifecycle
+    from loom_service.pool_management.registry import prepare_execution
+
+    _, spec, _, headers, _, _ = await setup(sessions)
+    selected = spec.participants[2]
+    async with sessions() as session:
+        principal = await resolve_pool_machine(session, headers(selected)['Authorization'])
+        head = await session.get(NebiusPoolParticipantLifecycle, selected.participant_id)
+        head.state = 'suspended'
+        with pytest.raises(ValueError):
+            await prepare_execution(session, principal, workload(selected))
+        assert head in session.dirty and head.state == 'suspended'
+
+
+async def test_same_participant_operations_use_cas_but_peer_operations_do_not_conflict(sessions):
+    import asyncio
+
+    module, spec, _, _, _, change = await setup(sessions)
+    first = await change(spec.participants[2], 'suspend', apply=False)
+    concurrent = first.model_copy(update={'operation_id': uuid4()})
+    peer = await change(spec.participants[1], 'suspend', apply=False)
+
+    async def run(request):
+        async with sessions.begin() as session:
+            return await module.transition_participant(session, request)
+
+    results = await asyncio.wait_for(asyncio.gather(run(first), run(concurrent), run(peer), return_exceptions=True), 10)
+    assert sum(isinstance(row, dict) for row in results) == 2
+    assert isinstance(results[2], dict) and results[2]['state'] == 'suspended'
+    assert sum(isinstance(row, ValueError) and 'predecessor' in str(row) for row in results) == 1
+
+
+async def test_retired_environment_can_reenroll_with_new_incarnation_without_resurrecting_credentials(sessions):
+    module, spec, _, headers, observe, change = await setup(sessions)
+    selected = spec.participants[2]
+    await change(selected, 'suspend')
+    await change(selected, 'retire')
+    await change(selected, 'complete_retirement')
+    replacement = selected.model_copy(update={'participant_id': uuid4(), 'incarnation': uuid4(),
+        'execution_namespace': selected.execution_namespace.model_copy(update={'uid': uuid4()}),
+        'build_namespace': selected.build_namespace.model_copy(update={'uid': uuid4()})})
+    # Profiles preserve the unchanged names, but authority binds new namespace UIDs.
+    machine, = (row for row in spec.machines if row.participant_id == selected.participant_id)
+    new_machine = machine.model_copy(update={'participant_id': replacement.participant_id,
+        'machine_id': uuid4(), 'token_sha256': uuid4().hex + uuid4().hex})
+    async with sessions() as session:
+        pool = await session.get(NebiusPoolBinding, spec.pool_id)
+        authority = physical_binding_digest(pool)
+    enrollment = module.PoolParticipantEnrollmentV2(schema_version='loom.pool-participant-enrollment.v2',
+        operation_id=uuid4(), pool_authority_sha256=authority, foundation_sha256='2' * 64,
+        participant=replacement, machines=(new_machine,), profiles=catalog(spec, selected))
+    async with sessions.begin() as session:
+        assert (await module.enroll_participant(session, enrollment))['state'] == 'enrolled'
+    await observe()  # Retired names/UIDs cannot poison the new collector scope.
+    async with sessions() as session:
+        assert await resolve_pool_machine(session, headers(selected)['Authorization']) is None
+        assert await session.get(NebiusPoolParticipant, selected.participant_id) is not None
+        assert (await session.get(NebiusPoolParticipant, replacement.participant_id)).phase == 'fenced'
+
+
+@pytest.mark.parametrize('statement', [
+    "UPDATE nebius_pool_lifecycle_operations SET receipt_json='{}'::jsonb",
+    'DELETE FROM nebius_pool_lifecycle_operations',
+    'TRUNCATE nebius_pool_lifecycle_operations CASCADE',
+    "UPDATE nebius_pool_participant_lifecycle SET state='retired'",
+    'DELETE FROM nebius_pool_participant_lifecycle',
+    'TRUNCATE nebius_pool_participant_lifecycle',
+])
+async def test_operation_and_head_history_cannot_be_rewritten_or_erased(sessions, statement):
+    from sqlalchemy import text
+    from sqlalchemy.exc import DBAPIError
+
+    await setup(sessions)
+    with pytest.raises(DBAPIError):
+        async with sessions.begin() as session:
+            await session.execute(text(statement))

@@ -20,6 +20,9 @@ from tests.integration.test_nebius_pool_profile_registry import catalog
 from tests.integration.test_nebius_pool_registry import machine
 from tests.integration.test_nebius_pool_registry import sessions as sessions
 from tests.unit.test_nebius_pool_task_image_render import build_inputs
+from tests.integration.test_nebius_environment_management import environment_registry as environment_registry
+from tests.support.nebius_platform import platform_inputs as platform_inputs
+from tests.unit.test_nebius_application_image_renderer import build_inputs as application_build_inputs
 
 
 def replacement(spec, selected):
@@ -131,3 +134,53 @@ async def test_release_commit_waits_for_charged_work_without_releasing_it(sessio
         await change(selected, 'commit_release', readiness=readiness)
     async with sessions() as session:
         assert (await session.scalar(select(NebiusPoolRequest))).phase == 'reserved'
+
+
+async def test_personal_application_builder_retains_exact_source_and_recipe_across_release(environment_registry, application_build_inputs):
+    from loom.application_source_upload import ApplicationSourceUploadBindingV1
+    from loom_service.application_management.build_dispatch import ApplicationBuildDispatch
+    from loom_service.application_management.source_registry import ApplicationSourceRegistry
+    from tests.integration.test_nebius_application_build_registry import build_registry, verified
+
+    _, sessions, (owner, _), _ = environment_registry
+    _, spec, app, headers, observe, change = await setup(sessions, application_recipe=application_build_inputs[0].recipe)
+    selected = spec.participants[2]
+    profile, = catalog(spec, selected).application_images
+    claim = application_build_inputs[0].model_copy(update={'recipe': profile.recipe,
+        'source_bucket': profile.settings.source_bucket, 'storage_endpoint': profile.settings.storage_endpoint,
+        'storage_region': profile.settings.storage_region, 'registry_repository': profile.settings.registry_repository})
+    sources = ApplicationSourceRegistry(sessions, binding=ApplicationSourceUploadBindingV1(
+        installation_id=selected.installation_id, data_environment_id=selected.environment_id,
+        cluster_id=spec.cluster_id, source_bucket=claim.source_bucket))
+    source = await verified(sources, owner)
+    builds = build_registry(sessions, sources, claim, pool_id=spec.pool_id, participant_id=selected.participant_id,
+        profile_id=profile.profile_id, target_id=profile.target.target_id,
+        admission_epoch=selected.admission_epoch, participant_revision=selected.binding_revision)
+    build = await builds.create(principal=owner, upload_id=source.upload_id, idempotency_key='retained-source')
+    request = await ApplicationBuildDispatch(builds, request_lifetime_seconds=600).freeze(build.build_id, attempt=1)
+    following, profiles = replacement(spec, selected)
+    readiness = (await change(selected, 'resume', apply=False)).readiness.model_dump(mode='json')
+    readiness.update(participant_binding_sha256=digest(following.model_dump(mode='json')),
+        catalog_sha256=digest({'participant': following.model_dump(mode='json'), 'profiles': profiles}))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='https://manager.example') as http:
+        path = f'/internal/pools/v1/{spec.pool_id}'
+        await observe(full=True)
+        response = await http.post(path + '/prepare', json=request.model_dump(mode='json'),
+            headers=headers(selected, 'application_builder'))
+        assert response.status_code == 200 and response.json()['phase'] == 'waiting', response.text
+        await change(selected, 'begin_release', replacement={'participant': following.model_dump(mode='json'),
+            'profiles': profiles, 'publication_sha256': '3' * 64})
+        await change(selected, 'commit_release', readiness=readiness)
+        await observe()
+        await change(following, 'activate', readiness=readiness)
+        response = await http.post(path + '/prepare', json=request.model_dump(mode='json'),
+            headers=headers(selected, 'application_builder'))
+        assert response.status_code == 200 and response.json()['phase'] == 'reserved', response.text
+        activated = await http.post(path + '/activate', json=PoolActivationV1(action=action(request),
+            not_after=request.deadline_at).model_dump(mode='json'), headers=headers(selected, 'application_builder'))
+        assert activated.status_code == 200 and activated.json()['phase'] == 'create_intent', activated.text
+    async with sessions() as session:
+        row = await session.scalar(select(NebiusPoolRequest))
+        assert row.priority == 3
+        assert row.plan_json['job']['metadata']['labels']['loom.application-build-id'] == str(build.build_id)
+        assert row.plan_json['job']['spec']['template']['spec']['initContainers'][0]['image'] == profile.recipe.trusted_image_ref
