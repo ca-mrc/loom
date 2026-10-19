@@ -19,7 +19,10 @@ from loom.execution_image_admission import ImageAdmissionKeyring
 from loom.nebius_environment_foundation import EnvironmentFoundationDeclarationV2
 from loom.nebius_kubernetes import NebiusKubernetesConnection
 from loom.nebius_pool_contract import PoolParticipantV1
-from loom_service.environment_management.candidates import GitHubCandidateCatalog, ProtectedPublication
+from loom_service.environment_management.candidates import (
+    GitHubCandidateCatalog,
+    ProtectedPublication,
+)
 from loom_service.environment_management.kubernetes_provider import KubernetesEnvironmentProvider
 from loom_service.pool_management.administration import administer
 from loom_service.pool_management.profiles import PoolProfileCatalog
@@ -46,8 +49,11 @@ async def prepared(sessions, tmp_path, platform_inputs, publication):
     subject = issuer()
     from scripts.ops import nebius_environment_foundation as foundations
     from scripts.ops import nebius_pool_administration_dispatch as dispatch
-    from scripts.ops.nebius_pool_administration_job import PoolAdministrationRuntimeV2, administration_documents
     from scripts.ops.nebius_platform_namespace import PlatformNamespaceBindingV2
+    from scripts.ops.nebius_pool_administration_job import (
+        PoolAdministrationRuntimeV2,
+        administration_documents,
+    )
 
     _, spec, _, _, _, _ = await platform(sessions)
     selected = spec.participants[2]
@@ -171,7 +177,7 @@ async def test_qualified_publication_and_observed_foundation_reach_real_closed_e
 @pytest.mark.parametrize('damage', ['failed_ci', 'manager_image', 'host_class', 'namespace_uid', 'cluster_uid',
     'profile_image', 'physical_pool', 'publication_binding'])
 async def test_unqualified_evidence_never_retains_an_apply_grant(sessions, tmp_path, platform_inputs, publication, damage):
-    async with prepared(sessions, tmp_path, platform_inputs, publication) as (module, policy, inputs, remote, api):
+    async with prepared(sessions, tmp_path, platform_inputs, publication) as (module, policy, inputs, remote, _api):
         if damage == 'failed_ci':
             publication[1][f'commits/{HEAD}/check-runs']['check_runs'][0]['conclusion'] = 'failure'
         elif damage == 'manager_image':
@@ -198,7 +204,7 @@ async def test_unqualified_evidence_never_retains_an_apply_grant(sessions, tmp_p
 
 
 async def test_unfinished_inspection_remains_pending_and_recovers_original_job(sessions, tmp_path, platform_inputs, publication):
-    async with prepared(sessions, tmp_path, platform_inputs, publication) as (module, policy, inputs, remote, api):
+    async with prepared(sessions, tmp_path, platform_inputs, publication) as (module, policy, inputs, _remote, api):
         operation_id = uuid4()
         api.pending = True
         assert await module.issue_enrollment(policy=policy, operation_id=operation_id, **inputs) is None
