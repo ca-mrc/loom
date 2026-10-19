@@ -9,6 +9,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
+import httpx
 import pytest
 from scripts.ops.nebius_development_build_cloud import DevelopmentRegistryCloudScope
 from scripts.ops.nebius_ingress_stage import _key
@@ -112,11 +113,12 @@ async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact
             await module.stage_environment_runtime(**kwargs)
         assert resources.creates == creates
         phase.write_bytes(saved)
+        phase.chmod(0o600)
 
         # Continue through the actual startup journal, not a second enrollment
         # or restaging operation. Only remote controller/HTTP effects are fake.
         startup = importlib.import_module('scripts.ops.nebius_environment_runtime_start')
-        from scripts.ops.nebius_development_runtime_live import runtime_resource_path
+        from scripts.ops.nebius_environment_runtime_start import runtime_resource_path
 
         from tests.ops.test_nebius_development_runtime_transition import RuntimeAPI
 
@@ -143,6 +145,25 @@ async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact
             yield api
 
         inputs = dict(policy=policy, operation_id=kwargs['operation_id'], workload_connection=workload_connection, **clients)
+        selected_path = '/apis/apps/v1/namespaces/app-red/deployments/loom-service'
+        original_service = copy.deepcopy(remote.kubernetes[selected_path])
+        reads = 0
+        def drift_after_foundation_read(request):
+            nonlocal reads
+            if request.method == 'GET' and request.url.path == selected_path:
+                reads += 1
+                if reads == 3:
+                    remote.kubernetes[selected_path]['spec']['template']['spec']['containers'][0]['image'] = 'foreign/image'
+            return remote.http(request)
+        async with httpx.AsyncClient(base_url='https://api.cluster.test', transport=httpx.MockTransport(drift_after_foundation_read)) as changed:
+            from loom_service.environment_management.kubernetes_provider import (
+                KubernetesEnvironmentProvider,
+            )
+
+            with pytest.raises(ValueError, match='environment_runtime_start_unqualified'):
+                await startup.start_environment_runtime(**{**inputs, 'kubernetes': KubernetesEnvironmentProvider(changed)})
+        assert changes == [], 'same-UID drift cannot become a newly authorized original'
+        remote.kubernetes[selected_path] = original_service
         assert (await startup.start_environment_runtime(**inputs))['status'] == 'runtime_start_pending'
         assert changes == []
         reject = False
