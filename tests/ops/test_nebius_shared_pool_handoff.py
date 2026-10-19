@@ -697,6 +697,127 @@ def test_closed_storage_parent_preserves_history_and_waits_for_drain_and_new_pub
     assert parent.load_completed_storage(runtime=runtime, reference=retained.reference) == completed
 
 
+@pytest.mark.parametrize('staging_observation', ['independent'], indirect=True)
+@pytest.mark.timeout(180)
+def test_storage_collector_https_uses_execution_namespace_and_preserves_uid_cas(shared_operation):
+    import importlib
+    import ssl
+
+    import httpx
+    from scripts.ops.nebius_development_runtime_live import runtime_resource_path
+    from scripts.ops.nebius_development_runtime_transition import advance_runtime_workloads
+    from scripts.ops.nebius_management_stage import _stage_fixed_documents
+    from scripts.ops.nebius_pool_storage_operation import (
+        retain_closed_storage,
+        storage_configuration_identity,
+        storage_transition_inputs,
+    )
+    from scripts.ops.nebius_shared_pool_entry import RetainedRuntimeReference
+
+    name = 'scripts.ops.nebius_pool_storage_transport'
+    assert importlib.util.find_spec(name) is not None, 'fixed storage collector transport is missing'
+    transport = importlib.import_module(name)
+    args, bindings = shared_operation
+    _, _, inputs, _, _ = _shared_entry_inputs(args, bindings)
+    retained = retain_closed_storage(runtime=RetainedRuntimeReference.model_validate(inputs['runtime']),
+        operation_id=uuid4(), target_disk_type='NETWORK_SSD_NON_REPLICATED')
+    cron = copy.deepcopy(retained.collector.original)
+    cron['metadata'].update(resourceVersion='1', generation=1)
+    path = runtime_resource_path(cron) + '/' + cron['metadata']['name']
+    namespace = cron['metadata']['namespace']
+    rows, effects, checks = {path: cron}, [], []
+    mode = {'fail_read': False, 'lose_reply': False, 'active': True}
+    active_pod = {'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {
+        'name': 'old-collector', 'namespace': namespace, 'uid': str(uuid4()),
+        'labels': cron['spec']['jobTemplate']['spec']['template']['metadata']['labels']},
+        'spec': cron['spec']['jobTemplate']['spec']['template']['spec'], 'status': {'phase': 'Running'}}
+
+    def qualify():
+        checks.append(True)
+        if mode['fail_read']:
+            raise ValueError('provider qualification failed')
+
+    def respond(message):
+        selected = message.url.path
+        if message.method == 'GET':
+            if selected.endswith('/jobs') or selected.endswith('/pods'):
+                return httpx.Response(200, json={'apiVersion': 'batch/v1' if selected.endswith('/jobs') else 'v1',
+                    'kind': 'JobList' if selected.endswith('/jobs') else 'PodList',
+                    'metadata': {'resourceVersion': '1'},
+                    'items': [active_pod] if selected.endswith('/pods') and mode['active'] else []})
+            return httpx.Response(200, json=rows[selected]) if selected in rows else httpx.Response(404)
+        assert '/namespaces/' + namespace + '/' in selected
+        preview = bool(message.url.params)
+        assert not preview or dict(message.url.params) == {'dryRun': 'All'}
+        if message.method == 'POST':
+            assert selected == '/api/v1/namespaces/loom-nebius-dev-execution/configmaps'
+            value = json.loads(message.content)
+            assert value['immutable'] is True
+            if not preview:
+                value['metadata'].update(uid=str(uuid4()), resourceVersion='1')
+                rows[selected + '/' + value['metadata']['name']] = copy.deepcopy(value)
+                effects.append('configuration')
+            return httpx.Response(201, json=value)
+        assert message.method == 'PATCH' and selected == path
+        patches = json.loads(message.content)
+        current = rows[path]
+        assert patches[:3] == [{'op': 'test', 'path': '/metadata/uid', 'value': current['metadata']['uid']},
+            {'op': 'test', 'path': '/metadata/resourceVersion', 'value': current['metadata']['resourceVersion']},
+            {'op': 'test', 'path': '/spec', 'value': current['spec']}]
+        value = copy.deepcopy(current)
+        for patch in patches[3:]:
+            parts = patch['path'].strip('/').split('/')
+            owner = value
+            for part in parts[:-1]:
+                owner = owner[part]
+            if patch['op'] == 'remove':
+                del owner[parts[-1]]
+            else:
+                owner[parts[-1]] = patch['value']
+        if not preview:
+            value['metadata'].update(resourceVersion=str(int(current['metadata']['resourceVersion']) + 1),
+                generation=current['metadata']['generation'] + 1)
+            rows[path] = value
+            effects.append('collector')
+            if mode['lose_reply']:
+                raise httpx.ReadError('lost committed CAS response')
+        return httpx.Response(200, json=value)
+
+    for phase, transition in (('pause', 'stop'), ('configuration', None), ('reconfigure', 'control'), ('resume', 'start')):
+        with transport.HTTPSStorageCollectorAPI(retained=retained, phase=phase,
+                api_server=args['runtime'].database.foundation.inputs.config['kubernetes_api_server'],
+                ssl_context=ssl.create_default_context(), qualify=qualify) as api:
+            api.client.close()
+            api.client = httpx.Client(base_url=api.api_server, transport=httpx.MockTransport(respond))
+            if transition is None:
+                documents, identity = storage_configuration_identity(retained)
+                _stage_fixed_documents(documents=documents, revision=identity['revision'], phase=identity['phase'],
+                    binding=retained.registration.binding, api=api, state_dir=retained.state_dir / phase)
+                with pytest.raises(ValueError):
+                    api.create_resource(retained.collector.previous_configuration)
+            else:
+                originals, targets, fingerprint = storage_transition_inputs(retained, phase)
+                mode['lose_reply'] = phase == 'reconfigure'
+                if phase == 'pause':
+                    mode['fail_read'] = True
+                    with pytest.raises(ValueError):
+                        advance_runtime_workloads(originals=originals, targets=targets, input_digest=fingerprint,
+                            phase=transition, api=api, state_dir=retained.state_dir / phase)
+                    assert effects == []
+                    mode['fail_read'] = False
+                    assert advance_runtime_workloads(originals=originals, targets=targets, input_digest=fingerprint,
+                        phase=transition, api=api, state_dir=retained.state_dir / phase) is False
+                    assert effects == ['collector']
+                    mode['active'] = False
+                assert advance_runtime_workloads(originals=originals, targets=targets, input_digest=fingerprint,
+                    phase=transition, api=api, state_dir=retained.state_dir / phase)
+                assert advance_runtime_workloads(originals=originals, targets=targets, input_digest=fingerprint,
+                    phase=transition, api=api, state_dir=retained.state_dir / phase)
+    assert effects == ['collector', 'configuration', 'collector', 'collector']
+    assert checks and rows[path]['metadata']['uid'] == retained.collector.original['metadata']['uid']
+    assert rows[path]['spec']['suspend'] is False
+
+
 class PreactivationAPI:
     """Only remote boundaries are doubled; real journals and history are used."""
 
