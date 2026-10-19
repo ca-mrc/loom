@@ -182,7 +182,9 @@ def test_repeat_refresh_preserves_retained_identity_and_observes_native_drain(re
     namespace = refresh_request.after.namespace
     iteration: int | None = None
     try:
-        _, core, _ = _load_client(cluster)
+        # API discovery can precede Deployment/ReplicaSet reconciliation. The
+        # native DNS Deployment witnesses that startup within the same budget.
+        _, core, _ = _load_client(cluster, required_addons=('dns',))
         apps = client.AppsV1Api(core.api_client)
         endpoint = 'https://127.0.0.1:' + str(cluster.get_exposed_port(6443))
         kube = yaml.safe_load(cluster.exec(['cat', '/etc/rancher/k3s/k3s.yaml']).output)

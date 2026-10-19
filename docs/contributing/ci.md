@@ -382,6 +382,9 @@ readiness. These reads share the original 90-second startup budget. API-only
 callers keep their existing boundary, and traffic/PVC assertions remain required.
 Addon failures include bounded Pod waiting reasons and warning events; the
 retirement fixture also records PVC status without logging Secrets or Pod specs.
+The repeat-refresh test also requires this native DNS readiness as an existing
+Deployment/ReplicaSet/Pod reconciliation startup witness before its functional
+30-second window; it adds no startup budget or storage prerequisite.
 
 The native repeat-refresh test retains its iteration and bounded Deployment,
 ReplicaSet, Pod and warning-event status before deleting its disposable node on

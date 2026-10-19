@@ -171,5 +171,5 @@ def test_refresh_interrupt_skips_diagnostics_and_still_stops_owned_cluster(monke
     assert caught.value is interrupt
     diagnostics.assert_not_called()
     start.assert_called_once_with(ephemeral_storage_floor='2Gi')
-    load.assert_called_once_with(cluster)
+    load.assert_called_once_with(cluster, required_addons=('dns',))
     cluster.stop.assert_called_once_with()
