@@ -405,15 +405,17 @@ async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact
             interrupt_ready_job = True
             class MutationAPI(PhaseAPI):
                 committed = None
-                def create_resource(self, doc):
+                def default_resource(self, doc):
                     nonlocal interrupt_ready_job
                     if doc['kind'] == 'Job' and self.request.request.action == 'ready' and interrupt_ready_job:
                         interrupt_ready_job = False
-                        raise OSError('interrupted before Job creation')
-                    return super().create_resource(doc)
+                        raise OSError('interrupted during Job preflight, before any create intent')
+                    return super().default_resource(doc)
                 def administration_report(self, state_dir):
                     nonlocal lose_ready_reply
-                    from scripts.ops.nebius_pool_administration_job import HTTPSPoolAdministrationJobAPI
+                    from scripts.ops.nebius_pool_administration_job import (
+                        HTTPSPoolAdministrationJobAPI,
+                    )
                     # Match the real transport: no process result is possible
                     # without both exact retained ConfigMap/Job identities.
                     HTTPSPoolAdministrationJobAPI._recorded(self, state_dir)
@@ -451,6 +453,20 @@ async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact
             blocked = await parent.activate_environment_runtime(**parent_inputs)
             assert blocked['status'] == 'environment_activation_blocked' and blocked['phase'] == 'ready'
             assert len(mutation_apis) == 1 and all(row.committed is None for row in mutation_apis.values())
+            class Later(datetime):
+                @classmethod
+                def now(cls, tz=None):
+                    return datetime.now(tz) + timedelta(hours=2)
+            from scripts.ops import nebius_pool_administration_dispatch as dispatcher
+            ready_issuance = retained.state_dir / ('activation-' + str(uuid5(activation_id, 'ready'))) / 'issued.json'
+            frozen_grant = ready_issuance.read_bytes()
+            with monkeypatch.context() as expired:
+                expired.setattr(parent, 'datetime', Later)
+                expired.setattr(dispatcher, 'datetime', Later)
+                expired_result = await parent.activate_environment_runtime(**parent_inputs)
+                assert expired_result['status'] == 'environment_activation_blocked'
+            assert ready_issuance.read_bytes() == frozen_grant
+            assert all(len(row.creates) == 1 and row.committed is None for row in mutation_apis.values())
             pending = await parent.activate_environment_runtime(**parent_inputs)
             assert pending['status'] == 'environment_activation_pending' and pending['phase'] == 'ready'
             assert len(mutation_apis) == 1
@@ -488,10 +504,6 @@ async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact
             assert len(changes) == 11, 'issuing admission operations cannot modify Kubernetes boundaries again'
             issuance_path = retained.state_dir / ('activation-' + str(issued[0][0]['transition_id'])) / 'issued.json'
             saved = issuance_path.read_bytes()
-            class Later(datetime):
-                @classmethod
-                def now(cls, tz=None):
-                    return datetime.now(tz) + timedelta(hours=2)
             with monkeypatch.context() as clock:
                 clock.setattr(activation, 'datetime', Later)
                 assert await activation.issue_environment_activation(**issued[0][0]) == issued[0][1]
@@ -502,3 +514,23 @@ async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact
             with pytest.raises(ValueError, match='environment_activation_issuance_unqualified'):
                 await activation.issue_environment_activation(**issued[0][0])
             issuance_path.write_bytes(saved)
+            receipt = retained.state_dir / ('activation-attempt-' + str(activation_id)) / 'ready.json'
+            saved_receipt = receipt.read_bytes()
+            receipt.unlink()
+            with pytest.raises(ValueError, match='environment_activation_unqualified'):
+                await parent.activate_environment_runtime(**parent_inputs)
+            receipt.write_bytes(saved_receipt)
+            receipt.chmod(0o600)
+            # A historical success is not a statement about the current head.
+            # Use a real authorized suspend, not a direct test-table rewrite.
+            active_operation = _load(policy.host, issued[-1][1]).request
+            suspend = type(active_operation).model_validate(active_operation.model_dump() | {
+                'operation_id': uuid4(), 'expected_head': active_operation.operation_id, 'action': 'suspend', 'readiness': None})
+            grant = activation._grant(policy, suspend, uuid4(), issued_at=datetime.now(UTC),
+                expires_at=datetime.now(UTC) + timedelta(minutes=1))
+            async with sessions.begin() as session:
+                await administer(session, suspend.model_dump_json().encode(), grant, action='apply')
+            with pytest.raises(ValueError, match='environment_activation_unqualified'):
+                await parent.activate_environment_runtime(**parent_inputs)
+            assert all(len(row.creates) == 2 for row in mutation_apis.values())
+            assert len(changes) == 11

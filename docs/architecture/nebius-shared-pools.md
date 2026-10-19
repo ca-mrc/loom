@@ -123,14 +123,28 @@ The protected activation issuer re-observes the application, platform, completed
 boundaries and empty task inventory before issuing an exact short-lived `ready`
 or `activate` operation. After boundary IO it rechecks the original application
 and platform process identities and pinned configuration; a newly healthy
-replacement cannot inherit an earlier process challenge. Activation selects the committed ready predecessor by its
-private administration reference, not a caller-provided state bypass. The existing
+replacement cannot inherit an earlier process challenge. Activation selects the
+committed ready predecessor by its private administration reference, not a
+caller-provided state bypass. The existing
 fixed administration Job commits that operation with participant-head CAS and fresh
 physical accounting; issuance alone performs no database mutation. Re-reading an
 issued grant preserves its original request and expiry, even after activation or
 expiration. A new attempt needs a new explicit operation identity. Public issuer
 configuration/host/workflow delivery and installed multi-owner execution remain
 separate requirements; the generic production promotion adapter is not yet wired.
+
+The internal activation parent now connects completed startup, selected boundary
+preparation, ready/active issuance and fixed administration dispatch under one
+retained attempt. Child operation IDs are deterministic. A valid original grant
+can resume interrupted Job staging through its existing create/readback journal;
+an uncertain create remains readback-only and is never blindly resubmitted.
+Expired authority permits only readback of an already-started attempt, never a
+replacement Job or renewed grant. A new attempt after ready must select the exact
+private ready predecessor. Completed replay verifies the current active head and
+physical evidence without rerunning closed startup or requiring empty task
+namespaces. Its `environment_active` result proves admission state, explicitly
+not executed build/task acceptance. This parent is not yet a public installed
+workflow.
 
 Explicit legacy adoption preserves qualified v1 authority, credentials and
 history. A completed global handoff is not repeated; standalone allocation cannot

@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 from uuid import UUID, uuid5
@@ -158,8 +159,13 @@ async def activate_environment_runtime(*, policy: PoolEnrollmentPolicyV2, operat
                     _completed(policy=policy, reference=reference, path=report_path, checksum=item['receipt_sha256'])
                     continue
                 start = policy.host.anchor_root / (str(reference.authorization_id) + '.started.json')
-                jobs = policy.host.state_root / str(reference.authorization_id) / 'execution' / 'jobs'
-                action = 'recover' if start.exists() and jobs.is_dir() else 'apply'
+                grant = _load(policy.host, reference).authorization
+                # Within the original grant, the fixed create/readback journal
+                # resumes partially staged inputs/Jobs without duplicate effects.
+                # Expired authority may only read an already-started attempt;
+                # neither a new Job nor a renewed grant is permitted.
+                fresh = grant.issued_at <= datetime.now(UTC) < grant.expires_at
+                action = 'recover' if start.exists() and not fresh else 'apply'
                 command = dict(schema_version='loom.pool-administration-command.v2', action=action,
                     reference=reference.model_dump(mode='json'))
                 report = await asyncio.to_thread(dispatch_administration, json.dumps(command).encode(),
