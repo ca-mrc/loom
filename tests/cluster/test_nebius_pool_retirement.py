@@ -20,6 +20,7 @@ from tests.ops.test_nebius_pool_role_fencing import fencing_inputs as fencing_in
 from tests.ops.test_nebius_pool_runtime import guest_runtime_inputs as guest_runtime_inputs
 from tests.ops.test_nebius_pool_runtime import runtime_inputs as runtime_inputs
 from tests.support.nebius_platform import platform_inputs as platform_inputs
+from tests.support.retained_pod_observation import wait_for_retained_pod_deletion
 from tests.unit.test_nebius_management_render import management_inputs as management_inputs
 
 pytestmark = pytest.mark.skipif(os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1",
@@ -286,16 +287,11 @@ async def test_actual_controller_retirement_preserves_templates_waits_for_pods_a
             # Retirement can stop at an earlier controller, and Kubernetes
             # deletes its Pods asynchronously. Resume until the retained Pod
             # enters deletion; its finalizer must still prevent completion.
-            deadline = time.monotonic() + 45
-            while True:
-                result = await asyncio.to_thread(retire, request, api, tmp_path)
-                assert result["status"] == "pending_drain" and result["writer_migration_complete"] is False
-                held = await asyncio.to_thread(core.read_namespaced_pod, held_pod.metadata.name, held_namespace)
-                assert held.metadata.uid == held_pod.metadata.uid
-                if held.metadata.deletion_timestamp is not None:
-                    break
-                assert time.monotonic() < deadline, "retained controller Pod did not enter deletion"
-                await asyncio.sleep(0.5)
+            await wait_for_retained_pod_deletion(
+                retire=lambda: retire(request, api, tmp_path),
+                read_pod=lambda: core.read_namespaced_pod(held_pod.metadata.name, held_namespace),
+                expected_uid=held_pod.metadata.uid,
+            )
             await asyncio.to_thread(core.patch_namespaced_pod, held_pod.metadata.name, held_namespace,
                 {"metadata": {"finalizers": None}})
             deadline = time.monotonic() + 60
