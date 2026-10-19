@@ -22,7 +22,10 @@ from sqlalchemy import text
 
 from loom.db.nebius_pool_lifecycle_schema import NebiusPoolLifecycleOperation
 from loom.nebius_kubernetes import NebiusKubernetesConnection
-from loom_service.pool_management.administration import PoolAdministrationAuthorizationV2, administer
+from loom_service.pool_management.administration import (
+    PoolAdministrationAuthorizationV2,
+    administer,
+)
 from loom_service.pool_management.capacity import digest
 from loom_service.pool_management.inspection import PoolInspectionV2, qualify_inspection
 from tests.integration.test_nebius_pool_platform_lifecycle import apply, prepare
@@ -30,7 +33,7 @@ from tests.integration.test_nebius_pool_registry import sessions as sessions
 from tests.ops.test_nebius_development_runtime_readiness import running as running
 
 
-@pytest.mark.parametrize('damage', [None, 'unpinned_authority', 'database', 'namespace', 'restart'])
+@pytest.mark.parametrize('damage', [None, 'unpinned_authority', 'database', 'namespace', 'restart', 'late-secret'])
 async def test_platform_runtime_uses_its_own_authority_without_environment_history(sessions, tmp_path, running, damage):
     name = 'scripts.ops.nebius_platform_runtime_readiness'
     assert importlib.util.find_spec(name), 'independent platform readiness consumer missing'
@@ -49,7 +52,7 @@ async def test_platform_runtime_uses_its_own_authority_without_environment_histo
     image = 'registry.example/service@sha256:' + 'e' * 64
     host = PoolAdministrationHostV2(runtime=PoolAdministrationRuntimeV2(binding=binding, service_image=image,
         database_secret='platform-db', database_url_key='admin-url', database_ca_key='ca.crt',
-        node_selector={}, tolerations=(), region='eu-north1'),
+        node_selector={'example.com/role': 'system'}, tolerations=(), region='eu-north1'),
         scope=PoolAdministrationScopeV2(installation_id=spec.installation_id, pool_id=spec.pool_id, authority='platform'),
         state_root=tmp_path / 'operations', anchor_root=tmp_path / 'anchors',
         connection=NebiusKubernetesConnection(endpoint='https://cluster.example', ca_file=tmp_path / 'ca.pem',
@@ -115,7 +118,14 @@ async def test_platform_runtime_uses_its_own_authority_without_environment_histo
             collections.setdefault(suffix, {'apiVersion': 'v1' if kind == 'Pod' else 'apps/v1',
                 'kind': kind + 'List', 'metadata': {'resourceVersion': '9'}, 'items': []})['items'].append(row)
     live = copy.deepcopy(resources)
+    gateway_after_commands = 0
     def read(path):
+        nonlocal gateway_after_commands
+        if path.endswith('/deployments/gateway') and len(commands) == 4:
+            gateway_after_commands += 1
+            if damage == 'late-secret' and gateway_after_commands == 4:
+                live['Secret:' + namespace + ':platform-db']['data']['service-url'] = base64.b64encode(
+                    url.replace(namespace, 'foreign').encode()).decode()
         if path in {'/api/v1/namespaces/kube-system', '/api/v1/namespaces/' + namespace}:
             selected = path.rsplit('/', 1)[1]
             return {'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': selected,
