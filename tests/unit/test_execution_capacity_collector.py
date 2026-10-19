@@ -51,7 +51,7 @@ def _settings(tmp_path: Path) -> ExecutionCapacityCollectorSettings:
         quota_nodes_name="non-gpu-vms",
         quota_vcpu_name="non-gpu-vcpu",
         quota_memory_name="non-gpu-memory",
-        quota_storage_name="ssd-storage",
+        quota_storage_name="compute.disk.size.network-ssd",
         quota_nodes_unit="count",
         quota_vcpu_unit="vcpu",
         quota_memory_unit="byte",
@@ -541,7 +541,7 @@ async def test_nebius_reader_validates_quota_units_region_and_node_group_state(
                     _quota("non-gpu-vms", "count", 20, 3, 1),
                     _quota("non-gpu-vcpu", "vcpu", 80, 12, 2),
                     _quota("non-gpu-memory", "byte", 160 * gib, 24 * gib, 3),
-                    _quota("ssd-storage", "byte", 2000 * gib, 300 * gib, 4),
+                    _quota("compute.disk.size.network-ssd", "byte", 2000 * gib, 300 * gib, 4),
                 ],
                 next_page_token="",
             )
@@ -613,7 +613,7 @@ async def test_nebius_reader_ignores_error_events_only_after_node_group_converge
         _quota("non-gpu-vms", "count", 20, 4, 1),
         _quota("non-gpu-vcpu", "vcpu", 200, 68, 2),
         _quota("non-gpu-memory", "byte", 640 * gib, 256 * gib, 3),
-        _quota("ssd-storage", "byte", 2000 * gib, 300 * gib, 4),
+        _quota("compute.disk.size.network-ssd", "byte", 2000 * gib, 300 * gib, 4),
     ]
     failed_scale_event = SimpleNamespace(
         last_occurrence=SimpleNamespace(
@@ -671,7 +671,7 @@ async def test_nebius_reader_uses_tenant_quotas_and_derives_unexposed_memory(
             items=[
                 _quota("non-gpu-vms", "count", 20, 3, 1),
                 _quota("non-gpu-vcpu", "vcpu", 80, 12, 2),
-                _quota("ssd-storage", "byte", 2000 * gib, 300 * gib, 4),
+                _quota("compute.disk.size.network-ssd", "byte", 2000 * gib, 300 * gib, 4),
             ],
             next_page_token="",
         )
@@ -953,6 +953,49 @@ def _platform_client() -> Any:
     )
 
 
+@pytest.mark.asyncio
+async def test_native_disk_class_rejects_old_storage_quota_before_publication(tmp_path: Path) -> None:
+    from nebius.api.nebius.mk8s.v1 import DiskSpec
+
+    settings = _settings(tmp_path).model_copy(update={
+        "quota_storage_name": "compute.disk.size.network-ssd",
+    })
+    spec = _node_group_spec()
+    spec.template.boot_disk = DiskSpec(
+        size_gibibytes=93, type=DiskSpec.DiskType.NETWORK_SSD_NON_REPLICATED,
+    )
+    reader = NebiusCapacityReader(
+        settings, sdk=object(), quota_client=object(), node_group_client=object(),
+        platform_client=_platform_client(),
+    )
+    with pytest.raises(NebiusObservationError, match=r"storage quota.*boot disk"):
+        await reader._node_group_placement(SimpleNamespace(
+            spec=spec, status=SimpleNamespace(node_count=0),
+        ))
+
+
+@pytest.mark.asyncio
+async def test_nrd_disk_charges_its_actual_raw_size_and_quota_class(tmp_path: Path) -> None:
+    from nebius.api.nebius.mk8s.v1 import DiskSpec
+
+    settings = _settings(tmp_path).model_copy(update={
+        "quota_storage_name": "compute.disk.size.network-ssd-non-replicated",
+    })
+    spec = _node_group_spec()
+    spec.template.boot_disk = DiskSpec(
+        size_gibibytes=93, type=DiskSpec.DiskType.NETWORK_SSD_NON_REPLICATED,
+    )
+    reader = NebiusCapacityReader(
+        settings, sdk=object(), quota_client=object(), node_group_client=object(),
+        platform_client=_platform_client(),
+    )
+    placement = await reader._node_group_placement(SimpleNamespace(
+        spec=spec, status=SimpleNamespace(node_count=0),
+    ))
+    assert placement.raw_node.storage_mib == 93 * 1024
+    assert placement.template["boot_disk_type"] == "NETWORK_SSD_NON_REPLICATED"
+
+
 def _daemon(*, uid: str, cpu: str = "100m", generation: int = 2, gpu: bool = False) -> Any:
     spec = SimpleNamespace(
         containers=[_resource_container(cpu=cpu, memory="128Mi")],
@@ -1152,7 +1195,7 @@ async def test_native_shape_and_zero_quota_override_old_policy_billing_shape(
     quotas = [
         _quota("non-gpu-vms", "count", 0, 0, 1),
         _quota("non-gpu-vcpu", "vcpu", 0, 0, 2),
-        _quota("ssd-storage", "byte", 0, 0, 3),
+        _quota("compute.disk.size.network-ssd", "byte", 0, 0, 3),
     ]
     native = SimpleNamespace(
         metadata=SimpleNamespace(id="nodegroup-test", parent_id="cluster-test", resource_version=9),
@@ -1210,7 +1253,7 @@ async def test_native_shape_and_zero_quota_override_old_policy_billing_shape(
     assert "memory" not in snapshot.quota_resources
     assert snapshot.quota_resources["storage"].used == 81920
     assert snapshot.quota_resources["storage"].parent_id == "tenant-test"
-    assert snapshot.quota_resources["storage"].name == "ssd-storage"
+    assert snapshot.quota_resources["storage"].name == "compute.disk.size.network-ssd"
     assert snapshot.quota_resources["vcpu"].used == 16000
 
     class Kubernetes:

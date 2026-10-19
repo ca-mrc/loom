@@ -62,6 +62,52 @@ run "reject_unbounded_capacity" {
   expect_failures = [var.integration_platform]
 }
 
+run "execution_build_disk_is_explicit_and_leaves_system_unchanged" {
+  command = plan
+  variables {
+    integration_platform = {
+      bucket_prefix       = "loom-platform-test"
+      execution_disk_type = "NETWORK_SSD_NON_REPLICATED"
+      execution_disk_gib  = 93
+    }
+  }
+  assert {
+    condition = (
+      nebius_mk8s_v1_node_group.integration["execution"].template.boot_disk.type == "NETWORK_SSD_NON_REPLICATED" &&
+      nebius_mk8s_v1_node_group.integration["execution"].template.boot_disk.size_gibibytes == 93 &&
+      nebius_mk8s_v1_node_group.integration["system"].template.boot_disk.type == "NETWORK_SSD" &&
+      nebius_mk8s_v1_node_group.integration["system"].template.boot_disk.size_gibibytes == 80 &&
+      nebius_mk8s_v1_node_group.integration["execution"].autoscaling.min_node_count == 0 &&
+      nebius_mk8s_v1_node_group.integration["execution"].autoscaling.max_node_count == 100
+    )
+    error_message = "An explicitly selected high-I/O execution disk must reach the node template without changing the system disk or execution node ceiling."
+  }
+}
+
+run "reject_invalid_nrd_allocation_unit" {
+  command = plan
+  variables {
+    integration_platform = {
+      bucket_prefix       = "loom-platform-test"
+      execution_disk_type = "NETWORK_SSD_NON_REPLICATED"
+      execution_disk_gib  = 100
+    }
+  }
+  expect_failures = [var.integration_platform]
+}
+
+run "reject_fractional_execution_disk" {
+  command = plan
+  variables { integration_platform = { bucket_prefix = "loom-platform-test", execution_disk_gib = 93.5 } }
+  expect_failures = [var.integration_platform]
+}
+
+run "reject_unknown_execution_disk_class" {
+  command = plan
+  variables { integration_platform = { bucket_prefix = "loom-platform-test", execution_disk_type = "UNKNOWN" } }
+  expect_failures = [var.integration_platform]
+}
+
 run "native_builder_scales_from_zero" {
   command = plan
   variables { integration_platform = { bucket_prefix = "loom-platform-test", execution_max_nodes = 2 } }

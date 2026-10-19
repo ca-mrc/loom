@@ -43,6 +43,11 @@ DEFAULT_TASK_RESOURCE_REQUESTS = {
     "verifier_sandbox": {"cpu_millis": 200, "memory_mib": 512, "ephemeral_storage_mib": 512},
 }
 
+EXECUTION_DISK_STORAGE_QUOTAS = {
+    "NETWORK_SSD": "compute.disk.size.network-ssd",
+    "NETWORK_SSD_NON_REPLICATED": "compute.disk.size.network-ssd-non-replicated",
+}
+
 
 class NebiusPlatformError(ValueError):
     """An input cannot describe an independent, reproducible environment."""
@@ -114,6 +119,7 @@ def validate_environment(config: dict[str, Any]) -> None:
             "task_identity_policy",
             "guest_execution_target",
             "emulated_auth_execution_target",
+            "execution_disk_type",
         }
         != expected
     ):
@@ -125,6 +131,9 @@ def validate_environment(config: dict[str, Any]) -> None:
         raise NebiusPlatformError(str(exc)) from exc
     if type(config.get("public_tls_bootstrap", False)) is not bool:
         raise NebiusPlatformError("public_tls_bootstrap must be a boolean")
+    disk_type = config.get("execution_disk_type", "NETWORK_SSD")
+    if not isinstance(disk_type, str) or disk_type not in EXECUTION_DISK_STORAGE_QUOTAS:
+        raise NebiusPlatformError("execution_disk_type must be NETWORK_SSD or NETWORK_SSD_NON_REPLICATED")
     if "task_egress" in config:
         from loom_llm_gateway.task_egress import TaskEgressConfig
 
@@ -399,6 +408,9 @@ def _regional_config(config: dict[str, Any], target: dict[str, Any]) -> dict[str
     result = dict(config)
     result.pop("regional_execution_targets", None)
     result.pop("execution_resource_quota", None)
+    # Regional node groups retain their independently owned SSD templates.
+    # The primary build disk selection must not change their quota class.
+    result.pop("execution_disk_type", None)
     # Native image builds remain in the primary region, even when execution
     # targets are configured elsewhere.
     result.pop("task_image_builder", None)
@@ -1112,6 +1124,10 @@ def _execution_documents(
                         if labels.get("kubernetes.io/metadata.name") == "loom":
                             labels["kubernetes.io/metadata.name"] = ns
             if doc["kind"] == "ConfigMap":
+                if filename == "nebius-capacity-collector.yaml":
+                    doc["data"]["LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_STORAGE_NAME"] = (
+                        EXECUTION_DISK_STORAGE_QUOTAS[config.get("execution_disk_type", "NETWORK_SSD")]
+                    )
                 if filename == "nebius-capacity-collector.yaml" and builder is not None:
                     doc["data"]["LOOM_EXECUTION_CAPACITY_COLLECTOR_BUILD_CONCURRENCY_LIMIT"] = str(
                         builder.max_concurrent
