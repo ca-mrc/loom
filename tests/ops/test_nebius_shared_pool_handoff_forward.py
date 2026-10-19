@@ -158,7 +158,9 @@ def test_shared_probe_rejects_incompatible_catalog_selection_before_io(
     # No client is constructed: incompatible authority must fail before reads.
     probes = object.__new__(HTTPSSharedPoolRuntimeProbes)
     probes.shared_bindings = object()
-    with pytest.raises(ValueError):
+    message = ('shared runtime observation binding differs' if selection == 'foreign-handoff'
+        else 'shared runtime observation cannot select an in-progress catalog')
+    with pytest.raises(ValueError, match=message):
         probes.inspect(state_dir=tmp_path,
             _shared_handoff=object() if selection == 'foreign-handoff' else None,
             _preactivation_catalog=object() if selection == 'preactivation' else None)

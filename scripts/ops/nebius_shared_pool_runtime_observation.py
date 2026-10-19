@@ -11,7 +11,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from scripts.ops.nebius_development_runtime_probes import HTTPSDevelopmentRuntimeProbes
 from scripts.ops.nebius_ingress_stage import _key, _uid
@@ -19,6 +19,9 @@ from scripts.ops.nebius_management_switch import _matches
 from scripts.ops.nebius_shared_pool_activation import shared_forward_activation_view
 from scripts.ops.nebius_shared_pool_handoff_live import SharedPoolGuardBindings
 from scripts.ops.nebius_shared_pool_operation import _files, _history
+
+if TYPE_CHECKING:
+    from scripts.ops.nebius_pool_preactivation_operation import RetainedPreactivationCatalog
 
 
 def shared_forward_runtime_view(*, bindings: SharedPoolGuardBindings, state_dir: Path
@@ -161,7 +164,10 @@ class HTTPSSharedPoolRuntimeProbes(HTTPSDevelopmentRuntimeProbes):
 
     def inspect(self, *, state_dir: Path, _prechild_phase: str | None = None,
             _expected_record: dict[str, Any] | None = None,
-            _shared_handoff: SharedPoolGuardBindings | None = None) -> dict[str, dict[str, Any]]:
+            _shared_handoff: SharedPoolGuardBindings | None = None,
+            _preactivation_catalog: RetainedPreactivationCatalog | None = None) -> dict[str, dict[str, Any]]:
+        if _preactivation_catalog is not None:
+            raise ValueError('shared runtime observation cannot select an in-progress catalog')
         if _shared_handoff is not None and _shared_handoff != self.shared_bindings:
             raise ValueError('shared runtime observation binding differs')
         return super().inspect(state_dir=state_dir, _prechild_phase=_prechild_phase,
