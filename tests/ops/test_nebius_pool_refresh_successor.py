@@ -5,11 +5,13 @@ import copy
 import hashlib
 import io
 import json
+import ssl
 import zipfile
 from dataclasses import asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import certifi
 import pytest
 from scripts.ops.nebius_ingress_stage import _key
 from scripts.ops.nebius_platform_rollout_successor import (
@@ -254,8 +256,8 @@ def test_completed_ordinary_successor_preflight_is_read_only_and_rejects_drift(p
         async def publication(actual, baseline):
             assert actual == selected_context and baseline == pool
             return successor
-        import ssl
-        certificate = ssl.DER_cert_to_PEM_cert(ssl.create_default_context().get_ca_certs(binary_form=True)[0]).encode()
+        trust = ssl.create_default_context(cafile=certifi.where())
+        certificate = ssl.DER_cert_to_PEM_cert(trust.get_ca_certs(binary_form=True)[0]).encode()
         def ca(path, limit):
             # The old install fixture stores the literal 'fixture-ca'. Supply
             # valid read-only TLS trust at this external certificate boundary.
