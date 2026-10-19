@@ -60,6 +60,13 @@ class EnvironmentBoundaryWorkloads(_Workloads):
                 raise ValueError('environment_boundary_reader_not_ready')
         self.qualify()
 
+    def check_inventory(self) -> None:
+        if self.build_profile is None:
+            raise ValueError('environment_boundary_build_profile_missing')
+        namespaces = {self.build_profile.target.namespace, *(doc['metadata']['namespace'] for doc in self.readers.values())}
+        for namespace in sorted(namespaces):
+            self._reader_boundary(namespace)
+
     def policy_ready(self) -> bool:
         self.qualify()
         profile = self.build_profile

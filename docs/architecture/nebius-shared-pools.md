@@ -107,9 +107,18 @@ platform checks using a fresh selected-participant inspection. It rejects a
 changed participant head, pool authority, data material or application process
 during the combined observation. The result
 `preactivation_runtime_verified_closed` still grants no admission: the protected
-activation parent must open and verify the selected worker/build boundaries and
-issue scoped ready/activate operations. Public host/workflow delivery and installed
-multi-owner execution remain separate acceptance requirements.
+activation parent must issue scoped ready/activate operations. Selected boundary
+preparation now consumes this evidence and journals the exact build-namespace PSA
+exception, followed by removal of both temporary closed-intake quota limits. It
+retains quota UIDs; shared capacity remains the allocator's responsibility, not
+per-environment budgets. It requires a policy-specific invalid-Pod dry-run denial
+before and after the build PSA change, and complete namespace inventory containing
+only the exact running readers, with no dormant Jobs or other task producers.
+Lost write replies permit readback, not blind retries. Readiness accepts changed
+foundation resources only through anchored boundary successor journals, preserving
+original startup/creation receipts. `runtime_boundaries_prepared_closed` does not
+open participant admission. Scoped ready/activate issuance, public host/workflow
+delivery and installed multi-owner execution remain separate requirements.
 
 Explicit legacy adoption preserves qualified v1 authority, credentials and
 history. A completed global handoff is not repeated; standalone allocation cannot

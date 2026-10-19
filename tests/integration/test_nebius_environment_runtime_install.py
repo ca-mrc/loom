@@ -329,7 +329,8 @@ async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact
             allow_quotas = False
             class Boundaries(Workloads):
                 def policy_ready(self):
-                    return True
+                    return allow_quotas or remote.kubernetes['/api/v1/namespaces/build-red']['metadata']['labels'][
+                        'pod-security.kubernetes.io/enforce'] == 'restricted'
                 def check_inventory(self):
                     pass  # Actual inventory transport is separately covered at the HTTP boundary.
             @contextmanager
@@ -343,6 +344,7 @@ async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact
             boundary_inputs = {**final_inputs, 'boundary_connection': boundary_connection}
             pending = await boundaries.prepare_environment_boundaries(**boundary_inputs)
             assert pending['status'] == 'runtime_boundaries_pending' and pending['admission_open'] is False
+            assert pending['phase'] == 'build-psa', 'failed post-CAS policy proof must prevent every quota release'
             assert len(changes) == 9 and changes[-1] == 'Namespace:-:build-red'
             assert remote.kubernetes['/api/v1/namespaces/build-red']['metadata']['labels']['pod-security.kubernetes.io/enforce'] == 'privileged'
             assert remote.kubernetes['/api/v1/namespaces/build-red/resourcequotas/loom-execution-disabled']['spec']['hard'] == {'pods': '0'}
@@ -358,3 +360,12 @@ async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact
             assert (await boundaries.prepare_environment_boundaries(**boundary_inputs))['status'] == 'runtime_boundaries_prepared_closed'
             assert len(changes) == 11, 'lost-reply and completed recovery must never repeat PATCH'
             assert startup.load_started_environment_runtime(policy=policy, operation_id=kwargs['operation_id']).resources == current.resources
+            child = retained.state_dir / 'boundaries' / 'build-psa' / 'transition.json'
+            saved = child.read_bytes()
+            child.unlink()
+            with pytest.raises(ValueError, match='environment_boundary_history_unqualified'):
+                boundaries.load_environment_boundary_progress(policy=policy, started=current)
+            child.write_bytes(saved)
+            child.chmod(0o600)
+            assert boundaries.load_environment_boundary_progress(policy=policy, started=current).cursor == {
+                'phases': {'build-psa': 'complete', 'worker-quota': 'complete', 'build-quota': 'complete'}}

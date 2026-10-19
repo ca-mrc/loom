@@ -27,6 +27,7 @@ import httpx
 from scripts.ops import nebius_certificates as state
 from scripts.ops.nebius_environment_foundation import FoundationCloud
 from scripts.ops.nebius_environment_foundation import _load as load_foundation
+from scripts.ops.nebius_environment_runtime_boundaries import load_environment_boundary_progress
 from scripts.ops.nebius_environment_runtime_install import _observe, _Resources
 from scripts.ops.nebius_environment_runtime_probes import (
     EnvironmentComponent,
@@ -164,6 +165,8 @@ async def observe_environment_runtime(*, policy: PoolEnrollmentPolicyV2, operati
     """Fresh process/data readback from anchored completed startup, not activation."""
     try:
         retained = load_started_environment_runtime(policy=policy, operation_id=operation_id)
+        boundaries = load_environment_boundary_progress(policy=policy, started=retained)
+        options = {key: (doc,) for key, doc in retained.resources.items()} | boundaries.options
         staged = retained.staged
         observation = await asyncio.to_thread(_observe, policy, staged.state_dir / 'readiness-observations', connect)
         if observation is None:
@@ -187,13 +190,14 @@ async def observe_environment_runtime(*, policy: PoolEnrollmentPolicyV2, operati
                 or policy.host.runtime.service_image != bundles[policy.manager_publication.candidate_id].candidate['images']['service']['image_ref']):
             raise ValueError
         _published_profiles(policy, app, catalog, plan)
-        successors: dict[str, tuple[dict[str, Any], ...]] = {'k8s:' + key: (doc,) for key, doc in retained.resources.items()
+        successors: dict[str, tuple[dict[str, Any], ...]] = {'k8s:' + key: docs for key, docs in options.items()
             if 'k8s:' + key in staged.plan['foundation_identities']}
         foundation = await observe_foundation(state_dir=policy.foundation_dir, reference=policy.foundation,
             kubernetes=kubernetes, cloud=cloud, public_http=public_http, _runtime_successors=successors)
         if foundation.foundation.identities != staged.plan['foundation_identities']:
             raise ValueError
-        files = {**retained.files, policy.foundation_dir / 'material.json': state._private_read(policy.foundation_dir / 'material.json', limit=8 * 1024**2)}
+        files = {**retained.files, **boundaries.files,
+            policy.foundation_dir / 'material.json': state._private_read(policy.foundation_dir / 'material.json', limit=8 * 1024**2)}
         material = _json(files[policy.foundation_dir / 'material.json'])
         if digest(material) != foundation.foundation.identities['credentials:material']:
             raise ValueError
@@ -203,9 +207,10 @@ async def observe_environment_runtime(*, policy: PoolEnrollmentPolicyV2, operati
                     or any(state._private_read(path, limit=8 * 1024**2) != raw for path, raw in files.items())):
                 raise ValueError('environment_runtime_readiness_evidence_changed')
         async def resources() -> None:
-            for doc in retained.resources.values():
+            for choices in options.values():
+                doc = choices[0]
                 actual = await kubernetes._request('GET', runtime_resource_path(doc) + '/' + doc['metadata']['name'])
-                if actual is None or not _matches(actual, doc, _uid(doc)):
+                if actual is None or not any(_matches(actual, allowed, _uid(doc)) for allowed in choices):
                     raise ValueError('environment_runtime_resource_changed')
             qualify()
         await resources()
@@ -251,7 +256,8 @@ async def observe_environment_runtime(*, policy: PoolEnrollmentPolicyV2, operati
         return {'status': 'runtime_processes_verified_closed', 'participant_id': str(policy.participant.participant_id),
             'operation_id': str(operation_id), 'admission_open': False, 'processes': processes,
             'observed_at': foundation.foundation.observed_at.isoformat(), 'valid_until': expires.isoformat(),
-            'foundation': after.model_dump(mode='json'), 'inspection': observation, 'runtime_sha256': digest(staged.plan)}
+            'foundation': after.model_dump(mode='json'), 'inspection': observation, 'runtime_sha256': digest(staged.plan),
+            'boundary_state_sha256': boundaries.sha256}
     except Exception:
         raise ValueError('environment_runtime_readiness_unqualified') from None
 
@@ -278,7 +284,10 @@ async def observe_environment_pre_activation(*, policy: PoolEnrollmentPolicyV2, 
         if environment is None:
             return None
         retained = load_started_environment_runtime(policy=policy, operation_id=operation_id)
-        if digest(retained.staged.plan) != environment['runtime_sha256']:
+        boundaries = load_environment_boundary_progress(policy=policy, started=retained)
+        options = {key: (doc,) for key, doc in retained.resources.items()} | boundaries.options
+        files = {**retained.files, **boundaries.files}
+        if digest(retained.staged.plan) != environment['runtime_sha256'] or boundaries.sha256 != environment['boundary_state_sha256']:
             raise ValueError
         observation = await asyncio.to_thread(_observe, policy, retained.staged.state_dir / 'preactivation-observations', connect,
             require_capacity=True, platform_authorization_id=platform_policy.authority.authorization_id)
@@ -295,7 +304,7 @@ async def observe_environment_pre_activation(*, policy: PoolEnrollmentPolicyV2, 
         material = policy.foundation_dir / 'material.json'
         def qualify() -> None:
             if (not snapshot.observed_at <= datetime.now(UTC) < expires or _policy(policy) != retained.staged.plan['policy']
-                    or any(state._private_read(path, limit=8 * 1024**2) != raw for path, raw in retained.files.items())
+                    or any(state._private_read(path, limit=8 * 1024**2) != raw for path, raw in files.items())
                     or digest(_json(state._private_read(material, limit=8 * 1024**2))) !=
                         environment['foundation']['foundation']['identities']['credentials:material']):
                 raise ValueError('environment_preactivation_evidence_changed')
@@ -312,9 +321,10 @@ async def observe_environment_pre_activation(*, policy: PoolEnrollmentPolicyV2, 
         # The application was observed first. A restart while the platform was
         # being checked must invalidate the combined result, not survive as a
         # formerly healthy component in an otherwise current evidence bundle.
-        for doc in retained.resources.values():
+        for choices in options.values():
+            doc = choices[0]
             actual = await kubernetes._request('GET', runtime_resource_path(doc) + '/' + doc['metadata']['name'])
-            if actual is None or not _matches(actual, doc, _uid(doc)):
+            if actual is None or not any(_matches(actual, allowed, _uid(doc)) for allowed in choices):
                 raise ValueError
         factory: ProbeConnection = probe_connection or partial(_process_connection, policy=policy,
             resources=retained.resources, namespaces=retained.staged.plan['namespace_uids'])
