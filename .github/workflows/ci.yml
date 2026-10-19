@@ -341,7 +341,10 @@ jobs:
           # Read-only full wheel cache; only ci-dependency-cache.yml saves it.
           save-cache: false
           prune-cache: false
-          cache-suffix: ci-wheels-v1
+          cache-suffix: ci-wheels-v2
+          # Same path on GitHub-hosted and self-hosted runners; setup-uv's
+          # defaults differ and the cache version hashes the path.
+          cache-local-path: /home/runner/.cache/uv
           cache-dependency-glob: uv.lock
 
       - name: Set up Python 3.11
@@ -428,7 +431,10 @@ jobs:
           # Read-only full wheel cache; only ci-dependency-cache.yml saves it.
           save-cache: false
           prune-cache: false
-          cache-suffix: ci-wheels-v1
+          cache-suffix: ci-wheels-v2
+          # Same path on GitHub-hosted and self-hosted runners; setup-uv's
+          # defaults differ and the cache version hashes the path.
+          cache-local-path: /home/runner/.cache/uv
           cache-dependency-glob: uv.lock
 
       - name: Set up Python 3.11
@@ -601,7 +607,10 @@ jobs:
           # Read-only full wheel cache; only ci-dependency-cache.yml saves it.
           save-cache: false
           prune-cache: false
-          cache-suffix: ci-wheels-v1
+          cache-suffix: ci-wheels-v2
+          # Same path on GitHub-hosted and self-hosted runners; setup-uv's
+          # defaults differ and the cache version hashes the path.
+          cache-local-path: /home/runner/.cache/uv
           cache-dependency-glob: uv.lock
 
       - name: Set up Python 3.11
@@ -648,7 +657,10 @@ jobs:
           # Read-only full wheel cache; only ci-dependency-cache.yml saves it.
           save-cache: false
           prune-cache: false
-          cache-suffix: ci-wheels-v1
+          cache-suffix: ci-wheels-v2
+          # Same path on GitHub-hosted and self-hosted runners; setup-uv's
+          # defaults differ and the cache version hashes the path.
+          cache-local-path: /home/runner/.cache/uv
           cache-dependency-glob: uv.lock
 
       - name: Set up Python 3.11
@@ -784,7 +796,10 @@ jobs:
           # Read-only full wheel cache; only ci-dependency-cache.yml saves it.
           save-cache: false
           prune-cache: false
-          cache-suffix: ci-wheels-v1
+          cache-suffix: ci-wheels-v2
+          # Same path on GitHub-hosted and self-hosted runners; setup-uv's
+          # defaults differ and the cache version hashes the path.
+          cache-local-path: /home/runner/.cache/uv
           cache-dependency-glob: uv.lock
 
       - name: Sync locked coverage tool
@@ -958,7 +973,10 @@ jobs:
           # Read-only full wheel cache; only ci-dependency-cache.yml saves it.
           save-cache: false
           prune-cache: false
-          cache-suffix: ci-wheels-v1
+          cache-suffix: ci-wheels-v2
+          # Same path on GitHub-hosted and self-hosted runners; setup-uv's
+          # defaults differ and the cache version hashes the path.
+          cache-local-path: /home/runner/.cache/uv
           cache-dependency-glob: uv.lock
 
       - name: Install locked service contract dependencies
@@ -1101,7 +1119,10 @@ jobs:
           # Read-only full wheel cache; only ci-dependency-cache.yml saves it.
           save-cache: false
           prune-cache: false
-          cache-suffix: ci-wheels-v1
+          cache-suffix: ci-wheels-v2
+          # Same path on GitHub-hosted and self-hosted runners; setup-uv's
+          # defaults differ and the cache version hashes the path.
+          cache-local-path: /home/runner/.cache/uv
           cache-dependency-glob: uv.lock
 
       - name: Set up Python 3.11
@@ -1223,7 +1244,10 @@ jobs:
           # Read-only full wheel cache; only ci-dependency-cache.yml saves it.
           save-cache: false
           prune-cache: false
-          cache-suffix: ci-wheels-v1
+          cache-suffix: ci-wheels-v2
+          # Same path on GitHub-hosted and self-hosted runners; setup-uv's
+          # defaults differ and the cache version hashes the path.
+          cache-local-path: /home/runner/.cache/uv
           cache-dependency-glob: uv.lock
 
       - name: Set up Python 3.11
@@ -1308,7 +1332,10 @@ jobs:
           # Read-only full wheel cache; only ci-dependency-cache.yml saves it.
           save-cache: false
           prune-cache: false
-          cache-suffix: ci-wheels-v1
+          cache-suffix: ci-wheels-v2
+          # Same path on GitHub-hosted and self-hosted runners; setup-uv's
+          # defaults differ and the cache version hashes the path.
+          cache-local-path: /home/runner/.cache/uv
           cache-dependency-glob: uv.lock
 
       - name: Set up Python 3.11
