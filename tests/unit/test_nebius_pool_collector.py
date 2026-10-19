@@ -53,7 +53,7 @@ def native_reader(config, *, count=1):
         quota_client=SimpleNamespace(list=lambda *_a, **_kw: _awaitable(SimpleNamespace(items=[
             _quota("non-gpu-vms", "count", 10, 0, 1), _quota("non-gpu-vcpu", "vcpu", 40, 0, 2),
             _quota("non-gpu-memory", "byte", 80 * 1024**3, 0, 3),
-            _quota("ssd-storage", "byte", 800 * 1024**3, 0, 4)], next_page_token=""))),
+            _quota("compute.disk.size.network-ssd", "byte", 800 * 1024**3, 0, 4)], next_page_token=""))),
         node_group_client=SimpleNamespace(get=lambda *_a, **_kw: _awaitable(SimpleNamespace(
             metadata=SimpleNamespace(id=config.nebius_node_group_id, parent_id="cluster-test", resource_version=9),
             spec=_node_group_spec(), status=SimpleNamespace(state=_enum("RUNNING"), node_count=count,
