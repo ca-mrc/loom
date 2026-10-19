@@ -31,6 +31,12 @@ class SupplyError(RuntimeError):
     pass
 
 
+class SupplyHTTPError(SupplyError):
+    def __init__(self, method: str, path: str, status: int) -> None:
+        self.status = status
+        super().__init__(f"GitHub {method} {path.split('?')[0]} returned HTTP {status}")
+
+
 def atomic_json(path: Path, value: Any) -> None:
     temporary = path.with_suffix(path.suffix + ".new")
     temporary.write_text(json.dumps(value, sort_keys=True) + "\n")
@@ -145,9 +151,7 @@ class API:
         except urllib.error.HTTPError as exc:
             if missing_ok and exc.code == 404:
                 return None
-            raise SupplyError(
-                f"GitHub {method} {path.split('?')[0]} returned HTTP {exc.code}"
-            ) from None
+            raise SupplyHTTPError(method, path, exc.code) from None
         except (OSError, TimeoutError):
             raise SupplyError(f"GitHub {method} {path.split('?')[0]} transport failed") from None
         return json.loads(raw) if raw else None
@@ -308,7 +312,15 @@ def retired_worker(api: API, root: Path, record: dict[str, Any], inventory: dict
         if run["display_title"] != run_title(record["slot"], record["nonce"]):
             raise SupplyError("refusing cancellation of an unrelated workflow")
         if run["status"] != "completed":
-            api.request("POST", f"/actions/runs/{record['run_id']}/cancel")
+            try:
+                api.request("POST", f"/actions/runs/{record['run_id']}/cancel")
+            except SupplyHTTPError as exc:
+                if exc.status != 409:
+                    raise
+                # Cancellation can race completion while run status still lags.
+                # Keep this slot's record until terminal readback; other supply
+                # work may continue without fabricating a retirement receipt.
+                return False
     folder = root / f"slot-{record['slot']:02d}"
     (folder / "jitconfig").unlink(missing_ok=True)
     atomic_json(folder / "retired.json", {**record, "phase": "retired", "retired_at": time.time()})
