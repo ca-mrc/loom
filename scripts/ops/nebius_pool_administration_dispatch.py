@@ -242,6 +242,13 @@ def dispatch_administration(content: bytes, *, action: str, host: PoolAdministra
                     # A missing apply anchor with an apply journal is data loss.
                     if (job_state / 'jobs' / ('loom-pool-admin-' + original.authorization.authorization_id.hex)).exists():
                         raise ValueError
+                    # Persist the local recovery layout before announcing an
+                    # apply attempt. No Kubernetes effect occurs here. A crash
+                    # immediately after the start anchor can then resume staging;
+                    # an already-started attempt with missing inputs still refuses.
+                    private_state._private_directory(job_state)
+                    private_state._private_directory(job_state / 'inputs')
+                    private_state._private_directory(job_state / 'jobs')
                     private_state._write_private(start, command.reference.model_dump_json().encode())
                     private_state._sync_directory(host.anchor_root)
             with connect(request) as api:
