@@ -57,5 +57,18 @@ async def test_real_api_accepts_closed_foundation_and_retains_exact_provider_ids
                 assert await provider.apply(context, step, create=False) == before[step.key]
             quotas = (await http.get('/api/v1/namespaces/work-red/resourcequotas')).json()['items']
             assert len(quotas) == 1 and quotas[0]['spec']['hard']['pods'] == '0'
+            # Independent activation retains the quota's identity but removes
+            # only the temporary closed-intake limits. Verify actual API
+            # defaulting for this representation, without enabling test Pods.
+            original = quotas[0]
+            path = '/api/v1/namespaces/work-red/resourcequotas/' + original['metadata']['name']
+            response = await http.patch(path + '?dryRun=All', headers={'Content-Type': 'application/json-patch+json'},
+                json=[{'op': 'test', 'path': '/metadata/uid', 'value': original['metadata']['uid']},
+                    {'op': 'test', 'path': '/metadata/resourceVersion', 'value': original['metadata']['resourceVersion']},
+                    {'op': 'replace', 'path': '/spec', 'value': {}}])
+            assert response.status_code == 200, response.text
+            assert response.json()['metadata']['uid'] == original['metadata']['uid']
+            assert response.json().get('spec', {}).get('hard', {}) == {}
+            assert (await http.get(path)).json()['spec']['hard'] == {'pods': '0'}
     finally:
         container.stop()
