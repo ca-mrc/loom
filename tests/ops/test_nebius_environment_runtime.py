@@ -2,12 +2,17 @@
 from __future__ import annotations
 
 import copy
+import base64
+import hashlib
 import importlib
 import json
 from pathlib import Path
 
 import pytest
 from tests.integration.test_nebius_pool_profile_registry import catalog
+from tests.ops.test_nebius_development_build_cloud import publisher_cloud as publisher_cloud
+from tests.ops.test_nebius_development_collector_cloud import collector_cloud as collector_cloud
+from tests.ops.test_nebius_development_collector_cloud import original_cloud as original_cloud
 from tests.ops.test_nebius_pool_runtime import desired_profile, env
 from tests.ops.test_nebius_pool_runtime import runtime_inputs as runtime_inputs
 from tests.support.nebius_platform import platform_inputs as platform_inputs
@@ -145,3 +150,72 @@ def test_runtime_cannot_substitute_data_or_authority(runtime_request, damage):
         runtime_request['profiles'] = PoolProfileCatalog.model_validate(body)
     with pytest.raises(ValueError, match='environment_runtime_unqualified'):
         render(**runtime_request)
+
+
+@pytest.fixture
+def material_request(runtime_request, publisher_cloud):
+    from scripts.ops.nebius_development_build_cloud import DevelopmentRegistryCloudScope
+
+    from loom_service.environment_management.credentials import generate_material
+
+    cloud = publisher_cloud
+    declaration = runtime_request['declaration']
+    config = declaration.platform_config
+    config.update(project_id=cloud.scope['project_id'], quota_parent_id=cloud.scope['tenant_id'], region=cloud.scope['region'])
+    runtime_request['declaration'] = EnvironmentFoundationDeclarationV2.model_validate(declaration.model_dump() | {
+        'platform_config_json': json.dumps(config)})
+    profiles = runtime_request['profiles'].model_dump(mode='json')
+    profiles['task_images'][0]['settings']['registry_repository'] = cloud.repositories[0]
+    runtime_request['profiles'] = PoolProfileCatalog.model_validate(profiles)
+    token = 'test-pool-machine-token-' + 'a' * 40
+    runtime_request['machine'] = runtime_request['machine'].model_copy(update={'token_sha256': hashlib.sha256(token.encode()).hexdigest()})
+    material = generate_material(namespace='app-red', tls_secret_name='test-db-tls')
+    material['loom-platform-storage'] = {'access-key': 'canonical-access', 'secret-key': 'canonical-secret',
+        'source-access-key': 'source-access', 'source-secret-key': 'source-secret'}
+    return dict(runtime=runtime_request, foundation_material=material, token=token,
+        registry_scope=DevelopmentRegistryCloudScope.model_validate(cloud.scope), registry_credential=cloud.credential)
+
+
+def test_runtime_material_delivers_only_scoped_machine_and_actuator_credentials(material_request):
+    from sqlalchemy.engine import make_url
+
+    material = getattr(subject(), 'render_runtime_material', None)
+    assert callable(material), 'runtime deployment still has unresolved credential references'
+    documents = material(**material_request)
+    secrets = {(row['metadata']['namespace'], row['metadata']['name']): {
+        key: base64.b64decode(value).decode() for key, value in row['data'].items()} for row in documents}
+    assert all(row['kind'] == 'Secret' and row['immutable'] is True for row in documents)
+    machine = material_request['runtime']['machine']
+    name = 'loom-pool-machine-' + machine.machine_id.hex
+    assert secrets['app-red', name] == secrets['work-red', name] == {'token': material_request['token']}
+    database = secrets['work-red', 'loom-execution-actuator-db']
+    assert set(database) == {'db-url', 'ca.crt'}
+    url = make_url(database['db-url'])
+    assert (url.username, url.host, url.database) == ('loom_actuator', 'loom-postgres.app-red.svc', 'loom')
+    assert url.password == material_request['foundation_material']['loom-platform-db']['actuator-password']
+    assert dict(url.query) == {'sslmode': 'verify-full', 'sslrootcert': '/var/run/loom-db/ca.crt'}
+    assert secrets['build-red', 'loom-task-build-source'] == {'access-key': 'canonical-access', 'secret-key': 'canonical-secret'}
+    assert secrets['build-red', 'loom-task-build-registry'] == {'credentials.json': material_request['registry_credential'].decode()}
+    assert len(secrets) == 5
+    material_request['token'] = 'foreign-machine-token'
+    with pytest.raises(ValueError, match='environment_runtime_material_unqualified'):
+        material(**material_request)
+
+
+@pytest.mark.parametrize('damage', ['database', 'secret_collision', 'registry', 'cache'])
+def test_runtime_material_cannot_deliver_foreign_or_ambiguous_credentials(material_request, damage):
+    material = getattr(subject(), 'render_runtime_material', None)
+    assert callable(material), 'runtime deployment still has unresolved credential references'
+    if damage == 'database':
+        db = material_request['foundation_material']['loom-platform-db']
+        db['actuator-url'] = db['admin-url']
+    elif damage == 'registry':
+        material_request['registry_scope'] = material_request['registry_scope'].model_copy(update={'project_id': 'project-foreign'})
+    elif damage == 'cache':
+        material_request['cache_material'] = {'access-key': 'unbound', 'secret-key': 'unbound'}
+    else:
+        body = material_request['runtime']['profiles'].model_dump(mode='json')
+        body['task_images'][0]['settings']['registry_secret_name'] = body['task_images'][0]['settings']['source_secret_name']
+        material_request['runtime']['profiles'] = PoolProfileCatalog.model_validate(body)
+    with pytest.raises(ValueError, match='environment_runtime_material_unqualified'):
+        material(**material_request)
