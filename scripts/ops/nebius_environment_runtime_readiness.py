@@ -18,6 +18,7 @@ import tempfile
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from typing import Any, cast
 from uuid import UUID
@@ -38,6 +39,10 @@ from scripts.ops.nebius_environment_runtime_start import (
 from scripts.ops.nebius_foundation_readiness import observe_foundation
 from scripts.ops.nebius_ingress_stage import _key, _uid
 from scripts.ops.nebius_management_switch import _matches
+from scripts.ops.nebius_platform_runtime_readiness import (
+    PlatformRuntimePolicyV2,
+    observe_platform_runtime,
+)
 from scripts.ops.nebius_pool_administration_dispatch import (
     Connection,
     PoolAdministrationReferenceV2,
@@ -55,7 +60,11 @@ from loom.nebius_kubernetes import NebiusKubernetesCredentials
 from loom_service.environment_management.candidates import GitHubCandidateCatalog, _json
 from loom_service.environment_management.kubernetes_provider import KubernetesEnvironmentProvider
 from loom_service.pool_management.capacity import digest
-from loom_service.pool_management.inspection import PoolInspectionV2, qualify_inspection
+from loom_service.pool_management.inspection import (
+    PoolInspectionSnapshotV2,
+    PoolInspectionV2,
+    qualify_inspection,
+)
 
 ProbeConnection = Callable[[Callable[[], None], str], AbstractContextManager[EnvironmentRuntimeProbes]]
 
@@ -120,6 +129,35 @@ class FixedProcessTransport:
             raise ValueError('environment_runtime_probe_transport_unqualified') from None
 
 
+@contextmanager
+def _process_connection(check: Callable[[], None], region: str, *, policy: PoolEnrollmentPolicyV2,
+        resources: dict[str, dict[str, Any]], namespaces: dict[str, str]) -> Iterator[EnvironmentRuntimeProbes]:
+    credentials = NebiusKubernetesCredentials(policy.host.connection)
+    try:
+        private = {path: state._private_read(path, limit=1024**2)
+            for path in (policy.host.connection.ca_file, policy.host.connection.credentials_file)}
+        def unchanged() -> None:
+            check()
+            if any(state._private_read(path, limit=1024**2) != raw for path, raw in private.items()):
+                raise ValueError('environment_runtime_probe_authority_changed')
+        with _Resources(policy=policy, documents=resources, namespaces=namespaces,
+                qualify=unchanged, credentials=credentials) as api:
+            def read(path: str) -> dict[str, Any]:
+                api.verify_identity(policy.host.runtime.binding)
+                value = api._request('GET', path)
+                if value is None:
+                    raise ValueError('environment_runtime_resource_missing')
+                return value
+            transport = FixedProcessTransport(endpoint=policy.host.connection.endpoint, trust=credentials.ssl_context,
+                token=credentials.get_token_sync(), qualify=unchanged)
+            try:
+                yield EnvironmentRuntimeProbes(read=read, execute=transport.execute, qualify=unchanged, region=region)
+            finally:
+                transport.close()
+    finally:
+        asyncio.run(credentials.close())
+
+
 async def observe_environment_runtime(*, policy: PoolEnrollmentPolicyV2, operation_id: UUID,
         catalog: GitHubCandidateCatalog, kubernetes: KubernetesEnvironmentProvider, cloud: FoundationCloud,
         public_http: httpx.AsyncClient, connect: Connection, probe_connection: ProbeConnection | None = None) -> dict[str, Any] | None:
@@ -172,33 +210,8 @@ async def observe_environment_runtime(*, policy: PoolEnrollmentPolicyV2, operati
             qualify()
         await resources()
         machine, = (row for row in policy.machines if row.workload_scope == 'environment')
-        @contextmanager
-        def connection(check: Callable[[], None], region: str) -> Iterator[EnvironmentRuntimeProbes]:
-            credentials = NebiusKubernetesCredentials(policy.host.connection)
-            private = {path: state._private_read(path, limit=1024**2)
-                for path in (policy.host.connection.ca_file, policy.host.connection.credentials_file)}
-            def unchanged() -> None:
-                check()
-                if any(state._private_read(path, limit=1024**2) != raw for path, raw in private.items()):
-                    raise ValueError('environment_runtime_probe_authority_changed')
-            try:
-                with _Resources(policy=policy, documents=retained.resources, namespaces=staged.plan['namespace_uids'],
-                        qualify=unchanged, credentials=credentials) as api:
-                    def read(path: str) -> dict[str, Any]:
-                        api.verify_identity(policy.host.runtime.binding)
-                        value = api._request('GET', path)
-                        if value is None:
-                            raise ValueError('environment_runtime_resource_missing')
-                        return value
-                    transport = FixedProcessTransport(endpoint=policy.host.connection.endpoint, trust=credentials.ssl_context,
-                        token=credentials.get_token_sync(), qualify=unchanged)
-                    try:
-                        yield EnvironmentRuntimeProbes(read=read, execute=transport.execute, qualify=unchanged, region=region)
-                    finally:
-                        transport.close()
-            finally:
-                asyncio.run(credentials.close())
-        factory = probe_connection or connection
+        factory: ProbeConnection = probe_connection or partial(_process_connection, policy=policy,
+            resources=retained.resources, namespaces=staged.plan['namespace_uids'])
         def inspect() -> list[dict[str, Any]]:
             result = []
             with factory(qualify, declaration.platform_config['region']) as probes:
@@ -241,3 +254,78 @@ async def observe_environment_runtime(*, policy: PoolEnrollmentPolicyV2, operati
             'foundation': after.model_dump(mode='json'), 'inspection': observation, 'runtime_sha256': digest(staged.plan)}
     except Exception:
         raise ValueError('environment_runtime_readiness_unqualified') from None
+
+
+async def observe_environment_pre_activation(*, policy: PoolEnrollmentPolicyV2, operation_id: UUID,
+        platform_policy: PlatformRuntimePolicyV2, catalog: GitHubCandidateCatalog,
+        kubernetes: KubernetesEnvironmentProvider, cloud: FoundationCloud, public_http: httpx.AsyncClient,
+        connect: Connection, probe_connection: ProbeConnection | None = None,
+        platform_probe_connection: ProbeConnection | None = None) -> dict[str, Any] | None:
+    """Connect current application and platform evidence, with admission closed.
+
+    No staging predecessor, application source equality with peers, pool open or
+    worker-boundary change is involved. The later activation parent must verify
+    worker/build admission boundaries before issuing any ready/activate grant.
+    """
+    try:
+        if (platform_policy.host.runtime != policy.host.runtime or platform_policy.host.connection != policy.host.connection
+                or platform_policy.host.scope.authority != 'platform'
+                or (platform_policy.host.scope.installation_id, platform_policy.host.scope.pool_id) != (
+                    policy.participant.installation_id, policy.participant.pool_id)):
+            raise ValueError
+        environment = await observe_environment_runtime(policy=policy, operation_id=operation_id, catalog=catalog,
+            kubernetes=kubernetes, cloud=cloud, public_http=public_http, connect=connect, probe_connection=probe_connection)
+        if environment is None:
+            return None
+        retained = load_started_environment_runtime(policy=policy, operation_id=operation_id)
+        if digest(retained.staged.plan) != environment['runtime_sha256']:
+            raise ValueError
+        observation = await asyncio.to_thread(_observe, policy, retained.staged.state_dir / 'preactivation-observations', connect,
+            require_capacity=True, platform_authorization_id=platform_policy.authority.authorization_id)
+        if observation is None:
+            return None
+        def inspected(value: dict[str, Any]) -> PoolInspectionSnapshotV2:
+            return qualify_inspection(value['report']['receipt'], PoolInspectionV2.model_validate(value['input']['request']),
+                UUID(value['input']['authorization']['authorization_id']))
+        snapshot, before = inspected(observation), inspected(environment['inspection'])
+        if (snapshot.participant != before.participant or snapshot.pool_authority_sha256 != before.pool_authority_sha256
+                or snapshot.participant is None or snapshot.participant.head.state != 'enrolled'):
+            raise ValueError
+        expires = min(snapshot.valid_until, datetime.fromisoformat(environment['valid_until']))
+        material = policy.foundation_dir / 'material.json'
+        def qualify() -> None:
+            if (not snapshot.observed_at <= datetime.now(UTC) < expires or _policy(policy) != retained.staged.plan['policy']
+                    or any(state._private_read(path, limit=8 * 1024**2) != raw for path, raw in retained.files.items())
+                    or digest(_json(state._private_read(material, limit=8 * 1024**2))) !=
+                        environment['foundation']['foundation']['identities']['credentials:material']):
+                raise ValueError('environment_preactivation_evidence_changed')
+        binding = platform_policy.host.runtime.binding
+        platform_factory: ProbeConnection = platform_probe_connection or partial(_process_connection, policy=policy,
+            resources=platform_policy.resources, namespaces={binding.namespace: binding.namespace_uid})
+        def platform_read() -> dict[str, Any]:
+            qualify()
+            with platform_factory(qualify, policy.host.runtime.region) as probes:
+                result = observe_platform_runtime(policy=platform_policy, snapshot=snapshot, probes=probes)
+            qualify()
+            return result
+        platform = await asyncio.to_thread(platform_read)
+        # The application was observed first. A restart while the platform was
+        # being checked must invalidate the combined result, not survive as a
+        # formerly healthy component in an otherwise current evidence bundle.
+        for doc in retained.resources.values():
+            actual = await kubernetes._request('GET', runtime_resource_path(doc) + '/' + doc['metadata']['name'])
+            if actual is None or not _matches(actual, doc, _uid(doc)):
+                raise ValueError
+        factory: ProbeConnection = probe_connection or partial(_process_connection, policy=policy,
+            resources=retained.resources, namespaces=retained.staged.plan['namespace_uids'])
+        def recheck() -> None:
+            with factory(qualify, policy.host.runtime.region) as probes:
+                for desired, proof in zip(retained.staged.plan['workloads'].values(), environment['processes'], strict=True):
+                    probes.recheck_process(workload=retained.resources[_key(desired)], proof=proof)
+        await asyncio.to_thread(recheck)
+        qualify()
+        return dict(status='preactivation_runtime_verified_closed', participant_id=str(policy.participant.participant_id),
+            operation_id=str(operation_id), admission_open=False, environment=environment, platform=platform,
+            inspection=observation, valid_until=expires.isoformat())
+    except Exception:
+        raise ValueError('environment_preactivation_unqualified') from None

@@ -284,7 +284,9 @@ async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact
             assert len(changes) == 8
             reject_process, late_restart = False, False
             assert hasattr(readiness, 'observe_environment_pre_activation'), 'connected platform/environment readiness missing'
-            from tests.integration.test_nebius_platform_runtime_readiness import prepared_platform_runtime
+            from tests.integration.test_nebius_platform_runtime_readiness import (
+                prepared_platform_runtime,
+            )
 
             platform_dir = tmp_path / 'platform'
             platform_dir.mkdir(mode=0o700)

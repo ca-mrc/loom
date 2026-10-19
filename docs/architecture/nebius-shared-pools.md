@@ -102,6 +102,15 @@ the observer need not be a long-running Pod. This reader does not establish
 sole-writer ownership itself: that remains the protected platform open/import
 issuer's responsibility. It cannot turn an unaudited `mode=global` into authority.
 
+The internal preactivation parent connects completed environment startup to these
+platform checks using a fresh selected-participant inspection. It rejects a
+changed participant head, pool authority, data material or application process
+during the combined observation. The result
+`preactivation_runtime_verified_closed` still grants no admission: the protected
+activation parent must open and verify the selected worker/build boundaries and
+issue scoped ready/activate operations. Public host/workflow delivery and installed
+multi-owner execution remain separate acceptance requirements.
+
 Explicit legacy adoption preserves qualified v1 authority, credentials and
 history. A completed global handoff is not repeated; standalone allocation cannot
 be adopted as global sole-writer authority. Ordinary v2 lifecycle operations do
