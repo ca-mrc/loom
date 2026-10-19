@@ -8,7 +8,7 @@ import json
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
+from uuid import uuid4, uuid5
 
 import httpx
 import pytest
@@ -377,10 +377,6 @@ async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact
             activation_name = 'scripts.ops.nebius_environment_activation_issuer'
             assert importlib.util.find_spec(activation_name), 'scoped readiness/activation issuer missing'
             activation = importlib.import_module(activation_name)
-            from scripts.ops.nebius_pool_administration_dispatch import dispatch_administration
-
-            from tests.integration.test_nebius_pool_administration_dispatch import command
-
             # Issuance must not retain formerly healthy processes or resources
             # when they change during the later native-policy/inventory checks.
             actuator_pod, = remote.kubernetes['/api/v1/namespaces/work-red/pods']['items']
@@ -400,40 +396,75 @@ async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact
                 assert not (retained.state_dir / ('activation-' + str(transition_id)) / 'issued.json').exists()
                 target[field] = original
 
+            parent_name = 'scripts.ops.nebius_environment_activation'
+            assert importlib.util.find_spec(parent_name), 'connected activation parent missing'
+            parent = importlib.import_module(parent_name)
+            loop = asyncio.get_running_loop()
+            mutation_apis = {}
+            lose_ready_reply = True
+            class MutationAPI(PhaseAPI):
+                committed = None
+                def administration_report(self, state_dir):
+                    nonlocal lose_ready_reply
+                    if self.committed is None:
+                        async def apply():
+                            async with sessions.begin() as session:
+                                return await administer(session, self.request.request.model_dump_json().encode(),
+                                    self.request.authorization, action='apply')
+                        self.committed = asyncio.run_coroutine_threadsafe(apply(), loop).result(timeout=20)
+                    if self.request.request.action == 'ready' and lose_ready_reply:
+                        lose_ready_reply = False
+                        return None  # Commit succeeded; parent must recover this same Job.
+                    return {'job_uid': str(uuid4()), 'pod_uid': str(uuid4()), 'receipt': self.committed}
+            @contextmanager
+            def activation_connection(request):
+                if request.action == 'status':
+                    with clients['connect'](request) as observation_api:
+                        yield observation_api
+                    return
+                identity = request.authorization.authorization_id
+                if identity not in mutation_apis:
+                    mutation_apis[identity] = MutationAPI(policy.host.runtime.binding)
+                    mutation_apis[identity].request = request
+                    mutation_apis[identity].failure = 'after'
+                assert mutation_apis[identity].request == request
+                yield mutation_apis[identity]
+            activation_id = uuid4()
+            parent_inputs = {**boundary_inputs, 'connect': activation_connection, 'activation_id': activation_id}
+            allow_quotas = False
+            pending = await parent.activate_environment_runtime(**parent_inputs)
+            assert pending['status'] == 'environment_activation_pending' and pending['phase'] == 'ready'
+            assert not mutation_apis, 'pending qualification cannot dispatch a state change'
+            allow_quotas = True
+            pending = await parent.activate_environment_runtime(**parent_inputs)
+            assert pending['status'] == 'environment_activation_pending' and pending['phase'] == 'ready'
+            assert len(mutation_apis) == 1
+            completed = await parent.activate_environment_runtime(**parent_inputs)
+            assert completed['status'] == 'environment_active' and completed['admission_open'] is True
+            assert completed['execution_verified'] is False
+            assert completed['participant_id'] == str(policy.participant.participant_id)
+            assert len(mutation_apis) == 2 and all(len(row.creates) == 2 for row in mutation_apis.values())
+            assert len(changes) == 11
+            # Completed recovery is a current-head read, not another closed-start
+            # or empty-task check once the participant can be running real work.
+            inventory_effects.append(lambda: pytest.fail('completed activation cannot rerun closed inventory'))
+            repeated = await parent.activate_environment_runtime(**parent_inputs)
+            assert repeated['status'] == 'environment_active'
+            assert len(inventory_effects) == 1
+            inventory_effects.clear()
+            assert all(len(row.creates) == 2 for row in mutation_apis.values())
             predecessor = None
             issued = []
-            class MutationAPI(PhaseAPI):
-                def administration_report(self, state_dir):
-                    return {'job_uid': str(uuid4()), 'pod_uid': str(uuid4()), 'receipt': self.committed}
             for action, expected_state in (('ready', 'ready'), ('activate', 'active')):
-                transition_id = uuid4()
+                transition_id = uuid5(activation_id, action)
                 issuing = dict(**final_inputs, transition_id=transition_id, action=action, predecessor=predecessor,
                     boundary_connection=boundary_connection)
-                if action == 'ready':
-                    allow_quotas = False
-                    assert await activation.issue_environment_activation(**issuing) is None
-                    assert not (retained.state_dir / ('activation-' + str(transition_id)) / 'issued.json').exists()
-                    allow_quotas = True
                 reference = await activation.issue_environment_activation(**issuing)
                 assert reference.participant_id == policy.participant.participant_id
                 operation = _load(policy.host, reference)
                 assert operation.request.expected_head == (enrollment.operation_id if predecessor is None else predecessor.operation_id)
                 assert operation.request.action == action and operation.request.readiness is not None
-                async with sessions.begin() as session:
-                    committed = await administer(session, operation.request.model_dump_json().encode(), operation.authorization, action='apply')
-                mutation_api = MutationAPI(policy.host.runtime.binding)
-                mutation_api.committed = committed
-                @contextmanager
-                def mutation_connection(request, operation=operation, mutation_api=mutation_api):
-                    assert request.request == operation.request and request.authorization == operation.authorization
-                    yield mutation_api
-                applied = await asyncio.to_thread(dispatch_administration, command(reference, 'apply'),
-                    action='apply', host=policy.host, connect=mutation_connection)
-                assert applied['status'] == 'complete'
-                assert applied['proof']['receipt']['receipt']['state'] == expected_state
-                assert (await asyncio.to_thread(dispatch_administration, command(reference, 'recover'),
-                    action='recover', host=policy.host, connect=mutation_connection))['status'] == 'complete'
-                assert len(mutation_api.creates) == 2
+                assert mutation_apis[reference.authorization_id].committed['receipt']['state'] == expected_state
                 assert await activation.issue_environment_activation(**issuing) == reference
                 issued.append((issuing, reference))
                 predecessor = reference
