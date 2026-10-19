@@ -74,6 +74,11 @@ async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact
         assert result['status'] == 'runtime_staged_closed'
         assert result['participant_id'] == str(policy.participant.participant_id)
         assert result['admission_open'] is False
+        retained = module.load_staged_environment_runtime(policy=policy, operation_id=kwargs['operation_id'])
+        assert retained.plan['workloads']['service']['metadata']['namespace'] == 'app-red'
+        assert retained.plan['workloads']['control_plane']['spec']['replicas'] == 0
+        assert all(doc['metadata'].get('uid') for doc in retained.resources.values())
+        assert retained.plan['foundation_identities']['k8s:Namespace:-:work-red'] == str(policy.participant.execution_namespace.uid)
         originals = copy.deepcopy(remote.writes)
         creates = list(resources.creates)
         assert await module.stage_environment_runtime(**kwargs) == result
@@ -100,6 +105,8 @@ async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact
         assert resources.creates == creates and remote.writes == originals
         phase = policy.host.state_root / ('runtime-' + str(kwargs['operation_id'])) / 'material' / 'stage.json'
         phase.unlink()
+        with pytest.raises(ValueError, match='environment_runtime_retained_unqualified'):
+            module.load_staged_environment_runtime(policy=policy, operation_id=kwargs['operation_id'])
         with pytest.raises(ValueError, match='environment_runtime_install_unqualified'):
             await module.stage_environment_runtime(**kwargs)
         assert resources.creates == creates
