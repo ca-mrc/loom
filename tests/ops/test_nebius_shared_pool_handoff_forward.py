@@ -150,6 +150,22 @@ from tests.ops.test_nebius_shared_pool_handoff import (
 )
 
 
+@pytest.mark.parametrize('selection', ['foreign-handoff', 'preactivation'])
+def test_shared_probe_rejects_incompatible_catalog_selection_before_io(
+        tmp_path, selection, manager_entry, retained):
+    from scripts.ops.nebius_shared_pool_runtime_observation import HTTPSSharedPoolRuntimeProbes
+
+    # No client is constructed: incompatible authority must fail before reads.
+    probes = object.__new__(HTTPSSharedPoolRuntimeProbes)
+    probes.shared_bindings = object()
+    message = ('shared runtime observation binding differs' if selection == 'foreign-handoff'
+        else 'shared runtime observation cannot select an in-progress catalog')
+    with pytest.raises(ValueError, match=message):
+        probes.inspect(state_dir=tmp_path,
+            _shared_handoff=object() if selection == 'foreign-handoff' else None,
+            _preactivation_catalog=object() if selection == 'preactivation' else None)
+
+
 @pytest.mark.timeout(420)
 @pytest.mark.parametrize('connected_parent', [False, True], ids=['adapter', 'parent'])
 def test_shared_parent_connects_current_staging_workload_transitions_without_replaying_unknown_patch(
@@ -1212,6 +1228,7 @@ def test_shared_build_activation_requires_effective_policy_and_never_repeats_unk
         for connection in (probes, probes.manager, probes.foundation):
             connection.client.close()
             connection.client = type(completed_pool[3].api.client)(base_url=connection.api_server, transport=httpx.MockTransport(read))
+        assert probes.inspect(state_dir=plan.runtime.state_dir, _preactivation_catalog=None)
         component, deployment, pod = probes._running('Deployment:loom-dev:loom-control-plane', plan.runtime.state_dir)
         assert component == 'controller' and deployment['metadata']['name'] == 'loom-control-plane'
         assert pod['status']['phase'] == 'Running'

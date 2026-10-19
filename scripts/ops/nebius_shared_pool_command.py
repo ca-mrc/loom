@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-DIAGNOSTIC_STAGES = frozenset({'operation', 'inputs', 'connection', 'handoff'})
+DIAGNOSTIC_STAGES = frozenset({'operation', 'inputs', 'connection', 'catalog', 'handoff'})
 
 
 FORWARD_PHASES = (

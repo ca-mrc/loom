@@ -213,7 +213,8 @@ def test_shared_unauthenticated_or_foreign_commands_never_prepare_release(tmp_pa
     raw = archive(members(tmp_path))
     gateway = module()
     monkeypatch.setattr(gateway, 'prepare_release', lambda *_: pytest.fail('unauthorized release preparation'))
-    for command in ('id', 'loom-nebius-development-runtime-install-v1', 'loom-nebius-shared-pool-forward-guards-v1'):
+    for command in ('id', 'loom-nebius-development-runtime-install-v1', 'loom-nebius-shared-pool-forward-guards-v1',
+            'loom-nebius-participant-prepare-v1', 'loom-nebius-participant-execute-v1', 'loom-nebius-participant-recover-v1'):
         monkeypatch.setattr(sys, 'stdin', SimpleNamespace(buffer=io.BytesIO(raw)))
         monkeypatch.setenv('SSH_ORIGINAL_COMMAND', command)
         assert gateway.authorized_main(hashlib.sha256(raw).hexdigest()) == 126
@@ -248,6 +249,24 @@ def test_shared_report_checks_direction_and_truthful_admission_without_exporting
             ('install', 'staging_restored_dev_closed', False), ('install', 'pending', True)):
         with pytest.raises(gateway.GatewayError):
             gateway.safe_report(json.dumps(report(tmp_path, status, opened=opened)).encode(), operation(tmp_path), action)
+
+
+@pytest.mark.parametrize('status', ['catalog_pending', 'shared_pool_catalog_refreshed'])
+def test_catalog_refresh_delivery_cannot_report_activation(tmp_path, status):
+    gateway = module()
+    selected = preparation_operation(tmp_path)
+    value = report(tmp_path, status) | {'preactivation_id': 'aebdb9eb-cfee-4367-8e52-2b236289ccdb'}
+    assert gateway.command(tmp_path, 'refresh-catalog')[-1] == 'refresh-catalog'
+    assert gateway.COMMANDS['loom-nebius-shared-pool-refresh-catalog-v1'] == 'refresh-catalog'
+    assert gateway.safe_report(json.dumps(value).encode(), selected, 'refresh-catalog') == value
+    for damage in ({'admission_open': True, 'writer_migration_complete': True},
+            {'preactivation_id': '00000000-0000-0000-0000-000000000000'}, {'phase': 'forward-guards'},
+            {'status': 'shared_pool_handoff_complete'}):
+        with pytest.raises(gateway.GatewayError):
+            gateway.safe_report(json.dumps(value | damage).encode(), selected, 'refresh-catalog')
+    for action in ('preflight', 'install', 'recover'):
+        with pytest.raises(gateway.GatewayError):
+            gateway.safe_report(json.dumps(value).encode(), selected, action)
 
 
 @pytest.mark.parametrize('version', [1, 2])
@@ -396,7 +415,7 @@ def test_shared_publisher_requires_exact_clean_integrated_source(tmp_path, monke
         publisher.verify_source(selected)
 
 
-@pytest.mark.parametrize('action', ['preflight', 'install', 'recover'])
+@pytest.mark.parametrize('action', ['preflight', 'install', 'recover', 'refresh-catalog'])
 @pytest.mark.parametrize('version', [1, 2])
 def test_shared_workflow_executes_protected_selector_and_cleans_its_key(tmp_path, action, version):
     flow = yaml.safe_load((ROOT / '.github/workflows/nebius-rollout.yml').read_text())
