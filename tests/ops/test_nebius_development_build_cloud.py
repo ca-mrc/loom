@@ -9,6 +9,8 @@ import pytest
 from nebius.api.nebius.registry import v1 as registry
 from tests.ops.test_nebius_development_collector_cloud import collector_cloud as collector_cloud
 from tests.ops.test_nebius_development_collector_cloud import original_cloud as original_cloud
+from tests.support.nebius_platform import platform_inputs as platform_inputs
+from tests.unit.test_nebius_environment_foundation import declaration
 
 
 def module():
@@ -47,6 +49,18 @@ async def test_registry_editor_binds_provider_host_and_id_to_both_catalog_reposi
     assert proof == {'account_id': 'serviceaccount-manager', 'key_id': 'authpublickey-manager',
         'credential_sha256': hashlib.sha256(cloud.credential).hexdigest(), 'registry_id': 'registry-builds'}
     assert ('get', 'registry-builds') in cloud.calls
+
+
+@pytest.mark.parametrize('kind', ['development', 'staging', 'production'])
+async def test_registry_scope_accepts_explicit_foundation_without_dev_name(publisher_cloud, platform_inputs, kind):
+    cloud = publisher_cloud
+    cloud.config = declaration(platform_inputs, kind=kind, backups=kind == 'production').platform_config
+    cloud.config.update(project_id=cloud.scope['project_id'], quota_parent_id=cloud.scope['tenant_id'], region=cloud.scope['region'])
+    result = await qualify(cloud)
+    assert result['registry_id'] == 'registry-builds'
+    cloud.config['project_id'] = 'project-foreign'
+    with pytest.raises(ValueError, match='development build registry unqualified'):
+        await qualify(cloud)
 
 
 @pytest.mark.parametrize('damage', ['project-editor', 'registry-admin', 'extra-membership',
