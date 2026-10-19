@@ -90,3 +90,39 @@ def test_storage_successor_rejects_every_unrelated_or_ambiguous_authority_change
     PoolInstallation.model_validate(after)
     with pytest.raises(ValueError):
         module().ClosedPoolStorageRefresh.model_validate(payload)
+
+
+def test_storage_parent_predispatch_failure_does_not_strand_registry_intent(tmp_path):
+    from scripts.ops.nebius_pool_storage_operation import _StorageRegistry
+    from scripts.ops.nebius_pool_storage_registry import advance_storage_registry, validate_storage_registry
+
+    refresh = module().ClosedPoolStorageRefresh.model_validate(selection())
+    effects = []
+    ready = False
+
+    class Database:
+        def observe(self, request):
+            return {**module()._identity(request), 'read_only': True, 'state': 'complete' if effects else 'ready'}
+
+        def commit(self, request):
+            effects.append(request.operation_id)
+            return {**self.observe(request), 'read_only': False}
+
+    def dispatch():
+        if not ready:
+            raise ValueError('parent qualification failed before database dispatch')
+
+    api = _StorageRegistry(Database(), dispatch)
+    state = tmp_path / 'registry'
+
+    def run():
+        return advance_storage_registry(request=refresh, api=api, state_dir=state, qualify=lambda: None)
+
+    with pytest.raises(ValueError):
+        run()
+    assert effects == []
+    assert validate_storage_registry(request=refresh, state_dir=state)['status'] == 'prepared'
+    ready = True
+    assert run() is True
+    assert run() is True
+    assert effects == [refresh.operation_id]
