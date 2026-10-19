@@ -42,4 +42,3 @@ class NebiusPoolProfileDocument(Base):
     family: Mapped[str] = mapped_column(Text, primary_key=True)
     document_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     document_sha256: Mapped[str] = mapped_column(Text, nullable=False)
-

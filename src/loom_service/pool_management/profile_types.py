@@ -18,4 +18,3 @@ class PoolProfiles:
     task_images: Mapping[UUID, PoolTaskImageProfile] = field(default_factory=dict)
     application_images: Mapping[UUID, PoolApplicationImageProfile] = field(default_factory=dict)
     catalog_sha256: str | None = None
-
