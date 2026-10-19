@@ -91,6 +91,17 @@ physical observation. Ordinary inventory requests retain their original serializ
 form. This observation proves neither spare slots nor exclusive writer authority;
 admission still takes its existing locks and rechecks capacity when it commits.
 
+An optional platform-authorization selector binds that inspection to the immutable
+audit of the current protected opening or global import. It returns reference
+hashes, not legacy participant material, and rejects an older opening after a
+close/reopen. The internal platform-runtime reader matches this reference to its
+pinned private authority, checks current manager/gateway resources and loaded
+settings against the same ledger database, and rechecks resources after process
+qualification. A fresh authenticated physical capture supplies observer evidence;
+the observer need not be a long-running Pod. This reader does not establish
+sole-writer ownership itself: that remains the protected platform open/import
+issuer's responsibility. It cannot turn an unaudited `mode=global` into authority.
+
 Explicit legacy adoption preserves qualified v1 authority, credentials and
 history. A completed global handoff is not repeated; standalone allocation cannot
 be adopted as global sole-writer authority. Ordinary v2 lifecycle operations do
