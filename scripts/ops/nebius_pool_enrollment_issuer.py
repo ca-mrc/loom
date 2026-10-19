@@ -19,7 +19,7 @@ import httpx
 from scripts.ops import nebius_certificates as state
 from scripts.ops.nebius_environment_foundation import FoundationCloud, FoundationReferenceV2
 from scripts.ops.nebius_environment_foundation import _load as load_foundation
-from scripts.ops.nebius_foundation_readiness import observe_foundation
+from scripts.ops.nebius_foundation_readiness import FoundationReadinessV2, observe_foundation
 from scripts.ops.nebius_pool_administration_dispatch import (
     Connection,
     PoolAdministrationHostV2,
@@ -104,22 +104,59 @@ def _scope(policy: PoolEnrollmentPolicyV2) -> None:
         raise ValueError('pool_enrollment_production_promotion_required')
 
 
-def _published_profiles(policy: PoolEnrollmentPolicyV2, app: CandidateBundle, catalog: GitHubCandidateCatalog) -> None:
+def _published_profiles(policy: PoolEnrollmentPolicyV2, app: CandidateBundle, catalog: GitHubCandidateCatalog,
+        plan: dict[str, Any]) -> None:
     runtime = ServiceExecutionRuntimeProfileV1.model_validate(app.profile)
     keyring = ImageAdmissionKeyring.from_json(json.dumps(policy.profiles.image_admission_keyring))
     if {name: key.public_bytes_raw() for name, key in keyring._keys.items()} != {
             name: key.public_bytes_raw() for name, key in catalog.keyring._keys.items()}:
         raise ValueError('pool_enrollment_trust_unqualified')
+    config, = (doc for docs in plan['files'].values() for doc in docs
+        if doc['kind'] == 'ConfigMap' and doc['metadata']['name'] == 'loom-platform-config')
+    classes = {}
+    for name in ('catalog.json', 'guest-catalog.json', 'emulated-auth-catalog.json'):
+        if name in config['data']:
+            declared = _json(config['data'][name].encode())
+            for target in declared['topology']['targets']:
+                classes[target['target_id']] = declared['execution_class']
     for row in policy.profiles.execution:
         if (row.candidate_sha, row.runtime_image_ref, row.runtime_binary_sha256) != (
                 runtime.candidate_sha, runtime.runtime_image_ref, runtime.runtime_binary_sha256):
             raise ValueError('pool_enrollment_profile_unqualified')
+        if classes.get(row.runtime.target_id) != row.execution_class.model_dump(mode='json'):
+            raise ValueError('pool_enrollment_capability_unqualified')
     settings = [row.settings for row in policy.profiles.task_images]
     settings.extend(row.settings for row in policy.profiles.application_images)
     for build in settings:
         if build.service_image != app.candidate['images']['service']['image_ref']:
             raise ValueError('pool_enrollment_profile_unqualified')
     policy.profiles.profiles()
+
+
+def _retain_issued(policy: PoolEnrollmentPolicyV2, operation_id: UUID, retained: dict[str, Any]) -> PoolAdministrationReferenceV2:
+    if set(retained) != {'request', 'authorization', 'evidence'}:
+        raise ValueError('pool_enrollment_issuance_conflict')
+    request = PoolParticipantEnrollmentV2.model_validate(retained['request'])
+    grant = PoolAdministrationAuthorizationV2.model_validate(retained['authorization'])
+    evidence = retained['evidence']
+    foundation = FoundationReadinessV2.model_validate(evidence['foundation'])
+    inspection = PoolInspectionV2(schema_version='loom.pool-inspection.v2', operation_id=uuid5(operation_id, 'inspect'),
+        installation_id=policy.participant.installation_id, pool_id=policy.participant.pool_id,
+        participant_id=policy.participant.participant_id, environment_id=policy.participant.environment_id,
+        incarnation=policy.participant.incarnation, environment_class=policy.participant.environment_class)
+    snapshot = qualify_inspection(evidence['inspection']['receipt'], inspection, uuid5(operation_id, 'inspect-authorization'))
+    expected = PoolParticipantEnrollmentV2(schema_version='loom.pool-participant-enrollment.v2', operation_id=operation_id,
+        participant=policy.participant, machines=policy.machines, profiles=policy.profiles,
+        pool_authority_sha256=snapshot.pool_authority_sha256, foundation_sha256=digest(foundation.model_dump(mode='json')))
+    if (request != expected or foundation.foundation.identity != policy.foundation.identity
+            or foundation.foundation.plan_sha256 != policy.foundation.plan_sha256
+            or grant != _grant(policy, expected, uuid5(operation_id, 'enroll-authorization'),
+                issued_at=grant.issued_at, expires_at=grant.expires_at)
+            or grant.issued_at < max(snapshot.observed_at, foundation.verified_at)
+            or grant.expires_at > min(snapshot.valid_until, foundation.foundation.observed_at + timedelta(minutes=5),
+                *(row.expires_at for row in policy.machines))):
+        raise ValueError('pool_enrollment_issuance_conflict')
+    return retain_authorized_operation(host=policy.host, request=request, authorization=grant, evidence_sha256=digest(evidence))
 
 
 def _inspect(policy: PoolEnrollmentPolicyV2, operation_id: UUID, directory: Path, connect: Connection) -> dict[str, Any] | None:
@@ -185,10 +222,7 @@ async def issue_enrollment(*, policy: PoolEnrollmentPolicyV2, operation_id: UUID
             issued = directory / 'issued.json'
             if issued.exists():
                 retained = _json(state._private_read(issued, limit=4 * 1024**2))
-                request = PoolParticipantEnrollmentV2.model_validate(retained['request'])
-                grant = PoolAdministrationAuthorizationV2.model_validate(retained['authorization'])
-                return retain_authorized_operation(host=policy.host, request=request, authorization=grant,
-                    evidence_sha256=digest(retained['evidence']))
+                return _retain_issued(policy, operation_id, retained)
         publications = {row.candidate_id: row for row in (policy.application_publication, policy.manager_publication)}
         if any(catalog.publications.get(row.candidate_id) != row for row in (policy.application_publication, policy.manager_publication)):
             raise ValueError('pool_enrollment_publication_unqualified')
@@ -203,7 +237,7 @@ async def issue_enrollment(*, policy: PoolEnrollmentPolicyV2, operation_id: UUID
                     != policy.host.connection.endpoint.rstrip('/')
                 or str(kubernetes.http.base_url).rstrip('/') != policy.host.connection.endpoint.rstrip('/')):
             raise ValueError('pool_enrollment_foundation_publication_unqualified')
-        _published_profiles(policy, app, catalog)
+        _published_profiles(policy, app, catalog, plan)
         report = await asyncio.to_thread(_inspect, policy, operation_id, directory, connect)
         if report is None:
             return None
@@ -238,15 +272,11 @@ async def issue_enrollment(*, policy: PoolEnrollmentPolicyV2, operation_id: UUID
                 raise ValueError('pool_enrollment_intent_conflict')
             if issued.exists():
                 retained = _json(state._private_read(issued, limit=4 * 1024**2))
-                request = PoolParticipantEnrollmentV2.model_validate(retained['request'])
-                grant = PoolAdministrationAuthorizationV2.model_validate(retained['authorization'])
-                evidence = retained['evidence']
             else:
-                state._write_private(issued, json.dumps({'request': request.model_dump(mode='json'),
-                    'authorization': grant.model_dump(mode='json'), 'evidence': evidence}, sort_keys=True).encode())
+                retained = {'request': request.model_dump(mode='json'), 'authorization': grant.model_dump(mode='json'), 'evidence': evidence}
+                state._write_private(issued, json.dumps(retained, sort_keys=True).encode())
                 state._sync_directory(directory)
-            reference = retain_authorized_operation(host=policy.host, request=request, authorization=grant,
-                evidence_sha256=digest(evidence))
+            reference = _retain_issued(policy, operation_id, retained)
             _load(policy.host, reference)
             return reference
     except Exception:
