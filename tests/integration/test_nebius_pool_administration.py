@@ -103,7 +103,7 @@ async def test_development_authority_cannot_apply_a_production_request_even_with
             await module.administer(session, operation.model_dump_json().encode(), grant, action='apply')
 
 
-async def test_actual_installed_process_requires_pinned_authorization_and_reports_only_receipt(sessions, tmp_path):
+async def test_actual_administration_process_requires_pinned_authorization_and_reports_only_receipt(sessions, tmp_path):
     import hashlib
 
     module = administration()
