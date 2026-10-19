@@ -254,22 +254,27 @@ def test_shared_report_checks_direction_and_truthful_admission_without_exporting
             gateway.safe_report(json.dumps(report(tmp_path, status, opened=opened)).encode(), operation(tmp_path), action)
 
 
-@pytest.mark.parametrize('status', ['catalog_pending', 'shared_pool_catalog_refreshed'])
-def test_catalog_refresh_delivery_cannot_report_activation(tmp_path, status):
+@pytest.mark.parametrize('action,status,identity', [
+    ('refresh-catalog', 'catalog_pending', 'preactivation_id'),
+    ('refresh-catalog', 'shared_pool_catalog_refreshed', 'preactivation_id'),
+    ('refresh-storage', 'storage_pending', 'storage_id'),
+    ('refresh-storage', 'shared_pool_storage_refreshed', 'storage_id'),
+])
+def test_closed_refresh_delivery_cannot_report_activation(tmp_path, action, status, identity):
     gateway = module()
     selected = preparation_operation(tmp_path)
-    value = report(tmp_path, status) | {'preactivation_id': 'aebdb9eb-cfee-4367-8e52-2b236289ccdb'}
-    assert gateway.command(tmp_path, 'refresh-catalog')[-1] == 'refresh-catalog'
-    assert gateway.COMMANDS['loom-nebius-shared-pool-refresh-catalog-v1'] == 'refresh-catalog'
-    assert gateway.safe_report(json.dumps(value).encode(), selected, 'refresh-catalog') == value
+    value = report(tmp_path, status) | {identity: 'aebdb9eb-cfee-4367-8e52-2b236289ccdb'}
+    assert gateway.command(tmp_path, action)[-1] == action
+    assert gateway.COMMANDS['loom-nebius-shared-pool-' + action + '-v1'] == action
+    assert gateway.safe_report(json.dumps(value).encode(), selected, action) == value
     for damage in ({'admission_open': True, 'writer_migration_complete': True},
-            {'preactivation_id': '00000000-0000-0000-0000-000000000000'}, {'phase': 'forward-guards'},
+            {identity: '00000000-0000-0000-0000-000000000000'}, {'phase': 'forward-guards'},
             {'status': 'shared_pool_handoff_complete'}):
         with pytest.raises(gateway.GatewayError):
-            gateway.safe_report(json.dumps(value | damage).encode(), selected, 'refresh-catalog')
-    for action in ('preflight', 'install', 'recover'):
+            gateway.safe_report(json.dumps(value | damage).encode(), selected, action)
+    for other in ('preflight', 'install', 'recover', 'refresh-storage' if action == 'refresh-catalog' else 'refresh-catalog'):
         with pytest.raises(gateway.GatewayError):
-            gateway.safe_report(json.dumps(value).encode(), selected, action)
+            gateway.safe_report(json.dumps(value).encode(), selected, other)
 
 
 @pytest.mark.parametrize('version', [1, 2])
