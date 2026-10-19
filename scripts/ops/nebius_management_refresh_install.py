@@ -33,6 +33,7 @@ from scripts.ops.nebius_management_refresh_switch import (
     switch_refresh,
 )
 from scripts.ops.nebius_management_stage import ManagementStageAPI
+from scripts.ops.nebius_platform_rollout_successor import OrdinaryPlatformRollout
 
 from loom.nebius_management_refresh_probe import SCHEMA, RefreshProbeSettings
 from loom.nebius_platform_render import digest
@@ -46,6 +47,7 @@ class ManagementRefreshInstallRequest:
     history: dict[Path, str]
     installation_anchor: Path
     pool_baseline: dict[str, Any] | None = None
+    platform_rollout: OrdinaryPlatformRollout | None = None
 
 
 class ManagementRefreshInstallError(RuntimeError):
@@ -102,6 +104,8 @@ def refresh_contract(request: ManagementRefreshInstallRequest) -> dict[str, Any]
         from scripts.ops.nebius_pool_predecessor import PoolPredecessorV1
 
         contract['pool_baseline'] = PoolPredecessorV1.model_validate(request.pool_baseline).model_dump(mode='json')
+    if request.platform_rollout is not None:
+        contract['platform_rollout'] = request.platform_rollout.model_dump(mode='json')
     return contract
 
 

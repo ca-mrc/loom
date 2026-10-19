@@ -321,8 +321,8 @@ class HTTPSPoolCutoverAPI(HTTPSManagementStageAPI):
         options = self.refresh.workload_options()
         expected = {}
         for key, original in self.originals.items():
-            desired, = (row for row in options[key] if _matches(observed[key], row, _uid(original)))
-            expected[key] = desired
+            desired, = (row for row in options[key] if self.refresh.matches_workload(observed[key], row, original))
+            expected[key] = observed[key] if self.refresh.successor is not None else desired
         return expected
 
     def qualify_writer_bindings(self) -> None:
@@ -362,8 +362,16 @@ class HTTPSPoolCutoverAPI(HTTPSManagementStageAPI):
             # to producer downtime, writer retirement or runtime mutation targets.
             consumers.update({_key(guard.database.statefulset): guard.database.statefulset
                 for guard in self.guards.request.guards if guard.database is not None})
+            expected_consumers = dict(consumers)
+            if self.refresh is not None and self.refresh.successor is not None:
+                for key, original in consumers.items():
+                    desired = self.refresh.successor_document(original)
+                    if desired != original:
+                        if not self.refresh.matches_workload(observed[key], desired, original):
+                            raise ValueError
+                        expected_consumers[key] = observed[key]
             qualify_retained_writer_workloads(self.request.fencing, workloads,
-                originals={**self.originals, **consumers}, expected={**expected, **consumers},
+                originals={**self.originals, **consumers}, expected={**expected, **expected_consumers},
                 platform_subjects=platform_controller_subjects(self.request.platform_authority))
             if self._retained_workload_projection(observed) != expected:
                 raise ValueError

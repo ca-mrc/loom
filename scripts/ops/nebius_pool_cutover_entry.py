@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import hashlib
 import json
 import re
@@ -304,7 +305,8 @@ class PoolCutoverEntryChecks:
             if request != self.context.request:
                 raise ValueError
             self.current()
-            qualify_pool_runtime_databases(self.context, self.readers.guards)
+            qualify_pool_runtime_databases(self.context, self.readers.guards,
+                **({} if self.refresh is None else {'refresh': self.refresh}))
             if self.refresh is None:
                 qualify_pool_manager_database(self.context, self.readers.history)
             else:
@@ -381,7 +383,8 @@ def _runtime_workload_options(context: PoolCutoverContext) -> tuple[dict[str, tu
         state_dir=state, anchor_dir=anchor).items()}, False
 
 
-def qualify_pool_runtime_databases(context: PoolCutoverContext, guards: KubectlPoolGuardAPI) -> None:
+def qualify_pool_runtime_databases(context: PoolCutoverContext, guards: KubectlPoolGuardAPI, *,
+        refresh: PoolManagerRefresh | None = None) -> None:
     """Bind retained consumers to their database and running actuator telemetry.
 
     Fresh operations require original running Pods. Recovery instead selects
@@ -393,7 +396,8 @@ def qualify_pool_runtime_databases(context: PoolCutoverContext, guards: KubectlP
         migration = context.request.fencing.retirement.migration
         if guards.request != migration or load_pool_cutover_inputs(context.operation) != context:
             raise ValueError
-        expected, startup = _runtime_workload_options(context)
+        expected, startup = (_runtime_workload_options(context) if refresh is None or refresh.successor is None else
+            (refresh.workload_options(), False))
         for target in migration.guards:
             database = target.database
             if database is None or database.actuator_credential_uid is None or database.actuator_credential_resource_version is None:
@@ -405,15 +409,21 @@ def qualify_pool_runtime_databases(context: PoolCutoverContext, guards: KubectlP
             for original in (target.controller, service, *actuators):
                 namespace, name = original["metadata"]["namespace"], original["metadata"]["name"]
                 current = guards._get("deployment", name, namespace)
-                desired, = (row for row in expected[_key(original)] if _matches(current, row, _uid(original)))
+                desired, = (row for row in expected[_key(original)] if (
+                    refresh.matches_workload(current, row, original) if refresh is not None else
+                    _matches(current, row, _uid(original))))
+                replacement = None
+                if refresh is not None and refresh.successor is not None:
+                    replacement = copy.deepcopy(current)
                 actuator = namespace != target.namespace
                 uid = database.actuator_credential_uid if actuator else database.credential_uid
                 version = database.actuator_credential_resource_version if actuator else database.credential_resource_version
                 if desired["spec"]["replicas"] == 1 and not startup:
+                    extra = {} if replacement is None else {'expected': replacement}
                     guards.qualify_runtime_database(target, original=original,
-                        credential_uid=uid, credential_resource_version=version)
+                        credential_uid=uid, credential_resource_version=version, **extra)
                     if actuator:
-                        guards.qualify_runtime_telemetry(target, original=original)
+                        guards.qualify_runtime_telemetry(target, original=original, **extra)
                 else:
                     if type(desired["spec"]["replicas"]) is not int or desired["spec"]["replicas"] not in ({0, 1} if startup else {0}):
                         raise ValueError
@@ -425,9 +435,12 @@ def qualify_pool_runtime_databases(context: PoolCutoverContext, guards: KubectlP
                     if (_uid(guards._database(target)) != _uid(backend)
                             or guards._workload_database_url(original, url_variable=variable,
                                 credential_uid=uid, credential_resource_version=version) != url
-                            or not _matches(guards._get("deployment", name, namespace), desired, _uid(original))):
+                            or not (refresh.matches_workload(guards._get("deployment", name, namespace), desired, original)
+                                if refresh is not None else
+                                _matches(guards._get("deployment", name, namespace), desired, _uid(original)))):
                         raise ValueError
-        if (_runtime_workload_options(context) != (expected, startup)
+        if ((_runtime_workload_options(context) if refresh is None or refresh.successor is None else
+                (refresh.workload_options(), False)) != (expected, startup)
                 or load_pool_cutover_inputs(context.operation) != context):
             raise ValueError
     except PoolMigrationError as error:
@@ -669,7 +682,7 @@ def connected_pool_readers(context: PoolCutoverContext, *, refresh: PoolManagerR
                 guards = KubectlPoolGuardAPI(request=migration, kubeconfig=kubeconfig, executable=executable)
                 history = KubectlPoolHistoryAPI(request=migration, target=target, kubeconfig=kubeconfig, executable=executable)
                 history.qualify_binding(migration, context.request.manager)
-                qualify_pool_runtime_databases(context, guards)
+                qualify_pool_runtime_databases(context, guards, **({} if refresh is None else {'refresh': refresh}))
                 if refresh is None:
                     qualify_pool_manager_database(context, history)
                 else:

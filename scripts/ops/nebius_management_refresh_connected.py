@@ -92,7 +92,7 @@ class HTTPSManagementRefreshInstaller(HTTPSApplicationSetupAPI):
         if pooled:
             if (self.pool is None or not isinstance(self.predecessor, (CompletedPoolCutover, CompletedRefresh))
                     or self.pool.refresh != PoolManagerRefresh(self.original, self.predecessor, request,
-                        self.state_dir, self.superseded)):
+                        self.state_dir, self.superseded, self.pool.refresh.successor)):
                 raise ManagementStageError('pool-aware refresh authority qualification is not connected')
             self.pool.refresh.qualify()
         elif self.pool is not None:

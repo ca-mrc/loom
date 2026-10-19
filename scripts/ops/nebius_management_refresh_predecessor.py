@@ -282,8 +282,11 @@ def _load_completed_refresh(selector: RefreshPredecessorV1, *, original: Complet
         resources = ManagementRefreshResourcesRequest(ManagementRefreshSwitchRequest(render, selector.operation_id,
             contract.get('initial_stopped')),
             setup.binding, setup.shared_namespace_uid, contract['manager_revision'], contract['target_manager_revision'])
+        from scripts.ops.nebius_platform_rollout_successor import OrdinaryPlatformRollout
+
         request = ManagementRefreshInstallRequest(resources, {}, original.upgrade.original_anchor,
-            contract.get('pool_baseline'))
+            contract.get('pool_baseline'), OrdinaryPlatformRollout.model_validate(contract['platform_rollout'])
+            if contract.get('platform_rollout') is not None else None)
         if (refresh_contract(request) != contract or _uid(render.active) != _uid(original.active)
                 or receipt['active_uid'] != _uid(original.active)):
             raise ValueError

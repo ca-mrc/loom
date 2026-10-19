@@ -1,7 +1,9 @@
 """Exact private inputs for a repeatable, protected retained-manager refresh."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import json
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
@@ -9,6 +11,7 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
+import httpx
 from pydantic import BaseModel, ConfigDict, Field
 from scripts.ops.nebius_application_upgrade_prerequisites import (
     ApplicationUpgradePrerequisites,
@@ -42,12 +45,19 @@ from scripts.ops.nebius_management_refresh_supersession import (
     load_failed_refresh,
 )
 from scripts.ops.nebius_management_refresh_switch import ManagementRefreshSwitchRequest
+from scripts.ops.nebius_platform_rollout_successor import (
+    OrdinaryPlatformRollout,
+    PlatformRolloutSuccessor,
+    resolve_platform_rollout,
+)
 from scripts.ops.nebius_pool_predecessor import (
     CompletedPoolCutover,
     PoolPredecessorV1,
     load_completed_pool,
 )
 
+from loom.execution_image_admission import ImageAdmissionKeyring
+from loom_service.environment_management.candidates import GitHubCandidateCatalog
 from loom_service.environment_management.deployment import ManagementDeployment
 
 
@@ -65,6 +75,7 @@ class RefreshPrivateInputs(BaseModel):
     prerequisites: UpgradePrerequisiteSettings
     foundation_candidate: str = Field(pattern=r'^[0-9a-f]{40}$')
     supersedes: SupersededRefreshV1 | None = None
+    platform_rollout: OrdinaryPlatformRollout | None = None
 
 
 @dataclass(frozen=True, repr=False)
@@ -141,8 +152,10 @@ def _load_refresh_inputs(operation: dict[str, Any], ancestors: tuple[str, ...], 
             setup.binding, setup.shared_namespace_uid, inputs.manager_revision, inputs.target_manager_revision)
         pool_baseline = (predecessor if isinstance(predecessor, CompletedPoolCutover) else
             predecessor.pool_baseline if isinstance(predecessor, CompletedRefresh) else None)
+        if inputs.platform_rollout is not None and (pool_baseline is None or pool_baseline.completion.outcome != 'legacy'):
+            raise ValueError
         request = ManagementRefreshInstallRequest(resources, history, original.upgrade.original_anchor,
-            None if pool_baseline is None else pool_baseline.selector.model_dump(mode='json'))
+            None if pool_baseline is None else pool_baseline.selector.model_dump(mode='json'), inputs.platform_rollout)
         return RefreshContext(inputs, original, predecessor, request, superseded)
     except Exception:
         raise EntryError('management private refresh inputs unqualified') from None
@@ -165,8 +178,15 @@ def connected_refresh_api(context: RefreshContext, operation: dict[str, Any]) ->
 
             if not isinstance(context.predecessor, (CompletedPoolCutover, CompletedRefresh)):
                 raise EntryError('pool refresh predecessor differs')
+            successor = None
+            if context.request.platform_rollout is not None:
+                baseline = (context.predecessor if isinstance(context.predecessor, CompletedPoolCutover)
+                    else context.predecessor.pool_baseline)
+                if baseline is None or baseline.completion.outcome != 'legacy':
+                    raise EntryError('pool refresh predecessor differs')
+                successor = asyncio.run(_platform_successor(context, baseline))
             projection = PoolManagerRefresh(original, context.predecessor, context.request,
-                Path(operation['state_dir']), context.superseded)
+                Path(operation['state_dir']), context.superseded, successor)
             # Pool authority keeps its own fixed reader/credential lifetime; do
             # not widen the retained manager reader into execution namespaces.
             parent = stack.enter_context(connected_pool_api(projection.qualify().context, refresh=projection))
@@ -176,6 +196,21 @@ def connected_refresh_api(context: RefreshContext, operation: dict[str, Any]) ->
             state_dir=Path(operation['state_dir']), api_server=connection.endpoint, ssl_context=trust, token=token,
             runtime_ca_pem=_private(connection.ca_file, 1024**2).decode(), checks=checks))
         yield api
+
+
+async def _platform_successor(context: RefreshContext, baseline: CompletedPoolCutover) -> PlatformRolloutSuccessor:
+    reference = context.request.platform_rollout
+    assert reference is not None
+    installation = context.original.deployment.installation
+    async with asyncio.timeout(240), httpx.AsyncClient(trust_env=False, follow_redirects=False, timeout=30) as http:
+        catalog = GitHubCandidateCatalog(http,
+            token=context.original.upgrade.original.material['loom-management-publications']['token'],
+            publications=[reference.publication], registry_prefix=installation.registry_prefix,
+            keyring=ImageAdmissionKeyring.from_json(json.dumps(installation.keyring)))
+        return await resolve_platform_rollout(reference=reference, catalog=catalog,
+            config=context.request.resources.switch.render.after.installation.foundation.platform_config,
+            keyring=installation.keyring,
+            previous_sha=baseline.context.inputs.candidate['candidate_sha'])
 
 
 def execute_refresh(context: RefreshContext, operation: dict[str, Any], action: str) -> dict[str, Any]:

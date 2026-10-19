@@ -2579,6 +2579,22 @@ schema is `loom.nebius-management-refresh-private-inputs.v1`, with:
   pool selector. Keep it through subsequent refreshes; omitting it cannot restore
   legacy writer authority. The separately scoped pool reader requalifies workloads,
   credentials, mode and effective permissions around refresh writes and completion.
+- Optional `platform_rollout`, for a **legacy** pool baseline whose application
+  workloads advanced through an ordinary completed platform rollout: an object
+  with `deployment_id` (the numeric GitHub deployment ID) and `publication` (the
+  existing exact `ProtectedPublication` selector for that platform candidate).
+  This publication may differ from the target manager publication. Qualification
+  requires a successful protected `nebius-rollout` run and its complete native
+  deployment artifact, including pre-upgrade backup, HTTPS smoke and candidate
+  readback. The selected candidate's pinned source renders the expected current
+  workloads using the validated target foundation configuration. Existing UID,
+  namespace, DB/credential, writer inventory, role and runtime checks still apply.
+  Unrelated image, environment, template or credential changes remain blockers.
+  This does not synthesize a shared-pool participant completion. Prepare a new
+  refresh operation and retain this selector through later refreshes while the
+  frozen pool baseline still predates that rollout; never edit the old baseline,
+  refresh inputs, or completed receipts. `management-refresh-preflight` performs
+  these checks without persisting Kubernetes or database changes.
 - `deployment`, `candidate` and `profile`: the target manager configuration and
   protected publication. The tooling source and candidate SHA must be identical.
 - `manager_revision` and `target_manager_revision`: the expected management DB

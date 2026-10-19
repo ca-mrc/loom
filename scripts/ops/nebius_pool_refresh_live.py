@@ -9,9 +9,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from scripts.ops.nebius_ingress_stage import _uid
 from scripts.ops.nebius_management_prerequisites import inventory_resources
-from scripts.ops.nebius_management_switch import _matches, _stable
+from scripts.ops.nebius_management_switch import _stable
 from scripts.ops.nebius_pool_activation_live import HTTPSPoolActivationAPI
 from scripts.ops.nebius_pool_cutover_live import HTTPSPoolCutoverAPI
 from scripts.ops.nebius_pool_gateway_authority import (
@@ -50,7 +49,7 @@ class HTTPSPoolRefreshAPI:
         observed = {}
         for key, choices in options.items():
             current = self.retained.read_workload(key)
-            if not any(_matches(current, wanted, _uid(self.pool.completion.workloads[key])) for wanted in choices):
+            if not any(self.refresh.matches_workload(current, wanted, self.pool.completion.workloads[key]) for wanted in choices):
                 raise ValueError
             observed[key] = _stable(current)
         return observed
