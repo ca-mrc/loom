@@ -3,15 +3,17 @@ from __future__ import annotations
 
 import copy
 import importlib
+import json
 from contextlib import contextmanager
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
-
 from scripts.ops.nebius_development_build_cloud import DevelopmentRegistryCloudScope
 from scripts.ops.nebius_ingress_stage import _key
 from scripts.ops.nebius_pool_administration_dispatch import _load
+
 from loom_service.pool_management.administration import administer
 from loom_service.pool_management.profiles import PoolProfileCatalog
 from tests.integration.test_nebius_enrollment_issuer import prepared
@@ -33,9 +35,12 @@ async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact
     cloud = publisher_cloud
     inputs = copy.deepcopy(platform_inputs)
     inputs[0].update(project_id=cloud.scope['project_id'], quota_parent_id=cloud.scope['tenant_id'], region=cloud.scope['region'])
-    async with prepared(sessions, tmp_path, inputs, publication) as (issuer, policy, clients, remote, _api):
+    async with prepared(sessions, tmp_path, inputs, publication) as (issuer, policy, clients, remote, api):
         profiles = policy.profiles.model_dump(mode='json')
         profiles['task_images'][0]['settings']['registry_repository'] = cloud.repositories[0]
+        # This fixture has no authorized cache identity; it tests canonical
+        # source + registry delivery, not arbitrary shared-cache credentials.
+        profiles['task_images'][0]['settings'].update(cache_bucket=None, cache_secret_name=None)
         profiles = PoolProfileCatalog.model_validate(profiles)
         token = 'runtime-participant-' + 'a' * 40
         import hashlib
@@ -77,6 +82,22 @@ async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact
         assert len(deployments) == 1 and deployments[0]['spec']['replicas'] == 0
         assert deployments[0]['metadata']['namespace'] == 'work-red'
         assert not any(doc['kind'] in {'Namespace', 'ResourceQuota', 'Job', 'CronJob'} for doc in resources.resources.values())
+        # An expired read-only observation is replaceable, but the original
+        # enrollment/mutation authority and runtime create intents are not.
+        api.pending = True
+        assert await module.stage_environment_runtime(**kwargs) is None
+        observations = policy.host.state_root / ('runtime-' + str(kwargs['operation_id'])) / 'observations'
+        previous = json.loads((observations / 'current.json').read_text())
+        inspection = observations / previous['operation_id'] / 'inspection.json'
+        pending = json.loads(inspection.read_text())
+        pending['authorization']['issued_at'] = (datetime.now(UTC) - timedelta(minutes=6)).isoformat()
+        pending['authorization']['expires_at'] = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+        inspection.write_text(json.dumps(pending))
+        api.pending = False
+        assert await module.stage_environment_runtime(**kwargs) == result
+        assert json.loads((observations / 'current.json').read_text())['operation_id'] != previous['operation_id']
+        assert _load(policy.host, enrollment) == job
+        assert resources.creates == creates and remote.writes == originals
         phase = policy.host.state_root / ('runtime-' + str(kwargs['operation_id'])) / 'material' / 'stage.json'
         phase.unlink()
         with pytest.raises(ValueError, match='environment_runtime_install_unqualified'):

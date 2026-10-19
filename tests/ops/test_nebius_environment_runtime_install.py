@@ -6,6 +6,7 @@ import copy
 import pytest
 from scripts.ops.nebius_environment_runtime import render_environment_runtime
 from scripts.ops.nebius_environment_runtime_install import _defaulted
+from scripts.ops.nebius_management_stage import ManagementStageError
 from tests.ops.test_nebius_environment_runtime import runtime_request as runtime_request
 from tests.ops.test_nebius_pool_runtime import runtime_inputs as runtime_inputs
 from tests.support.nebius_platform import platform_inputs as platform_inputs
@@ -32,7 +33,7 @@ def test_runtime_preview_refuses_authority_or_enforcement_changes(runtime_reques
         def default_resource(self, document):
             return observed
 
-    with pytest.raises(ValueError):
+    with pytest.raises((ValueError, ManagementStageError)):
         _defaulted(API(), desired)
 
 
