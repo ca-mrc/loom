@@ -49,6 +49,42 @@ def _scope():
     })
 
 
+def test_legacy_capture_retains_its_original_wire_fingerprint():
+    from loom_execution_capacity_collector.pool import PoolPodClassifier
+
+    scope = _scope()
+    assert 'authority' not in scope.model_dump(mode='json')
+    assert all('execution_namespace_uid' not in row for row in scope.model_dump(mode='json')['environments'])
+    assert PoolPodClassifier(scope).fingerprint == 'sha256:d2c4efe119e6643a0d3f91e83e00c026ecb0f820134dacf0b1cb82e52983877d'
+
+
+@pytest.mark.parametrize('damage', ['missing-uid', 'nil-uid', 'duplicate-uid', 'wrong-node-group'])
+def test_physical_capture_requires_unique_installed_namespace_identity(damage):
+    from loom_execution_capacity_collector.pool import PoolObservationScope
+
+    value = _scope().model_dump(mode='json')
+    value['node_selector']['nebius.com/node-group-id'] = 'group-1'
+    value['authority'] = {
+        'pool_id': str(UUID(int=101)), 'installation_id': str(UUID(int=102)),
+        'cluster_id': 'cluster-1', 'node_group_id': 'group-1', 'admission_epoch': 2,
+        'physical_binding_sha256': 'a' * 64, 'registration_sha256': 'b' * 64,
+    }
+    for index, row in enumerate(value['environments']):
+        row['execution_namespace_uid'] = str(UUID(int=201 + 2 * index))
+        row['build_namespace_uid'] = str(UUID(int=202 + 2 * index))
+    PoolObservationScope.model_validate(value)
+    if damage == 'missing-uid':
+        del value['environments'][0]['execution_namespace_uid']
+    elif damage == 'nil-uid':
+        value['environments'][0]['build_namespace_uid'] = str(UUID(int=0))
+    elif damage == 'duplicate-uid':
+        value['environments'][1]['execution_namespace_uid'] = value['environments'][0]['execution_namespace_uid']
+    else:
+        value['authority']['node_group_id'] = 'foreign'
+    with pytest.raises(ValueError):
+        PoolObservationScope.model_validate(value)
+
+
 def _node(name="node-1"):
     return k8s.V1Node(
         metadata=k8s.V1ObjectMeta(name=name, uid=f"uid-{name}", labels={"loom.nebius/role": "execution"}),

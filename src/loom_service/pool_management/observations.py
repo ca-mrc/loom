@@ -3,7 +3,8 @@
 These functions run inside the caller's management transaction and never perform
 network I/O or commit. Collection happens between those transactions. New requests
 do not invalidate a capture: only its exact represented Job receipts can discount
-reservations later. A new registration requires a fresh capture.
+reservations later. Legacy registration changes require a fresh capture; opted-in
+physical scopes remain usable through independent participant changes.
 """
 from __future__ import annotations
 
@@ -38,6 +39,10 @@ from loom_execution_capacity_collector.pool import (
 )
 from loom_service.pool_management.auth import PoolPrincipal, authorize_pool_machine
 from loom_service.pool_management.locks import acquire_pool_mutation_lock
+from loom_service.pool_management.observation_binding import (
+    capture_authority,
+    qualify_capture_binding,
+)
 
 _CAPTURE_MAX_AGE = timedelta(minutes=5)
 
@@ -124,6 +129,7 @@ async def issue_pool_capture(session: AsyncSession, principal: PoolPrincipal) ->
     try:
         with session.no_autoflush:
             pool, participants, registration_sha = await _registration(session, principal)
+            authority = capture_authority(pool, registration_sha)
             by_id = {row.participant_id: row for row in participants}
             requests = list((await session.scalars(select(NebiusPoolRequest).where(
                 NebiusPoolRequest.pool_id == pool.pool_id, NebiusPoolRequest.job_uid.is_not(None),
@@ -175,7 +181,9 @@ async def issue_pool_capture(session: AsyncSession, principal: PoolPrincipal) ->
                     environment_id=row.environment_id, incarnation=row.incarnation,
                     execution_namespace=row.execution_namespace.name, build_namespace=row.build_namespace.name,
                     target_ids=tuple(target.target_id for target in row.targets),
-                ) for row in participants), jobs=tuple(jobs),
+                    execution_namespace_uid=row.execution_namespace.uid if authority is not None else None,
+                    build_namespace_uid=row.build_namespace.uid if authority is not None else None,
+                ) for row in participants), jobs=tuple(jobs), authority=authority,
             )
             capture_id = uuid4()
             created = (await session.execute(insert(NebiusPoolCapture).values(
@@ -199,13 +207,12 @@ async def record_pool_observation(session: AsyncSession, principal: PoolPrincipa
             capture = (await session.scalars(select(NebiusPoolCapture).where(
                 NebiusPoolCapture.capture_id == capture_id,
             ).execution_options(populate_existing=True))).one_or_none()
-            if (capture is None or capture.pool_id != pool.pool_id
-                    or capture.admission_epoch != pool.admission_epoch or capture.registration_sha256 != registration_sha
-                    or observed_at.utcoffset() is None):
+            if capture is None or observed_at.utcoffset() is None:
                 raise PoolObservationError
             provider = ProviderCapacitySnapshot.model_validate(provider.model_dump())
             kubernetes = KubernetesCapacitySnapshot.model_validate(kubernetes.model_dump())
             scope = PoolObservationScope.model_validate(capture.scope_json)
+            qualify_capture_binding(pool, capture, scope, registration_sha)
             fingerprint = PoolPodClassifier(scope).fingerprint
             if (fingerprint.removeprefix("sha256:") != capture.scope_sha256
                     or kubernetes.source_versions.get("pool_scope") != fingerprint

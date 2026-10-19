@@ -37,6 +37,7 @@ from loom_execution_capacity_collector.contracts import (
     ResourceTotals,
 )
 from loom_execution_capacity_collector.pool import PoolObservationScope, PoolPodClassifier
+from loom_service.pool_management.observation_binding import qualify_capture_binding
 from loom_service.pool_management.observations import read_pool_registration
 
 CHARGED_PHASES = ("reserved", "create_intent", "observed", "cleanup_intent")
@@ -111,9 +112,9 @@ async def _read_capacity(session: AsyncSession, pool: NebiusPoolBinding, now: da
     observation, capture = result
     payload = observation.observation_json
     scope = PoolObservationScope.model_validate(capture.scope_json)
+    qualify_capture_binding(pool, capture, scope, registration)
     fingerprint = PoolPodClassifier(scope).fingerprint
-    if (capture.registration_sha256 != registration or capture.admission_epoch != pool.admission_epoch
-            or capture.scope_sha256 != fingerprint.removeprefix("sha256:")
+    if (capture.scope_sha256 != fingerprint.removeprefix("sha256:")
             or observation.observation_sha256 != digest(payload)
             or payload["capture_id"] != str(capture.capture_id)
             or datetime.fromisoformat(payload["observed_at"]) != observation.observed_at
