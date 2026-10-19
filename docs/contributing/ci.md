@@ -369,6 +369,11 @@ fail-fast cancellation disabled. This replaces a serial run that exhausted its
 35-minute limit after completing only 61% of 77 tests; it removes no test paths
 or protected checks. Per-shard duration reporting supports later balance review.
 
+The shared disposable K3s fixture requests normal Docker stop before removing
+the stopped container and its volumes. Its 30-second shutdown allowance does not
+change test deadlines. Stop and removal errors still fail the job. K3s remains
+PID 1; adding an init wrapper would interfere with its cgroup startup sequence.
+
 The 75-minute integration budget retains room for optional coverage and runner
 variation. File counts alone do not measure shard balance; use the per-shard
 duration reports from the current head.
