@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 
 from loom.db.nebius_pool_lifecycle_schema import NebiusPoolLifecycleOperation
 from loom_service.pool_management.capacity import digest
@@ -175,3 +175,64 @@ async def test_unlocked_capacity_cannot_replace_serialized_admission_or_use_mixe
         await session.execute(text('SET TRANSACTION ISOLATION LEVEL READ COMMITTED, ' + transaction))
         with pytest.raises(ValueError, match='pool_inspection_requires_read_only_snapshot'):
             await observe_connected_capacity(session, selected.pool_id, datetime.now(UTC))
+
+
+@pytest.mark.parametrize('damage', [None, 'different_grant', 'different_head', 'changed_audit'])
+async def test_platform_authority_inspection_binds_committed_protected_open_not_just_global_mode(sessions, damage):
+    from datetime import timedelta
+
+    from loom.db.nebius_pool_schema import NebiusPoolBinding
+    from loom_service.pool_management.administration import PoolAdministrationAuthorizationV2
+    from tests.integration.test_nebius_pool_platform_lifecycle import apply, prepare
+
+    module = inspection()
+    assert 'platform_authorization_id' in module.PoolInspectionV2.model_fields, 'audited platform authority readback missing'
+    _module, spec, installed, authority, capture, opening = await prepare(sessions)
+    await capture()
+    operation = opening(installed.operation_id, authority)
+    committed = await apply(sessions, operation)
+    await capture()  # Opening advanced physical authority; never reuse pre-open capacity.
+    authorization_id = committed['authorization_id']
+    if damage == 'different_grant':
+        authorization_id = str(uuid4())
+    elif damage == 'different_head':
+        async with sessions.begin() as session:
+            pool = await session.get(NebiusPoolBinding, spec.pool_id)
+            binding = {**pool.binding_json, 'lifecycle_head_operation_id': str(installed.operation_id)}
+            await session.execute(update(NebiusPoolBinding).where(NebiusPoolBinding.pool_id == spec.pool_id)
+                .values(binding_json=binding, binding_sha256=digest(binding)))
+    elif damage == 'changed_audit':
+        async with sessions.begin() as session:
+            row = await session.get(NebiusPoolLifecycleOperation, authorization_id)
+            body = copy.deepcopy(row.request_json)
+            body['authorization']['authority'] = 'development'
+            await session.execute(update(NebiusPoolLifecycleOperation)
+                .where(NebiusPoolLifecycleOperation.operation_id == authorization_id)
+                .values(request_json=body, request_sha256=digest(body)))
+    request = module.PoolInspectionV2(schema_version='loom.pool-inspection.v2', operation_id=uuid4(),
+        installation_id=spec.installation_id, pool_id=spec.pool_id,
+        require_capacity=damage != 'different_head', platform_authorization_id=authorization_id)
+    now = datetime.now(UTC)
+    grant = PoolAdministrationAuthorizationV2(schema_version='loom.pool-administration-authorization.v2',
+        authorization_id=uuid4(), installation_id=spec.installation_id, pool_id=spec.pool_id, authority='platform',
+        request_sha256=digest(request.model_dump(mode='json')), issued_at=now, expires_at=now + timedelta(minutes=5))
+
+    async def read():
+        async with sessions.begin() as session:
+            await session.execute(text('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY'))
+            result = await administration().administer(session, request.model_dump_json().encode(), grant, action='status')
+            return module.qualify_inspection(result, request, grant.authorization_id)
+
+    if damage:
+        with pytest.raises(ValueError, match='platform_authority'):
+            await read()
+        return
+    observed = await read()
+    assert observed.platform_authority.operation_id == operation.operation_id
+    assert str(observed.platform_authority.authorization_id) == authorization_id
+    assert observed.platform_authority.request_sha256 == digest(operation.model_dump(mode='json'))
+    assert observed.platform_authority.receipt_sha256 == digest(committed['receipt'])
+    # The snapshot reports only a committed authority reference, not legacy
+    # participant material, token hashes or private prior readiness documents.
+    assert set(observed.platform_authority.model_dump()) == {
+        'operation_id', 'authorization_id', 'authorization_sha256', 'request_sha256', 'receipt_sha256'}
