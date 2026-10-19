@@ -10,7 +10,7 @@ import re
 from typing import Literal
 from uuid import UUID
 
-from scripts.ops.nebius_pool_activation_database import _header
+from scripts.ops.nebius_pool_activation_database import _participant_header
 
 from loom.nebius_rollout_guard import LOCK_KEY
 
@@ -23,7 +23,7 @@ def pool_guard_activation_sql(operation_id: UUID, participant_id: UUID, candidat
             or action not in {"observe", "release", "fence"}):
         raise ValueError("pool_guard_activation_scope_unqualified")
     owner, recovery = str(operation_id), "pool-recovery:" + str(operation_id)
-    query = _header(read_only=action == "observe")
+    query = _participant_header(read_only=action == "observe")
     if action != "observe":
         query += f"SELECT pg_advisory_xact_lock({LOCK_KEY});\n"
     if action == "release":

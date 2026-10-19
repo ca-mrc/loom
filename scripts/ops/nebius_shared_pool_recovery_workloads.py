@@ -66,10 +66,11 @@ def _sources(bindings: SharedPoolGuardBindings, state: Path) -> dict[str, tuple[
     frame = _frame(bindings, state)
     result = shared_forward_staging_options(bindings=bindings, state_dir=state)
     completed = bindings.plan.development.runtime
+    resources = bindings.plan.effective_runtime_resources
     for key in (*completed.plan.fixed['workloads'], *completed.plan.originals):
         if key in result:
             raise ValueError
-        result[key] = (copy.deepcopy(completed.resources[key]),)
+        result[key] = (copy.deepcopy(resources[key]),)
     original = copy.deepcopy(bindings.plan.development.gateway_original)
     result[_key(original)] = (original,)
     phase = frame['forward']['forward-gateway']['status']

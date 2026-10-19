@@ -57,7 +57,10 @@ def test_participant_bundle_imports_real_dispatch_without_workspace_modules(tmp_
     from scripts.ops.nebius_shared_pool_delivery_gateway import SOURCES as SHARED_SOURCES
 
     gateway = module()
-    assert not any('nebius_pool_participant' in path for path in SHARED_SOURCES), 'do not widen the handoff grant'
+    # Catalog projection/transport are reusable primitives, not permission to
+    # dispatch ordinary participant releases through the shared handoff key.
+    assert {path for path in SHARED_SOURCES if 'nebius_pool_participant' in path} == {
+        'scripts/ops/nebius_pool_participant_catalog.py', 'scripts/ops/nebius_pool_participant_release.py'}
     build = tmp_path / 'wheel-build'
     build.mkdir()
     executable = shutil.which('uv')

@@ -5,6 +5,7 @@ import copy
 import importlib
 import json
 import os
+import subprocess
 import time
 from dataclasses import asdict
 from types import SimpleNamespace
@@ -19,6 +20,87 @@ from tests.unit.test_nebius_pool_application_image_render import pool_inputs as 
 from tests.unit.test_nebius_pool_application_image_render import render as render_application
 from tests.unit.test_nebius_pool_task_image_render import build_inputs as task_inputs
 from tests.unit.test_nebius_pool_task_image_render import render as render_task
+
+
+def _add_build_policy_diagnostics(cluster, observed_policy, error):
+    """Retain bounded evidence from this test's disposable node before teardown."""
+    try:
+        metadata = getattr(observed_policy, 'metadata', None)
+        status = getattr(observed_policy, 'status', None)
+        snapshot = {'generation': getattr(metadata, 'generation', None),
+            'status': status.to_dict() if status is not None else None}
+        error.add_note('last observed build policy status: ' + json.dumps(snapshot, default=str)[-16384:])
+    except Exception as diagnostic_error:
+        error.add_note(f'build policy status unavailable: {type(diagnostic_error).__name__}')
+    try:
+        container_id = cluster.get_wrapped_container().id
+    except Exception as diagnostic_error:
+        error.add_note(f'disposable node unavailable: {type(diagnostic_error).__name__}')
+        return
+    commands = [
+        ('node logs', ['docker', 'logs', '--tail=150', container_id]),
+        ('container state', ['docker', 'inspect', '--format={{json .State}}', container_id]),
+        ('node conditions', ['docker', 'exec', container_id, 'kubectl', '--request-timeout=2s',
+            'get', 'nodes', '-o=jsonpath={range .items[*]}{.metadata.name}{": "}{.status.conditions}{"\\n"}{end}']),
+    ]
+    for label, command in commands:
+        try:
+            result = subprocess.run(command, text=True, capture_output=True, timeout=3)
+            error.add_note(f'{label} (exit {result.returncode}):\n' + (result.stdout + result.stderr)[-16384:])
+        except Exception as diagnostic_error:
+            error.add_note(f'{label} unavailable: {type(diagnostic_error).__name__}')
+
+
+def test_build_policy_diagnostics_retain_status_and_bound_node_reads(monkeypatch):
+    cluster = SimpleNamespace(get_wrapped_container=lambda: SimpleNamespace(id='owned-node'))
+    observed = SimpleNamespace(metadata=SimpleNamespace(generation=1),
+        status=SimpleNamespace(to_dict=lambda: {'observed_generation': None, 'type_checking': None}),
+        spec={'private': 'do-not-record-spec'})
+    error = AssertionError('build policy compilation did not finish')
+    commands = []
+
+    def read(command, **kwargs):
+        commands.append(command)
+        assert kwargs == {'text': True, 'capture_output': True, 'timeout': 3}
+        return SimpleNamespace(returncode=0, stdout='node evidence ' + 'x' * 20000, stderr='')
+
+    monkeypatch.setattr(subprocess, 'run', read)
+    _add_build_policy_diagnostics(cluster, observed, error)
+    notes = error.__notes__
+    assert '"observed_generation": null' in notes[0]
+    assert '"generation": 1' in notes[0]
+    assert '"type_checking": null' in notes[0]
+    assert len(commands) == 3
+    assert commands[0] == ['docker', 'logs', '--tail=150', 'owned-node']
+    assert all(len(note) < 17000 for note in notes)
+    assert 'do-not-record-spec' not in '\n'.join(notes)
+
+
+def test_build_policy_diagnostics_failures_do_not_hide_original(monkeypatch):
+    cluster = SimpleNamespace(get_wrapped_container=lambda: SimpleNamespace(id='owned-node'))
+    error = AssertionError('original policy failure')
+    commands = []
+
+    def unavailable(command, **kwargs):
+        commands.append(command)
+        raise subprocess.TimeoutExpired(command, 3, output='private diagnostic data')
+
+    monkeypatch.setattr(subprocess, 'run', unavailable)
+    _add_build_policy_diagnostics(cluster, None, error)
+    assert str(error) == 'original policy failure'
+    assert len(commands) == 3
+    assert sum('TimeoutExpired' in note for note in error.__notes__) == 3
+    assert 'private diagnostic data' not in '\n'.join(error.__notes__)
+
+
+def test_build_policy_diagnostics_missing_node_preserves_original():
+    def unavailable():
+        raise RuntimeError('private container error')
+
+    error = AssertionError('original policy failure')
+    _add_build_policy_diagnostics(SimpleNamespace(get_wrapped_container=unavailable), None, error)
+    assert str(error) == 'original policy failure'
+    assert error.__notes__[-1] == 'disposable node unavailable: RuntimeError'
 
 
 def wait_for_namespace_admission(core, namespace, pod, *, deadline, policy_name=None):
@@ -169,6 +251,7 @@ def test_pooled_build_policy_compiles_and_constrains_both_native_workloads(build
             pod['spec']['runtimeClassName'] = 'build-runtime-fixture'
     policies = documents(namespace, catalog)
     cluster = _start_k3s(ephemeral_storage_floor='1Gi')
+    observed_policy = None
     try:
         _, core, _ = _load_client(cluster)
         admission = client.AdmissionregistrationV1Api(core.api_client)
@@ -198,6 +281,7 @@ def test_pooled_build_policy_compiles_and_constrains_both_native_workloads(build
         deadline = time.monotonic() + 25
         while True:
             policy = admission.read_validating_admission_policy(policies[0]['metadata']['name'])
+            observed_policy = policy
             if policy.status and policy.status.type_checking:
                 assert not policy.status.type_checking.expression_warnings
                 break
@@ -309,5 +393,8 @@ def test_pooled_build_policy_compiles_and_constrains_both_native_workloads(build
                     'requests': {'cpu': '2'}, 'limits': {'cpu': '2'}}}]}},
                 auth_settings=['BearerToken'], _return_http_data_only=True)
         assert denied.value.status == 403 and policies[0]['metadata']['name'] in denied.value.body
+    except BaseException as error:
+        _add_build_policy_diagnostics(cluster, observed_policy, error)
+        raise
     finally:
         cluster.stop()

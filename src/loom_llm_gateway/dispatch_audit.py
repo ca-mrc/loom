@@ -183,6 +183,7 @@ class DispatchAudit:
                 provider_observed_at=datetime.now(UTC),
                 provider_http_status=_http_status(response),
             ),
+            observation="provider",
         )
 
     async def send(
@@ -374,21 +375,39 @@ def request_dispatch_audit(
     return audit_for_request(request, ctx, dialect, provider_connection_id, purpose)
 
 
-async def _persist_observation(state: _RequestAudit, statement: Any) -> None:
+async def _persist_observation(
+    state: _RequestAudit, statement: Any, *, observation: Literal["provider", "gateway"],
+) -> None:
     assert state.session_factory is not None
+    phase = "session"
     try:
         async with asyncio.timeout(_AUDIT_TIMEOUT_SECONDS):
             async with state.session_factory() as session:
+                phase = "execute"
                 await session.execute(statement)
+                phase = "commit"
                 await session.commit()
+                phase = "session_exit"
     except asyncio.CancelledError:
         # A repeated cancellation may interrupt cleanup. Keep the durable
         # admitted/pending row instead of suppressing cancellation or spawning
         # an unbounded background finalizer.
         logger.warning("gateway_dispatch_observation_cancelled request_id=%s", state.request_id)
         raise
-    except Exception:
-        logger.error("gateway_dispatch_observation_failed request_id=%s", state.request_id)
+    except Exception as exc:
+        # Match admission's fixed categories; driver details, SQL binds and
+        # tracebacks can contain private data. Phase identifies the unfinished
+        # await, not its physical cause (execute includes connection checkout).
+        category = (
+            "timeout" if isinstance(exc, TimeoutError)
+            else "database" if isinstance(exc, SQLAlchemyError)
+            else "other"
+        )
+        logger.error(
+            "gateway_dispatch_observation_failed request_id=%s observation=%s "
+            "phase=%s error_category=%s",
+            state.request_id, observation, phase, category,
+        )
 
 
 def _http_status(response: Any) -> int | None:
@@ -443,4 +462,5 @@ class DispatchAuditMiddleware:
                         gateway_http_status=status,
                         gateway_observed_at=datetime.now(UTC),
                     ),
+                    observation="gateway",
                 )

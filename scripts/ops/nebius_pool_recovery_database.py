@@ -11,7 +11,7 @@ import re
 from typing import Any
 from uuid import UUID
 
-from scripts.ops.nebius_pool_activation_database import _binding_hex, _header
+from scripts.ops.nebius_pool_activation_database import _binding_hex, _header, _participant_header
 
 from loom.nebius_rollout_guard import ACTIVITY_SQL
 from loom_service.pool_management.capacity import digest
@@ -78,7 +78,7 @@ FROM activity"""
 
 def participant_recovery_drain_sql(operation_id: UUID, participant_id: UUID, candidate: str) -> str:
     _participant_scope(operation_id, participant_id, candidate)
-    return _header(read_only=True) + f"""DO $pool_recovery_guard$
+    return _participant_header(read_only=True) + f"""DO $pool_recovery_guard$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM public.nebius_rollout_guard WHERE id=1
         AND owner='pool-recovery:{operation_id}' AND candidate_sha='{candidate}')

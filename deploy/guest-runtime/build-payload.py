@@ -38,22 +38,35 @@ def download(item: dict[str, object], directory: Path) -> Path:
         raise ValueError(f"archive URL must use HTTPS: {url}")
     try:
         for attempt in range(1, 4):
+            failure: HTTPError | TimeoutError | None = None
             try:
                 with urlopen(url, timeout=120) as response, partial.open("wb") as output:
-                    shutil.copyfileobj(response, output)
+                    while True:
+                        try:
+                            chunk = response.read(64 * 1024)
+                        except TimeoutError as error:
+                            # Restart a timed-out body from byte zero. Keep
+                            # local cache I/O outside this transport boundary.
+                            failure = error
+                            break
+                        if not chunk:
+                            break
+                        output.write(chunk)
             except HTTPError as error:
                 error.close()
-                partial.unlink(missing_ok=True)
-                print(
-                    f"guest archive {expected}: HTTP {error.code}, attempt {attempt}/3",
-                    file=sys.stderr,
-                    flush=True,
-                )
-                if error.code not in {500, 502, 503, 504} or attempt == 3:
-                    raise
-                time.sleep(attempt)
-            else:
+                failure = error
+            if failure is None:
                 break
+            partial.unlink(missing_ok=True)
+            reason = f"HTTP {failure.code}" if isinstance(failure, HTTPError) else "body timeout"
+            print(
+                f"guest archive {expected}: {reason}, attempt {attempt}/3",
+                file=sys.stderr,
+                flush=True,
+            )
+            if (isinstance(failure, HTTPError) and failure.code not in {500, 502, 503, 504}) or attempt == 3:
+                raise failure
+            time.sleep(attempt)
         if partial.stat().st_size != item["bytes"] or digest(partial) != expected:
             raise ValueError(f"archive content does not match source lock: {url}")
         partial.replace(destination)

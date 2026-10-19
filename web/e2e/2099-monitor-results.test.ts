@@ -1,4 +1,5 @@
 import AxeBuilder from "@axe-core/playwright";
+import type { Locator } from "@playwright/test";
 import type { ApiOverride } from "./fixtures/api";
 import { expect, test } from "./fixtures/guardedTest";
 
@@ -140,6 +141,18 @@ test("Batch run plan explains TaskSet purpose, task count and state-count naviga
 });
 
 test("cancelled Batch observes children, canonical output and cleanup without reload", async ({ apiHarness, browserHarness, page }, testInfo) => {
+  // Drive the browser's polling cadence separately from real response latency.
+  // Pause before navigation so a slow assertion cannot consume another state.
+  await page.clock.install({ time: new Date("2026-09-23T00:00:00Z") });
+  await page.clock.pauseAt(new Date("2026-09-23T00:01:00Z"));
+  const expectVisible = async (locator: Locator) => {
+    await expect.poll(async () => {
+      // Query notifications use timers too; flush them without waiting out
+      // another five-second polling interval while the real request resolves.
+      await page.clock.runFor(50);
+      return locator.isVisible();
+    }).toBe(true);
+  };
   const projection = (active: boolean, archiving: boolean, deleted: boolean) => ({
     ...batch, state: "cancelled", expected_trial_count: 1,
     trial_summary: active ? { running: 1 } : { cancelled: 1 },
@@ -154,21 +167,29 @@ test("cancelled Batch observes children, canonical output and cleanup without re
   const path = "/api/v1/batches/review-batch";
   const fixture = await apiHarness.install({ role: "user", overrides: [
     json("cancel accepted before children settle", path, projection(true, true, false)),
-    json("children cancelled while output archives", path, projection(false, true, false)),
+    { name: "children cancelled while output archives", method: "GET", path,
+      // CI observed a 7.7s response: polling cadence must not consume the
+      // assertion budget before the response being asserted has arrived.
+      response: { kind: "json", status: 200, body: projection(false, true, false), delayMs: 8_000 } },
     json("canonical output before cleanup", path, projection(false, false, false)),
     json("execution resources released", path, projection(false, false, true)),
     json("no prepared delivery export", `${path}/delivery-export`, null),
   ] });
   await page.goto(`${browserHarness.baseURL}/batches/review-batch`);
   await page.bringToFront();
+  await expectVisible(page.getByText("Trial counts by state", { exact: true }));
   await page.getByText("Trial counts by state", { exact: true }).click();
   await expect(page.getByRole("row", { name: "running 1", exact: true })).toBeVisible();
-  await expect(page.getByRole("row", { name: "cancelled 1", exact: true })).toBeVisible();
+  await page.clock.runFor(5_000);
+  await expectVisible(page.getByRole("row", { name: "cancelled 1", exact: true }));
   const ready = page.getByText("Canonical bundles ready", { exact: true }).locator("..");
-  await expect(ready.getByText("1", { exact: true })).toBeVisible();
+  await expect(ready.getByText("0", { exact: true })).toBeVisible();
+  await page.clock.runFor(5_000);
+  await expectVisible(ready.getByText("1", { exact: true }));
   const reads = () => fixture.ledger.filter((entry) => entry.method === "GET" && entry.path === path).length;
+  await expect.poll(reads).toBe(3);
+  await page.clock.runFor(5_000);
   await expect.poll(reads).toBe(4);
-  await page.clock.install();
   await page.clock.runFor(15_000);
   expect(reads()).toBe(4);
   await page.screenshot({ path: testInfo.outputPath("cancelled-batch-converged.png") });
