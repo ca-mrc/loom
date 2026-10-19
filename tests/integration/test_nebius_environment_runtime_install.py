@@ -210,6 +210,7 @@ async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact
                 continue
             doc = remote.kubernetes[runtime_resource_path(doc) + '/' + doc['metadata']['name']]
             namespace, name = doc['metadata']['namespace'], doc['metadata']['name']
+            doc['metadata'].setdefault('generation', 1)
             doc['status'] = {'observedGeneration': doc['metadata']['generation'],
                 'replicas': 1, 'updatedReplicas': 1, 'readyReplicas': 1, 'availableReplicas': 1}
             labels = {**doc['spec']['template']['metadata']['labels'], 'pod-template-hash': 'abc123'}
@@ -217,7 +218,8 @@ async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact
                 'namespace': namespace, 'uid': str(uuid4()), 'generation': 1, 'resourceVersion': '9', 'labels': labels,
                 'ownerReferences': [{'apiVersion': 'apps/v1', 'kind': 'Deployment', 'name': name,
                     'uid': doc['metadata']['uid'], 'controller': True}]},
-                'spec': {'replicas': 1, 'selector': {'matchLabels': labels}, 'template': copy.deepcopy(doc['spec']['template'])},
+                'spec': {'replicas': 1, 'selector': {'matchLabels': {**doc['spec']['selector']['matchLabels'], 'pod-template-hash': 'abc123'}},
+                    'template': copy.deepcopy(doc['spec']['template'])},
                 'status': {'observedGeneration': 1, 'replicas': 1, 'readyReplicas': 1, 'availableReplicas': 1}}
             replica['spec']['template']['metadata']['labels'] = labels
             pod = copy.deepcopy(doc['spec']['template'])
@@ -247,6 +249,7 @@ async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact
 
         commands = []
         reject_process = False
+        late_restart = False
         @contextmanager
         def probe_connection(qualify, region):
             def read(path):
@@ -260,6 +263,10 @@ async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact
                 assert command[3] in {'service', 'controller', 'actuator'}
                 assert 'private-' not in ' '.join(command)
                 commands.append(command[3])
+                if late_restart and command[3] == 'actuator':
+                    service_pod, = (row for row in remote.kubernetes['/api/v1/namespaces/app-red/pods']['items']
+                        if row['metadata']['name'].startswith('loom-service-'))
+                    service_pod['status']['containerStatuses'][0]['restartCount'] += 1
                 return {} if reject_process else {'status': 'qualified'}
             yield EnvironmentRuntimeProbes(read=read, execute=execute, qualify=qualify, region=region)
 
@@ -272,6 +279,12 @@ async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact
             assert sorted(commands) == ['actuator', 'actuator', 'controller', 'controller', 'service', 'service']
             assert len(changes) == 8
             reject_process = True
+            with pytest.raises(ValueError, match='environment_runtime_readiness_unqualified'):
+                await readiness.observe_environment_runtime(**observe_inputs)
+            assert len(changes) == 8
+            reject_process, late_restart = False, True
+            # A later component's probe must not leave the earlier service's
+            # successful, but superseded, process evidence in the ready bundle.
             with pytest.raises(ValueError, match='environment_runtime_readiness_unqualified'):
                 await readiness.observe_environment_runtime(**observe_inputs)
             assert len(changes) == 8

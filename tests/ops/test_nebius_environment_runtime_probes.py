@@ -4,10 +4,15 @@ from __future__ import annotations
 import copy
 import importlib
 import json
+import os
+import ssl
 import subprocess
 import sys
+from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
+import certifi
 import pytest
 from tests.ops.test_nebius_development_runtime_readiness import running as running
 from tests.ops.test_nebius_pool_runtime import guest_runtime_inputs as guest_runtime_inputs
@@ -28,14 +33,18 @@ def test_generic_process_probe_binds_actual_configuration_and_current_process(se
     current['metadata'].update(name=target['metadata']['name'], namespace='app-blue')
     current['spec'] = copy.deepcopy(target['spec'])
     current['spec']['replicas'] = 1
-    labels = {**current['spec']['selector']['matchLabels'], 'pod-template-hash': 'abc123'}
+    labels = {**current['spec']['template']['metadata']['labels'], 'pod-template-hash': 'abc123'}
     replica['metadata'].update(namespace='app-blue', labels=labels)
     replica['metadata']['ownerReferences'][0].update(name=current['metadata']['name'])
-    replica['spec'].update(selector={'matchLabels': labels}, template=copy.deepcopy(current['spec']['template']))
+    replica['spec'].update(selector={'matchLabels': {**current['spec']['selector']['matchLabels'], 'pod-template-hash': 'abc123'}},
+        template=copy.deepcopy(current['spec']['template']))
     replica['spec']['template']['metadata']['labels'] = labels
+    pod['metadata'].update(copy.deepcopy(current['spec']['template']['metadata']))
     pod['metadata'].update(namespace='app-blue', labels=labels)
     pod['spec'] = copy.deepcopy(current['spec']['template']['spec'])
     pod['status']['containerStatuses'][0]['name'] = pod['spec']['containers'][0]['name']
+    pod['status']['initContainerStatuses'] = [{'name': row['name'], 'state': {'terminated': {'exitCode': 0}}}
+        for row in pod['spec'].get('initContainers', [])]
     wanted = copy.deepcopy(current)
     db_url = 'postgresql+psycopg://reader:private-db-marker@loom-postgres.app-blue.svc:5432/loom'
     db_variable = {'controller': 'LOOM_CP_DB_URL', 'actuator': 'LOOM_EXECUTION_ACTUATOR_DB_URL', 'service': 'LOOM_SVC_DB_URL'}[component]
@@ -93,3 +102,49 @@ def test_generic_process_probe_binds_actual_configuration_and_current_process(se
             observe()
         assert 'private-' not in str(error.value)
     assert reads
+
+
+@pytest.mark.parametrize('damage', [None, 'command', 'connection', 'error', 'oversized'])
+def test_fixed_process_transport_uses_only_private_explicit_connection_and_cleans_it(monkeypatch, damage):
+    from scripts.ops import nebius_environment_runtime_readiness as readiness
+    from scripts.ops.nebius_pool_migration_guard import _BOUND_DATABASE_COMMAND
+
+    monkeypatch.setattr(readiness.shutil, 'which', lambda name, path: '/usr/bin/kubectl')
+    executed = []
+    def run(command, **kwargs):
+        executed.append(command)
+        assert kwargs['env'] == {'PATH': os.defpath, 'LANG': 'C.UTF-8'}
+        assert kwargs['timeout'] == 40 and kwargs['check'] is False
+        config_path = Path(command[command.index('--kubeconfig') + 1])
+        assert config_path.stat().st_mode & 0o777 == 0o600
+        config = json.loads(config_path.read_text())
+        assert config['clusters'][0]['cluster']['server'] == 'https://selected.cluster.test'
+        assert config['users'][0]['user'] == {'token': 'private-transport-fixture'}
+        assert len(config['clusters']) == len(config['users']) == len(config['contexts']) == 1
+        assert command[command.index('exec') + 1:command.index('--')] == ['-n', 'work-blue', 'pod/reader-pod', '-c', 'reader']
+        return SimpleNamespace(returncode=1 if damage == 'error' else 0,
+            stderr=b'private-failure-marker' if damage == 'error' else b'',
+            stdout=b'x' * 65537 if damage == 'oversized' else b'{"status":"qualified"}')
+    monkeypatch.setattr(readiness.subprocess, 'run', run)
+    transport = readiness.FixedProcessTransport(endpoint='https://selected.cluster.test', trust=ssl.create_default_context(cafile=certifi.where()),
+        token='private-transport-fixture', qualify=lambda: None)
+    directory = transport.path.parent
+    try:
+        command = ['python', '-c', _BOUND_DATABASE_COMMAND, 'actuator', 'a' * 64, 'b' * 64]
+        if damage == 'command':
+            command[2] = 'print("arbitrary command")'
+        elif damage == 'connection':
+            transport.path.write_text('{}')
+        pod = {'metadata': {'name': 'reader-pod', 'namespace': 'work-blue', 'uid': str(uuid4())}}
+        if damage is None:
+            assert transport.execute(pod, 'reader', command) == {'status': 'qualified'}
+            assert len(executed) == 1
+        else:
+            with pytest.raises(ValueError, match='environment_runtime_probe_transport_unqualified') as error:
+                transport.execute(pod, 'reader', command)
+            assert 'private-' not in str(error.value)
+            if damage in {'command', 'connection'}:
+                assert not executed
+    finally:
+        transport.close()
+    assert not directory.exists()
