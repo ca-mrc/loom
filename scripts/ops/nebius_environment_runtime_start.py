@@ -12,6 +12,7 @@ import json
 import tomllib
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -133,6 +134,38 @@ def _options(plan: dict[str, Any], retained: StagedEnvironmentRuntimeV2, cursor:
                 desired['metadata']['uid'] = _uid(before[key])
                 current[key] = (desired,) if item['status'] == 'applied' else (before[key], desired)
     return current
+
+
+@dataclass(frozen=True, repr=False)
+class StartedEnvironmentRuntimeV2:
+    staged: StagedEnvironmentRuntimeV2
+    resources: dict[str, dict[str, Any]]
+    files: dict[Path, bytes]
+
+
+def load_started_environment_runtime(*, policy: PoolEnrollmentPolicyV2, operation_id: UUID) -> StartedEnvironmentRuntimeV2:
+    """Retained exact successors, never an assertion about current readiness."""
+    try:
+        staged = load_staged_environment_runtime(policy=policy, operation_id=operation_id)
+        directory = staged.state_dir / 'start'
+        paths = [directory / 'plan.json', directory / 'cursor.json',
+            policy.host.anchor_root / ('runtime-start-' + str(operation_id) + '.json'),
+            *(directory / phase / 'transition.json' for phase in _PHASES)]
+        files = {path: state._private_read(path, limit=8 * 1024**2) for path in paths}
+        plan, cursor, anchor = (json.loads(files[path]) for path in paths[:3])
+        if (set(plan) != {'runtime_sha256', 'originals'} or plan['runtime_sha256'] != digest(staged.plan)
+                or anchor != {'operation_id': str(operation_id), 'plan_sha256': digest(plan)}
+                or cursor != {'phases': dict.fromkeys(_PHASES, 'complete')}):
+            raise ValueError
+        options = _options(plan, staged, cursor)
+        resources = {**copy.deepcopy(staged.resources), **{key: docs[0] for key, docs in options.items() if len(docs) == 1}}
+        files.update(staged.files)
+        if any(len(docs) != 1 for docs in options.values()) or any(
+                state._private_read(path, limit=8 * 1024**2) != raw for path, raw in files.items()):
+            raise ValueError
+        return StartedEnvironmentRuntimeV2(staged, resources, files)
+    except Exception:
+        raise ValueError('environment_runtime_started_unqualified') from None
 
 
 class _Workloads:
