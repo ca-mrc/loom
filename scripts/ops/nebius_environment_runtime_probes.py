@@ -22,6 +22,7 @@ from scripts.ops.nebius_pool_migration_guard import (
 )
 from scripts.ops.nebius_pool_runtime_settings import (
     BOUND_POOL_SETTINGS_COMMAND,
+    PoolSettingsComponent,
     expected_pool_runtime_settings,
 )
 
@@ -65,15 +66,16 @@ class EnvironmentRuntimeProbes:
         try:
             final, pod = self._running(workload)
             if (set(proof) != {'component', 'deployment_uid', 'pod_uid', 'process_sha256'}
-                    or proof['component'] not in {'service', 'controller', 'actuator'}
+                    or proof['component'] not in {'service', 'controller', 'actuator', 'manager', 'gateway'}
                     or proof['deployment_uid'] != _uid(final) or proof['pod_uid'] != _uid(pod)
                     or proof['process_sha256'] != digest(self._process(pod))):
                 raise ValueError
         except Exception:
             raise ValueError('environment_runtime_process_changed') from None
 
-    def qualify_process(self, *, workload: dict[str, Any], component: EnvironmentComponent,
-            database_namespace: str, database_url: str, token_sha256: str | None = None) -> dict[str, Any]:
+    def qualify_process(self, *, workload: dict[str, Any], component: PoolSettingsComponent,
+            database_namespace: str, database_url: str, token_sha256: str | None = None,
+            catalog_sha256: str | None = None) -> dict[str, Any]:
         """Challenge the selected image's real typed settings and DB URL readers.
 
         Read the exact Deployment/ReplicaSet/Pod ancestry on both sides. A Pod
@@ -81,19 +83,23 @@ class EnvironmentRuntimeProbes:
         Secret values never enter command arguments, reports or failure messages.
         """
         try:
-            if component not in {'service', 'controller', 'actuator'}:
+            if component not in {'service', 'controller', 'actuator', 'manager', 'gateway'}:
                 raise ValueError
             qualify_database_destination(database_url, database_namespace)
             current, before = self._running(workload)
-            expected = expected_pool_runtime_settings(component, current, token_sha256=token_sha256)
-            url = database_url if component == 'actuator' else str(PostgresDsn(database_url))
+            expected = expected_pool_runtime_settings(component, current, token_sha256=token_sha256,
+                catalog_sha256=catalog_sha256)
+            url = database_url if component in {'actuator', 'gateway'} else str(PostgresDsn(database_url))
             container, = current['spec']['template']['spec']['containers']
             for command, value in ((BOUND_POOL_SETTINGS_COMMAND, json.dumps(expected, sort_keys=True, separators=(',', ':'))),
                     (_BOUND_DATABASE_COMMAND, url)):
                 nonce = secrets.token_hex(32)
                 response = hmac.new(bytes.fromhex(nonce), value.encode(), 'sha256').hexdigest()
                 self.qualify()
-                report = self.execute(before, container['name'], ['python', '-c', command, component, nonce, response])
+                # The manager uses the service's existing typed DB reader;
+                # preserve that fixed command's installed v1 bytes.
+                role = 'service' if component == 'manager' and command == _BOUND_DATABASE_COMMAND else component
+                report = self.execute(before, container['name'], ['python', '-c', command, role, nonce, response])
                 self.qualify()
                 if report != {'status': 'qualified'}:
                     raise ValueError

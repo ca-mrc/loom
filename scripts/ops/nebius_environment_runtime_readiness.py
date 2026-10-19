@@ -101,7 +101,8 @@ class FixedProcessTransport:
         try:
             if (len(command) != 6 or command[:2] != ['python', '-c']
                     or command[2] not in {BOUND_POOL_SETTINGS_COMMAND, _BOUND_DATABASE_COMMAND}
-                    or command[3] not in {'service', 'controller', 'actuator'}
+                    or command[3] not in {'service', 'controller', 'actuator', 'manager', 'gateway'}
+                    or (command[3] == 'manager' and command[2] == _BOUND_DATABASE_COMMAND)
                     or any(re.fullmatch('[0-9a-f]{64}', item) is None for item in command[4:])
                     or any(re.fullmatch('[a-z0-9][a-z0-9.-]{0,252}', item) is None for item in (
                         pod['metadata']['namespace'], pod['metadata']['name'], container))):
