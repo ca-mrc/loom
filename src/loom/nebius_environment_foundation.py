@@ -149,6 +149,11 @@ def render_foundation(declaration: EnvironmentFoundationDeclarationV2, candidate
     files['60-execution.yaml'] = _closed_execution(row)
     files['70-public.yaml'] = [_service('loom-web', row.application_namespace, 8080), _shared_ingress(row, declaration)]
     files['40-services.yaml'] = [doc for doc in files['40-services.yaml'] if doc['kind'] != 'PersistentVolumeClaim']
+    database, = (doc for doc in files['20-database.yaml'] if doc['kind'] == 'StatefulSet')
+    claim, = database['spec']['volumeClaimTemplates']
+    files['20-database.yaml'].insert(0, {'apiVersion': 'v1', 'kind': 'PersistentVolumeClaim',
+        'metadata': {'name': 'data-loom-postgres-0', 'namespace': row.application_namespace},
+        'spec': copy.deepcopy(claim['spec'])})
     if not declaration.backups_enabled:
         files['80-backup.yaml'] = []
     peer = {'namespaceSelector': {'matchLabels': {'kubernetes.io/metadata.name': declaration.ingress_namespace}},

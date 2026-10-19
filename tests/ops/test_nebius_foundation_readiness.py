@@ -9,10 +9,10 @@ from uuid import uuid4
 
 import httpx
 import pytest
-
-from loom_service.environment_management.kubernetes_provider import KubernetesEnvironmentProvider
 from tests.ops.test_nebius_environment_foundation import Remote, prepare, run
 from tests.support.nebius_platform import platform_inputs as platform_inputs
+
+from loom_service.environment_management.kubernetes_provider import KubernetesEnvironmentProvider
 
 
 def module():

@@ -196,7 +196,8 @@ async def _material(state_dir: Path, context: ProvisioningContext, step: Provisi
 
 
 async def reconcile_foundation(*, state_dir: Path, reference: FoundationReferenceV2,
-        kubernetes: KubernetesEnvironmentProvider, cloud: FoundationCloud) -> FoundationObservationV2:
+        kubernetes: KubernetesEnvironmentProvider, cloud: FoundationCloud,
+        observe_only: bool = False) -> FoundationObservationV2:
     """Recover exact effects and qualify all bindings, including completed steps.
 
     Holding a nonblocking local operation lock prevents concurrent local runners;
@@ -218,7 +219,7 @@ async def reconcile_foundation(*, state_dir: Path, reference: FoundationReferenc
                 raise ProviderBlockedError('foundation_cluster_identity_conflict')
         await qualify_cluster()
         steps = _steps(plan)
-        create = plan['mode'] == 'create'
+        create = plan['mode'] == 'create' and not observe_only
         identities = dict(plan['import_identities'] or {})
         step_root = state_dir / 'steps'
         state._private_directory(step_root)
@@ -236,7 +237,7 @@ async def reconcile_foundation(*, state_dir: Path, reference: FoundationReferenc
                 raise ValueError('foundation_journal_missing') from None
             if digest(recorded) != checksum or not (step_root / f'{record_index}.intent.json').exists():
                 raise ValueError('foundation_journal_conflict')
-        if (state_dir / 'observed.json').exists() and len(records) != len(steps):
+        if ((state_dir / 'observed.json').exists() or observe_only) and len(records) != len(steps):
             raise ValueError('foundation_journal_incomplete')
         for index, step in enumerate(steps):
             path = step_root / f'{index:04d}.observed.json'
