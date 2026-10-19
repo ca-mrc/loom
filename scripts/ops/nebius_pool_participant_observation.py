@@ -484,6 +484,7 @@ class HTTPSParticipantResourceObserver(ManagementKubernetesTransport):
         from scripts.ops.nebius_development_pool_registration import development_profile_catalog
         from scripts.ops.nebius_development_runtime_external import qualify_runtime_cloud
         from scripts.ops.nebius_development_runtime_retained import load_completed_runtime
+        from scripts.ops.nebius_shared_pool_operation import _history
 
         from loom_control_plane.execution_placement import quota_identity
 
@@ -495,19 +496,25 @@ class HTTPSParticipantResourceObserver(ManagementKubernetesTransport):
             view = _ResourceView(retained, preparing)
             completed = bound.plan.development.runtime
             request = completed.request
-            if load_completed_runtime(request) != completed:
+            if (load_completed_runtime(request) != completed
+                    or not bound.plan.history.items() <= retained.inputs.history.items()):
                 raise ValueError
             collector = prepare_collector_runtime(request.database)
-            config = collector.configuration
+            storage = bound.plan.storage
+            config = collector.configuration if storage is None else storage.resources.configuration
             keys = {_key(config), f"Secret:{config['metadata']['namespace']}:{collector.credential_secret_name}"}
             profiles = development_profile_catalog(request.database.manager.retained.request)
             keys.update(f'Secret:{row.settings.namespace}:{row.settings.registry_secret_name}'
                 for row in profiles.task_images)
             keys.update(f'Secret:{row.settings.namespace}:{row.settings.registry_secret_name}'
                 for row in profiles.application_images)
-            if not keys <= completed.plan.fixed['material'].keys():
+            material_keys = set(completed.plan.fixed['material'])
+            if storage is not None:
+                material_keys.add(_key(config))
+            if not keys <= material_keys:
                 raise ValueError
-            expected = {key: completed.resources[key] for key in keys}
+            effective = bound.plan.effective_runtime_resources
+            expected = {key: effective[key] for key in keys}
 
             def material() -> None:
                 for row in expected.values():
@@ -516,6 +523,7 @@ class HTTPSParticipantResourceObserver(ManagementKubernetesTransport):
                         raise ValueError
 
             def unchanged() -> None:
+                _history(bound)
                 if (bindings != bound or self.retained != retained
                         or (self.api_server, self.client, str(self.client.base_url), dict(self.client.headers)) != connection
                         or private_state._private_read(operator_credentials, limit=1024**2) != operator
@@ -529,7 +537,8 @@ class HTTPSParticipantResourceObserver(ManagementKubernetesTransport):
             spec = retained.release.refresh.before
             async with self._publication_catalog(completed=completed, http=http):
                 unchanged()
-                snapshot = await qualify_runtime_cloud(request=request, operator_credentials=operator_credentials)
+                snapshot = await qualify_runtime_cloud(request=request, operator_credentials=operator_credentials,
+                    **({} if storage is None else {'storage': storage.retained.inputs.refresh}))
                 if (snapshot.node_group is None or snapshot.node_group.id != spec.node_group_id
                         or {key: quota_identity(value) for key, value in snapshot.quota_resources.items()} != spec.quota_identities
                         or snapshot.provider_capacity_state != 'available'
