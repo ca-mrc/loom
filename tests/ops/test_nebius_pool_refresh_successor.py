@@ -201,6 +201,7 @@ def test_completed_ordinary_successor_preflight_is_read_only_and_rejects_drift(p
         completion_sha256=result['completion_sha256']), original=root)
     successor = asyncio.run(ordinary_rollout[0]())
     metadata, payload, _ = private_refresh(root, pool)
+    payload.update(manager_revision='0174', target_manager_revision='0177')
     payload['platform_rollout'] = successor.reference.model_dump(mode='json')
     payload['deployment']['installation']['foundation']['platform_config_json'] = json.dumps(successor.config)
     save_private(metadata, payload)
@@ -228,6 +229,10 @@ def test_completed_ordinary_successor_preflight_is_read_only_and_rejects_drift(p
     with pool_refresh_http(bound)() as (verifier, external):
         before = copy.deepcopy(external.objects)
         verifier.qualify()
+        external.failure = 'manager_schema'
+        with pytest.raises(ValueError):
+            verifier.qualify()
+        external.failure = None
         dormant = pool.context.request.fencing.retirement.dormant_consumers[0]
         for original in (dormant.actuator, dormant.collector):
             assert _key(original) not in successor.resources

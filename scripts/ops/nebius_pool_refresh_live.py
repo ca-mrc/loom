@@ -77,16 +77,20 @@ class HTTPSPoolRefreshAPI:
 
     def _admission(self) -> None:
         history = self.parent.history
+        options = self.refresh.manager_revision_options()
+        revision = history.management_schema_revision(options)
         if self.pool.completion.outcome == 'global':
-            history.qualify_active_pool()
+            history.qualify_active_pool(manager_revision=revision)
         else:
-            if (history.activation_pool('observe') != 'fenced'
-                    or history.machine_retirement('observe') != 'revoked'
-                    or history.recovery_pool_drained() is not True):
+            if (history.activation_pool('observe', manager_revision=revision) != 'fenced'
+                    or history.machine_retirement('observe', manager_revision=revision) != 'revoked'
+                    or history.recovery_pool_drained(manager_revision=revision) is not True):
                 raise ValueError
         for guard in self.parent.request.fencing.retirement.migration.guards:
             if self.parent.guards.activation_guard(guard, 'observe') != 'open':
                 raise ValueError
+        if self.refresh.manager_revision_options() != options:
+            raise ValueError
 
     def _outcome(self) -> None:
         self._admission()

@@ -9,7 +9,11 @@ from __future__ import annotations
 import json
 from typing import Any, Literal, cast
 
-from scripts.ops.nebius_pool_activation_database import _binding_hex, _header
+from scripts.ops.nebius_pool_activation_database import (
+    _binding_hex,
+    _header,
+    _manager_observation_header,
+)
 from scripts.ops.nebius_pool_recovery_database import _pool_drain_counts_sql
 
 from loom_service.pool_management.capacity import digest
@@ -60,11 +64,15 @@ SELECT CASE WHEN
     END AS state FROM expected"""
 
 
-def pool_machine_retirement_sql(spec: PoolInstallation, *, action: Literal['observe', 'revoke']) -> str:
+def pool_machine_retirement_sql(spec: PoolInstallation, *, action: Literal['observe', 'revoke'],
+        manager_revision: str = '0176') -> str:
     spec = PoolInstallation.model_validate(spec.model_dump())
     if action not in {'observe', 'revoke'}:
         raise ValueError('pool_machine_retirement_action_unqualified')
     write = action == 'revoke'
+    if write and manager_revision != '0176':
+        raise ValueError('pool machine retirement write revision unqualified')
+    header = _header(read_only=False) if write else _manager_observation_header(manager_revision)
     locks = f"""DO $pool_machine_locks$
 BEGIN
 PERFORM pg_advisory_xact_lock(hashtextextended('nebius-global-pool-mutation',1915));
@@ -85,7 +93,7 @@ END $pool_machine_locks$;
             WHERE t.token_hash=c.token_hash AND m.pool_id='{spec.pool_id}'::uuid AND t.revoked_at IS NULL;
     END IF;
 """ if write else ''
-    return _header(read_only=not write) + locks + f"""DO $pool_machine_retirement$
+    return header + locks + f"""DO $pool_machine_retirement$
 DECLARE current_state text;
 BEGIN
     SELECT state INTO current_state FROM ({_state_sql(spec)}) authority;

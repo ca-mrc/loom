@@ -16,6 +16,7 @@ from scripts.ops.nebius_management_refresh import platform_disk_type, render_ref
 from scripts.ops.nebius_management_refresh_install import (
     ManagementRefreshInstallRequest,
     refresh_manager_options,
+    refresh_manager_revision_options,
 )
 from scripts.ops.nebius_management_refresh_predecessor import (
     CompletedRefresh,
@@ -129,6 +130,11 @@ class PoolManagerRefresh:
         storage = quotas['storage']
         quotas['storage'] = (*storage[:3], name, storage[4])
         return desired, quotas
+
+    def manager_revision_options(self) -> tuple[str, ...]:
+        """Read this phase within the live reader's existing scope qualification."""
+        return refresh_manager_revision_options(self.request, state=self.state_dir,
+            anchor=self.state_dir.parent / 'anchor')
 
     def workload_options(self) -> dict[str, tuple[dict[str, Any], ...]]:
         """Permit only exact manager journal states; preserve all other workloads."""

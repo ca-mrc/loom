@@ -19,6 +19,11 @@ PoolActivationState = Literal["closed", "global", "fenced"]
 # adds publication retention, not a new handoff/outbox/guard layout. This is an
 # audited compatibility set, never the automatically discovered migration head.
 PARTICIPANT_SCHEMA_REVISIONS = ("0176", "0177")
+# 0175 changes an Oracle archival trigger; 0176 adds Harbor sessions; 0177 adds
+# source-publication retention. None changes these manager ledger/read predicates.
+# A refresh must select ONE revision from its bound migration phase; this is not
+# a startup or write compatibility set and is never an automatic schema fallback.
+MANAGER_OBSERVATION_REVISIONS = ("0174", "0176", "0177")
 
 
 def _binding_hex(spec: PoolInstallation) -> str:
@@ -55,6 +60,13 @@ def _header(*, read_only: bool) -> str:
         schema_unqualified="(SELECT version_num FROM public.alembic_version) IS DISTINCT FROM '0176'")
 
 
+def _manager_observation_header(manager_revision: str) -> str:
+    if manager_revision not in MANAGER_OBSERVATION_REVISIONS:
+        raise ValueError('pool manager observation revision unqualified')
+    return _transaction_header(read_only=True,
+        schema_unqualified=f"(SELECT version_num FROM public.alembic_version) IS DISTINCT FROM '{manager_revision}'")
+
+
 def _participant_header(*, read_only: bool) -> str:
     return _transaction_header(read_only=read_only, schema_unqualified=_participant_schema_unqualified_sql())
 
@@ -70,10 +82,10 @@ SELECT json_build_object('schema','loom.pool-activation-state.v1',
 """
 
 
-def pool_activation_state_sql(spec: PoolInstallation) -> str:
+def pool_activation_state_sql(spec: PoolInstallation, *, manager_revision: str = '0176') -> str:
     """Observe only the exact original, opened, or terminally fenced binding."""
     spec = PoolInstallation.model_validate(spec.model_dump())
-    return _header(read_only=True) + _report_sql(spec) + "ROLLBACK;\n"
+    return _manager_observation_header(manager_revision) + _report_sql(spec) + "ROLLBACK;\n"
 
 
 def fence_pool_activation_sql(spec: PoolInstallation) -> str:

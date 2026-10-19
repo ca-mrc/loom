@@ -326,3 +326,99 @@ def test_activation_cannot_bypass_incomplete_or_changed_barriers(install, damage
             activation(install)
     assert {phase: stage.creates for phase, stage in api.stages.items()} == writes
     assert api.switch.calls == ['retire', 'activate']
+
+
+@pytest.mark.parametrize('pending,expected', [
+    ('manager-probe', ('0174',)), ('migration', ('0174', '0177')),
+    ('post-migration-probe', ('0174', '0177')), (None, ('0177',)),
+])
+def test_manager_schema_observation_follows_own_migration(install, tmp_path, pending, expected):
+    from scripts.ops.nebius_management_refresh_install import refresh_manager_revision_options
+
+    original, _, _, _ = install
+    (tmp_path / 'schema').mkdir(mode=0o700)
+    case = install_case(replace(original.resources, manager_revision='0174', target_manager_revision='0177'),
+        tmp_path / 'schema', history=original.history, installation_anchor=original.installation_anchor)
+    request, api, state, anchor = case
+    assert refresh_manager_revision_options(request, state=state, anchor=anchor) == ('0174',)
+    api.pending = pending
+    run(case)
+    saved = {path: path.read_bytes() for path in state.rglob('*.json')}
+    assert refresh_manager_revision_options(request, state=state, anchor=anchor) == expected
+    assert {path: path.read_bytes() for path in saved} == saved
+
+
+@pytest.mark.parametrize('damage', ['foreign_job', 'lost_job', 'foreign_probe'])
+def test_manager_schema_cannot_use_unbound_migration_or_probe(install, tmp_path, damage):
+    from scripts.ops.nebius_management_refresh_install import refresh_manager_revision_options
+
+    original, _, _, _ = install
+    (tmp_path / 'schema').mkdir(mode=0o700)
+    case = install_case(replace(original.resources, manager_revision='0174', target_manager_revision='0177'),
+        tmp_path / 'schema', history=original.history, installation_anchor=original.installation_anchor)
+    request, api, state, anchor = case
+    api.pending = 'migration' if damage != 'foreign_probe' else None
+    run(case)
+    path = state / 'migration/stage.json'
+    row = json.loads(path.read_bytes())
+    key, = row['resources']
+    if damage == 'foreign_job':
+        row['resources'][key]['desired']['spec']['template']['spec']['containers'][0]['image'] += '-foreign'
+        path.write_text(json.dumps(row))
+    elif damage == 'lost_job':
+        path.unlink()
+    else:
+        path = state / 'refresh.json'
+        row = json.loads(path.read_bytes())
+        row['phases']['post-migration-probe']['proof']['probe']['revision'] = '0174'
+        path.write_text(json.dumps(row))
+    from scripts.ops.nebius_management_stage import ManagementStageError
+
+    with pytest.raises((ValueError, ManagementStageError)):
+        refresh_manager_revision_options(request, state=state, anchor=anchor)
+
+
+def test_manager_schema_unknown_migration_dispatch_resumes_without_recreate(install, tmp_path):
+    from scripts.ops.nebius_management_refresh_install import (
+        ManagementRefreshInstallError,
+        refresh_manager_revision_options,
+    )
+
+    original, _, _, _ = install
+    (tmp_path / 'schema').mkdir(mode=0o700)
+    case = install_case(replace(original.resources, manager_revision='0174', target_manager_revision='0177'),
+        tmp_path / 'schema', history=original.history, installation_anchor=original.installation_anchor)
+    request, api, state, anchor = case
+    # Prepare earlier phases through a genuinely pending backup.
+    api.pending = 'backup'
+    run(case)
+    migration = PhaseAPI(request.resources.binding)
+    create, get = migration.create_resource, migration.get_resource
+    lost = True
+
+    def lose_response(document):
+        create(document)
+        raise OSError('lost POST response')
+
+    def lose_readback(document):
+        if lost and migration.resources:
+            raise OSError('lost GET response')
+        value = get(document)
+        if value is not None:
+            value['status'] = {'conditions': [{'type': 'Complete', 'status': 'True'}], 'succeeded': 1}
+        return value
+
+    migration.create_resource, migration.get_resource = lose_response, lose_readback
+    api.stages['migration'] = migration
+    api.pending = None
+    with pytest.raises(ManagementRefreshInstallError):
+        run(case)
+    row = json.loads((state / 'migration/stage.json').read_bytes())
+    job, = row['resources'].values()
+    assert job['status'] == 'create_intent'
+    assert refresh_manager_revision_options(request, state=state, anchor=anchor) == ('0174', '0177')
+    assert len(migration.creates) == 1
+    lost = False
+    assert run(case)['status'] == 'management_refreshed'
+    assert len(migration.creates) == 1
+    assert refresh_manager_revision_options(request, state=state, anchor=anchor) == ('0177',)

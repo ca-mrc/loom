@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
+from scripts.ops.nebius_pool_migration import PoolMigrationError
 from tests.ops.test_nebius_pool_database_guard import database_guard as database_guard
 from tests.ops.test_nebius_pool_gateway_probe import projected_gateway as projected_gateway
 from tests.ops.test_nebius_pool_runtime import runtime_inputs as runtime_inputs
@@ -549,3 +550,29 @@ def test_management_history_rejects_identity_drift_or_unqualified_pages(manageme
         api.qualify_pending_origins(participant, (origin,))
     assert 'private-marker' not in str(error.value)
     assert sum(row[0] == 'exec' for row in state.calls) == (1 if damage in {'after_drift', 'report', 'origin', 'missing'} else 0)
+
+
+@pytest.mark.parametrize('revision', ['0174', '0177'])
+def test_refresh_schema_observation_is_read_only_and_exact(management_history, revision):
+    api, state = management_history
+    state.report = {'revision': revision}
+    assert api.management_schema_revision((revision,)) == revision
+    query = next(call[-1] for call in state.calls if call[0] == 'exec')
+    assert 'REPEATABLE READ READ ONLY' in query and 'ROLLBACK;' in query
+    assert 'public.alembic_version' in query
+    with pytest.raises(PoolMigrationError):
+        api.management_schema_revision(('0176',))
+
+
+@pytest.mark.parametrize('damage', ['pod', 'multiple', 'missing'])
+def test_refresh_schema_readback_rejects_replacement_or_unqualified_result(management_history, damage):
+    api, state = management_history
+    state.report = {'revision': '0174'}
+    if damage == 'pod':
+        state.after_drift = True
+    elif damage == 'multiple':
+        state.report['other'] = '0177'
+    else:
+        state.report = {}
+    with pytest.raises(PoolMigrationError):
+        api.management_schema_revision(('0174',))

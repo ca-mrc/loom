@@ -273,6 +273,43 @@ def refresh_manager_options(request: ManagementRefreshInstallRequest, *, state: 
     return result
 
 
+def refresh_manager_revision_options(request: ManagementRefreshInstallRequest, *, state: Path,
+                                     anchor: Path) -> tuple[str, ...]:
+    """Observe the original schema until this refresh may have dispatched migration.
+
+    A migration create intent permits observing either side of its transition;
+    the existing post-migration probe narrows observation to the target. This
+    grants no startup or migration authority.
+    """
+    from scripts.ops.nebius_management_refresh_resources import _revision, refresh_documents
+    from scripts.ops.nebius_management_stage import _validate_record
+
+    if any(not path.is_absolute() or path != path.resolve() for path in (state, anchor)):
+        raise ValueError
+    history = _history(request)
+    parent = refresh_record(request, state=state, anchor=anchor, history=history)
+    before, target = request.resources.manager_revision, request.resources.target_manager_revision
+    options: tuple[str, ...] = (before,)
+    if parent is not None and 'migration' in parent['phases']:
+        documents = refresh_documents(request.resources, 'migration')
+        stage = json.loads(private_state._private_read(state / 'migration/stage.json', limit=4 * 1024**2))
+        identity = {'schema': 'loom.nebius-management-stage.v1', 'binding': asdict(request.resources.binding),
+            'revision': _revision(request.resources, documents), 'phase': 'refresh-migration'}
+        _validate_record(stage, identity, documents)
+        job, = (item for item in stage['resources'].values() if item['desired']['kind'] == 'Job')
+        if job['status'] in {'create_intent', 'created'}:
+            options = tuple(dict.fromkeys((before, target)))
+        probe = parent['phases'].get('post-migration-probe')
+        if probe is not None and probe['proof'] is not None:
+            if job['status'] != 'created':
+                raise ValueError
+            _proof(request, 'post-migration-probe', state, probe['proof'])
+            options = (target,)
+    if _history(request) != history or refresh_record(request, state=state, anchor=anchor, history=history) != parent:
+        raise ValueError
+    return options
+
+
 def refresh_management(*, request: ManagementRefreshInstallRequest, api: ManagementRefreshInstallAPI,
                        state_dir: Path, anchor_dir: Path) -> dict[str, Any]:
     """Never restart a lost child journal or activate before all runtime barriers."""
