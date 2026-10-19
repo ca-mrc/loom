@@ -10,7 +10,15 @@ from datetime import timedelta
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    model_serializer,
+    model_validator,
+)
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,7 +26,7 @@ from loom.db.nebius_pool_catalog_schema import NebiusPoolParticipantCatalog
 from loom.db.nebius_pool_lifecycle_schema import NebiusPoolParticipantLifecycle
 from loom.db.nebius_pool_schema import NebiusPoolBinding, NebiusPoolMachine, NebiusPoolParticipant
 from loom.nebius_pool_contract import PoolParticipantV1
-from loom_service.pool_management.capacity import digest
+from loom_service.pool_management.capacity import digest, observe_connected_capacity
 from loom_service.pool_management.control import _clock
 from loom_service.pool_management.lifecycle_contracts import PoolRuntimeReadinessV2
 from loom_service.pool_management.observation_binding import physical_binding_digest
@@ -40,6 +48,14 @@ class PoolInspectionV2(_Strict):
     environment_id: UUID | None = None
     incarnation: UUID | None = None
     environment_class: Literal['development', 'staging', 'production'] | None = None
+    require_capacity: bool = Field(default=False, strict=True)
+
+    @model_serializer(mode='wrap')
+    def retained_inventory_bytes(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        value: dict[str, Any] = handler(self)
+        if not self.require_capacity:
+            value.pop('require_capacity', None)
+        return value
 
     @model_validator(mode='after')
     def identity(self) -> PoolInspectionV2:
@@ -95,6 +111,23 @@ class _Participant(_Strict):
     catalog_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
 
 
+class PoolCapacityObservationV2(_Strict):
+    """Authenticated physical evidence, not free slots or an allocation grant."""
+    pool_id: UUID
+    pool_authority_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
+    observation_id: UUID
+    observed_at: AwareDatetime
+    valid_until: AwareDatetime
+    placement_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
+
+    @model_validator(mode='after')
+    def bounded(self) -> PoolCapacityObservationV2:
+        if (not self.pool_id.int or not self.observation_id.int
+                or not timedelta(seconds=10) <= self.valid_until - self.observed_at <= timedelta(seconds=900)):
+            raise ValueError('pool_inspection_capacity_unqualified')
+        return self
+
+
 class PoolInspectionSnapshotV2(_Strict):
     pool: PoolLedgerIdentityV2
     pool_authority_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
@@ -103,6 +136,14 @@ class PoolInspectionSnapshotV2(_Strict):
     capabilities: tuple[str, ...]
     machines: tuple[_Machine, ...] = Field(min_length=2, max_length=2)
     participant: _Participant | None
+    capacity: tuple[PoolCapacityObservationV2, ...] | None = Field(default=None, min_length=1, max_length=1000)
+
+    @model_serializer(mode='wrap')
+    def retained_inventory_bytes(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        value: dict[str, Any] = handler(self)
+        if self.capacity is None:
+            value.pop('capacity', None)
+        return value
 
     @model_validator(mode='after')
     def coherence(self) -> PoolInspectionSnapshotV2:
@@ -113,6 +154,13 @@ class PoolInspectionSnapshotV2(_Strict):
                 or len({row.machine_id for row in self.machines if row.machine_id.int}) != 2):
             raise ValueError('pool_inspection_snapshot_unqualified')
         selected = self.participant
+        if self.capacity is not None:
+            own = [row for row in self.capacity if row.pool_id == self.pool.pool_id]
+            if (len(own) != 1 or own[0].pool_authority_sha256 != self.pool_authority_sha256
+                    or len({row.pool_id for row in self.capacity}) != len(self.capacity)
+                    or any(self.valid_until > row.valid_until or row.observed_at > self.observed_at + timedelta(seconds=60)
+                        for row in self.capacity)):
+                raise ValueError('pool_inspection_capacity_unqualified')
         if selected is not None:
             binding = selected.binding.model_dump(mode='json')
             catalog = {'participant': binding, 'profiles': selected.profiles.model_dump(mode='json')}
@@ -135,7 +183,8 @@ def qualify_inspection(result: Any, request: PoolInspectionV2, authorization_id:
     snapshot, selected = report.snapshot, report.snapshot.participant
     if (report.authorization_id != authorization_id or report.request_sha256 != digest(request.model_dump(mode='json'))
             or (snapshot.pool.installation_id, snapshot.pool.pool_id) != (request.installation_id, request.pool_id)
-            or (request.participant_id is None and selected is not None)):
+            or (request.participant_id is None and selected is not None)
+            or request.require_capacity != (snapshot.capacity is not None)):
         raise ValueError('pool_inspection_report_unqualified')
     if selected is not None and (selected.binding.participant_id, selected.binding.environment_id,
             selected.binding.incarnation, selected.binding.environment_class) != (
@@ -168,9 +217,18 @@ async def inspect_pool(session: AsyncSession, request: PoolInspectionV2, authori
                 head=_Head(operation_id=head.head_operation_id, generation=head.generation, state=head.state,
                     binding_sha256=head.binding_sha256), profiles=PoolProfileCatalog.model_validate(catalog.document_json['profiles']),
                 catalog_sha256=catalog.document_sha256)
+    capacity = None
+    valid_until = now + timedelta(minutes=5)
+    if request.require_capacity:
+        current = await observe_connected_capacity(session, pool.pool_id, now)
+        capacity = tuple(PoolCapacityObservationV2(pool_id=row.pool.pool_id, pool_authority_sha256=physical_binding_digest(row.pool),
+            observation_id=row.observation_id, observed_at=row.observed_at,
+            valid_until=row.observed_at + timedelta(seconds=row.policy.observation_max_age_seconds),
+            placement_sha256=digest(row.placement.model_dump(mode='json'))) for row in current.values())
+        valid_until = min(valid_until, *(row.valid_until for row in capacity))
     snapshot = PoolInspectionSnapshotV2(pool=identity, pool_authority_sha256=physical_binding_digest(pool), observed_at=now,
-        valid_until=now + timedelta(minutes=5), capabilities=('physical-v1', 'registry-v1', 'scoped-lifecycle-v1'),
-        machines=machines, participant=participant)
+        valid_until=valid_until, capabilities=('physical-v1', 'registry-v1', 'scoped-lifecycle-v1'),
+        machines=machines, participant=participant, capacity=capacity)
     observer, = (row for row in machines if row.role == 'observer')
     gateway, = (row for row in machines if row.role == 'gateway')
     await qualify_runtime_readiness(session, pool, PoolRuntimeReadinessV2(observed_at=now, valid_until=snapshot.valid_until,

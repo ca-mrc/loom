@@ -84,6 +84,13 @@ platform writer/observer/gateway/capacity qualification, worker/build boundaries
 protected grant issuance and connected release/workflow delivery remain separate.
 These source adapters do not prove installed task or multi-owner acceptance.
 
+Protected inspection can additionally require current physical capacity. It uses
+the same authenticated, connected provider-quota accounting as admission, inside
+a repeatable-read, read-only snapshot. Its expiry cannot outlive any connected
+physical observation. Ordinary inventory requests retain their original serialized
+form. This observation proves neither spare slots nor exclusive writer authority;
+admission still takes its existing locks and rechecks capacity when it commits.
+
 Explicit legacy adoption preserves qualified v1 authority, credentials and
 history. A completed global handoff is not repeated; standalone allocation cannot
 be adopted as global sole-writer authority. Ordinary v2 lifecycle operations do

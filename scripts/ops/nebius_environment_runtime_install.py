@@ -248,7 +248,8 @@ def _resources(policy: PoolEnrollmentPolicyV2, documents: dict[str, dict[str, An
         asyncio.run(credentials.close())
 
 
-def _observe(policy: PoolEnrollmentPolicyV2, directory: Path, connect: Connection) -> dict[str, Any] | None:
+def _observe(policy: PoolEnrollmentPolicyV2, directory: Path, connect: Connection, *,
+        require_capacity: bool = False) -> dict[str, Any] | None:
     # Refresh a completed observation on each invocation; never renew a mutation
     # grant or silently change its expected participant/head. Pending read Jobs
     # retain their own identity, unlike fire-and-forget repeated inspections.
@@ -261,7 +262,7 @@ def _observe(policy: PoolEnrollmentPolicyV2, directory: Path, connect: Connectio
         identity = UUID(current['operation_id'])
         target = directory / str(identity)
         try:
-            report = _inspect(policy, identity, target, connect)
+            report = _inspect(policy, identity, target, connect, require_capacity=require_capacity)
         except ValueError as error:
             if str(error) != 'pool_enrollment_inspection_expired':
                 raise
@@ -275,7 +276,7 @@ def _observe(policy: PoolEnrollmentPolicyV2, directory: Path, connect: Connectio
             current = {'operation_id': str(identity), 'status': 'pending'}
             state._atomic_json(path, current)
             target = directory / str(identity)
-            report = _inspect(policy, identity, target, connect)
+            report = _inspect(policy, identity, target, connect, require_capacity=require_capacity)
         if report is not None:
             current['status'] = 'complete'
             state._atomic_json(path, current)

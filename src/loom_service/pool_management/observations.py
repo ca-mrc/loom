@@ -38,7 +38,10 @@ from loom_execution_capacity_collector.pool import (
     PoolPodClassifier,
 )
 from loom_service.pool_management.auth import PoolPrincipal, authorize_pool_machine
-from loom_service.pool_management.locks import acquire_pool_mutation_lock
+from loom_service.pool_management.locks import (
+    acquire_pool_mutation_lock,
+    require_pool_read_snapshot,
+)
 from loom_service.pool_management.observation_binding import (
     capture_authority,
     qualify_capture_binding,
@@ -93,14 +96,18 @@ async def _registration(session: AsyncSession, principal: PoolPrincipal) -> tupl
     return pool, bindings, digest
 
 
-async def read_pool_registration(session: AsyncSession, pool: NebiusPoolBinding) -> tuple[tuple[PoolParticipantV1, ...], str]:
-    """Read exact registration under the caller's mutation/pool locks."""
+async def read_pool_registration(session: AsyncSession, pool: NebiusPoolBinding, *, lock: bool = True) -> tuple[tuple[PoolParticipantV1, ...], str]:
+    """Read exact registration under writer locks or a strictly read-only snapshot."""
     if pool is None or pool.mode not in {"closed", "global"} or _digest(pool.binding_json) != pool.binding_sha256:
         raise PoolObservationError
-    rows = list((await session.scalars(select(NebiusPoolParticipant).where(
+    query = select(NebiusPoolParticipant).where(
         NebiusPoolParticipant.pool_id == pool.pool_id,
     ).order_by(NebiusPoolParticipant.participant_id).limit(10_001)
-        .with_for_update(read=True).execution_options(populate_existing=True))).all())
+    if lock:
+        query = query.with_for_update(read=True)
+    else:
+        await require_pool_read_snapshot(session)
+    rows = list((await session.scalars(query.execution_options(populate_existing=True))).all())
     if len(rows) > 10_000:
         raise PoolObservationError
     bindings = []
