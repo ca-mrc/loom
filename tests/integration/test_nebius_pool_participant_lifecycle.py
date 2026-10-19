@@ -50,7 +50,7 @@ async def platform(sessions):
 
 
 async def setup(sessions, *, active=True):
-    module, spec, platform_spec, tokens, _, authority = await platform(sessions)
+    module, spec, _, tokens, _, authority = await platform(sessions)
     heads = {}
     for participant in spec.participants:
         request = module.PoolParticipantEnrollmentV2(
@@ -152,12 +152,22 @@ async def test_suspension_blocks_new_intake_but_reserved_work_can_activate_and_p
             not_after=request.deadline_at).model_dump(mode='json'), headers=headers(selected))
         assert response.status_code == 200, response.text
         assert response.json()['phase'] == 'create_intent'
+        reservation_id = response.json()['reservation_id']
         response = await http.post(path + '/prepare', json=workload(spec.participants[1]).model_dump(mode='json'),
             headers=headers(spec.participants[1]))
         assert response.status_code == 200 and response.json()['phase'] == 'reserved'
     async with sessions() as session:
         assert (await session.scalar(select(NebiusPoolRequest).where(
             NebiusPoolRequest.participant_id == selected.participant_id))).phase == 'create_intent'
+    from uuid import UUID
+
+    from loom_service.pool_management.gateway_journal import PoolGatewayJournal
+    from tests.integration.test_nebius_pool_registry import machine
+
+    gateway = await machine(sessions, spec.pool_id, role='gateway')
+    journal = PoolGatewayJournal(sessions)
+    effect = await journal.prepare_create(gateway, UUID(reservation_id), kind='Job')
+    assert (await journal.dispatch_create(gateway, effect.effect_id)).phase == 'dispatched'
 
 
 async def test_enrolled_participant_cannot_admit_before_ready_and_activation(sessions):
@@ -244,3 +254,43 @@ async def test_activation_rejects_unqualified_readiness_before_opening(sessions,
         await change(selected, 'activate', readiness=evidence)
     async with sessions() as session:
         assert (await session.get(NebiusPoolParticipant, selected.participant_id)).phase == 'fenced'
+
+
+async def test_pending_operation_refuses_changed_policy_without_mutating_selected_participant(sessions):
+    module, spec, _, _, _, change = await setup(sessions)
+    selected = spec.participants[2]
+    request = await change(selected, 'suspend', apply=False)
+    async with sessions.begin() as session:
+        await session.execute(update(NebiusPoolBinding).where(NebiusPoolBinding.pool_id == spec.pool_id)
+            .values(policy_revision=2))
+    with pytest.raises(ValueError, match='authority'):
+        async with sessions.begin() as session:
+            await module.transition_participant(session, request)
+
+
+async def test_retiring_never_activated_participant_does_not_grant_execution_authority(sessions):
+    _, spec, _, _, _, change = await setup(sessions, active=False)
+    selected = spec.participants[2]
+    await change(selected, 'retire')
+    async with sessions() as session:
+        assert (await session.get(NebiusPoolParticipant, selected.participant_id)).phase == 'fenced'
+
+
+async def test_suspended_high_priority_waiter_does_not_hold_peer_capacity_and_can_resume(sessions):
+    _, spec, app, headers, observe, change = await setup(sessions)
+    selected, peer = spec.participants[0], spec.participants[2]
+    request = workload(selected)
+    await observe(full=True)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='https://manager.example') as http:
+        path = f'/internal/pools/v1/{spec.pool_id}/prepare'
+        first = await http.post(path, json=request.model_dump(mode='json'), headers=headers(selected))
+        assert first.status_code == 200 and first.json()['phase'] == 'waiting'
+        await change(selected, 'suspend')
+        await observe()
+        held = await http.post(path, json=request.model_dump(mode='json'), headers=headers(selected))
+        assert held.status_code == 409
+        lower = await http.post(path, json=workload(peer).model_dump(mode='json'), headers=headers(peer))
+        assert lower.status_code == 200 and lower.json()['phase'] == 'reserved'
+        await change(selected, 'resume')
+        resumed = await http.post(path, json=request.model_dump(mode='json'), headers=headers(selected))
+        assert resumed.status_code == 200 and resumed.json()['phase'] == 'reserved'

@@ -156,8 +156,18 @@ async def test_retained_waiter_resumes_original_profile_but_new_stale_request_is
             headers=headers(selected))
         assert response.status_code == 200, response.text
         assert response.json()['phase'] == 'create_intent'
+        reservation_id = response.json()['reservation_id']
     async with sessions() as session:
         assert await session.scalar(select(func.count()).select_from(NebiusPoolRequest)) == 1
+    from uuid import UUID
+
+    from loom_service.pool_management.gateway_journal import PoolGatewayJournal
+    from tests.integration.test_nebius_pool_registry import machine
+
+    gateway = await machine(sessions, spec.pool_id, role='gateway')
+    journal = PoolGatewayJournal(sessions)
+    effect = await journal.prepare_create(gateway, UUID(reservation_id), kind='Job')
+    assert (await journal.dispatch_create(gateway, effect.effect_id)).phase == 'dispatched'
 
 
 async def test_catalog_replay_is_exact_and_sql_evidence_cannot_be_rewritten(sessions):
