@@ -1269,9 +1269,14 @@ capacity admission without an additional build-count ceiling. Admission accounts
 for both workloads' CPU, memory, temporary storage, Pod slots, node limits and
 shared regional cloud quotas. Pending tasks remain queued until granted capacity;
 a bundle containing thousands of tasks does not create that many Pods at once.
-The existing workload-class priority and waiting age govern contention; there is
-no fixed split between build and execution capacity. Cleanup-pending resources
-remain charged until their release is acknowledged.
+On the native shared-capacity path, contention protects the oldest valid build
+and ordinary queued Trial waiting heads, using their first actual capacity wait
+rather than bundle submission time. Only the current eligible head for each target is
+protected; queued task counts are not resource reservations. The scheduler's
+existing team fair-share and submit priority remain unchanged. The separate
+registered-pool path retains its workload-class/age ordering. There is no fixed
+split between build and execution capacity. Cleanup-pending resources remain
+charged until their release is acknowledged.
 
 An optional positive integer adds an operator ceiling on unfinished builds,
 including cleanup. There is no built-in maximum of 16. An explicit integer also

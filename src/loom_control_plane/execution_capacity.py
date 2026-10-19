@@ -58,6 +58,7 @@ _PENDING_AUTHORIZATION_STATES = (
 class ExecutionProvisioningBlockedError(Exception):
     reason: str
     retry_after_seconds: int = 15
+    capacity_wait: dict[str, Any] | None = None
 
 
 def _utc(value: datetime, *, name: str) -> datetime:
@@ -477,6 +478,7 @@ async def reserve_execution_provisioning(
     lease_id: UUID,
     now: datetime | None = None,
     revalidate_existing: bool = False,
+    capacity_wait_inputs: dict[str, Any] | None = None,
 ) -> ExecutionProvisioningAuthorization | None:
     """Authorize one Nebius create against fresh provider and cluster evidence."""
 
@@ -509,12 +511,29 @@ async def reserve_execution_provisioning(
     ).scalar_one_or_none()
     if cost is None:
         raise ExecutionProvisioningBlockedError("execution_capacity_resource_envelope_unavailable")
-    decision = await admit_capacity_resources(
-        session, target=target, demand_id=f"{lease_id}:{lease.resource_generation}",
-        resources=ResourceTotals(cpu_millis=cost.requested_cpu_millis, memory_mib=cost.requested_memory_mib,
-                                 storage_mib=cost.requested_ephemeral_storage_mib),
-        current_time=current_time, already_reserved=existing is not None, exclude_lease_id=lease_id,
-    )
+    resources = ResourceTotals(cpu_millis=cost.requested_cpu_millis, memory_mib=cost.requested_memory_mib,
+                               storage_mib=cost.requested_ephemeral_storage_mib)
+    try:
+        decision = await admit_capacity_resources(
+            session, target=target, demand_id=f"{lease_id}:{lease.resource_generation}",
+            resources=resources, current_time=current_time,
+            already_reserved=existing is not None, exclude_lease_id=lease_id,
+            capacity_wait_inputs=capacity_wait_inputs,
+        )
+    except ExecutionProvisioningBlockedError as exc:
+        # Carry only the already validated Pod envelope across the scheduler's
+        # savepoint rollback. It is not a lease or a cost reservation.
+        context = None
+        if existing is None and lease.execution_role == "attempt":
+            from loom_control_plane.execution_capacity_wait import execution_target_fingerprint
+
+            context = {"target_id": target.id, "pool_id": target.logical_pool_id,
+                       "resources": resources.model_dump(),
+                       "target_fingerprint": execution_target_fingerprint(target),
+                       "runtime_contract_sha256": lease.runtime_contract_sha256,
+                       "image_materialization_id": (lease.runtime_contract_json or {}).get("task_image_materialization_id"),
+                       "task_revision_sha256": (lease.runtime_contract_json or {}).get("task_revision_sha256")}
+        raise ExecutionProvisioningBlockedError(exc.reason, exc.retry_after_seconds, context) from exc
     if existing is not None:
         return existing
     payload = {"schema_version": "loom.execution-provisioning-authorization.v1", "lease_id": str(lease_id), **decision}
@@ -552,6 +571,7 @@ async def admit_capacity_resources(
     already_reserved: bool = False,
     exclude_lease_id: UUID | None = None,
     exclude_native_attempt_id: UUID | None = None,
+    capacity_wait_inputs: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Shared admission arithmetic under the caller's capacity transaction lock.
 
@@ -613,16 +633,30 @@ async def admit_capacity_resources(
         claiming = await session.get(TaskImageMaterializationAttempt, exclude_native_attempt_id)
     # Previously committed authority precedes later waiting work. Revalidation
     # remains subject to genuine reservations and provider/cleanup evidence.
-    waiting = [] if already_reserved else await read_capacity_waits(
+    from loom_control_plane.execution_capacity_wait import read_execution_capacity_waits
+
+    waiting, build_order = ([], None) if already_reserved else await read_capacity_waits(
         session, now=current_time, claiming_attempt=claiming,
         claiming_target=target, claiming_resources=resources,
     )
+    execution_waiting, execution_order = ([], None) if already_reserved else await read_execution_capacity_waits(
+        session, now=current_time, claiming_lease_id=exclude_lease_id,
+        claiming_inputs=capacity_wait_inputs,
+    )
+    # Both kinds of incoming demand yield only to older renewable waiting
+    # heads. A new claim has no inherited queue age. Real authority stays first.
+    order = build_order or execution_order or (current_time, demand_id)
+    waiting = [row for row in waiting
+               if (row.first_waited_at, f"task-image-wait:{row.materialization_id}:{row.lease_epoch}") < order]
+    execution_waiting = [row for row in execution_waiting if row.order < order]
 
     def native_demands(target_ids: frozenset[str], *, include_waits: bool = True) -> list[tuple[str, ResourceTotals]]:
         return [
             *((row.demand_id, row.resources) for row in native_active if row.target_id in target_ids),
             *((f"task-image-wait:{row.materialization_id}:{row.lease_epoch}", wait_resources(row))
               for row in waiting if include_waits and row.target_id in target_ids),
+            *((row.demand_id, row.resources) for row in execution_waiting
+              if include_waits and row.target_id in target_ids),
         ]
 
     same_target = [row for row in authorizations if row.target_id in group.target_ids]
@@ -656,7 +690,8 @@ async def admit_capacity_resources(
         row.target_id in group.target_ids and row.reserved_at >= current_time - timedelta(minutes=1)
         for row in native
     )
-    waiting_here = sum(row.target_id in group.target_ids for row in waiting)
+    waiting_here = sum(row.target_id in group.target_ids for row in waiting) + sum(
+        row.target_id in group.target_ids for row in execution_waiting)
     if not already_reserved and int(recent_creates or 0) + waiting_here >= policy.max_create_per_minute:
         raise ExecutionProvisioningBlockedError("execution_capacity_create_rate_exceeded", 30)
     recent_pending = sum(
@@ -784,7 +819,8 @@ async def admit_capacity_resources(
         other_observation = await _latest_observation(session, other_group.owner.id)
         has_active = (any(row.target_id in other_group.target_ids for row in authorizations)
                       or any(row.target_id in other_group.target_ids for row in native_active)
-                      or any(row.target_id in other_group.target_ids for row in waiting))
+                      or any(row.target_id in other_group.target_ids for row in waiting)
+                      or any(row.target_id in other_group.target_ids for row in execution_waiting))
         if other_observation is None and not has_active:
             continue
         if other_observation is None:

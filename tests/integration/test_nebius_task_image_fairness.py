@@ -2,24 +2,35 @@
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 import pytest
-from sqlalchemy import event, select
+from sqlalchemy import event, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from loom.db.schema import (
     ExecutionCapacityPolicy,
+    ExecutionCostReservation,
     ExecutionProvisioningAuthorization,
+    ServiceExecutionLease,
     ServiceExecutionTarget,
+    Task,
     TaskImageCapacityWait,
     TaskImageMaterialization,
     Trial,
 )
+from loom.execution_contract import ExecutionRoutingReason
+from loom.pipeline.keys import canonical_digest
 from loom_control_plane.execution_capacity import (
     ExecutionProvisioningBlockedError,
     reserve_execution_provisioning,
 )
-from loom_control_plane.service_execution import set_execution_target_health
+from loom_control_plane.service_execution import (
+    _bind_kubernetes_execution_route,
+    set_execution_target_health,
+)
+from loom_control_plane.service_execution_scheduler import reserve_next_service_execution
+from loom_control_plane.task_image_capacity import reserve_native_task_image_capacity
 from loom_execution_actuator.renderer import ExecutionTargetRuntime
 from loom_execution_actuator.task_image_controller import (
     NativeTaskImageController,
@@ -35,9 +46,12 @@ from tests.integration.test_nebius_task_image_controller import (
 )
 from tests.integration.test_service_execution_leases import (
     _cleanup_service_execution_test_rows,  # noqa: F401
+    _configure_scheduler_trial,
+    _requirements,
     _reserve,
     _seed_ready_trial,
 )
+from tests.support.execution_image_admission import IMAGE_ADMISSION_KEYRING
 
 
 @pytest.fixture
@@ -88,6 +102,25 @@ async def _free(sessions, target, now, *, quota_nodes=1):
         await _record(session, target.target_id, now + timedelta(seconds=1), free)
 
 
+async def _schedule_ready_execution(sessions, at):
+    async with sessions() as session, session.begin():
+        return await reserve_next_service_execution(session, environment="staging", pool_id="nebius-cpu",
+            image_admission_keyring=IMAGE_ADMISSION_KEYRING, now=at)
+
+
+@pytest.fixture
+async def waiting_execution(native_build_setup):
+    _, sessions, _, _, _, trial_id, _, now = native_build_setup
+    async with sessions() as session, session.begin():
+        await _configure_scheduler_trial(session, trial_id=trial_id, now=now)
+    assert await _schedule_ready_execution(sessions, now) is None
+    async with sessions() as session:
+        trial = await session.get(Trial, trial_id)
+        assert trial.state == "queued" and trial.attempt_count == 0
+        assert trial.scheduling_observation["reason"].startswith("execution_capacity_")
+    return native_build_setup
+
+
 async def test_new_trial_cannot_take_last_capacity_a_waiting_builder_needs(waiting_build):
     controller, sessions, kube, image_id, _, trial_id, target, now = waiting_build
     # The occupied allocation drains. A trial arrives before the next builder
@@ -106,6 +139,144 @@ async def test_new_trial_cannot_take_last_capacity_a_waiting_builder_needs(waiti
     assert attempts[0].native_build["capacity_reserved_at"]
     async with sessions() as session:
         assert await session.get(TaskImageCapacityWait, target.target_id) is None
+
+
+async def test_execution_waiting_before_successive_build_heads_gets_released_capacity(native_build_setup):
+    controller, sessions, kube, image_id, builder_trial_id, trial_id, target, now = native_build_setup
+    async with sessions() as session, session.begin():
+        await _configure_scheduler_trial(session, trial_id=trial_id, now=now)
+        builder_team_id = (await session.get(Trial, builder_trial_id)).team_id
+
+    async def schedule(at):
+        async with sessions() as session, session.begin():
+            return await reserve_next_service_execution(session, environment="staging", pool_id="nebius-cpu",
+                image_admission_keyring=IMAGE_ADMISSION_KEYRING, now=at)
+
+    assert await schedule(now) is None
+    async with sessions() as session:
+        queued = await session.get(Trial, trial_id)
+        assert queued.state == "queued" and queued.attempt_count == 0
+        assert queued.scheduling_observation["reason"].startswith("execution_capacity_")
+        first_wait = datetime.fromisoformat(queued.scheduling_observation["observed_at"])
+        for model in (ServiceExecutionLease, ExecutionCostReservation):
+            assert await session.scalar(select(func.count()).select_from(model).where(model.trial_id == trial_id)) == 0
+
+    lease = None
+    for index in range(2):
+        await controller.run_once()
+        async with sessions() as session:
+            wait = await session.get(TaskImageCapacityWait, target.target_id)
+            assert wait is not None and wait.materialization_id == image_id
+            assert wait.first_waited_at > first_wait
+        await _free(sessions, target, now + timedelta(seconds=index * 20))
+        lease = await schedule(now + timedelta(seconds=(index + 1) * 20))
+        if lease is not None:
+            break
+        # A later build must not acquire and replenish the only headroom ahead
+        # of this older, ready execution on every capacity-release cycle.
+        await controller.run_once()
+        _, attempts = await rows(sessions, image_id)
+        assert len(attempts) == 1 and attempts[0].native_build["capacity_reserved_at"]
+        async with sessions() as session, session.begin():
+            (await session.get(Trial, builder_trial_id)).cancellation_requested_at = datetime.now(UTC)
+        await controller._reconcile(attempts[0].id)
+        _, attempts = await rows(sessions, image_id)
+        assert attempts[0].native_build["capacity_released_at"] and not kube.jobs
+        if index == 0:
+            image_id, builder_trial_id = await seed_image(sessions, builder_team_id)
+            async with sessions() as session, session.begin():
+                await _record(session, target.target_id, now + timedelta(seconds=20), placement_fixture(
+                    target_id=target.target_id, nodes=1, used_nodes=1, quota_nodes=1, requested_cpu=64000))
+    assert lease is not None, "younger native build heads repeatedly bypassed the waiting execution"
+    assert lease.trial_id == trial_id and lease.attempt == 1
+
+
+@pytest.mark.parametrize("invalidated", ["cancelled", "input", "route", "attempt", "expired",
+                                      "target_environment", "target_region"])
+async def test_invalid_execution_wait_cannot_hold_builder_capacity(waiting_execution, invalidated):
+    controller, sessions, _, _, _, trial_id, target, now = waiting_execution
+    async with sessions() as session, session.begin():
+        trial = await session.get(Trial, trial_id)
+        if invalidated == "cancelled":
+            trial.cancellation_requested_at = now
+        elif invalidated == "input":
+            (await session.get(Task, trial.task_id)).checksum = "f" * 64
+        elif invalidated == "route":
+            _bind_kubernetes_execution_route(trial=trial,
+                target=await session.get(ServiceExecutionTarget, target.target_id),
+                execution_class_id=target.execution_class_id,
+                requirements_digest=canonical_digest(_requirements().model_dump(mode="json")),
+                routing_reason=ExecutionRoutingReason.ADMIN_TARGET_BINDING, current_time=now)
+        elif invalidated == "attempt":
+            trial.attempt_count += 1
+        elif invalidated in {"target_environment", "target_region"}:
+            persisted_target = await session.get(ServiceExecutionTarget, target.target_id)
+            if invalidated == "target_environment":
+                persisted_target.environment = "development"
+            else:
+                persisted_target.region = "eu-west1"
+    await _free(sessions, target, now)
+    claim_at = now + timedelta(seconds=121 if invalidated == "expired" else 2)
+    async with sessions() as session, session.begin():
+        if invalidated == "expired":
+            await set_execution_target_health(session, target_id=target.target_id,
+                desired_state="active", observed_state="ready", health_status="healthy", observed_at=claim_at)
+        # Use the real native claim/render/admission path with an explicit
+        # clock so expiry needs no sleeps or patched production clock.
+        attempt = await controller._prepare_claim(session)
+        assert attempt is not None
+        native = await reserve_native_task_image_capacity(session, attempt_id=attempt.id,
+            now=claim_at)
+        assert native["capacity_reserved_at"]
+
+
+async def test_actual_spare_quota_admits_build_and_waiting_execution(waiting_execution):
+    controller, sessions, _, image_id, _, trial_id, target, now = waiting_execution
+    await _free(sessions, target, now, quota_nodes=2)
+    await controller.run_once()
+    _, attempts = await rows(sessions, image_id)
+    assert len(attempts) == 1 and attempts[0].native_build["capacity_reserved_at"]
+    lease = await _schedule_ready_execution(sessions, now + timedelta(seconds=20))
+    assert lease is not None and lease.trial_id == trial_id
+
+
+async def test_only_one_execution_waiting_head_per_target_is_projected(waiting_execution):
+    controller, sessions, _, image_id, _, trial_id, target, now = waiting_execution
+    async with sessions() as session, session.begin():
+        original = await session.get(Trial, trial_id)
+        another_id = uuid4()
+        session.add(Trial(id=another_id, team_id=original.team_id, task_id=original.task_id,
+            batch_id=original.batch_id, config=original.config, requires_caps=original.requires_caps,
+            state="queued", attempt_count=0))
+    assert await _schedule_ready_execution(sessions, now + timedelta(milliseconds=1)) is None
+    async with sessions() as session:
+        another = await session.get(Trial, another_id)
+        assert another.scheduling_observation["reason"].startswith("execution_capacity_")
+    # The real 63 CPU build and one 1 CPU execution head fit this 64 CPU
+    # allocation. Projecting every queued execution would incorrectly deny it.
+    controller.settings = controller.settings.model_copy(update={"cpu_millis": 63000})
+    await _free(sessions, target, now)
+    await controller.run_once()
+    _, attempts = await rows(sessions, image_id)
+    assert len(attempts) == 1 and attempts[0].native_build["capacity_reserved_at"]
+
+
+async def test_execution_wait_renewal_keeps_first_age_and_protects_matching_backoff(waiting_execution):
+    controller, sessions, kube, image_id, _, trial_id, target, now = waiting_execution
+    async with sessions() as session:
+        first = (await session.get(Trial, trial_id)).scheduling_observation["capacity_wait"]["first_waited_at"]
+    await controller.run_once()  # The builder starts waiting after the execution.
+    assert await _schedule_ready_execution(sessions, now + timedelta(seconds=15)) is None
+    async with sessions() as session:
+        trial = await session.get(Trial, trial_id)
+        assert trial.scheduling_observation["capacity_wait"]["first_waited_at"] == first
+        assert trial.next_attempt_at == now + timedelta(seconds=30)
+    await _free(sessions, target, now + timedelta(seconds=15))
+    await controller.run_once()
+    row, attempts = await rows(sessions, image_id)
+    assert row.attempt_count == 0 and not attempts and kube.ensure_calls == 0
+    lease = await _schedule_ready_execution(sessions, now + timedelta(seconds=30))
+    assert lease is not None and lease.trial_id == trial_id
 
 
 @pytest.mark.parametrize("invalidated", ["expired", "cancelled", "epoch", "shape", "pool"])

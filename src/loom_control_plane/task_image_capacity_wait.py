@@ -121,7 +121,7 @@ async def read_capacity_waits(
     claiming_attempt: TaskImageMaterializationAttempt | None = None,
     claiming_target: ServiceExecutionTarget | None = None,
     claiming_resources: ResourceTotals | None = None,
-) -> list[TaskImageCapacityWait]:
+) -> tuple[list[TaskImageCapacityWait], tuple[datetime, str] | None]:
     """Caller holds capacity lock; older builders precede younger builders.
 
     Reading never renews a fence. Only the controller that just validated actual
@@ -143,16 +143,14 @@ async def read_capacity_waits(
         or own.renewed_at > now + timedelta(seconds=60)
     ):
         own = None
-    cutoff = (own.first_waited_at, own.target_id) if own else None
+    cutoff = (own.first_waited_at, f"task-image-wait:{own.materialization_id}:{own.lease_epoch}") if own else None
     result = []
     for row in rows:
         if row.materialization_id == claiming_materialization_id:
             continue
-        if cutoff is not None and (row.first_waited_at, row.target_id) >= cutoff:
-            continue
         if await _eligible(session, row, now):
             result.append(row)
-    return result
+    return result, cutoff
 
 
 async def remember_capacity_wait(

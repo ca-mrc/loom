@@ -96,6 +96,9 @@ SELECT t.id,
        t.submitted_at,
        t.task_id,
        t.attempt_count,
+       t.execution_route_generation,
+       t.execution_route_pool_name,
+       t.requires_caps,
        task_definition.checksum AS task_checksum,
        task_definition.config AS task_config,
        task_definition.source_provenance AS task_source_provenance,
@@ -255,13 +258,23 @@ async def reserve_next_service_execution(
                 "trial_id": str(row["id"]), "reason": str(exc),
             })
         except ExecutionProvisioningBlockedError as exc:
+            from loom_control_plane.execution_capacity_wait import remember_execution_capacity_wait
+            from loom_control_plane.task_image_capacity_wait import WAIT_LEASE_SECONDS
+
             delay = max(1, min(300, exc.retry_after_seconds))
+            if exc.capacity_wait is not None:
+                delay = min(delay, WAIT_LEASE_SECONDS // 2)
+            retry_at = current_time + timedelta(seconds=delay)
+            observation = await remember_execution_capacity_wait(
+                session, row=row, context=exc.capacity_wait, reason=exc.reason,
+                now=current_time, retry_at=retry_at,
+            )
             await session.execute(
                 update(Trial)
                 .where(Trial.id == row["id"], Trial.state == "queued")
                 .values(
-                    next_attempt_at=current_time + timedelta(seconds=delay),
-                    scheduling_observation={"reason": exc.reason, "observed_at": current_time.isoformat()},
+                    next_attempt_at=retry_at,
+                    scheduling_observation=observation,
                 )
             )
             _LOG.info("service_execution_capacity_wait", extra={"reason": exc.reason})
@@ -453,6 +466,9 @@ async def _reserve_service_candidate(
                     routing_reason=ExecutionRoutingReason.PREEXISTING_ASSIGNMENT,
                     deadline_at=compiled.deadline_at,
                     now=current_time,
+                    capacity_wait_inputs={key: row[key] for key in (
+                        "execution_route_generation", "execution_route_pool_name",
+                    )},
                 )
                 await session.execute(update(Trial).where(Trial.id == row["id"]).values(
                     scheduling_observation={
@@ -463,7 +479,10 @@ async def _reserve_service_candidate(
                 ))
                 return lease
         except ExecutionProvisioningBlockedError as exc:
-            blocked = exc
+            # One realizable target is one waiting demand, never a reservation
+            # for every alternative region. Preserve its compiled envelope.
+            if blocked is None or (blocked.capacity_wait is None and exc.capacity_wait is not None):
+                blocked = exc
     if blocked is not None:
         raise blocked
     raise ExecutionProvisioningBlockedError("execution_target_unavailable", retry_after_seconds=15)
