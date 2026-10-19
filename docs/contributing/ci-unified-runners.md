@@ -31,6 +31,14 @@ workflows share that limit. Only runnable queued jobs whose native `needs`
 dependencies have completed contribute to demand, including candidate missing-test
 matrix rows and publication after its prerequisite jobs finish.
 
+Demand inventory uses GitHub's official paginated
+`/actions/runs/{run_id}/attempts/{run_attempt}/jobs` endpoint, bound to the
+positive integer `run_attempt` returned with each source run. This keeps rerun
+demand separate from earlier attempts. On 2026-10-19, the ordinary latest-jobs
+endpoint repeatedly returned HTTP 502 for a run whose exact-attempt inventory
+succeeded. Missing or invalid attempts and API errors still stop reconciliation;
+they never become zero demand or permission to retire an unused worker.
+
 GitHub has no atomic provider preference between matching runners. Hosted
 capacity is supplied while OLDLAB contributes overflow, but simultaneous ready
 workers can win either way. Availability takes precedence over strict GitHub
@@ -76,6 +84,13 @@ is involved. Only this controller's own unused donor runs may be cancelled,
 after fresh busy-state readback and successful deregistration. API/deletion
 failure preserves execution. Source CI is never cancelled or retried here.
 Inspect root-owned `status.json` and per-slot `worker.json`; never print JIT files.
+
+An HTTP 409 conflict when cancelling an exactly owned, already deregistered
+donor defers that slot's retirement while other supply work continues. GitHub
+run status can lag a terminal worker job. The controller keeps the slot record
+and any remaining JIT file, writes no retirement receipt, and waits for terminal
+run readback before ordinary finalization. Busy-runner and exact-title checks
+still precede cancellation; other API or transport errors still stop reconciliation.
 
 On each OLDLAB host, install `scripts/ops/ci_runner_unified_host.py` and run it
 with `--install-runtime /usr/local/lib/loom-ci-runner-expansion
