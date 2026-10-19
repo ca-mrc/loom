@@ -70,7 +70,7 @@ def _name(value: Any, label: str) -> str:
 
 
 def validate_environment(config: dict[str, Any]) -> None:
-    managed = config.get("schema_version") == "loom.nebius-managed-environment.v1"
+    managed = config.get("schema_version") in {"loom.nebius-managed-environment.v1", "loom.nebius-environment-platform.v2"}
     if not managed and config.get("schema_version") != "loom.nebius-platform.v1":
         raise NebiusPlatformError("unsupported platform configuration")
     expected = {
@@ -180,8 +180,11 @@ def validate_environment(config: dict[str, Any]) -> None:
         _name(config.get(key), key)
     if managed:
         from loom.nebius_environment_contract import EnvironmentRegistrationV1
+        from loom.nebius_environment_foundation import EnvironmentFoundationIdentityV2
 
-        registration = EnvironmentRegistrationV1.model_validate(config["registration"])
+        registration = (EnvironmentFoundationIdentityV2.model_validate(config["registration"])
+            if config['schema_version'] == 'loom.nebius-environment-platform.v2'
+            else EnvironmentRegistrationV1.model_validate(config["registration"]))
         for key, expected_value in (
             ("namespace", registration.application_namespace),
             ("execution_namespace", registration.execution_namespace),
@@ -1394,7 +1397,7 @@ def build_platform(
     repo_root: Path,
 ) -> dict[str, list[dict[str, Any]]]:
     """Build Kubernetes resources from published image refs and environment settings."""
-    if config.get("schema_version") == "loom.nebius-managed-environment.v1":
+    if config.get("schema_version") in {"loom.nebius-managed-environment.v1", "loom.nebius-environment-platform.v2"}:
         raise NebiusPlatformError("use render_environment for managed children")
     return _build_platform(config, candidate, profile, keyring, repo_root=repo_root)
 
