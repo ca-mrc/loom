@@ -2575,9 +2575,11 @@ schema is `loom.nebius-management-refresh-private-inputs.v1`, with:
   Receipt qualification compares Kubernetes resource quantities numerically
   (for example, `100m` and `0.1`) without rewriting frozen receipt bytes or
   accepting changed resource amounts or other runtime configuration.
-- `pool_baseline`, when inherited from a completed cutover: the exact qualified
-  pool selector. Keep it through subsequent refreshes; omitting it cannot restore
-  legacy writer authority. The separately scoped pool reader requalifies workloads,
+- The operation derives `pool_baseline` from the completed pool predecessor or
+  preceding refresh and records it in the refresh contract. It is not a separate
+  private-input field. Subsequent refreshes retain that exact qualified pool
+  selector; omitting it cannot restore legacy writer authority. The separately
+  scoped pool reader requalifies workloads,
   credentials, mode and effective permissions around refresh writes and completion.
 - Optional `platform_rollout`, for a **legacy** pool baseline whose application
   workloads advanced through an ordinary completed platform rollout: an object
