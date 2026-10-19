@@ -3,6 +3,12 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import hashlib
+import hmac
+import json
+import os
+import subprocess
+import sys
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -155,3 +161,68 @@ async def test_storage_registry_journal_never_redispatches_unknown_commit(sessio
         assert await snapshot(sessions) == after
         journal.validate_storage_registry(request=request, state_dir=tmp_path / 'registry', complete=True)
     assert dispatches == [request.operation_id]
+
+
+async def test_storage_publication_requires_new_exact_capture_and_never_opens_pool(sessions, tmp_path):
+    name = 'scripts.ops.nebius_pool_storage_capacity'
+    assert importlib.util.find_spec(name) is not None, 'closed storage aggregate proof is missing'
+    command = importlib.import_module(name)
+    from loom_execution_capacity_collector.contracts import QuotaResource
+    from loom_service.pool_management.auth import resolve_pool_machine
+    from tests.integration.test_nebius_pool_installation import installation
+    from tests.integration.test_nebius_pool_observation_registry import capture_scope, publish, snapshots
+
+    before, tokens = installation(('staging', 'development'))
+    before['quota_identities']['storage'][3] = 'compute.disk.size.network-ssd'
+    after = json.loads(json.dumps(before))
+    after['quota_identities']['storage'][3] = 'compute.disk.size.network-ssd-non-replicated'
+    after['policy_revision'] += 1
+    refresh = module().ClosedPoolStorageRefresh(schema_version='loom.closed-pool-storage-refresh.v1',
+        operation_id=uuid4(), target_disk_type='NETWORK_SSD_NON_REPLICATED', before=before, after=after)
+    async with sessions.begin() as session:
+        await register_installation(session, refresh.before)
+    observer, = (row for row in refresh.before.machines if row.role == 'observer')
+    async with sessions() as session:
+        principal = await resolve_pool_machine(session, 'Bearer ' + tokens[observer.machine_id])
+
+    async def report(spec, *, wrong_quota=False):
+        capture = await capture_scope(sessions, principal)
+        provider, kubernetes = snapshots(capture)
+        quotas = {key: QuotaResource(parent_id=value[0], region=value[1], service=value[2], name=value[3],
+            unit=value[4], limit={'nodes': 2, 'vcpu': 8000, 'storage': 65536}[key], used=0)
+            for key, value in spec.quota_identities.items()}
+        if wrong_quota:
+            quotas['storage'] = quotas['storage'].model_copy(update={'name': 'foreign-storage'})
+        await publish(sessions, principal, capture, provider=provider.model_copy(update={'quota_resources': quotas}),
+            kubernetes=kubernetes)
+
+    await report(refresh.before)
+    url = sessions.kw['bind'].url.render_as_string(hide_password=False)
+    environment = {key: value for key, value in os.environ.items() if not key.startswith(('LOOM_', 'DATABASE_'))}
+    environment.update(LOOM_SVC_DB_URL=url, LOOM_SVC_SERVICE_MODE='management')
+    nonce = 'ab' * 32
+    expected = command.expected_storage_capacity(refresh.after)
+    signature = hmac.new(bytes.fromhex(nonce), json.dumps(expected, sort_keys=True,
+        separators=(',', ':')).encode(), 'sha256').hexdigest()
+
+    async def run():
+        frozen = await snapshot(sessions)
+        result = await asyncio.to_thread(subprocess.run, [sys.executable, '-c', command.BOUND_CLOSED_STORAGE_CAPACITY_COMMAND,
+            str(refresh.after.pool_id), nonce, signature], env=environment, cwd=tmp_path,
+            capture_output=True, timeout=35, check=False)
+        assert await snapshot(sessions) == frozen
+        assert all(token.encode() not in result.stdout + result.stderr for token in tokens.values())
+        return result
+
+    assert (await run()).returncode == 1  # A matching physical report cannot replace registry authority.
+    await asyncio.to_thread(read_sql, url, module().refresh_closed_storage_sql(refresh))
+    pending = await run()
+    assert (pending.returncode, pending.stdout, pending.stderr) == (0, b'{"status": "pending"}\n', b'')
+    await report(refresh.after)
+    ready = await run()
+    assert (ready.returncode, ready.stdout, ready.stderr) == (0, b'{"status": "qualified"}\n', b'')
+    await report(refresh.after, wrong_quota=True)
+    assert (await run()).returncode == 1
+    async with sessions.begin() as session:
+        await session.execute(update(NebiusPoolBinding).where(NebiusPoolBinding.pool_id == refresh.after.pool_id).values(mode='global'))
+    assert (await run()).returncode == 1
