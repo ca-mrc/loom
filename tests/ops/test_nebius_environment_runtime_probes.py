@@ -22,7 +22,7 @@ from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_management_render import management_inputs as management_inputs
 
 
-@pytest.mark.parametrize('settings_case', ['controller', 'actuator', 'service'], indirect=True)
+@pytest.mark.parametrize('settings_case', ['controller', 'actuator', 'service', 'manager', 'gateway'], indirect=True)
 @pytest.mark.parametrize('damage', [None, 'settings', 'database', 'restart', 'template', 'missing_reply'])
 def test_generic_process_probe_binds_actual_configuration_and_current_process(settings_case, running, tmp_path, damage):
     module = 'scripts.ops.nebius_environment_runtime_probes'
@@ -47,11 +47,16 @@ def test_generic_process_probe_binds_actual_configuration_and_current_process(se
         for row in pod['spec'].get('initContainers', [])]
     wanted = copy.deepcopy(current)
     db_url = 'postgresql+psycopg://reader:private-db-marker@loom-postgres.app-blue.svc:5432/loom'
-    db_variable = {'controller': 'LOOM_CP_DB_URL', 'actuator': 'LOOM_EXECUTION_ACTUATOR_DB_URL', 'service': 'LOOM_SVC_DB_URL'}[component]
+    db_variable = {'controller': 'LOOM_CP_DB_URL', 'actuator': 'LOOM_EXECUTION_ACTUATOR_DB_URL',
+        'service': 'LOOM_SVC_DB_URL', 'manager': 'LOOM_SVC_DB_URL', 'gateway': 'LOOM_POOL_GATEWAY_DB_URL'}[component]
     environment[db_variable] = db_url
     if damage == 'settings':
         if component == 'service':
             environment['LOOM_SVC_SERVICE_MODE'] = 'management'
+        elif component == 'manager':
+            environment['LOOM_SVC_SERVICE_MODE'] = 'application'
+        elif component == 'gateway':
+            environment['LOOM_POOL_GATEWAY_MACHINE_ID'] = str(uuid4())
         else:
             variable = 'LOOM_CP_SERVICE_EXECUTION_GLOBAL_POOL_JSON' if component == 'controller' else 'LOOM_EXECUTION_ACTUATOR_GLOBAL_POOL'
             pool = json.loads(environment[variable])
@@ -86,13 +91,14 @@ def test_generic_process_probe_binds_actual_configuration_and_current_process(se
     subject = probes.EnvironmentRuntimeProbes(read=read, execute=execute, qualify=lambda: None, region='eu-north1')
     def observe():
         return subject.qualify_process(workload=wanted, component=component, database_namespace='app-blue',
-            database_url=db_url, token_sha256=options.get('token_sha256'))
+            database_url=db_url, **options)
     if damage is None:
         result = observe()
         assert result['pod_uid'] == pod['metadata']['uid']
         assert result['deployment_uid'] == current['metadata']['uid']
         assert result['component'] == component and len(executions) == 2
         assert 'private-' not in json.dumps(result)
+        subject.recheck_process(workload=wanted, proof=result)
         # Name reuse never makes another process the retained one.
         current['metadata']['uid'] = str(uuid4())
         with pytest.raises(ValueError, match='environment_runtime_process_unqualified'):
