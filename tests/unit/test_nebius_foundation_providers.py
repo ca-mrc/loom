@@ -100,3 +100,25 @@ async def test_kubernetes_create_success_rejects_replacement_before_readback():
         with pytest.raises(ProviderBlockedError, match='identity_conflict'):
             await KubernetesEnvironmentProvider(http).apply(ctx, namespace())
     assert calls == ['GET', 'POST', 'GET']
+
+
+@pytest.mark.parametrize('damage', ['owner', 'init_container', 'host_network', 'privileged', 'service_account'])
+def test_controller_readback_rejects_added_execution_authority(damage):
+    expected = {'apiVersion': 'apps/v1', 'kind': 'Deployment', 'metadata': {'name': 'service'},
+        'spec': {'template': {'spec': {'containers': [{'name': 'service', 'image': 'fixed',
+            'securityContext': {'allowPrivilegeEscalation': False}}], 'automountServiceAccountToken': False}}}}
+    actual = copy.deepcopy(expected)
+    actual['metadata']['uid'] = 'retained'
+    pod = actual['spec']['template']['spec']
+    if damage == 'owner':
+        actual['metadata']['ownerReferences'] = [{'uid': 'foreign-owner'}]
+    elif damage == 'init_container':
+        pod['initContainers'] = [{'name': 'unreviewed', 'image': 'foreign'}]
+    elif damage == 'host_network':
+        pod['hostNetwork'] = True
+    elif damage == 'privileged':
+        pod['containers'][0]['securityContext']['privileged'] = True
+    else:
+        pod['serviceAccountName'] = 'foreign'
+    with pytest.raises(ProviderBlockedError, match='identity_conflict'):
+        KubernetesEnvironmentProvider._identity(actual, expected, 'retained')
