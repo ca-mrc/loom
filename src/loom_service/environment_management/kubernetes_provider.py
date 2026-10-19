@@ -53,7 +53,7 @@ def _contains(
             kind = expected["kind"]
         exact = exact or (kind in _RESOURCES and (
             (path == ("spec",) and kind in {"NetworkPolicy", "ResourceQuota"})
-            or (bool(path) and path[-1] in {"selector", "podSelector", "namespaceSelector"})
+            or (bool(path) and path[-1] in {"selector", "podSelector", "namespaceSelector", "securityContext"})
         ))
         if not isinstance(actual, dict):
             return False
@@ -155,8 +155,20 @@ class KubernetesEnvironmentProvider:
         metadata = actual.get("metadata", {})
         uid = metadata.get("uid")
         if (not isinstance(uid, str) or not uid or metadata.get("deletionTimestamp")
+                or metadata.get('ownerReferences', []) != expected.get('metadata', {}).get('ownerReferences', [])
                 or (recorded is not None and recorded != uid) or not _contains(actual, expected)):
             raise ProviderBlockedError("kubernetes_resource_identity_conflict")
+        if expected.get('kind') in {'Deployment', 'StatefulSet', 'Job', 'CronJob'}:
+            observed, wanted = actual['spec'], expected['spec']
+            if expected['kind'] == 'CronJob':
+                observed, wanted = observed['jobTemplate']['spec'], wanted['jobTemplate']['spec']
+            observed, wanted = observed['template']['spec'], wanted['template']['spec']
+            defaults: dict[str, Any] = {'initContainers': [], 'ephemeralContainers': [],
+                'hostNetwork': False, 'hostPID': False, 'hostIPC': False, 'shareProcessNamespace': False,
+                'serviceAccountName': 'default', 'securityContext': {}}
+            if any(not _contains(observed.get(key, default), wanted.get(key, default), exact=key == 'securityContext')
+                    for key, default in defaults.items()):
+                raise ProviderBlockedError('kubernetes_resource_identity_conflict')
         return uid
 
     async def apply(self, context: ProvisioningContext, step: ProvisioningStep, *, create: bool = True) -> str:
