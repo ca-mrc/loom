@@ -59,7 +59,9 @@ def _dockerfile(spec: SourceFixture) -> str:
     return f'''FROM {spec.compiler} AS build
 ADD source.tar.gz /src/
 WORKDIR /src/minio-{spec.commit}
-RUN CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags "-s -w \
+# Keep Go module ZIP transfers on HTTP/1.1 after proxy HTTP/2 stream resets.
+# This build-only setting does not enter the disposable MinIO runtime.
+RUN GODEBUG=http2client=0 CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags "-s -w \
 -X github.com/minio/minio/cmd.Version={spec.version} \
 -X github.com/minio/minio/cmd.ReleaseTag={spec.release} \
 -X github.com/minio/minio/cmd.CopyrightYear={spec.version[:4]} \
