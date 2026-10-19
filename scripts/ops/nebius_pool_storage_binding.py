@@ -7,11 +7,18 @@ Ordinary participant releases deliberately cannot deserialize this contract.
 """
 from __future__ import annotations
 
+import copy
 import json
+from dataclasses import dataclass
 from typing import Any, Literal, cast
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, model_validator
+from scripts.ops.nebius_development_collector_runtime import prepare_collector_runtime
+from scripts.ops.nebius_development_runtime_install import DevelopmentRuntimeInstallRequest
+from scripts.ops.nebius_development_runtime_retained import load_completed_runtime
+from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
+from scripts.ops.nebius_management_stage import _MARKER
 from scripts.ops.nebius_pool_activation_database import _header
 from scripts.ops.nebius_pool_startup_database import _authority_condition, _expected_authority
 
@@ -44,6 +51,61 @@ class ClosedPoolStorageRefresh(BaseModel):
                 or after.quota_identities != {**before.quota_identities, 'storage': expected}):
             raise ValueError('closed_storage_refresh_changes_unqualified_authority')
         return self
+
+
+@dataclass(frozen=True, repr=False)
+class StorageCollectorPlan:
+    previous_configuration: dict[str, Any]
+    configuration: dict[str, Any]
+    original: dict[str, Any]
+    paused: dict[str, Any]
+    reconfigured: dict[str, Any]
+    resumed: dict[str, Any]
+
+
+def prepare_storage_collector(*, runtime: DevelopmentRuntimeInstallRequest,
+        refresh: ClosedPoolStorageRefresh) -> StorageCollectorPlan:
+    """Project an exact completed observer; never adopt an asserted live pause.
+
+    The parent must journal/drain the pause before replacing its configuration,
+    commit the exact SQL successor, then restore this retained schedule. These
+    documents alone are neither current readiness nor permission to write them.
+    """
+    try:
+        refresh = ClosedPoolStorageRefresh.model_validate(refresh.model_dump())
+        completed = load_completed_runtime(runtime)
+        if refresh.before != completed.request.database.manager.retained.request.registration.spec:
+            raise ValueError
+        rendered = prepare_collector_runtime(completed.request.database)
+        original = copy.deepcopy(completed.resources[_key(rendered.cronjob)])
+        previous = copy.deepcopy(completed.resources[_key(rendered.configuration)])
+        _uid(original)
+        _uid(previous)
+        container, = original['spec']['jobTemplate']['spec']['template']['spec']['containers']
+        if (type(original['spec'].get('suspend')) is not bool or previous.get('immutable') is not True
+                or previous.get('data') != rendered.configuration['data']
+                or container.get('envFrom') != [{'configMapRef': {'name': previous['metadata']['name']}}]):
+            raise ValueError
+        configuration = _snapshot(previous)
+        configuration['metadata']['name'] = 'loom-pool-storage-' + refresh.operation_id.hex
+        annotations = configuration['metadata'].get('annotations', {})
+        annotations.pop(_MARKER, None)
+        if not annotations:
+            configuration['metadata'].pop('annotations', None)
+        marker = 'loom.nebius/pool-storage-operation'
+        configuration['metadata'].setdefault('labels', {})[marker] = str(refresh.operation_id)
+        configuration['data']['LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_STORAGE_NAME'] = refresh.after.quota_identities['storage'][3]
+        paused = _snapshot(original)
+        paused['spec']['suspend'] = True
+        paused['metadata'].setdefault('annotations', {})[marker] = str(refresh.operation_id)
+        reconfigured = copy.deepcopy(paused)
+        next_container, = reconfigured['spec']['jobTemplate']['spec']['template']['spec']['containers']
+        next_container['envFrom'] = [{'configMapRef': {'name': configuration['metadata']['name']}}]
+        resumed = copy.deepcopy(reconfigured)
+        resumed['spec']['suspend'] = original['spec']['suspend']
+        return StorageCollectorPlan(previous, configuration, original, paused, reconfigured, resumed)
+    except Exception:
+        raise ValueError('storage collector history unqualified') from None
 
 
 def _identity(request: ClosedPoolStorageRefresh) -> dict[str, str]:
