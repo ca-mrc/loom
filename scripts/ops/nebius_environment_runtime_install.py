@@ -12,6 +12,7 @@ import copy
 import json
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -33,15 +34,17 @@ from scripts.ops.nebius_environment_runtime import (
 )
 from scripts.ops.nebius_foundation_readiness import observe_foundation
 from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
-from scripts.ops.nebius_management_authority_stage import _defaulted as authority_defaulted
 from scripts.ops.nebius_management_material import ManagementBinding
 from scripts.ops.nebius_management_stage import (
     _MARKER,
     ManagementStageAPI,
+    _comparison_snapshot,
     _stage_fixed_documents,
+    _validate_record,
 )
-from scripts.ops.nebius_management_stage import _defaulted as workload_defaulted
-from scripts.ops.nebius_management_supplied import _defaulted as secret_defaulted
+from scripts.ops.nebius_management_stage import (
+    _qualified_defaulted as workload_defaulted,
+)
 from scripts.ops.nebius_management_transport import ManagementKubernetesTransport
 from scripts.ops.nebius_pool_administration_dispatch import (
     Connection,
@@ -59,7 +62,7 @@ from scripts.ops.nebius_pool_enrollment_issuer import (
 from loom.nebius_environment_foundation import EnvironmentFoundationDeclarationV2
 from loom.nebius_kubernetes import NebiusKubernetesCredentials
 from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1
-from loom_service.environment_management.candidates import GitHubCandidateCatalog
+from loom_service.environment_management.candidates import GitHubCandidateCatalog, _json
 from loom_service.environment_management.kubernetes_provider import KubernetesEnvironmentProvider
 from loom_service.pool_management.administration import PoolAdministrationAuthorizationV2
 from loom_service.pool_management.capacity import digest
@@ -70,16 +73,20 @@ ResourceConnection = Callable[[dict[str, dict[str, Any]], dict[str, str], Callab
 
 
 def _defaulted(api: ManagementStageAPI, desired: dict[str, Any]) -> dict[str, Any]:
+    return qualify_runtime_defaulted(desired, api.default_resource(desired))
+
+
+def qualify_runtime_defaulted(desired: dict[str, Any], actual: dict[str, Any]) -> dict[str, Any]:
     """Only inert defaults, never added grants or narrowed admission matching."""
     kind = desired['kind']
-    if kind == 'Secret':
-        return secret_defaulted(api, desired)
     if kind == 'Deployment':
-        return workload_defaulted(api, desired)
-    if kind in {'Role', 'ClusterRole', 'RoleBinding', 'ClusterRoleBinding'}:
-        return authority_defaulted(api, desired)
-    observed = _snapshot(api.default_resource(desired))
+        return workload_defaulted(desired, actual)
+    observed = _snapshot(actual)
     comparison = copy.deepcopy(observed)
+    if kind in {'RoleBinding', 'ClusterRoleBinding'}:
+        for subject in comparison['subjects']:
+            if subject.pop('apiGroup', '') != '':
+                raise ValueError('environment_runtime_subject_unqualified')
     if kind in {'ValidatingAdmissionPolicy', 'ValidatingAdmissionPolicyBinding'}:
         qualify_build_policy_spec(desired, observed)
         comparison['spec'] = copy.deepcopy(desired['spec'])
@@ -109,6 +116,64 @@ def _uncreated_readers(readers: tuple[dict[str, Any], ...], files: dict[str, lis
                 or original.get('automountServiceAccountToken') is not False):
             raise ValueError('environment_runtime_foundation_collision')
     return tuple(result)
+
+
+@dataclass(frozen=True, repr=False)
+class StagedEnvironmentRuntimeV2:
+    state_dir: Path
+    plan: dict[str, Any]
+    resources: dict[str, dict[str, Any]]
+    files: dict[Path, bytes]
+
+
+def load_staged_environment_runtime(*, policy: PoolEnrollmentPolicyV2, operation_id: UUID) -> StagedEnvironmentRuntimeV2:
+    """Immutable staged history, not current runtime readiness or activation."""
+    try:
+        _scope(policy)
+        if not operation_id.int:
+            raise ValueError
+        directory = policy.host.state_root / ('runtime-' + str(operation_id))
+        files: dict[Path, bytes] = {}
+        def read(path: Path) -> dict[str, Any]:
+            files[path] = state._private_read(path, limit=8 * 1024**2)
+            return _json(files[path])
+        plan = read(directory / 'plan.json')
+        checksum = digest(plan)
+        anchor = read(policy.host.anchor_root / ('runtime-' + str(operation_id) + '.json'))
+        cursor = read(directory / 'cursor.json')
+        phases = ('material', 'readers-isolation', 'gateway-authority', 'workloads')
+        if (set(plan) != {'schema_version', 'operation_id', 'policy', 'enrollment', 'documents',
+                'registry_scope', 'workloads', 'namespace_uids', 'foundation_identities'}
+                or plan['schema_version'] != 'loom.environment-runtime-plan.v2' or plan['operation_id'] != str(operation_id)
+                or plan['policy'] != _policy(policy)
+                or anchor != {'operation_id': str(operation_id), 'plan_sha256': checksum}
+                or cursor != {'phases': {phase: 'complete' for phase in phases}}
+                or set(plan['documents']) != set(phases)):
+            raise ValueError
+        reference = PoolAdministrationReferenceV2.model_validate(plan['enrollment'])
+        enrolled = _load(policy.host, reference)
+        if not isinstance(enrolled.request, PoolParticipantEnrollmentV2) or enrolled.request.participant != policy.participant:
+            raise ValueError
+        resources = {}
+        for phase in phases:
+            record = read(directory / phase / 'stage.json')
+            _validate_record(record, {'schema': 'loom.nebius-management-stage.v1',
+                'binding': asdict(policy.host.runtime.binding), 'revision': 'sha256:' + checksum,
+                'phase': 'environment-runtime-' + phase}, plan['documents'][phase])
+            for key, item in record['resources'].items():
+                if (key in resources or item['status'] != 'created'
+                        or qualify_runtime_defaulted(item['desired'], item['expected']) != item['expected']
+                        or _comparison_snapshot(item['observed']) != item['expected']):
+                    raise ValueError
+                document = copy.deepcopy(item['observed'])
+                document['metadata']['uid'] = item['uid']
+                _uid(document)
+                resources[key] = document
+        if any(state._private_read(path, limit=8 * 1024**2) != raw for path, raw in files.items()):
+            raise ValueError
+        return StagedEnvironmentRuntimeV2(directory, plan, resources, files)
+    except Exception:
+        raise ValueError('environment_runtime_retained_unqualified') from None
 
 
 class _Resources(ManagementKubernetesTransport):
@@ -297,6 +362,8 @@ async def stage_environment_runtime(*, policy: PoolEnrollmentPolicyV2, enrollmen
         namespaces = {**foundation.foundation.namespace_uids, policy.host.runtime.binding.namespace: policy.host.runtime.binding.namespace_uid}
         plan = {'schema_version': 'loom.environment-runtime-plan.v2', 'operation_id': str(operation_id),
             'policy': policy_body, 'enrollment': enrollment.model_dump(mode='json'), 'documents': documents,
+            'workloads': rendered.workloads, 'namespace_uids': namespaces,
+            'foundation_identities': foundation.foundation.identities,
             'registry_scope': registry_scope.model_dump(mode='json')}
         checksum = digest(plan)
         expires = min(snapshot.valid_until, foundation.foundation.observed_at + timedelta(minutes=5), *(row.expires_at for row in policy.machines))
