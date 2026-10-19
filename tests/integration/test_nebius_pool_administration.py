@@ -13,7 +13,10 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import select
 
-from loom.db.nebius_pool_lifecycle_schema import NebiusPoolLifecycleOperation, NebiusPoolParticipantLifecycle
+from loom.db.nebius_pool_lifecycle_schema import (
+    NebiusPoolLifecycleOperation,
+    NebiusPoolParticipantLifecycle,
+)
 from loom_service.pool_management.capacity import digest
 from tests.integration.test_nebius_pool_participant_lifecycle import setup
 from tests.integration.test_nebius_pool_registry import sessions as sessions
@@ -51,6 +54,11 @@ async def test_protected_apply_replay_and_status_retain_original_intent(sessions
     assert status['receipt']['state'] == status['current']['state'] == 'suspended'
     assert status['current']['operation_id'] == str(operation.operation_id)
     assert first['authorization_id'] == str(grant.authorization_id)
+    async with sessions() as session:
+        audit = await session.get(NebiusPoolLifecycleOperation, grant.authorization_id)
+        assert audit is not None, 'the exact authorizing evidence must survive process loss'
+        assert audit.request_json['authorization'] == grant.model_dump(mode='json')
+        assert audit.receipt_json['operation_id'] == str(operation.operation_id)
 
 
 @pytest.mark.parametrize('damage', ['participant', 'environment', 'incarnation', 'installation', 'pool',
@@ -119,6 +127,10 @@ async def test_actual_installed_process_requires_pinned_authorization_and_report
     assert result.returncode == 0, result.stdout
     value = json.loads(result.stdout)
     assert value['receipt']['operation_id'] == str(operation.operation_id) and value['receipt']['state'] == 'suspended'
+    env['LOOM_POOL_ADMINISTRATION_ACTION'] = 'status'
+    result = await asyncio.to_thread(subprocess.run, [sys.executable, '-m', module.__name__],
+        env=env, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0 and json.loads(result.stdout)['current']['state'] == 'suspended'
     env['LOOM_POOL_ADMINISTRATION_AUTHORIZATION_SHA256'] = 'f' * 64
     result = await asyncio.to_thread(subprocess.run, [sys.executable, '-m', module.__name__],
         env=env, capture_output=True, text=True, timeout=30)
@@ -126,3 +138,20 @@ async def test_actual_installed_process_requires_pinned_authorization_and_report
     async with sessions() as session:
         assert len(list(await session.scalars(select(NebiusPoolLifecycleOperation).where(
             NebiusPoolLifecycleOperation.operation_id == operation.operation_id)))) == 1
+
+
+async def test_authorization_identity_cannot_be_rebound_to_another_operation(sessions):
+    module = administration()
+    _, spec, _, _, _, change = await setup(sessions)
+    selected = spec.participants[2]
+    operation = await change(selected, 'suspend', apply=False)
+    grant = authorization(module, selected, operation)
+    async with sessions.begin() as session:
+        await module.administer(session, operation.model_dump_json().encode(), grant, action='apply')
+    resume = await change(selected, 'resume', apply=False, expected_head=operation.operation_id)
+    forged = authorization(module, selected, resume).model_copy(update={'authorization_id': grant.authorization_id})
+    with pytest.raises(ValueError):
+        async with sessions.begin() as session:
+            await module.administer(session, resume.model_dump_json().encode(), forged, action='apply')
+    async with sessions() as session:
+        assert (await session.get(NebiusPoolParticipantLifecycle, selected.participant_id)).state == 'suspended'
