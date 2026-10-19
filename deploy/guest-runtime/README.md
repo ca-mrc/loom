@@ -27,12 +27,14 @@ without executing package installation hooks. An unavailable pinned archive
 fails the build. Updating dependencies requires updating the lock and running
 the full payload verification and guest capability tests.
 
-For HTTP 500, 502, 503 or 504, the downloader makes at most three attempts, waiting
-one and then two seconds between attempts. Each attempt retains the 120-second
-network timeout. Diagnostics identify the locked archive by SHA256, HTTP status
-and attempt count, without logging URLs or response bodies. Other HTTP errors,
-transport failures, local filesystem failures and size/hash mismatches fail
-without retries. Failed downloads remove their partial files; only complete,
+For HTTP 500, 502, 503 or 504, or a timeout while reading the response body, the
+downloader shares one budget of at most three attempts, waiting one and then two
+seconds between attempts. Each attempt retains the 120-second network timeout;
+an interrupted body restarts from byte zero. Diagnostics identify the locked
+archive by SHA256, HTTP status or body-timeout category, and attempt count,
+without logging URLs or response bodies. Other HTTP errors, other transport
+failures, local filesystem failures and size/hash mismatches fail without
+retries. Failed downloads remove their partial files; only complete,
 verified archives enter the cache. These are build-time archive retries, not
 task execution retries.
 
