@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -110,3 +111,47 @@ async def test_closed_storage_update_uses_global_admission_lock_without_partial_
         with pytest.raises(psycopg.errors.LockNotAvailable):
             await asyncio.to_thread(read_sql, url, storage.refresh_closed_storage_sql(request))
     assert await snapshot(sessions) == before
+
+
+@pytest.mark.parametrize('failure', [None, 'lost-before', 'lost-after'])
+async def test_storage_registry_journal_never_redispatches_unknown_commit(sessions, tmp_path, failure):
+    name = 'scripts.ops.nebius_pool_storage_registry'
+    assert importlib.util.find_spec(name) is not None, 'storage registry recovery journal is missing'
+    journal = importlib.import_module(name)
+    storage = module()
+    request, url = await setup(sessions)
+    dispatches = []
+
+    class API:
+        def observe(self, selected):
+            assert selected == request
+            return read_sql(url, storage.pool_storage_state_sql(selected))
+
+        def commit(self, selected):
+            assert selected == request
+            dispatches.append(selected.operation_id)
+            if failure == 'lost-before':
+                raise TimeoutError('transport outcome unknown')
+            result = read_sql(url, storage.refresh_closed_storage_sql(selected))
+            if failure == 'lost-after':
+                raise TimeoutError('committed response lost')
+            return result
+
+    def run():
+        return journal.advance_storage_registry(request=request, api=API(),
+            state_dir=tmp_path / 'registry', qualify=lambda: None)
+
+    before = await snapshot(sessions)
+    if failure == 'lost-before':
+        for _ in range(2):
+            with pytest.raises(ValueError):
+                await asyncio.to_thread(run)
+        assert await snapshot(sessions) == before
+    else:
+        assert await asyncio.to_thread(run)
+        after = await snapshot(sessions)
+        assert after != before
+        assert await asyncio.to_thread(run)
+        assert await snapshot(sessions) == after
+        journal.validate_storage_registry(request=request, state_dir=tmp_path / 'registry', complete=True)
+    assert dispatches == [request.operation_id]
