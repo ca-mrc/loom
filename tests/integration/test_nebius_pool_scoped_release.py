@@ -23,7 +23,8 @@ from tests.integration.test_nebius_pool_profile_registry import catalog
 from tests.integration.test_nebius_pool_registry import machine
 from tests.integration.test_nebius_pool_registry import sessions as sessions
 from tests.support.nebius_platform import platform_inputs as platform_inputs
-from tests.unit.test_nebius_pool_task_image_render import build_inputs
+from tests.unit.test_nebius_application_image_renderer import build_inputs as build_inputs
+from tests.unit.test_nebius_pool_task_image_render import build_inputs as task_build_inputs
 
 
 def replacement(spec, selected):
@@ -47,7 +48,7 @@ def replacement(spec, selected):
 def request_for(selected, kind):
     if kind == 'trial':
         return workload(selected)
-    _, body, _ = build_inputs()
+    _, body, _ = task_build_inputs()
     body.update(pool_id=selected.pool_id, participant_revision=selected.binding_revision,
         admission_epoch=selected.admission_epoch, target_id=selected.targets[0].target_id,
         origin=workload(selected).origin.model_dump(mode='json'))
@@ -137,17 +138,17 @@ async def test_release_commit_waits_for_charged_work_without_releasing_it(sessio
         assert (await session.scalar(select(NebiusPoolRequest))).phase == 'reserved'
 
 
-async def test_personal_application_builder_retains_exact_source_and_recipe_across_release(environment_registry, application_build_inputs):
+async def test_personal_application_builder_retains_exact_source_and_recipe_across_release(environment_registry, build_inputs):
     from loom.application_source_upload import ApplicationSourceUploadBindingV1
     from loom_service.application_management.build_dispatch import ApplicationBuildDispatch
     from loom_service.application_management.source_registry import ApplicationSourceRegistry
     from tests.integration.test_nebius_application_build_registry import build_registry, verified
 
     _, sessions, (owner, _), _ = environment_registry
-    _, spec, app, headers, observe, change = await setup(sessions, application_recipe=application_build_inputs[0].recipe)
+    _, spec, app, headers, observe, change = await setup(sessions, application_recipe=build_inputs[0].recipe)
     selected = spec.participants[2]
     profile, = catalog(spec, selected).application_images
-    claim = application_build_inputs[0].model_copy(update={'recipe': profile.recipe,
+    claim = build_inputs[0].model_copy(update={'recipe': profile.recipe,
         'source_bucket': profile.settings.source_bucket, 'storage_endpoint': profile.settings.storage_endpoint,
         'storage_region': profile.settings.storage_region, 'registry_repository': profile.settings.registry_repository})
     sources = ApplicationSourceRegistry(sessions, binding=ApplicationSourceUploadBindingV1(
