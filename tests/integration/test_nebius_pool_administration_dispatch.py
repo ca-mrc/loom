@@ -122,6 +122,36 @@ async def test_recovery_does_not_recreate_lost_job_journals(sessions, tmp_path):
     assert result['status'] == 'blocked'
 
 
+async def test_apply_can_resume_interruption_after_start_but_cannot_recreate_lost_inputs(sessions, tmp_path, monkeypatch):
+    module, host, job, reference = await prepared(sessions, tmp_path)
+    async with sessions.begin() as session:
+        committed = await administration().administer(session, job.request.model_dump_json().encode(), job.authorization, action='apply')
+    class API(PhaseAPI):
+        def administration_report(self, state_dir):
+            return dict(job_uid=str(uuid4()), pod_uid=str(uuid4()), receipt=committed)
+    api = API(host.runtime.binding)
+    @contextmanager
+    def connect(request):
+        assert request == job
+        yield api
+    def interrupted(**kwargs):
+        raise OSError('process interrupted before staging starts')
+    with monkeypatch.context() as crash:
+        crash.setattr(module, 'stage_administration_job', interrupted)
+        assert module.dispatch_administration(command(reference, 'apply'), action='apply', host=host, connect=connect)['status'] == 'blocked'
+    assert not api.creates
+    result = module.dispatch_administration(command(reference, 'apply'), action='apply', host=host, connect=connect)
+    assert result['status'] == 'complete'
+    assert len(api.creates) == 2
+    execution = host.state_root / str(reference.authorization_id) / 'execution'
+    (execution / 'inputs').rename(execution / 'saved-inputs')
+    try:
+        assert module.dispatch_administration(command(reference, 'apply'), action='apply', host=host, connect=connect)['status'] == 'blocked'
+        assert len(api.creates) == 2
+    finally:
+        (execution / 'saved-inputs').rename(execution / 'inputs')
+
+
 async def test_status_before_apply_does_not_prevent_the_authorized_write(sessions, tmp_path):
     module, host, job, reference = await prepared(sessions, tmp_path)
     async with sessions.begin() as session:
