@@ -726,7 +726,7 @@ def test_storage_collector_https_uses_execution_namespace_and_preserves_uid_cas(
     path = runtime_resource_path(cron) + '/' + cron['metadata']['name']
     namespace = cron['metadata']['namespace']
     rows, effects, checks = {path: cron}, [], []
-    mode = {'fail_read': False, 'lose_reply': False, 'active': True}
+    mode = {'fail_read': False, 'lose_reply': False, 'active': True, 'fail_at_dispatch': False}
     active_pod = {'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {
         'name': 'old-collector', 'namespace': namespace, 'uid': str(uuid4()),
         'labels': cron['spec']['jobTemplate']['spec']['template']['metadata']['labels']},
@@ -736,6 +736,11 @@ def test_storage_collector_https_uses_execution_namespace_and_preserves_uid_cas(
         checks.append(True)
         if mode['fail_read']:
             raise ValueError('provider qualification failed')
+        child = retained.state_dir / phase / ('stage.json' if phase == 'configuration' else 'transition.json')
+        if mode['fail_at_dispatch'] and child.exists():
+            if any(item['status'] in {'intent', 'create_intent'}
+                    for item in json.loads(child.read_bytes())['resources'].values()):
+                raise ValueError('provider read failed immediately before HTTP dispatch')
 
     def respond(message):
         selected = message.url.path
@@ -791,6 +796,14 @@ def test_storage_collector_https_uses_execution_namespace_and_preserves_uid_cas(
             api.client = type(api.client)(base_url=api.api_server, transport=httpx.MockTransport(respond))
             if transition is None:
                 documents, identity = storage_configuration_identity(retained)
+                mode['fail_at_dispatch'] = True
+                with pytest.raises((ValueError, RuntimeError)):
+                    _stage_fixed_documents(documents=documents, revision=identity['revision'], phase=identity['phase'],
+                        binding=retained.registration.binding, api=api, state_dir=retained.state_dir / phase)
+                assert effects == ['collector']
+                assert all(item['status'] == 'prepared' for item in json.loads(
+                    (retained.state_dir / phase / 'stage.json').read_bytes())['resources'].values())
+                mode['fail_at_dispatch'] = False
                 _stage_fixed_documents(documents=documents, revision=identity['revision'], phase=identity['phase'],
                     binding=retained.registration.binding, api=api, state_dir=retained.state_dir / phase)
                 with pytest.raises(ValueError):
@@ -805,6 +818,14 @@ def test_storage_collector_https_uses_execution_namespace_and_preserves_uid_cas(
                             phase=transition, api=api, state_dir=retained.state_dir / phase)
                     assert effects == []
                     mode['fail_read'] = False
+                    mode['fail_at_dispatch'] = True
+                    with pytest.raises(ValueError):
+                        advance_runtime_workloads(originals=originals, targets=targets, input_digest=fingerprint,
+                            phase=transition, api=api, state_dir=retained.state_dir / phase)
+                    assert effects == []
+                    assert all(item['status'] == 'prepared' for item in json.loads(
+                        (retained.state_dir / phase / 'transition.json').read_bytes())['resources'].values())
+                    mode['fail_at_dispatch'] = False
                     try:
                         waiting = advance_runtime_workloads(originals=originals, targets=targets, input_digest=fingerprint,
                             phase=transition, api=api, state_dir=retained.state_dir / phase)
