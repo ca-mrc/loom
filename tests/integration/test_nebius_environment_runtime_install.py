@@ -402,10 +402,21 @@ async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact
             loop = asyncio.get_running_loop()
             mutation_apis = {}
             lose_ready_reply = True
+            interrupt_ready_job = True
             class MutationAPI(PhaseAPI):
                 committed = None
+                def create_resource(self, doc):
+                    nonlocal interrupt_ready_job
+                    if doc['kind'] == 'Job' and self.request.request.action == 'ready' and interrupt_ready_job:
+                        interrupt_ready_job = False
+                        raise OSError('interrupted before Job creation')
+                    return super().create_resource(doc)
                 def administration_report(self, state_dir):
                     nonlocal lose_ready_reply
+                    from scripts.ops.nebius_pool_administration_job import HTTPSPoolAdministrationJobAPI
+                    # Match the real transport: no process result is possible
+                    # without both exact retained ConfigMap/Job identities.
+                    HTTPSPoolAdministrationJobAPI._recorded(self, state_dir)
                     if self.committed is None:
                         async def apply():
                             async with sessions.begin() as session:
@@ -426,6 +437,7 @@ async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact
                 if identity not in mutation_apis:
                     mutation_apis[identity] = MutationAPI(policy.host.runtime.binding)
                     mutation_apis[identity].request = request
+                    mutation_apis[identity].administration = request
                     mutation_apis[identity].failure = 'after'
                 assert mutation_apis[identity].request == request
                 yield mutation_apis[identity]
@@ -436,6 +448,9 @@ async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact
             assert pending['status'] == 'environment_activation_pending' and pending['phase'] == 'ready'
             assert not mutation_apis, 'pending qualification cannot dispatch a state change'
             allow_quotas = True
+            blocked = await parent.activate_environment_runtime(**parent_inputs)
+            assert blocked['status'] == 'environment_activation_blocked' and blocked['phase'] == 'ready'
+            assert len(mutation_apis) == 1 and all(row.committed is None for row in mutation_apis.values())
             pending = await parent.activate_environment_runtime(**parent_inputs)
             assert pending['status'] == 'environment_activation_pending' and pending['phase'] == 'ready'
             assert len(mutation_apis) == 1
