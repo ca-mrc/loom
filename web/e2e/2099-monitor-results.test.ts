@@ -154,7 +154,10 @@ test("cancelled Batch observes children, canonical output and cleanup without re
   const path = "/api/v1/batches/review-batch";
   const fixture = await apiHarness.install({ role: "user", overrides: [
     json("cancel accepted before children settle", path, projection(true, true, false)),
-    json("children cancelled while output archives", path, projection(false, true, false)),
+    { name: "children cancelled while output archives", method: "GET", path,
+      // CI observed a 7.7s response: polling cadence must not consume the
+      // assertion budget before the response being asserted has arrived.
+      response: { kind: "json", status: 200, body: projection(false, true, false), delayMs: 8_000 } },
     json("canonical output before cleanup", path, projection(false, false, false)),
     json("execution resources released", path, projection(false, false, true)),
     json("no prepared delivery export", `${path}/delivery-export`, null),
