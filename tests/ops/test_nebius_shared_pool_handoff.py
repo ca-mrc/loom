@@ -308,6 +308,53 @@ def shared_runtime(completed_pool, publisher_cloud):
     return request, api
 
 
+@pytest.mark.timeout(180)
+def test_closed_storage_projection_pauses_and_restores_actual_enabled_collector(shared_runtime):
+    from scripts.ops import nebius_pool_storage_binding as storage
+    from scripts.ops.nebius_development_runtime_retained import load_completed_runtime
+
+    request, api = shared_runtime
+    completed = load_completed_runtime(request)
+    original = request.database.manager.retained.request.registration.spec
+    after = original.model_dump(mode='json')
+    after['policy_revision'] += 1
+    after['quota_identities']['storage'][3] = 'compute.disk.size.network-ssd-non-replicated'
+    refresh = storage.ClosedPoolStorageRefresh(schema_version='loom.closed-pool-storage-refresh.v1',
+        operation_id=uuid4(), target_disk_type='NETWORK_SSD_NON_REPLICATED', before=original, after=after)
+    resources = copy.deepcopy(api.store.resources)
+    plan = storage.prepare_storage_collector(runtime=request, refresh=refresh)
+    assert api.store.resources == resources
+    assert load_completed_runtime(request) == completed
+    assert plan.original['spec']['suspend'] is False
+    assert plan.paused['spec']['suspend'] is True
+    assert plan.reconfigured['spec']['suspend'] is True
+    assert plan.resumed['spec']['suspend'] is False
+    name = 'loom-pool-storage-' + refresh.operation_id.hex
+    assert plan.configuration['metadata']['name'] == name
+    assert plan.configuration['immutable'] is True
+    key = 'LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_STORAGE_NAME'
+    assert plan.configuration['data'][key] == 'compute.disk.size.network-ssd-non-replicated'
+    assert plan.configuration['data'] == {
+        **plan.previous_configuration['data'], key: 'compute.disk.size.network-ssd-non-replicated'}
+    # Every image, credential mount, node selection, schedule and other setting
+    # remains the installed one. Only suspension and the fixed config reference move.
+    expected = copy.deepcopy(plan.original['spec'])
+    expected['suspend'] = True
+    assert plan.paused['spec'] == expected
+    expected['jobTemplate']['spec']['template']['spec']['containers'][0]['envFrom'] = [
+        {'configMapRef': {'name': name}}]
+    assert plan.reconfigured['spec'] == expected
+    expected['suspend'] = False
+    assert plan.resumed['spec'] == expected
+    # A syntactically valid physical delta for another policy cannot reuse this history.
+    changed = refresh.model_dump(mode='json')
+    for version in ('before', 'after'):
+        changed[version]['admission']['build_concurrency_limit'] += 1
+    changed = storage.ClosedPoolStorageRefresh.model_validate(changed)
+    with pytest.raises(ValueError, match='storage collector'):
+        storage.prepare_storage_collector(runtime=request, refresh=changed)
+
+
 @pytest.fixture
 def shared_operation(shared_runtime, staging_history, staging_observation, completed_pool, handoff):
     """A real source/history plan and GET-qualified database-bound migration."""
