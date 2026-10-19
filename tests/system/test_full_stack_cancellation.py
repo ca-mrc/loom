@@ -27,6 +27,7 @@ def test_cancel_before_terminal(compose_stack: dict[str, str]) -> None:
     r = httpx.post(
         f"{cp}/trials/{trial_id}/cancel",
         headers={"Authorization": f"Bearer {raw_token}"},
+        timeout=10,
     )
     assert r.status_code in (200, 409), r.text
 
@@ -35,6 +36,7 @@ def test_cancel_before_terminal(compose_stack: dict[str, str]) -> None:
         r = httpx.get(
             f"{cp}/trials/{trial_id}",
             headers={"Authorization": f"Bearer {raw_token}"},
+            timeout=10,
         )
         final_state = r.json()["state"]
         if final_state in ("succeeded", "failed", "cancelled"):
