@@ -60,7 +60,7 @@ def test_boundary_intent_changes_only_owned_quotas_and_explicit_build_psa(runtim
 def test_boundary_quota_release_accepts_only_exact_running_readers(running, foreign):
     module = importlib.import_module('scripts.ops.nebius_environment_runtime_boundaries')
     assert hasattr(module, 'EnvironmentBoundaryWorkloads'), 'selected boundary transport missing'
-    reader, collections, replica, pod = running
+    reader, _, replica, pod = running
     namespace = reader['metadata']['namespace']
     quota = {'apiVersion': 'v1', 'kind': 'ResourceQuota', 'metadata': {'namespace': namespace,
         'name': 'loom-execution-disabled', 'uid': str(uuid4()), 'resourceVersion': '3'},
@@ -123,7 +123,8 @@ def test_build_namespace_cas_requires_effective_exact_native_policy(runtime_requ
         assert method == 'GET'
         if path.endswith('/build-red'):
             return namespace
-        return next(doc for doc in live.values() if path.endswith('/' + doc['metadata']['name']))
+        kind = 'ValidatingAdmissionPolicyBinding' if '/validatingadmissionpolicybindings/' in path else 'ValidatingAdmissionPolicy'
+        return copy.deepcopy(next(doc for doc in live.values() if doc['kind'] == kind and path.endswith('/' + doc['metadata']['name'])))
     def serve(request):
         assert request.url.params['dryRun'] == 'All'
         if request.method == 'PATCH':

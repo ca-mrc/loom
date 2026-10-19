@@ -60,6 +60,10 @@ WorkloadConnection = Callable[[dict[str, dict[str, Any]], dict[str, dict[str, An
 
 
 def runtime_resource_path(document: dict[str, Any]) -> str:
+    if document['kind'] == 'Namespace':
+        if document.get('apiVersion') != 'v1' or document['metadata'].get('namespace') is not None:
+            raise ValueError('environment_runtime_namespace_scope_invalid')
+        return '/api/v1/namespaces'
     if document['kind'] == 'ResourceQuota':
         return '/api/v1/namespaces/' + str(document['metadata']['namespace']) + '/resourcequotas'
     return _runtime_resource_path(document)

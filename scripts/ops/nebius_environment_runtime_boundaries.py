@@ -9,6 +9,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from scripts.ops.nebius_environment_boundary_live import (
+    EnvironmentBoundaryWorkloads as EnvironmentBoundaryWorkloads,
+)
 from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
 
 from loom.nebius_pool_contract import PoolParticipantV1
