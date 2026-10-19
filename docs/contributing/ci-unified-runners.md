@@ -31,6 +31,14 @@ workflows share that limit. Only runnable queued jobs whose native `needs`
 dependencies have completed contribute to demand, including candidate missing-test
 matrix rows and publication after its prerequisite jobs finish.
 
+Demand inventory uses GitHub's official paginated
+`/actions/runs/{run_id}/attempts/{run_attempt}/jobs` endpoint, bound to the
+positive integer `run_attempt` returned with each source run. This keeps rerun
+demand separate from earlier attempts. On 2026-10-19, the ordinary latest-jobs
+endpoint repeatedly returned HTTP 502 for a run whose exact-attempt inventory
+succeeded. Missing or invalid attempts and API errors still stop reconciliation;
+they never become zero demand or permission to retire an unused worker.
+
 GitHub has no atomic provider preference between matching runners. Hosted
 capacity is supplied while OLDLAB contributes overflow, but simultaneous ready
 workers can win either way. Availability takes precedence over strict GitHub

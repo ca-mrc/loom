@@ -194,7 +194,10 @@ def source_demand(api: API, root: Path, now: float) -> int:
         path = str(run["path"]).split("@", 1)[0]
         if path.rsplit("/", 1)[-1] not in SOURCE_WORKFLOWS:
             continue
-        jobs = api.pages(f"/actions/runs/{run['id']}/jobs?filter=latest", "jobs")
+        attempt = run.get("run_attempt")
+        if type(attempt) is not int or attempt < 1:
+            raise SupplyError("source run has an invalid attempt")
+        jobs = api.pages(f"/actions/runs/{run['id']}/attempts/{attempt}/jobs", "jobs")
         if not any(
             SHARED_LABEL in job.get("labels", []) and job["status"] == "queued" for job in jobs
         ):
