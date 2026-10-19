@@ -210,23 +210,61 @@ def test_guest_inherits_omitted_verifier_user_from_root_task():
     )
     assert "guest_root_identity_required" not in reasons
     for sidecar in _compile(task, trial, profile).sidecars:
-        assert sidecar.identity is not None
-        assert (sidecar.identity.run_as_user, sidecar.identity.run_as_group) == (0, 0)
+        assert sidecar.identity is not None and sidecar.guest_task_identity is not None
+        assert (sidecar.identity.run_as_user, sidecar.identity.run_as_group, sidecar.identity.home) == (0, 0, "/root")
+        assert (sidecar.guest_task_identity.run_as_user, sidecar.guest_task_identity.run_as_group) == (0, 0)
 
 
-@pytest.mark.parametrize("section,change", [
-    ("environment", {"user": "agent"}),
-    ("verifier", {"user": "1001:1001"}),
-])
-def test_guest_rejects_nonroot_identities_instead_of_rewriting_them(section, change):
-    task, trial, _ = _guest_inputs()
+def test_guest_keeps_the_launcher_root_and_runs_the_task_user_inside():
+    task, trial, profile = _guest_inputs()
     raw = task.model_dump(mode="json")
-    raw[section].update(change)
-    reasons = automatic_service_execution_rejections(
-        TaskConfig.model_validate(raw), trial, source_provenance=_provenance(),
-        supported_capabilities=GUEST_EXECUTION_CAPABILITIES,
+    raw["environment"].update(user="agent")
+    raw["verifier"]["user"] = None
+    task = TaskConfig.model_validate(raw)
+    assert "guest_root_identity_required" not in automatic_service_execution_rejections(
+        task, trial, source_provenance=_provenance(), supported_capabilities=GUEST_EXECUTION_CAPABILITIES,
     )
-    assert "guest_root_identity_required" in reasons
+    for sidecar in _compile(task, trial, profile).sidecars:
+        assert (sidecar.identity.run_as_user, sidecar.identity.run_as_group) == (0, 0)
+        assert sidecar.guest_task_identity is not None
+        assert (sidecar.guest_task_identity.run_as_user, sidecar.guest_task_identity.run_as_group,
+                sidecar.guest_task_identity.home) == (65532, 65532, "/home/agent")
+
+
+def test_guest_verifier_can_differ_when_each_guest_is_private():
+    task, trial, profile = _guest_inputs()
+    raw = task.model_dump(mode="json")
+    raw["environment"]["environment"]["HOME"] = "/home/task"
+    raw["verifier"].update(user="1001:1001")
+    task = TaskConfig.model_validate(raw)
+    reasons = automatic_service_execution_rejections(
+        task, trial, source_provenance=_provenance(), supported_capabilities=GUEST_EXECUTION_CAPABILITIES,
+    )
+    assert "guest_root_identity_required" not in reasons and "unsupported_task_identity" not in reasons
+    plan = _compile(task, trial, profile)
+    task_sandbox = next(sidecar for sidecar in plan.sidecars if sidecar.role_name == "task-sandbox")
+    verifier_sandbox = next(sidecar for sidecar in plan.sidecars if sidecar.role_name == "verifier-sandbox")
+    assert task_sandbox.guest_task_identity.home == "/home/task"
+    assert (task_sandbox.guest_task_identity.run_as_user, verifier_sandbox.guest_task_identity.run_as_user) == (0, 1001)
+    assert verifier_sandbox.identity.run_as_user == task_sandbox.identity.run_as_user == 0
+
+
+def test_shared_guest_rejects_a_different_verifier_identity():
+    task, trial, profile = _guest_inputs()
+    raw = task.model_dump(mode="json")
+    raw["environment"]["environment"]["HOME"] = "/home/task"
+    raw["verifier"].update(user="1001:1001", env_mode="shared")
+    task = TaskConfig.model_validate(raw)
+    trial = trial.model_copy(update={"verifier_env_mode": "shared"})
+    profile = profile.model_copy(update={"supports_shared_guest": True})
+    reasons = automatic_service_execution_rejections(
+        task, trial, source_provenance=_provenance(), supported_capabilities=GUEST_EXECUTION_CAPABILITIES,
+        supports_shared_guest=True,
+    )
+    assert reasons.count("guest_shared_identity_mismatch") == 1
+    assert "unsupported_task_identity" not in reasons
+    with pytest.raises(ValueError, match="guest_shared_identity_mismatch"):
+        _compile(task, trial, profile)
 
 
 @pytest.mark.parametrize("section,change,reason", [
@@ -409,6 +447,7 @@ def test_renderer_keeps_guest_state_private_bounded_and_host_unprivileged(capabi
             "--cpu-millis", str(plan.task_resources.cpu_millis),
             "--max-transfer-bytes", str(plan.max_artifact_bytes),
             "--exec-timeout-seconds", plan.sidecars[0].argv[-1],
+            "--task-uid", "0", "--task-gid", "0", "--task-groups", "-", "--task-home", "/root",
             *(["--nested-docker"] if capability == "nested_docker" else []),
         ]
         assert container["image"] == plan.task_image_ref

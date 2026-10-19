@@ -44,9 +44,11 @@ task guest retains system files, processes and kernel state between agent and
 verifier controllers. Private verifier inputs are staged only after the agent ends.
 Separate grading retains two private guests. An omitted ``verifier.user``
 inherits the resolved task identity; ``isolation=guest`` does not rewrite
-an authored or OCI-resolved nonroot user to root. Guest still requires
-both sandboxes to be uid/gid 0, so a missing verifier on a root task
-admits and a nonroot task remains ``guest_root_identity_required``.
+an authored or OCI-resolved nonroot user to root. The QEMU launcher stays
+uid/gid 0. The task user is ``guest_task_identity`` and is what runs inside
+the guest. A shared guest is one VM, so an explicit verifier user that
+resolves to a different uid, gid, home, or group list is
+``guest_shared_identity_mismatch``. An omitted verifier user still inherits.
 Unresolved prerequisites and external
 cluster, general PKCS#11 or DPDK requirements remain admission rejections.
 Emulated authentication additionally requires the deployment profile's explicit
@@ -62,10 +64,14 @@ Each sidecar carries `guest_execution` with schema
 capabilities. A plain guest carries an empty list; Go rejects a missing
 (`null`) list, and an empty one adds no `--nested-docker` or other capability
 setup. Python and Go both validate the exact class, the matching one or two private roles,
-matching task images/resources, root identities, private socket/probe paths,
+matching task images/resources, a root launcher identity, private socket/probe paths,
 timeouts and payload reservation. Historical requirements cannot silently
-upgrade into a guest. Authored or OCI-resolved nonroot identities are
-rejected, not rewritten to root.
+upgrade into a guest. A new guest plan also carries ``guest_task_identity``.
+Absent, an already compiled guest stays root inside the VM. Present, exec
+and file operations use that frozen uid, gid, supplementary groups, and HOME.
+The launcher command gains ``--task-uid``, ``--task-gid``, ``--task-groups``,
+and ``--task-home``; the namespace policy still accepts the historical
+command that boots as root.
 
 ## Isolation and lifetime
 

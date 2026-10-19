@@ -455,6 +455,11 @@
           "runtime": "qemu-tcg-v1",
           "schema_version": "loom.guest-execution.v1"
         },
+        "guest_task_identity": {
+          "home": "/root",
+          "run_as_group": 0,
+          "run_as_user": 0
+        },
         "identity": {
           "home": "/root",
           "run_as_group": 0,
@@ -511,6 +516,11 @@
           ],
           "runtime": "qemu-tcg-v1",
           "schema_version": "loom.guest-execution.v1"
+        },
+        "guest_task_identity": {
+          "home": "/root",
+          "run_as_group": 0,
+          "run_as_user": 0
         },
         "identity": {
           "home": "/root",
@@ -1085,6 +1095,11 @@
           "runtime": "qemu-tcg-v1",
           "schema_version": "loom.guest-execution.v1"
         },
+        "guest_task_identity": {
+          "home": "/root",
+          "run_as_group": 0,
+          "run_as_user": 0
+        },
         "identity": {
           "home": "/root",
           "run_as_group": 0,
@@ -1141,6 +1156,11 @@
           ],
           "runtime": "qemu-tcg-v1",
           "schema_version": "loom.guest-execution.v1"
+        },
+        "guest_task_identity": {
+          "home": "/root",
+          "run_as_group": 0,
+          "run_as_user": 0
         },
         "identity": {
           "home": "/root",

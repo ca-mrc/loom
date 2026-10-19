@@ -32,7 +32,15 @@ func main() {
 	flag.Int64Var(&c.MaxTransfer, "max-transfer-bytes", 256<<20, "maximum sandbox transfer")
 	flag.IntVar(&c.ExecTimeout, "exec-timeout-seconds", 900, "maximum exec deadline")
 	flag.BoolVar(&c.NestedDocker, "nested-docker", false, "start a guest-owned Docker daemon")
+	taskUID := flag.String("task-uid", "", "frozen in-guest uid")
+	taskGID := flag.String("task-gid", "", "frozen in-guest gid")
+	taskGroups := flag.String("task-groups", "", "frozen in-guest supplementary groups")
+	taskHome := flag.String("task-home", "", "frozen in-guest HOME")
 	flag.Parse()
+	if err := c.applyTaskIdentity(*taskUID, *taskGID, *taskGroups, *taskHome); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	if err := runGuest(ctx, c); err != nil {

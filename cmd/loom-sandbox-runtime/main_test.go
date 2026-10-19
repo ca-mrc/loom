@@ -10,10 +10,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -31,7 +33,7 @@ func testClient(t *testing.T) *http.Client {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := &http.Server{Handler: (runtimeServer{1024, 3 * time.Second}).handler()}
+	server := &http.Server{Handler: (runtimeServer{1024, 3 * time.Second, nil}).handler()}
 	go server.Serve(listener)
 	t.Cleanup(func() { server.Close() })
 	client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -262,7 +264,7 @@ func TestStopProcessesFinishesAfterRequestCancellation(t *testing.T) {
 	if runtime.GOOS != "linux" || os.Getpid() != 1 {
 		t.Skip("cleanup requires an isolated Linux PID namespace with the runtime as PID 1")
 	}
-	handler := (runtimeServer{1024, 3 * time.Second}).handler()
+	handler := (runtimeServer{1024, 3 * time.Second, nil}).handler()
 	execute := func(command string) execResult {
 		t.Helper()
 		data, _ := json.Marshal(execRequest{Argv: []string{"/bin/sh", "-c", command}})
@@ -429,5 +431,28 @@ func TestReadlinkRejectsRegularAndUnsafePaths(t *testing.T) {
 		if err != nil || response.StatusCode != 400 || strings.Contains(string(data), "secret") {
 			t.Fatalf("unsafe alias accepted: path=%q status=%d", path, response.StatusCode)
 		}
+	}
+}
+
+func TestGuestTaskIdentityRejectsADifferentRequestedUser(t *testing.T) {
+	server := runtimeServer{maxTransfer: 1024, maxTimeout: time.Second, identity: &guestTaskIdentity{
+		uid: 1001, gid: 1002, home: "/home/oci-user",
+	}}
+	root := "root"
+	_, _, rejection := server.validateCommand(execRequest{User: &root, Timeout: 1})
+	if rejection == nil || rejection.code != "exec_user_mismatch" {
+		t.Fatalf("%v", rejection)
+	}
+	matched := "1001:1002"
+	_, environment, rejection := server.validateCommand(execRequest{User: &matched, Timeout: 1, Env: map[string]string{"HOME": "/tmp"}})
+	if rejection != nil {
+		t.Fatal(rejection)
+	}
+	cmd := exec.Command("/bin/true")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	prepared := server.prepareCommand(cmd, environment)
+	joined := strings.Join(prepared, "\n")
+	if !strings.Contains(joined, "HOME=/home/oci-user") || strings.Contains(joined, "HOME=/tmp") || strings.Contains(joined, "HOME=/root") {
+		t.Fatalf("%q", prepared)
 	}
 }

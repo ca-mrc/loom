@@ -216,6 +216,7 @@ class SidecarContainerV1(_Strict):
     depends_on: tuple[str, ...] = Field(default=(), max_length=32)
     private_sandbox: bool = False
     identity: SandboxIdentityV1 | None = None
+    guest_task_identity: SandboxIdentityV1 | None = Field(default=None, exclude_if=lambda value: value is None)
     guest_execution: GuestExecutionV1 | None = Field(default=None, exclude_if=lambda value: value is None)
     task_fixture: bool = Field(default=False, strict=True, exclude_if=lambda value: not value)
     task_image_component: str | None = Field(default=None, exclude_if=lambda value: value is None)
@@ -228,7 +229,8 @@ class SidecarContainerV1(_Strict):
 
             validate_fixture_component(self.role_name, self.task_image_component)
             validate_fixture_hostname(self.hostname)
-            if self.private_sandbox or self.identity is not None or self.depends_on or self.environment:
+            if (self.private_sandbox or self.identity is not None or self.guest_task_identity is not None
+                    or self.depends_on or self.environment):
                 raise ValueError("fixture cannot share a sandbox identity or trusted sidecar contract")
         elif self.task_image_component is not None or self.hostname is not None or self.role_name.startswith("fixture-"):
             raise ValueError("fixture metadata and roles require explicit fixture isolation")
@@ -253,6 +255,8 @@ class SidecarContainerV1(_Strict):
             if (self.resources.cpu_millis < 1000 or self.resources.memory_mib < 512
                     or self.resources.ephemeral_storage_mib < 160):
                 raise ValueError("guest execution resources are below the admitted minimum")
+        if self.guest_task_identity is not None and self.guest_execution is None:
+            raise ValueError("guest task identity requires guest execution")
         return self
 
     @field_validator("image_ref")

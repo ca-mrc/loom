@@ -6,9 +6,18 @@ from pathlib import Path
 import pytest
 
 from loom.nebius_platform_render import NebiusPlatformError, build_platform
+from loom.nebius_task_identity_policy import _guest_private_expression
 from tests.support.nebius_platform import platform_inputs as platform_inputs
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_guest_home_reject_is_a_valid_cel_string():
+    expression = _guest_private_expression()
+    # CEL treats one backslash as a string escape. RE2 needs \. for a dot, so
+    # the policy text must contain the two-character escape \\.
+    assert "(?:^|/)\\\\.\\\\.?(?:/|$)" in expression
+    assert "\\." not in expression.replace("\\\\", "")
 
 
 def test_identity_profile_cannot_claim_readiness_in_restricted_namespace(platform_inputs):

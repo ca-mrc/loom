@@ -65,6 +65,7 @@ from loom.pipeline.keys import canonical_digest
 from loom.prebuilt_task_images import resolve_prebuilt_task_image, validate_prebuilt_image_pins
 from loom.sandbox_identity import (
     concrete_sandbox_user,
+    guest_shared_identity_compatible,
     inherited_sandbox_user,
     resolve_sandbox_identity,
 )
@@ -444,6 +445,8 @@ def automatic_service_execution_rejections(
     allow_task_image_preparation: bool = False,
     supported_capabilities: frozenset[GuestExecutionCapability] = frozenset(),
     supports_shared_guest: bool = False,
+    agent_uid: int = 65532,
+    agent_gid: int = 65532,
 ) -> tuple[str, ...]:
     """Return stable reasons why the v1 ordinary-TaskSet compiler cannot run a task."""
 
@@ -493,18 +496,15 @@ def automatic_service_execution_rejections(
             reasons.append("isolation_guest_shared_unsupported")
         if env.sidecars:
             reasons.append("guest_sidecars_unsupported")
-        for user in (env.user, inherited_sandbox_user(env.user, task.verifier.user)):
-            # ``user="image"`` waits for #2544 publication metadata. Do not
-            # resolve it here or treat the placeholder as a missing root uid.
-            concrete = concrete_sandbox_user(user)
-            if concrete is None:
-                continue
-            try:
-                identity = resolve_sandbox_identity(concrete, env.environment.get("HOME"))
-            except ValueError:
-                identity = None
-            if identity is None or identity.run_as_user != 0 or identity.run_as_group != 0:
-                reasons.append("guest_root_identity_required")
+        if resolve_verifier_env_mode(task, trial) == "shared" and task.verifier.user is not None:
+            # One VM cannot be two users. An unresolved user is recorded once
+            # below as unsupported_task_identity.
+            compatible = guest_shared_identity_compatible(
+                env.user, task.verifier.user, env.environment.get("HOME"), env.supplementary_groups,
+                default_uid=agent_uid, default_gid=agent_gid,
+            )
+            if compatible is False:
+                reasons.append("guest_shared_identity_mismatch")
         admission = evaluate_execution_admission(
             workload_requirements_from_task(task, trial if network_override_supported else trial.model_copy(
                 update={"baseline_network_policy_override": None})),
@@ -698,7 +698,7 @@ def compile_service_execution_plan(
             or task != TaskConfig.model_validate(task_image_grant.task_config)
             or source_provenance != task_image_grant.task_source_provenance):
             raise ValueError("prepared task image does not match the frozen task")
-        task = resolve_prepared_task(task, task_image_grant)
+        task = resolve_prepared_task(task, task_image_grant, agent_uid=profile.run_as_user)
     source_task_image = task.environment.docker_image
     if is_workspace_harness(trial.agent_name):
         task = resolve_prebuilt_task_image(task, profile.prebuilt_image_pins)
@@ -711,6 +711,7 @@ def compile_service_execution_plan(
         source_provenance=source_provenance,
         supported_capabilities=profile.supported_guest_capabilities,
         supports_shared_guest=profile.supports_shared_guest,
+        agent_uid=profile.run_as_user, agent_gid=profile.run_as_group,
     )
     if reasons:
         raise ValueError("automatic service execution is incompatible: " + ",".join(reasons))
@@ -1061,6 +1062,8 @@ def execution_selection_rejections(
         allow_task_image_preparation=allow_task_image_preparation,
         supported_capabilities=profile.supported_guest_capabilities if profile is not None else frozenset(),
         supports_shared_guest=profile.supports_shared_guest if profile is not None else False,
+        agent_uid=profile.run_as_user if profile is not None else 65532,
+        agent_gid=profile.run_as_group if profile is not None else 65532,
     ))
     if profile is None:
         reasons.append("runtime_profile_unavailable")

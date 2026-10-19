@@ -31,6 +31,7 @@ from loom.db.schema import (
 )
 from loom.execution_architecture import execution_cpu_arch
 from loom.models.task import TaskConfig
+from loom.sandbox_identity import published_supplementary_groups
 from loom.task_image_metadata import TaskImageRuntimeMetadataV1
 
 if TYPE_CHECKING:
@@ -108,7 +109,9 @@ def task_bundle_content_manifest_digest(provenance: Mapping[str, Any]) -> str:
         raise ValueError("bundle_content_manifest_sha256 must be a bare SHA-256 digest")
     return digest
 
-def resolve_prepared_task(task: TaskConfig, grant: TaskImageExecutionGrantV1) -> TaskConfig:
+def resolve_prepared_task(
+    task: TaskConfig, grant: TaskImageExecutionGrantV1, *, agent_uid: int = 65532,
+) -> TaskConfig:
     """Use the ready image for resource admission without changing its frozen source."""
     if task != TaskConfig.model_validate(grant.task_config):
         raise ValueError("prepared images do not match the frozen task")
@@ -134,6 +137,13 @@ def resolve_prepared_task(task: TaskConfig, grant: TaskImageExecutionGrantV1) ->
             environment["entrypoint"] = list(metadata.entrypoint)
         environment["image_entrypoint"] = False
         environment["image_workdir"] = False
+    metadata = grant.image_runtime_metadata.get("task")
+    if metadata is not None:
+        groups = published_supplementary_groups(
+            task.environment.user, metadata.uid, metadata.supplementary_groups, agent_uid=agent_uid,
+        )
+        if groups:
+            environment["supplementary_groups"] = list(groups)
     for sidecar in environment["sidecars"]:
         if sidecar["dockerfile"] is not None:
             sidecar.update(dockerfile=None, docker_build_context=None,

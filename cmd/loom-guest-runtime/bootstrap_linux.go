@@ -171,7 +171,40 @@ func sandboxInit() {
 		bootMust(startDocker(environment))
 	}
 	binary := guestPayload + "/bin/loom-sandbox-runtime"
-	bootMust(syscall.Exec(binary, []string{binary, "--guest-channel", "--max-transfer-bytes", strconv.FormatInt(config.MaxTransfer, 10), "--exec-timeout-seconds", strconv.Itoa(config.ExecTimeout)}, environment))
+	argv := []string{binary, "--guest-channel", "--max-transfer-bytes", strconv.FormatInt(config.MaxTransfer, 10), "--exec-timeout-seconds", strconv.Itoa(config.ExecTimeout)}
+	runtimeEnvironment := environment
+	if config.TaskIdentity {
+		if !validTaskHome(config.TaskHome) {
+			panic("invalid guest task identity")
+		}
+		runtimeEnvironment = replaceEnv(environment, "HOME", config.TaskHome)
+		groups := "-"
+		if len(config.TaskGroups) > 0 {
+			parts := make([]string, len(config.TaskGroups))
+			for i, group := range config.TaskGroups {
+				parts[i] = strconv.FormatUint(uint64(group), 10)
+			}
+			groups = strings.Join(parts, ",")
+		}
+		argv = append(argv,
+			"--task-uid", strconv.FormatUint(uint64(config.TaskUID), 10),
+			"--task-gid", strconv.FormatUint(uint64(config.TaskGID), 10),
+			"--task-groups", groups,
+			"--task-home", config.TaskHome,
+		)
+	}
+	bootMust(syscall.Exec(binary, argv, runtimeEnvironment))
+}
+
+func replaceEnv(environment []string, key, value string) []string {
+	prefix := key + "="
+	replaced := make([]string, 0, len(environment)+1)
+	for _, entry := range environment {
+		if !strings.HasPrefix(entry, prefix) {
+			replaced = append(replaced, entry)
+		}
+	}
+	return append(replaced, prefix+value)
 }
 
 func configureGuestNetwork() error {

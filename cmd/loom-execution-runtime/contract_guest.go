@@ -47,6 +47,11 @@ func (p plan) validateGuestExecution() error {
 		if s.Identity == nil || s.Identity.RunAsUser == nil || *s.Identity.RunAsUser != 0 || s.Identity.RunAsGroup == nil || *s.Identity.RunAsGroup != 0 {
 			return fmt.Errorf("guest runtime requires explicit root task identity")
 		}
+		if s.GuestTaskIdentity != nil {
+			if err := s.GuestTaskIdentity.concrete(); err != nil {
+				return fmt.Errorf("invalid guest task identity")
+			}
+		}
 		if s.Resources != p.TaskResources || s.ImageRef != p.TaskImageRef {
 			return fmt.Errorf("guest sandbox resources and image must match task")
 		}

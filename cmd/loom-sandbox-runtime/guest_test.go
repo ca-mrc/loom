@@ -30,7 +30,7 @@ func TestGuestListenerServesExistingSandboxAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer channel.Close()
-	server := &http.Server{Handler: (runtimeServer{1024, time.Second}).handler()}
+	server := &http.Server{Handler: (runtimeServer{1024, time.Second, nil}).handler()}
 	defer server.Close()
 	go func() { _ = server.Serve(<-ready) }()
 	client := &http.Client{Transport: &http.Transport{DialContext: channel.DialContext}, Timeout: time.Second}

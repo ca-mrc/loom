@@ -182,6 +182,15 @@ def _sidecar(
                 "--max-transfer-bytes", str(max_artifact_bytes),
                 "--exec-timeout-seconds", value.argv[-1],
             ]
+            if value.guest_task_identity is not None:
+                task_identity = value.guest_task_identity
+                groups = ",".join(str(item) for item in task_identity.supplementary_groups) or "-"
+                result["command"].extend([
+                    "--task-uid", str(task_identity.run_as_user),
+                    "--task-gid", str(task_identity.run_as_group),
+                    "--task-groups", groups,
+                    "--task-home", task_identity.home,
+                ])
             if "nested_docker" in value.guest_execution.capabilities:
                 result["command"].append("--nested-docker")
     return result
