@@ -36,7 +36,7 @@ def test_reader_quota_cannot_start_preexisting_jobs(foreign):
     with httpx.Client(transport=httpx.MockTransport(patch), base_url='https://cluster.test') as client:
         api = SimpleNamespace(client=client, policy=SimpleNamespace(host=SimpleNamespace(runtime=SimpleNamespace(binding='test'))),
             verify_identity=lambda binding: None, _request=request)
-        runtime = _Workloads(api, {_key(quota): quota}, {_key(quota): desired}, 'eu-north1')
+        runtime = _Workloads(api, {_key(quota): quota}, {_key(quota): desired}, 'eu-north1', {})
         if foreign:
             with pytest.raises(ValueError, match='environment_runtime'):
                 runtime.preview_workload(_key(quota), quota, desired)
