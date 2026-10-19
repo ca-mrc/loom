@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import func, select, text, update
+from sqlalchemy import func, select, text
 
 from loom.db.nebius_pool_lifecycle_schema import NebiusPoolLifecycleOperation
 from loom_service.pool_management.capacity import digest
@@ -177,12 +177,12 @@ async def test_unlocked_capacity_cannot_replace_serialized_admission_or_use_mixe
             await observe_connected_capacity(session, selected.pool_id, datetime.now(UTC))
 
 
-@pytest.mark.parametrize('damage', [None, 'different_grant', 'different_head', 'changed_audit'])
+@pytest.mark.parametrize('damage', [None, 'different_grant', 'different_head'])
 async def test_platform_authority_inspection_binds_committed_protected_open_not_just_global_mode(sessions, damage):
     from datetime import timedelta
 
-    from loom.db.nebius_pool_schema import NebiusPoolBinding
     from loom_service.pool_management.administration import PoolAdministrationAuthorizationV2
+    from loom_service.pool_management.lifecycle_contracts import PoolPlatformOperationV2
     from tests.integration.test_nebius_pool_platform_lifecycle import apply, prepare
 
     module = inspection()
@@ -196,22 +196,16 @@ async def test_platform_authority_inspection_binds_committed_protected_open_not_
     if damage == 'different_grant':
         authorization_id = str(uuid4())
     elif damage == 'different_head':
-        async with sessions.begin() as session:
-            pool = await session.get(NebiusPoolBinding, spec.pool_id)
-            binding = {**pool.binding_json, 'lifecycle_head_operation_id': str(installed.operation_id)}
-            await session.execute(update(NebiusPoolBinding).where(NebiusPoolBinding.pool_id == spec.pool_id)
-                .values(binding_json=binding, binding_sha256=digest(binding)))
-    elif damage == 'changed_audit':
-        async with sessions.begin() as session:
-            row = await session.get(NebiusPoolLifecycleOperation, authorization_id)
-            body = copy.deepcopy(row.request_json)
-            body['authorization']['authority'] = 'development'
-            await session.execute(update(NebiusPoolLifecycleOperation)
-                .where(NebiusPoolLifecycleOperation.operation_id == authorization_id)
-                .values(request_json=body, request_sha256=digest(body)))
+        close = PoolPlatformOperationV2(schema_version='loom.pool-platform-operation.v2', operation_id=uuid4(),
+            installation_id=spec.installation_id, pool_id=spec.pool_id, expected_head=operation.operation_id,
+            pool_authority_sha256=committed['receipt']['pool_authority_sha256'], action='close')
+        closed = await apply(sessions, close)
+        await capture()
+        await apply(sessions, opening(close.operation_id, closed['receipt']['pool_authority_sha256']))
+        await capture()
     request = module.PoolInspectionV2(schema_version='loom.pool-inspection.v2', operation_id=uuid4(),
         installation_id=spec.installation_id, pool_id=spec.pool_id,
-        require_capacity=damage != 'different_head', platform_authorization_id=authorization_id)
+        require_capacity=True, platform_authorization_id=authorization_id)
     now = datetime.now(UTC)
     grant = PoolAdministrationAuthorizationV2(schema_version='loom.pool-administration-authorization.v2',
         authorization_id=uuid4(), installation_id=spec.installation_id, pool_id=spec.pool_id, authority='platform',

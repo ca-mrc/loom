@@ -226,14 +226,17 @@ async def test_capacity_observer_dispatches_required_read_only_proof_without_cha
         api.pending = True
         directory = policy.host.state_root / 'capacity-observations'
         policy.host.state_root.mkdir(mode=0o700)
-        assert await asyncio.to_thread(_observe, policy, directory, inputs['connect'], require_capacity=True) is None
+        authority_id = uuid4()
+        options = {'require_capacity': True, 'platform_authorization_id': authority_id}
+        assert await asyncio.to_thread(_observe, policy, directory, inputs['connect'], **options) is None
         configs = [row for row in api.resources.values() if row['kind'] == 'ConfigMap']
         config, = configs
         request = json.loads(config['data']['request.json'])
         assert request['require_capacity'] is True
+        assert request['platform_authorization_id'] == str(authority_id)
         assert request['participant_id'] == str(policy.participant.participant_id)
         assert api.request.action == 'status'
-        assert await asyncio.to_thread(_observe, policy, directory, inputs['connect'], require_capacity=True) is None
+        assert await asyncio.to_thread(_observe, policy, directory, inputs['connect'], **options) is None
         assert len(api.creates) == 2, 'pending capacity inspection keeps the same fixed Job'
 
 
