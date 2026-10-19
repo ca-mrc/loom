@@ -32,7 +32,8 @@ class NativeTaskImageSettings(BaseModel):
     ephemeral_storage_mib: int = Field(default=16384, ge=16384, le=524288)
     max_processes: int = Field(default=512, ge=64, le=4096)
     active_deadline_seconds: int = Field(default=1800, ge=60, le=7200)
-    max_concurrent: int = Field(default=1, ge=1, le=16)
+    # Optional operator guard; physical resource/quota admission always applies.
+    max_concurrent: int | None = Field(default=None, ge=1, strict=True)
     # Preserve filesystem semantics for unchanged authored Dockerfiles. The
     # faster OverlayFS backend is opt-in after qualifying the task workload.
     snapshotter: Literal["overlayfs", "native"] = "native"

@@ -458,7 +458,7 @@ class NativeTaskImageController:
         if unexpected:
             raise RuntimeError("Native build reconciliation failed; inspect bounded actuator diagnostics")
         jobs = await self.kubernetes.inventory(self.settings.namespace)
-        if len(jobs) >= self.settings.max_concurrent:
+        if self.settings.max_concurrent is not None and len(jobs) >= self.settings.max_concurrent:
             return
         try:
             claimed_attempt_id = await self._claim()
@@ -505,7 +505,8 @@ class NativeTaskImageController:
         target = await session.get(ServiceExecutionTarget, self.target.target_id)
         if target is None or target.provider != "nebius" or target.desired_state != "active" or target.health_status != "healthy":
             return None
-        if len(await self._outstanding(session)) >= self.settings.max_concurrent:
+        if (self.settings.max_concurrent is not None
+                and len(await self._outstanding(session)) >= self.settings.max_concurrent):
             return None
         row = await claim_task_image_materialization(session, builder_id=self.builder_id, cpu_arch="x86_64",
                                                     nebius_pool_id=self.settings.pool_id)

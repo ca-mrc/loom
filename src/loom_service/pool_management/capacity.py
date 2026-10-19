@@ -51,7 +51,7 @@ class PoolCapacityPolicyV1(BaseModel):
     max_pending_jobs: int = Field(ge=1)
     max_unschedulable_jobs: int = Field(ge=0)
     max_image_pull_backoff_jobs: int = Field(ge=0)
-    build_concurrency_limit: int = Field(ge=1)
+    build_concurrency_limit: int | None = Field(default=None, ge=1)
 
 
 @dataclass(frozen=True)
@@ -178,7 +178,7 @@ def require_fit(capacities: dict[UUID, PoolCapacity], *, candidate: NebiusPoolRe
     if candidate.workload_kind in build_kinds:
         builds = sum(row.pool_id == candidate.pool_id and row.workload_kind in build_kinds
                      for row in (*active, *protected_waits))
-        if builds + 1 > current.policy.build_concurrency_limit:
+        if current.policy.build_concurrency_limit is not None and builds + 1 > current.policy.build_concurrency_limit:
             raise PlacementUnavailableError("pool_build_concurrency_exceeded")
     rows = [*active, *protected_waits, candidate]
     projected = {key: plan_placement(value.placement,
