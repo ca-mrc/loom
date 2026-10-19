@@ -222,8 +222,27 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
     assert hasattr(module, 'observe_shared_pool_processes'), 'connected SQL/process preflight is missing'
     request, parent = shared_runtime
     calls, documents, fallback = runtime_http_inventory(request, parent, completed_pool[3].server, handoff[2])
+    physical = None
+    if forward_processes in {'forward', 'recovery-processes'}:
+        from scripts.ops import nebius_pool_storage_operation as storage
+        from scripts.ops.nebius_development_runtime_live import runtime_resource_path
+        from scripts.ops.nebius_shared_pool_entry import RetainedRuntimeReference
+        from tests.ops.test_nebius_shared_pool_handoff import ClosedStorageAPI, _shared_entry_inputs
+
+        original_args, original_bindings = shared_operation.__wrapped__(
+            shared_runtime, staging_history, staging_observation, completed_pool, handoff)
+        _, _, inputs, _, _ = _shared_entry_inputs(original_args, original_bindings)
+        runtime = RetainedRuntimeReference.model_validate(inputs['runtime'])
+        retained = storage.retain_closed_storage(runtime=runtime, operation_id=uuid4(),
+            target_disk_type='NETWORK_SSD_NON_REPLICATED')
+        storage_api = ClosedStorageAPI(retained)
+        storage_api.collector.ready = storage_api.publication_ready = True
+        assert storage.run_closed_storage(retained=retained, api=storage_api)
+        physical = storage.load_completed_storage(runtime=runtime, reference=retained.reference)
+        for row in (physical.resources.collector, physical.resources.configuration):
+            documents[runtime_resource_path(row) + '/' + row['metadata']['name']] = copy.deepcopy(row)
     plan = module.prepare_shared_pool_handoff(runtime=request, observation=staging_observation,
-        legacy=staging_history, repo_root=ROOT)
+        legacy=staging_history, repo_root=ROOT, storage=physical)
     attachment = plan.staging.attachment
     staging, dev = attachment.guard, next(row for row in plan.migration.guards if row.namespace == 'loom-dev')
     spec = plan.migration.registration.spec
@@ -534,7 +553,12 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
                             else row.participant_id == participant_id and row.workload_scope == 'environment'))
                         settings = expected_pool_runtime_settings(component, workload,
                             token_sha256=machine.token_sha256 if component in {'controller', 'actuator', 'gateway'} else None,
-                            catalog_sha256=hashlib.sha256(spec.profiles.model_dump_json().encode()).hexdigest() if component == 'manager' else None)
+                            # Physical correction leaves the mounted catalog
+                            # bytes unchanged; round-tripping the registration
+                            # can reorder maps without changing its meaning.
+                            catalog_sha256=hashlib.sha256(documents['/api/v1/namespaces/' + manager_namespace
+                                + '/configmaps/loom-pool-profiles-' + spec.operation_id.hex]['data']['profiles.json']
+                                .encode()).hexdigest() if component == 'manager' else None)
                     payload = json.dumps(settings, sort_keys=True, separators=(',', ':')).encode()
                     check = 'settings'
                 assert hmac.new(bytes.fromhex(nonce), payload, 'sha256').hexdigest() == response
@@ -554,7 +578,7 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
 
     monkeypatch.setattr(subprocess, 'run', execute_with_hook)
     history = {path: path.read_bytes() for path in plan.history}
-    with HTTPSDevelopmentRuntimeProbes(request=request,
+    with HTTPSDevelopmentRuntimeProbes(request=request, storage=physical,
             api_server=request.database.foundation.inputs.config['kubernetes_api_server'],
             ssl_context=ssl.create_default_context(cadata=request.database.foundation.bootstrap['material']['loom-platform-db']['ca.crt']),
             token='operator-test') as probes:
@@ -564,7 +588,7 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
 
         def observe():
             return module.observe_shared_pool_processes(runtime=request, observation=staging_observation,
-                legacy=staging_history, repo_root=ROOT, development=probes,
+                legacy=staging_history, repo_root=ROOT, development=probes, storage=physical,
                 kubeconfig=Path(probes.prefix[probes.prefix.index('--kubeconfig') + 1]), executable=Path(probes.prefix[0]))
 
         try:

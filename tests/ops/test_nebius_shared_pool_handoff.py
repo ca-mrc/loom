@@ -5171,8 +5171,12 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
             registry_keys = {key for key, row in resources.items() if row['kind'] == 'Secret'
                 and row['metadata'].get('labels', {}).get('loom.nebius/development-material-purpose') == 'registry'}
             assert registry_keys
-            collector_config, = (key for key, row in resources.items() if row['kind'] == 'ConfigMap'
-                and row.get('data', {}).get('LOOM_EXECUTION_CAPACITY_COLLECTOR_COLLECTION_MODE') == 'pool')
+            if bindings.plan.storage is None:
+                collector_config, = (key for key, row in resources.items() if row['kind'] == 'ConfigMap'
+                    and row.get('data', {}).get('LOOM_EXECUTION_CAPACITY_COLLECTOR_COLLECTION_MODE') == 'pool')
+            else:
+                collector_config = _key(bindings.plan.storage.resources.configuration)
+                assert observed.quota_resources['storage'].name == 'compute.disk.size.network-ssd-non-replicated'
             for key in (collector_key, reader_key, collector_config, *sorted(registry_keys)):
                 original = copy.deepcopy(resources[key])
                 reads_before = len(provider_reads)
@@ -5699,12 +5703,15 @@ def _exercise_completed_recovery_readers(bindings):
 @pytest.mark.timeout(420)
 async def test_shared_provider_uses_installed_observer_and_retains_scale_zero(
         shared_runtime, staging_history, staging_observation, completed_pool, handoff,
-        publisher_cloud, monkeypatch, tmp_path):
+        publisher_cloud, monkeypatch, tmp_path, shared_operation):
     """The common-pool preflight must use actual observer IAM/pool readbacks."""
     import ssl
 
     import httpx
+    from scripts.ops import nebius_pool_storage_operation as storage
+    from scripts.ops.nebius_development_runtime_live import runtime_resource_path
     from scripts.ops.nebius_development_runtime_observation import HTTPSDevelopmentRuntimeObserver
+    from scripts.ops.nebius_shared_pool_entry import RetainedRuntimeReference
     from scripts.ops.nebius_shared_pool_handoff_live import observe_shared_pool_provider
     from tests.ops.test_nebius_development_pool_retained import (
         runtime_cloud_transport,
@@ -5713,9 +5720,20 @@ async def test_shared_provider_uses_installed_observer_and_retains_scale_zero(
 
     request, parent = shared_runtime
     calls, documents, handler = runtime_http_inventory(request, parent, completed_pool[3].server, handoff[2])
+    args, bindings = shared_operation
+    _, _, inputs, _, _ = _shared_entry_inputs(args, bindings)
+    runtime = RetainedRuntimeReference.model_validate(inputs['runtime'])
+    retained = storage.retain_closed_storage(runtime=runtime, operation_id=uuid4(), target_disk_type='NETWORK_SSD_NON_REPLICATED')
+    storage_api = ClosedStorageAPI(retained)
+    storage_api.collector.ready = storage_api.publication_ready = True
+    assert storage.run_closed_storage(retained=retained, api=storage_api)
+    physical = storage.load_completed_storage(runtime=runtime, reference=retained.reference)
+    for row in (physical.resources.collector, physical.resources.configuration):
+        documents[runtime_resource_path(row) + '/' + row['metadata']['name']] = copy.deepcopy(row)
     operator, sessions, reads, closed, mode = runtime_cloud_transport(request, publisher_cloud, monkeypatch, tmp_path)
-    spec = request.database.manager.retained.request.registration.spec
-    with HTTPSDevelopmentRuntimeObserver(request=request,
+    mode['storage_quota'] = 'compute.disk.size.network-ssd-non-replicated'
+    spec = physical.retained.registration.spec
+    with HTTPSDevelopmentRuntimeObserver(request=request, storage=physical,
             api_server=request.database.foundation.inputs.config['kubernetes_api_server'],
             ssl_context=ssl.create_default_context()) as observer:
         for connection in (observer, observer.manager, observer.foundation):
@@ -5725,10 +5743,12 @@ async def test_shared_provider_uses_installed_observer_and_retains_scale_zero(
 
         async def observe():
             return await observe_shared_pool_provider(runtime=request, observation=staging_observation,
-                legacy=staging_history, repo_root=ROOT, development=observer, operator_credentials=operator)
+                legacy=staging_history, repo_root=ROOT, development=observer, operator_credentials=operator,
+                storage=physical)
 
         result = await observe()
         assert result.provider.node_group.id == spec.node_group_id
+        assert result.provider.quota_resources['storage'].name == 'compute.disk.size.network-ssd-non-replicated'
         assert result.provider.node_count == result.provider.ready_node_count == result.provider.target_node_count == 0
         assert result.provider.provider_capacity_state == 'available' and result.provider.autoscaler_state == 'ready'
         assert reads == [('quotas', request.collector_scope.account_id), ('nodegroup', request.collector_scope.account_id)]
