@@ -166,12 +166,12 @@ def _retain_issued(policy: PoolEnrollmentPolicyV2, operation_id: UUID, retained:
 
 
 def _inspect(policy: PoolEnrollmentPolicyV2, operation_id: UUID, directory: Path, connect: Connection, *,
-        require_capacity: bool = False) -> dict[str, Any] | None:
+        require_capacity: bool = False, platform_authorization_id: UUID | None = None) -> dict[str, Any] | None:
     selected = policy.participant
     request = PoolInspectionV2(schema_version='loom.pool-inspection.v2', operation_id=uuid5(operation_id, 'inspect'),
         installation_id=selected.installation_id, pool_id=selected.pool_id, participant_id=selected.participant_id,
         environment_id=selected.environment_id, incarnation=selected.incarnation, environment_class=selected.environment_class,
-        require_capacity=require_capacity)
+        require_capacity=require_capacity, platform_authorization_id=platform_authorization_id)
     with state._locked_state(directory):
         path = directory / 'inspection.json'
         if path.exists():
