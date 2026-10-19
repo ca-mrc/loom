@@ -107,6 +107,12 @@ def render_environment_runtime(*, declaration: EnvironmentFoundationDeclarationV
         foundation = render_foundation(declaration, candidate, profile=runtime_profile.model_dump(mode='json'),
             keyring=profiles.image_admission_keyring, repo_root=repo_root)
         applications = {doc['metadata']['name']: doc for doc in foundation.files['40-services.yaml'] if doc['kind'] == 'Deployment'}
+        # The foundation renderer binds environment-local resource policy to the
+        # approved publication. Preserve that effective profile when wiring the
+        # pool; the publication alone intentionally omits deployment defaults.
+        effective_profile = ServiceExecutionRuntimeProfileV1.model_validate_json(_environment(
+            applications['loom-service']['spec']['template']['spec']['containers'][0])[
+                'LOOM_SVC_SERVICE_EXECUTION_RUNTIME_PROFILE_JSON']['value'])
         images = {key: value['image_ref'] for key, value in candidate['images'].items()}
         execution = _execution_documents(config, images, repo_root)
         actuators = [doc for doc in execution if doc['kind'] == 'Deployment']
@@ -134,7 +140,7 @@ def render_environment_runtime(*, declaration: EnvironmentFoundationDeclarationV
         workloads = wire_scoped_participant(participant=participant, profiles=profiles, machine=machine,
             candidate=candidate, application_namespace=row.application_namespace, management_origin=management_origin,
             controller=applications['loom-control-plane'], service=applications['loom-service'], actuator=primary,
-            guest_actuators=tuple(doc for doc in actuators if doc is not primary), runtime_profile=runtime_profile)
+            guest_actuators=tuple(doc for doc in actuators if doc is not primary), runtime_profile=effective_profile)
         _environment(workloads['control_plane']['spec']['template']['spec']['containers'][0])[
             'LOOM_CP_SERVICE_EXECUTION_SCHEDULER_ENABLED']['value'] = 'true'
         # The full foundation's separate gateway owns these routes. The selected
@@ -150,7 +156,9 @@ def render_environment_runtime(*, declaration: EnvironmentFoundationDeclarationV
             if name == 'default':
                 raise ValueError
             account = _obj('ServiceAccount', name, namespace)
-            account['automountServiceAccountToken'] = namespace == row.execution_namespace and name == 'loom-execution-actuator'
+            # Only the reader Pod explicitly opts in. This also matches the
+            # existing foundation account without changing its default grants.
+            account['automountServiceAccountToken'] = False
             readers.append(account)
         subject = {'kind': 'ServiceAccount', 'name': 'loom-execution-actuator', 'namespace': row.execution_namespace}
         readers.extend(_role_pair(namespace=None, name='loom-pool-reader-' + participant.participant_id.hex, subject=subject,

@@ -106,7 +106,7 @@ async def prepared(sessions, tmp_path, platform_inputs, publication):
                 authority=selected.environment_class), state_root=tmp_path / 'operations', anchor_root=tmp_path / 'anchors',
             connection=NebiusKubernetesConnection(endpoint='https://api.cluster.test', ca_file=tmp_path / 'ca.pem',
                 credentials_file=tmp_path / 'credentials.json'))
-        policy = subject.PoolEnrollmentPolicyV2(host=host, foundation_dir=state, foundation=foundation,
+        policy = subject.PoolEnrollmentPolicyV2(host=host, management_origin='https://platform.example.com', foundation_dir=state, foundation=foundation,
             application_publication=pinned, manager_publication=pinned, participant=selected,
             profiles=PoolProfileCatalog.model_validate(profiles),
             machines=tuple(row for row in spec.machines if row.participant_id == selected.participant_id))

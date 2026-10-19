@@ -13,6 +13,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 from uuid import UUID, uuid5
 
 import httpx
@@ -55,6 +56,7 @@ from loom_service.pool_management.profiles import PoolProfileCatalog
 @dataclass(frozen=True, repr=False)
 class PoolEnrollmentPolicyV2:
     host: PoolAdministrationHostV2
+    management_origin: str
     foundation_dir: Path
     foundation: FoundationReferenceV2
     application_publication: ProtectedPublication
@@ -66,6 +68,10 @@ class PoolEnrollmentPolicyV2:
 
 def _policy(policy: PoolEnrollmentPolicyV2) -> dict[str, Any]:
     _host(policy.host)
+    origin = urlsplit(policy.management_origin)
+    if (origin.scheme != 'https' or not origin.hostname or origin.username or origin.password
+            or origin.path not in {'', '/'} or origin.query or origin.fragment):
+        raise ValueError('pool_enrollment_policy_unqualified')
     if (not policy.foundation_dir.is_absolute() or policy.foundation_dir != policy.foundation_dir.resolve()
             or policy.foundation_dir == Path('/') or policy.foundation_dir in policy.host.state_root.parents
             or policy.host.state_root in policy.foundation_dir.parents):
@@ -76,7 +82,7 @@ def _policy(policy: PoolEnrollmentPolicyV2) -> dict[str, Any]:
         foundation=policy.foundation.model_dump(mode='json'), participant=policy.participant.model_dump(mode='json'),
         profiles=policy.profiles.model_dump(mode='json'), machines=[row.model_dump(mode='json') for row in policy.machines],
         application_publication=policy.application_publication.model_dump(mode='json'),
-        manager_publication=policy.manager_publication.model_dump(mode='json'))
+        manager_publication=policy.manager_publication.model_dump(mode='json'), management_origin=policy.management_origin)
     return _json(json.dumps(body, allow_nan=False).encode())
 
 
