@@ -195,3 +195,83 @@ async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact
         child.chmod(0o600)
         assert startup.load_started_environment_runtime(policy=policy, operation_id=kwargs['operation_id']).resources == current.resources
         assert len(changes) == 8
+
+        # Continue to actual process probes. Only kubectl/remote processes are
+        # doubled here; fixed commands also run against real settings in ops tests.
+        from scripts.ops.nebius_environment_runtime_probes import EnvironmentRuntimeProbes
+        from scripts.ops.nebius_pool_migration_guard import _BOUND_DATABASE_COMMAND
+        from scripts.ops.nebius_pool_runtime_settings import BOUND_POOL_SETTINGS_COMMAND
+
+        readiness_name = 'scripts.ops.nebius_environment_runtime_readiness'
+        assert importlib.util.find_spec(readiness_name), 'connected runtime observation missing'
+        readiness = importlib.import_module(readiness_name)
+        for doc in current.resources.values():
+            if doc['kind'] != 'Deployment':
+                continue
+            doc = remote.kubernetes[runtime_resource_path(doc) + '/' + doc['metadata']['name']]
+            namespace, name = doc['metadata']['namespace'], doc['metadata']['name']
+            doc['status'] = {'observedGeneration': doc['metadata']['generation'],
+                'replicas': 1, 'updatedReplicas': 1, 'readyReplicas': 1, 'availableReplicas': 1}
+            labels = {**doc['spec']['template']['metadata']['labels'], 'pod-template-hash': 'abc123'}
+            replica = {'apiVersion': 'apps/v1', 'kind': 'ReplicaSet', 'metadata': {'name': name + '-abc123',
+                'namespace': namespace, 'uid': str(uuid4()), 'generation': 1, 'resourceVersion': '9', 'labels': labels,
+                'ownerReferences': [{'apiVersion': 'apps/v1', 'kind': 'Deployment', 'name': name,
+                    'uid': doc['metadata']['uid'], 'controller': True}]},
+                'spec': {'replicas': 1, 'selector': {'matchLabels': labels}, 'template': copy.deepcopy(doc['spec']['template'])},
+                'status': {'observedGeneration': 1, 'replicas': 1, 'readyReplicas': 1, 'availableReplicas': 1}}
+            replica['spec']['template']['metadata']['labels'] = labels
+            pod = copy.deepcopy(doc['spec']['template'])
+            pod.update(apiVersion='v1', kind='Pod')
+            pod['metadata'].update(name=name + '-abc123-pod', namespace=namespace, uid=str(uuid4()), labels=labels,
+                ownerReferences=[{'apiVersion': 'apps/v1', 'kind': 'ReplicaSet', 'name': replica['metadata']['name'],
+                    'uid': replica['metadata']['uid'], 'controller': True}])
+            pod['status'] = {'phase': 'Running', 'conditions': [{'type': 'Ready', 'status': 'True'}],
+                'containerStatuses': [{'name': row['name'], 'ready': True, 'restartCount': 0, 'state': {'running': {}}}
+                    for row in pod['spec']['containers']],
+                'initContainerStatuses': [{'name': row['name'], 'state': {'terminated': {'exitCode': 0}}}
+                    for row in pod['spec'].get('initContainers', [])]}
+            for version, kind, suffix, item in (('apps/v1', 'ReplicaSet', 'replicasets', replica), ('v1', 'Pod', 'pods', pod)):
+                path = ('/api/v1' if version == 'v1' else '/apis/apps/v1') + '/namespaces/' + namespace + '/' + suffix
+                remote.kubernetes.setdefault(path, {'apiVersion': version, 'kind': kind + 'List',
+                    'metadata': {'resourceVersion': '9'}, 'items': []})['items'].append(item)
+
+        def runtime_http(request):
+            response = remote.http(request)
+            selector = request.url.params.get('labelSelector')
+            if selector and response.status_code == 200 and response.json().get('kind') == 'PodList':
+                value = response.json()
+                key, expected = selector.split('=')
+                value['items'] = [row for row in value['items'] if row['metadata'].get('labels', {}).get(key) == expected]
+                return httpx.Response(200, json=value)
+            return response
+
+        commands = []
+        reject_process = False
+        @contextmanager
+        def probe_connection(qualify, region):
+            def read(path):
+                qualify()
+                response = runtime_http(httpx.Request('GET', 'https://api.cluster.test' + path))
+                assert response.status_code == 200
+                return response.json()
+            def execute(pod, container, command):
+                assert pod['metadata']['namespace'] in {'app-red', 'work-red'}
+                assert command[2] in {BOUND_POOL_SETTINGS_COMMAND, _BOUND_DATABASE_COMMAND}
+                assert command[3] in {'service', 'controller', 'actuator'}
+                assert 'private-' not in ' '.join(command)
+                commands.append(command[3])
+                return {} if reject_process else {'status': 'qualified'}
+            yield EnvironmentRuntimeProbes(read=read, execute=execute, qualify=qualify, region=region)
+
+        async with httpx.AsyncClient(base_url='https://api.cluster.test', transport=httpx.MockTransport(runtime_http)) as http:
+            observe_inputs = {**clients, 'kubernetes': KubernetesEnvironmentProvider(http),
+                'policy': policy, 'operation_id': kwargs['operation_id'], 'probe_connection': probe_connection}
+            observed = await readiness.observe_environment_runtime(**observe_inputs)
+            assert observed['status'] == 'runtime_processes_verified_closed' and observed['admission_open'] is False
+            assert observed['participant_id'] == str(policy.participant.participant_id)
+            assert sorted(commands) == ['actuator', 'actuator', 'controller', 'controller', 'service', 'service']
+            assert len(changes) == 8
+            reject_process = True
+            with pytest.raises(ValueError, match='environment_runtime_readiness_unqualified'):
+                await readiness.observe_environment_runtime(**observe_inputs)
+            assert len(changes) == 8
