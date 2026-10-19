@@ -2,9 +2,8 @@
 from __future__ import annotations
 
 import asyncio
-import importlib
-import hashlib
 import hmac
+import importlib
 import json
 import os
 import subprocess
@@ -170,7 +169,11 @@ async def test_storage_publication_requires_new_exact_capture_and_never_opens_po
     from loom_execution_capacity_collector.contracts import QuotaResource
     from loom_service.pool_management.auth import resolve_pool_machine
     from tests.integration.test_nebius_pool_installation import installation
-    from tests.integration.test_nebius_pool_observation_registry import capture_scope, publish, snapshots
+    from tests.integration.test_nebius_pool_observation_registry import (
+        capture_scope,
+        publish,
+        snapshots,
+    )
 
     before, tokens = installation(('staging', 'development'))
     before['quota_identities']['storage'][3] = 'compute.disk.size.network-ssd'
@@ -182,10 +185,11 @@ async def test_storage_publication_requires_new_exact_capture_and_never_opens_po
     async with sessions.begin() as session:
         await register_installation(session, refresh.before)
     observer, = (row for row in refresh.before.machines if row.role == 'observer')
-    async with sessions() as session:
-        principal = await resolve_pool_machine(session, 'Bearer ' + tokens[observer.machine_id])
-
     async def report(spec, *, wrong_quota=False):
+        # Each real collector request authenticates against the current policy;
+        # a principal resolved before the correction is deliberately stale.
+        async with sessions() as session:
+            principal = await resolve_pool_machine(session, 'Bearer ' + tokens[observer.machine_id])
         capture = await capture_scope(sessions, principal)
         provider, kubernetes = snapshots(capture)
         quotas = {key: QuotaResource(parent_id=value[0], region=value[1], service=value[2], name=value[3],
