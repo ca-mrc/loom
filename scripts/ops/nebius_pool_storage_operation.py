@@ -13,7 +13,7 @@ import json
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
@@ -38,7 +38,6 @@ from scripts.ops.nebius_management_stage import (
 )
 from scripts.ops.nebius_management_transport import ManagementNotDispatchedError
 from scripts.ops.nebius_pool_preactivation_operation import (
-    PreactivationReference,
     _read,
     _ScopedCatalog,
     _ScopedManager,
@@ -50,6 +49,7 @@ from scripts.ops.nebius_pool_storage_binding import (
     StorageCollectorPlan,
     prepare_storage_collector,
 )
+from scripts.ops.nebius_pool_storage_binding import StorageReference as StorageReference
 from scripts.ops.nebius_pool_storage_registry import (
     advance_storage_registry,
     validate_storage_registry,
@@ -64,8 +64,8 @@ _CHILDREN = {'pause': 'pause/transition.json', 'configuration': 'configuration/s
 _TRANSITIONS = {'pause': 'stop', 'reconfigure': 'control', 'resume': 'start'}
 
 
-class StorageReference(PreactivationReference):
-    """Separate type and anchor from the application catalog ancestry."""
+if TYPE_CHECKING:
+    from scripts.ops.nebius_pool_preactivation_operation import CompletedPreactivationCatalog
 
 
 class StorageInputs(BaseModel):
@@ -283,6 +283,28 @@ def load_completed_storage(*, runtime: RetainedRuntimeReference, reference: Stor
         raise ValueError('completed storage correction unqualified; preserve evidence') from None
 
 
+def resolve_runtime_storage(*, runtime: DevelopmentRuntimeInstallRequest,
+        preactivation: CompletedPreactivationCatalog | None = None,
+        storage: CompletedClosedStorage | None = None) -> CompletedClosedStorage | None:
+    """Resolve one explicit chain, never independently select two latest heads.
+
+    A catalog pins its physical predecessor. A storage-only handoff selects its
+    completed predecessor directly. Historical absent selections remain absent.
+    """
+    if preactivation is not None:
+        reference = preactivation.retained.inputs.storage
+        selected = None if reference is None else load_completed_storage(
+            runtime=preactivation.retained.inputs.runtime, reference=reference)
+        if storage is not None and storage != selected:
+            raise ValueError('catalog storage ancestry differs')
+        storage = selected
+    if storage is not None:
+        selected = load_completed_storage(runtime=storage.retained.inputs.runtime, reference=storage.retained.reference)
+        if selected != storage or storage.retained.runtime != runtime:
+            raise ValueError('runtime storage ancestry differs')
+    return storage
+
+
 def storage_runtime_view(retained: RetainedClosedStorage
         ) -> tuple[dict[Path, bytes], dict[str, tuple[dict[str, Any], ...]]]:
     """Only journal-permitted resource alternatives; never an inferred live head."""
@@ -380,10 +402,21 @@ class _StorageStage(_ScopedCatalog):
             self.check()
         except Exception:
             raise ManagementNotDispatchedError('storage configuration not dispatched') from None
+        undispatched = False
         try:
             self.api.create_resource(document)
+        except ManagementNotDispatchedError:
+            undispatched = True
+            raise
         finally:
-            self.check()
+            try:
+                self.check()
+            except Exception:
+                # Keep the parent's failure latch, but do not erase proof that
+                # transport was never called. The child checks exact intent
+                # bytes before restoring prepared, so damaged evidence stays.
+                if not undispatched:
+                    raise
 
 
 class _StorageWorkload(_ScopedManager):
@@ -397,10 +430,18 @@ class _StorageWorkload(_ScopedManager):
             self.check()
         except Exception:
             raise ManagementNotDispatchedError('storage collector not dispatched') from None
+        undispatched = False
         try:
             return self.api.patch_workload(key, before, desired)
+        except ManagementNotDispatchedError:
+            undispatched = True
+            raise
         finally:
-            self.check()
+            try:
+                self.check()
+            except Exception:
+                if not undispatched:
+                    raise
 
 
 class _StorageRegistry:

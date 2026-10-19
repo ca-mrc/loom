@@ -53,6 +53,13 @@ from scripts.ops.nebius_pool_predecessor import (
     PoolPredecessorV1,
     load_completed_pool,
 )
+from scripts.ops.nebius_pool_storage_binding import StorageReference
+from scripts.ops.nebius_pool_storage_operation import (
+    RetainedClosedStorage,
+    load_closed_storage,
+    load_completed_storage,
+    run_closed_storage,
+)
 from scripts.ops.nebius_shared_pool_api import (
     HTTPSSharedPoolOperationAPI,
     SharedPoolPhaseEvidence,
@@ -82,9 +89,10 @@ SOURCE_RECORD = ROOT / 'shared-pool-source.json'
 class SharedPoolPrivateInputs(BaseModel):
     model_config = ConfigDict(extra='forbid', frozen=True, hide_input_in_errors=True)
     schema_version: Literal['loom.nebius-shared-pool-inputs.v1', 'loom.nebius-shared-pool-inputs.v2',
-        'loom.nebius-shared-pool-inputs.v3']
+        'loom.nebius-shared-pool-inputs.v3', 'loom.nebius-shared-pool-inputs.v4']
     preactivation: PreactivationReference | None = None
     schema_successor: DevelopmentSchemaReference | None = None
+    storage: StorageReference | None = Field(default=None, exclude_if=lambda value: value is None)
     runtime: RetainedRuntimeReference
     legacy: PoolPredecessorV1
     staging_observation_file: Path
@@ -94,7 +102,10 @@ class SharedPoolPrivateInputs(BaseModel):
 
     @model_validator(mode='after')
     def catalog_selection(self) -> Self:
-        if ((self.schema_version.endswith('.v3')) != (self.schema_successor is not None)
+        if self.schema_version.endswith('.v4'):
+            if self.storage is None:
+                raise ValueError('shared pool physical successor selection missing')
+        elif (self.storage is not None or (self.schema_version.endswith('.v3')) != (self.schema_successor is not None)
                 or (self.schema_successor is None and (self.schema_version.endswith('.v2')) != (self.preactivation is not None))):
             raise ValueError('shared pool catalog selection differs from input version')
         return self
@@ -126,6 +137,15 @@ class PreactivationEntryContext:
     inputs: SharedPoolPrivateInputs
     runtime: DevelopmentRuntimeInstallRequest
     retained: RetainedPreactivationCatalog
+    files: dict[Path, bytes]
+
+
+@dataclass(frozen=True, repr=False)
+class StorageEntryContext:
+    operation: dict[str, Any]
+    inputs: SharedPoolPrivateInputs
+    runtime: DevelopmentRuntimeInstallRequest
+    retained: RetainedClosedStorage
     files: dict[Path, bytes]
 
 
@@ -267,8 +287,15 @@ def _load_inputs(operation: dict[str, Any], *, source_record: Path, include_oper
                 if historical in files and files[historical] != raw:
                     raise ValueError
                 files[historical] = raw
+        storage = None
+        if inputs.storage is not None:
+            storage = load_completed_storage(runtime=inputs.runtime, reference=inputs.storage)
+            for historical, raw in storage.files.items():
+                if historical in files and files[historical] != raw:
+                    raise ValueError
+                files[historical] = raw
         plan = prepare_shared_pool_handoff(runtime=runtime, observation=observation, legacy=legacy, repo_root=ROOT,
-            preactivation=preactivation, schema_successor=successor)
+            preactivation=preactivation, schema_successor=successor, storage=storage)
         dev, = (row for row in plan.migration.guards if row.namespace == 'loom-dev')
         guard = inputs.development_guard
         if (guard.participant_id, guard.namespace, guard.namespace_uid) != (dev.participant_id, dev.namespace, dev.namespace_uid):
@@ -293,6 +320,8 @@ def load_preactivation_inputs(operation: dict[str, Any]) -> PreactivationEntryCo
         retained = load_preactivation_catalog(runtime=inputs.runtime, reference=inputs.preactivation, repo_root=ROOT)
         if retained.inputs.schema_successor != inputs.schema_successor:
             raise ValueError
+        if inputs.storage is not None and retained.inputs.storage != inputs.storage:
+            raise ValueError('catalog refresh physical ancestry differs')
         if retained.runtime != roots.runtime or retained.inputs.source.model_dump(mode='json') != roots.observation:
             raise ValueError('catalog refresh source differs from captured handoff')
         # Prove this selected successor can satisfy the same pure staging
@@ -308,6 +337,27 @@ def load_preactivation_inputs(operation: dict[str, Any]) -> PreactivationEntryCo
         return PreactivationEntryContext(dict(operation), inputs, roots.runtime, retained, files)
     except Exception:
         raise ValueError('shared pool preactivation inputs unqualified') from None
+
+
+def load_storage_inputs(operation: dict[str, Any]) -> StorageEntryContext:
+    """Read an explicit pending correction without claiming activation readiness."""
+    try:
+        roots = _load_input_roots(operation, source_record=SOURCE_RECORD, include_operator=True)
+        inputs, files = roots.inputs, roots.files
+        if inputs.storage is None or inputs.preactivation is not None:
+            raise ValueError('storage correction requires its own explicit selection')
+        retained = load_closed_storage(runtime=inputs.runtime, reference=inputs.storage)
+        if retained.runtime != roots.runtime:
+            raise ValueError('storage correction runtime differs')
+        for path, raw in retained.files.items():
+            if path in files and files[path] != raw:
+                raise ValueError
+            files[path] = raw
+        if any(_private(path) != raw for path, raw in files.items()):
+            raise ValueError
+        return StorageEntryContext(dict(operation), inputs, roots.runtime, retained, files)
+    except Exception:
+        raise ValueError('shared pool storage inputs unqualified') from None
 
 
 def load_historical_inputs(*, operation_path: Path, operation_sha256: str) -> SharedPoolHistoricalContext:
@@ -383,7 +433,7 @@ def main(operation_path: str, action: str) -> int:
     """Dispatch one fixed parent action and export only bounded, non-secret state."""
     stage = 'operation'
     try:
-        if action not in {'qualify', 'preflight', 'install', 'recover', 'refresh-catalog'}:
+        if action not in {'qualify', 'preflight', 'install', 'recover', 'refresh-catalog', 'refresh-storage'}:
             raise ValueError
         path = Path(operation_path)
         raw = _private(path)
@@ -393,6 +443,30 @@ def main(operation_path: str, action: str) -> int:
             print(json.dumps({'status': 'tooling_qualified'}))
             return 0
         stage = 'inputs'
+        if action == 'refresh-storage':
+            from scripts.ops.nebius_pool_storage_live import HTTPSClosedStorageOperationAPI
+
+            storage_inputs = load_storage_inputs(operation)
+            if path in storage_inputs.files or _private(path) != raw:
+                raise ValueError
+            storage_inputs.files[path] = raw
+            stage = 'connection'
+            connection = storage_inputs.inputs.operator_connection
+            context, token = asyncio.run(_transport(connection))
+            if any(_private(item) != before for item, before in storage_inputs.files.items()):
+                raise ValueError
+            with HTTPSClosedStorageOperationAPI(retained=storage_inputs.retained,
+                    operator_credentials=connection.credentials_file, api_server=connection.endpoint,
+                    ssl_context=context, token=token, private_files=storage_inputs.files) as storage_api:
+                stage = 'storage'
+                complete = run_closed_storage(retained=storage_inputs.retained, api=storage_api)
+            result = {'status': 'shared_pool_storage_refreshed' if complete else 'storage_pending',
+                'pool_id': str(storage_inputs.retained.inputs.refresh.after.pool_id),
+                'storage_id': str(storage_inputs.retained.reference.operation_id),
+                'admission_open': False, 'writer_migration_complete': False}
+            identity = {key: operation[key] for key in ('source_sha', 'installation_id', 'namespace', 'operation_id')}
+            print(json.dumps({**result, **identity}, sort_keys=True))
+            return 0
         if action == 'refresh-catalog':
             from scripts.ops.nebius_pool_preactivation_live import HTTPSPreactivationOperationAPI
 

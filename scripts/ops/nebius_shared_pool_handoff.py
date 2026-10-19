@@ -44,6 +44,7 @@ from loom_service.pool_management.installation import PoolInstallation
 if TYPE_CHECKING:
     from scripts.ops.nebius_development_schema_upgrade import CompletedDevelopmentSchemaSuccessor
     from scripts.ops.nebius_pool_preactivation_operation import CompletedPreactivationCatalog
+    from scripts.ops.nebius_pool_storage_operation import CompletedClosedStorage
 
 MARKER = 'loom.nebius/shared-pool-handoff-operation'
 _LEGACY_MARKERS = {'loom.nebius/pool-retirement-operation', 'loom.nebius/pool-cutover-operation',
@@ -101,11 +102,15 @@ class SharedPoolHandoffPlan:
     history: dict[Path, str]
     input_digest: str
     preactivation: CompletedPreactivationCatalog | None = None
+    storage: CompletedClosedStorage | None = None
 
     @property
     def effective_runtime_resources(self) -> dict[str, dict[str, Any]]:
         """Current catalog/manager overlay; original installation stays intact."""
         resources = copy.deepcopy(self.development.selection.resources)
+        if self.storage is not None:
+            for row in (self.storage.resources.configuration, self.storage.resources.collector):
+                resources[_key(row)] = copy.deepcopy(row)
         if self.preactivation is not None:
             for row in (self.preactivation.resources.manager, self.preactivation.resources.catalog):
                 resources[_key(row)] = copy.deepcopy(row)
@@ -230,7 +235,8 @@ def prepare_staging_forward(*, registration: PoolRegistrationRequest, observatio
 def prepare_shared_pool_handoff(*, runtime: DevelopmentRuntimeInstallRequest,
         observation: dict[str, Any], legacy: CompletedPoolCutover, repo_root: Path,
         preactivation: CompletedPreactivationCatalog | None = None,
-        schema_successor: CompletedDevelopmentSchemaSuccessor | None = None) -> SharedPoolHandoffPlan:
+        schema_successor: CompletedDevelopmentSchemaSuccessor | None = None,
+        storage: CompletedClosedStorage | None = None) -> SharedPoolHandoffPlan:
     """Compose completed CLOSED dev and current staging without replaying either.
 
     The complete migration contract is used only for fixed staging projection.
@@ -239,10 +245,15 @@ def prepare_shared_pool_handoff(*, runtime: DevelopmentRuntimeInstallRequest,
     The protected parent still owns live sole-writer and provider qualification.
     """
     try:
+        from scripts.ops.nebius_pool_storage_operation import resolve_runtime_storage
+
         development = prepare_development_activation(runtime, schema_successor=schema_successor)
         completed = development.runtime
         database = completed.request.database
         registration = development.selection.registration
+        storage = resolve_runtime_storage(runtime=runtime, preactivation=preactivation, storage=storage)
+        if storage is not None:
+            registration = storage.retained.registration
         if preactivation is not None:
             from scripts.ops.nebius_pool_preactivation_operation import load_completed_preactivation
 
@@ -327,6 +338,10 @@ def prepare_shared_pool_handoff(*, runtime: DevelopmentRuntimeInstallRequest,
             if any(path in catalog_files and catalog_files[path] != raw for path, raw in preactivation.files.items()):
                 raise ValueError
             catalog_files.update(preactivation.files)
+        if storage is not None:
+            if any(path in catalog_files and catalog_files[path] != raw for path, raw in storage.files.items()):
+                raise ValueError
+            catalog_files = {**storage.files, **catalog_files}
         if any(path in completed.files and completed.files[path] != raw for path, raw in catalog_files.items()):
             raise ValueError
         for path, raw in {**completed.files, **catalog_files}.items():
@@ -343,6 +358,6 @@ def prepare_shared_pool_handoff(*, runtime: DevelopmentRuntimeInstallRequest,
             'staging_reader_authority': readers,
             'history': {str(path): value for path, value in history.items()}})
         return SharedPoolHandoffPlan(development, staging, migration, targets, material, originals, role_targets,
-            readers, history, checksum, preactivation)
+            readers, history, checksum, preactivation, storage)
     except Exception:
         raise ValueError('shared pool handoff intent unqualified') from None

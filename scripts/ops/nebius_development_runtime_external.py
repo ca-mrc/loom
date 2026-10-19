@@ -158,6 +158,10 @@ async def qualify_runtime_cloud(*, request: DevelopmentRuntimeInstallRequest,
                     snapshot = await reader.capture_pool(expected_cluster_id=config['cluster_id'])
                 finally:
                     await reader.close()
+                if storage is not None and (snapshot.node_group is None
+                        or snapshot.node_group.id != storage.after.node_group_id
+                        or snapshot.node_group.template.get('boot_disk_type') != storage.target_disk_type):
+                    raise ValueError('selected native storage type differs')
                 if private_state._private_read(credential, limit=1024**2) != request.collector_credential:
                     raise ValueError
         if private_state._private_read(operator_credentials, limit=1024**2) != original:

@@ -55,17 +55,20 @@ from loom_service.environment_management.candidates import _json
 if TYPE_CHECKING:
     from scripts.ops.nebius_development_schema_upgrade import CompletedDevelopmentSchemaSuccessor
     from scripts.ops.nebius_pool_preactivation_operation import CompletedPreactivationCatalog
+    from scripts.ops.nebius_pool_storage_operation import CompletedClosedStorage
 
 
 class HTTPSDevelopmentRuntimeProbes(HTTPSDevelopmentRuntimeObserver):
     def __init__(self, *, request: DevelopmentRuntimeInstallRequest, api_server: str,
                  ssl_context: ssl.SSLContext, token: str, private_files: dict[Path, bytes] | None = None,
                  preactivation: CompletedPreactivationCatalog | None = None,
-                 schema_successor: CompletedDevelopmentSchemaSuccessor | None = None):
+                 schema_successor: CompletedDevelopmentSchemaSuccessor | None = None,
+                 storage: CompletedClosedStorage | None = None):
         if not token:
             raise ValueError('development runtime probe credential missing')
         super().__init__(request=request, api_server=api_server, ssl_context=ssl_context,
-            token=token, private_files=private_files, preactivation=preactivation, schema_successor=schema_successor)
+            token=token, private_files=private_files, preactivation=preactivation,
+            schema_successor=schema_successor, storage=storage)
         try:
             # The protected gateway strips PATH to os.defpath. Include the
             # standard operator installation directory without trusting ambient
@@ -182,6 +185,8 @@ class HTTPSDevelopmentRuntimeProbes(HTTPSDevelopmentRuntimeObserver):
         """One fixed READ ONLY query, bracketed by retained database qualification."""
         try:
             spec = self.effective_registration.spec
+            if self.preactivation is None and self.storage is not None:
+                spec = self.storage.retained.registration.spec
             before = self._database(self.manager.binding.namespace)
             report = self._exec(before, 'loom-postgres', ['psql', '-X', '-qAt', '-v', 'ON_ERROR_STOP=1',
                 '-U', 'postgres', '-d', 'loom', '-c', pool_startup_closed_sql(spec, manager_revision=self.manager_revision)])

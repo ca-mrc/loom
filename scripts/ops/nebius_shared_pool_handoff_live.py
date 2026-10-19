@@ -18,6 +18,7 @@ from uuid import UUID
 
 if TYPE_CHECKING:
     from scripts.ops.nebius_pool_preactivation_operation import CompletedPreactivationCatalog
+    from scripts.ops.nebius_pool_storage_operation import CompletedClosedStorage
 
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_development_bootstrap import _secret_documents
@@ -75,7 +76,8 @@ def observe_shared_pool_guard_bindings(*, runtime: DevelopmentRuntimeInstallRequ
         observation: dict[str, Any], legacy: CompletedPoolCutover, repo_root: Path,
         development: HTTPSDevelopmentRuntimeObserver,
         preactivation: CompletedPreactivationCatalog | None = None,
-        schema_successor: CompletedDevelopmentSchemaSuccessor | None = None) -> SharedPoolGuardBindings:
+        schema_successor: CompletedDevelopmentSchemaSuccessor | None = None,
+        storage: CompletedClosedStorage | None = None) -> SharedPoolGuardBindings:
     """Bind dev's actual database and credentials without an unbound fallback.
 
     Staging keeps the independently captured binding qualified by its attachment.
@@ -84,7 +86,7 @@ def observe_shared_pool_guard_bindings(*, runtime: DevelopmentRuntimeInstallRequ
     """
     try:
         plan = prepare_shared_pool_handoff(runtime=runtime, observation=observation,
-            legacy=legacy, repo_root=repo_root, preactivation=preactivation, schema_successor=schema_successor)
+            legacy=legacy, repo_root=repo_root, preactivation=preactivation, schema_successor=schema_successor, storage=storage)
         completed = plan.development.runtime
         foundation = runtime.database.foundation
 
@@ -92,6 +94,7 @@ def observe_shared_pool_guard_bindings(*, runtime: DevelopmentRuntimeInstallRequ
             if (development.request != runtime or development.plan != completed.plan
                     or development.preactivation != plan.preactivation
                     or development.schema_successor != plan.development.schema_successor
+                    or development.storage != plan.storage
                     or development.api_server.rstrip('/') != foundation.inputs.config['kubernetes_api_server'].rstrip('/')):
                 raise ValueError
 
@@ -133,7 +136,7 @@ def observe_shared_pool_guard_bindings(*, runtime: DevelopmentRuntimeInstallRequ
                         and current[name]['metadata']['resourceVersion'] != original['metadata']['resourceVersion'])):
                 raise ValueError
         if prepare_shared_pool_handoff(runtime=runtime, observation=observation,
-                legacy=legacy, repo_root=repo_root, preactivation=preactivation, schema_successor=schema_successor) != plan:
+                legacy=legacy, repo_root=repo_root, preactivation=preactivation, schema_successor=schema_successor, storage=storage) != plan:
             raise ValueError
         qualify_observer()
         dev_guard, = (row for row in plan.migration.guards if row.namespace == 'loom-dev')
@@ -292,7 +295,8 @@ def observe_shared_pool_writers(*, runtime: DevelopmentRuntimeInstallRequest,
         observation: dict[str, Any], legacy: CompletedPoolCutover, repo_root: Path,
         transport: ManagementKubernetesTransport,
         preactivation: CompletedPreactivationCatalog | None = None,
-        schema_successor: CompletedDevelopmentSchemaSuccessor | None = None) -> SharedPoolWriterObservation:
+        schema_successor: CompletedDevelopmentSchemaSuccessor | None = None,
+        storage: CompletedClosedStorage | None = None) -> SharedPoolWriterObservation:
     """GET-only RBAC and built-in workload census before the first guard.
 
     External credentials, provider ownership and process drain are separate
@@ -301,14 +305,14 @@ def observe_shared_pool_writers(*, runtime: DevelopmentRuntimeInstallRequest,
     """
     try:
         plan = prepare_shared_pool_handoff(runtime=runtime, observation=observation,
-            legacy=legacy, repo_root=repo_root, preactivation=preactivation, schema_successor=schema_successor)
+            legacy=legacy, repo_root=repo_root, preactivation=preactivation, schema_successor=schema_successor, storage=storage)
         roots = _resource_roots(plan, frozenset({'Deployment', 'StatefulSet', 'CronJob'}))
         authority = _authority_roots(plan)
         result = _observe_shared_writer_options(plan=plan, transport=transport,
             workload_options={key: (row,) for key, row in roots.items()},
             authority_options={key: (row,) for key, row in authority.items()})
         if prepare_shared_pool_handoff(runtime=runtime, observation=observation, legacy=legacy, repo_root=repo_root,
-                preactivation=preactivation, schema_successor=schema_successor) != plan:
+                preactivation=preactivation, schema_successor=schema_successor, storage=storage) != plan:
             raise ValueError
         return result
     except Exception:
@@ -440,7 +444,8 @@ async def observe_shared_pool_provider(*, runtime: DevelopmentRuntimeInstallRequ
         observation: dict[str, Any], legacy: CompletedPoolCutover, repo_root: Path,
         development: HTTPSDevelopmentRuntimeObserver, operator_credentials: Path,
         preactivation: CompletedPreactivationCatalog | None = None,
-        schema_successor: CompletedDevelopmentSchemaSuccessor | None = None) -> SharedPoolProviderObservation:
+        schema_successor: CompletedDevelopmentSchemaSuccessor | None = None,
+        storage: CompletedClosedStorage | None = None) -> SharedPoolProviderObservation:
     """Read the registered physical group with the installed observer's key.
 
     Available zero-size and currently scaling groups qualify, even with no spare
@@ -450,13 +455,14 @@ async def observe_shared_pool_provider(*, runtime: DevelopmentRuntimeInstallRequ
     """
     try:
         plan = prepare_shared_pool_handoff(runtime=runtime, observation=observation,
-            legacy=legacy, repo_root=repo_root, preactivation=preactivation, schema_successor=schema_successor)
+            legacy=legacy, repo_root=repo_root, preactivation=preactivation, schema_successor=schema_successor, storage=storage)
         completed = plan.development.runtime
 
         def inspect() -> dict[str, dict[str, Any]]:
             if (development.request != runtime or development.plan != completed.plan
                     or development.preactivation != plan.preactivation
                     or development.schema_successor != plan.development.schema_successor
+                    or development.storage != plan.storage
                     or development.api_server.rstrip('/') != runtime.database.foundation.inputs.config[
                         'kubernetes_api_server'].rstrip('/')):
                 raise ValueError
@@ -464,7 +470,9 @@ async def observe_shared_pool_provider(*, runtime: DevelopmentRuntimeInstallRequ
                 for row in development.inspect(state_dir=completed.state_dir).values()}
 
         before = inspect()  # Includes the installed collector Secret/configuration.
-        snapshot = await qualify_runtime_cloud(request=runtime, operator_credentials=operator_credentials, schema_successor=schema_successor)
+        snapshot = await qualify_runtime_cloud(request=runtime, operator_credentials=operator_credentials,
+            schema_successor=schema_successor,
+            **({} if plan.storage is None else {'storage': plan.storage.retained.inputs.refresh}))
         spec = plan.migration.registration.spec
         if (snapshot.node_group is None or snapshot.node_group.id != spec.node_group_id
                 or {key: quota_identity(value) for key, value in snapshot.quota_resources.items()} != spec.quota_identities
@@ -472,7 +480,7 @@ async def observe_shared_pool_provider(*, runtime: DevelopmentRuntimeInstallRequ
                 or snapshot.autoscaler_state not in {'ready', 'scaling'}):
             raise ValueError
         if (inspect() != before or prepare_shared_pool_handoff(runtime=runtime, observation=observation,
-                legacy=legacy, repo_root=repo_root, preactivation=preactivation, schema_successor=schema_successor) != plan):
+                legacy=legacy, repo_root=repo_root, preactivation=preactivation, schema_successor=schema_successor, storage=storage) != plan):
             raise ValueError
         checksum = digest({'handoff': plan.input_digest, 'provider': snapshot.model_dump(mode='json'), 'workloads': before})
         return SharedPoolProviderObservation(plan, snapshot, checksum)
@@ -493,7 +501,8 @@ def observe_shared_pool_processes(*, runtime: DevelopmentRuntimeInstallRequest,
         observation: dict[str, Any], legacy: CompletedPoolCutover, repo_root: Path,
         development: HTTPSDevelopmentRuntimeProbes, kubeconfig: Path,
         executable: Path, preactivation: CompletedPreactivationCatalog | None = None,
-        schema_successor: CompletedDevelopmentSchemaSuccessor | None = None) -> SharedPoolProcessObservation:
+        schema_successor: CompletedDevelopmentSchemaSuccessor | None = None,
+        storage: CompletedClosedStorage | None = None) -> SharedPoolProcessObservation:
     """Qualify current DB/process state without changing intake or credentials.
 
     The new manager must be CLOSED with its exact active registration; the old
@@ -505,7 +514,8 @@ def observe_shared_pool_processes(*, runtime: DevelopmentRuntimeInstallRequest,
     try:
         def bind() -> SharedPoolGuardBindings:
             return observe_shared_pool_guard_bindings(runtime=runtime, observation=observation,
-                legacy=legacy, repo_root=repo_root, development=development, preactivation=preactivation, schema_successor=schema_successor)
+                legacy=legacy, repo_root=repo_root, development=development, preactivation=preactivation,
+                schema_successor=schema_successor, storage=storage)
 
         bound = bind()
         plan, migration = bound.plan, bound.migration

@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Any, Literal, cast
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from scripts.ops.nebius_development_collector_runtime import prepare_collector_runtime
 from scripts.ops.nebius_development_runtime_install import DevelopmentRuntimeInstallRequest
 from scripts.ops.nebius_development_runtime_retained import load_completed_runtime
@@ -25,6 +25,19 @@ from scripts.ops.nebius_pool_startup_database import _authority_condition, _expe
 from loom.nebius_platform_render import EXECUTION_DISK_STORAGE_QUOTAS
 from loom_service.pool_management.capacity import digest
 from loom_service.pool_management.installation import PoolInstallation
+
+
+class StorageReference(BaseModel):
+    model_config = ConfigDict(extra='forbid', frozen=True, hide_input_in_errors=True)
+    operation_id: UUID
+    inputs_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
+
+    @field_validator('operation_id')
+    @classmethod
+    def nonzero(cls, value: UUID) -> UUID:
+        if not value.int:
+            raise ValueError('storage operation must be nonzero')
+        return value
 
 
 class ClosedPoolStorageRefresh(BaseModel):

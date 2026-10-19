@@ -87,14 +87,12 @@ class HTTPSDevelopmentRuntimeObserver(ManagementKubernetesTransport):
                     raise ValueError('development runtime catalog evidence differs')
                 self.private_files[path] = raw
         self._preactivation_origin = copy.deepcopy(self.preactivation)
+        if preactivation is not None or storage is not None:
+            from scripts.ops.nebius_pool_storage_operation import resolve_runtime_storage
+
+            storage = resolve_runtime_storage(runtime=self.request, preactivation=preactivation, storage=storage)
         self.storage = copy.deepcopy(storage)
         if storage is not None:
-            from scripts.ops.nebius_pool_storage_operation import load_completed_storage
-
-            selected_storage = load_completed_storage(runtime=storage.retained.inputs.runtime,
-                reference=storage.retained.reference)
-            if selected_storage != storage or storage.retained.runtime != self.request or preactivation is not None:
-                raise ValueError('development runtime storage ancestry differs')
             for path, raw in storage.files.items():
                 if path in self.private_files and self.private_files[path] != raw:
                     raise ValueError('development runtime storage evidence differs')
@@ -186,7 +184,7 @@ class HTTPSDevelopmentRuntimeObserver(ManagementKubernetesTransport):
                 storage_view = storage_runtime_view(_storage_correction)
                 choices = {**choices, **storage_view[1]}
             if self.storage is not None:
-                if (_prechild_phase is not None or _shared_handoff is not None or _preactivation_catalog is not None
+                if (_prechild_phase is not None
                         or any(item['status'] != 'complete' for item in record['phases'].values())):
                     raise ValueError
                 choices = dict(choices)
@@ -200,6 +198,8 @@ class HTTPSDevelopmentRuntimeObserver(ManagementKubernetesTransport):
                         or _preactivation_catalog.runtime != self.request
                         or _preactivation_catalog.inputs.schema_successor != (
                             None if self.schema_successor is None else self.schema_successor.reference)
+                        or _preactivation_catalog.inputs.storage != (
+                            None if self.storage is None else self.storage.retained.reference)
                         or any(item['status'] != 'complete' for item in record['phases'].values())):
                     raise ValueError
                 preactivation_view = preactivation_runtime_view(_preactivation_catalog)
@@ -219,7 +219,8 @@ class HTTPSDevelopmentRuntimeObserver(ManagementKubernetesTransport):
                 if (self.request != completed.request or self.plan != completed.plan
                         or state_dir != completed.state_dir or _prechild_phase is not None
                         or self.preactivation != _shared_handoff.plan.preactivation
-                        or self.schema_successor != _shared_handoff.plan.development.schema_successor):
+                        or self.schema_successor != _shared_handoff.plan.development.schema_successor
+                        or self.storage != _shared_handoff.plan.storage):
                     raise ValueError
                 shared_state = Path(manager.operation['state_dir']).parent / 'shared-pool-handoff'
                 shared_view = shared_runtime_view(bindings=_shared_handoff, state_dir=shared_state)
