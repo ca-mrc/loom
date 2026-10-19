@@ -61,7 +61,7 @@ def test_optional_native_build_loop_parses_env_and_participates_in_readiness(
         monkeypatch.setenv("LOOM_EXECUTION_ACTUATOR_" + key, value)
     settings = ExecutionActuatorSettings()
     assert settings.task_image_builder is not None
-    assert settings.task_image_builder.max_concurrent == 1
+    assert settings.task_image_builder.max_concurrent is None
     health = ActuatorRuntimeHealth(stale_after_seconds=90, task_image_builder_enabled=True)
     health.mark_success("command")
     health.mark_success("reconcile")

@@ -18,6 +18,28 @@ from loom_execution_actuator.task_image_renderer import render_task_image_job
 from tests.unit.test_nebius_task_image_renderer import inputs  # noqa: F401
 
 
+def _builder_settings(**updates):
+    from loom_execution_actuator.task_image_settings import NativeTaskImageSettings
+
+    return NativeTaskImageSettings(namespace="builds", service_image="registry.example/service",
+        storage_endpoint="https://storage.example", storage_region="eu-north1", source_bucket="source",
+        registry_repository="registry.example/tasks", **updates)
+
+
+def test_optional_build_count_has_no_default_or_sixteen_ceiling_and_preserves_old_json():
+    assert _builder_settings().max_concurrent is None
+    for limit in (None, 1, 16, 17, 64):
+        settings = _builder_settings(max_concurrent=limit)
+        assert settings.max_concurrent == limit
+        assert type(settings).model_validate_json(settings.model_dump_json()) == settings
+
+
+@pytest.mark.parametrize("value", [0, -1, True, 1.5, "17"])
+def test_optional_operator_build_limit_rejects_nonpositive_or_noninteger(value):
+    with pytest.raises(ValueError):
+        _builder_settings(max_concurrent=value)
+
+
 def receipt_job(*, message=None):
     image_id = uuid4()
     message = message if message is not None else json.dumps({

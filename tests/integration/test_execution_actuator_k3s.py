@@ -282,8 +282,17 @@ def _executable_lease(
 def _start_k3s(*, node_name: str | None = None, ephemeral_storage_floor: str | None = None) -> object:
     from testcontainers.core.container import DockerContainer
 
+    class DisposableK3sContainer(DockerContainer):
+        def stop(self, force: bool = False, delete_volume: bool = True) -> None:
+            # Testcontainers directly force-removes by default. Let K3s PID 1
+            # terminate its children before removal, without an init wrapper
+            # that would interfere with its root-cgroup startup sequence.
+            if self._container is not None:
+                self._container.stop(timeout=30)
+            super().stop(force=force, delete_volume=delete_volume)
+
     container = (
-        DockerContainer(
+        DisposableK3sContainer(
             "rancher/k3s@sha256:08fdebd14db9ab7d5ea821d5bfa95d02341a6ef886842fcc8d9dfd0e9fa9e0cd"
         )
         .with_exposed_ports(6443)

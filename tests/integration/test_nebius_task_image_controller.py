@@ -362,12 +362,12 @@ async def test_two_replicas_do_not_start_two_jobs(controller_setup):
     assert row.state == "running" and len(attempts) == 1 and kube.ensure_calls == 1
 
 
-@pytest.mark.parametrize("concurrency", [1, 2])
+@pytest.mark.parametrize("concurrency", [1, 2, 17])
 async def test_concurrent_claims_respect_build_slots_until_cleanup(controller_setup, concurrency):
     controller, sessions, team_id, kube = controller_setup
     controller.settings = controller.settings.model_copy(update={"max_concurrent": concurrency})
-    images = [await seed_image(sessions, team_id) for _ in range(3)]
-    claimed = await asyncio.gather(*(controller._claim() for _ in range(3)))
+    images = [await seed_image(sessions, team_id) for _ in range(concurrency + 1)]
+    claimed = await asyncio.gather(*(controller._claim() for _ in images))
     assert sum(attempt is not None for attempt in claimed) == concurrency
     for attempt in claimed:
         if attempt is not None:
@@ -384,6 +384,22 @@ async def test_concurrent_claims_respect_build_slots_until_cleanup(controller_se
     kube.allow_delete = True
     await controller._reconcile(first_id)
     assert await controller._claim() is not None
+
+
+async def test_resource_only_builds_claim_and_create_beyond_sixteen(controller_setup):
+    controller, sessions, team_id, kube = controller_setup
+    controller.settings = controller.settings.model_copy(update={"max_concurrent": None})
+    for _ in range(17):
+        await seed_image(sessions, team_id)
+    claimed = await asyncio.gather(*(controller._claim() for _ in range(17)))
+    assert all(attempt is not None for attempt in claimed)
+    for attempt in claimed:
+        await controller._reconcile(attempt)
+    assert len(kube.jobs) == 17
+    # Exercise the inventory gate too, after seventeen real DB reservations.
+    await seed_image(sessions, team_id)
+    await controller.run_once()
+    assert len(kube.jobs) == 18
 
 
 async def test_unstarted_expired_attempt_is_cleaned_by_db_scan(controller_setup):

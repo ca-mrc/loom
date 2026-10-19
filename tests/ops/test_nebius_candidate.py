@@ -206,6 +206,44 @@ def test_publication_workflow_preserves_explicit_guest_budgets(ready, volume, ar
         assert not any(argument.startswith("--guest-") for argument in arguments)
 
 
+@pytest.mark.parametrize("shared,guest,identity,mode,valid", [
+    (None, "true", "true", "platform", True),
+    ("false", "true", "true", "platform", True),
+    ("true", "true", "true", "platform", True),
+    ("true", "false", "true", "platform", False),
+    ("true", "true", "false", "platform", False),
+    ("invalid", "true", "true", "platform", False),
+    ("true", "false", "false", "harness-only", True),
+])
+def test_publication_workflow_preserves_shared_guest_readiness(shared, guest, identity, mode, valid):
+    workflow = yaml.safe_load((candidate.ROOT / candidate.WORKFLOW).read_text())
+    step = next(step for step in workflow["jobs"]["publish"]["steps"]
+                if step.get("name") == "Build and publish the fixed candidate")
+    assert step["env"]["NEBIUS_SHARED_GUEST_READY"] == "${{ vars.NEBIUS_SHARED_GUEST_READY || 'false' }}"
+    script = step["run"].split('publication_args=(--mode "$PUBLICATION_MODE")', 1)[1]
+    env = {**os.environ, "PUBLICATION_MODE": mode, "AGENT_VERSION": "",
+           "NEBIUS_TASK_WEB_EGRESS_READY": "true", "NEBIUS_SERVICE_LIFECYCLE_READY": "true",
+           "NEBIUS_TASK_IDENTITY_READY": identity, "NEBIUS_REGISTRY_PREFIX": "fixture",
+           "NEBIUS_GUEST_RUNTIME_READY": guest,
+           "NEBIUS_GUEST_RUNTIME_VOLUME_MIB": "1024" if guest == "true" else "",
+           "NEBIUS_GUEST_MAX_ARTIFACT_BYTES": "10737418240" if guest == "true" else "",
+           "NEBIUS_EMULATED_PKCS11_READY": "false",
+           "NEBIUS_IMAGE_UPLOAD_TIMEOUT_SECONDS": "900", "NEBIUS_SIGNING_KEY_ID": "fixture",
+           "work": "/unused", "RUNNER_TEMP": "/unused"}
+    env.pop("NEBIUS_SHARED_GUEST_READY", None)
+    if shared is not None:
+        env["NEBIUS_SHARED_GUEST_READY"] = shared
+    result = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-euo", "pipefail", "-c",
+         'uv() { printf "%s\\n" "$@"; }\npublication_args=(--mode "$PUBLICATION_MODE")' + script],
+        capture_output=True, text=True, env=env,
+    )
+    assert (result.returncode == 0) is valid, result.stderr
+    if valid:
+        assert ("--supports-shared-guest" in result.stdout.splitlines()) is (
+            shared == "true" and mode == "platform")
+
+
 def inputs(tmp_path: Path) -> tuple[dict, Path, str]:
     key = Ed25519PrivateKey.generate()
     private = tmp_path / "signer.pem"

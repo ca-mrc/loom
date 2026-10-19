@@ -573,6 +573,7 @@ async def reserve_trial_execution(
     routing_reason: ExecutionRoutingReason = ExecutionRoutingReason.ADMIN_TARGET_BINDING,
     parent_lease_id: UUID | None = None,
     verifier_retry: int = 0,
+    capacity_wait_inputs: dict[str, Any] | None = None,
     deadline_at: datetime,
     now: datetime | None = None,
     pool_handoff_id: UUID | None = None,
@@ -892,7 +893,8 @@ async def reserve_trial_execution(
     # rolled back together before any outbox command or execution attempt exists.
     # The actuator reuses this authorization when it eventually creates the Job.
     if global_identity is None:
-        await reserve_execution_provisioning(session, lease_id=lease.id, now=current_time)
+        await reserve_execution_provisioning(session, lease_id=lease.id, now=current_time,
+                                             capacity_wait_inputs=capacity_wait_inputs)
     command_payload = {
         "schema_version": "loom.execution-command.v1",
         "lease_id": str(lease_id),

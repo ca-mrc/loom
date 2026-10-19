@@ -999,6 +999,8 @@ def _task_image_builder_documents(config: dict[str, Any], settings: Any) -> list
     namespace["metadata"]["labels"]["pod-security.kubernetes.io/enforce"] = "privileged"
     quota = _obj("ResourceQuota", "loom-task-image-build-capacity", ns)
     count = settings.max_concurrent
+    # Keep this same apply-owned object even without an operator guard. An
+    # explicit empty hard map removes previously applied count/resource caps.
     quota["spec"] = {
         "hard": {
             "pods": str(count),
@@ -1011,7 +1013,7 @@ def _task_image_builder_documents(config: dict[str, Any], settings: Any) -> list
             "limits.cpu": f"{settings.cpu_millis * count}m",
             "limits.memory": f"{settings.memory_mib * count}Mi",
             "limits.ephemeral-storage": f"{settings.ephemeral_storage_mib * count}Mi",
-        }
+        } if count is not None else {}
     }
     account = _obj("ServiceAccount", "loom-execution-attempt", ns)
     account["automountServiceAccountToken"] = False
@@ -1129,9 +1131,11 @@ def _execution_documents(
                         EXECUTION_DISK_STORAGE_QUOTAS[config.get("execution_disk_type", "NETWORK_SSD")]
                     )
                 if filename == "nebius-capacity-collector.yaml" and builder is not None:
-                    doc["data"]["LOOM_EXECUTION_CAPACITY_COLLECTOR_BUILD_CONCURRENCY_LIMIT"] = str(
-                        builder.max_concurrent
-                    )
+                    limit_key = "LOOM_EXECUTION_CAPACITY_COLLECTOR_BUILD_CONCURRENCY_LIMIT"
+                    if builder.max_concurrent is None:
+                        doc["data"].pop(limit_key, None)
+                    else:
+                        doc["data"][limit_key] = str(builder.max_concurrent)
                 for suffix, key in (
                     ("NEBIUS_PROJECT_ID", "project_id"),
                     ("NEBIUS_QUOTA_PARENT_ID", "quota_parent_id"),

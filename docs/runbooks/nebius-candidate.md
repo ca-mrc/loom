@@ -90,6 +90,14 @@ persist the matching profile fields on later platform publications; they do not
 activate deployment configuration. Harbor-only publications do not emit a
 platform profile. Invalid values fail publication.
 
+`NEBIUS_SHARED_GUEST_READY=true` additionally persists `supports_shared_guest`
+through normal publication. It requires both `NEBIUS_GUEST_RUNTIME_READY=true`
+and task-identity readiness; missing or false keeps shared guests disabled.
+Qualify the resident guest's file, process and private kernel-state continuity
+between agent and verifier before enabling this protected environment variable.
+The equivalent local candidate/profile option is `--supports-shared-guest`.
+Deploy through the normal idle guard; existing trials retain their frozen plans.
+
 For the equivalent local preparation path, `nebius_candidate.py create` and
 `build`, and `prepare_nebius_runtime_profile.py`, accept the optional flags
 `--supports-task-web-egress`, `--service-lifecycle-ready`,

@@ -218,7 +218,36 @@ def test_scheduler_deadline_requires_positive_integer(platform_inputs: tuple, ma
         build_platform(config, candidate, profile, {}, repo_root=ROOT)
 
 
-@pytest.mark.parametrize("concurrency", [1, 2, 16])
+@pytest.mark.parametrize("explicit_null", [False, True])
+def test_resource_only_native_builds_clear_previous_namespace_cap(platform_inputs: tuple, explicit_null: bool) -> None:
+    config, candidate, profile = platform_inputs
+    config["task_image_builder"] = {
+        "registry_repository": "cr.eu-north1.nebius.cloud/test/task-images", "max_concurrent": 16,
+    }
+    old = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    old_quota = next(doc for doc in old["60-execution.yaml"]
+                     if doc["kind"] == "ResourceQuota" and doc["metadata"]["name"] == "loom-task-image-build-capacity")
+    if explicit_null:
+        config["task_image_builder"]["max_concurrent"] = None
+    else:
+        del config["task_image_builder"]["max_concurrent"]
+    docs = build_platform(config, candidate, profile, {}, repo_root=ROOT)["60-execution.yaml"]
+    quota = next(doc for doc in docs if doc["kind"] == "ResourceQuota"
+                 and doc["metadata"]["name"] == "loom-task-image-build-capacity")
+    # Keep the same apply-owned object and explicitly clear old hard keys.
+    assert quota["metadata"] == old_quota["metadata"]
+    assert old_quota["spec"]["hard"]["pods"] == "16"
+    assert quota["spec"]["hard"] == {}
+    collector = next(doc for doc in docs if doc["kind"] == "ConfigMap"
+                     and "LOOM_EXECUTION_CAPACITY_COLLECTOR_TARGET_ID" in doc["data"])
+    assert "LOOM_EXECUTION_CAPACITY_COLLECTOR_BUILD_CONCURRENCY_LIMIT" not in collector["data"]
+    actuator = next(doc for doc in docs if doc["kind"] == "Deployment")
+    env = {row["name"]: row.get("value")
+           for row in actuator["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert json.loads(env["LOOM_EXECUTION_ACTUATOR_TASK_IMAGE_BUILDER"])["max_concurrent"] is None
+
+
+@pytest.mark.parametrize("concurrency", [1, 2, 16, 17, 64])
 def test_native_builds_share_the_actuator_but_have_an_isolated_namespace(
     platform_inputs: tuple, concurrency: int,
 ) -> None:
@@ -284,7 +313,7 @@ def test_native_builds_share_the_actuator_but_have_an_isolated_namespace(
         {"registry_repository": "docker.io/public/task-images"},
         {
             "registry_repository": "cr.eu-north1.nebius.cloud/test/task-images",
-            "max_concurrent": 17,
+            "max_concurrent": 0,
         },
         {
             "registry_repository": "cr.eu-north1.nebius.cloud/test/task-images",

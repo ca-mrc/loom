@@ -333,6 +333,11 @@ disabled; a repeated bootstrap preserves its operator intent.
 Configure the protected `nebius-candidate` workflow explicitly:
 
 - `NEBIUS_GUEST_RUNTIME_READY=true` selects `qemu-tcg-v1`.
+- `NEBIUS_SHARED_GUEST_READY=true` enables agent and verifier controllers to use
+  the same resident guest, retaining files, processes and private kernel state.
+  It requires guest and task-identity readiness. Qualify state continuity and
+  verifier output collection before enabling it; leave it unset or false until
+  then. Private verifier inputs are staged only after the agent finishes.
 - `NEBIUS_EMULATED_PKCS11_READY=true` additionally enables the emulated-auth
   profile capability. It requires guest and task-identity readiness plus a
   distinct `emulated_auth_execution_target: {"target_id": "<auth guest target>"}`
@@ -1264,22 +1269,37 @@ overlapping durations or present reservation estimates as measured peak disk.
 
 `cache_bucket` is optional. When absent, cache credentials and import/export are
 omitted. Source, backup and trajectory buckets cannot be used as build cache.
-`max_concurrent` accepts 1–16, defaults to 1, bounds unfinished builds including
-cleanup, and renders the matching build-namespace quota. Set it to 16 in the
-operator configuration to prepare up to 16 uncached task environments at once.
-With the per-build resources above, that allows 16 CPU, 32 GiB memory and 256 GiB
-temporary storage across the build namespace. It does not reserve that capacity
-up front or force 16 builds to run: node capacity, provider quota and shared
-capacity admission still determine how many can start. On the shared execution
-pool, account for the 16 GiB storage request per build alongside Trial requests;
-builds can need several nodes even when their total CPU would fit on one.
+`max_concurrent` defaults to `null`: builds and Trials use the existing shared
+capacity admission without an additional build-count ceiling. Admission accounts
+for both workloads' CPU, memory, temporary storage, Pod slots, node limits and
+shared regional cloud quotas. Pending tasks remain queued until granted capacity;
+a bundle containing thousands of tasks does not create that many Pods at once.
+On the native shared-capacity path, contention protects the oldest valid build
+and ordinary queued Trial waiting heads, using their first actual capacity wait
+rather than bundle submission time. Only the current eligible head for each target is
+protected; queued task counts are not resource reservations. The scheduler's
+existing team fair-share and submit priority remain unchanged. The separate
+registered-pool path retains its workload-class/age ordering. There is no fixed
+split between build and execution capacity. Cleanup-pending resources remain
+charged until their release is acknowledged.
 
-The renderer also supplies this same limit to the existing capacity collector.
+An optional positive integer adds an operator ceiling on unfinished builds,
+including cleanup. There is no built-in maximum of 16. An explicit integer also
+renders a matching build-namespace quota; `null` renders the same owned quota with
+an empty `hard` map to remove an older count-derived limit. This does not remove
+physical capacity or cloud-quota checks. On shared nodes, account for the 16 GiB
+storage request per build alongside Trial requests; builds can need several nodes
+even when their total CPU would fit on one. This resource admission does not
+measure or reserve disk IOPS or bandwidth.
+
+The renderer also supplies an explicit integer limit to the existing capacity collector.
 Monitor's shared-node panel displays the configured build concurrency from that
 target's capacity observation, including when no builds or execution nodes remain.
 Observation freshness still applies; historical observations without the field
 show unavailable. This is a configured ceiling, not a count of currently available
-build slots, and does not change admission or node scaling.
+build slots, and does not change admission or node scaling. With `null`, the
+collector omits the optional count limit. Existing installations with an explicit
+integer retain it until their operator configuration is updated.
 Apply the operator configuration through the
 normal renderer/deployer; changing only the actuator environment or namespace
 quota leaves the two limits inconsistent. Builds still compete with executions
