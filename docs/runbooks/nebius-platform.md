@@ -333,6 +333,11 @@ disabled; a repeated bootstrap preserves its operator intent.
 Configure the protected `nebius-candidate` workflow explicitly:
 
 - `NEBIUS_GUEST_RUNTIME_READY=true` selects `qemu-tcg-v1`.
+- `NEBIUS_SHARED_GUEST_READY=true` enables agent and verifier controllers to use
+  the same resident guest, retaining files, processes and private kernel state.
+  It requires guest and task-identity readiness. Qualify state continuity and
+  verifier output collection before enabling it; leave it unset or false until
+  then. Private verifier inputs are staged only after the agent finishes.
 - `NEBIUS_EMULATED_PKCS11_READY=true` additionally enables the emulated-auth
   profile capability. It requires guest and task-identity readiness plus a
   distinct `emulated_auth_execution_target: {"target_id": "<auth guest target>"}`

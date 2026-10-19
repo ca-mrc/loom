@@ -602,16 +602,40 @@ def test_installed_agent_reaches_the_pod_loopback_broker_from_a_guest(monkeypatc
 
 
 def test_shared_guest_verification_observes_system_changes_after_client_reconnect() -> None:
-    """Shared grading must retain agent changes outside the workspace and kernel state."""
-    with guest() as (client, _, directory):
+    """Shared grading retains the private guest's files, kernel and live processes."""
+    with guest() as (client, _, directory), guest() as (other, _, _):
+        host_pattern = Path("/proc/sys/kernel/core_pattern").read_bytes()
         boot = execute(client, "cat /proc/sys/kernel/random/boot_id")
-        execute(client, "echo repaired > /etc/repair-result; echo guest-repaired > /proc/sys/kernel/core_pattern")
+        assert execute(other, "cat /proc/sys/kernel/random/boot_id") != boot
+        other_pattern = execute(other, "cat /proc/sys/kernel/core_pattern")
+        assert execute(client, "/bin/busybox id -u; /bin/busybox id -g") == "0\n0\n"
+        execute(client, "set -eu; echo repaired > /etc/repair-result; "
+                "echo guest-repaired > /proc/sys/kernel/core_pattern")
+        started = client.post("http://sandbox/processes", json={
+            "argv": ["/bin/busybox", "sleep", "300"], "cwd": "/", "timeout_sec": 60,
+        })
+        assert started.status_code == 201, started.text
+        agent_process = started.json()
+        assert agent_process["running"] and agent_process["pid"] > 0
+        agent_pid = str(agent_process["pid"])
+        client.close()
         # The agent and verifier controllers are independent clients of the
         # same resident sandbox, not separate guest incarnations.
         with httpx.Client(transport=httpx.HTTPTransport(uds=str(directory / "sandbox.sock")), timeout=40) as verifier:
             assert execute(verifier, "cat /etc/repair-result /proc/sys/kernel/core_pattern") == "repaired\nguest-repaired\n"
             assert execute(verifier, "cat /proc/sys/kernel/random/boot_id") == boot
+            status = verifier.get(f"http://sandbox/processes/{agent_process['id']}")
+            status.raise_for_status()
+            assert status.json()["running"] and status.json()["pid"] == agent_process["pid"]
+            process_stat = execute(verifier, f"kill -0 {agent_pid} && cat /proc/{agent_pid}/stat").split()
+            assert process_stat[0] == agent_pid
+            assert process_stat[2] != "Z", "agent process exited before shared grading"
+            assert execute(verifier, "/bin/busybox id -u; /bin/busybox id -g") == "0\n0\n"
+        assert execute(other, "cat /proc/sys/kernel/core_pattern") == other_pattern
+        execute(other, "test ! -e /etc/repair-result")
         assert not (directory / "root/etc/repair-result").exists()
+        assert Path("/proc/sys/kernel/core_pattern").read_bytes() == host_pattern
+    assert Path("/proc/sys/kernel/core_pattern").read_bytes() == host_pattern
 
 
 def test_guest_preserves_image_authored_tools() -> None:
