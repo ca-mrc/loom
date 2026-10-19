@@ -798,3 +798,120 @@ def test_nebius_scoped_routing_cannot_remove_mixed_path_or_label_requirements():
 def test_api_contract_changes_select_frontend_codegen_check(path):
     plan = plan_validations(changed_paths=[path], labels=set(), event_name="pull_request")
     assert plan.web_checks
+
+
+# Registering a file the same change adds is not an ownership-authority change.
+BASE_MANIFEST = {
+    "ci_lanes": ["tests-root", "integration"],
+    "test_suites": [
+        {"id": "unit", "lane": "tests-root", "include_paths": ["tests/unit/**"], "exclude_paths": []},
+        {"id": "integration", "lane": "integration", "include_paths": ["tests/integration/test_a.py"]},
+    ],
+    "test_sharding": [{"lane": "integration", "shard_count": 6, "salt": "s", "pins": [
+        {"path": "tests/integration/test_a.py", "shard_index": 1}]}],
+}
+NEW = "tests/integration/test_new.py"
+
+
+def _registered(base: dict, mutate) -> dict:
+    import copy
+
+    head = copy.deepcopy(base)
+    mutate(head)
+    return head
+
+
+@pytest.mark.parametrize(("mutate", "added", "registration"), [
+    # The #2537 shape: a new test joins one suite, leaves another and gets a pin.
+    (lambda m: (m["test_suites"][1]["include_paths"].append(NEW),
+                m["test_suites"][0]["exclude_paths"].append(NEW),
+                m["test_sharding"][0]["pins"].append({"path": NEW, "shard_index": 1})), {NEW}, True),
+    (lambda m: m["test_suites"][1]["include_paths"].insert(0, NEW), {NEW}, True),
+    (lambda m: None, set(), True),
+    # A path that already existed changes the ownership of existing work.
+    (lambda m: m["test_suites"][1]["include_paths"].append(NEW), set(), False),
+    (lambda m: m["test_suites"][1]["include_paths"].append("tests/integration/test_*.py"),
+     {"tests/integration/test_*.py"}, False),
+    (lambda m: m["test_suites"][1]["include_paths"].remove("tests/integration/test_a.py"), set(), False),
+    # Reordering existing entries is not an addition.
+    (lambda m: m["test_suites"][1]["include_paths"].insert(0, m["test_suites"][1]["include_paths"].pop())
+     or m["test_suites"][1]["include_paths"].insert(0, NEW) or m["ci_lanes"].reverse(), {NEW}, False),
+    (lambda m: m["test_sharding"][0].update(shard_count=8), set(), False),
+    (lambda m: m["test_sharding"][0]["pins"][0].update(shard_index=2), set(), False),
+    (lambda m: m["test_sharding"][0]["pins"].append({"path": NEW, "shard_index": 1, "x": 1}), {NEW}, False),
+    # Selection rules, ignore lists and new lanes or suites keep full regression.
+    (lambda m: m["test_suites"][1].update(affected_paths=[NEW]), {NEW}, False),
+    (lambda m: m["test_suites"][1].setdefault("unaffected_paths", []).append(NEW), {NEW}, False),
+    (lambda m: m["ci_lanes"].append(NEW), {NEW}, False),
+    (lambda m: m["test_suites"].append({"id": "new", "lane": "integration", "include_paths": [NEW]}),
+     {NEW}, False),
+])
+def test_manifest_registration_accepts_only_new_file_registration(mutate, added, registration) -> None:
+    from scripts.plan_ci_validations import manifest_change_is_registration
+
+    head = _registered(BASE_MANIFEST, mutate)
+    assert manifest_change_is_registration(BASE_MANIFEST, head, frozenset(added)) is registration
+
+
+def test_manifest_registration_reads_merge_base_and_added_files(tmp_path: Path) -> None:
+    import subprocess
+    import tomllib
+
+    from scripts import plan_ci_validations as planner
+
+    manifest = tmp_path / "config/component-ownership.toml"
+    manifest.parent.mkdir()
+
+    def git(*args: str) -> str:
+        return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args], cwd=tmp_path,
+                              check=True, capture_output=True, text=True).stdout.strip()
+
+    git("init", "-q")
+    manifest.write_text('[[test_suites]]\nid = "i"\ninclude_paths = ["tests/a.py"]\n')
+    git("add", "-A")
+    git("commit", "-qm", "base")
+    base = git("rev-parse", "HEAD")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests/b.py").write_text("")
+    manifest.write_text('[[test_suites]]\nid = "i"\ninclude_paths = ["tests/a.py", "tests/b.py"]\n')
+    git("add", "-A")
+    git("commit", "-qm", "register")
+    changed = ["config/component-ownership.toml", "tests/b.py"]
+    assert tomllib.loads(manifest.read_text())
+    assert planner.manifest_registration_only(tmp_path, base, changed) is True
+    # Unknown evidence keeps the stronger ownership-authority fallback.
+    assert planner.manifest_registration_only(tmp_path, "", changed) is False
+    assert planner.manifest_registration_only(tmp_path, "0" * 40, changed) is False
+    assert planner.manifest_registration_only(tmp_path, "f" * 40, changed) is False
+    assert planner.manifest_registration_only(tmp_path, base, ["tests/b.py"]) is False
+    (tmp_path / "tests/b.py").unlink()
+    manifest.write_text('[[test_suites]]\nid = "i"\ninclude_paths = ["tests/a.py", "tests/c.py"]\n')
+    git("add", "-A")
+    git("commit", "-qm", "register an existing-or-missing file")
+    assert planner.manifest_registration_only(tmp_path, base, changed) is False
+
+
+def test_registration_only_manifest_runs_its_validation_instead_of_every_gate() -> None:
+    from scripts.plan_ci_validations import COMPONENT_OWNERSHIP_PATH, MANIFEST_VALIDATION_TEST
+
+    changed = [COMPONENT_OWNERSHIP_PATH, "tests/unit/test_immutable_object.py"]
+    authority = plan_validations(changed_paths=changed, labels=set(), event_name="pull_request")
+    registration = plan_validations(changed_paths=changed, labels=set(), event_name="pull_request",
+                                    manifest_registration_only=True)
+    assert authority.selected_heavy_checks() == set(HEAVY_CHECKS) and not authority.test_changes
+    assert not any("ownership-authority-change" in reason
+                   for reasons in registration.reasons.values() for reason in reasons)
+    assert registration.tests_root and not registration.go_checks and not registration.locked_environments
+    assert set(registration.test_changes) == {MANIFEST_VALIDATION_TEST, "tests/unit/test_immutable_object.py"}
+    # Editing the manifest's own validation keeps the authority fallback.
+    direct = plan_validations(changed_paths=[*changed, MANIFEST_VALIDATION_TEST], labels=set(),
+                              event_name="pull_request", manifest_registration_only=True)
+    assert direct.selected_heavy_checks() == set(HEAVY_CHECKS) and not direct.test_changes
+
+
+def test_workflow_plan_passes_the_change_base_for_registration_checks() -> None:
+    import yaml
+
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/ci.yml").read_text())
+    step = next(s for s in workflow["jobs"]["workflow-plan"]["steps"] if s.get("id") == "plan")
+    assert '--base-sha "${BASE_SHA:-}"' in step["run"]
