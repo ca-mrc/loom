@@ -1058,6 +1058,8 @@ def runtime_cloud_transport(request, publisher_cloud, monkeypatch, tmp_path):
         if mode.get('storage_quota') == 'compute.disk.size.network-ssd-non-replicated':
             native.template.boot_disk = mk8s.DiskSpec(size_gibibytes=80,
                 type=mk8s.DiskSpec.DiskType.NETWORK_SSD_NON_REPLICATED)
+        if mode.get('native_disk_type') is not None:
+            native.template.boot_disk = SimpleNamespace(size_gibibytes=80, type=_enum(mode['native_disk_type']))
         return SimpleNamespace(metadata=SimpleNamespace(id=spec.node_group_id, resource_version=1,
             parent_id='foreign-cluster' if mode['damage'] == 'cluster' else config['cluster_id']),
             spec=native, status=SimpleNamespace(
@@ -1549,6 +1551,11 @@ async def test_runtime_cloud_uses_observer_credentials_and_rejects_authority_or_
     assert reads[-2:] == [('quotas', scope.account_id), ('nodegroup', scope.account_id)]
     assert sessions == closed and not sessions[-1].path.exists()
     assert request.database.manager.retained.request.registration.spec == before
+    for native_disk_type in ('UNSPECIFIED', 'UNRECOGNIZED_NATIVE_DISK', 'NETWORK_SSD'):
+        mode['native_disk_type'] = native_disk_type
+        with pytest.raises(ValueError, match='development runtime cloud unqualified'):
+            await module.qualify_runtime_cloud(request=request, operator_credentials=operator, storage=storage)
+        assert sessions == closed and not sessions[-1].path.exists()
 
 
 
