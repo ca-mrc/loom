@@ -1,6 +1,7 @@
 """Closed delivery consumes real enrollment and source evidence before staging."""
 from __future__ import annotations
 
+import asyncio
 import copy
 import importlib
 import json
@@ -369,3 +370,45 @@ async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact
             child.chmod(0o600)
             assert boundaries.load_environment_boundary_progress(policy=policy, started=current).cursor == {
                 'phases': {'build-psa': 'complete', 'worker-quota': 'complete', 'build-quota': 'complete'}}
+            activation_name = 'scripts.ops.nebius_environment_activation_issuer'
+            assert importlib.util.find_spec(activation_name), 'scoped readiness/activation issuer missing'
+            activation = importlib.import_module(activation_name)
+            from scripts.ops.nebius_pool_administration_dispatch import dispatch_administration
+
+            from tests.integration.test_nebius_pool_administration_dispatch import command
+
+            predecessor = None
+            issued = []
+            class MutationAPI(PhaseAPI):
+                def administration_report(self, state_dir):
+                    return {'job_uid': str(uuid4()), 'pod_uid': str(uuid4()), 'receipt': self.committed}
+            for action, expected_state in (('ready', 'ready'), ('activate', 'active')):
+                transition_id = uuid4()
+                issuing = dict(**final_inputs, transition_id=transition_id, action=action, predecessor=predecessor,
+                    boundary_connection=boundary_connection)
+                reference = await activation.issue_environment_activation(**issuing)
+                assert reference.participant_id == policy.participant.participant_id
+                operation = _load(policy.host, reference)
+                assert operation.request.expected_head == (enrollment.operation_id if predecessor is None else predecessor.operation_id)
+                assert operation.request.action == action and operation.request.readiness is not None
+                async with sessions.begin() as session:
+                    committed = await administer(session, operation.request.model_dump_json().encode(), operation.authorization, action='apply')
+                mutation_api = MutationAPI(policy.host.runtime.binding)
+                mutation_api.committed = committed
+                @contextmanager
+                def mutation_connection(request, operation=operation, mutation_api=mutation_api):
+                    assert request.request == operation.request and request.authorization == operation.authorization
+                    yield mutation_api
+                applied = await asyncio.to_thread(dispatch_administration, command(reference, 'apply'),
+                    action='apply', host=policy.host, connect=mutation_connection)
+                assert applied['status'] == 'complete'
+                assert applied['proof']['receipt']['receipt']['state'] == expected_state
+                assert (await asyncio.to_thread(dispatch_administration, command(reference, 'recover'),
+                    action='recover', host=policy.host, connect=mutation_connection))['status'] == 'complete'
+                assert len(mutation_api.creates) == 2
+                assert await activation.issue_environment_activation(**issuing) == reference
+                issued.append((issuing, reference))
+                predecessor = reference
+            # The earlier ready intent stays immutable even after activation.
+            assert await activation.issue_environment_activation(**issued[0][0]) == issued[0][1]
+            assert len(changes) == 11, 'issuing admission operations cannot modify Kubernetes boundaries again'
