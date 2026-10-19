@@ -33,6 +33,7 @@ def test_multi_step_completes_all_steps(compose_stack: dict[str, str]) -> None:
         r = httpx.get(
             f"{cp}/trials/{trial_id}",
             headers={"Authorization": f"Bearer {raw_token}"},
+            timeout=10,
         )
         assert r.status_code == 200, r.text
         body = r.json()
