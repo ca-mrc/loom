@@ -841,12 +841,19 @@ registration, a new input directory alone is insufficient. Before handoff:
 
 Schema compatibility is separate from release/catalog identity. The retained
 management database must still be exactly `0176`. Participant readiness,
-guard/role handoff and recovery accept the audited `0176` and `0177` layouts;
+guard/role handoff and recovery accept the audited `0175`, `0176` and `0177` layouts;
 readiness reports the actual revision. The `0177` publication journal remains
 inaccessible to the actuator. An unknown revision, missing journal or excessive
 role grants blocks qualification. No handoff command migrates a database or
 changes its version marker. Protected read-only lease census also supports
 `0177`; a successful census is not handoff authority.
+
+The retained dev participant may remain on its qualified `0175` runtime: `0176`
+adds Harbor sessions without changing the shared-pool journals or guard layout.
+This compatibility does not upgrade its application or permit a newer image
+against an unsupported database. The runtime's own exact schema check remains
+in force. `0177` publication retention, when present, remains inaccessible to
+the actuator; older layouts do not manufacture that journal.
 
 The `loom.nebius-shared-pool-inputs.v1` private document contains:
 

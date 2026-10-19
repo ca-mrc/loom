@@ -521,7 +521,7 @@ BEGIN
         THEN RAISE EXCEPTION 'pool runtime source journal authority unqualified'; END IF;
     END LOOP;
     FOR item IN SELECT unnest(ARRAY['task_bundle_source_writes','task_bundle_source_versions','task_source_publications']) AS name LOOP
-        IF item.name='task_source_publications' AND (SELECT version_num FROM public.alembic_version)='0176'
+        IF item.name='task_source_publications' AND (SELECT version_num FROM public.alembic_version) IN ('0175','0176')
           AND to_regclass('public.task_source_publications') IS NULL THEN CONTINUE; END IF;
         IF has_table_privilege('loom_actuator',item.name,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
           OR has_any_column_privilege('loom_actuator',item.name,'SELECT,INSERT,UPDATE,REFERENCES')
