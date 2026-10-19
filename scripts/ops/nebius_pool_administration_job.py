@@ -37,6 +37,7 @@ from loom_service.pool_management.administration import (
     _Request,
 )
 from loom_service.pool_management.capacity import digest
+from loom_service.pool_management.inspection import PoolInspectionV2, qualify_inspection
 from loom_service.pool_management.legacy_adoption import PoolLegacyAdoptionV2
 from loom_service.pool_management.lifecycle_contracts import (
     PoolParticipantEnrollmentV2,
@@ -94,7 +95,12 @@ def _qualified(value: PoolAdministrationJobV2) -> PoolAdministrationJobV2:
                 or item.get('operator') not in {'Equal', 'Exists'}
                 or item.get('effect') not in {'NoSchedule', 'NoExecute', 'PreferNoSchedule'} for item in runtime.tolerations)):
         raise ValueError('pool_administration_runtime_unqualified')
-    if isinstance(request, (PoolPlatformInstallationV2, PoolPlatformOperationV2, PoolLegacyAdoptionV2)):
+    if isinstance(request, PoolInspectionV2):
+        if (value.action != 'status' or (grant.installation_id, grant.pool_id, grant.participant_id,
+                grant.environment_id, grant.incarnation, grant.authority) != (request.installation_id,
+                request.pool_id, request.participant_id, request.environment_id, request.incarnation, request.environment_class or 'platform')):
+            raise ValueError('pool_administration_target_unqualified')
+    elif isinstance(request, (PoolPlatformInstallationV2, PoolPlatformOperationV2, PoolLegacyAdoptionV2)):
         target = request.before if isinstance(request, PoolLegacyAdoptionV2) else request
         if grant.authority != 'platform' or (grant.installation_id, grant.pool_id) != (target.installation_id, target.pool_id):
             raise ValueError('pool_administration_target_unqualified')
@@ -179,6 +185,9 @@ def _head(value: Any, *, receipt: bool = False) -> None:
 def validate_administration_report(request: PoolAdministrationJobV2, report: Any) -> None:
     request = _qualified(request)
     grant, operation = request.authorization, request.request
+    if isinstance(operation, PoolInspectionV2):
+        qualify_inspection(report, operation, grant.authorization_id)
+        return
     if (not isinstance(report, dict) or set(report) != {'schema_version', 'authorization_id', 'request_sha256', 'receipt', 'current'}
             or report['schema_version'] != 'loom.pool-administration-result.v2'
             or report['authorization_id'] != str(grant.authorization_id) or report['request_sha256'] != grant.request_sha256):
