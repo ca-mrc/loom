@@ -602,14 +602,21 @@ class ClosedStorageAPI:
 
 @pytest.mark.parametrize('staging_observation', ['independent'], indirect=True)
 @pytest.mark.timeout(240)
-def test_closed_storage_parent_preserves_history_and_waits_for_drain_and_new_publication(shared_operation):
+def test_closed_storage_parent_preserves_history_and_waits_for_drain_and_new_publication(
+        shared_operation, shared_runtime, completed_pool, handoff):
     import importlib
+    import ssl
+
+    import httpx
 
     name = 'scripts.ops.nebius_pool_storage_operation'
     assert importlib.util.find_spec(name) is not None, 'retained closed storage operation is missing'
     parent = importlib.import_module(name)
+    from scripts.ops.nebius_development_runtime_live import runtime_resource_path
+    from scripts.ops.nebius_development_runtime_observation import HTTPSDevelopmentRuntimeObserver
     from scripts.ops.nebius_development_runtime_retained import load_completed_runtime
     from scripts.ops.nebius_shared_pool_entry import RetainedRuntimeReference
+    from tests.ops.test_nebius_development_pool_retained import runtime_http_inventory
 
     args, bindings = shared_operation
     _, _, inputs, _, _ = _shared_entry_inputs(args, bindings)
@@ -623,6 +630,20 @@ def test_closed_storage_parent_preserves_history_and_waits_for_drain_and_new_pub
     with pytest.raises(ValueError):
         parent.load_completed_storage(runtime=runtime, reference=retained.reference)
     api = ClosedStorageAPI(retained)
+    _, documents, handler = runtime_http_inventory(args['runtime'], shared_runtime[1], completed_pool[3].server, handoff[2])
+
+    def inspect(completed=None):
+        for row in (*api.collector.rows.values(), *api.configuration.resources.values()):
+            documents[runtime_resource_path(row) + '/' + row['metadata']['name']] = copy.deepcopy(row)
+        with HTTPSDevelopmentRuntimeObserver(request=args['runtime'],
+                api_server=args['runtime'].database.foundation.inputs.config['kubernetes_api_server'],
+                ssl_context=ssl.create_default_context(), storage=completed) as observer:
+            for connection in (observer, observer.manager, observer.foundation):
+                connection.client.close()
+                connection.client = type(completed_pool[3].api.client)(base_url=connection.api_server,
+                    transport=httpx.MockTransport(handler))
+            return observer.inspect(state_dir=original.state_dir,
+                _storage_correction=retained if completed is None else None)
 
     def run():
         return parent.run_closed_storage(retained=retained, api=api)
@@ -630,7 +651,16 @@ def test_closed_storage_parent_preserves_history_and_waits_for_drain_and_new_pub
     assert run() is False  # An applied suspension is not proof that Jobs/Pods drained.
     assert len(api.collector.patches) == 1 and api.commits == 0
     assert api.configuration.creates == []
+    assert inspect()[_key(retained.collector.original)]['spec']['suspend'] is True
     api.collector.ready = True
+    api.failure = 'registry'
+    with pytest.raises(ValueError):
+        run()
+    current = inspect()[_key(retained.collector.original)]
+    assert current['spec']['suspend'] is True
+    assert current['spec']['jobTemplate']['spec']['template']['spec']['containers'][0]['envFrom'] == [
+        {'configMapRef': {'name': retained.collector.configuration['metadata']['name']}}]
+    assert api.commits == 0
     api.failure = 'commit-after'
     assert run() is False  # Resume does not substitute for fresh aggregate publication.
     assert len(api.configuration.creates) == 1
@@ -641,6 +671,13 @@ def test_closed_storage_parent_preserves_history_and_waits_for_drain_and_new_pub
     api.publication_ready = True
     assert run() is True
     completed = parent.load_completed_storage(runtime=runtime, reference=retained.reference)
+    assert inspect(completed)[_key(retained.collector.original)]['spec']['suspend'] is False
+    collector = api.collector.rows[_key(retained.collector.original)]
+    correct = copy.deepcopy(collector)
+    collector['spec']['jobTemplate']['spec']['template']['spec']['containers'][0]['image'] = 'unqualified:latest'
+    with pytest.raises(ValueError):
+        inspect(completed)
+    api.collector.rows[_key(retained.collector.original)] = correct
     assert completed.resources.configuration['data']['LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_STORAGE_NAME'] == (
         'compute.disk.size.network-ssd-non-replicated')
     assert all(path.read_bytes() == raw for path, raw in original.files.items())
