@@ -219,6 +219,7 @@ def test_publication_workflow_preserves_shared_guest_readiness(shared, guest, id
     workflow = yaml.safe_load((candidate.ROOT / candidate.WORKFLOW).read_text())
     step = next(step for step in workflow["jobs"]["publish"]["steps"]
                 if step.get("name") == "Build and publish the fixed candidate")
+    assert step["env"]["NEBIUS_SHARED_GUEST_READY"] == "${{ vars.NEBIUS_SHARED_GUEST_READY || 'false' }}"
     script = step["run"].split('publication_args=(--mode "$PUBLICATION_MODE")', 1)[1]
     env = {**os.environ, "PUBLICATION_MODE": mode, "AGENT_VERSION": "",
            "NEBIUS_TASK_WEB_EGRESS_READY": "true", "NEBIUS_SERVICE_LIFECYCLE_READY": "true",
