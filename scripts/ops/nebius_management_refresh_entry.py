@@ -124,6 +124,15 @@ def _load_refresh_inputs(operation: dict[str, Any], ancestors: tuple[str, ...], 
             if inputs.predecessor.operation['operation_id'] == str(operation_id):
                 raise ValueError
             predecessor = load_completed_pool(inputs.predecessor, original=original)
+        pool_baseline = (predecessor if isinstance(predecessor, CompletedPoolCutover) else
+            predecessor.pool_baseline if isinstance(predecessor, CompletedRefresh) else None)
+        if inputs.platform_rollout is not None and (pool_baseline is None or pool_baseline.completion.outcome != 'legacy'):
+            raise ValueError
+        from scripts.ops.nebius_management_refresh import platform_disk_type
+
+        if (platform_disk_type(predecessor.deployment) != platform_disk_type(inputs.deployment)
+                and inputs.platform_rollout is None):
+            raise ValueError
         render = ManagementRefreshRenderRequest(predecessor.deployment, inputs.deployment, predecessor.active,
             inputs.candidate, inputs.profile, Path(__file__).resolve().parents[2])
         config_name = render_refresh(render).config['metadata']['name']
@@ -150,10 +159,6 @@ def _load_refresh_inputs(operation: dict[str, Any], ancestors: tuple[str, ...], 
         resources = ManagementRefreshResourcesRequest(ManagementRefreshSwitchRequest(render, operation_id,
             superseded.stopped if superseded is not None else None),
             setup.binding, setup.shared_namespace_uid, inputs.manager_revision, inputs.target_manager_revision)
-        pool_baseline = (predecessor if isinstance(predecessor, CompletedPoolCutover) else
-            predecessor.pool_baseline if isinstance(predecessor, CompletedRefresh) else None)
-        if inputs.platform_rollout is not None and (pool_baseline is None or pool_baseline.completion.outcome != 'legacy'):
-            raise ValueError
         request = ManagementRefreshInstallRequest(resources, history, original.upgrade.original_anchor,
             None if pool_baseline is None else pool_baseline.selector.model_dump(mode='json'), inputs.platform_rollout)
         return RefreshContext(inputs, original, predecessor, request, superseded)

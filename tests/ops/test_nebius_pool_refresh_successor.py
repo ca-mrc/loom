@@ -72,7 +72,7 @@ def private_cutover(completed_upgrade, cutover_inputs, database_guard):
 
 
 @pytest.fixture
-def ordinary_rollout(private_cutover, monkeypatch):
+def ordinary_rollout(private_cutover, monkeypatch, request):
     import os
     import subprocess
 
@@ -89,7 +89,9 @@ def ordinary_rollout(private_cutover, monkeypatch):
         monkeypatch.setattr(nebius_candidate_render, 'run_private', run_private)
     _, inputs, root = private_cutover
     reference = OrdinaryPlatformRollout(deployment_id=700, publication=inputs['publication'])
-    config = root.deployment.installation.foundation.platform_config
+    config = copy.deepcopy(root.deployment.installation.foundation.platform_config)
+    if getattr(request, 'param', None) is not None:
+        config['execution_disk_type'] = request.param
     source = reference.publication.source_sha
     scope = {key: config[key] for key in ('cluster_id', 'namespace', 'execution_namespace')}
     receipt = dict(schema_version='loom.nebius-deployment.v1', mode='apply', status='complete',
@@ -179,6 +181,8 @@ async def test_ordinary_proof_requires_completed_exact_scoped_publication(ordina
 
 
 @pytest.mark.timeout(420)
+@pytest.mark.parametrize('ordinary_rollout', [None, 'NETWORK_SSD_NON_REPLICATED'],
+    ids=['ssd', 'nrd'], indirect=True)
 def test_completed_ordinary_successor_preflight_is_read_only_and_rejects_drift(private_cutover, ordinary_rollout, connected_refresh, monkeypatch):
     import asyncio
     from contextlib import contextmanager
@@ -198,9 +202,27 @@ def test_completed_ordinary_successor_preflight_is_read_only_and_rejects_drift(p
     successor = asyncio.run(ordinary_rollout[0]())
     metadata, payload, _ = private_refresh(root, pool)
     payload['platform_rollout'] = successor.reference.model_dump(mode='json')
+    payload['deployment']['installation']['foundation']['platform_config_json'] = json.dumps(successor.config)
     save_private(metadata, payload)
     selected_context = context(metadata)
     request, state = selected_context.request, Path(metadata['state_dir'])
+    if successor.config.get('execution_disk_type') == 'NETWORK_SSD_NON_REPLICATED':
+        # A valid disk reference is renderable, but changing it without the
+        # existing protected ordinary-rollout binding grants no refresh authority.
+        unbound = copy.deepcopy(payload)
+        unbound.pop('platform_rollout')
+        save_private(metadata, unbound)
+        with pytest.raises(refresh_entry.EntryError):
+            context(metadata)
+        foreign = copy.deepcopy(payload)
+        foundation = foreign['deployment']['installation']['foundation']
+        config = json.loads(foundation['platform_config_json'])
+        config['execution_disk_type'] = 'NETWORK_HDD'
+        foundation['platform_config_json'] = json.dumps(config)
+        save_private(metadata, foreign)
+        with pytest.raises(refresh_entry.EntryError):
+            context(metadata)
+        save_private(metadata, payload)
     bound = PoolManagerRefresh(root, pool, request, state, successor=successor)
     original_history = {path: path.read_bytes() for path in pool.history}
     with pool_refresh_http(bound)() as (verifier, external):

@@ -2597,6 +2597,19 @@ schema is `loom.nebius-management-refresh-private-inputs.v1`, with:
   frozen pool baseline still predates that rollout; never edit the old baseline,
   refresh inputs, or completed receipts. `management-refresh-preflight` performs
   these checks without persisting Kubernetes or database changes.
+  A change of `execution_disk_type` requires this same protected ordinary-rollout
+  reference and a legacy baseline. An absent value means `NETWORK_SSD`;
+  `NETWORK_SSD_NON_REPLICATED` selects the source-rendered NRD storage quota.
+  The primary collector's observed ConfigMap may differ from the frozen baseline
+  only in that exact quota name. Its UID, other data, fixed cloud credentials,
+  tenant/region/node-group/cluster identities and CPU/memory quota identities
+  remain pinned; the native disk and capacity reader still qualify current
+  provider observations before and after the read. The stopped pool-created
+  observer and historical receipts remain unchanged. A canonical-config-only
+  edit is insufficient workload proof: finish a genuine backed-up ordinary
+  rollout using the current configuration before selecting its deployment here.
+  This reference neither applies cloud resources nor proves disk size,
+  placement or deletion of an earlier node generation.
 - `deployment`, `candidate` and `profile`: the target manager configuration and
   protected publication. The tooling source and candidate SHA must be identical.
 - `manager_revision` and `target_manager_revision`: the expected management DB

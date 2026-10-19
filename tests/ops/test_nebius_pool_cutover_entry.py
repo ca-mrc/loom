@@ -888,7 +888,7 @@ def test_connected_entry_qualifies_all_runtime_consumers_before_returning_operat
         if damage == 'manager':
             raise PoolMigrationError('management_runtime_database')
 
-    def provider_probe(selected, base):
+    def provider_probe(selected, base, *, refresh=None):
         assert selected == context
         physical.append(True)
         if damage == 'provider':
