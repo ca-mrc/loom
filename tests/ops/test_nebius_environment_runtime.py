@@ -132,6 +132,26 @@ def test_closed_foundation_network_allows_reader_control_traffic_not_task_databa
     assert all(rule.get('ports') and all(port['port'] in {53, 9100} for port in rule['ports']) for rule in task_rules)
 
 
+def test_runtime_preserves_foundation_local_resource_policy(runtime_request):
+    from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1
+
+    published = runtime_request['runtime_profile'].model_dump(mode='json')
+    published.pop('default_task_resource_requests', None)
+    runtime_request['runtime_profile'] = ServiceExecutionRuntimeProfileV1.model_validate(published)
+    result = subject().render_environment_runtime(**runtime_request)
+    effective = json.loads(env(result.workloads['service'])['LOOM_SVC_SERVICE_EXECUTION_RUNTIME_PROFILE_JSON']['value'])
+    assert effective['default_task_resource_requests']['task_sandbox']['cpu_millis'] == 600
+    assert effective['candidate_sha'] == published['candidate_sha']
+
+
+def test_runtime_uses_foundation_account_without_implicit_token_mount(runtime_request):
+    result = subject().render_environment_runtime(**runtime_request)
+    account, = [doc for doc in result.readers if doc['kind'] == 'ServiceAccount'
+        and doc['metadata']['name'] == 'loom-execution-actuator']
+    assert account['automountServiceAccountToken'] is False
+    assert result.workloads['actuator']['spec']['template']['spec']['automountServiceAccountToken'] is True
+
+
 @pytest.mark.parametrize('damage', ['source_bucket', 'profile_namespace', 'target', 'environment', 'management_namespace'])
 def test_runtime_cannot_substitute_data_or_authority(runtime_request, damage):
     render = subject().render_environment_runtime
