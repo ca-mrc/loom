@@ -788,7 +788,7 @@ def test_storage_collector_https_uses_execution_namespace_and_preserves_uid_cas(
                 api_server=args['runtime'].database.foundation.inputs.config['kubernetes_api_server'],
                 ssl_context=ssl.create_default_context(), qualify=qualify) as api:
             api.client.close()
-            api.client = httpx.Client(base_url=api.api_server, transport=httpx.MockTransport(respond))
+            api.client = type(api.client)(base_url=api.api_server, transport=httpx.MockTransport(respond))
             if transition is None:
                 documents, identity = storage_configuration_identity(retained)
                 _stage_fixed_documents(documents=documents, revision=identity['revision'], phase=identity['phase'],
@@ -805,8 +805,20 @@ def test_storage_collector_https_uses_execution_namespace_and_preserves_uid_cas(
                             phase=transition, api=api, state_dir=retained.state_dir / phase)
                     assert effects == []
                     mode['fail_read'] = False
-                    assert advance_runtime_workloads(originals=originals, targets=targets, input_digest=fingerprint,
-                        phase=transition, api=api, state_dir=retained.state_dir / phase) is False
+                    try:
+                        waiting = advance_runtime_workloads(originals=originals, targets=targets, input_digest=fingerprint,
+                            phase=transition, api=api, state_dir=retained.state_dir / phase)
+                    except Exception as error:
+                        locations = []
+                        while error is not None:
+                            trace = error.__traceback__
+                            while trace is not None:
+                                locations.append((type(error).__name__, Path(trace.tb_frame.f_code.co_filename).name,
+                                    trace.tb_frame.f_code.co_name, trace.tb_lineno))
+                                trace = trace.tb_next
+                            error = error.__context__
+                        pytest.fail(repr(locations), pytrace=False)
+                    assert waiting is False
                     assert effects == ['collector']
                     mode['active'] = False
                 assert advance_runtime_workloads(originals=originals, targets=targets, input_digest=fingerprint,
