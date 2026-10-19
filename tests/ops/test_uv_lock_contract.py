@@ -178,7 +178,8 @@ def test_workflows_use_checksum_verified_uv_locked_sync_and_safe_caches() -> Non
         assert inputs.get("cache-dependency-glob") == "uv.lock", path
 
 
-CI_WHEEL_CACHE_SUFFIX = "ci-wheels-v1"
+CI_WHEEL_CACHE_SUFFIX = "ci-wheels-v2"
+CI_WHEEL_CACHE_PATH = "/home/runner/.cache/uv"
 
 
 def _sync_flags(command: str) -> set[str]:
@@ -204,6 +205,9 @@ def test_ci_wheel_cache_has_one_trusted_writer_and_complete_contents() -> None:
                 if inputs.get("cache-suffix") != CI_WHEEL_CACHE_SUFFIX:
                     continue
                 assert inputs.get("prune-cache") is False, path
+                # The cache version hashes the path, and setup-uv's default path
+                # differs between GitHub-hosted and self-hosted runners.
+                assert inputs.get("cache-local-path") == CI_WHEEL_CACHE_PATH, path
                 assert inputs.get("cache-dependency-glob") == "uv.lock", path
                 assert "python-version" not in inputs and not inputs.get("cache-python"), path
                 syncs = {frozenset(_sync_flags(line)) for other in steps

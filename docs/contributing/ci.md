@@ -272,7 +272,10 @@ locked-workspace policy as candidate publication. PR and merge-group jobs retain
 their existing cache-write restrictions.
 
 CI test jobs restore a full, unpruned uv wheel cache (`cache-suffix:
-ci-wheels-v1`, ~200 MB compressed) and never save it. setup-uv's default pruning
+ci-wheels-v2`, ~200 MB compressed) and never save it. Every writer and reader sets
+`cache-local-path: /home/runner/.cache/uv`: GitHub's cache version hashes the
+cached path, and setup-uv defaults to `RUNNER_TEMP` on GitHub-hosted runners but
+`~/.cache/uv` on self-hosted ones, so `ci-wheels-v1` was written but never hit. setup-uv's default pruning
 kept only locally built packages (~180 KB), so every job downloaded about 150
 wheels from PyPI again: ~5 seconds on GitHub VMs, but 4-5 minutes with timeouts
 on OLDLAB guests, whose GitHub cache downloads are fast. The only writer is
