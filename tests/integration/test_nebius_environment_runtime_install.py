@@ -328,12 +328,16 @@ async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact
             boundaries = importlib.import_module('scripts.ops.nebius_environment_runtime_boundaries')
             assert hasattr(boundaries, 'prepare_environment_boundaries'), 'connected selected-boundary preparation missing'
             allow_quotas = False
+            inventory_effects = []
             class Boundaries(Workloads):
                 def policy_ready(self):
                     return allow_quotas or remote.kubernetes['/api/v1/namespaces/build-red']['metadata']['labels'][
                         'pod-security.kubernetes.io/enforce'] == 'restricted'
                 def check_inventory(self):
-                    pass  # Actual inventory transport is separately covered at the HTTP boundary.
+                    # Actual inventory transport is separately covered at the
+                    # HTTP boundary; inject remote drift during this later IO.
+                    if inventory_effects:
+                        inventory_effects.pop(0)()
             @contextmanager
             def boundary_connection(before, targets, namespaces, qualify):
                 transport = Boundaries({key: remote.kubernetes[runtime_resource_path(doc) + '/' + doc['metadata']['name']]
@@ -376,6 +380,25 @@ async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact
             from scripts.ops.nebius_pool_administration_dispatch import dispatch_administration
 
             from tests.integration.test_nebius_pool_administration_dispatch import command
+
+            # Issuance must not retain formerly healthy processes or resources
+            # when they change during the later native-policy/inventory checks.
+            actuator_pod, = remote.kubernetes['/api/v1/namespaces/work-red/pods']['items']
+            platform_pod = platform.collections['pods']['items'][0]
+            platform_database = platform.live['Secret:' + policy.host.runtime.binding.namespace + ':' + policy.host.runtime.database_secret]
+            for target, field, value in (
+                    (actuator_pod['status']['containerStatuses'][0], 'restartCount', 99),
+                    (platform_pod['status']['containerStatuses'][0], 'restartCount', 99),
+                    (platform_database['data'], 'service-url', 'Zm9yZWlnbg==')):
+                original = target[field]
+                inventory_effects.append(lambda target=target, field=field, value=value: target.__setitem__(field, value))
+                transition_id = uuid4()
+                with pytest.raises(ValueError, match='environment_activation_issuance_unqualified'):
+                    await activation.issue_environment_activation(**final_inputs, transition_id=transition_id,
+                        action='ready', predecessor=None, boundary_connection=boundary_connection)
+                assert not inventory_effects
+                assert not (retained.state_dir / ('activation-' + str(transition_id)) / 'issued.json').exists()
+                target[field] = original
 
             predecessor = None
             issued = []
