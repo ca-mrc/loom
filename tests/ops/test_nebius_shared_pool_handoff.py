@@ -536,6 +536,130 @@ def test_preactivation_preparation_preserves_completed_runtime_and_is_immutable(
             parent.retain_preactivation_catalog(**changed)
 
 
+class ClosedStorageAPI:
+    """Real history/CAS/create journals; only external cluster/SQL I/O is doubled."""
+
+    def __init__(self, retained):
+        from tests.ops.test_nebius_development_runtime_transition import RuntimeAPI
+        from tests.ops.test_nebius_management_stage import PhaseAPI
+
+        self.retained = retained
+        self.configuration = PhaseAPI(retained.registration.binding)
+        self.collector = RuntimeAPI({_key(retained.collector.original): retained.collector.original})
+        self.collector.rows[_key(retained.collector.original)]['metadata']['resourceVersion'] = '1'
+        self.registry = self
+        self.registry_state = 'ready'
+        self.commits = 0
+        self.publication_ready = False
+        self.failure = None
+
+    def workload(self, phase, originals, targets):
+        if phase == 'resume':
+            assert self.registry_state == 'complete'
+        return self.collector
+
+    def qualify(self, retained, phase):
+        from scripts.ops import nebius_certificates as private_state
+
+        assert retained == self.retained
+        with pytest.raises(private_state.CertificateError):
+            with private_state._locked_state(retained.anchor_dir / 'shared-pool-handoff-lock'):
+                pytest.fail('storage correction did not hold the handoff lock')
+        if self.failure == phase:
+            raise ValueError('simulated provider/gateway/authority drift')
+
+    def qualify_publication(self, retained, resources):
+        from scripts.ops.nebius_management_switch import _matches
+
+        assert retained == self.retained
+        current = self.collector.rows[_key(resources.collector)]
+        assert _matches(current, resources.collector, current['metadata']['uid'])
+        assert current['spec']['suspend'] is False
+        assert self.registry_state == 'complete'
+        return self.publication_ready
+
+    def observe(self, refresh):
+        from scripts.ops.nebius_pool_storage_binding import _identity
+
+        assert refresh == self.retained.inputs.refresh
+        return {**_identity(refresh), 'state': self.registry_state, 'read_only': True}
+
+    def commit(self, refresh):
+        assert refresh == self.retained.inputs.refresh
+        current = self.collector.rows[_key(self.retained.collector.original)]
+        assert self.collector.ready and current['spec']['suspend'] is True
+        container, = current['spec']['jobTemplate']['spec']['template']['spec']['containers']
+        assert container['envFrom'] == [{'configMapRef': {
+            'name': 'loom-pool-storage-' + refresh.operation_id.hex}}]
+        self.commits += 1
+        if self.failure == 'commit-before':
+            raise OSError('lost before commit')
+        self.registry_state = 'complete'
+        if self.failure == 'commit-after':
+            raise OSError('lost after commit')
+        return {**self.observe(refresh), 'read_only': False}
+
+
+@pytest.mark.parametrize('staging_observation', ['independent'], indirect=True)
+@pytest.mark.timeout(240)
+def test_closed_storage_parent_preserves_history_and_waits_for_drain_and_new_publication(shared_operation):
+    import importlib
+
+    name = 'scripts.ops.nebius_pool_storage_operation'
+    assert importlib.util.find_spec(name) is not None, 'retained closed storage operation is missing'
+    parent = importlib.import_module(name)
+    from scripts.ops.nebius_development_runtime_retained import load_completed_runtime
+    from scripts.ops.nebius_shared_pool_entry import RetainedRuntimeReference
+
+    args, bindings = shared_operation
+    _, _, inputs, _, _ = _shared_entry_inputs(args, bindings)
+    runtime = RetainedRuntimeReference.model_validate(inputs['runtime'])
+    original = load_completed_runtime(args['runtime'])
+    parameters = dict(runtime=runtime, operation_id=uuid4(), target_disk_type='NETWORK_SSD_NON_REPLICATED')
+    retained = parent.retain_closed_storage(**parameters)
+    assert parent.retain_closed_storage(**parameters) == retained
+    assert parent.load_closed_storage(runtime=runtime, reference=retained.reference) == retained
+    assert retained.registration.spec.operation_id == original.request.database.manager.retained.request.registration.spec.operation_id
+    with pytest.raises(ValueError):
+        parent.load_completed_storage(runtime=runtime, reference=retained.reference)
+    api = ClosedStorageAPI(retained)
+
+    def run():
+        return parent.run_closed_storage(retained=retained, api=api)
+
+    assert run() is False  # An applied suspension is not proof that Jobs/Pods drained.
+    assert len(api.collector.patches) == 1 and api.commits == 0
+    assert api.configuration.creates == []
+    api.collector.ready = True
+    api.failure = 'commit-after'
+    assert run() is False  # Resume does not substitute for fresh aggregate publication.
+    assert len(api.configuration.creates) == 1
+    assert len(api.collector.patches) == 3 and api.commits == 1
+    assert api.collector.rows[_key(retained.collector.original)]['spec']['suspend'] is False
+    with pytest.raises(ValueError):
+        parent.load_completed_storage(runtime=runtime, reference=retained.reference)
+    api.publication_ready = True
+    assert run() is True
+    completed = parent.load_completed_storage(runtime=runtime, reference=retained.reference)
+    assert completed.resources.configuration['data']['LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_STORAGE_NAME'] == (
+        'compute.disk.size.network-ssd-non-replicated')
+    assert all(path.read_bytes() == raw for path, raw in original.files.items())
+    assert run() is True
+    assert len(api.configuration.creates) == 1 and len(api.collector.patches) == 3 and api.commits == 1
+    assert all(path.read_bytes() == raw for path, raw in completed.files.items())
+    # A lost completed child cannot be recreated, even though the live pool matches.
+    child = retained.state_dir / 'registry/registry.json'
+    saved = child.read_bytes()
+    child.unlink()
+    with pytest.raises(ValueError):
+        run()
+    assert not child.exists() and api.commits == 1
+    from scripts.ops import nebius_certificates as private_state
+
+    private_state._write_private(child, saved)
+    assert parent.load_completed_storage(runtime=runtime, reference=retained.reference) == completed
+
+
 class PreactivationAPI:
     """Only remote boundaries are doubled; real journals and history are used."""
 
