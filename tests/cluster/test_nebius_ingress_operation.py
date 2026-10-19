@@ -245,7 +245,7 @@ CREATE TABLE task_image_materialization_attempts (native_build jsonb);
                       "volumes": [{"name": "tooling", "hostPath": {"path": "/tmp/loom-ingress-qualification", "type": "Directory"}},
                                   {"name": "runtime", "emptyDir": {}}],
                       "initContainers": [{"name": "install", "image": GUARD_PYTHON, "command": ["sh", "-ec",
-                          "/tooling/uv venv --no-config --no-cache --no-python-downloads --python /usr/local/bin/python /runtime; "
+                          "/tooling/uv venv --clear --no-config --no-cache --no-python-downloads --python /usr/local/bin/python /runtime; "
                           "/tooling/uv pip sync --no-config --no-cache --python /runtime/bin/python --require-hashes "
                           "--only-binary :all: /tooling/requirements.txt; "
                           "/tooling/uv pip install --no-config --no-cache --python /runtime/bin/python --offline --no-deps /tooling/wheels/*.whl"],
