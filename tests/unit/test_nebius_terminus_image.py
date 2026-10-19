@@ -845,6 +845,53 @@ def test_alpine_rejects_apt_update_even_without_apt_packages(tmp_path):
     assert not (tmp_path / OFFLINE_SCRIPT).exists()
 
 
+def test_leap_preparation_retains_authored_source_identity_and_uses_only_zypper():
+    authored = 'FROM opensuse/leap:15.5\nRUN echo authored > /task-input\nUSER 1001:1001\n'
+    derived = append_terminus_runtime_tools(authored)
+    assert derived.startswith(authored)
+    assert derived.endswith('USER 1001:1001\n')
+    assert 'zypper' in derived and 'apt-get' not in derived
+    assert '--dry-run' in derived and '--no-refresh' in derived
+    assert 'addrepo' not in derived and 'dist-upgrade' not in derived
+
+
+@pytest.mark.parametrize('transaction,drift,accepted', [
+    ('<install-summary><to-install><solvable type="package" name="tmux"/></to-install></install-summary>', False, True),
+    ('<install-summary><to-upgrade/></install-summary>', False, False),
+    ('<install-summary><to-downgrade/></install-summary>', False, False),
+    ('<install-summary><to-remove/></install-summary>', False, False),
+    ('<install-summary><to-install><solvable type="package" name="libc"/></to-install></install-summary>', False, False),
+    ('<install-summary><to-install/></install-summary>', True, False),
+    ('<install-summary><to-install/></install-summary>', 'key-renewal', True),
+    ('<stream/>', False, False),
+])
+def test_leap_solver_and_inventory_reject_authored_package_changes(tmp_path, transaction, drift, accepted):
+    from loom.nebius_terminus_image import _suse_package_install
+    installed = tmp_path / 'installed'
+    installed.write_text('libc 0:1-1.x86_64\ngpg-pubkey 0:old-key.(none)\n')
+    called = tmp_path / 'install-called'
+    rpm = tmp_path / 'rpm'
+    rpm.write_text('#!/bin/sh\ncase "$*" in\n*-qa*) cat "$LOOM_TEST_INSTALLED" ;;\n*) exit 1 ;;\nesac\n')
+    manager = tmp_path / 'zypper'
+    manager.write_text('#!/bin/sh\nset -eu\ncase "$*" in\n'
+                       '*--dry-run*) printf "%s\\n" "$LOOM_TEST_TRANSACTION" ;;\n'
+                       '*install*) touch "$LOOM_TEST_INSTALL_CALLED"; '
+                       'if [ "$LOOM_TEST_DRIFT" = 1 ]; then '
+                       'printf "libc 0:2-1.x86_64\\n" > "$LOOM_TEST_INSTALLED"; '
+                       'elif [ "$LOOM_TEST_DRIFT" = 2 ]; then '
+                       'printf "libc 0:1-1.x86_64\\ngpg-pubkey 0:renewed-key.(none)\\n" > "$LOOM_TEST_INSTALLED"; fi ;;\nesac\n')
+    timeout = tmp_path / 'timeout'
+    timeout.write_text('#!/bin/sh\nshift\nexec "$@"\n')
+    for executable in (rpm, manager, timeout):
+        executable.chmod(0o755)
+    env = {**os.environ, 'PATH': f"{tmp_path}:{os.environ['PATH']}",
+           'LOOM_TEST_TRANSACTION': transaction, 'LOOM_TEST_INSTALLED': str(installed),
+           'LOOM_TEST_INSTALL_CALLED': str(called), 'LOOM_TEST_DRIFT': '2' if drift == 'key-renewal' else str(int(drift))}
+    result = subprocess.run(['/bin/sh', '-c', _suse_package_install()], capture_output=True, text=True, env=env)
+    assert (result.returncode == 0) is accepted, result.stderr
+    assert called.exists() is (accepted or drift)
+
+
 @pytest.mark.parametrize('wrapped', ['if false; then\napk add --no-cache wget\nfi',
                                    'bootstrap() {\napk add --no-cache wget\n}',
                                    '(\napk add --no-cache wget\n)',

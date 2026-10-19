@@ -31,6 +31,7 @@ from loom.nebius_kubernetes import (
 from loom.nebius_pool_native_runtime import PoolNativeRuntimeV1
 from loom.security.redaction import redact_text
 from loom.task_image_build_plan import derive_task_image_build_components
+from loom.task_image_errors import package_guard_failure, preparation_failure_from_receipt
 from loom_control_plane.execution_capacity import (
     _CAPACITY_ADMISSION_LOCK,
     ExecutionProvisioningBlockedError,
@@ -392,6 +393,19 @@ def build_observation(observation: dict[str, Any]) -> dict[str, Any]:
                 if isinstance(reason, str) and re.fullmatch(r"[A-Za-z][A-Za-z0-9]{0,63}", reason):
                     safe["reason"] = reason
                 phase["state"] = {kind: safe}
+                if row["name"] == "prepare" and kind == "terminated":
+                    message = detail.get("message", "")
+                    if isinstance(message, str) and len(message.encode()) <= 4096:
+                        try:
+                            receipt = json.loads(message)
+                        except ValueError:
+                            receipt = None
+                        classified = preparation_failure_from_receipt(receipt)
+                        if classified is not None:
+                            phase["preparation_error"] = {
+                                key: receipt[key] for key in ('error_schema', 'error_code', 'retryable')
+                            }
+                            phase["preparation_error"]["error"] = _safe_log(classified[1])
             phases.append(phase)
         result["phases"] = phases
     if observation.get("builder_log"):
@@ -420,12 +434,25 @@ def _native_failure(native: dict[str, Any]) -> tuple[str, str, bool] | None:
     for phase in native.get("phases", []):
         if phase.get("state", {}).get("terminated", {}).get("reason") == "OOMKilled":
             return "build_oom_killed", "Native build phase " + phase["name"] + " was OOMKilled", False
+    unclassified_prepare_failure = False
+    for phase in native.get("phases", []):
+        if phase.get("name") == "prepare" and phase.get("state", {}).get("terminated", {}).get("exitCode", 0):
+            classified = preparation_failure_from_receipt(phase.get("preparation_error"))
+            if classified is not None:
+                return classified
+            unclassified_prepare_failure = True
     for phase in native.get("phases", []):
         if phase.get("name") == "build" and phase.get("state", {}).get("terminated", {}).get("exitCode") == 124:
             return "build_deadline_exceeded", "Native build exceeded the task's build timeout", True
+        if phase.get("name") == "build" and phase.get("state", {}).get("terminated", {}).get("exitCode", 0):
+            classified = package_guard_failure(native.get('builder_log', ''))
+            if classified is not None:
+                return classified
     for condition in native.get("job_conditions", []):
         if condition.get("status") == "True" and condition.get("reason") == "DeadlineExceeded":
             return "build_deadline_exceeded", "Job DeadlineExceeded: " + condition.get("message", ""), True
+    if unclassified_prepare_failure:
+        return "build_prepare_failed", "Native prepare failed without a classified retryable cause", False
     return None
 
 
@@ -784,7 +811,7 @@ async def record_native_build_result(session: AsyncSession, row: TaskImageMateri
             "build_" + phase + "_failed",
             ("Native build phase " + phase + " failed. " + native.get("builder_log", ""))
             if phase == "build" else "Native build phase " + phase + " failed: " + _phase_error(observed, phase),
-            phase != "build")
+            phase not in {"build", "prepare"})
         try:
             await fail_native_build(session, row, reason, builder_id=builder_id, retryable=retryable, images=images, message=message)
         except TaskImageCompletionError:

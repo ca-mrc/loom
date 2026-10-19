@@ -68,6 +68,7 @@ def build_s3_client(
     access_key: str | None = None,
     secret_key: str | None = None,
     region: str = "us-east-1",
+    config: Config | None = None,
 ) -> Any:
     """Build a boto3 S3 client per the configured ``auth_kind``.
 
@@ -97,7 +98,7 @@ def build_s3_client(
             aws_access_key_id=access_key,
             aws_secret_access_key=secret_key,
             region_name=region,
-            config=Config(signature_version="s3v4"),
+            config=Config(signature_version="s3v4").merge(config or Config()),
         )
     if auth_kind == "irsa":
         # boto3's default provider chain: env vars → shared credentials
@@ -108,7 +109,7 @@ def build_s3_client(
             "s3",
             endpoint_url=endpoint_url,
             region_name=region,
-            config=Config(signature_version="s3v4"),
+            config=Config(signature_version="s3v4").merge(config or Config()),
         )
     raise UnsupportedAuthKindError(
         f"auth_kind={auth_kind!r} not supported by build_s3_client. "

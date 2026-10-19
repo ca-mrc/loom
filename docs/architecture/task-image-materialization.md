@@ -30,6 +30,46 @@ manifest from the actual files and checks the registered identity, legacy revisi
 and mode digest together. Malformed or mismatched strong identity cannot fall back
 to checksum-only validation. Sources without that field retain the legacy reader.
 
+Before creating a Batch or any Trials, native execution admission reads the
+frozen service-input manifest and its primary Dockerfile through the existing
+source-storage authority. It checks that binding and classifies the actual final
+base with `classify_terminus_image`; task labels are not a compatibility claim.
+The same pure classifier runs in native image preparation. Submission, failed
+rerun and library clone use this admission boundary, so a deterministic rejection
+is atomic. A temporarily unavailable source returns HTTP 503; unsupported or
+invalid input returns HTTP 400. These bounded reads run outside the event loop
+with at most eight concurrent compatibility checks. Existing frozen task packages,
+execution plans and historical results are not rewritten.
+
+The additional qualified distribution is exactly `opensuse/leap:15.5`. The
+platform appends a derived harness layer using the existing Zypper repositories
+and the distribution packages `asciinema bash ca-certificates curl shadow python3
+tar tmux`. It does not add repositories, switch distribution, rewrite authored
+RUN commands or substitute a Python interpreter. It installs only missing
+packages. Before installation, Zypper's XML dry-run transaction must contain no
+removal, upgrade, downgrade, reinstallation or replacement of an installed RPM.
+The installation reuses that refreshed metadata with `--no-refresh`, and every
+previously installed name/epoch/version/release/architecture must still exist
+afterward. Only exact-name `gpg-pubkey` pseudo-records are excluded from this
+software inventory: the distribution's normal verified repository-key renewal
+may update those trust-metadata records. GPG verification remains enabled;
+unknown-key auto-import and GPG bypass flags are not used. Qualification records
+the key metadata before and after separately. A required authored-package change fails the build; no ready image
+is published. The original USER is restored after the platform layer.
+
+Preparation termination receipts carry schema
+`loom.task-image-preparation-error.v1`, a stable `image_preparation_*` code and
+its explicit retry classification. Unsupported bases, invalid Dockerfiles or
+inputs, missing objects and denied access do not retry. Typed connection/read
+timeouts and temporary source-service failures use the existing bounded SDK and
+materialization retry budgets. Unknown prepare failures fail without automatic
+retry; exception wording cannot grant retry authority. The package-preservation
+guard emits an explicit structured diagnostic; the failed build can retain its
+nonretryable `image_preparation_package_change_required` code. Only that
+nonretryable guard code is accepted from build output. Original build failures
+and timeouts retain their existing policies; ordinary prose is not parsed into
+source or connection failures.
+
 Task-source recovery inventories only versions whose stored metadata matches the
 committed write intent. Its shared `loom.trajectory.immutable_object` reader then
 fetches the exact non-null S3 `VersionId` and verifies the returned version, byte

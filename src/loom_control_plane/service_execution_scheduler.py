@@ -40,6 +40,7 @@ from loom.service_execution_materialization import (
     resolve_runner_task_image,
     verifier_handoff_input,
 )
+from loom.task_image_failure import image_preparation_failure
 from loom.task_image_materialization import (
     get_trial_task_image_execution_grant,
     resolve_prepared_task,
@@ -327,12 +328,15 @@ async def _compile_service_candidate_plan(
             # Nothing was admitted: no attempt, lease, quota or model accounting
             # exists to release. Use the same queued terminal transition as the
             # retry-exhaustion sweeper; batch status derives from Trial state.
+            typed_failure = image_preparation_failure(prerequisites[0].failure_reason)
+            result = ({"task_image_preparation_failure": typed_failure} if typed_failure is not None else None)
             await session.execute(update(Trial).where(
                 Trial.id == row["id"], Trial.state == "queued",
                 Trial.cancellation_requested_at.is_(None),
             ).values(state="failed", failure_reason="task_image_build_failed",
                      failure_message="Task image preparation failed; inspect the build result.",
-                     finished_at=current_time, next_attempt_at=None))
+                     finished_at=current_time, next_attempt_at=None,
+                     **({"result": result} if result is not None else {})))
             return None
         raise ExecutionProvisioningBlockedError("task_image_preparation_pending", retry_after_seconds=15)
     try:

@@ -137,8 +137,19 @@ def _runtime(tmp_path: Path, provider: str, model: str, base: str):
     ledger = LocalHarborLedger(trial_id=trial_id, model=tracked, connection=connection, rate_cards=rates)
     runtime = LoomTerminus2Runtime(model=tracked, team_id=str(uuid4()), trial_id=trial_id,
         cp_client=None, gateway_url="", direct_provider=connection, direct_ledger=ledger, max_turns=2)
-    driver = FakeDriver(exec_handler=lambda *args: ExecResult(return_code=0,
-        stdout=b"qualification terminal\n", stderr=b"", duration_sec=0))
+
+    def terminal(command: str, *_args: Any) -> ExecResult:
+        # This terminal transport is scripted, including tmux's literal pane
+        # liveness protocol. Ordinary screen text cannot stand in for pane_dead.
+        if command.startswith("tmux display-message") and "#{pane_dead}" in command:
+            stdout = b"0\n"
+        elif command.startswith("tmux set-option") and "remain-on-exit" in command:
+            stdout = b""
+        else:
+            stdout = b"qualification terminal\n"
+        return ExecResult(return_code=0, stdout=stdout, stderr=b"", duration_sec=0)
+
+    driver = FakeDriver(exec_handler=terminal)
     writer = TrajectoryWriter(local_path=tmp_path / "events.jsonl", store=FakeObjectStore(),
         bucket="qualification", key=f"{trial_id}/events.jsonl", min_part_bytes=0)
     return runtime, ledger, driver, writer

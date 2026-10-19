@@ -68,6 +68,67 @@ def test_receipt_requires_owned_pod_successful_publisher_and_exact_identity():
         publication_receipt(job, materialization_id=image_id, lease_epoch=2)
 
 
+@pytest.mark.parametrize('code,retryable', [
+    ('image_preparation_base_unsupported', False),
+    ('image_preparation_input_invalid', False),
+    ('image_preparation_source_unavailable', True),
+])
+def test_preparation_retry_authority_survives_native_observation(code, retryable):
+    from loom.task_image_errors import TaskImagePreparationError
+    from loom_execution_actuator.task_image_controller import _native_failure
+
+    _, job = receipt_job()
+    receipt = TaskImagePreparationError(code, 'Preparation failed').receipt()
+    job['pods'][0]['status']['initContainerStatuses'] = [{
+        'name': 'prepare', 'state': {'terminated': {
+            'exitCode': 1, 'reason': 'Error', 'message': json.dumps(receipt),
+        }},
+    }]
+    assert _native_failure(build_observation(job)) == (code, 'Preparation failed', retryable)
+
+
+@pytest.mark.parametrize('message', ['unsupported base connection timeout',
+                                  '{"error":"temporary connection failure","retryable":true}',
+                                  '{"error_schema":"loom.task-image-preparation-error.v1","error_code":"foreign","retryable":true}'])
+def test_unstructured_prepare_failure_does_not_gain_retry_from_prose(message):
+    from loom_execution_actuator.task_image_controller import _native_failure
+
+    _, job = receipt_job()
+    job['pods'][0]['status']['initContainerStatuses'] = [{
+        'name': 'prepare', 'state': {'terminated': {'exitCode': 1, 'reason': 'Error', 'message': message}},
+    }]
+    assert _native_failure(build_observation(job))[2] is False
+
+
+def test_prepare_interrupted_by_job_deadline_keeps_infrastructure_retry_policy():
+    from loom_execution_actuator.task_image_controller import _native_failure
+
+    assert _native_failure({
+        'phases': [{'name': 'prepare', 'state': {'terminated': {'exitCode': 137}}}],
+        'job_conditions': [{'status': 'True', 'reason': 'DeadlineExceeded'}],
+    })[0::2] == ('build_deadline_exceeded', True)
+
+
+def test_package_preservation_guard_survives_failed_build_observation():
+    from loom.task_image_errors import (
+        PACKAGE_GUARD_MESSAGE,
+        PACKAGE_GUARD_PREFIX,
+        TaskImagePreparationError,
+    )
+    from loom_execution_actuator.task_image_controller import _native_failure
+
+    _, job = receipt_job()
+    job['status'] = {'failed': 1}
+    job['pods'][0]['status']['initContainerStatuses'] = [{
+        'name': 'build', 'state': {'terminated': {'exitCode': 1, 'reason': 'Error'}},
+    }]
+    frame = TaskImagePreparationError('image_preparation_package_change_required', PACKAGE_GUARD_MESSAGE).receipt()
+    job['builder_log'] = '#7 1.25 ' + PACKAGE_GUARD_PREFIX + json.dumps(frame)
+    assert _native_failure(build_observation(job)) == (
+        'image_preparation_package_change_required', PACKAGE_GUARD_MESSAGE, False,
+    )
+
+
 @pytest.mark.parametrize("message", ["[]", "{}", "x" * 4097, "invalid json"])
 def test_bad_receipt_is_bounded_validation_error(message):
     image_id, job = receipt_job(message=message)
