@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
-from scripts.ops.nebius_management_refresh import render_refresh
+from scripts.ops.nebius_management_refresh import platform_disk_type, render_refresh
 from scripts.ops.nebius_management_refresh_install import (
     ManagementRefreshInstallRequest,
     refresh_manager_options,
@@ -72,8 +72,9 @@ class PoolManagerRefresh:
                     or _uid(render.active) != _uid(pool.active)):
                 raise ValueError
             render_refresh(render)
+            disk_changed = platform_disk_type(render.before) != platform_disk_type(render.after)
             if request.platform_rollout is None:
-                if self.successor is not None:
+                if self.successor is not None or disk_changed:
                     raise ValueError
             elif (self.successor is None or self.successor.reference != request.platform_rollout
                     or pool.completion.outcome != 'legacy'
@@ -99,6 +100,36 @@ class PoolManagerRefresh:
         except Exception:
             raise ValueError('pool_refresh_projection_unqualified') from None
 
+    def provider_options(self) -> tuple[dict[str, Any], dict[str, tuple[str, str, str, str, str]]]:
+        """Project only the source-selected primary storage quota for a read.
+
+        Historical registration and the stopped pool observer remain untouched.
+        Live collector identity, credentials and native disk still need the
+        existing provider qualifier before and after its bounded observation.
+        """
+        from loom.nebius_platform_render import EXECUTION_DISK_STORAGE_QUOTAS
+
+        pool = self.qualify()
+        context, successor = pool.context, self.successor
+        original = context.request.collector_config
+        quotas = copy.deepcopy(context.inputs.installation.quota_identities)
+        desired = copy.deepcopy(original)
+        if successor is None:
+            return desired, quotas
+        key = 'LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_STORAGE_NAME'
+        selected = successor.resources[_key(original)]
+        if (selected.get('apiVersion') != 'v1' or selected.get('kind') != 'ConfigMap'
+                or _key(selected) != _key(original)
+                or original['metadata']['namespace'] != successor.config['execution_namespace']):
+            raise ValueError('pool_refresh_provider_projection_unqualified')
+        name = EXECUTION_DISK_STORAGE_QUOTAS[successor.config.get('execution_disk_type', 'NETWORK_SSD')]
+        desired['data'][key] = name
+        if selected['data'] != desired['data'] or original['data'][key] != quotas['storage'][3]:
+            raise ValueError('pool_refresh_provider_projection_unqualified')
+        storage = quotas['storage']
+        quotas['storage'] = (*storage[:3], name, storage[4])
+        return desired, quotas
+
     def workload_options(self) -> dict[str, tuple[dict[str, Any], ...]]:
         """Permit only exact manager journal states; preserve all other workloads."""
         try:
@@ -120,6 +151,8 @@ class PoolManagerRefresh:
             return copy.deepcopy(original)
         pool = (self.predecessor if isinstance(self.predecessor, CompletedPoolCutover)
             else self.predecessor.pool_baseline)
+        if pool is None:
+            raise ValueError('pool_refresh_projection_unqualified')
         dormant = pool.context.request.fencing.retirement.dormant_consumers
         if any(_key(original) == _key(row) for consumer in dormant
                 for row in (consumer.actuator, consumer.collector)):

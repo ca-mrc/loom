@@ -311,7 +311,8 @@ class PoolCutoverEntryChecks:
                 qualify_pool_manager_database(self.context, self.readers.history)
             else:
                 qualify_pool_manager_database(self.context, self.readers.history, refresh=self.refresh)
-            qualify_pool_provider(self.context, self.readers.base)
+            qualify_pool_provider(self.context, self.readers.base,
+                **({} if self.refresh is None else {'refresh': self.refresh}))
             self.current()
         except Exception:
             raise EntryError("pool cutover connected prerequisites unqualified") from None
@@ -513,7 +514,8 @@ def _collector_cloud_credential(context: PoolCutoverContext, base: HTTPSManageme
     return value
 
 
-def qualify_pool_provider(context: PoolCutoverContext, base: HTTPSManagementPrerequisites) -> None:
+def qualify_pool_provider(context: PoolCutoverContext, base: HTTPSManagementPrerequisites, *,
+        refresh: PoolManagerRefresh | None = None) -> None:
     """Qualify the actual collector principal, physical group and quota scope.
 
     This read neither requests nodes nor reserves a share of provider headroom.
@@ -523,12 +525,17 @@ def qualify_pool_provider(context: PoolCutoverContext, base: HTTPSManagementPrer
     """
     try:
         original = context.request.collector_config
+        expected, quota_identities = original, context.inputs.installation.quota_identities
+        if refresh is not None:
+            if refresh.qualify().context != context:
+                raise ValueError
+            expected, quota_identities = refresh.provider_options()
         namespace, name = original["metadata"]["namespace"], original["metadata"]["name"]
         path = "/api/v1/namespaces/" + namespace + "/configmaps/" + name
         current = base._request("GET", path)
-        if current is None or not _matches(current, original, _uid(original)):
+        if current is None or not _matches(current, expected, _uid(original)):
             raise ValueError
-        raw, spec = original["data"], context.inputs.installation
+        raw, spec = expected["data"], context.inputs.installation
         foundation = context.original.deployment.installation.foundation.platform_config
         values: dict[str, Any] = {}
         for field, definition in NebiusCapacitySourceSettings.model_fields.items():
@@ -563,7 +570,7 @@ def qualify_pool_provider(context: PoolCutoverContext, base: HTTPSManagementPrer
                 try:
                     snapshot = await reader.capture_pool(expected_cluster_id=spec.cluster_id)
                     if (snapshot.node_group is None or snapshot.node_group.id != spec.node_group_id
-                            or {key: quota_identity(value) for key, value in snapshot.quota_resources.items()} != spec.quota_identities
+                            or {key: quota_identity(value) for key, value in snapshot.quota_resources.items()} != quota_identities
                             or snapshot.provider_capacity_state != "available"
                             or snapshot.autoscaler_state not in {"ready", "scaling"}):
                         raise ValueError
@@ -582,7 +589,8 @@ def qualify_pool_provider(context: PoolCutoverContext, base: HTTPSManagementPrer
                 raise ValueError
         current = base._request("GET", path)
         if (_collector_cloud_credential(context, base) != before
-                or current is None or not _matches(current, original, _uid(original))):
+                or current is None or not _matches(current, expected, _uid(original))
+                or (refresh is not None and refresh.provider_options() != (expected, quota_identities))):
             raise ValueError
     except Exception:
         raise EntryError("pool cutover provider unqualified") from None
@@ -687,7 +695,7 @@ def connected_pool_readers(context: PoolCutoverContext, *, refresh: PoolManagerR
                     qualify_pool_manager_database(context, history)
                 else:
                     qualify_pool_manager_database(context, history, refresh=refresh)
-                qualify_pool_provider(context, base)
+                qualify_pool_provider(context, base, **({} if refresh is None else {'refresh': refresh}))
                 if load_pool_cutover_inputs(context.operation) != context:
                     raise ValueError
             except EntryError:
