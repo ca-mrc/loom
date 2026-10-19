@@ -134,13 +134,15 @@ def test_storage_parent_predispatch_failure_does_not_strand_registry_intent(tmp_
 
 @pytest.mark.parametrize('kind', ['configuration', 'workload'])
 @pytest.mark.parametrize('damage', [None, 'delete', 'replace'])
-def test_storage_predispatch_read_failure_preserves_retry_or_damaged_evidence(tmp_path, kind, damage):
+@pytest.mark.parametrize('boundary', ['parent', 'transport'])
+def test_storage_predispatch_read_failure_preserves_retry_or_damaged_evidence(tmp_path, kind, damage, boundary):
     from dataclasses import asdict
 
     from scripts.ops.nebius_development_runtime_transition import advance_runtime_workloads
     from scripts.ops.nebius_ingress_stage import _key
     from scripts.ops.nebius_management_material import ManagementBinding
     from scripts.ops.nebius_management_stage import _stage_fixed_documents
+    from scripts.ops.nebius_management_transport import ManagementNotDispatchedError
     from scripts.ops.nebius_pool_storage_operation import _StorageStage, _StorageWorkload
     from tests.ops.test_nebius_development_runtime_transition import transition
     from tests.support.nebius_phase_api import PhaseAPI
@@ -150,9 +152,10 @@ def test_storage_predispatch_read_failure_preserves_retry_or_damaged_evidence(tm
     state, changed = tmp_path / 'child', []
     path = state / ('stage.json' if kind == 'configuration' else 'transition.json')
     failing = True
+    transport_failed = False
 
     def qualify():
-        if failing and path.exists():
+        if failing and (boundary == 'parent' or transport_failed) and path.exists():
             record = json.loads(path.read_bytes())
             if any(item['status'] in {'intent', 'create_intent'} for item in record['resources'].values()):
                 if damage == 'delete':
@@ -183,6 +186,19 @@ def test_storage_predispatch_read_failure_preserves_retry_or_damaged_evidence(tm
             return advance_runtime_workloads(originals=originals, targets=targets,
                 input_digest='sha256:' + 'a' * 64, phase='stop',
                 api=_StorageWorkload(api, qualify, lambda: None), state_dir=state)
+
+    if boundary == 'transport':
+        name = 'create_resource' if kind == 'configuration' else 'patch_workload'
+        original = getattr(api, name)
+
+        def fail_before_transport(*args):
+            nonlocal transport_failed
+            if failing:
+                transport_failed = True
+                raise ManagementNotDispatchedError('final HTTP preflight failed without emitting a write')
+            return original(*args)
+
+        setattr(api, name, fail_before_transport)
 
     with pytest.raises((ValueError, RuntimeError)):
         run()

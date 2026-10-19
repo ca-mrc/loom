@@ -853,7 +853,7 @@ def test_storage_collector_https_uses_execution_namespace_and_preserves_uid_cas(
 
 @pytest.mark.timeout(600)
 def test_connected_closed_storage_requires_stopped_gateway_and_fresh_bound_publication(
-        shared_operation, shared_runtime, completed_pool, handoff, monkeypatch, tmp_path):
+        shared_operation, shared_runtime, completed_pool, handoff, monkeypatch, tmp_path, capsys):
     """Catch bypassed live checks, old inventory fallback, or premature completion."""
     import hmac
     import importlib
@@ -862,8 +862,10 @@ def test_connected_closed_storage_requires_stopped_gateway_and_fresh_bound_publi
     from types import SimpleNamespace
 
     import httpx
+    from scripts.ops import nebius_certificates as private_state
     from scripts.ops import nebius_development_runtime_probes as probes_module
     from scripts.ops import nebius_pool_storage_operation as parent
+    from scripts.ops import nebius_shared_pool_entry as entry_module
     from scripts.ops.nebius_development_runtime_live import runtime_resource_path
     from scripts.ops.nebius_pool_migration_guard import _BOUND_DATABASE_COMMAND
     from scripts.ops.nebius_pool_runtime_settings import (
@@ -890,10 +892,17 @@ def test_connected_closed_storage_requires_stopped_gateway_and_fresh_bound_publi
     assert importlib.util.find_spec(name) is not None, 'connected closed storage adapter is missing'
     module = importlib.import_module(name)
     args, bindings = shared_operation
-    _, _, inputs, _, _ = _shared_entry_inputs(args, bindings)
+    root, operation, inputs, _, _ = _shared_entry_inputs(args, bindings)
     retained = parent.retain_closed_storage(runtime=RetainedRuntimeReference.model_validate(inputs['runtime']),
         operation_id=uuid4(), target_disk_type='NETWORK_SSD_NON_REPLICATED')
     refresh = retained.inputs.refresh
+    inputs.update(schema_version='loom.nebius-shared-pool-inputs.v3', storage=retained.reference.model_dump(mode='json'))
+    private_state._atomic_json(root / 'inputs.json', inputs)
+    operation['inputs_sha256'] = hashlib.sha256((root / 'inputs.json').read_bytes()).hexdigest()
+    private_state._atomic_json(root / 'operation.json', operation)
+    monkeypatch.setattr(entry_module, 'SOURCE_RECORD', root / 'shared-pool-source.json')
+    assert hasattr(entry_module, 'load_storage_inputs'), 'pending storage correction needs protected intake'
+    assert entry_module.load_storage_inputs(operation).retained == retained
     _, documents, fallback = runtime_http_inventory(args['runtime'], shared_runtime[1], completed_pool[3].server, handoff[2])
     for row in documents.values():
         row['metadata'].setdefault('resourceVersion', '501')
@@ -1025,9 +1034,7 @@ def test_connected_closed_storage_requires_stopped_gateway_and_fresh_bound_publi
         if state['failure'] == 'provider':
             raise ValueError('provider storage drift')
 
-    operator = tmp_path / 'storage-operator.json'
-    from scripts.ops import nebius_certificates as private_state
-    private_state._write_private(operator, b'{"test":"operator"}')
+    operator = root / 'operator-key.json'
     with monkeypatch.context() as patch:
         patch.setattr(module, 'qualify_runtime_publication', publication)
         patch.setattr(module, 'qualify_runtime_cloud', cloud)
@@ -1078,6 +1085,22 @@ def test_connected_closed_storage_requires_stopped_gateway_and_fresh_bound_publi
             assert events[-3:] == ['database', 'settings', 'capacity']
             assert run()
             assert events.count('registry') == 1 and events.count('collector') == 3
+        async def authenticate(connection):
+            assert connection == entry_module.NebiusKubernetesConnection.model_validate(inputs['operator_connection'])
+            return ssl.create_default_context(cadata=args['runtime'].database.foundation.bootstrap['material']['loom-platform-db']['ca.crt']), 'operator-test'
+
+        patch.setattr(entry_module, '_transport', authenticate)
+        assert entry_module.main(str(root / 'operation.json'), 'refresh-storage') == 0
+        result = json.loads(capsys.readouterr().out)
+        assert result['status'] == 'shared_pool_storage_refreshed'
+        assert result['storage_id'] == str(retained.reference.operation_id)
+        assert result['admission_open'] is False and result['writer_migration_complete'] is False
+        assert events.count('registry') == 1 and events.count('collector') == 3
+        # The same completed selection is consumable by handoff intake; it does
+        # not manufacture admission or replay any original installation stage.
+        context = entry_module.load_inputs(operation)
+        assert context.bindings.plan.storage.retained.reference == retained.reference
+        assert context.bindings.migration.registration.spec == retained.registration.spec
 
 
 class PreactivationAPI:
