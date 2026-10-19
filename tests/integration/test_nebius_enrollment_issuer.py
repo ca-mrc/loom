@@ -1,6 +1,7 @@
 """Real publication/foundation/SQL qualification precedes closed enrollment grants."""
 from __future__ import annotations
 
+import asyncio
 import copy
 import importlib
 import json
@@ -216,6 +217,23 @@ async def test_unfinished_inspection_remains_pending_and_recovers_original_job(s
         api.pending = False
         assert await module.issue_enrollment(policy=policy, operation_id=operation_id, **inputs) is not None
         assert len(api.creates) == 2, 'recovery must not make another inspection Job'
+
+
+async def test_capacity_observer_dispatches_required_read_only_proof_without_changing_enrollment(sessions, tmp_path, platform_inputs, publication):
+    from scripts.ops.nebius_environment_runtime_install import _observe
+
+    async with prepared(sessions, tmp_path, platform_inputs, publication) as (_module, policy, inputs, _remote, api):
+        api.pending = True
+        directory = policy.host.state_root / 'capacity-observations'
+        assert await asyncio.to_thread(_observe, policy, directory, inputs['connect'], require_capacity=True) is None
+        configs = [row for row in api.resources.values() if row['kind'] == 'ConfigMap']
+        config, = configs
+        request = json.loads(config['data']['request.json'])
+        assert request['require_capacity'] is True
+        assert request['participant_id'] == str(policy.participant.participant_id)
+        assert api.request.action == 'status'
+        assert await asyncio.to_thread(_observe, policy, directory, inputs['connect'], require_capacity=True) is None
+        assert len(api.creates) == 2, 'pending capacity inspection keeps the same fixed Job'
 
 
 async def test_published_runtime_cannot_gain_unpublished_execution_capabilities(sessions, tmp_path, platform_inputs, publication):
