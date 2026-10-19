@@ -32,7 +32,7 @@ from tests.unit.test_nebius_candidate_catalog import publication as publication
 @pytest.mark.parametrize('committed_enrollment', [False, True])
 @pytest.mark.timeout(180)
 async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact_effects(
-        sessions, tmp_path, platform_inputs, publication, publisher_cloud, committed_enrollment, running):
+        sessions, tmp_path, platform_inputs, publication, publisher_cloud, committed_enrollment, running, monkeypatch):
     name = 'scripts.ops.nebius_environment_runtime_install'
     assert importlib.util.find_spec(name), 'protected independent runtime installer is missing'
     module = importlib.import_module(name)
@@ -386,6 +386,11 @@ async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact
                 transition_id = uuid4()
                 issuing = dict(**final_inputs, transition_id=transition_id, action=action, predecessor=predecessor,
                     boundary_connection=boundary_connection)
+                if action == 'ready':
+                    allow_quotas = False
+                    assert await activation.issue_environment_activation(**issuing) is None
+                    assert not (retained.state_dir / ('activation-' + str(transition_id)) / 'issued.json').exists()
+                    allow_quotas = True
                 reference = await activation.issue_environment_activation(**issuing)
                 assert reference.participant_id == policy.participant.participant_id
                 operation = _load(policy.host, reference)
@@ -412,3 +417,19 @@ async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact
             # The earlier ready intent stays immutable even after activation.
             assert await activation.issue_environment_activation(**issued[0][0]) == issued[0][1]
             assert len(changes) == 11, 'issuing admission operations cannot modify Kubernetes boundaries again'
+            issuance_path = retained.state_dir / ('activation-' + str(issued[0][0]['transition_id'])) / 'issued.json'
+            saved = issuance_path.read_bytes()
+            class Later(datetime):
+                @classmethod
+                def now(cls, tz=None):
+                    return datetime.now(tz) + timedelta(hours=2)
+            with monkeypatch.context() as clock:
+                clock.setattr(activation, 'datetime', Later)
+                assert await activation.issue_environment_activation(**issued[0][0]) == issued[0][1]
+            assert issuance_path.read_bytes() == saved, 'historical grant recovery must not renew issuance or readiness'
+            damaged = json.loads(saved)
+            damaged['request']['expected_head'] = str(uuid4())
+            issuance_path.write_text(json.dumps(damaged))
+            with pytest.raises(ValueError, match='environment_activation_issuance_unqualified'):
+                await activation.issue_environment_activation(**issued[0][0])
+            issuance_path.write_bytes(saved)

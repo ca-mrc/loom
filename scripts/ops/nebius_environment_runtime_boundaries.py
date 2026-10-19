@@ -14,6 +14,7 @@ from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 from uuid import UUID
@@ -179,6 +180,43 @@ def load_environment_boundary_progress(*, policy: PoolEnrollmentPolicyV2,
         raise ValueError('environment_boundary_history_unqualified') from None
 
 
+@contextmanager
+def _boundary_connection(before: dict[str, dict[str, Any]], desired: dict[str, dict[str, Any]],
+        namespaces: dict[str, str], check: Callable[[], None], *, policy: PoolEnrollmentPolicyV2,
+        started: StartedEnvironmentRuntimeV2) -> Iterator[BoundaryWorkloadAPI]:
+    profiles: tuple[_TaskImage | _ApplicationImage, ...] = (*policy.profiles.task_images, *policy.profiles.application_images)
+    if not profiles or any(row.target.namespace != policy.participant.build_namespace.name for row in profiles):
+        raise ValueError('environment_boundary_build_profiles_unqualified')
+    build_policy = {key: doc for key, doc in started.resources.items()
+        if doc['kind'] in {'ValidatingAdmissionPolicy', 'ValidatingAdmissionPolicyBinding'}}
+    with _resources(policy, desired, namespaces, check) as api:
+        yield EnvironmentBoundaryWorkloads(api, before, desired, policy.host.runtime.region,
+            _readers(started), build_policy=build_policy, build_profile=profiles[0])
+
+
+def verify_prepared_environment_boundaries(*, policy: PoolEnrollmentPolicyV2, started: StartedEnvironmentRuntimeV2,
+        progress: EnvironmentBoundaryProgressV2, qualify: Callable[[], None],
+        boundary_connection: BoundaryConnection | None = None) -> bool:
+    """Fresh read-only admission/inventory proof from every completed successor."""
+    if progress.plan is None or progress.cursor != {'phases': dict.fromkeys(_PHASES, 'complete')}:
+        raise ValueError('environment_boundaries_not_prepared')
+    qualify()
+    factory: BoundaryConnection = boundary_connection or partial(_boundary_connection, policy=policy, started=started)
+    targets = boundary_targets(participant=policy.participant, reader_count=len(_readers(started)), originals=progress.plan['originals'])
+    with factory(progress.plan['originals'], targets, started.staged.plan['namespace_uids'], qualify) as api:
+        api.check_inventory()
+        if not api.policy_ready():
+            return False
+        for key, choices in progress.options.items():
+            expected, = choices
+            if not api.workload_ready(key, _snapshot(expected)):
+                return False
+        api.check_inventory()
+        ready = api.policy_ready()
+    qualify()
+    return ready
+
+
 async def prepare_environment_boundaries(*, policy: PoolEnrollmentPolicyV2, operation_id: UUID,
         platform_policy: PlatformRuntimePolicyV2, catalog: GitHubCandidateCatalog, kubernetes: KubernetesEnvironmentProvider,
         cloud: FoundationCloud, public_http: httpx.AsyncClient, connect: Connection,
@@ -238,18 +276,7 @@ async def prepare_environment_boundaries(*, policy: PoolEnrollmentPolicyV2, oper
                         or _read(anchor) != {'operation_id': str(operation_id), 'plan_sha256': digest(plan)}
                         or any(state._private_read(file, limit=8 * 1024**2) != raw for file, raw in started.files.items())):
                     raise ValueError('environment_boundary_evidence_changed')
-            @contextmanager
-            def connection(before: dict[str, dict[str, Any]], desired: dict[str, dict[str, Any]],
-                    namespaces: dict[str, str], check: Callable[[], None]) -> Iterator[BoundaryWorkloadAPI]:
-                profiles: tuple[_TaskImage | _ApplicationImage, ...] = (*policy.profiles.task_images, *policy.profiles.application_images)
-                if not profiles or any(row.target.namespace != policy.participant.build_namespace.name for row in profiles):
-                    raise ValueError('environment_boundary_build_profiles_unqualified')
-                build_policy = {key: doc for key, doc in started.resources.items()
-                    if doc['kind'] in {'ValidatingAdmissionPolicy', 'ValidatingAdmissionPolicyBinding'}}
-                with _resources(policy, desired, namespaces, check) as api:
-                    yield EnvironmentBoundaryWorkloads(api, before, desired, policy.host.runtime.region,
-                        _readers(started), build_policy=build_policy, build_profile=profiles[0])
-            factory = boundary_connection or connection
+            factory: BoundaryConnection = boundary_connection or partial(_boundary_connection, policy=policy, started=started)
             for phase, key in _keys(policy.participant).items():
                 before, desired = {key: plan['originals'][key]}, {key: targets[key]}
                 child = directory / phase

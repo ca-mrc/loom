@@ -47,6 +47,7 @@ from scripts.ops.nebius_platform_runtime_readiness import (
 from scripts.ops.nebius_pool_administration_dispatch import (
     Connection,
     PoolAdministrationReferenceV2,
+    _load,
 )
 from scripts.ops.nebius_pool_enrollment_issuer import (
     PoolEnrollmentPolicyV2,
@@ -66,8 +67,30 @@ from loom_service.pool_management.inspection import (
     PoolInspectionV2,
     qualify_inspection,
 )
+from loom_service.pool_management.lifecycle_contracts import PoolParticipantOperationV2
 
 ProbeConnection = Callable[[Callable[[], None], str], AbstractContextManager[EnvironmentRuntimeProbes]]
+
+
+def qualify_readiness_predecessor(*, policy: PoolEnrollmentPolicyV2, enrollment: PoolAdministrationReferenceV2,
+        snapshot: PoolInspectionSnapshotV2, predecessor: PoolAdministrationReferenceV2 | None) -> None:
+    """A ready successor needs its exact private scoped grant, never a state skip."""
+    selected = snapshot.participant
+    if selected is None or selected.binding != policy.participant or selected.profiles != policy.profiles:
+        raise ValueError('environment_runtime_participant_changed')
+    if predecessor is None:
+        if selected.head.state != 'enrolled' or selected.head.operation_id != enrollment.operation_id:
+            raise ValueError('environment_runtime_not_enrolled')
+        return
+    previous = _load(policy.host, predecessor).request
+    if (not isinstance(previous, PoolParticipantOperationV2) or previous.action != 'ready'
+            or previous.expected_head != enrollment.operation_id or previous.expected_binding_sha256 != selected.head.binding_sha256
+            or previous.pool_authority_sha256 != snapshot.pool_authority_sha256
+            or previous.readiness is None or previous.readiness.catalog_sha256 != selected.catalog_sha256
+            or (previous.pool_id, previous.participant_id, previous.incarnation) != (
+                policy.participant.pool_id, policy.participant.participant_id, policy.participant.incarnation)
+            or selected.head.operation_id != predecessor.operation_id or selected.head.state != 'ready'):
+        raise ValueError('environment_runtime_ready_predecessor_unqualified')
 
 
 class FixedProcessTransport:
@@ -161,7 +184,8 @@ def _process_connection(check: Callable[[], None], region: str, *, policy: PoolE
 
 async def observe_environment_runtime(*, policy: PoolEnrollmentPolicyV2, operation_id: UUID,
         catalog: GitHubCandidateCatalog, kubernetes: KubernetesEnvironmentProvider, cloud: FoundationCloud,
-        public_http: httpx.AsyncClient, connect: Connection, probe_connection: ProbeConnection | None = None) -> dict[str, Any] | None:
+        public_http: httpx.AsyncClient, connect: Connection, probe_connection: ProbeConnection | None = None,
+        _readiness_predecessor: PoolAdministrationReferenceV2 | None = None) -> dict[str, Any] | None:
     """Fresh process/data readback from anchored completed startup, not activation."""
     try:
         retained = load_started_environment_runtime(policy=policy, operation_id=operation_id)
@@ -174,10 +198,8 @@ async def observe_environment_runtime(*, policy: PoolEnrollmentPolicyV2, operati
         snapshot = qualify_inspection(observation['report']['receipt'], PoolInspectionV2.model_validate(observation['input']['request']),
             UUID(observation['input']['authorization']['authorization_id']))
         enrollment = PoolAdministrationReferenceV2.model_validate(staged.plan['enrollment'])
-        selected = snapshot.participant
-        if (selected is None or selected.binding != policy.participant or selected.profiles != policy.profiles
-                or selected.head.state != 'enrolled' or selected.head.operation_id != enrollment.operation_id
-                or str(kubernetes.http.base_url).rstrip('/') != policy.host.connection.endpoint.rstrip('/')):
+        qualify_readiness_predecessor(policy=policy, enrollment=enrollment, snapshot=snapshot, predecessor=_readiness_predecessor)
+        if str(kubernetes.http.base_url).rstrip('/') != policy.host.connection.endpoint.rstrip('/'):
             raise ValueError
         if any(catalog.publications.get(row.candidate_id) != row for row in (policy.application_publication, policy.manager_publication)):
             raise ValueError
@@ -203,6 +225,7 @@ async def observe_environment_runtime(*, policy: PoolEnrollmentPolicyV2, operati
             raise ValueError
         expires = min(snapshot.valid_until, foundation.foundation.observed_at + timedelta(minutes=5), *(row.expires_at for row in policy.machines))
         def qualify() -> None:
+            qualify_readiness_predecessor(policy=policy, enrollment=enrollment, snapshot=snapshot, predecessor=_readiness_predecessor)
             if (not snapshot.observed_at <= datetime.now(UTC) < expires or _policy(policy) != staged.plan['policy']
                     or any(state._private_read(path, limit=8 * 1024**2) != raw for path, raw in files.items())):
                 raise ValueError('environment_runtime_readiness_evidence_changed')
@@ -266,7 +289,8 @@ async def observe_environment_pre_activation(*, policy: PoolEnrollmentPolicyV2, 
         platform_policy: PlatformRuntimePolicyV2, catalog: GitHubCandidateCatalog,
         kubernetes: KubernetesEnvironmentProvider, cloud: FoundationCloud, public_http: httpx.AsyncClient,
         connect: Connection, probe_connection: ProbeConnection | None = None,
-        platform_probe_connection: ProbeConnection | None = None) -> dict[str, Any] | None:
+        platform_probe_connection: ProbeConnection | None = None,
+        _readiness_predecessor: PoolAdministrationReferenceV2 | None = None) -> dict[str, Any] | None:
     """Connect current application and platform evidence, with admission closed.
 
     No staging predecessor, application source equality with peers, pool open or
@@ -280,7 +304,8 @@ async def observe_environment_pre_activation(*, policy: PoolEnrollmentPolicyV2, 
                     policy.participant.installation_id, policy.participant.pool_id)):
             raise ValueError
         environment = await observe_environment_runtime(policy=policy, operation_id=operation_id, catalog=catalog,
-            kubernetes=kubernetes, cloud=cloud, public_http=public_http, connect=connect, probe_connection=probe_connection)
+            kubernetes=kubernetes, cloud=cloud, public_http=public_http, connect=connect, probe_connection=probe_connection,
+            _readiness_predecessor=_readiness_predecessor)
         if environment is None:
             return None
         retained = load_started_environment_runtime(policy=policy, operation_id=operation_id)
@@ -298,7 +323,7 @@ async def observe_environment_pre_activation(*, policy: PoolEnrollmentPolicyV2, 
                 UUID(value['input']['authorization']['authorization_id']))
         snapshot, before = inspected(observation), inspected(environment['inspection'])
         if (snapshot.participant != before.participant or snapshot.pool_authority_sha256 != before.pool_authority_sha256
-                or snapshot.participant is None or snapshot.participant.head.state != 'enrolled'):
+                or snapshot.participant is None or snapshot.participant.head.state not in {'enrolled', 'ready'}):
             raise ValueError
         expires = min(snapshot.valid_until, datetime.fromisoformat(environment['valid_until']))
         material = policy.foundation_dir / 'material.json'

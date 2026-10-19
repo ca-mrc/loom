@@ -117,8 +117,18 @@ only the exact running readers, with no dormant Jobs or other task producers.
 Lost write replies permit readback, not blind retries. Readiness accepts changed
 foundation resources only through anchored boundary successor journals, preserving
 original startup/creation receipts. `runtime_boundaries_prepared_closed` does not
-open participant admission. Scoped ready/activate issuance, public host/workflow
-delivery and installed multi-owner execution remain separate requirements.
+open participant admission.
+
+The protected activation issuer re-observes the application, platform, completed
+boundaries and empty task inventory before issuing an exact short-lived `ready`
+or `activate` operation. Activation selects the committed ready predecessor by its
+private administration reference, not a caller-provided state bypass. The existing
+fixed administration Job commits that operation with participant-head CAS and fresh
+physical accounting; issuance alone performs no database mutation. Re-reading an
+issued grant preserves its original request and expiry, even after activation or
+expiration. A new attempt needs a new explicit operation identity. Public issuer
+configuration/host/workflow delivery and installed multi-owner execution remain
+separate requirements; the generic production promotion adapter is not yet wired.
 
 Explicit legacy adoption preserves qualified v1 authority, credentials and
 history. A completed global handoff is not repeated; standalone allocation cannot
