@@ -423,7 +423,7 @@ def test_shared_publisher_requires_exact_clean_integrated_source(tmp_path, monke
         publisher.verify_source(selected)
 
 
-@pytest.mark.parametrize('action', ['preflight', 'install', 'recover', 'refresh-catalog'])
+@pytest.mark.parametrize('action', ['preflight', 'install', 'recover', 'refresh-catalog', 'refresh-storage'])
 @pytest.mark.parametrize('version', [1, 2])
 def test_shared_workflow_executes_protected_selector_and_cleans_its_key(tmp_path, action, version):
     flow = yaml.safe_load((ROOT / '.github/workflows/nebius-rollout.yml').read_text())
