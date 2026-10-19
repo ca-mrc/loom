@@ -383,6 +383,12 @@ callers keep their existing boundary, and traffic/PVC assertions remain required
 Addon failures include bounded Pod waiting reasons and warning events; the
 retirement fixture also records PVC status without logging Secrets or Pod specs.
 
+The native repeat-refresh test retains its iteration and bounded Deployment,
+ReplicaSet, Pod and warning-event status before deleting its disposable node on
+failure. Diagnostic reads have individual request bounds and cannot replace the
+original error. They include no resource specs, Secret data or arbitrary error
+messages; the existing Pod-creation and overall test deadlines remain unchanged.
+
 The 75-minute integration budget retains room for optional coverage and runner
 variation. File counts alone do not measure shard balance; use the per-shard
 duration reports from the current head.
