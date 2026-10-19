@@ -17,6 +17,8 @@ from uuid import UUID
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 from scripts.ops import nebius_certificates as state
+from scripts.ops.nebius_ingress_stage import _key, _uid
+from scripts.ops.nebius_management_switch import _matches
 
 from loom.nebius_environment_foundation import (
     EnvironmentFoundationDeclarationV2,
@@ -59,8 +61,8 @@ class FoundationObservationV2(_Strict):
     identity: EnvironmentFoundationIdentityV2
     plan_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
     observed_at: AwareDatetime
-    phase: Literal['resources_verified'] = 'resources_verified'
-    execution_enabled: Literal[False] = False
+    phase: Literal['resources_verified', 'runtime_bindings_verified'] = 'resources_verified'
+    execution_enabled: Literal[False] | None = False
     namespace_uids: dict[str, str]
     identities: dict[str, str]
 
@@ -197,12 +199,19 @@ async def _material(state_dir: Path, context: ProvisioningContext, step: Provisi
 
 async def reconcile_foundation(*, state_dir: Path, reference: FoundationReferenceV2,
         kubernetes: KubernetesEnvironmentProvider, cloud: FoundationCloud,
-        observe_only: bool = False) -> FoundationObservationV2:
+        observe_only: bool = False,
+        _runtime_successors: dict[str, tuple[dict[str, Any], ...]] | None = None) -> FoundationObservationV2:
     """Recover exact effects and qualify all bindings, including completed steps.
 
     Holding a nonblocking local operation lock prevents concurrent local runners;
     no database transaction is held across provider IO. Separate environments
     have distinct state roots. The host's pinned issuer supplies the clients.
+
+    Runtime-only callers may supply exact UID-bound successors reconstructed from
+    their anchored phase journals. This is not a public skip-list: only the fixed
+    app/worker-boundary keys are replaceable, all data and credential bindings
+    remain checked, and this mode cannot create or rewrite foundation history.
+    The runtime parent separately owns rollout and process readiness.
     """
     with state._locked_state(state_dir):
         observed_at = datetime.now(UTC)
@@ -252,6 +261,20 @@ async def reconcile_foundation(*, state_dir: Path, reference: FoundationReferenc
                 1, 1, reference.operation_id), declaration.registration.model_dump(mode='json'),
             declaration.platform_config, identities,
             documents={step.key: step.payload for step in steps if step.kind == 'kubernetes'})
+        if _runtime_successors is not None:
+            row = reference.identity
+            allowed = {f'k8s:Deployment:{row.application_namespace}:{name}' for name in (
+                'loom-service', 'loom-control-plane', 'loom-web', 'loom-llm-gateway')}
+            allowed.add('k8s:Namespace:-:' + row.build_namespace)
+            allowed.update(f'k8s:ResourceQuota:{namespace}:loom-execution-disabled'
+                for namespace in (row.execution_namespace, row.build_namespace))
+            if not observe_only or not _runtime_successors or set(_runtime_successors) - allowed:
+                raise ValueError('foundation_runtime_scope_invalid')
+            for key, options in _runtime_successors.items():
+                if (not options or len(options) > 2 or key not in context.documents or any(
+                        key != 'k8s:' + _key(doc)
+                        or _uid(doc) != identities[key] for doc in options)):
+                    raise ValueError('foundation_runtime_successor_invalid')
         cloud_provider = NebiusEnvironmentCloudProvider(cloud)
         for index, step in enumerate(steps):
             # Retain each intended effect before attempting it, including the
@@ -262,7 +285,19 @@ async def reconcile_foundation(*, state_dir: Path, reference: FoundationReferenc
                 kind, expected = cloud_provider.intent(context, step)
                 intent['resolved'] = {'kind': kind, 'body': expected}
             _retain(step_root / f'{index:04d}.intent.json', intent)
-            if step.kind == 'object_bucket' or action in {'service_account', 'group', 'membership', 'access_key'}:
+            if _runtime_successors is not None and step.key in _runtime_successors:
+                _, resource_path = kubernetes._path(context, step.payload)
+                actual = await kubernetes._request('GET', resource_path)
+                if actual is None or not any(_matches(actual, expected, identities[step.key])
+                        for expected in _runtime_successors[step.key]):
+                    raise ValueError('foundation_runtime_successor_conflict')
+                identity = identities[step.key]
+            elif _runtime_successors is not None and step.kind == 'application_ready':
+                # Startup intentionally stops these processes. Their exact
+                # successor manifests are checked above; the parent must prove
+                # drain/start and process configuration, not reuse this receipt.
+                identity = identities[step.key]
+            elif step.kind == 'object_bucket' or action in {'service_account', 'group', 'membership', 'access_key'}:
                 identity = await cloud_provider.apply(context, step, create=create)
             elif action == 'material':
                 identity = digest(await _material(state_dir, context, step, cloud, create=create))
@@ -283,12 +318,16 @@ async def reconcile_foundation(*, state_dir: Path, reference: FoundationReferenc
             if step.key in identities and identities[step.key] != identity:
                 raise ProviderBlockedError('foundation_resource_identity_conflict')
             _retain(step_root / f'{index:04d}.observed.json', {'key': step.key, 'identity': identity})
-            records[f'{index:04d}'] = digest({'key': step.key, 'identity': identity})
-            state._atomic_json(cursor_path, {'records': records})
+            if _runtime_successors is None:
+                records[f'{index:04d}'] = digest({'key': step.key, 'identity': identity})
+                state._atomic_json(cursor_path, {'records': records})
             identities[step.key] = identity
         await qualify_cluster()
         observed = FoundationObservationV2(operation_id=reference.operation_id, identity=reference.identity,
             plan_sha256=reference.plan_sha256, observed_at=observed_at, identities=identities,
+            phase='resources_verified' if _runtime_successors is None else 'runtime_bindings_verified',
+            execution_enabled=False if _runtime_successors is None else None,
             namespace_uids={name: identities['k8s:Namespace:-:' + name] for name in context.namespaces})
-        state._atomic_json(state_dir / 'observed.json', observed.model_dump(mode='json'))
+        if _runtime_successors is None:
+            state._atomic_json(state_dir / 'observed.json', observed.model_dump(mode='json'))
         return observed

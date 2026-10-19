@@ -8,11 +8,11 @@ import httpx
 import pytest
 from scripts.ops import nebius_environment_foundation as foundation
 from scripts.ops.nebius_ingress_stage import _snapshot
+from tests.ops.test_nebius_environment_foundation import Remote, prepare, run
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 
 from loom_service.environment_management.kubernetes_provider import KubernetesEnvironmentProvider
 from loom_service.environment_management.provider import ProviderBlockedError
-from tests.ops.test_nebius_environment_foundation import Remote, prepare, run
-from tests.support.nebius_platform import platform_inputs as platform_inputs
 
 
 @pytest.mark.parametrize('damage', [None, 'uid', 'unapproved', 'data', 'create'])
