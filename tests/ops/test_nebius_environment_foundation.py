@@ -5,15 +5,16 @@ import base64
 import copy
 import importlib
 import json
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import httpx
 import pytest
+from tests.support.nebius_platform import platform_inputs as platform_inputs
+from tests.unit.test_nebius_environment_foundation import ROOT, declaration
 
 from loom_service.environment_management.kubernetes_provider import KubernetesEnvironmentProvider
 from loom_service.environment_management.provider import ProviderBlockedError, ProviderRetryError
-from tests.support.nebius_platform import platform_inputs as platform_inputs
-from tests.unit.test_nebius_environment_foundation import ROOT, declaration
 
 
 def module():
@@ -26,6 +27,7 @@ class Remote:
     def __init__(self, state):
         self.state, self.kubernetes, self.cloud, self.writes = state, {}, {}, []
         self.lose = None
+        self.first_read = None
 
     def assert_journaled(self):
         assert (self.state / 'plan.json').exists(), 'effect preceded frozen plan'
@@ -34,6 +36,8 @@ class Remote:
     def http(self, request):
         path = request.url.path
         if request.method == 'GET':
+            if self.first_read is None:
+                self.first_read = datetime.now(UTC)
             return httpx.Response(200, json=self.kubernetes[path]) if path in self.kubernetes else httpx.Response(404)
         assert request.method == 'POST', 'foundation creation cannot patch or delete'
         self.assert_journaled()
@@ -98,6 +102,7 @@ async def test_foundation_creation_uses_own_resources_then_reobserves_without_re
     observed = await run(state, reference, remote)
     assert observed.phase == 'resources_verified'
     assert observed.execution_enabled is False
+    assert observed.observed_at <= remote.first_read, 'long provisioning cannot mint fresh evidence from old reads'
     assert set(observed.namespace_uids) == {'app-red', 'work-red', 'build-red'}
     assert all(value in {doc['metadata']['uid'] for doc in remote.kubernetes.values()}
         for value in observed.namespace_uids.values())
@@ -182,4 +187,17 @@ async def test_exact_import_is_read_only_preserves_credentials_and_rejects_repla
     secret['metadata']['uid'] = 'recreated'
     with pytest.raises(ProviderBlockedError, match='identity_conflict'):
         await run(destination, imported, remote)
+    assert remote.writes == writes
+
+
+async def test_missing_completed_step_record_is_not_treated_as_permission_to_recreate(tmp_path, platform_inputs):
+    state = tmp_path / 'foundation'
+    reference = prepare(state, platform_inputs)
+    remote = Remote(state)
+    await run(state, reference, remote)
+    writes = copy.deepcopy(remote.writes)
+    (state / 'steps' / '0000.observed.json').unlink()
+    del remote.kubernetes['/api/v1/namespaces/app-red']
+    with pytest.raises(ValueError, match='journal'):
+        await run(state, reference, remote)
     assert remote.writes == writes
