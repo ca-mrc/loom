@@ -190,6 +190,7 @@ jobs:
           NEBIUS_TASK_IDENTITY_READY: ${{ vars.NEBIUS_TASK_IDENTITY_READY || 'false' }}
           NEBIUS_TERMINUS2_MULTI_MODEL_READY: ${{ vars.NEBIUS_TERMINUS2_MULTI_MODEL_READY || 'false' }}
           NEBIUS_GUEST_RUNTIME_READY: ${{ vars.NEBIUS_GUEST_RUNTIME_READY || 'false' }}
+          NEBIUS_SHARED_GUEST_READY: ${{ vars.NEBIUS_SHARED_GUEST_READY || 'false' }}
           NEBIUS_EMULATED_PKCS11_READY: ${{ vars.NEBIUS_EMULATED_PKCS11_READY || 'false' }}
           NEBIUS_GUEST_RUNTIME_VOLUME_MIB: ${{ vars.NEBIUS_GUEST_RUNTIME_VOLUME_MIB }}
           NEBIUS_GUEST_MAX_ARTIFACT_BYTES: ${{ vars.NEBIUS_GUEST_MAX_ARTIFACT_BYTES }}
@@ -243,7 +244,8 @@ jobs:
           if [[ "$PUBLICATION_MODE" == platform ]]; then
             : "${NEBIUS_EMULATED_PKCS11_READY:=false}"
             : "${NEBIUS_TERMINUS2_MULTI_MODEL_READY:=false}"
-            for setting in NEBIUS_TASK_WEB_EGRESS_READY NEBIUS_SERVICE_LIFECYCLE_READY NEBIUS_TASK_IDENTITY_READY NEBIUS_TERMINUS2_MULTI_MODEL_READY NEBIUS_GUEST_RUNTIME_READY NEBIUS_EMULATED_PKCS11_READY; do
+            : "${NEBIUS_SHARED_GUEST_READY:=false}"
+            for setting in NEBIUS_TASK_WEB_EGRESS_READY NEBIUS_SERVICE_LIFECYCLE_READY NEBIUS_TASK_IDENTITY_READY NEBIUS_TERMINUS2_MULTI_MODEL_READY NEBIUS_GUEST_RUNTIME_READY NEBIUS_SHARED_GUEST_READY NEBIUS_EMULATED_PKCS11_READY; do
               case "${!setting}" in
                 true|false) ;;
                 *) echo "Invalid runtime readiness setting: $setting" >&2; exit 1 ;;
@@ -262,6 +264,11 @@ jobs:
             elif [[ -n "$NEBIUS_GUEST_RUNTIME_VOLUME_MIB" || -n "$NEBIUS_GUEST_MAX_ARTIFACT_BYTES" ]]; then
               echo "Guest budgets require explicit guest runtime readiness" >&2
               exit 1
+            fi
+            if [[ "$NEBIUS_SHARED_GUEST_READY" == true ]]; then
+              test "$NEBIUS_GUEST_RUNTIME_READY" == true
+              test "$NEBIUS_TASK_IDENTITY_READY" == true
+              publication_args+=(--supports-shared-guest)
             fi
             if [[ "$NEBIUS_EMULATED_PKCS11_READY" == true ]]; then
               test "$NEBIUS_GUEST_RUNTIME_READY" == true
