@@ -3,7 +3,12 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import io
 import json
+import shutil
+import subprocess
+import sys
+import zipfile
 from pathlib import Path
 from uuid import uuid4
 
@@ -102,3 +107,37 @@ def test_public_report_only_projects_bound_receipt_identity(damage):
         assert output['status'] == 'complete' and output['reference'] == ref
         assert output['receipt_sha256'] == hashlib.sha256(json.dumps(receipt, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
         assert 'proof' not in output, 'private receipt content is not public runner output'
+
+
+def test_bundle_loads_real_dispatch_from_published_wheel_and_only_pinned_scripts(tmp_path):
+    from scripts.ops.nebius_ingress_rollout import build_wheels
+
+    gateway = module()
+    build = tmp_path / 'build'
+    build.mkdir()
+    uv = shutil.which('uv')
+    assert uv is not None
+    wheels = build_wheels(build, uv=Path(uv))
+    content = {name: raw for name, raw in members().items() if not name.startswith('wheels/')}
+    content.update({'wheels/' + path.name: path.read_bytes() for path in wheels.iterdir()})
+    files, _ = gateway.unpack_bundle(archive(content))
+    root, site = tmp_path / 'source', tmp_path / 'site'
+    for name, raw in files.items():
+        if name.startswith('scripts/'):
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(raw)
+        elif name.startswith('wheels/'):
+            with zipfile.ZipFile(io.BytesIO(raw)) as wheel:
+                wheel.extractall(site)
+    result = subprocess.run([sys.executable, '-I', '-c',
+        'import sys,pathlib;root=pathlib.Path(sys.argv[1]);site=pathlib.Path(sys.argv[2]);'
+        'sys.path[:0]=[str(root),str(site)];'
+        'from scripts.ops.nebius_pool_administration_dispatch import main;'
+        'assert all(pathlib.Path(m.__file__).is_relative_to(root) for n,m in sys.modules.items() '
+        'if n.startswith("scripts.ops.") and getattr(m,"__file__",None));'
+        'assert all(pathlib.Path(m.__file__).is_relative_to(site) for n,m in sys.modules.items() '
+        'if n.split(".")[0] in ("loom","loom_service") and getattr(m,"__file__",None));'
+        'raise SystemExit(main("/missing","a"*64,"prepare","{}"))', str(root), str(site)],
+        cwd=tmp_path, capture_output=True, timeout=45)
+    assert result.returncode == 1 and json.loads(result.stdout)['status'] == 'blocked', result.stderr.decode()
