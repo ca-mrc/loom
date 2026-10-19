@@ -179,3 +179,19 @@ async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact
         quota = remote.kubernetes['/api/v1/namespaces/work-red/resourcequotas/loom-execution-disabled']
         assert quota['spec']['hard'] == {'pods': '1', 'count/jobs.batch': '0'}
         assert remote.kubernetes['/api/v1/namespaces/build-red/resourcequotas/loom-execution-disabled']['spec']['hard'] == {'pods': '0'}
+        # Read-only successors must come from all anchored completed phases,
+        # not a caller template or merely the presence of running workloads.
+        assert hasattr(startup, 'load_started_environment_runtime'), 'completed startup evidence reader missing'
+        current = startup.load_started_environment_runtime(policy=policy, operation_id=kwargs['operation_id'])
+        assert current.resources['Deployment:app-red:loom-service']['spec']['replicas'] == 1
+        assert current.resources['Deployment:work-red:loom-execution-actuator']['spec']['replicas'] == 1
+        assert current.resources['ResourceQuota:work-red:loom-execution-disabled']['spec']['hard']['count/jobs.batch'] == '0'
+        child = retained.state_dir / 'start' / 'replace' / 'transition.json'
+        saved = child.read_bytes()
+        child.unlink()
+        with pytest.raises(ValueError, match='environment_runtime_started_unqualified'):
+            startup.load_started_environment_runtime(policy=policy, operation_id=kwargs['operation_id'])
+        child.write_bytes(saved)
+        child.chmod(0o600)
+        assert startup.load_started_environment_runtime(policy=policy, operation_id=kwargs['operation_id']).resources == current.resources
+        assert len(changes) == 8
