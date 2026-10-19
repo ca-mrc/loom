@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import importlib
 from dataclasses import replace
+from datetime import datetime
 from uuid import uuid4
 
 import pytest
@@ -114,3 +115,52 @@ async def test_inspection_job_cannot_be_rendered_as_apply(sessions):
     assert {'name': 'LOOM_POOL_ADMINISTRATION_ACTION', 'value': 'status'} in container['env']
     with pytest.raises(ValueError):
         jobs().administration_documents(replace(job, action='apply', observation_id=None))
+
+
+async def test_capacity_inspection_is_read_only_bounded_and_not_an_available_slot_claim(sessions):
+    module, job, selected, _change = await prepared(sessions)
+    assert 'require_capacity' in module.PoolInspectionV2.model_fields, 'activation capacity inspection missing'
+    # Ordinary retained inventory request/report bytes remain unchanged.
+    assert 'require_capacity' not in job.request.model_dump(mode='json')
+    ordinary = await observe(sessions, job)
+    assert 'capacity' not in ordinary['snapshot']
+    request = module.PoolInspectionV2.model_validate({**job.request.model_dump(mode='json'), 'require_capacity': True})
+    grant = job.authorization.model_copy(update={'request_sha256': digest(request.model_dump(mode='json'))})
+    before = None
+    async with sessions() as session:
+        before = await session.scalar(select(func.count()).select_from(NebiusPoolLifecycleOperation))
+    result = await observe(sessions, replace(job, request=request, authorization=grant))
+    jobs().validate_administration_report(replace(job, request=request, authorization=grant), result)
+    capacity, = result['snapshot']['capacity']
+    assert capacity['pool_id'] == str(selected.pool_id)
+    assert capacity['pool_authority_sha256'] == ordinary['snapshot']['pool_authority_sha256']
+    assert datetime.fromisoformat(result['snapshot']['valid_until']) <= datetime.fromisoformat(capacity['valid_until'])
+    assert set(capacity) == {'pool_id', 'pool_authority_sha256', 'observation_id', 'observed_at', 'valid_until', 'placement_sha256'}
+    # Removing a required observation is not a successful inventory-only report.
+    damaged = copy.deepcopy(result)
+    damaged['snapshot'].pop('capacity')
+    with pytest.raises(ValueError):
+        jobs().validate_administration_report(replace(job, request=request, authorization=grant), damaged)
+    async with sessions() as session:
+        assert await session.scalar(select(func.count()).select_from(NebiusPoolLifecycleOperation)) == before
+
+
+async def test_capacity_inspection_requires_authentic_observation_but_enrollment_does_not(sessions):
+    from tests.integration.test_nebius_pool_participant_lifecycle import platform
+
+    _, spec, _, _, _, _ = await platform(sessions)
+    module = inspection()
+    assert 'require_capacity' in module.PoolInspectionV2.model_fields, 'activation capacity inspection missing'
+    selected = spec.participants[2]
+    body = dict(schema_version='loom.pool-inspection.v2', operation_id=uuid4(), installation_id=spec.installation_id,
+        pool_id=spec.pool_id, participant_id=selected.participant_id, environment_id=selected.environment_id,
+        incarnation=selected.incarnation, environment_class=selected.environment_class)
+    async def run(required):
+        request = module.PoolInspectionV2(**body, require_capacity=required)
+        grant = authorization(administration(), selected, request)
+        async with sessions.begin() as session:
+            await session.execute(text('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY'))
+            return await administration().administer(session, request.model_dump_json().encode(), grant, action='status')
+    assert (await run(False))['snapshot']['participant'] is None
+    with pytest.raises(ValueError, match='pool_observation_unavailable'):
+        await run(True)
