@@ -12,6 +12,7 @@ from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 import boto3
@@ -38,11 +39,14 @@ from loom.db.schema import (
     Team,
     TeamQuota,
     Token,
+    Trial,
+    TrialTaskImageMaterialization,
     User,
 )
 from loom.taskset.materialize import MaterializeOutput, TaskRowDraft
 from loom.taskset.storage_bytes import team_taskset_storage_bytes
 from loom.taskset.transform_sandbox import TransformSandboxConfig
+from loom_control_plane.routes.trials import _ensure_trial_task_image_links
 from loom_service import taskset_gc, taskset_materializer
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
@@ -392,6 +396,73 @@ async def _submit_inline_task_set(
         )
     assert response.status_code == 202, response.text
     return response.json()["task_set_id"]
+
+
+async def test_public_rebuild_preserves_trial_and_retained_bundle(materialization_setup) -> None:
+    app, tokens, teams = materialization_setup
+    headers = {"Authorization": f"Bearer {tokens['team_a']}"}
+    trial_id = uuid4()
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post(
+                "/api/v1/tasksets", headers=headers,
+                files={
+                    "manifest": ("manifest.yaml", _MANIFEST_BUNDLE_UPLOAD.encode(), "application/x-yaml"),
+                    "bundle": ("bundle.tar.gz", _bundle_tar_bytes(), "application/gzip"),
+                },
+            )
+            assert response.status_code == 202, response.text
+            task_set_id = response.json()["task_set_id"]
+            await _run_materializer_once(app)
+            async with app.state.session_factory() as session:
+                task = (await session.scalars(select(Task).where(Task.task_set_id == task_set_id))).one()
+                task_id, checksum, source = task.id, task.checksum, task.source
+                await session.execute(insert(Trial).values(
+                    id=trial_id, team_id=teams["team_a"], task_id=task_id,
+                    config={"agent_name": "oracle"}, requires_caps={}, state="failed",
+                    failure_reason="previous_oracle_failure", result={"fixture": "original"},
+                ))
+                await _ensure_trial_task_image_links(session, trial_id=trial_id, task_row=task)
+                image = (await session.scalars(select(TaskImageMaterialization).where(
+                    TaskImageMaterialization.task_id == task_id,
+                ))).one()
+                image_id, frozen_source = image.id, image.task_source
+                frozen_config, frozen_provenance = image.task_config, image.task_source_provenance
+                await session.commit()
+
+            response = await client.post(f"/api/v1/tasksets/{task_set_id}/rebuild", headers=headers)
+            assert response.status_code == 202, response.text
+            await _run_materializer_once(app)
+            response = await client.get(f"/api/v1/tasksets/{task_set_id}", headers=headers)
+            assert response.status_code == 200, response.text
+            assert response.json()["status"] == "ready"
+            assert response.json()["materialization_job_state"] == "succeeded"
+            assert response.json()["task_count"] == 1
+            async with app.state.session_factory() as session:
+                current = await session.get(Task, task_id)
+                assert current.checksum == checksum
+                assert current.source != source
+                assert (await session.get(Trial, trial_id)).result == {"fixture": "original"}
+                assert list(await session.scalars(select(TrialTaskImageMaterialization.materialization_id).where(
+                    TrialTaskImageMaterialization.trial_id == trial_id,
+                ))) == [image_id]
+                image = await session.get(TaskImageMaterialization, image_id)
+                assert (image.task_source, image.task_config, image.task_source_provenance) == (
+                    frozen_source, frozen_config, frozen_provenance,
+                )
+                for retained_source in (current.source, frozen_source):
+                    parsed = urlsplit(retained_source)
+                    obj = app.state.minio_client.get_object(
+                        Bucket=parsed.netloc, Key=parsed.path.lstrip("/") + "data/input.txt",
+                    )
+                    assert obj["Body"].read() == b"per-task payload\n"
+    finally:
+        async with app.state.session_factory() as session:
+            await session.execute(delete(TrialTaskImageMaterialization).where(
+                TrialTaskImageMaterialization.trial_id == trial_id,
+            ))
+            await session.execute(delete(Trial).where(Trial.id == trial_id))
+            await session.commit()
 
 
 async def _seed_canary_system_team(app: FastAPI) -> UUID:

@@ -90,6 +90,13 @@ new materialization; it does not edit historical trial inputs. `ready` confirms
 materialization, not successful task execution or support for every declared
 runtime requirement.
 
+Rebuild updates retained task IDs in place so existing Trial references remain
+valid. New task IDs are inserted and removed, unreferenced IDs are deleted in
+the same fenced publication transaction. Removing a task still referenced by
+history remains rejected atomically. Existing Trials keep their frozen native
+image-materialization associations; rebuilding does not attach the new revision
+to those Trials.
+
 Sandbox file-transfer failures expose only fixed reason codes such as
 `file_permission_denied`, `file_read_only_filesystem`, `file_io_error`,
 or `file_invalid_target`. Raw filesystem errors, paths and uploaded contents

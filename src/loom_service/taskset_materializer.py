@@ -344,6 +344,7 @@ async def publish_if_current(
         )
 
     has_publishable_rows = bool(output.task_rows)
+    published_ids = {row.id for row in output.task_rows}
     state = "succeeded" if has_publishable_rows else "failed"
     if output.job_failure_reason and not has_publishable_rows:
         state = "failed"
@@ -367,27 +368,27 @@ async def publish_if_current(
         values=job_values,
     )
     if has_publishable_rows:
-        # A rebuild replaces catalog rows and relocates legacy source objects.
-        # Keep the repaired default only for the exact same task revision; it
-        # must not leak into changed configs/checksums or manifest-backed input.
-        previous_legacy = {
+        # Retained IDs must stay in place: Trials reference these catalog rows.
+        # Keep the job -> TaskSet -> sorted Task lock order within publication.
+        previous_tasks = {
             row.id: row
-            for row in (await session.execute(
-                select(
-                    Task.id, Task.checksum, Task.config, Task.source_provenance,
-                    Task.legacy_separate_verifier_checksum,
-                )
-                .where(
-                    Task.task_set_id == task_set_id,
-                    Task.legacy_separate_verifier_checksum.is_not(None),
-                )
+            for row in (await session.scalars(
+                select(Task)
+                .where(Task.task_set_id == task_set_id)
                 .order_by(Task.id)
                 .with_for_update(),
             )).all()
         }
+        # Keep the repaired default only for the exact same legacy revision.
         legacy_defaults: dict[str, str] = {}
+        seen_ids: set[str] = set()
         for draft in output.task_rows:
-            previous = previous_legacy.get(draft.id)
+            previous = previous_tasks.get(draft.id)
+            if previous is not None and draft.id in seen_ids:
+                # New duplicates still hit the primary key; reused rows need
+                # the same rejection instead of a last-write-wins update.
+                raise ValueError("TaskSet publication contains duplicate task IDs")
+            seen_ids.add(draft.id)
             if (
                 previous is not None
                 and previous.legacy_separate_verifier_checksum
@@ -398,21 +399,26 @@ async def publish_if_current(
                 and "bundle_content_manifest_sha256" not in draft.source_provenance
             ):
                 legacy_defaults[draft.id] = previous.legacy_separate_verifier_checksum
-        await session.execute(delete(Task).where(Task.task_set_id == task_set_id))
-        published_tasks = [
-            Task(
-                id=row.id,
-                checksum=row.checksum,
-                legacy_separate_verifier_checksum=legacy_defaults.get(row.id),
-                config=row.config,
-                source=row.source,
-                source_provenance=row.source_provenance,
-                tags=row.tags,
-                task_set_id=task_set_id,
-                benchmark_id=None,
-            )
-            for row in sorted(output.task_rows, key=lambda row: row.id)
-        ]
+        removed_ids = previous_tasks.keys() - published_ids
+        if removed_ids:
+            # Referenced removals still fail atomically under the existing FKs.
+            await session.execute(delete(Task).where(
+                Task.task_set_id == task_set_id,
+                Task.id.in_(removed_ids),
+            ))
+        published_tasks = []
+        for row in sorted(output.task_rows, key=lambda row: row.id):
+            task_row = previous_tasks.get(row.id)
+            if task_row is None:
+                task_row = Task(id=row.id, task_set_id=task_set_id)
+            task_row.checksum = row.checksum
+            task_row.legacy_separate_verifier_checksum = legacy_defaults.get(row.id)
+            task_row.config = row.config
+            task_row.source = row.source
+            task_row.source_provenance = row.source_provenance
+            task_row.tags = row.tags
+            task_row.benchmark_id = None
+            published_tasks.append(task_row)
         session.add_all(published_tasks)
         await session.flush()
         for task_row in published_tasks:
