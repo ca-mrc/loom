@@ -81,6 +81,7 @@ def _object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 class EnvironmentFoundationDeclarationV2(_Strict):
     schema_version: Literal['loom.environment-foundation.v2']
     operation_id: UUID
+    kube_system_uid: UUID
     registration: EnvironmentFoundationIdentityV2
     platform_config_json: str = Field(min_length=2, max_length=262144)
     public_dns_zone: str
@@ -103,7 +104,7 @@ class EnvironmentFoundationDeclarationV2(_Strict):
     @model_validator(mode='after')
     def binding(self) -> EnvironmentFoundationDeclarationV2:
         config, row = self.platform_config, self.registration
-        if (not self.operation_id.int or config.get('schema_version') != 'loom.nebius-environment-platform.v2'
+        if (not self.operation_id.int or not self.kube_system_uid.int or config.get('schema_version') != 'loom.nebius-environment-platform.v2'
                 or config.get('registration') != row.model_dump(mode='json')
                 or row.public_host.partition('.')[2] != self.public_dns_zone
                 or self.ingress_namespace in row.namespaces

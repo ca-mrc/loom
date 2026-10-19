@@ -207,6 +207,16 @@ async def reconcile_foundation(*, state_dir: Path, reference: FoundationReferenc
         observed_at = datetime.now(UTC)
         plan = _load(state_dir, reference)
         declaration = EnvironmentFoundationDeclarationV2.model_validate(plan['declaration'])
+        async def qualify_cluster() -> None:
+            if str(kubernetes.http.base_url).rstrip('/') != declaration.platform_config['kubernetes_api_server'].rstrip('/'):
+                raise ProviderBlockedError('foundation_cluster_origin_conflict')
+            cluster = await kubernetes._request('GET', '/api/v1/namespaces/kube-system')
+            if (cluster is None or cluster.get('apiVersion') != 'v1' or cluster.get('kind') != 'Namespace'
+                    or cluster.get('metadata', {}).get('name') != 'kube-system'
+                    or cluster['metadata'].get('uid') != str(declaration.kube_system_uid)
+                    or cluster['metadata'].get('deletionTimestamp')):
+                raise ProviderBlockedError('foundation_cluster_identity_conflict')
+        await qualify_cluster()
         steps = _steps(plan)
         create = plan['mode'] == 'create'
         identities = dict(plan['import_identities'] or {})
@@ -275,6 +285,7 @@ async def reconcile_foundation(*, state_dir: Path, reference: FoundationReferenc
             records[f'{index:04d}'] = digest({'key': step.key, 'identity': identity})
             state._atomic_json(cursor_path, {'records': records})
             identities[step.key] = identity
+        await qualify_cluster()
         observed = FoundationObservationV2(operation_id=reference.operation_id, identity=reference.identity,
             plan_sha256=reference.plan_sha256, observed_at=observed_at, identities=identities,
             namespace_uids={name: identities['k8s:Namespace:-:' + name] for name in context.namespaces})
