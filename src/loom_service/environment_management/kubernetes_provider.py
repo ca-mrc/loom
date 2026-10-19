@@ -159,8 +159,10 @@ class KubernetesEnvironmentProvider:
             raise ProviderBlockedError("kubernetes_resource_identity_conflict")
         return uid
 
-    async def apply(self, context: ProvisioningContext, step: ProvisioningStep) -> str:
+    async def apply(self, context: ProvisioningContext, step: ProvisioningStep, *, create: bool = True) -> str:
         if step.kind == "kubernetes":
+            if not create and not context.identities.get(step.key):
+                raise ProviderBlockedError("kubernetes_import_identity_missing")
             expected = self._expected(context, step)
             collection, path = self._path(context, expected)
             namespace = expected["metadata"].get("namespace")
@@ -177,9 +179,16 @@ class KubernetesEnvironmentProvider:
                 }}}, recorded_namespace)
             actual = await self._request("GET", path)
             if actual is None:
-                if step.key in context.identities:
+                if not create or step.key in context.identities:
                     raise ProviderBlockedError("kubernetes_recorded_resource_missing")
-                actual = await self._request("POST", collection, body=expected)
+                reply = await self._request("POST", collection, body=expected)
+                if reply is None:
+                    raise ProviderRetryError("kubernetes_create_unconfirmed")
+                created_uid = self._identity(reply, expected, None)
+                actual = await self._request("GET", path)
+                if actual is None:
+                    raise ProviderRetryError("kubernetes_create_unconfirmed")
+                self._identity(actual, expected, created_uid)
             assert actual is not None
             if actual.get("metadata", {}).get("annotations", {}).get("loom.nebius/retained-by") is not None:
                 raise ProviderBlockedError("kubernetes_resource_retained")
