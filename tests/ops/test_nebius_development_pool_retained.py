@@ -186,6 +186,8 @@ def pool_inputs(request, retained):
         if mode.startswith('foundation-runtime-build-material'):
             for identity in value['quota_identities'].values():
                 identity[0] = config['quota_parent_id']
+            # Match the native SSD template used by observer preflight.
+            value['quota_identities']['storage'][3] = 'compute.disk.size.network-ssd'
             for kind, purpose in (('task_images', 'task'), ('application_images', 'application')):
                 for profile in value['profiles'][kind]:
                     profile['settings'].update(source_secret_name='loom-build-' + purpose + '-source',
