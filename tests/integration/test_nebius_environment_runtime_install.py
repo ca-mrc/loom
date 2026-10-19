@@ -29,6 +29,7 @@ from tests.unit.test_nebius_candidate_catalog import publication as publication
 
 
 @pytest.mark.parametrize('committed_enrollment', [False, True])
+@pytest.mark.timeout(180)
 async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact_effects(
         sessions, tmp_path, platform_inputs, publication, publisher_cloud, committed_enrollment, running):
     name = 'scripts.ops.nebius_environment_runtime_install'
@@ -282,6 +283,7 @@ async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact
             with pytest.raises(ValueError, match='environment_runtime_readiness_unqualified'):
                 await readiness.observe_environment_runtime(**observe_inputs)
             assert len(changes) == 8
+
             reject_process, late_restart = False, False
             assert hasattr(readiness, 'observe_environment_pre_activation'), 'connected platform/environment readiness missing'
             from tests.integration.test_nebius_platform_runtime_readiness import (
@@ -318,3 +320,41 @@ async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact
             with pytest.raises(ValueError, match='environment_runtime_readiness_unqualified'):
                 await readiness.observe_environment_runtime(**observe_inputs)
             assert len(changes) == 8
+
+            # Keep the same real enrollment/start/process/platform chain. Opening
+            # selected Kubernetes boundaries never grants participant admission.
+            reject_process = late_restart = late_application_restart = False
+            boundaries = importlib.import_module('scripts.ops.nebius_environment_runtime_boundaries')
+            assert hasattr(boundaries, 'prepare_environment_boundaries'), 'connected selected-boundary preparation missing'
+            allow_quotas = False
+            class Boundaries(Workloads):
+                def policy_ready(self):
+                    return True
+                def check_inventory(self):
+                    pass  # Actual inventory transport is separately covered at the HTTP boundary.
+            @contextmanager
+            def boundary_connection(before, targets, namespaces, qualify):
+                transport = Boundaries({key: remote.kubernetes[runtime_resource_path(doc) + '/' + doc['metadata']['name']]
+                    for key, doc in before.items()})
+                transport.ready, transport.failure = True, 'after'
+                transport.preview_rejected = not allow_quotas and any(doc['kind'] == 'ResourceQuota' for doc in targets.values())
+                transport.qualify = qualify
+                yield transport
+            boundary_inputs = {**final_inputs, 'boundary_connection': boundary_connection}
+            pending = await boundaries.prepare_environment_boundaries(**boundary_inputs)
+            assert pending['status'] == 'runtime_boundaries_pending' and pending['admission_open'] is False
+            assert len(changes) == 9 and changes[-1] == 'Namespace:-:build-red'
+            assert remote.kubernetes['/api/v1/namespaces/build-red']['metadata']['labels']['pod-security.kubernetes.io/enforce'] == 'privileged'
+            assert remote.kubernetes['/api/v1/namespaces/build-red/resourcequotas/loom-execution-disabled']['spec']['hard'] == {'pods': '0'}
+            # Anchored partial successors must be observable on recovery without
+            # rewriting original startup or foundation evidence.
+            allow_quotas = True
+            opened = await boundaries.prepare_environment_boundaries(**boundary_inputs)
+            assert opened['status'] == 'runtime_boundaries_prepared_closed' and opened['admission_open'] is False
+            assert len(changes) == 11
+            assert set(changes[-2:]) == {'ResourceQuota:work-red:loom-execution-disabled', 'ResourceQuota:build-red:loom-execution-disabled'}
+            for space in ('work-red', 'build-red'):
+                assert remote.kubernetes[f'/api/v1/namespaces/{space}/resourcequotas/loom-execution-disabled']['spec'] == {}
+            assert (await boundaries.prepare_environment_boundaries(**boundary_inputs))['status'] == 'runtime_boundaries_prepared_closed'
+            assert len(changes) == 11, 'lost-reply and completed recovery must never repeat PATCH'
+            assert startup.load_started_environment_runtime(policy=policy, operation_id=kwargs['operation_id']).resources == current.resources
