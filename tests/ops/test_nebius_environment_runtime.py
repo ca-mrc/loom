@@ -7,16 +7,16 @@ import json
 from pathlib import Path
 
 import pytest
-
-from loom.nebius_environment_foundation import EnvironmentFoundationDeclarationV2
-from loom.nebius_pool_contract import PoolParticipantV1
-from loom_service.pool_management.profiles import PoolProfileCatalog
 from tests.integration.test_nebius_pool_profile_registry import catalog
 from tests.ops.test_nebius_pool_runtime import desired_profile, env
 from tests.ops.test_nebius_pool_runtime import runtime_inputs as runtime_inputs
 from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_environment_foundation import declaration
 from tests.unit.test_nebius_management_render import management_inputs as management_inputs
+
+from loom.nebius_environment_foundation import EnvironmentFoundationDeclarationV2
+from loom.nebius_pool_contract import PoolParticipantV1
+from loom_service.pool_management.profiles import PoolProfileCatalog
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -30,6 +30,8 @@ def runtime_request(runtime_inputs, platform_inputs):
     for name in ('installation_id', 'pool_id', 'participant_id', 'environment_id', 'incarnation'):
         identity[name] = str(getattr(old, name))
     config = wanted.platform_config
+    identity['physical_pool_id'] = config['execution_node_group_id'] = migration.registration.spec.node_group_id
+    identity['cluster_id'] = config['cluster_id'] = migration.registration.spec.cluster_id
     config['registration'] = identity
     wanted = EnvironmentFoundationDeclarationV2.model_validate(wanted.model_dump() | {
         'registration': identity, 'platform_config_json': json.dumps(config)})
@@ -107,6 +109,22 @@ def test_runtime_is_scoped_closed_and_consumable_without_staging_history(runtime
                 assert settings.node_selector == runtime_request['profiles'].execution[0].runtime.node_selector
     source = json.loads(env(workloads['service'])['LOOM_SVC_POOL_SUBMISSION_SOURCE_JSON']['value'])
     assert source['data_environment_id'] == str(runtime_request['participant'].environment_id)
+
+
+def test_closed_foundation_network_allows_reader_control_traffic_not_task_database_access(runtime_request):
+    result = subject().render_environment_runtime(**runtime_request)
+    policies = [row for row in result.isolation if row['kind'] == 'NetworkPolicy']
+    reader = [row for row in policies if row['spec']['podSelector'] == {
+        'matchLabels': {'app.kubernetes.io/name': 'loom-execution-actuator'}}]
+    assert reader, 'zero-execution foundation default-deny still blocks the actuator'
+    rules = [rule for policy in reader for rule in policy['spec'].get('egress', [])]
+    assert any(rule.get('ports') == [{'protocol': 'TCP', 'port': 5432}] and rule.get('to') == [{
+        'namespaceSelector': {'matchLabels': {'kubernetes.io/metadata.name': 'app-red'}},
+        'podSelector': {'matchLabels': {'app': 'loom-postgres'}}}] for rule in rules)
+    assert any({'protocol': 'TCP', 'port': 443} in rule.get('ports', []) for rule in rules)
+    task_rules = [rule for policy in policies if policy['spec']['podSelector'] == {
+        'matchLabels': {'app.kubernetes.io/component': 'execution-unit'}} for rule in policy['spec'].get('egress', [])]
+    assert all(rule.get('ports') and all(port['port'] in {53, 9100} for port in rule['ports']) for rule in task_rules)
 
 
 @pytest.mark.parametrize('damage', ['source_bucket', 'profile_namespace', 'target', 'environment', 'management_namespace'])
