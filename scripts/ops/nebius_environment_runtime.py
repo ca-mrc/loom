@@ -6,17 +6,25 @@ relaxes namespace isolation/quotas nor starts processes or replaces a peer.
 """
 from __future__ import annotations
 
+import base64
 import copy
+import hashlib
 import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from scripts.ops.nebius_development_build_cloud import (
+    DevelopmentRegistryCloudScope,
+    registry_public_key,
+)
 from scripts.ops.nebius_development_build_policy import build_policy_documents
 from scripts.ops.nebius_pool_runtime import _environment, wire_scoped_participant
+from sqlalchemy.engine import make_url
 
 from loom.nebius_environment_foundation import EnvironmentFoundationDeclarationV2, render_foundation
+from loom.nebius_platform_bootstrap import database_url
 from loom.nebius_platform_render import (
     _execution_documents,
     _network_policy,
@@ -188,3 +196,70 @@ def render_environment_runtime(*, declaration: EnvironmentFoundationDeclarationV
         return EnvironmentRuntimeV2(workloads, tuple(readers), tuple(gateway), tuple(isolation))
     except Exception:
         raise ValueError('environment_runtime_unqualified') from None
+
+
+def render_runtime_material(*, runtime: dict[str, Any], foundation_material: dict[str, dict[str, str]],
+        token: str, registry_scope: DevelopmentRegistryCloudScope, registry_credential: bytes,
+        cache_material: dict[str, str] | None = None) -> tuple[dict[str, Any], ...]:
+    """Pure projection from retained private material, never credential generation.
+
+    The parent verifies foundation material hashes, current machine credentials
+    and live registry/cache authority before staging. Only the actuator's own
+    database role is copied; admin/service/authentication keys stay in the data
+    foundation. This result is private and must never enter a public report.
+    """
+    try:
+        render_environment_runtime(**runtime)
+        declaration, participant, machine, profiles = (runtime[key] for key in ('declaration', 'participant', 'machine', 'profiles'))
+        row, config = declaration.registration, declaration.platform_config
+        if (not isinstance(token, str) or re.fullmatch(r'[A-Za-z0-9._~+/-]{32,512}=*', token) is None
+                or hashlib.sha256(token.encode()).hexdigest() != machine.token_sha256):
+            raise ValueError
+        builds = [(profile.settings, 'canonical', '') for profile in profiles.task_images]
+        builds.extend((profile.settings, 'source', 'source-') for profile in profiles.application_images)
+        registry_public_key(scope=registry_scope, config=config, credential=registry_credential,
+            repositories=tuple(sorted({settings.registry_repository for settings, *_ in builds})))
+        caches = {settings.cache_bucket for settings, *_ in builds if settings.cache_bucket is not None}
+        if len(caches) > 1 or bool(caches) != (cache_material is not None):
+            raise ValueError
+        selected: dict[tuple[str, str], tuple[str, dict[str, str]]] = {}
+
+        def add(namespace: str, name: str, purpose: str, data: dict[str, str]) -> None:
+            if (not data or any(not isinstance(value, str) or not 0 < len(value) <= 1024**2 for value in data.values())
+                    or re.fullmatch(r'[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?', name) is None):
+                raise ValueError
+            identity = namespace, name
+            if identity in selected and selected[identity] != (purpose, data):
+                raise ValueError
+            selected[identity] = purpose, data
+
+        for namespace in (row.application_namespace, row.execution_namespace):
+            add(namespace, 'loom-pool-machine-' + machine.machine_id.hex, 'machine', {'token': token})
+        database = foundation_material['loom-platform-db']
+        url = make_url(database_url(database['actuator-url'], row.application_namespace))
+        if url.username != 'loom_actuator' or not url.password or url.password != database['actuator-password']:
+            raise ValueError
+        add(row.execution_namespace, 'loom-execution-actuator-db', 'actuator', {
+            'db-url': url.set(drivername='postgresql+psycopg').render_as_string(hide_password=False), 'ca.crt': database['ca.crt']})
+        storage = foundation_material['loom-platform-storage']
+        for settings, purpose, prefix in builds:
+            add(row.build_namespace, settings.source_secret_name, purpose,
+                {key: storage[prefix + key] for key in ('access-key', 'secret-key')})
+            add(row.build_namespace, settings.registry_secret_name, 'registry', {'credentials.json': registry_credential.decode('utf-8')})
+            if (settings.cache_bucket is None) != (settings.cache_secret_name is None):
+                raise ValueError
+            if settings.cache_secret_name is not None:
+                if cache_material is None or set(cache_material) != {'access-key', 'secret-key'}:
+                    raise ValueError
+                add(row.build_namespace, settings.cache_secret_name, 'cache', cache_material)
+        result = []
+        for (namespace, name), (purpose, data) in sorted(selected.items()):
+            secret = _obj('Secret', name, namespace)
+            secret.update(type='Opaque', immutable=True, data={key: base64.b64encode(value.encode()).decode() for key, value in data.items()})
+            secret['metadata']['labels'] = {'loom.nebius/environment-id': str(row.environment_id),
+                'loom.nebius/incarnation': str(row.incarnation), 'loom.nebius/participant-id': str(participant.participant_id),
+                'loom.nebius/runtime-material-purpose': purpose}
+            result.append(secret)
+        return tuple(result)
+    except Exception:
+        raise ValueError('environment_runtime_material_unqualified') from None

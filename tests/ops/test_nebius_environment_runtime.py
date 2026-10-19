@@ -1,8 +1,8 @@
 """Independent runtime delivery uses actual foundation and process consumers."""
 from __future__ import annotations
 
-import copy
 import base64
+import copy
 import hashlib
 import importlib
 import json
