@@ -77,6 +77,13 @@ after fresh busy-state readback and successful deregistration. API/deletion
 failure preserves execution. Source CI is never cancelled or retried here.
 Inspect root-owned `status.json` and per-slot `worker.json`; never print JIT files.
 
+An HTTP 409 conflict when cancelling an exactly owned, already deregistered
+donor defers that slot's retirement while other supply work continues. GitHub
+run status can lag a terminal worker job. The controller keeps the slot record
+and any remaining JIT file, writes no retirement receipt, and waits for terminal
+run readback before ordinary finalization. Busy-runner and exact-title checks
+still precede cancellation; other API or transport errors still stop reconciliation.
+
 On each OLDLAB host, install `scripts/ops/ci_runner_unified_host.py` and run it
 with `--install-runtime /usr/local/lib/loom-ci-runner-expansion
 --retire-legacy-idle`. It adds the common/capability labels and root-owned marker
