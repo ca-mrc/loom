@@ -32,6 +32,7 @@ from loom_service.pool_management.capacity import digest, resources
 from loom_service.pool_management.early_cancellation import read_early_cancellation
 from loom_service.pool_management.locks import acquire_pool_mutation_lock
 from loom_service.pool_management.origin import qualify_pool_origin
+from loom_service.pool_management.profile_registry import resolve_profiles
 from loom_service.pool_management.registry import (
     _WORKLOAD,
     PoolProfiles,
@@ -134,7 +135,7 @@ async def cancel_unstarted_pool_request(session: AsyncSession, principal: PoolPr
 
 
 async def activate_pool_request(session: AsyncSession, principal: PoolPrincipal, activation: PoolActivationV1, *,
-                                profiles: PoolProfiles) -> PoolReceiptV1:
+                                profiles: PoolProfiles | None = None) -> PoolReceiptV1:
     activation = PoolActivationV1.model_validate_json(activation.model_dump_json())
     action = activation.action
     async with _locked_request(session, principal, action) as (row, pool):
@@ -158,10 +159,12 @@ async def activate_pool_request(session: AsyncSession, principal: PoolPrincipal,
         if registered is None or priority != row.priority:
             raise PoolControlError
         participant = PoolParticipantV1.model_validate(registered.binding_json)
+        original, selected_profiles = await resolve_profiles(session, pool, participant, request.participant_revision,
+            retained=True, fallback=profiles)
         now = await _clock(session)
         if not now < activation.not_after <= row.deadline_at:
             raise PoolControlError("pool_activation_expired")
-        prepared = _render(request, participant, profiles, row.request_id, now)
+        prepared = _render(request, original, selected_profiles, row.request_id, now)
         if (prepared.request_sha256 != row.request_sha256 or prepared.resources != resources(row)
                 or prepared.pod_slots != row.pod_slots or prepared.namespace_uid != row.namespace_uid
                 or prepared.job["spec"]["template"]["spec"]["nodeSelector"] != pool.binding_json["node_selector"]):

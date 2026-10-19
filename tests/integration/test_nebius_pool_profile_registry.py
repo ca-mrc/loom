@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import copy
 import importlib
-from datetime import UTC, datetime
 from uuid import uuid4
 
 import httpx
@@ -97,6 +96,8 @@ async def test_real_http_admission_uses_participant_registry_without_startup_cat
 
 
 async def replace_release(sessions, spec, selected):
+    from loom_service.pool_management.locks import acquire_pool_mutation_lock
+
     old = catalog(spec, selected)
     replacements = {target.profile_id: uuid4() for target in selected.targets}
     following = selected.model_copy(update={'binding_revision': selected.binding_revision + 1,
@@ -108,6 +109,7 @@ async def replace_release(sessions, spec, selected):
         'task_images': tuple(row.model_copy(update={'profile_id': replacements[row.profile_id]}) for row in old.task_images),
     })
     async with sessions.begin() as session:
+        await acquire_pool_mutation_lock(session)
         payload = following.model_dump(mode='json')
         await session.execute(update(NebiusPoolParticipant).where(
             NebiusPoolParticipant.participant_id == selected.participant_id).values(
@@ -188,3 +190,28 @@ async def test_catalog_cannot_widen_the_registered_participant(sessions, damage)
     async with sessions.begin() as session:
         with pytest.raises(ValueError):
             await registry().store_participant_catalog(session, selected, PoolProfileCatalog.model_validate(document))
+
+
+async def test_profile_identity_cannot_be_reused_for_different_bytes(sessions):
+    spec, _, _, _ = await setup(sessions)
+    selected = spec.participants[0]
+    changed = catalog(spec, selected).model_dump(mode='json')
+    changed['execution'][0]['candidate_sha'] = '2' * 40
+    async with sessions.begin() as session:
+        with pytest.raises(ValueError, match='pool_profile_identity_conflict'):
+            await registry().store_participant_catalog(session, selected, PoolProfileCatalog.model_validate(changed))
+
+
+async def test_resolver_does_not_flush_or_use_pending_catalog_edits(sessions):
+    from loom.db.nebius_pool_catalog_schema import NebiusPoolParticipantCatalog
+
+    spec, _, _, _ = await setup(sessions)
+    selected = spec.participants[0]
+    async with sessions() as session:
+        pool = await session.get(NebiusPoolBinding, spec.pool_id)
+        row = await session.get(NebiusPoolParticipantCatalog, (selected.participant_id, selected.binding_revision))
+        row.document_json = {'pending': True}
+        with pytest.raises(ValueError, match='pool_profile_registry_requires_clean_transaction'):
+            await registry().resolve_profiles(session, pool, selected, selected.binding_revision,
+                retained=False, fallback=None)
+        assert row in session.dirty and row.document_json == {'pending': True}
