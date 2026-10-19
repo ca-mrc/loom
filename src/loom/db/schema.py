@@ -72,6 +72,12 @@ from loom.db.nebius_pool_catalog_schema import (
 from loom.db.nebius_pool_catalog_schema import (
     NebiusPoolProfileDocument as NebiusPoolProfileDocument,
 )
+from loom.db.nebius_pool_lifecycle_schema import (
+    NebiusPoolLifecycleOperation as NebiusPoolLifecycleOperation,
+)
+from loom.db.nebius_pool_lifecycle_schema import (
+    NebiusPoolParticipantLifecycle as NebiusPoolParticipantLifecycle,
+)
 from loom.db.nebius_pool_outbox_schema import NebiusPoolBuildOutbox as NebiusPoolBuildOutbox
 from loom.db.nebius_pool_outbox_schema import NebiusPoolExecutionOutbox as NebiusPoolExecutionOutbox
 from loom.db.nebius_pool_outbox_schema import NebiusPoolSubmission as NebiusPoolSubmission

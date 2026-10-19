@@ -154,7 +154,7 @@ async def activate_pool_request(session: AsyncSession, principal: PoolPrincipal,
         request = _WORKLOAD.validate_python(row.request_json)
         priority = await qualify_pool_origin(session, principal, request.origin,
             target_id=request.target_id, workload_kind=request.key.workload_kind,
-            application_build=request if isinstance(request, PoolApplicationImagePrepareV1) else None)
+            application_build=request if isinstance(request, PoolApplicationImagePrepareV1) else None, intake=False)
         registered = await session.get(NebiusPoolParticipant, row.participant_id)
         if registered is None or priority != row.priority:
             raise PoolControlError

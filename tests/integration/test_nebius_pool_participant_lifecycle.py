@@ -10,7 +10,12 @@ import httpx
 import pytest
 from sqlalchemy import func, select, update
 
-from loom.db.nebius_pool_schema import NebiusPoolBinding, NebiusPoolMachine, NebiusPoolParticipant, NebiusPoolRequest
+from loom.db.nebius_pool_schema import (
+    NebiusPoolBinding,
+    NebiusPoolMachine,
+    NebiusPoolParticipant,
+    NebiusPoolRequest,
+)
 from loom.nebius_pool_contract import PoolActivationV1
 from loom_execution_capacity_collector.contracts import CapacityPlacement
 from loom_service.app import create_app
@@ -18,6 +23,7 @@ from loom_service.config import LoomServiceSettings
 from loom_service.pool_management.auth import resolve_pool_machine
 from loom_service.pool_management.capacity import digest
 from loom_service.pool_management.installation import PoolInstallation
+from loom_service.pool_management.observation_binding import physical_binding_digest
 from tests.execution_placement_fixtures import placement_fixture
 from tests.integration.test_nebius_pool_installation import installation
 from tests.integration.test_nebius_pool_observation_continuity import workload
@@ -45,7 +51,7 @@ async def platform(sessions):
     async with sessions.begin() as session:
         receipt = await module.register_platform(session, platform_spec)
         pool = await session.get(NebiusPoolBinding, spec.pool_id)
-        authority = pool.binding_sha256
+        authority = physical_binding_digest(pool)
     return module, spec, platform_spec, tokens, receipt, authority
 
 
@@ -55,7 +61,7 @@ async def setup(sessions, *, active=True):
     for participant in spec.participants:
         request = module.PoolParticipantEnrollmentV2(
             schema_version='loom.pool-participant-enrollment.v2', operation_id=uuid4(),
-            pool_binding_sha256=authority, participant=participant,
+            pool_authority_sha256=authority, participant=participant,
             foundation_sha256='1' * 64, profiles=catalog(spec, participant),
             machines=tuple(row for row in spec.machines if row.participant_id == participant.participant_id))
         async with sessions.begin() as session:
@@ -88,10 +94,10 @@ async def setup(sessions, *, active=True):
         document = dict(schema_version='loom.pool-participant-operation.v2', operation_id=uuid4(),
             participant_id=participant.participant_id, pool_id=spec.pool_id, incarnation=participant.incarnation,
             expected_head=heads[participant.participant_id]['operation_id'], expected_binding_sha256=binding_sha,
-            pool_binding_sha256=authority, action=verb)
+            pool_authority_sha256=authority, action=verb)
         if verb in {'ready', 'activate', 'resume'}:
             document['readiness'] = dict(observed_at=datetime.now(UTC), valid_until=datetime.now(UTC) + timedelta(seconds=60),
-                participant_binding_sha256=binding_sha, pool_binding_sha256=authority,
+                participant_binding_sha256=binding_sha, pool_authority_sha256=authority,
                 catalog_sha256=digest({'participant': participant.model_dump(mode='json'),
                     'profiles': catalog(spec, participant).model_dump(mode='json')}),
                 gateway_machine_id=next(row.machine_id for row in spec.machines if row.role == 'gateway'),

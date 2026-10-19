@@ -100,7 +100,8 @@ def qualify_pool_history(origin: PoolWorkOriginV1, *, participant: PoolParticipa
 
 async def qualify_pool_origin(session: AsyncSession, principal: PoolPrincipal, origin: PoolWorkOriginV1, *,
                               target_id: str, workload_kind: PoolWorkloadKind,
-                              application_build: PoolApplicationImagePrepareV1 | None = None) -> int:
+                              application_build: PoolApplicationImagePrepareV1 | None = None,
+                              intake: bool = True) -> int:
     """Return class for a new request after locked current-authority readback.
 
     Call after the pool mutation lock, before persisting the immutable request.
@@ -119,6 +120,11 @@ async def qualify_pool_origin(session: AsyncSession, principal: PoolPrincipal, o
             pool = await session.get(NebiusPoolBinding, current.pool_id)
             if row is None or pool is None or canonical_digest(row.binding_json).removeprefix("sha256:") != row.binding_sha256:
                 raise ValueError
+            if intake:
+                from loom_service.pool_management.intake import intake_open
+
+                if not await intake_open(session, pool, row):
+                    raise ValueError
             binding = PoolParticipantV1.model_validate(row.binding_json)
             if (binding.participant_id, binding.pool_id, binding.installation_id, binding.environment_id,
                     binding.incarnation, binding.binding_revision, binding.admission_epoch) != (

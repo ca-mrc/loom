@@ -39,6 +39,7 @@ from loom_service.pool_management.capacity import (
     resources,
 )
 from loom_service.pool_management.early_cancellation import read_early_cancellation
+from loom_service.pool_management.intake import intake_open
 from loom_service.pool_management.locks import acquire_pool_mutation_lock
 from loom_service.pool_management.origin import qualify_pool_origin, qualify_retained_pool_origin
 from loom_service.pool_management.profile_registry import resolve_profiles
@@ -199,9 +200,11 @@ async def _prepare_request(session: AsyncSession, principal: PoolPrincipal, requ
         NebiusPoolRequest.pool_id.in_(capacities), NebiusPoolRequest.granted_at >= now - timedelta(minutes=1),
     ).group_by(NebiusPoolRequest.pool_id))).all()}
     participants = {value.participant_id: value for capacity in capacities.values() for value in capacity.participants}
-    active_participants = set((await session.scalars(select(NebiusPoolParticipant.participant_id).where(
+    active_rows = (await session.scalars(select(NebiusPoolParticipant).where(
         NebiusPoolParticipant.pool_id.in_(capacities), NebiusPoolParticipant.phase == "active",
-    ))).all())
+    ))).all()
+    active_participants = {participant.participant_id for participant in active_rows
+        if await intake_open(session, capacities[participant.pool_id].pool, participant)}
     protected_waits: list[NebiusPoolRequest] = []
     for candidate in waiting:
         if candidate.request_id != row.request_id:
