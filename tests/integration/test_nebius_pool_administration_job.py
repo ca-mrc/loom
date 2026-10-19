@@ -2,21 +2,24 @@
 from __future__ import annotations
 
 import hashlib
+import copy
 import importlib
 import json
 import os
 import subprocess
 import sys
+import ssl
 from dataclasses import replace
 from uuid import uuid4
 
 import pytest
-from tests.support.nebius_phase_api import PhaseAPI
+import httpx
 
 from loom.db.nebius_pool_lifecycle_schema import NebiusPoolParticipantLifecycle
 from tests.integration.test_nebius_pool_administration import administration, authorization
 from tests.integration.test_nebius_pool_participant_lifecycle import setup
 from tests.integration.test_nebius_pool_registry import sessions as sessions
+from tests.support.nebius_phase_api import PhaseAPI
 
 
 def jobs():
@@ -140,3 +143,68 @@ async def test_changed_input_or_private_report_is_refused(sessions, damage):
         return
     with pytest.raises(ValueError):
         module.administration_documents(current)
+
+
+@pytest.mark.parametrize('damage', ['state', 'binding', 'generation', 'current_absent'])
+async def test_report_must_describe_the_exact_completed_transition(sessions, damage):
+    module = jobs()
+    current, _, _ = await inputs(sessions)
+    async with sessions.begin() as session:
+        report = await administration().administer(session, current.request.model_dump_json().encode(),
+            current.authorization, action='apply')
+    if damage == 'state':
+        report['receipt']['state'] = 'active'
+    elif damage == 'binding':
+        report['receipt']['binding_sha256'] = 'f' * 64
+    elif damage == 'generation':
+        report['receipt']['generation'] = True
+    else:
+        report['current'] = None
+    with pytest.raises(ValueError):
+        module.validate_administration_report(current, report)
+
+
+async def test_https_readback_requires_recorded_job_pod_and_database_commit(sessions, tmp_path):
+    module = jobs()
+    current, _, _ = await inputs(sessions)
+    binding = current.runtime.binding
+    external = PhaseAPI(binding)
+    module.stage_administration_job(request=current, api=external, state_dir=tmp_path)
+    job, = (row for row in external.resources.values() if row['kind'] == 'Job')
+    job['status'] = {'conditions': [{'type': 'Complete', 'status': 'True'}], 'succeeded': 1}
+    uid, name = job['metadata']['uid'], job['metadata']['name']
+    pod = {'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {**copy.deepcopy(job['spec']['template']['metadata']),
+        'namespace': binding.namespace, 'name': name + '-abc', 'uid': str(uuid4()),
+        'ownerReferences': [{'apiVersion': 'batch/v1', 'kind': 'Job', 'name': name, 'uid': uid, 'controller': True}]},
+        'spec': copy.deepcopy(job['spec']['template']['spec']), 'status': {'phase': 'Succeeded',
+            'containerStatuses': [{'name': 'register', 'restartCount': 0, 'state': {'terminated': {'exitCode': 0}}}]}}
+    async with sessions.begin() as session:
+        report = await administration().administer(session, current.request.model_dump_json().encode(),
+            current.authorization, action='apply')
+
+    def respond(message):
+        assert message.method == 'GET', 'commit readback may not mutate or retry effects'
+        path = message.url.path
+        if path in {'/api/v1/namespaces/kube-system', '/api/v1/namespaces/' + binding.namespace}:
+            ns = path.rsplit('/', 1)[-1]
+            return httpx.Response(200, json={'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {
+                'name': ns, 'uid': binding.kube_system_uid if ns == 'kube-system' else binding.namespace_uid,
+                'labels': {'loom.nebius/management-installation': binding.installation_id,
+                    'pod-security.kubernetes.io/enforce': 'restricted'}}})
+        if '/configmaps/' in path or '/jobs/' in path:
+            kind = 'ConfigMap' if '/configmaps/' in path else 'Job'
+            return httpx.Response(200, json=external.resources[kind + ':' + path.rsplit('/', 1)[-1]])
+        if path.endswith('/pods'):
+            return httpx.Response(200, json={'apiVersion': 'v1', 'kind': 'PodList', 'metadata': {}, 'items': [pod]})
+        if path.endswith('/log'):
+            return httpx.Response(200, json=report)
+        return httpx.Response(200, json=pod)
+
+    api = module.HTTPSPoolAdministrationJobAPI(request=current, api_server='https://cluster.example', ssl_context=ssl.create_default_context())
+    api.client.close()
+    api.client = httpx.Client(base_url='https://cluster.example', transport=httpx.MockTransport(respond))
+    with api:
+        assert api.administration_report(tmp_path) == {'job_uid': uid, 'pod_uid': pod['metadata']['uid'], 'receipt': report}
+        pod['metadata']['ownerReferences'][0]['uid'] = str(uuid4())
+        with pytest.raises(RuntimeError):
+            api.administration_report(tmp_path)
