@@ -374,6 +374,15 @@ the stopped container and its volumes. Its 30-second shutdown allowance does not
 change test deadlines. Stop and removal errors still fail the job. K3s remains
 PID 1; adding an init wrapper would interfere with its cgroup startup sequence.
 
+Disposable K3s API discovery does not imply that native DNS or dynamic storage
+is ready. Tests that require these addons opt into `_load_client` readiness:
+`required_addons=('dns',)` checks the current CoreDNS Deployment and a ready
+`kube-dns` endpoint; `('dns', 'storage')` also checks local-path provisioner
+readiness. These reads share the original 90-second startup budget. API-only
+callers keep their existing boundary, and traffic/PVC assertions remain required.
+Addon failures include bounded Pod waiting reasons and warning events; the
+retirement fixture also records PVC status without logging Secrets or Pod specs.
+
 The 75-minute integration budget retains room for optional coverage and runner
 variation. File counts alone do not measure shard balance; use the per-shard
 duration reports from the current head.
