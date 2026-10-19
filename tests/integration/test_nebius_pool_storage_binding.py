@@ -8,15 +8,22 @@ from uuid import uuid4
 import psycopg
 import pytest
 from sqlalchemy import insert, update
-from tests.integration.conftest import retained_pool_sessions as sessions
+
+from loom.db.nebius_pool_schema import (
+    NebiusPoolBinding,
+    NebiusPoolCancellation,
+    NebiusPoolParticipant,
+    NebiusPoolRequest,
+)
+from loom.db.schema import Token
+from loom_service.pool_management.installation import register_installation
+from loom_service.pool_management.locks import acquire_pool_mutation_lock
+from tests.integration.conftest import retained_pool_sessions
 from tests.integration.test_nebius_pool_activation_fence import read_sql
 from tests.integration.test_nebius_pool_participant_refresh import reserved, snapshot
 from tests.ops.test_nebius_pool_storage_binding import module, selection
 
-from loom.db.nebius_pool_schema import NebiusPoolBinding, NebiusPoolCancellation, NebiusPoolParticipant, NebiusPoolRequest
-from loom.db.schema import Token
-from loom_service.pool_management.installation import register_installation
-from loom_service.pool_management.locks import acquire_pool_mutation_lock
+sessions = retained_pool_sessions
 
 
 async def setup(sessions):
