@@ -577,6 +577,8 @@ def test_publication_builds_selected_images_and_reuses_platform_admission(
         elif args[0] == "scanner":
             Path(args[args.index("--output") + 1]).write_text('{"Trivy":{"Version":"0.74.0"},"Results":[]}')
         elif args[:2] == ("skopeo", "inspect"):
+            # Digest readback reads only the manifest, never the tag list.
+            assert args[2:5] == ("--no-tags", "--format", "{{.Digest}}"), args
             return digest
         return ""
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
+import tomllib
 from collections.abc import Collection, Sequence
 from dataclasses import asdict, dataclass, replace
 from functools import lru_cache
@@ -79,6 +81,14 @@ PLANNER_PATHS = {
     "scripts/ops/nebius_pool_test_plan.py",
     "tests/ops/test_plan_ci_validations.py",
 }
+
+COMPONENT_OWNERSHIP_PATH = "config/component-ownership.toml"
+MANIFEST_VALIDATION_TEST = "tests/ops/test_component_ownership_manifest.py"
+# Path lists that may grow by registering files the same change adds, without
+# counting as an ownership-authority change. Ignore lists, affected/unaffected
+# paths and every other field keep the full regression.
+REGISTRATION_FIELDS = frozenset({"include_paths", "exclude_paths", "pins"})
+_GLOB_CHARACTERS = frozenset("*?[]{}")
 
 OWNERSHIP_AUTHORITY_PATHS = {
     "config/component-ownership.toml",
@@ -212,6 +222,66 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 COMPONENT_OWNERSHIP_MANIFEST = REPO_ROOT / "config/component-ownership.toml"
 
 
+def manifest_change_is_registration(base: object, head: object, added: frozenset[str],
+                                    field: str = "") -> bool:
+    """Return whether ``head`` only registers files that this change adds.
+
+    New literal paths may join include/exclude lists, and new pins may place
+    them. Any removal, reordering, changed value, new key, table or rule, glob
+    or pre-existing file is an ownership-authority change.
+    """
+    def new_file(value: object) -> bool:
+        return isinstance(value, str) and not _GLOB_CHARACTERS & set(value) and value in added
+
+    if type(base) is not type(head):
+        return False
+    if isinstance(base, dict):
+        assert isinstance(head, dict)
+        return base.keys() == head.keys() and all(
+            manifest_change_is_registration(base[key], head[key], added, key) for key in base)
+    if not isinstance(base, list):
+        return base == head
+    assert isinstance(head, list)
+    if len(base) == len(head) and all(isinstance(item, dict) for item in (*base, *head)):
+        # Tables keep their positions; compare each one field by field.
+        return all(manifest_change_is_registration(old, new, added, field)
+                   for old, new in zip(base, head, strict=True))
+    remaining, extra = iter(head), []
+    for item in base:
+        for candidate in remaining:
+            if candidate == item:
+                break
+            extra.append(candidate)
+        else:
+            return False
+    extra.extend(remaining)
+    return not extra or (field in REGISTRATION_FIELDS and all(
+        new_file(item) or (isinstance(item, dict) and set(item) == {"path", "shard_index"}
+                           and new_file(item["path"]) and isinstance(item["shard_index"], int))
+        for item in extra))
+
+
+def manifest_registration_only(repo_root: Path, base_sha: str, changed_paths: Collection[str]) -> bool:
+    """Compare the manifest with its merge base; unknown evidence keeps full regression."""
+    if COMPONENT_OWNERSHIP_PATH not in changed_paths or not base_sha.strip("0"):
+        return False
+
+    def git(*args: str) -> str:
+        return subprocess.run(["git", *args], cwd=repo_root, check=True, capture_output=True,
+                              text=True, timeout=30).stdout
+
+    try:
+        base = git("merge-base", base_sha, "HEAD").strip()
+        added = frozenset(git("diff", "--name-only", "--no-renames", "--diff-filter=A", base, "HEAD").splitlines())
+        return manifest_change_is_registration(
+            tomllib.loads(git("show", f"{base}:{COMPONENT_OWNERSHIP_PATH}")),
+            tomllib.loads((repo_root / COMPONENT_OWNERSHIP_PATH).read_text(encoding="utf-8")),
+            added,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
+
+
 @dataclass(frozen=True)
 class ValidationPlan:
     event_relevant: bool
@@ -341,6 +411,7 @@ def plan_validations(
     pull_request_action_label: str = "",
     pull_request_draft: bool = False,
     pull_request_base_changed: bool = False,
+    manifest_registration_only: bool = False,
 ) -> ValidationPlan:
     if event_name not in SUPPORTED_EVENTS:
         raise ValueError(f"unsupported event_name: {event_name}")
@@ -357,6 +428,14 @@ def plan_validations(
         )
 
     paths = tuple(dict.fromkeys(path.strip() for path in changed_paths if path.strip()))
+    authority_paths = OWNERSHIP_AUTHORITY_PATHS
+    if manifest_registration_only and COMPONENT_OWNERSHIP_PATH in paths:
+        # Only registers files this change adds: the manifest tests validate the
+        # registration and the new files select their own owners.
+        if MANIFEST_VALIDATION_TEST not in paths:
+            authority_paths = OWNERSHIP_AUTHORITY_PATHS - {MANIFEST_VALIDATION_TEST}
+        paths = tuple(dict.fromkeys(
+            MANIFEST_VALIDATION_TEST if path == COMPONENT_OWNERSHIP_PATH else path for path in paths))
     docs_only = bool(paths) and all(_is_documentation_path(path) for path in paths)
     unowned_runtime = False
     selected = {name: False for name in (*HEAVY_CHECKS, "coverage_summary", "web_checks")}
@@ -378,7 +457,7 @@ def plan_validations(
         for name in HEAVY_CHECKS:
             select(name, "planner-change")
 
-    if any(path in OWNERSHIP_AUTHORITY_PATHS for path in paths):
+    if any(path in authority_paths for path in paths):
         for name in HEAVY_CHECKS:
             select(name, "ownership-authority-change")
 
@@ -615,7 +694,7 @@ def plan_validations(
     force_baseline = (
         not paths or event_name in {"workflow_dispatch", "schedule"} or unowned_runtime
         or selected["coverage_summary"]
-        or any(path in PLANNER_PATHS | OWNERSHIP_AUTHORITY_PATHS
+        or any(path in PLANNER_PATHS | authority_paths
                or path == ".github/workflows/ci.yml"
                or _is_dependency_authority_path(path) for path in paths)
     )
@@ -712,20 +791,23 @@ def main() -> int:
         choices=("true", "false"),
         default="false",
     )
+    parser.add_argument("--base-sha", default="")
     parser.add_argument("--github-output", type=Path, required=True)
     parser.add_argument("--test-scope", choices=("all", "nebius"), default=os.environ.get("CI_TEST_SCOPE", "all"))
     args = parser.parse_args()
     labels = json.loads(args.labels_json or "[]")
     if not isinstance(labels, list) or not all(isinstance(label, str) for label in labels):
         raise SystemExit("--labels-json must be a JSON array of strings")
+    changed_paths = args.changed_files.read_text(encoding="utf-8").splitlines()
     plan = plan_validations(
-        changed_paths=args.changed_files.read_text(encoding="utf-8").splitlines(),
+        changed_paths=changed_paths,
         labels=set(labels),
         event_name=args.event_name,
         pull_request_action=args.pull_request_action,
         pull_request_action_label=args.pull_request_action_label,
         pull_request_draft=args.pull_request_draft == "true",
         pull_request_base_changed=args.pull_request_base_changed == "true",
+        manifest_registration_only=manifest_registration_only(REPO_ROOT, args.base_sha, changed_paths),
     )
     outputs = plan.github_outputs()
     effective_changes = tuple(json.loads(outputs["test_changes"]))

@@ -719,8 +719,10 @@ def build(args: argparse.Namespace) -> None:
                 Path(os.environ["REGISTRY_AUTH_FILE"]),
             )
             _copy_image(archive, tag, timeout_seconds=args.upload_timeout_seconds)
+            # --no-tags: the digest needs only the manifest; listing every tag
+            # in the repository adds latency that grows with its history.
             published_digest = _run(
-                "skopeo", "inspect", "--format", "{{.Digest}}", f"docker://{tag}"
+                "skopeo", "inspect", "--no-tags", "--format", "{{.Digest}}", f"docker://{tag}"
             )
             if published_digest != scanned_digest:
                 raise ValueError("published manifest differs from the scanned OCI bytes")

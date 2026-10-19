@@ -259,6 +259,7 @@ jobs:
             --pull-request-action-label "$PR_ACTION_LABEL" \
             --pull-request-draft "$PR_DRAFT" \
             --pull-request-base-changed "$PR_BASE_CHANGED" \
+            --base-sha "${BASE_SHA:-}" \
             --github-output "$GITHUB_OUTPUT"
 
       - name: Docs-only fast path
