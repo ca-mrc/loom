@@ -94,7 +94,10 @@ def test_storage_successor_rejects_every_unrelated_or_ambiguous_authority_change
 
 def test_storage_parent_predispatch_failure_does_not_strand_registry_intent(tmp_path):
     from scripts.ops.nebius_pool_storage_operation import _StorageRegistry
-    from scripts.ops.nebius_pool_storage_registry import advance_storage_registry, validate_storage_registry
+    from scripts.ops.nebius_pool_storage_registry import (
+        advance_storage_registry,
+        validate_storage_registry,
+    )
 
     refresh = module().ClosedPoolStorageRefresh.model_validate(selection())
     effects = []

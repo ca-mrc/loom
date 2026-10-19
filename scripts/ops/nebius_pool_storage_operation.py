@@ -18,7 +18,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 from scripts.ops import nebius_certificates as private_state
-from scripts.ops.nebius_closed_registry import ClosedRegistryAPI
+from scripts.ops.nebius_closed_registry import ClosedRegistryAPI, RegistryNotDispatchedError
 from scripts.ops.nebius_development_runtime_install import DevelopmentRuntimeInstallRequest
 from scripts.ops.nebius_development_runtime_retained import (
     RetainedRuntimeReference,
@@ -32,6 +32,7 @@ from scripts.ops.nebius_development_runtime_transition import (
 from scripts.ops.nebius_ingress_stage import _key, _uid
 from scripts.ops.nebius_management_stage import (
     ManagementStageAPI,
+    _qualified_defaulted,
     _stage_fixed_documents,
     _validate_record,
 )
@@ -281,6 +282,77 @@ def load_completed_storage(*, runtime: RetainedRuntimeReference, reference: Stor
         raise ValueError('completed storage correction unqualified; preserve evidence') from None
 
 
+def storage_runtime_view(retained: RetainedClosedStorage
+        ) -> tuple[dict[Path, bytes], dict[str, tuple[dict[str, Any], ...]]]:
+    """Only journal-permitted resource alternatives; never an inferred live head."""
+    state = retained.state_dir
+    marker = retained.anchor_dir / (str(retained.reference.operation_id) + '-pool-storage-dispatch.json')
+    files = {path: _read(path) for path in (marker, state / 'operation.json')}
+    frame = _json(files[state / 'operation.json'])
+    identity = _operation_identity(retained)
+    if (_json(files[marker]) != identity or set(frame) != {*identity, 'status', 'phases', 'files'}
+            or any(frame[key] != value for key, value in identity.items())
+            or frame['status'] not in {'pending', 'complete'} or set(frame['phases']) != set(_CHILDREN)):
+        raise ValueError('storage runtime frame differs')
+    choices: dict[str, tuple[dict[str, Any], ...]] = {
+        _key(row): (row,) for row in (retained.collector.original, retained.collector.previous_configuration)}
+    expected_files, pending = set(), False
+    for phase, suffix in _CHILDREN.items():
+        status = frame['phases'][phase]
+        path = state / suffix
+        exists = path.exists() or path.is_symlink()
+        if status == 'complete' and not pending:
+            expected_files.add(suffix)
+        elif status in {'prepared', 'intent'}:
+            if pending and (status != 'prepared' or exists):
+                raise ValueError('storage phase order differs')
+            pending = True
+        else:
+            raise ValueError('storage phase order differs')
+        if not exists:
+            if status != 'prepared':
+                raise ValueError('storage child evidence missing')
+            continue
+        files[path] = _read(path)
+        if status == 'complete' and frame['files'].get(suffix) != hashlib.sha256(files[path]).hexdigest():
+            raise ValueError('completed storage evidence changed')
+        child = _json(files[path])
+        if phase in _TRANSITIONS:
+            originals, targets, fingerprint = storage_transition_inputs(retained, phase)
+            validate_runtime_transition(child, originals=originals, targets=targets,
+                input_digest=fingerprint, phase=_TRANSITIONS[phase])
+            key, = originals
+            item = child['resources'][key]
+            if (status == 'complete' and item['status'] != 'applied') or (status == 'prepared' and item['status'] == 'applied'):
+                raise ValueError('storage workload has no matching intent')
+            if item['status'] != 'prepared' and status != 'prepared':
+                desired = copy.deepcopy(item['expected'])
+                desired['metadata']['uid'] = _uid(originals[key])
+                choices[key] = (originals[key], desired) if item['status'] == 'intent' else (desired,)
+        elif phase == 'configuration':
+            documents, stage_identity = storage_configuration_identity(retained)
+            _validate_record(child, stage_identity, documents)
+            item = child['resources'][_key(retained.collector.configuration)]
+            if (status == 'complete' and item['status'] != 'created') or (status == 'prepared' and item['status'] == 'created'):
+                raise ValueError('storage configuration has no matching intent')
+            if item['status'] == 'created':
+                actual = copy.deepcopy(item['observed'])
+                actual['metadata']['uid'] = item['uid']
+                _uid(actual)
+                if _qualified_defaulted(item['desired'], actual) != item['expected']:
+                    raise ValueError('storage configuration differs')
+                choices[_key(actual)] = (actual,)
+        else:
+            record = validate_storage_registry(request=retained.inputs.refresh, state_dir=state / phase,
+                complete=status == 'complete')
+            if status == 'prepared' and record['status'] == 'complete':
+                raise ValueError('storage registry has no matching intent')
+    if set(frame['files']) != expected_files or (frame['status'] == 'complete' and pending):
+        raise ValueError('storage runtime completion differs')
+    _unchanged(files)
+    return files, choices
+
+
 class ClosedStorageOperationAPI(Protocol):
     @property
     def configuration(self) -> ManagementStageAPI: ...
@@ -324,7 +396,10 @@ class _StorageRegistry:
         return self.api.observe(request)
 
     def commit(self, request: ClosedPoolStorageRefresh) -> dict[str, Any]:
-        self.dispatch()
+        try:
+            self.dispatch()
+        except Exception:
+            raise RegistryNotDispatchedError('storage parent failed before database dispatch') from None
         return self.api.commit(request)
 
 
