@@ -152,6 +152,7 @@ from tests.ops.test_nebius_shared_pool_handoff import (
 
 # Hosted-runner activation took 587s including its independent fixture.
 @pytest.mark.timeout(1200)
+@pytest.mark.parametrize('staging_history', ['0174'], indirect=True)
 @pytest.mark.parametrize('forward_processes', [False, True, 'activation', 'recovery-databases'],
     ids=['initial', 'forward', 'activation', 'recovery-databases'])
 def test_shared_process_preflight_reads_current_databases_and_retired_authority(
@@ -229,6 +230,7 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
     old = staging_history.context
     old_spec = old.inputs.installation
     old_namespace = old.original.upgrade.setup.binding.namespace
+    old_revision = getattr(getattr(old.predecessor, 'resources', None), 'target_manager_revision', '0176')
     manager_namespace = request.database.manager.retained.request.retained.binding.namespace
 
     def add(row):
@@ -357,7 +359,7 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
                 assert args[3] == 'pod/loom-postgres-0' and args[5] == 'loom-postgres'
                 sql = args[-1]
                 if namespace == old_namespace:
-                    assert sql == pool_machine_retirement_sql(old_spec, action='observe')
+                    assert sql == pool_machine_retirement_sql(old_spec, action='observe', manager_revision=old_revision)
                     value = {'schema': 'loom.pool-machine-retirement.v1', 'operation_id': str(old_spec.operation_id),
                         'installation_sha256': digest(old_spec.model_dump(mode='json')),
                         'state': 'active' if mode['damage'] == 'old-active' else 'revoked'}

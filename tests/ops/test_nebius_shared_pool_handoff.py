@@ -132,7 +132,7 @@ def original_platform_inputs():
 
 
 @pytest.fixture
-def staging_history(original_platform_inputs, retained, tmp_path):
+def staging_history(original_platform_inputs, retained, tmp_path, request):
     """Run the existing legacy installer/recovery in an independent fixture root.
 
     Only external I/O is doubled by those fixtures. Calling their builders
@@ -166,7 +166,13 @@ def staging_history(original_platform_inputs, retained, tmp_path):
         cutover = entry.cutover_inputs.__wrapped__(collector, retirement, fencing, runtime)
         with pytest.MonkeyPatch.context() as patch:
             database = entry.database_guard.__wrapped__(runtime, platform, base, patch)
-            operation, _, root = entry.private_cutover.__wrapped__(completed, cutover, database)
+            operation, payload, root = entry.private_cutover.__wrapped__(completed, cutover, database)
+            if getattr(request, 'param', None) == '0174':
+                from tests.ops.test_nebius_management_refresh_predecessor import complete_refresh
+
+                selector, _ = complete_refresh(root, manager_revision='0174')
+                payload['predecessor'] = selector
+                entry.save_private(operation, payload)
             _, completion = finish_cutover(operation, legacy=True)
     return load_completed_pool(PoolPredecessorV1(operation=operation,
         completion_sha256=completion['completion_sha256']), original=root)
