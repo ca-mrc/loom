@@ -10,6 +10,66 @@ shared execution without owning its capacity or credentials. Native attempt and
 publication semantics remain in [service execution](nebius-service-execution.md).
 Source implementation does not establish installed target acceptance.
 
+## Independent platform and participant lifecycle (v2)
+
+The platform owns the allocator, physical policy, observer, gateway and durable
+registry. No application environment owns that authority. An empty platform is
+valid and starts closed; it needs no dummy staging/development participant.
+Environment operations select an exact participant/environment/incarnation, not
+the first matching class or a namespace prefix. Production, staging and shared
+development use the same lifecycle. Personal applications remain submission
+origins under the shared-development data environment, not separate allocators.
+
+Opted-in pools use three explicit binding fields: `observation_binding=physical-v1`,
+`profile_source=registry-v1`, and `lifecycle_source=scoped-v1`. Omitted fields retain
+v1 semantics. Physical-v1 observations bind the full physical policy/topology and
+authority epoch, plus immutable historical namespace UID and Job attribution.
+Adding a participant or releasing its images does not invalidate an otherwise
+fresh physical capture. Actual authority/topology/policy changes still do. Unknown
+or removed-participant Pods remain conservatively accounted; roster removal never
+proves reclaimed capacity. Legacy captures still require exact registration
+equality, including their existing post-transition freshness barriers.
+
+Immutable participant catalogs and scoped lifecycle heads live in the management
+database. Admission and gateway execution resolve retained profile identities
+there, preserving exact old profiles for already retained waiting/charged work.
+An ordinary participant release does not replace peer catalogs, rewrite the
+platform binding or require a global controller restart.
+
+Enrollment starts with admission closed. Qualified transitions are
+`enrolled -> ready -> active`, suspension/resumption, and
+`retiring -> retired`. Suspension closes **new admission**, not dispatch or cleanup
+of already charged work. Waiting demand retains its identity but cannot reserve
+priority headroom while suspended. Image-only releases first check support for
+retained requests, then suspend only the selected participant and wait for charged
+work to drain. Incompatible schema/protocol changes are not image-only releases.
+Retirement refuses unresolved work; cancelling waiting requests requires an exact
+protected list of retained request generations. Running-work cancellation needs
+separate authority and verified cleanup. Tombstones and history remain, and a new
+incarnation cannot reuse old credentials. Retirement does not authorize data
+deletion.
+
+Protected platform opening is separate from participant activation. It requires
+fresh physical evidence and qualified observer/gateway/sole-writer authority;
+closing refuses outstanding charged work. Platform transitions advance the full
+physical binding and require fresh observations before later admissions. Neither
+transition repeats writer transfer or changes a participant's application release.
+
+The administration process and fixed Kubernetes Jobs enforce bounded,
+exact-request authorization, predecessor checks, transaction serialization and
+immutable operation/grant audit. The isolated forced-command launcher accepts only
+previously retained references for prepare/apply/recover/status; it cannot accept
+runner-selected paths, Secrets, grant contents, code or target authority. Recovery
+reads the original Job, and status uses a separately identified read-only Job.
+Historical completion receipts are not current readiness. The source launcher
+and foundation adapters require a protected evidence issuer and installed workflow
+integration before operators can use this as an end-to-end deployment path.
+
+Explicit legacy adoption preserves qualified v1 authority, credentials and
+history. A completed global handoff is not repeated; standalone allocation cannot
+be adopted as global sole-writer authority. Ordinary v2 lifecycle operations do
+not use the historical staging plan or completed development-runtime ancestry.
+
 ## Physical pool observation for managed environments
 
 Each environment binding lists its local target aliases; different environments

@@ -107,6 +107,52 @@ section locations used by earlier references to this platform contract.
 
 ## Managed environment identity and rendering
 
+### Independent full-environment foundations (v2)
+
+`loom.nebius_environment_foundation` represents full development, staging and
+production **data boundaries**, not personal applications. Each declaration binds
+explicit installation, pool, participant, environment and incarnation IDs. Class
+selects protected policy; it does not select an instance, namespace or credential.
+Two environments of the same class can use distinct configured namespaces,
+targets and hostnames on the same physical pool. Personal frontend/API deployments
+continue to reuse the shared-development data boundary.
+
+The `loom.environment-foundation.v2` declaration binds the exact Kubernetes
+origin and `kube-system` UID, shared HTTPS ingress, application-node placement and
+the complete `loom.nebius-environment-platform.v2` configuration. Rendering uses
+the existing platform templates with execution closed: no execution writer Pods,
+zero-Pod execution/build quotas, and disabled local scheduling/capacity admission.
+The standalone deploy helper cannot deploy this format. The database PVC is an
+explicit owned resource created before the StatefulSet, not an unobserved
+controller-created claim. Production requires backups; development can omit the
+backup workload, bucket and credential resources. Artifacts and trajectories may
+share one canonical bucket and its object-access policy; source data remains
+separately scoped.
+
+The protected foundation adapter retains exact intents before provider effects.
+It reuses the existing Kubernetes/Nebius providers and credential generator,
+persists credentials before publishing Secrets, and records observed resource
+IDs. A lost reply is reconciled against the original intent. Foreign collisions,
+missing recorded resources, replaced UIDs and incomplete retained history fail
+closed. There is no patch/delete fallback. An explicit import of a retained v2
+foundation re-observes every exact source ID without reinstalling workloads or
+rotating credentials; legacy installations require their separate ancestry
+adapter, not name-only adoption.
+
+`scripts.ops.nebius_foundation_readiness` performs a read-only check of completed
+resources, the owned bound PVC, PostgreSQL Pod/StatefulSet/Service/EndpointSlice
+lineage, and the environment's authenticated public dependency endpoint. It
+suppresses inherited client credentials/cookies and rejects redirects. Evidence
+age starts at the earliest read, not the end of provisioning. This is foundation
+readiness, **not** pool enrollment, sole-writer proof, runtime/schema compatibility
+or successful task execution. These source primitives do not establish an
+installed multi-person development environment.
+
+See the [independent pool lifecycle](nebius-shared-pools.md#independent-platform-and-participant-lifecycle-v2)
+for the separate capacity authority and participant transitions.
+
+### Retained v1 full-environment format
+
 This section describes the retained full-environment v1 format. New personal
 applications use the [shared-data, application-only contract](nebius-personal-applications.md) and do not own
 execution/build namespaces, databases or buckets.
