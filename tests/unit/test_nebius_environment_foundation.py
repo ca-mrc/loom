@@ -57,6 +57,9 @@ def test_generic_foundations_use_own_explicit_names_data_and_closed_execution(pl
     assert {doc['metadata']['namespace'] for doc in documents if doc['kind'] == 'ResourceQuota' and doc['spec']['hard'].get('pods') == '0'} == {'work-red', 'build-red'}
     database, = (doc for doc in documents if doc['kind'] == 'StatefulSet')
     assert database['metadata']['namespace'] == 'app-red'
+    pvc, = (doc for doc in documents if doc['kind'] == 'PersistentVolumeClaim')
+    assert (pvc['metadata']['namespace'], pvc['metadata']['name']) == ('app-red', 'data-loom-postgres-0')
+    assert pvc['spec'] == database['spec']['volumeClaimTemplates'][0]['spec']
     ingress, = (doc for doc in documents if doc['kind'] == 'Ingress')
     assert ingress['spec']['tls'] == [{'hosts': ['red.env.example.com']}]
     assert any(doc['kind'] == 'CronJob' for doc in documents) == (kind == 'production')
