@@ -67,7 +67,7 @@ def _guest_private_expression() -> str:
         "c.command[24].split(',').all(g, g.matches('^(?:0|[1-9][0-9]*)$') && int(g) <= 2147483647))) && "
         "size(c.command[26]) <= 4096 && "
         "c.command[26].matches('^/(?:[-A-Za-z0-9._]+/)*[-A-Za-z0-9._]+$') && "
-        "!c.command[26].matches('(?:^|/)\\.\\.?(?:/|$)') && "
+        "!c.command[26].matches('(?:^|/)\\\\.\\\\.?(?:/|$)') && "
         "!c.command[26].matches('^/(?:proc|sys|dev|run|loom|tests|verifier|solution)(?:/|$)') && "
         "(size(c.command) == 27 || c.command[27] == '--nested-docker'))) && "
         "(!has(c.args) || size(c.args) == 0) && !has(c.lifecycle) && "
