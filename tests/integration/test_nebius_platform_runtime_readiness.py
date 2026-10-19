@@ -5,7 +5,9 @@ import base64
 import copy
 import importlib
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
@@ -33,12 +35,12 @@ from tests.integration.test_nebius_pool_registry import sessions as sessions
 from tests.ops.test_nebius_development_runtime_readiness import running as running
 
 
-@pytest.mark.parametrize('damage', [None, 'unpinned_authority', 'database', 'namespace', 'restart', 'late-secret'])
-async def test_platform_runtime_uses_its_own_authority_without_environment_history(sessions, tmp_path, running, damage):
+async def prepared_platform_runtime(sessions, tmp_path, running, *, damage=None, existing=None):
     name = 'scripts.ops.nebius_platform_runtime_readiness'
     assert importlib.util.find_spec(name), 'independent platform readiness consumer missing'
     subject = importlib.import_module(name)
-    _, spec, installed, authority, capture, opening = await prepare(sessions)
+    _, spec, installed, authority, capture, opening = await prepare(sessions,
+        platform_input=None if existing is None else existing[0])
     await capture()
     operation = opening(installed.operation_id, authority)
     committed = await apply(sessions, operation)
@@ -57,6 +59,10 @@ async def test_platform_runtime_uses_its_own_authority_without_environment_histo
         state_root=tmp_path / 'operations', anchor_root=tmp_path / 'anchors',
         connection=NebiusKubernetesConnection(endpoint='https://cluster.example', ca_file=tmp_path / 'ca.pem',
             credentials_file=tmp_path / 'credentials.json'))
+    if existing is not None:
+        host = replace(existing[1], scope=host.scope, state_root=tmp_path / 'operations', anchor_root=tmp_path / 'anchors')
+        binding, image = host.runtime.binding, host.runtime.service_image
+        namespace = binding.namespace
     reference = retain_authorized_operation(host=host, request=operation, authorization=grant, evidence_sha256='a' * 64)
     request = PoolInspectionV2(schema_version='loom.pool-inspection.v2', operation_id=uuid4(),
         installation_id=spec.installation_id, pool_id=spec.pool_id, require_capacity=True,
@@ -75,7 +81,8 @@ async def test_platform_runtime_uses_its_own_authority_without_environment_histo
         resources[_key(row)] = row
         return row
     url = f'postgresql+psycopg://reader:private-fixture@loom-postgres.{namespace}.svc:5432/loom'
-    add('Secret', 'platform-db', data={key: base64.b64encode(url.encode()).decode() for key in ('service-url', 'admin-url')})
+    database_name = host.runtime.database_secret
+    add('Secret', database_name, data={key: base64.b64encode(url.encode()).decode() for key in ('service-url', host.runtime.database_url_key)})
     gateway_machine, = (row for row in spec.machines if row.role == 'gateway')
     add('Secret', 'gateway-token', data={'token': base64.b64encode(b'private-gateway-fixture').decode()})
     catalog = add('ConfigMap', 'platform-profiles', data={'profiles.json': spec.profiles.model_dump_json()})
@@ -101,7 +108,7 @@ async def test_platform_runtime_uses_its_own_authority_without_environment_histo
                 'ca_file': '/kube/ca.crt', 'token_file': '/kube/token'})}
         container['env'] = [{'name': key, 'value': value} for key, value in values.items()]
         container['env'].append({'name': 'LOOM_SVC_DB_URL' if component == 'manager' else 'LOOM_POOL_GATEWAY_DB_URL',
-            'valueFrom': {'secretKeyRef': {'name': 'platform-db', 'key': 'service-url'}}})
+            'valueFrom': {'secretKeyRef': {'name': database_name, 'key': 'service-url'}}})
         hashed = {**labels, 'pod-template-hash': 'abc123'}
         replica['metadata'].update(name=component + '-rs', namespace=namespace, uid=str(uuid4()), labels=hashed,
             ownerReferences=[{'apiVersion': 'apps/v1', 'kind': 'Deployment', 'name': component,
@@ -124,7 +131,7 @@ async def test_platform_runtime_uses_its_own_authority_without_environment_histo
         if path.endswith('/deployments/gateway') and len(commands) == 4:
             gateway_after_commands += 1
             if damage == 'late-secret' and gateway_after_commands == 4:
-                live['Secret:' + namespace + ':platform-db']['data']['service-url'] = base64.b64encode(
+                live['Secret:' + namespace + ':' + database_name]['data']['service-url'] = base64.b64encode(
                     url.replace(namespace, 'foreign').encode()).decode()
         if path in {'/api/v1/namespaces/kube-system', '/api/v1/namespaces/' + namespace}:
             selected = path.rsplit('/', 1)[1]
@@ -144,16 +151,25 @@ async def test_platform_runtime_uses_its_own_authority_without_environment_histo
         manager_key='Deployment:' + namespace + ':manager', gateway_key='Deployment:' + namespace + ':gateway',
         gateway_token_key='Secret:' + namespace + ':gateway-token', catalog_key=_key(catalog))
     if damage == 'database':
-        live['Secret:' + namespace + ':platform-db']['data']['service-url'] = base64.b64encode(url.replace(namespace, 'foreign').encode()).decode()
+        live['Secret:' + namespace + ':' + database_name]['data']['service-url'] = base64.b64encode(url.replace(namespace, 'foreign').encode()).decode()
     elif damage == 'unpinned_authority':
         (host.anchor_root / (str(reference.authorization_id) + '.json')).unlink()
+    return SimpleNamespace(subject=subject, policy=policy, snapshot=snapshot, probes=probes, commands=commands,
+        operation=operation, live=live, collections=collections, capture=capture)
+
+
+@pytest.mark.parametrize('damage', [None, 'unpinned_authority', 'database', 'namespace', 'restart', 'late-secret'])
+async def test_platform_runtime_uses_its_own_authority_without_environment_history(sessions, tmp_path, running, damage):
+    context = await prepared_platform_runtime(sessions, tmp_path, running, damage=damage)
+    def observe():
+        return context.subject.observe_platform_runtime(policy=context.policy, snapshot=context.snapshot, probes=context.probes)
     if damage:
         with pytest.raises(ValueError, match='platform_runtime_unqualified'):
-            subject.observe_platform_runtime(policy=policy, snapshot=snapshot, probes=probes)
+            observe()
     else:
-        result = subject.observe_platform_runtime(policy=policy, snapshot=snapshot, probes=probes)
+        result = observe()
         assert result['status'] == 'platform_runtime_verified'
-        assert result['platform_operation_id'] == str(operation.operation_id)
+        assert result['platform_operation_id'] == str(context.operation.operation_id)
         assert [row['component'] for row in result['processes']] == ['manager', 'gateway']
-        assert commands == ['manager', 'service', 'gateway', 'gateway']
+        assert context.commands == ['manager', 'service', 'gateway', 'gateway']
         assert 'private-' not in json.dumps(result)

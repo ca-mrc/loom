@@ -22,6 +22,7 @@ from tests.integration.test_nebius_pool_registry import sessions as sessions
 from tests.ops.test_nebius_development_build_cloud import publisher_cloud as publisher_cloud
 from tests.ops.test_nebius_development_collector_cloud import collector_cloud as collector_cloud
 from tests.ops.test_nebius_development_collector_cloud import original_cloud as original_cloud
+from tests.ops.test_nebius_development_runtime_readiness import running as running
 from tests.support.nebius_phase_api import PhaseAPI
 from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_candidate_catalog import publication as publication
@@ -29,7 +30,7 @@ from tests.unit.test_nebius_candidate_catalog import publication as publication
 
 @pytest.mark.parametrize('committed_enrollment', [False, True])
 async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact_effects(
-        sessions, tmp_path, platform_inputs, publication, publisher_cloud, committed_enrollment):
+        sessions, tmp_path, platform_inputs, publication, publisher_cloud, committed_enrollment, running):
     name = 'scripts.ops.nebius_environment_runtime_install'
     assert importlib.util.find_spec(name), 'protected independent runtime installer is missing'
     module = importlib.import_module(name)
@@ -280,6 +281,34 @@ async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact
             reject_process = True
             with pytest.raises(ValueError, match='environment_runtime_readiness_unqualified'):
                 await readiness.observe_environment_runtime(**observe_inputs)
+            assert len(changes) == 8
+            reject_process, late_restart = False, False
+            assert hasattr(readiness, 'observe_environment_pre_activation'), 'connected platform/environment readiness missing'
+            from tests.integration.test_nebius_platform_runtime_readiness import prepared_platform_runtime
+
+            platform_dir = tmp_path / 'platform'
+            platform_dir.mkdir(mode=0o700)
+            platform = await prepared_platform_runtime(sessions, platform_dir, running, existing=(api.platform_input, policy.host))
+            late_application_restart = False
+            @contextmanager
+            def platform_probe_connection(qualify, region):
+                def execute(pod, container, command):
+                    if late_application_restart and command[3] == 'gateway':
+                        actuator_pod, = remote.kubernetes['/api/v1/namespaces/work-red/pods']['items']
+                        actuator_pod['status']['containerStatuses'][0]['restartCount'] += 1
+                    return platform.probes.execute(pod, container, command)
+                yield EnvironmentRuntimeProbes(read=platform.probes.read, execute=execute, qualify=qualify, region=region)
+            final_inputs = {**observe_inputs, 'platform_policy': platform.policy, 'platform_probe_connection': platform_probe_connection}
+            ready = await readiness.observe_environment_pre_activation(**final_inputs)
+            assert ready['status'] == 'preactivation_runtime_verified_closed'
+            assert ready['admission_open'] is False and ready['participant_id'] == str(policy.participant.participant_id)
+            assert ready['platform']['platform_operation_id'] == str(platform.operation.operation_id)
+            assert api.request.request.require_capacity is True
+            assert api.request.request.platform_authorization_id == platform.policy.authority.authorization_id
+            assert len(changes) == 8, 'preactivation readback must not open quotas or restart readers'
+            late_application_restart = True
+            with pytest.raises(ValueError, match='environment_preactivation_unqualified'):
+                await readiness.observe_environment_pre_activation(**final_inputs)
             assert len(changes) == 8
             reject_process, late_restart = False, True
             # A later component's probe must not leave the earlier actuator's

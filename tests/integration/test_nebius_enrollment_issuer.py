@@ -57,7 +57,8 @@ async def prepared(sessions, tmp_path, platform_inputs, publication):
         administration_documents,
     )
 
-    _, spec, _, _, _, _ = await platform(sessions)
+    platform_input = await platform(sessions)
+    _, spec, _, _, _, _ = platform_input
     selected = spec.participants[2]
     reference, responses, payload, keyring, candidate = publication
     pinned = ProtectedPublication.model_validate(reference)
@@ -141,6 +142,7 @@ async def prepared(sessions, tmp_path, platform_inputs, publication):
                 return {'job_uid': str(uuid4()), 'pod_uid': str(uuid4()), 'receipt': json.loads(result.stdout)}
 
         api = API(runtime.binding)
+        api.platform_input = platform_input
 
         @contextmanager
         def connect(request):

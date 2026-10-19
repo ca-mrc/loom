@@ -31,9 +31,9 @@ def lifecycle():
     return importlib.import_module(name)
 
 
-async def prepare(sessions):
+async def prepare(sessions, *, platform_input=None):
     module = lifecycle()
-    _, spec, installed, tokens, _, authority = await platform(sessions)
+    _, spec, installed, tokens, _, authority = platform_input if platform_input is not None else await platform(sessions)
 
     async def observe():
         observer, = (row for row in spec.machines if row.role == 'observer')
