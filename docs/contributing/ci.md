@@ -346,6 +346,8 @@ available for local tests.
 System smoke uses a Compose project per run/attempt and Docker-assigned loopback
 ports; it discovers actual service endpoints once and passes the registry endpoint
 to the image builder without changing the original port mappings.
+Failed Compose commands print a bounded, redacted tail of their captured output,
+so image-build errors remain visible even before service containers exist.
 
 Both integration lanes also prepare selected `postgres:16`, `postgres:17` and
 `python:3.11-slim` fixtures before pytest, following literal references through
