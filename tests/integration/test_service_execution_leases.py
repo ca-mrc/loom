@@ -156,6 +156,7 @@ from tests.support.execution_image_admission import (
     IMAGE_ADMISSION_KEYRING,
     signed_image_admission_bundle,
 )
+from tests.support.postgres_cleanup_diagnostics import observe_row_cleanup
 
 
 @pytest.fixture(autouse=True)
@@ -228,7 +229,12 @@ async def _cleanup_service_execution_test_rows(postgres_url: str):  # type: igno
                     ServiceExecutionLease.trial_id.in_(owned_trials)
                 )
             )
-            await session.execute(delete(Trial).where(Trial.id.in_(owned_trials)))
+            # Select owned teams directly: rejoining Trial adds a primary-key
+            # lookup for every backlog row during cleanup.
+            with observe_row_cleanup(
+                engine.sync_engine, fixture_name="service_execution_trials"
+            ):
+                await session.execute(delete(Trial).where(Trial.team_id.in_(owned_team_ids)))
             await session.execute(
                 delete(Batch).where(
                     Batch.team_id.in_(select(Team.id).where(Team.name.like("service-execution-%")))
