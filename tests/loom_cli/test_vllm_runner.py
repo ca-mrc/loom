@@ -1,13 +1,16 @@
 """vllm_runner — subprocess lifecycle, dep-check, health-probe, cleanup.
 
-vLLM itself is a heavy GPU dep; these tests use mocks throughout.
+vLLM itself is a heavy GPU dep; tests use mocks or harmless Python processes.
 Coverage: the orchestration glue (find-free-port + cmd construction +
 poll-until-healthy + graceful-stop), not the vLLM process itself.
 """
 
 from __future__ import annotations
 
+import json
+import signal
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -252,6 +255,80 @@ def test_single_model_keep_alive_transfers_only_completed_process(
     finally:
         if proc in vr._LIVE_PROCESSES:
             vr._LIVE_PROCESSES.remove(proc)
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGHUP"), reason="requires POSIX hangup signals")
+@pytest.mark.parametrize("transferred", [False, True])
+def test_hangup_stops_only_cli_owned_detached_server(tmp_path: Path, transferred: bool) -> None:
+    # Isolate signal handlers and orphan reaping from pytest. The supervisor
+    # becomes a Linux subreaper so even the RED path cleans up its own server.
+    launcher = tmp_path / "launcher.py"
+    launcher.write_text('''
+import signal
+import subprocess
+import sys
+from loom_cli import vllm_runner as vr
+
+server = subprocess.Popen(
+    [sys.executable, "-c", "import time; time.sleep(60)"],
+    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    start_new_session=True,
+)
+vr._LIVE_PROCESSES.append(server)
+vr._install_cleanup_handlers()
+if sys.argv[1] == "True":
+    vr.retain_one(server)
+print(server.pid, flush=True)
+signal.pause()
+''')
+    supervisor = '''
+import ctypes
+import json
+import os
+import select
+import signal
+import subprocess
+import sys
+
+if sys.platform.startswith("linux"):
+    assert ctypes.CDLL(None).prctl(36, 1, 0, 0, 0) == 0  # PR_SET_CHILD_SUBREAPER
+parent = subprocess.Popen(
+    [sys.executable, sys.argv[1], sys.argv[2]],
+    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True,
+)
+server_pid = None
+try:
+    assert select.select([parent.stdout], [], [], 10)[0], "launcher did not become ready"
+    server_pid = int(parent.stdout.readline())
+    parent.send_signal(signal.SIGHUP)
+    _, stderr = parent.communicate(timeout=10)
+    try:
+        os.kill(server_pid, 0)
+        alive = True
+    except ProcessLookupError:
+        alive = False
+    print(json.dumps({"parent_exit": parent.returncode, "server_alive": alive, "stderr": stderr}))
+finally:
+    if parent.poll() is None:
+        parent.kill()
+    parent.communicate(timeout=10)
+    if server_pid is not None:
+        try:
+            os.kill(server_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            os.waitpid(server_pid, 0)
+        except ChildProcessError:
+            pass
+'''
+    result = subprocess.run(
+        [sys.executable, "-c", supervisor, str(launcher), str(transferred)],
+        capture_output=True, text=True, timeout=30, check=True,
+    )
+    observed = json.loads(result.stdout)
+    assert observed["parent_exit"] == -signal.SIGHUP
+    assert observed["server_alive"] is transferred, observed
 
 
 @pytest.mark.parametrize("failure_at", ["process_exit", "settle", "probe"])
