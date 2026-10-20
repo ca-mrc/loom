@@ -50,6 +50,8 @@ from loom_control_plane.execution_capacity import ExecutionProvisioningBlockedEr
 from loom_control_plane.execution_resource_allocation import allocate_target_resources
 from loom_control_plane.service_execution import (
     ServiceExecutionConflict,
+    ServiceExecutionParentTerminalError,
+    ServiceExecutionPolicyBlockedError,
     committed_handoff_files,
     mark_verifier_unavailable,
     reserve_trial_execution,
@@ -116,6 +118,7 @@ SELECT t.id,
    AND (t.next_attempt_at IS NULL OR t.next_attempt_at <= :now)
    AND t.family_key IS NULL
    AND b.backend = 'nebius'
+   AND b.state IN ('submitted', 'running')
    AND t.requires_caps->>'worker_pool' = :pool_id
    AND (
          t.execution_route_pool_name IS NULL
@@ -243,6 +246,10 @@ async def reserve_next_service_execution(
                     maximum_deadline_seconds=maximum_deadline_seconds,
                     current_time=current_time,
                 )
+        except ServiceExecutionParentTerminalError:
+            # The parent changed after selection. Its cancellation/settlement
+            # owns the child state; rollback this candidate and continue scanning.
+            continue
         except ServiceExecutionConfigurationError as exc:
             # The candidate savepoint has rolled back. This queued failure owns
             # no attempt, lease, admission slot or spend; leave transient and
@@ -257,6 +264,21 @@ async def reserve_next_service_execution(
             ))
             _LOG.warning("service_execution_configuration_invalid", extra={
                 "trial_id": str(row["id"]), "reason": str(exc),
+            })
+        except ServiceExecutionPolicyBlockedError as exc:
+            # Only policy denials are candidate-local waits. The savepoint has
+            # released their route, admission seat and spend; identity and
+            # invariant conflicts must still escape to the scheduler's error path.
+            retry_at = current_time + timedelta(seconds=max(1, min(300, exc.retry_after_seconds)))
+            await session.execute(update(Trial).where(
+                Trial.id == row["id"], Trial.state == "queued",
+                Trial.cancellation_requested_at.is_(None),
+            ).values(
+                next_attempt_at=retry_at,
+                scheduling_observation={"reason": exc.reason, "observed_at": current_time.isoformat()},
+            ))
+            _LOG.info("service_execution_policy_wait", extra={
+                "trial_id": str(row["id"]), "reason": exc.reason,
             })
         except ExecutionProvisioningBlockedError as exc:
             from loom_control_plane.execution_capacity_wait import remember_execution_capacity_wait
@@ -435,6 +457,7 @@ async def _reserve_service_candidate(
         return None
     runtime_plan, requirements = compiled.runtime_plan, compiled.requirements
     blocked: ExecutionProvisioningBlockedError | None = None
+    policy_blocked: ServiceExecutionPolicyBlockedError | None = None
     for target in compiled.targets:
         if requirements.data_residency and target.data_residency != requirements.data_residency:
             continue
@@ -482,6 +505,13 @@ async def _reserve_service_candidate(
                     },
                 ))
                 return lease
+        except ServiceExecutionPolicyBlockedError as exc:
+            if exc.scope_kind not in {"target", "region"}:
+                raise
+            # A local policy denial does not rule out another target/region.
+            # Its savepoint has released all reservation side effects.
+            if policy_blocked is None:
+                policy_blocked = exc
         except ExecutionProvisioningBlockedError as exc:
             # One realizable target is one waiting demand, never a reservation
             # for every alternative region. Preserve its compiled envelope.
@@ -489,6 +519,8 @@ async def _reserve_service_candidate(
                 blocked = exc
     if blocked is not None:
         raise blocked
+    if policy_blocked is not None:
+        raise policy_blocked
     raise ExecutionProvisioningBlockedError("execution_target_unavailable", retry_after_seconds=15)
 
 

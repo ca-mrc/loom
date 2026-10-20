@@ -5,14 +5,17 @@ synchronous seed)."""
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from threading import Event
 from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, delete, insert, select
+from sqlalchemy import create_engine, delete, insert, select, text, update
 from sqlalchemy.orm import sessionmaker
 
 from loom.db.schema import (
@@ -21,6 +24,7 @@ from loom.db.schema import (
     DataLifecycleGcItem,
     DataLifecycleGcRun,
     DataLifecycleObject,
+    ExecutionAdmissionReservation,
     Task,
     Team,
     TeamQuota,
@@ -72,6 +76,7 @@ def seed_team(postgres_url: str) -> Iterator[tuple[UUID, str]]:
     finally:
         with session_factory() as s:
             s.execute(delete(Trial))
+            s.execute(delete(Batch))
             s.execute(delete(Token))
             s.execute(delete(TeamQuota))
             s.execute(delete(User).where(User.username_normalized.like("cp-submit-user-%")))
@@ -289,6 +294,169 @@ def test_unknown_batch_id_returns_400(
         )
     assert r.status_code == 400
     assert "unknown batch" in r.json()["detail"]
+
+
+@pytest.mark.parametrize("terminal_state", ["cancelled", "finished"])
+def test_batch_terminal_transition_fences_captured_submission(
+    app,  # type: ignore[no-untyped-def]
+    seed_team: tuple[UUID, str],
+    postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    terminal_state: str,
+) -> None:
+    from loom_control_plane.routes import trials as trials_route
+
+    team_id, raw = seed_team
+    batch_id = uuid4()
+    engine = create_engine(postgres_url)
+    sessions = sessionmaker(engine)
+    with sessions() as session:
+        session.add(Batch(
+            id=batch_id, team_id=team_id, name="cancel fanout race",
+            task_filter={}, trial_config={}, state="submitted", backend="docker",
+            created_by_token_prefix="abcdef12", expected_trial_count=2,
+        ))
+        session.commit()
+    payload = {
+        "task_id": "hello", "config": {"agent_name": "oracle", "agent_model": None},
+        "batch_id": str(batch_id), "idempotency_key": f"{batch_id}:existing",
+    }
+    headers = {"Authorization": f"Bearer {raw}"}
+    validated = Event()
+    original_validate = trials_route.validate_submission_agent_task_compatibility
+
+    async def capture_submission(*args, **kwargs):  # type: ignore[no-untyped-def]
+        await original_validate(*args, **kwargs)
+        validated.set()
+
+    try:
+        with TestClient(app) as client:
+            existing = client.post("/trials", headers=headers, json=payload)
+            assert existing.status_code == 201, existing.text
+            monkeypatch.setattr(
+                trials_route, "validate_submission_agent_task_compatibility", capture_submission,
+            )
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                with sessions() as cancelling:
+                    cancelling.execute(select(Batch).where(Batch.id == batch_id).with_for_update())
+                    submission = executor.submit(
+                        client.post, "/trials", headers=headers,
+                        json={**payload, "idempotency_key": f"{batch_id}:late"},
+                    )
+                    # The request has read the active parent and passed preflight;
+                    # cancellation now commits before authoritative child admission.
+                    assert validated.wait(timeout=5)
+                    cancelling.execute(update(Batch).where(Batch.id == batch_id).values(
+                        state=terminal_state, finished_at=datetime.now(UTC),
+                    ))
+                    cancelling.commit()
+                late = submission.result(timeout=5)
+            assert late.status_code == 409, late.text
+            replay = client.post("/trials", headers=headers, json=payload)
+            assert replay.status_code == 201, replay.text
+            assert replay.json() == existing.json()
+        with sessions() as session:
+            assert session.scalars(select(Trial.id).where(Trial.batch_id == batch_id)).all() == [
+                UUID(existing.json()["trial_id"]),
+            ]
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("admission_kind", ["reservation", "global_selection"])
+def test_concurrent_batch_replay_does_not_deadlock_scheduler_admission(
+    app,  # type: ignore[no-untyped-def]
+    seed_team: tuple[UUID, str],
+    postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    admission_kind: str,
+) -> None:
+    from loom_control_plane.routes import trials as trials_route
+
+    team_id, raw = seed_team
+    batch_id = uuid4()
+    engine = create_engine(postgres_url)
+    sessions = sessionmaker(engine)
+    with sessions() as session:
+        session.add(Batch(
+            id=batch_id, team_id=team_id, name="concurrent replay admission",
+            task_filter={}, trial_config={}, state="submitted", backend="docker",
+            created_by_token_prefix="abcdef12", expected_trial_count=1,
+        ))
+        session.commit()
+    payload = {
+        "task_id": "hello", "config": {"agent_name": "oracle", "agent_model": None},
+        "batch_id": str(batch_id), "idempotency_key": f"{batch_id}:concurrent",
+    }
+    headers = {"Authorization": f"Bearer {raw}"}
+    missed_replay = Event()
+    canonical_committed = Event()
+    replay_waiting = Event()
+    captured_request = None
+    original_validate = trials_route.validate_submission_agent_task_compatibility
+    original_ensure = trials_route._ensure_trial_task_image_links
+
+    async def capture_fastpath_miss(*args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal captured_request
+        await original_validate(*args, **kwargs)
+        if captured_request is None:
+            captured_request = asyncio.current_task()
+            missed_replay.set()
+            assert await asyncio.to_thread(canonical_committed.wait, 5)
+
+    async def capture_canonical_replay(*args, **kwargs):  # type: ignore[no-untyped-def]
+        if captured_request is asyncio.current_task():
+            # The canonical replay locks its existing Trial to preserve image
+            # links; the scheduler below already owns that row.
+            replay_waiting.set()
+        await original_ensure(*args, **kwargs)
+
+    monkeypatch.setattr(trials_route, "validate_submission_agent_task_compatibility", capture_fastpath_miss)
+    monkeypatch.setattr(trials_route, "_ensure_trial_task_image_links", capture_canonical_replay)
+    reservation_error = None
+    try:
+        with TestClient(app) as client:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                replay_future = executor.submit(client.post, "/trials", headers=headers, json=payload)
+                try:
+                    assert missed_replay.wait(timeout=5)
+                    canonical = client.post("/trials", headers=headers, json=payload)
+                    assert canonical.status_code == 201, canonical.text
+                    trial_id = UUID(canonical.json()["trial_id"])
+                    with sessions() as scheduler:
+                        # Native admission takes Batch KEY SHARE via its FK;
+                        # global selection explicitly locks the parent after
+                        # its existing Trial. Neither may deadlock a replay.
+                        scheduler.execute(select(Trial).where(Trial.id == trial_id).with_for_update())
+                        scheduler.execute(text("SET LOCAL lock_timeout = '5s'"))
+                        canonical_committed.set()
+                        assert replay_waiting.wait(timeout=5)
+                        try:
+                            if admission_kind == "reservation":
+                                scheduler.execute(insert(ExecutionAdmissionReservation).values(
+                                    trial_id=trial_id, attempt=1, execution_role="attempt",
+                                    team_id=team_id, batch_id=batch_id, pool_id="test-replay",
+                                    owner_kind="service_execution_lease", owner_id=uuid4(),
+                                    acquired_at=datetime.now(UTC),
+                                ))
+                            else:
+                                scheduler.execute(select(Batch).where(Batch.id == batch_id).with_for_update())
+                            # This test owns no actual execution lease. Roll back
+                            # its reservation after proving FK admission proceeds.
+                            scheduler.rollback()
+                        except Exception as exc:
+                            reservation_error = exc
+                            scheduler.rollback()
+                finally:
+                    canonical_committed.set()
+                replay = replay_future.result(timeout=10)
+            assert reservation_error is None, repr(reservation_error)
+            assert replay.status_code == 201, replay.text
+            assert replay.json() == canonical.json()
+        with sessions() as session:
+            assert session.scalars(select(Trial.id).where(Trial.batch_id == batch_id)).all() == [trial_id]
+    finally:
+        engine.dispose()
 
 
 def test_team_token_cannot_submit_trial_for_other_team_batch(

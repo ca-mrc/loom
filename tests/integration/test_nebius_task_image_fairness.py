@@ -5,6 +5,7 @@ import json
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta, timezone
 from time import perf_counter
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -12,6 +13,7 @@ from sqlalchemy import event, func, insert, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from loom.db.schema import (
+    Batch,
     ExecutionCapacityPolicy,
     ExecutionCostReservation,
     ExecutionProvisioningAuthorization,
@@ -58,6 +60,16 @@ from tests.integration.test_service_execution_leases import (
 from tests.support.execution_image_admission import IMAGE_ADMISSION_KEYRING
 
 
+def _healthy_placement(*, sampled_at: datetime | None = None, **kwargs: Any) -> dict[str, Any]:
+    """This file models healthy nodes; preserve each test's later damage."""
+    placement = placement_fixture(**kwargs)
+    stamp = (sampled_at or datetime.now(UTC)).isoformat()
+    for node in placement["nodes"]:
+        node.update(name=node["uid"], draining=False,
+                    io_pressure={"sampled_at": stamp, "full_avg10": 0.0})
+    return placement
+
+
 @pytest.fixture
 async def native_build_setup(claim_setup):  # noqa: F811
     sessions, team_id = claim_setup
@@ -65,7 +77,7 @@ async def native_build_setup(claim_setup):  # noqa: F811
     now = datetime.now(UTC)
     async with sessions() as session, session.begin():
         trial_id, target = await _seed_ready_trial(session, now=now)
-        occupied = placement_fixture(
+        occupied = _healthy_placement(
             target_id=target.target_id, nodes=1, used_nodes=1,
             quota_nodes=1, requested_cpu=64_000,
         )
@@ -100,7 +112,7 @@ async def waiting_build(native_build_setup):
 
 async def _free(sessions, target, now, *, quota_nodes=1):
     async with sessions() as session, session.begin():
-        free = placement_fixture(
+        free = _healthy_placement(
             target_id=target.target_id, nodes=1, used_nodes=1, quota_nodes=quota_nodes,
         )
         await _record(session, target.target_id, now + timedelta(seconds=1), free)
@@ -189,20 +201,22 @@ async def test_execution_waiting_before_successive_build_heads_gets_released_cap
         if index == 0:
             image_id, builder_trial_id = await seed_image(sessions, builder_team_id)
             async with sessions() as session, session.begin():
-                await _record(session, target.target_id, now + timedelta(seconds=20), placement_fixture(
+                await _record(session, target.target_id, now + timedelta(seconds=20), _healthy_placement(
                     target_id=target.target_id, nodes=1, used_nodes=1, quota_nodes=1, requested_cpu=64000))
     assert lease is not None, "younger native build heads repeatedly bypassed the waiting execution"
     assert lease.trial_id == trial_id and lease.attempt == 1
 
 
 @pytest.mark.parametrize("invalidated", ["cancelled", "input", "route", "attempt", "expired",
-                                      "target_environment", "target_region"])
+                                      "target_environment", "target_region", "parent_cancelled", "parent_finished"])
 async def test_invalid_execution_wait_cannot_hold_builder_capacity(waiting_execution, invalidated):
     controller, sessions, _, _, _, trial_id, target, now = waiting_execution
     async with sessions() as session, session.begin():
         trial = await session.get(Trial, trial_id)
         if invalidated == "cancelled":
             trial.cancellation_requested_at = now
+        elif invalidated.startswith("parent_"):
+            (await session.get(Batch, trial.batch_id)).state = invalidated.removeprefix("parent_")
         elif invalidated == "input":
             (await session.get(Task, trial.task_id)).checksum = "f" * 64
         elif invalidated == "route":
@@ -225,6 +239,13 @@ async def test_invalid_execution_wait_cannot_hold_builder_capacity(waiting_execu
         if invalidated == "expired":
             await set_execution_target_health(session, target_id=target.target_id,
                 desired_state="active", observed_state="ready", health_status="healthy", observed_at=claim_at)
+            # This case advances the explicit admission clock by121s. Model an
+            # ordinary fresh collector epoch at that same clock, independently
+            # of the deliberately expired execution-wait hint.
+            await _record(session, target.target_id, claim_at, _healthy_placement(
+                target_id=target.target_id, nodes=1, used_nodes=1, quota_nodes=1,
+                sampled_at=claim_at,
+            ))
         # Use the real native claim/render/admission path with an explicit
         # clock so expiry needs no sleeps or patched production clock.
         attempt = await controller._prepare_claim(session)
@@ -528,7 +549,7 @@ async def test_real_spare_headroom_can_admit_trial_without_displacing_wait(waiti
 async def test_wait_reuses_compatible_native_allocatable_history(waiting_build):
     _, sessions, _, _, _, trial_id, target, now = waiting_build
     async with sessions() as session, session.begin():
-        current = placement_fixture(
+        current = _healthy_placement(
             target_id=target.target_id, nodes=1, used_nodes=1, quota_nodes=1,
         )
         current["template_samples"] = []
@@ -544,7 +565,7 @@ async def test_wait_reuses_compatible_native_allocatable_history(waiting_build):
 ])
 async def test_wait_can_use_observed_managed_drain_without_cold_sample(native_build_setup, occupant):
     controller, sessions, kube, _, _, trial_id, target, now = native_build_setup
-    occupied = placement_fixture(target_id=target.target_id, nodes=1, used_nodes=1,
+    occupied = _healthy_placement(target_id=target.target_id, nodes=1, used_nodes=1,
                                  quota_nodes=1, requested_cpu=64_000)
     occupied["template_samples"] = []
     occupied["node_group"]["template"]["preset"] = "new-template-without-sample"
@@ -570,7 +591,7 @@ async def test_wait_can_use_observed_managed_drain_without_cold_sample(native_bu
         assert (wait is not None) == (occupant == "managed")
     if occupant != "managed":
         return  # No evidence that unknown resident/DaemonSet overhead can drain.
-    free = placement_fixture(target_id=target.target_id, nodes=1, used_nodes=1, quota_nodes=1)
+    free = _healthy_placement(target_id=target.target_id, nodes=1, used_nodes=1, quota_nodes=1)
     free["template_samples"] = []
     free["node_group"]["template"]["preset"] = "new-template-without-sample"
     async with sessions() as session, session.begin():
@@ -588,7 +609,7 @@ async def test_wait_protects_shared_native_quota_but_not_an_independent_domain(w
     async with sessions() as session, session.begin():
         trial_id, second = await _seed_ready_trial(session, now=now)
         for target in (first, second):
-            placement = placement_fixture(
+            placement = _healthy_placement(
                 target_id=target.target_id, nodes=0, used_nodes=0, quota_nodes=1,
                 parent_id="wait-shared" if domain in {"shared", "impossible-policy"} else target.target_id,
             )
@@ -691,7 +712,7 @@ async def two_waiting_builds(waiting_build):
             },
         )
         for current in (target, second_target):
-            occupied = placement_fixture(
+            occupied = _healthy_placement(
                 target_id=current.target_id, nodes=0, used_nodes=1, quota_nodes=1,
                 parent_id="ordered-waits",
             )
@@ -711,7 +732,7 @@ async def two_waiting_builds(waiting_build):
     async with sessions() as session, session.begin():
         assert await session.get(TaskImageCapacityWait, second_target.target_id) is not None
         for current in (target, second_target):
-            free = placement_fixture(target_id=current.target_id, nodes=0, used_nodes=0,
+            free = _healthy_placement(target_id=current.target_id, nodes=0, used_nodes=0,
                                      quota_nodes=1, parent_id="ordered-waits")
             await _record(session, current.target_id, now + timedelta(seconds=1), free)
     return waiting_build, second, second_kube, second_image, second_target

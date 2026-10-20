@@ -384,6 +384,21 @@ def test_workspace_fixture_is_admitted_with_a_prepared_image(tmp_path: Path, age
     ) == ()
 
 
+def test_workspace_fixture_runs_as_the_agent_identity(tmp_path: Path) -> None:
+    # A root-owned workdir fails staging (`file_permission_denied`) for every
+    # harness; a root image user fails Terminus' exec (`exec_user_mismatch`) (#2054).
+    from loom.sandbox_identity import resolve_sandbox_identity
+
+    root, task = _workspace_fixture(tmp_path)
+    identity = resolve_sandbox_identity(task.environment.user, "/home/agent")
+    assert identity is not None
+    owner = f"{identity.run_as_user}:{identity.run_as_group}"
+    dockerfile = (root / "environment" / "Dockerfile").read_text()
+    assert f"chown {owner} {task.environment.workdir}\n" in dockerfile
+    # Terminus execs as the agent identity; the image user must match it.
+    assert dockerfile.endswith(f"USER {owner}\nWORKDIR {task.environment.workdir}\n")
+
+
 def test_workspace_fixture_hides_solution_and_verifier_from_model_agents(tmp_path: Path) -> None:
     from fnmatch import fnmatchcase
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import re
 import shutil
 import stat
@@ -69,6 +70,10 @@ _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _KEY = re.compile(r"[0-9a-f]{64}\Z")
 # Stable Job-log markers for stage timing (Phase 2). Logs only — no DB schema.
 _STAGE_KEY = "loom_task_image_stage"
+_IO_FULL = re.compile(
+    r"full\s+avg10=([0-9]+(?:\.[0-9]+)?)\s+avg60=[0-9]+(?:\.[0-9]+)?"
+    r"\s+avg300=[0-9]+(?:\.[0-9]+)?\s+total=[0-9]+\Z"
+)
 
 
 class BuildPreparationError(TaskImagePreparationError):
@@ -156,7 +161,46 @@ def load_claim(path: Path) -> dict[str, Any]:
     export_format = claim.get("oci_export_format", "archive")
     if export_format not in {"archive", "directory"}:
         raise BuildPreparationError("invalid OCI export format")
+    _io_full_avg10_limit(claim)
     return claim
+
+
+def _io_full_avg10_limit(claim: dict[str, Any]) -> float | None:
+    if "io_full_avg10_max" not in claim:
+        return None
+    value = claim["io_full_avg10_max"]
+    if type(value) not in {int, float} or not 0 <= value <= 100 or not math.isfinite(value):
+        raise BuildPreparationError("invalid I/O pressure threshold")
+    return float(value)
+
+
+def _parse_io_full_avg10(body: str) -> float | None:
+    full = [line.strip() for line in body.splitlines() if line.split()[:1] == ["full"]]
+    if len(full) != 1 or (match := _IO_FULL.fullmatch(full[0])) is None:
+        return None
+    value = float(match[1])
+    return value if math.isfinite(value) and 0 <= value <= 100 else None
+
+
+def _wait_for_io_health(claim: dict[str, Any]) -> None:
+    maximum = _io_full_avg10_limit(claim)
+    if maximum is None:
+        return
+    with stage_span("io_pressure", full_avg10_max=maximum):
+        while True:
+            try:
+                value = _parse_io_full_avg10(Path("/proc/pressure/io").read_text())
+            except (OSError, UnicodeError):
+                value = None
+            if value is not None and value <= maximum:
+                emit_stage("io_pressure", "healthy", full_avg10=value, full_avg10_max=maximum)
+                return
+            emit_stage(
+                "io_pressure", "wait", full_avg10=value, full_avg10_max=maximum,
+                poll_interval_sec=5,
+            )
+            # The existing Kubernetes Job deadline bounds waiting and the build.
+            time.sleep(5)
 
 
 def _client(claim: dict[str, Any], secret: Path) -> Any:
@@ -798,18 +842,18 @@ def prepare(claim: dict[str, Any], work: Path, secrets: Path) -> None:
         finally:
             source.close()
         (work / "oci").mkdir(exist_ok=True)
-        if not (secrets / "cache").is_dir():
-            return
-        cache = _client(claim, secrets / "cache")
-        try:
-            verified: dict[str, tuple[Path, int]] = {}
-            for index, _ in enumerate(derive_task_image_build_components(claim["task_config"])):
-                with stage_span("cache_import", component_index=index), cache_request_counts(
-                    cache, "cache_import", component_index=index,
-                ):
-                    _try_import_cache(cache, claim, index=index, work=work, verified=verified)
-        finally:
-            cache.close()
+        if (secrets / "cache").is_dir():
+            cache = _client(claim, secrets / "cache")
+            try:
+                verified: dict[str, tuple[Path, int]] = {}
+                for index, _ in enumerate(derive_task_image_build_components(claim["task_config"])):
+                    with stage_span("cache_import", component_index=index), cache_request_counts(
+                        cache, "cache_import", component_index=index,
+                    ):
+                        _try_import_cache(cache, claim, index=index, work=work, verified=verified)
+            finally:
+                cache.close()
+        _wait_for_io_health(claim)
 
 
 def pack_cache(directory: Path, archive: Path) -> None:

@@ -5809,9 +5809,12 @@ async def test_get_batch_not_found(
     assert r.status_code == 404
 
 
+@pytest.mark.parametrize("upstream_failure", [False, True])
 async def test_cancel_batch_cascades_to_active_trials(
     camp_setup: tuple[FastAPI, str, UUID],
     postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    upstream_failure: bool,
 ) -> None:
     app, raw, team_id = camp_setup
     transport = httpx.ASGITransport(app=app)
@@ -5865,6 +5868,24 @@ async def test_cancel_batch_cascades_to_active_trials(
         s.commit()
     sync_engine.dispose()
 
+    original_request = app.state.http_client.request
+    failures_remaining = 2 if upstream_failure else 0
+
+    async def inspect_cancellation(*args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal failures_remaining
+        # The fence must be committed, and no parent/auth lock may cross HTTP.
+        async with app.state.session_factory() as session:
+            parent = (await session.execute(
+                select(Batch).where(Batch.id == cid).with_for_update(nowait=True),
+            )).scalar_one()
+            assert parent.state == "cancelled"
+            assert parent.result_status == "cancelled"
+        if failures_remaining:
+            failures_remaining -= 1
+            return httpx.Response(503, json={"detail": "temporarily unavailable"})
+        return await original_request(*args, **kwargs)
+
+    monkeypatch.setattr(app.state.http_client, "request", inspect_cancellation)
     async with httpx.AsyncClient(
         transport=transport,
         base_url="http://svc",
@@ -5873,12 +5894,30 @@ async def test_cancel_batch_cascades_to_active_trials(
             f"/api/v1/batches/{cid}/cancel",
             headers={"Authorization": f"Bearer {raw}"},
         )
-    assert cancel.status_code == 200
-    assert cancel.json()["state"] == "cancelled"
+    assert cancel.status_code == (503 if upstream_failure else 200)
+    if upstream_failure:
+        from loom_service.batch_runner import run_once
+
+        # A crashed request or unavailable CP leaves durable recovery work.
+        # A second failure must also leave it discoverable for a later tick.
+        for _ in range(2):
+            await run_once(
+                session_factory=app.state.session_factory,
+                http_client=app.state.http_client,
+                batch_size=10, submit_rate_per_sec=100,
+                cp_authorization=f"Bearer {raw}",
+            )
+        async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+            replay = await ac.post(
+                f"/api/v1/batches/{cid}/cancel",
+                headers={"Authorization": f"Bearer {raw}"},
+            )
+        assert replay.status_code == 200
+        assert replay.json()["state"] == "cancelled"
+    else:
+        assert cancel.json()["state"] == "cancelled"
 
     # Re-fetch trial states.
-    from sqlalchemy import select
-
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
     with sl() as s:

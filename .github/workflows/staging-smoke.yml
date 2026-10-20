@@ -175,6 +175,8 @@ jobs:
 
   system-smoke:
     name: manifest-owned system smoke
+    env:
+      COMPOSE_PROJECT_NAME: loom-system-${{ github.run_id }}-${{ github.run_attempt }}
     needs: [plan]
     if: >-
       needs.plan.outputs.gate_mode == 'full' &&

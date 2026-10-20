@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class ResourceTotals(BaseModel):
@@ -41,10 +41,32 @@ class ManagedPodPlacement(BaseModel):
     requests: ResourceTotals
 
 
+class NodeIOPressure(BaseModel):
+    """Measured node stall pressure; absent telemetry is never numeric zero."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    sampled_at: AwareDatetime
+    full_avg10: float = Field(ge=0, le=100, allow_inf_nan=False)
+
+    @field_validator("sampled_at", mode="before")
+    @classmethod
+    def _stored_time(cls, value: Any) -> Any:
+        # Placement is persisted as JSONB and revalidated in Python mode. Keep
+        # strict aware-datetime validation after decoding its ISO wire format.
+        return datetime.fromisoformat(value) if isinstance(value, str) else value
+
+
 class NodePlacement(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     uid: str = Field(min_length=1)
+    name: str | None = Field(
+        default=None, min_length=1, max_length=253, exclude_if=lambda value: value is None,
+    )
+    io_pressure: NodeIOPressure | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
     provider_id: str = Field(min_length=1)
     ready: bool
     unschedulable: bool
@@ -260,6 +282,7 @@ __all__ = [
     "CapacityObservationV1",
     "CapacityPolicyBinding",
     "KubernetesCapacitySnapshot",
+    "NodeIOPressure",
     "NodeStateCounts",
     "ProviderCapacitySnapshot",
     "ResourceTotals",

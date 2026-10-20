@@ -320,6 +320,68 @@ def test_existing_docker_plugin_layout_does_not_block_guest(layout: str) -> None
         assert execute(client, "echo $DOCKER_CONFIG").strip() == "/loom/docker-client"
 
 
+def _add_container_guest_failure_diagnostics(name: str, error: BaseException) -> None:
+    """Read this fixture's evidence before teardown, preserving the failure."""
+    if isinstance(error, httpx.HTTPStatusError):
+        error.add_note(f"guest HTTP {error.response.status_code}: {error.response.text[:1024]}")
+    commands = [
+        ["docker", "inspect", "--format", "{{json .State}}", name],
+        ["docker", "exec", name, "/bin/busybox", "cat",
+         "/sys/fs/cgroup/memory.events", "/sys/fs/cgroup/memory.current",
+         "/sys/fs/cgroup/memory.peak", "/sys/fs/cgroup/cpu.stat"],
+        ["docker", "logs", "--tail", "80", name],
+    ]
+    for command in commands:
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=5)
+            detail = f"exit={result.returncode}\n{(result.stdout + result.stderr)[-16300:]}"
+        except Exception as diagnostic_error:
+            detail = type(diagnostic_error).__name__
+        error.add_note(" ".join(command) + "\n" + detail)
+
+
+def test_container_guest_failure_diagnostics_retain_bounded_evidence(monkeypatch) -> None:
+    commands = []
+
+    def run(command, **kwargs):
+        assert 0 < kwargs["timeout"] <= 5
+        commands.append(command)
+        output = {
+            "inspect": '{"OOMKilled":true}',
+            "exec": "oom_kill 1\n",
+            "logs": "old console output\n" * 2000 + "guest channel lost\n",
+        }[command[1]]
+        return subprocess.CompletedProcess(command, 0, output, "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    response = httpx.Response(502, text="guest unavailable", request=httpx.Request("POST", "http://sandbox/exec"))
+    error = httpx.HTTPStatusError("archive failed", request=response.request, response=response)
+    _add_container_guest_failure_diagnostics("owned-guest", error)
+    notes = "\n".join(error.__notes__)
+    assert '"OOMKilled":true' in notes and "oom_kill 1" in notes
+    assert "guest channel lost" in notes and "502" in notes and "guest unavailable" in notes
+    assert len(notes) < 52000
+    assert all("owned-guest" in command for command in commands)
+
+
+@pytest.mark.parametrize("original", [AssertionError("archive failed"), pytest.fail.Exception("test deadline")])
+def test_container_guest_diagnostics_do_not_replace_failure(monkeypatch, original) -> None:
+    def unavailable(command, **kwargs):
+        assert 0 < kwargs["timeout"] <= 5
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr(subprocess, "run", unavailable)
+    with pytest.raises(type(original)) as caught:
+        try:
+            raise original
+        except BaseException as error:
+            _add_container_guest_failure_diagnostics("owned-guest", error)
+            raise
+    assert caught.value is original
+    assert len(original.__notes__) == 3
+    assert all("TimeoutExpired" in note for note in original.__notes__)
+
+
 @contextlib.contextmanager
 def container_guest(*, memory_mib: int = 1024, storage_mib: int = 160,
                     disk_state: bool = False, cpus: int = 1) -> Iterator[tuple[httpx.Client, str]]:
@@ -382,6 +444,9 @@ def container_guest(*, memory_mib: int = 1024, storage_mib: int = 160,
                         assert time.monotonic() < deadline, (directory / "console.log").read_text()
                         time.sleep(0.05)
                     yield client, name
+            except BaseException as error:
+                _add_container_guest_failure_diagnostics(name, error)
+                raise
             finally:
                 subprocess.run(["docker", "stop", "--time=5", name], capture_output=True, check=False)
                 process.wait(timeout=10)

@@ -455,10 +455,17 @@ async def test_admin_cancel_rejects_invalid_context_and_rolls_back(cancel_stack,
         trial = await session.get(Trial, stack.trial_id)
         assert trial.state == "queued"
         assert trial.cancellation_requested_at is None
-        assert (await session.get(Batch, stack.batch_id)).state != "cancelled"
-        assert not (await session.execute(select(AdminAuditEvent).where(
+        parent_committed = resource == "batches" and failure == "audit-write"
+        assert ((await session.get(Batch, stack.batch_id)).state == "cancelled") == parent_committed
+        events = (await session.execute(select(AdminAuditEvent).where(
             AdminAuditEvent.target_id.in_([str(stack.trial_id), str(stack.batch_id)]),
         ))).scalars().all()
+        # A child audit failure rolls back that child; the already accepted
+        # parent fence and its audit remain durable for cancellation recovery.
+        assert len(events) == int(parent_committed)
+        if parent_committed:
+            assert events[0].action == "batch.cancel"
+            assert events[0].event_metadata["reason"] == "acceptance"
 
 
 @pytest.mark.parametrize("resource", ["trials", "batches"])
@@ -495,19 +502,30 @@ async def test_bodyless_admin_cancel_and_batch_audit_failure(cancel_stack, monke
     async def fail_batch_audit(*args, **kwargs):
         raise RuntimeError("batch audit unavailable")
 
-    monkeypatch.setattr("loom_service.routes.batches.write_admin_audit_event", fail_batch_audit)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=stack.service, raise_app_exceptions=False),
                                  base_url="http://svc") as client:
-        response = await client.post(f"/api/v1/batches/{stack.batch_id}/cancel",
-            headers={"Authorization": f"Bearer {secret}", "X-Loom-Admin-Actor": "operator"})
+        with monkeypatch.context() as failure:
+            failure.setattr("loom_service.routes.batches.write_admin_audit_event", fail_batch_audit)
+            response = await client.post(f"/api/v1/batches/{stack.batch_id}/cancel",
+                headers={"Authorization": f"Bearer {secret}", "X-Loom-Admin-Actor": "operator"})
     assert response.status_code == 500
     async with stack.sessions() as session:
-        # Fanout already committed its own cancellation and audit; only Batch rolls back.
-        assert (await session.get(Trial, stack.trial_id)).state == "cancelled"
+        # Parent audit failure stops fanout before any child cancellation.
+        assert (await session.get(Trial, stack.trial_id)).state == "queued"
         assert (await session.get(Batch, stack.batch_id)).state != "cancelled"
         events = (await session.execute(select(AdminAuditEvent).where(
             AdminAuditEvent.target_id.in_([str(stack.trial_id), str(stack.batch_id)]),
         ))).scalars().all()
-        assert len(events) == 1
-        assert events[0].action == "trial.cancel"
-        assert events[0].event_metadata["reason"] is None
+        assert events == []
+    assert stack.cp_requests == []
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=stack.service),
+                                 base_url="http://svc") as client:
+        response = await client.post(f"/api/v1/batches/{stack.batch_id}/cancel",
+            headers={"Authorization": f"Bearer {secret}", "X-Loom-Admin-Actor": "operator"})
+    assert response.status_code == 200
+    async with stack.sessions() as session:
+        events = (await session.execute(select(AdminAuditEvent).where(
+            AdminAuditEvent.target_id.in_([str(stack.trial_id), str(stack.batch_id)]),
+        ))).scalars().all()
+        assert {event.action for event in events} == {"batch.cancel", "trial.cancel"}
+        assert all(event.event_metadata["reason"] is None for event in events)
