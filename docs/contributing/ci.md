@@ -342,6 +342,8 @@ runs only restore caches; trusted pushes, dispatches and scheduled runs may save
 them. Recipe or release changes get a new cache key, and invalid archives fall
 back to normal pinned-image preparation. The lazy per-fixture resolver remains
 available for local tests.
+Runtime curl, CA certificates and coreutils follow compatible distribution security
+updates while the MinIO release, source checksum, compiler and base image stay pinned.
 
 Both integration lanes also prepare selected `postgres:16`, `postgres:17` and
 `python:3.11-slim` fixtures before pytest, following literal references through

@@ -104,7 +104,7 @@ async def test_reference_cancellation_reaps_real_migration_child_before_database
     monkeypatch.setattr(builder, "ReferenceDatabase", lambda _url: database)
     create_process = asyncio.create_subprocess_exec
     child = None
-    ready = asyncio.Event()
+    created = asyncio.Event()
 
     async def spawn(*args, **kwargs):
         nonlocal child
@@ -113,14 +113,16 @@ async def test_reference_cancellation_reaps_real_migration_child_before_database
         child = await create_process(
             builder.sys.executable,
             "-c",
-            "import signal; print('ready', flush=True); signal.pause()",
+            "import time; time.sleep(60)",
             stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
-        assert child.stdout is not None
-        assert await asyncio.wait_for(child.stdout.readline(), timeout=5) == b"ready\n"
-        ready.set()
+        assert child.pid > 0 and child.returncode is None
+        # Return ownership without awaiting interpreter output/startup. The
+        # caller resumes through process assignment before the event waiter can
+        # run, so cancellation tests the production kill/reap boundary.
+        created.set()
         return child
 
     async def destroy(_identity):
@@ -133,7 +135,7 @@ async def test_reference_cancellation_reaps_real_migration_child_before_database
         builder._observe_fresh_database("postgresql+psycopg://unused/isolated", identity)
     )
     try:
-        await asyncio.wait_for(ready.wait(), timeout=10)
+        await asyncio.wait_for(created.wait(), timeout=10)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(task, timeout=5)
@@ -147,6 +149,8 @@ async def test_reference_cancellation_reaps_real_migration_child_before_database
         if child is not None and child.returncode is None:
             child.kill()
             await child.wait()
+        if child is not None:
+            assert child.returncode is not None
 
 
 def test_script_path_entrypoint_rejects_arguments_without_provisioning():
