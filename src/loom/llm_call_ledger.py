@@ -85,6 +85,7 @@ def serialize_execution_accounting_call(row: LlmCall) -> dict[str, Any]:
             "upstream_timeout", "upstream_transport", "upstream_http_4xx",
             "upstream_http_5xx", "upstream_http_error", "attempt_deadline_reached",
         },
+        "_loom_gateway_route": {"native_responses", "chat_translation"},
     }.items():
         value = extras.get(key)
         if isinstance(value, str) and value in allowed:

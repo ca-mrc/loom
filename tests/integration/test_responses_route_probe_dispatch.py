@@ -277,6 +277,15 @@ async def _read_probe_state(
     return row  # type: ignore[return-value]
 
 
+async def _recorded_routes(postgres_url: str) -> list[str]:
+    """Each recorded call's Gateway route (#2054): both share the Responses dialect."""
+    engine = create_async_engine(postgres_url)
+    async with async_sessionmaker(engine, expire_on_commit=False)() as ses:
+        extras = (await ses.execute(select(LlmCall.provider_extras))).scalars().all()
+    await engine.dispose()
+    return [item["_loom_gateway_route"] for item in extras]
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Cached FALSE → skip native, dispatch to translator
 # ──────────────────────────────────────────────────────────────────────
@@ -309,6 +318,7 @@ async def test_cached_false_skips_native_and_translates(
     assert any(p.endswith("/chat/completions") for p in paths), (
         f"expected a /chat/completions call; got {paths}"
     )
+    assert await _recorded_routes(postgres_url) == ["chat_translation"]
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -384,6 +394,7 @@ async def test_cached_true_uses_native_path_unchanged(
     assert not any(p.endswith("/chat/completions") for p in paths), (
         f"native path should not have translated; got {paths}"
     )
+    assert await _recorded_routes(postgres_url) == ["native_responses"]
 
 
 # ──────────────────────────────────────────────────────────────────────
