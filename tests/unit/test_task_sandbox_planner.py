@@ -283,6 +283,25 @@ def test_controller_trial_json_keeps_the_network_override(override: NetworkPolic
     assert received == trial
 
 
+def test_deferred_verifier_plan_inherits_the_same_tagged_trial_json() -> None:
+    # The deferred (separate-execution) verifier pod reuses the attempt's
+    # ``main.environment`` verbatim (#2212's plan shape), so a tag dropped by
+    # the agent plan would silently break grading too. Pin that it round-trips.
+    override = GatewayOnly()
+    _, _, request = _request(policy=override, override=override)
+    plan = compile_task_sandbox_plan(request)
+    assert plan.verifier_execution == "separate_execution"
+
+    verifier = compile_deferred_verifier_plan(
+        plan, request.task, verifier_timeout_seconds=60,
+        handoff_input=RuntimeHandoffInputV1(manifest_sha256="sha256:" + "5" * 64, file_count=1, total_bytes=1),
+    )
+
+    assert verifier.main.environment["LOOM_TASK_TRIAL_JSON"] == plan.main.environment["LOOM_TASK_TRIAL_JSON"]
+    received = TrialConfig.model_validate_json(verifier.main.environment["LOOM_TASK_TRIAL_JSON"])
+    assert received.baseline_network_policy_override == override
+
+
 @pytest.mark.parametrize("name", [name for name in _CASES if not name.startswith(("direct", "litellm"))])
 def test_migrated_plans_stay_consistent_with_requirements_allocation_and_rendering(name: str) -> None:
     from loom.service_execution_materialization import compile_service_execution_plan
