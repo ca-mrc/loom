@@ -57,9 +57,12 @@ successor is not activation authority, and ambiguous writes are reconciled from
 retained intent and readback rather than retried. See the
 [catalog refresh procedure](../runbooks/nebius-deployment.md#shared-pool-handoff-delivery).
 Management catalog/startup SQL remains pinned to the retained `0176` database.
-Participant handoff and recovery separately support the audited `0176` and `0177`
-layouts; the latter adds publication retention without changing pool guards or
-outboxes. The actuator receives no access to that publication journal. Readiness
+Participant handoff and recovery separately support the audited `0176`, `0177`
+and `0178` layouts. Publication retention in `0177` and management catalog/lifecycle
+history in `0178` do not change pool guards or outboxes. The actuator receives no
+access to those journals, and role qualification rejects even column-level grants
+to them. An older `0175` participant needs an explicit schema upgrade before this
+runtime qualification; read-only diagnostics do not grant writer authority. Readiness
 reports the actual participant revision, and unreviewed revisions remain blocked;
 handoff never upgrades or relabels a database to satisfy these checks.
 Staging also selects seven-day ephemeral lifecycle authority and mandatory fresh

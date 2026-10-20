@@ -2828,8 +2828,9 @@ request and its existing phase journal. Before migration dispatch they require
 the original revision; a bound migration Job create intent permits observing
 either original or target, including a lost create response. A qualified
 post-migration probe narrows observation to the target. The read-only ledger
-queries support audited manager schemas 0174, 0176 and 0177 with identical pool
-layouts, while requiring the single selected revision on each read. Default
+queries support audited manager schemas 0174, 0176, 0177 and 0178 with identical
+legacy pool layouts, while requiring the single selected revision on each read.
+A scoped lifecycle binding cannot pass the exact legacy binding comparison. Default
 pool readers and all fence/revoke/startup writes retain their exact0176 contract.
 This does not widen participant schemas or advance shared handoff.
 The refresh installer requalifies it in preflight, immediately before actual

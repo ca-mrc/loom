@@ -80,7 +80,7 @@ async def manager_database(isolated_migration_postgres_url: str, request):
         await engine.dispose()
 
 
-@pytest.mark.parametrize('manager_database', ['0174', '0176', '0177'], indirect=True)
+@pytest.mark.parametrize('manager_database', ['0174', '0176', '0177', '0178'], indirect=True)
 @pytest.mark.parametrize('reader', ['activation', 'active', 'drain', 'retirement'])
 async def test_bound_manager_observation_uses_exact_revision_without_relaxing_scope(manager_database, reader):
     spec, sessions, url, revision = manager_database
@@ -127,7 +127,7 @@ async def test_bound_manager_observation_uses_exact_revision_without_relaxing_sc
             _read(url, fence_pool_activation_sql(spec))
 
 
-@pytest.mark.parametrize('manager_database', ['0174', '0177'], indirect=True)
+@pytest.mark.parametrize('manager_database', ['0174', '0177', '0178'], indirect=True)
 async def test_bound_manager_revision_preserves_busy_journals_and_retirement_refusal(manager_database):
     from tests.integration.test_nebius_pool_participant_refresh import reserved, snapshot
 
@@ -147,13 +147,13 @@ async def test_bound_manager_revision_preserves_busy_journals_and_retirement_ref
     assert await snapshot(sessions) == before
 
 
-@pytest.mark.parametrize('revision', ['0174', '0177', '0175', '0178', "0176'; COMMIT; --", None])
+@pytest.mark.parametrize('revision', ['0174', '0177', '0175', '0178', '0199', "0176'; COMMIT; --", None])
 def test_manager_observation_revision_never_broadens_revocation(revision):
     value, _ = installation()
     spec = PoolInstallation.model_validate(value)
     with pytest.raises(ValueError):
         pool_machine_retirement_sql(spec, action='revoke', manager_revision=revision)
-    if revision not in {'0174', '0177'}:
+    if revision not in {'0174', '0177', '0178'}:
         for generate in (pool_activation_state_sql, pool_active_authority_sql, pool_recovery_drain_sql):
             with pytest.raises(ValueError):
                 generate(spec, manager_revision=revision)

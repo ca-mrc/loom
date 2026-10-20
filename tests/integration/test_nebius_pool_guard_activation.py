@@ -25,13 +25,14 @@ async def test_participant_guard_rejects_unaudited_schema_before_mutation(
     owner, participant = uuid4(), uuid4()
     with psycopg.connect(url, autocommit=True) as db:
         assert db.execute('SELECT version_num FROM alembic_version').fetchall() == [('0178',)]
+        db.execute("UPDATE alembic_version SET version_num='0199'")
         with pytest.raises(psycopg.errors.RaiseException, match='pool activation schema unqualified'):
             db.execute(pool_guard_activation_sql(owner, participant, 'a' * 40, action=action), prepare=False)
         db.rollback()
         assert db.execute('SELECT count(*) FROM nebius_rollout_guard').fetchone() == (0,)
 
 
-@pytest.mark.parametrize('schema_revision', ['0176', '0177'])
+@pytest.mark.parametrize('schema_revision', ['0176', '0177', '0178'])
 def test_participant_schema_supports_complete_handoff_and_recovery_without_upgrading_manager(
         isolated_migration_postgres_url, schema_revision):
     from scripts.ops.nebius_pool_activation_database import pool_activation_state_sql
@@ -51,8 +52,7 @@ def test_participant_schema_supports_complete_handoff_and_recovery_without_upgra
     from tests.integration.conftest import retain_pool_schema
     from tests.integration.test_nebius_pool_participant_refresh import selection
 
-    if schema_revision == '0176':
-        retain_pool_schema(isolated_migration_postgres_url)
+    retain_pool_schema(isolated_migration_postgres_url, schema_revision)
     value, _ = selection()
     spec = PoolParticipantRefresh.model_validate(value).before
     participant = spec.participants[0]
@@ -74,7 +74,7 @@ def test_participant_schema_supports_complete_handoff_and_recovery_without_upgra
     assert page == {'status': 'observed', 'schema_revision': schema_revision, 'rows': []}
     assert qualify_cutover_readiness_page(page, participant=participant, after=None) == ()
     with pytest.raises(ValueError):
-        qualify_cutover_readiness_page({**page, 'schema_revision': '0178'}, participant=participant, after=None)
+        qualify_cutover_readiness_page({**page, 'schema_revision': '0199'}, participant=participant, after=None)
     assert read_sql(url, pool_guard_activation_sql(owner, identity, candidate, action='observe'))['status'] == 'held'
     assert read_sql(url, pool_guard_activation_sql(owner, identity, candidate, action='release'))['status'] == 'open'
     assert read_sql(url, pool_guard_activation_sql(owner, identity, candidate, action='fence'))['status'] == 'fenced'
@@ -84,7 +84,7 @@ def test_participant_schema_supports_complete_handoff_and_recovery_without_upgra
     with psycopg.connect(url, autocommit=True) as db:
         assert db.execute('SELECT count(*) FROM nebius_rollout_guard').fetchone() == (0,)
         assert db.execute('SELECT version_num FROM alembic_version').fetchall() == [(schema_revision,)]
-        if schema_revision == '0177':
+        if schema_revision in {'0177', '0178'}:
             assert db.execute('SELECT count(*) FROM task_source_publications').fetchone() == (0,)
             with pytest.raises(psycopg.errors.RaiseException, match='pool activation schema unqualified'):
                 db.execute(pool_activation_state_sql(spec), prepare=False)

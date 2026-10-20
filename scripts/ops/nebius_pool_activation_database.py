@@ -16,14 +16,18 @@ from loom_service.pool_management.installation import PoolInstallation
 
 PoolActivationState = Literal["closed", "global", "fenced"]
 # Participant databases advance independently of the retained manager. 0177
-# adds publication retention, not a new handoff/outbox/guard layout. This is an
-# audited compatibility set, never the automatically discovered migration head.
-PARTICIPANT_SCHEMA_REVISIONS = ("0176", "0177")
+# adds publication retention; 0178 adds management catalog/lifecycle tables.
+# Neither changes the handoff/outbox/guard layout; the role guard separately
+# rejects access to those management tables. This is an audited compatibility
+# set, never the automatically discovered migration head.
+PARTICIPANT_SCHEMA_REVISIONS = ("0176", "0177", "0178")
 # 0175 changes an Oracle archival trigger; 0176 adds Harbor sessions; 0177 adds
-# source-publication retention. None changes these manager ledger/read predicates.
+# source-publication retention; 0178 adds separate catalog/lifecycle tables.
+# None changes these legacy manager ledger/read predicates. A scoped-v1 binding
+# still fails the exact legacy binding comparison, regardless of schema revision.
 # A refresh must select ONE revision from its bound migration phase; this is not
 # a startup or write compatibility set and is never an automatic schema fallback.
-MANAGER_OBSERVATION_REVISIONS = ("0174", "0176", "0177")
+MANAGER_OBSERVATION_REVISIONS = ("0174", "0176", "0177", "0178")
 
 
 def _binding_hex(spec: PoolInstallation) -> str:

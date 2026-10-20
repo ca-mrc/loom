@@ -696,8 +696,8 @@ def isolated_migration_postgres_url(migration_template_postgres_url: str) -> Ite
     )
 
 
-def retain_pool_schema(postgres_url: str) -> None:
-    """Prepare an owned test database for the protected, retained 0176 protocol.
+def retain_pool_schema(postgres_url: str, revision: str = "0176") -> None:
+    """Prepare an owned test database for an explicitly retained pool protocol.
 
     Run the real downgrade rather than relabeling a current-head database. This
     must only be used by historical pool tests on their isolated databases.
@@ -707,7 +707,7 @@ def retain_pool_schema(postgres_url: str) -> None:
     cfg.set_main_option("script_location", str(repo_root / "database" / "migrations"))
     url = make_url(postgres_url).set(drivername="postgresql+psycopg").render_as_string(hide_password=False)
     cfg.set_main_option("sqlalchemy.url", url.replace("%", "%%"))
-    command.downgrade(cfg, "0176")
+    command.downgrade(cfg, revision)
 
 
 @pytest.fixture

@@ -342,6 +342,47 @@ async def test_same_participant_operations_use_cas_but_peer_operations_do_not_co
     assert sum(isinstance(row, ValueError) and 'predecessor' in str(row) for row in results) == 1
 
 
+async def test_scoped_suspension_and_connected_pool_admission_share_one_quota_lock(sessions):
+    import asyncio
+
+    from loom_service.pool_management.control import cancel_unstarted_pool_request
+    from tests.integration.test_nebius_pool_registry import machine, prepare
+    from tests.integration.test_nebius_pool_registry import setup as connected_setup
+
+    _, spec, _, headers, _, change = await setup(sessions)
+    selected, peer = spec.participants[2], spec.participants[1]
+    other = await connected_setup(sessions, occupied_cpu=3000, max_nodes=2, quota_nodes=3,
+        parent_id='parent', group_id='connected-pool', memory_quota=False)
+    value = placement_fixture(target_id='group-1', parent_id='parent', quota_nodes=3,
+        node_cpu=3000, node_memory=8192, node_storage=32768, requested_cpu=3000)
+    del value['quota_resources']['memory']
+    await publish_placement(sessions, await machine(sessions, spec.pool_id), CapacityPlacement.model_validate(value))
+    async with sessions() as session:
+        principal = await resolve_pool_machine(session, headers(peer)['Authorization'])
+        before = (await session.get(NebiusPoolBinding, spec.pool_id)).binding_sha256
+    requests = (workload(peer), other[2][0])
+    principals = (principal, other[1][0])
+    profiles = ({}, other[3])
+    changed, *receipts = await asyncio.wait_for(asyncio.gather(
+        change(selected, 'suspend'),
+        *(prepare(sessions, owner, request, catalog) for owner, request, catalog
+          in zip(principals, requests, profiles, strict=True)),
+    ), timeout=15)
+    assert changed['state'] == 'suspended'
+    # Two occupied physical pools share room for exactly one additional node.
+    # A scoped transition cannot invalidate peer evidence or double-spend it.
+    assert sorted(receipt.phase for receipt in receipts) == ['reserved', 'waiting']
+    async with sessions() as session:
+        assert (await session.get(NebiusPoolBinding, spec.pool_id)).binding_sha256 == before
+        charged = (await session.scalars(select(NebiusPoolRequest).where(NebiusPoolRequest.phase == 'reserved'))).all()
+        assert len(charged) == 1 and charged[0].cpu_millis == 1500 and charged[0].plan_json is None
+    winner = next(index for index, receipt in enumerate(receipts) if receipt.phase == 'reserved')
+    async with sessions.begin() as session:
+        assert (await cancel_unstarted_pool_request(session, principals[winner], action(requests[winner]))).phase == 'cancelled_unstarted'
+    waiting = 1 - winner
+    assert (await prepare(sessions, principals[waiting], requests[waiting], profiles[waiting])).phase == 'reserved'
+
+
 async def test_retired_environment_can_reenroll_with_new_incarnation_without_resurrecting_credentials(sessions):
     module, spec, _, headers, observe, change = await setup(sessions)
     selected = spec.participants[2]
