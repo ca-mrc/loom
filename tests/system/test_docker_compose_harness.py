@@ -15,6 +15,39 @@ from tests.integration.minio_test_images import MINIO_TEST_IMAGE
 from tests.system import docker_compose
 
 
+def test_compose_failure_reports_bounded_redacted_output_without_replacing_error(
+    monkeypatch: Any, capsys: Any,
+) -> None:
+    secret = "s" * 40_000
+    failure = subprocess.CalledProcessError(
+        1,
+        ["docker", "compose", "up", "--build"],
+        output=(
+            "discarded build preamble\n" + "build progress\n" * 4_000
+            + f"Bearer {secret}\npackage build failed: concrete root cause\n"
+        ),
+        stderr="Dockerfile.control-plane:20\nloom_w_worker-secret\n",
+    )
+
+    def fail(*args: Any, **kwargs: Any) -> None:
+        raise failure
+
+    monkeypatch.setattr(docker_compose.subprocess, "run", fail)
+    with pytest.raises(subprocess.CalledProcessError) as caught:
+        docker_compose._compose("up", "--build")
+
+    assert caught.value is failure
+    output = capsys.readouterr().err
+    assert "package build failed: concrete root cause" in output
+    assert "Dockerfile.control-plane:20" in output
+    assert "discarded build preamble" not in output
+    assert secret[:64] not in output
+    assert "loom_w_worker-secret" not in output
+    assert "[REDACTED:bearer]" in output
+    assert "[REDACTED:loom-token]" in output
+    assert len(output) <= 33_000
+
+
 @pytest.mark.parametrize("requested_port", [None, "61234"])
 @pytest.mark.parametrize("service,container_port,setting", [
     ("postgres", "5432", "POSTGRES"), ("registry", "5000", "REGISTRY"),

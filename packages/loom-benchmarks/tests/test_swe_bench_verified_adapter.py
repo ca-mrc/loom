@@ -9,6 +9,7 @@ from pathlib import Path
 
 from loom_benchmarks.adapters.swe_bench_verified import SWEBenchVerifiedAdapter
 from loom_benchmarks.base import BenchmarkInstance
+from loom_benchmarks.fetch import fetch_upstream
 
 from loom.models.task import TaskConfig
 from loom.models.verifier import VerifierResult
@@ -17,6 +18,23 @@ FIXTURE = (
     Path(__file__).parent
     / "fixtures" / "swe_bench_verified" / "sample.json"
 )
+
+
+def test_instance_selection_preserves_fetched_revision(tmp_path, monkeypatch) -> None:
+    adapter = SWEBenchVerifiedAdapter()
+    calls = []
+
+    def dataset(locator, subset=None, *, revision=None, cache_dir):
+        calls.append(revision)
+        row = json.loads(FIXTURE.read_text())[0]
+        row["instance_id"] = "pinned-row" if revision == adapter.upstream_source.revision else "head-row"
+        return {"test": [row]}
+
+    monkeypatch.setattr("datasets.load_dataset", dataset)
+    fetched = fetch_upstream(adapter.upstream_source, cache_root=tmp_path)
+    instances = list(adapter.list_instances(source_dir=fetched, split="test"))
+    assert [instance.instance_id for instance in instances] == ["pinned-row"]
+    assert calls == [adapter.upstream_source.revision, adapter.upstream_source.revision]
 
 
 def test_convert_emits_valid_task(tmp_path: Path) -> None:

@@ -78,15 +78,30 @@ def _compose(
         env.setdefault(f"LOOM_SYSTEM_{service}_PORT", "0")
     if env_extra:
         env.update(env_extra)
-    return subprocess.run(
-        cmd,
-        check=check,
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=timeout_sec,
-    )
+    try:
+        return subprocess.run(
+            cmd,
+            check=check,
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=timeout_sec,
+        )
+    except subprocess.CalledProcessError as exc:
+        # Pytest truncates exception-local stdout/stderr, hiding build failures
+        # before services exist. Redact before truncating so a cut token prefix
+        # cannot leave its secret suffix in the diagnostic tail.
+        output = _redact_diagnostics(f"{exc.stdout or ''}\n{exc.stderr or ''}")
+        try:
+            print(
+                f"Compose command failed (exit {exc.returncode}); output tail:\n"
+                f"{output[-32_768:]}",
+                file=sys.stderr,
+            )
+        except OSError:
+            pass  # A failed diagnostic must not replace the original failure.
+        raise
 
 
 def _published_port(service: str, container_port: str) -> int:
