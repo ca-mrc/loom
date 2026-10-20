@@ -228,6 +228,10 @@ Resource reservations remain charged until the controller confirms UID-fenced
 cleanup. Cancellation, expiry and controller restarts must not authorize a new
 attempt while an old resource may still exist. Publication evidence and retained
 image references must remain readable for historical results and recovery.
+The claim transaction checks every prior native attempt for an unreleased
+reservation, including attempts older than the latest epoch. Attempts that never
+reserved resources do not block a successor; unrelated materializations remain
+eligible when capacity is available.
 
 ## Compatibility and verification
 

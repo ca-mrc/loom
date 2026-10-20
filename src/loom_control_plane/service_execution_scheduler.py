@@ -50,6 +50,7 @@ from loom_control_plane.execution_capacity import ExecutionProvisioningBlockedEr
 from loom_control_plane.execution_resource_allocation import allocate_target_resources
 from loom_control_plane.service_execution import (
     ServiceExecutionConflict,
+    ServiceExecutionPolicyBlockedError,
     committed_handoff_files,
     mark_verifier_unavailable,
     reserve_trial_execution,
@@ -257,6 +258,21 @@ async def reserve_next_service_execution(
             ))
             _LOG.warning("service_execution_configuration_invalid", extra={
                 "trial_id": str(row["id"]), "reason": str(exc),
+            })
+        except ServiceExecutionPolicyBlockedError as exc:
+            # Only policy denials are candidate-local waits. The savepoint has
+            # released their route, admission seat and spend; identity and
+            # invariant conflicts must still escape to the scheduler's error path.
+            retry_at = current_time + timedelta(seconds=max(1, min(300, exc.retry_after_seconds)))
+            await session.execute(update(Trial).where(
+                Trial.id == row["id"], Trial.state == "queued",
+                Trial.cancellation_requested_at.is_(None),
+            ).values(
+                next_attempt_at=retry_at,
+                scheduling_observation={"reason": exc.reason, "observed_at": current_time.isoformat()},
+            ))
+            _LOG.info("service_execution_policy_wait", extra={
+                "trial_id": str(row["id"]), "reason": exc.reason,
             })
         except ExecutionProvisioningBlockedError as exc:
             from loom_control_plane.execution_capacity_wait import remember_execution_capacity_wait

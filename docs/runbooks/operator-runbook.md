@@ -49,9 +49,12 @@ Each accepted administrator Trial request, including a successful replay, writes
 `trial.cancel` to `admin_audit_events` in the same transaction as cancellation
 and execution fencing. Batch requests write `batch.cancel` with the Batch state,
 even when a replay has no active Trials. Active children pass through the same
-Trial authority and receive their own events. Batch fanout spans transactions;
-if a later child fails, earlier accepted child cancellations and their audits
-remain durable, while the Batch request does not record success. Audit writes
+Trial authority and receive their own events. The Batch state and its audit commit
+before child requests, stopping further fanout even if a child request fails.
+The endpoint still returns that upstream failure; earlier child cancellations
+and their audits remain durable. The batch runner retries undelivered children
+using its own scoped authority, without impersonating the administrator or
+creating additional administrator Trial events. Audit writes
 must succeed before their owning transaction commits. Reasons are redacted
 before persistence; never put credentials in operator context or evidence.
 

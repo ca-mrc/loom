@@ -151,6 +151,15 @@ class ServiceExecutionConflict(ServiceExecutionError):  # noqa: N818 - contract 
     pass
 
 
+class ServiceExecutionPolicyBlockedError(ServiceExecutionConflict):
+    """A candidate must wait for admission or paid-execution policy to allow it."""
+
+    def __init__(self, reason: str, *, retry_after_seconds: int = 15) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.retry_after_seconds = retry_after_seconds
+
+
 class ServiceExecutionFenceError(ServiceExecutionConflict):
     pass
 
@@ -871,6 +880,10 @@ async def reserve_trial_execution(
             now=current_time,
         )
     except ExecutionAdmissionBlockedError as exc:
+        if exc.scope_kind in {
+            "global", "environment", "region", "team", "batch", "execution_class", "pool",
+        }:
+            raise ServiceExecutionPolicyBlockedError(exc.reason) from exc
         raise ServiceExecutionConflict(exc.reason) from exc
     # The lease row is still uncommitted and cannot become executable without
     # the deferred outbox constraint. Persisting its identity first lets the
@@ -888,6 +901,19 @@ async def reserve_trial_execution(
             now=current_time,
         )
     except ExecutionFinanceBlockedError as exc:
+        policy_reasons = {
+            f"execution_budget_{scope}_{reason}"
+            for scope in ("pool", "target")
+            for reason in (
+                "emergency_stop", "duration_exceeded", "attempt_limit_exceeded",
+                "daily_limit_exceeded", "monthly_limit_exceeded",
+            )
+        }
+        if exc.reason in policy_reasons | {
+            "execution_cost_price_binding_unavailable",
+            "execution_cost_price_snapshot_not_effective",
+        }:
+            raise ServiceExecutionPolicyBlockedError(exc.reason) from exc
         raise ServiceExecutionConflict(exc.reason) from exc
     # Capacity waits remain queued: reservation, budget and admission writes are
     # rolled back together before any outbox command or execution attempt exists.

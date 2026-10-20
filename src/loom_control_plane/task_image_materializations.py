@@ -376,6 +376,14 @@ async def claim_task_image_materialization(
             *scope,
             TaskImageMaterialization.cpu_arch == cpu_arch,
             TaskImageMaterialization.attempt_count < TaskImageMaterialization.max_attempts,
+            # Lease expiry and refunded retry budgets do not prove native
+            # resources are gone. Every reserved attempt must acknowledge exact
+            # cleanup before a successor can claim this materialization.
+            ~exists().where(
+                TaskImageMaterializationAttempt.materialization_id == TaskImageMaterialization.id,
+                TaskImageMaterializationAttempt.native_build["capacity_reserved_at"].astext.is_not(None),
+                TaskImageMaterializationAttempt.native_build["capacity_released_at"].astext.is_(None),
+            ),
             or_(
                 and_(
                     TaskImageMaterialization.state == "queued",
