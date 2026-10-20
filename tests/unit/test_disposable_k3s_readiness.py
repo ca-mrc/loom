@@ -51,7 +51,8 @@ def loading_client(monkeypatch):
     core = SimpleNamespace(get_api_resources=lambda **kwargs: object())
     core.read_namespaced_service = lambda *args, **kwargs: SimpleNamespace(spec=SimpleNamespace(cluster_ip="10.43.0.1"))
     batch = object()
-    monkeypatch.setattr(client, "CoreV1Api", lambda: core)
+    core_api = client.CoreV1Api
+    monkeypatch.setattr(client, "CoreV1Api", lambda api_client=None: core if api_client is None else core_api(api_client))
     monkeypatch.setattr(client, "BatchV1Api", lambda: batch)
     container = SimpleNamespace(
         exec=lambda command: SimpleNamespace(exit_code=0, output=b"{}"),
@@ -322,6 +323,31 @@ def test_ready_pod_does_not_build_failure_diagnostics(loading_client, monkeypatc
     core.list_namespaced_event = unexpected
     assert fixture._wait_for_pod(core, "test", "ingress") is pod
     assert clock[0] == 0
+
+
+def test_pod_failure_diagnostics_do_not_honor_retry_after_or_change_readiness_client(loading_client, monkeypatch):
+    from urllib3.connectionpool import HTTPConnectionPool
+    from urllib3.response import HTTPResponse
+
+    _, core, _, clock = loading_client
+    pod = client.V1Pod(metadata=client.V1ObjectMeta(name="broker", uid="current-pod"),
+        status=client.V1PodStatus(phase="Pending"))
+    core.read_namespaced_pod = lambda name, namespace: pod
+    requests = []
+
+    def throttled(pool, connection, method, url, **kwargs):
+        requests.append(url)
+        return HTTPResponse(body=b"{}", status=429, headers={"Retry-After": "600"})
+
+    monkeypatch.setattr(HTTPConnectionPool, "_make_request", throttled)
+    configuration = client.Configuration(host="http://127.0.0.1:1")
+    with client.ApiClient(configuration=configuration) as api_client:
+        core.api_client = api_client
+        core.list_namespaced_event = client.CoreV1Api(api_client).list_namespaced_event
+        with pytest.raises(AssertionError, match="did not become ready: Pending"):
+            fixture._wait_for_pod(core, "test", "broker")
+        assert len(requests) == 1 and clock[0] == 60
+        assert configuration.retries is None
 
 
 def test_policy_diagnostics_identify_missing_status_and_stale_generation():
