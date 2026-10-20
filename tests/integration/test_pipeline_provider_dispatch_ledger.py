@@ -800,3 +800,149 @@ async def test_stale_sweep_yields_to_cleanup_attempt_lock_before_accounting(
     assert await _accounting(seed, grant) == (
         "settled", "uncertain", 10, "settled", 10, 0, 1, 0, 10, 0, 10, 1,
     )
+
+
+@pytest.mark.parametrize("accounting", ["release", "settlement", "sweep"])
+async def test_dispatch_accounting_and_terminal_latch_do_not_deadlock(
+    ledger_seed: _LedgerSeed, monkeypatch: pytest.MonkeyPatch, accounting: str,
+) -> None:
+    """Exercise the real run/ledger-before-Attempt cancellation writer."""
+    from loom.db.schema import ExecutionAttempt
+    from loom.pipeline.budget import TerminalCause
+    from loom_pipeline_orchestrator.repository import PipelineRepository, RunLease
+
+    seed = ledger_seed
+    grant = await seed.reserve()
+    if accounting != "release":
+        async with seed.sessions() as session:
+            await mark_provider_dispatch_sent(session, ctx=seed.ctx, dispatch_id=grant.dispatch_id)
+    lease = RunLease(seed.ids["run"], "dispatch-accounting-test", 1, seed.now + timedelta(minutes=5))
+    async with seed.sessions() as session, session.begin():
+        await session.execute(
+            text("""UPDATE pipeline_runs
+                    SET claimed_by=:owner,lease_epoch=1,lease_expires_at=:expires WHERE id=:id"""),
+            {"owner": lease.claimed_by, "expires": lease.lease_expires_at,
+             "id": lease.pipeline_run_id},
+        )
+    stale_before = await _cutoff(seed)
+    accounting_started, latch_has_ledger, sweep_selected = (
+        asyncio.Event(), asyncio.Event(), asyncio.Event()
+    )
+    original_get, original_execute = AsyncSession.get, AsyncSession.execute
+
+    async def gated_get(session: AsyncSession, entity: Any, ident: Any, **kwargs: Any) -> Any:
+        result = await original_get(session, entity, ident, **kwargs)
+        if accounting != "sweep" and not accounting_started.is_set() and entity in (
+            ExecutionAttempt, PipelineProviderDispatch,
+        ):
+            accounting_started.set()
+            await latch_has_ledger.wait()
+        return result
+
+    async def gated_execute(session: AsyncSession, statement: Any, *args: Any, **kwargs: Any) -> Any:
+        result = await original_execute(session, statement, *args, **kwargs)
+        descriptions = getattr(statement, "column_descriptions", [])
+        if accounting == "sweep" and descriptions and (
+            descriptions[0].get("entity") is PipelineProviderDispatch
+        ):
+            sweep_selected.set()
+        return result
+
+    class GatedRepository(PipelineRepository):
+        async def _cancel_not_started_attempts(
+            self, session: AsyncSession, lease: RunLease, cause: TerminalCause,
+        ) -> None:
+            latch_has_ledger.set()
+            if accounting == "sweep":
+                await sweep_selected.wait()
+            await super()._cancel_not_started_attempts(session, lease, cause)
+
+    async def account() -> Any:
+        if accounting == "sweep":
+            await latch_has_ledger.wait()
+        async with seed.sessions() as session:
+            if accounting == "release":
+                return await release_provider_dispatch_unsent(
+                    session, ctx=seed.ctx, dispatch_id=grant.dispatch_id,
+                )
+            if accounting == "settlement":
+                return await settle_provider_dispatch(
+                    session, ctx=seed.ctx, dispatch_id=grant.dispatch_id, outcome="succeeded",
+                    usage=TokenUsage(input_tokens=1, output_tokens=1), actual_cost_microusd=4,
+                    rate_card_hash="test", request_params={},
+                    response_digest=canonical_digest({"ok": 1}),
+                )
+            return await settle_stale_provider_dispatches(session, stale_before=stale_before)
+
+    async def cancel() -> TerminalCause:
+        if accounting != "sweep":
+            await accounting_started.wait()
+        return await GatedRepository(seed.sessions).latch_terminal_cause(
+            lease, TerminalCause.USER_CANCEL,
+        )
+
+    monkeypatch.setattr(AsyncSession, "get", gated_get)
+    monkeypatch.setattr(AsyncSession, "execute", gated_execute)
+    tasks = [asyncio.create_task(account()), asyncio.create_task(cancel())]
+    try:
+        settled, cause = await asyncio.wait_for(asyncio.gather(*tasks), timeout=10)
+        assert cause is TerminalCause.USER_CANCEL
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+    if accounting == "sweep":
+        assert settled == 0
+        assert await account() == 1
+        expected = ("settled", "uncertain", 10, "settled", 10, 0, 1, 0, 10, 0, 10, 1)
+    else:
+        assert await account() == settled
+        expected = (
+            ("settled", "not_dispatched", 0, "released", None, 0, 0, 0, 0, 0, 0, 0)
+            if accounting == "release"
+            else ("settled", "succeeded", 4, "settled", 4, 0, 1, 0, 4, 0, 4, 1)
+        )
+    assert await _accounting(seed, grant) == expected
+    async with seed.sessions() as session:
+        row = (await session.execute(text("""
+            SELECT l.terminal_cause,a.cancellation_requested_at,o.state
+              FROM pipeline_budget_ledgers l
+              JOIN pipeline_stage_runs s ON s.pipeline_run_id=l.pipeline_run_id
+              JOIN execution_attempts a ON a.stage_run_id=s.id
+              JOIN pipeline_cancellation_outbox o ON o.execution_attempt_id=a.id
+             WHERE a.id=:id
+        """), {"id": seed.ids["attempt"]})).one()
+    assert row.terminal_cause == "user_cancel"
+    assert row.cancellation_requested_at is not None
+    assert row.state == "pending"
+
+
+async def test_settlement_ledger_contention_is_bounded_and_retryable(
+    ledger_seed: _LedgerSeed,
+) -> None:
+    from loom.db.schema import PipelineBudgetLedger
+
+    seed = ledger_seed
+    grant = await seed.reserve()
+    async with seed.sessions() as session:
+        await mark_provider_dispatch_sent(session, ctx=seed.ctx, dispatch_id=grant.dispatch_id)
+    before = await _accounting(seed, grant)
+
+    async def settle() -> Any:
+        async with seed.sessions() as session:
+            return await settle_provider_dispatch(
+                session, ctx=seed.ctx, dispatch_id=grant.dispatch_id, outcome="succeeded",
+                usage=TokenUsage(input_tokens=1, output_tokens=1), actual_cost_microusd=4,
+                rate_card_hash="test", request_params={}, response_digest=canonical_digest({"ok": 1}),
+            )
+
+    async with seed.sessions() as blocker, blocker.begin():
+        await blocker.get(PipelineBudgetLedger, seed.ids["run"], with_for_update=True)
+        with pytest.raises(ProviderDispatchError, match="provider_dispatch_accounting_busy"):
+            await asyncio.wait_for(settle(), timeout=4)
+    assert await _accounting(seed, grant) == before
+    assert (await settle()).actual_cost_microusd == 4
+    assert await _accounting(seed, grant) == (
+        "settled", "succeeded", 4, "settled", 4, 0, 1, 0, 4, 0, 4, 1,
+    )
