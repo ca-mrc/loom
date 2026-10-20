@@ -20,10 +20,11 @@ from loom.nebius_platform_render import build_platform
 
 PREFIX = 'LOOM_EXECUTION_CAPACITY_COLLECTOR_'
 STORAGE = PREFIX + 'QUOTA_STORAGE_NAME'
+BUILD_LIMIT = PREFIX + 'BUILD_CONCURRENCY_LIMIT'
 
 
 @pytest.fixture
-def provider(platform_inputs, tmp_path, monkeypatch):
+def provider(platform_inputs, tmp_path, monkeypatch, request):
     from nebius.api.nebius.compute.v1 import PlatformServiceClient
     from nebius.api.nebius.mk8s.v1 import DiskSpec, NodeGroupServiceClient
     from nebius.api.nebius.quotas.v1 import QuotaAllowanceServiceClient
@@ -36,6 +37,10 @@ def provider(platform_inputs, tmp_path, monkeypatch):
     )
 
     config, candidate, profile = copy.deepcopy(platform_inputs)
+    mode = getattr(request, 'param', False)
+    if mode:
+        config['task_image_builder'] = {
+            'registry_repository': 'cr.eu-north1.nebius.cloud/test/task-images', 'max_concurrent': 16}
     root = Path(__file__).resolve().parents[2]
     def collector(environment):
         files = build_platform(environment, candidate, profile, {}, repo_root=root)
@@ -43,7 +48,10 @@ def provider(platform_inputs, tmp_path, monkeypatch):
             if row['kind'] == 'ConfigMap' and row['metadata']['name'] == 'loom-execution-capacity-collector')
     original = collector(config)
     original['metadata'].update(uid=str(uuid4()), resourceVersion='7')
-    selected_config = {**config, 'execution_disk_type': 'NETWORK_SSD_NON_REPLICATED'}
+    selected_config = copy.deepcopy(config)
+    selected_config['execution_disk_type'] = 'NETWORK_SSD_NON_REPLICATED'
+    if mode is True:
+        selected_config['task_image_builder']['max_concurrent'] = None
     selected = collector(selected_config)
     current = copy.deepcopy(original)
     current['data'] = copy.deepcopy(selected['data'])
@@ -78,7 +86,7 @@ def provider(platform_inputs, tmp_path, monkeypatch):
             ready_node_count=0, reconciling=False, events=[]))
     group.spec.template.boot_disk = DiskSpec(size_gibibytes=93, type=DiskSpec.DiskType.NETWORK_SSD_NON_REPLICATED)
     state = SimpleNamespace(context=context, refresh=bound, current=current, selected=selected, config=selected_config,
-        secret=secret, spec=spec, group=group, calls=[], files=[], closed=[], qualified=qualified, late=None)
+        secret=secret, spec=spec, group=group, calls=[], http_calls=[], files=[], closed=[], qualified=qualified, late=None)
     async def quota_read(_self, request, **kwargs):
         state.calls.append('quotas')
         assert request.parent_id == config['quota_parent_id']
@@ -101,6 +109,7 @@ def provider(platform_inputs, tmp_path, monkeypatch):
         assert path.read_bytes() == material
         assert path.stat().st_mode & 0o777 == 0o600
     def get(method, path):
+        state.http_calls.append((method, path))
         assert method == 'GET'
         return copy.deepcopy(secret if '/secrets/' in path else current)
     state.base = SimpleNamespace(_request=get)
@@ -114,15 +123,21 @@ def provider(platform_inputs, tmp_path, monkeypatch):
     return state
 
 
+@pytest.mark.parametrize('provider', [False, 'retained', True],
+    ids=['no-builder', 'retained-builder', 'resource-only-builder'], indirect=True)
 def test_source_bound_nrd_provider_reads_actual_native_group_without_rewriting_history(provider):
     p = provider
-    before = copy.deepcopy((p.context.request.collector_config, p.spec.quota_identities))
+    before = copy.deepcopy((p.context.request.collector_config, p.spec.quota_identities, p.current, p.secret))
     with pytest.raises(EntryError):
         entry.qualify_pool_provider(p.context, p.base)
     entry.qualify_pool_provider(p.context, p.base, refresh=p.refresh)
     assert p.calls == ['quotas', 'group'] and p.closed == [True]
     assert p.qualified and all(not path.exists() for path in p.files)
-    assert (p.context.request.collector_config, p.spec.quota_identities) == before
+    assert (p.context.request.collector_config, p.spec.quota_identities, p.current, p.secret) == before
+    assert p.http_calls and all(method == 'GET' for method, _ in p.http_calls)
+    if p.config.get('task_image_builder', {}).get('max_concurrent', 16) is None:
+        assert p.context.request.collector_config['data'][BUILD_LIMIT] == '16'
+        assert BUILD_LIMIT not in p.current['data']
 
 
 @pytest.mark.parametrize('damage', ['uid', 'credential', 'late_config', 'late_credential', 'credential_file',
@@ -162,3 +177,30 @@ def test_nrd_projection_rejects_scope_material_and_other_quota_drift(provider, d
         entry.qualify_pool_provider(p.context, p.base, refresh=p.refresh)
     assert 'private' not in str(error.value)
     assert all(not path.exists() for path in p.files)
+
+
+@pytest.mark.parametrize('provider', [True], indirect=True)
+@pytest.mark.parametrize('damage', ['live_limit', 'selected_limit', 'late_limit', 'late_projection_limit',
+    'other_data', 'selected_other_data', 'other_quota'])
+def test_resource_only_builder_provider_rejects_limit_and_unrelated_drift(provider, damage):
+    p = provider
+    if damage == 'live_limit':
+        p.current['data'][BUILD_LIMIT] = '16'
+    elif damage == 'selected_limit':
+        p.selected['data'][BUILD_LIMIT] = p.current['data'][BUILD_LIMIT] = '16'
+    elif damage == 'late_limit':
+        p.late = lambda: p.current['data'].update({BUILD_LIMIT: '16'})
+    elif damage == 'late_projection_limit':
+        p.late = lambda: p.selected['data'].update({BUILD_LIMIT: '16'})
+    elif damage == 'other_data':
+        p.current['data'][PREFIX + 'NEBIUS_PROJECT_ID'] = 'foreign'
+    elif damage == 'selected_other_data':
+        p.selected['data'][PREFIX + 'NEBIUS_PROJECT_ID'] = 'foreign'
+    else:
+        p.spec.quota_identities['vcpu'] = (*p.spec.quota_identities['vcpu'][:-1], 'foreign')
+    before = copy.deepcopy((p.context.request.collector_config, p.spec.quota_identities))
+    with pytest.raises(EntryError):
+        entry.qualify_pool_provider(p.context, p.base, refresh=p.refresh)
+    assert all(method == 'GET' for method, _ in p.http_calls)
+    assert all(not path.exists() for path in p.files)
+    assert (p.context.request.collector_config, p.spec.quota_identities) == before

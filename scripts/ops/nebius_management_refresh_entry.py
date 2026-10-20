@@ -128,9 +128,9 @@ def _load_refresh_inputs(operation: dict[str, Any], ancestors: tuple[str, ...], 
             predecessor.pool_baseline if isinstance(predecessor, CompletedRefresh) else None)
         if inputs.platform_rollout is not None and (pool_baseline is None or pool_baseline.completion.outcome != 'legacy'):
             raise ValueError
-        from scripts.ops.nebius_management_refresh import platform_disk_type
+        from scripts.ops.nebius_management_refresh import platform_references_changed
 
-        if (platform_disk_type(predecessor.deployment) != platform_disk_type(inputs.deployment)
+        if (platform_references_changed(predecessor.deployment, inputs.deployment)
                 and inputs.platform_rollout is None):
             raise ValueError
         render = ManagementRefreshRenderRequest(predecessor.deployment, inputs.deployment, predecessor.active,

@@ -47,9 +47,30 @@ def platform_disk_type(deployment: ManagementDeployment) -> str:
     return str(value)
 
 
+def platform_builder_limit(deployment: ManagementDeployment) -> int | None:
+    """Read the ordinary builder's optional limit, never a refresh-owned budget."""
+    builder = deployment.installation.foundation.platform_config.get('task_image_builder')
+    if builder is None:
+        return None
+    if not isinstance(builder, dict):
+        raise ValueError
+    value = builder.get('max_concurrent')
+    if value is not None and (type(value) is not int or value < 1):
+        raise ValueError
+    return value
+
+
+def platform_references_changed(before: ManagementDeployment, after: ManagementDeployment) -> bool:
+    """Execution references require the existing qualified ordinary-rollout proof."""
+    old = (platform_disk_type(before), platform_builder_limit(before))
+    new = (platform_disk_type(after), platform_builder_limit(after))
+    return old != new
+
+
 def _configuration(before: ManagementDeployment, after: ManagementDeployment) -> None:
     for deployment in (before, after):
         platform_disk_type(deployment)
+        platform_builder_limit(deployment)
     old, new = (ManagementDeployment.model_validate(value.model_dump()).model_dump(mode='json')
         for value in (before, after))
     previous, current = old['installation'], new['installation']
@@ -77,6 +98,10 @@ def _configuration(before: ManagementDeployment, after: ManagementDeployment) ->
         # This is a reference to the ordinary rollout's execution disk. Entry
         # binds a change to its protected publication; refresh creates no disk.
         config.pop('execution_disk_type', None)
+        # Ordinary rollout owns the builder and its ResourceQuota. Preserve all
+        # other builder settings; only its observed concurrency reference varies.
+        if isinstance(config.get('task_image_builder'), dict):
+            config['task_image_builder'].pop('max_concurrent', None)
         foundation['platform_config_json'] = json.dumps(config, sort_keys=True)
     if old != new:
         raise ValueError

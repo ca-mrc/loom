@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
-from scripts.ops.nebius_management_refresh import platform_disk_type, render_refresh
+from scripts.ops.nebius_management_refresh import platform_references_changed, render_refresh
 from scripts.ops.nebius_management_refresh_install import (
     ManagementRefreshInstallRequest,
     refresh_manager_options,
@@ -73,9 +73,9 @@ class PoolManagerRefresh:
                     or _uid(render.active) != _uid(pool.active)):
                 raise ValueError
             render_refresh(render)
-            disk_changed = platform_disk_type(render.before) != platform_disk_type(render.after)
+            references_changed = platform_references_changed(render.before, render.after)
             if request.platform_rollout is None:
-                if self.successor is not None or disk_changed:
+                if self.successor is not None or references_changed:
                     raise ValueError
             elif (self.successor is None or self.successor.reference != request.platform_rollout
                     or pool.completion.outcome != 'legacy'
@@ -102,7 +102,7 @@ class PoolManagerRefresh:
             raise ValueError('pool_refresh_projection_unqualified') from None
 
     def provider_options(self) -> tuple[dict[str, Any], dict[str, tuple[str, str, str, str, str]]]:
-        """Project only the source-selected primary storage quota for a read.
+        """Project source-selected primary storage and build-limit references.
 
         Historical registration and the stopped pool observer remain untouched.
         Live collector identity, credentials and native disk still need the
@@ -125,6 +125,13 @@ class PoolManagerRefresh:
             raise ValueError('pool_refresh_provider_projection_unqualified')
         name = EXECUTION_DISK_STORAGE_QUOTAS[successor.config.get('execution_disk_type', 'NETWORK_SSD')]
         desired['data'][key] = name
+        if isinstance(successor.config.get('task_image_builder'), dict):
+            limit_key = 'LOOM_EXECUTION_CAPACITY_COLLECTOR_BUILD_CONCURRENCY_LIMIT'
+            limit = successor.config['task_image_builder'].get('max_concurrent')
+            if limit is None:
+                desired['data'].pop(limit_key, None)
+            else:
+                desired['data'][limit_key] = str(limit)
         if selected['data'] != desired['data'] or original['data'][key] != quotas['storage'][3]:
             raise ValueError('pool_refresh_provider_projection_unqualified')
         storage = quotas['storage']

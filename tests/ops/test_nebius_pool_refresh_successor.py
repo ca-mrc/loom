@@ -50,7 +50,7 @@ def platform_inputs():
     # Match the original development participant before generating any history.
     config.update(namespace='loom-nebius-platform-2', execution_namespace='loom-nebius-exec-2',
         target_id='pool-target-2', environment='development',
-        task_image_builder={'registry_repository': 'cr.eu-north1.nebius.cloud/test/task-images', 'max_concurrent': 2})
+        task_image_builder={'registry_repository': 'cr.eu-north1.nebius.cloud/test/task-images', 'max_concurrent': 16})
     return config, candidate, profile
 
 
@@ -90,8 +90,15 @@ def ordinary_rollout(private_cutover, monkeypatch, request):
     _, inputs, root = private_cutover
     reference = OrdinaryPlatformRollout(deployment_id=700, publication=inputs['publication'])
     config = copy.deepcopy(root.deployment.installation.foundation.platform_config)
-    if getattr(request, 'param', None) is not None:
-        config['execution_disk_type'] = request.param
+    changes = getattr(request, 'param', None)
+    if isinstance(changes, dict):
+        for key, value in changes.items():
+            if key == 'task_image_builder':
+                config[key].update(value)
+            else:
+                config[key] = value
+    elif changes is not None:
+        config['execution_disk_type'] = changes
     source = reference.publication.source_sha
     scope = {key: config[key] for key in ('cluster_id', 'namespace', 'execution_namespace')}
     receipt = dict(schema_version='loom.nebius-deployment.v1', mode='apply', status='complete',
@@ -181,8 +188,10 @@ async def test_ordinary_proof_requires_completed_exact_scoped_publication(ordina
 
 
 @pytest.mark.timeout(420)
-@pytest.mark.parametrize('ordinary_rollout', [None, 'NETWORK_SSD_NON_REPLICATED'],
-    ids=['ssd', 'nrd'], indirect=True)
+@pytest.mark.parametrize('ordinary_rollout', [None, 'NETWORK_SSD_NON_REPLICATED',
+    {'task_image_builder': {'max_concurrent': None}},
+    {'execution_disk_type': 'NETWORK_SSD_NON_REPLICATED', 'task_image_builder': {'max_concurrent': None}}],
+    ids=['ssd', 'nrd', 'resource-only-builder', 'nrd-resource-only-builder'], indirect=True)
 def test_completed_ordinary_successor_preflight_is_read_only_and_rejects_drift(private_cutover, ordinary_rollout, connected_refresh, monkeypatch):
     import asyncio
     from contextlib import contextmanager
@@ -207,14 +216,17 @@ def test_completed_ordinary_successor_preflight_is_read_only_and_rejects_drift(p
     save_private(metadata, payload)
     selected_context = context(metadata)
     request, state = selected_context.request, Path(metadata['state_dir'])
-    if successor.config.get('execution_disk_type') == 'NETWORK_SSD_NON_REPLICATED':
-        # A valid disk reference is renderable, but changing it without the
-        # existing protected ordinary-rollout binding grants no refresh authority.
+    if (successor.config.get('execution_disk_type') == 'NETWORK_SSD_NON_REPLICATED'
+            or successor.config['task_image_builder']['max_concurrent'] is None):
+        # Valid disk/builder references grant no refresh authority without the
+        # existing completed ordinary-rollout binding, including builder-only changes.
         unbound = copy.deepcopy(payload)
         unbound.pop('platform_rollout')
         save_private(metadata, unbound)
         with pytest.raises(refresh_entry.EntryError):
             context(metadata)
+        with pytest.raises(ValueError, match='pool_refresh_projection_unqualified'):
+            PoolManagerRefresh(root, pool, replace(request, platform_rollout=None), state).qualify()
         foreign = copy.deepcopy(payload)
         foundation = foreign['deployment']['installation']['foundation']
         config = json.loads(foundation['platform_config_json'])
@@ -295,6 +307,7 @@ def test_completed_ordinary_successor_preflight_is_read_only_and_rejects_drift(p
         monkeypatch.setattr(refresh_entry, 'ApplicationUpgradePrerequisites', lambda **_: old_api.checks)
         monkeypatch.setattr(refresh_entry, '_platform_successor', publication)
         monkeypatch.setattr(cutover_entry, 'connected_pool_api', reader)
+        before = copy.deepcopy(external.objects)
         try:
             report = refresh_entry.execute_refresh(selected_context, metadata, 'preflight')
         except Exception as error:
@@ -302,7 +315,6 @@ def test_completed_ordinary_successor_preflight_is_read_only_and_rejects_drift(p
         assert report['status'] == 'preflight_qualified'
         assert len(connections) == 1
         assert all(call.method == 'GET' for call in live.calls)
-        before = copy.deepcopy(external.objects)
         assert external.objects == before
         assert {path: path.read_bytes() for path in original_history} == original_history
         assert not state.exists()
