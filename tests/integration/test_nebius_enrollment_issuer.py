@@ -33,6 +33,7 @@ from tests.integration.test_nebius_pool_profile_registry import catalog as profi
 from tests.integration.test_nebius_pool_registry import sessions as sessions
 from tests.ops.test_nebius_environment_foundation import Remote, run
 from tests.ops.test_nebius_foundation_readiness import database_controller
+from tests.ops.test_nebius_production_promotion import promotion_fixture as promotion_fixture
 from tests.support.nebius_phase_api import PhaseAPI
 from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_candidate_catalog import HEAD, github_transport
@@ -47,7 +48,7 @@ def issuer():
 
 
 @asynccontextmanager
-async def prepared(sessions, tmp_path, platform_inputs, publication):
+async def prepared(sessions, tmp_path, platform_inputs, publication, *, kind='development'):
     subject = issuer()
     from scripts.ops import nebius_environment_foundation as foundations
     from scripts.ops import nebius_pool_administration_dispatch as dispatch
@@ -59,7 +60,7 @@ async def prepared(sessions, tmp_path, platform_inputs, publication):
 
     platform_input = await platform(sessions)
     _, spec, _, _, _, _ = platform_input
-    selected = spec.participants[2]
+    selected = next(row for row in spec.participants if row.environment_class == kind)
     reference, responses, payload, keyring, candidate = publication
     pinned = ProtectedPublication.model_validate(reference)
     async with httpx.AsyncClient(transport=github_transport(responses, payload)) as github:
@@ -68,7 +69,7 @@ async def prepared(sessions, tmp_path, platform_inputs, publication):
         bundle = await catalog.resolve(pinned.candidate_id)
         config = copy.deepcopy(platform_inputs[0])
         config.update(cluster_id=spec.cluster_id, execution_node_group_id=spec.node_group_id)
-        wanted = declaration((config, bundle.candidate, bundle.profile))
+        wanted = declaration((config, bundle.candidate, bundle.profile), kind=kind, backups=kind == 'production')
         identity = wanted.registration.model_copy(update={name: getattr(selected, name)
             for name in ('installation_id', 'pool_id', 'participant_id', 'environment_id', 'incarnation')})
         identity = identity.model_copy(update={'target_id': selected.targets[0].target_id})
@@ -85,7 +86,7 @@ async def prepared(sessions, tmp_path, platform_inputs, publication):
         selected = PoolParticipantV1.model_validate(selected.model_dump() | {
             'execution_namespace': {'name': identity.execution_namespace, 'uid': observed.namespace_uids[identity.execution_namespace]},
             'build_namespace': {'name': identity.build_namespace, 'uid': observed.namespace_uids[identity.build_namespace]}})
-        profiles = profile_catalog(spec, spec.participants[2]).model_dump(mode='json')
+        profiles = profile_catalog(spec, next(row for row in spec.participants if row.environment_class == kind)).model_dump(mode='json')
         profiles['image_admission_keyring'] = json.loads(keyring)
         for row in profiles['execution']:
             row.update(candidate_sha=candidate['candidate_sha'], runtime_image_ref=bundle.profile['runtime_image_ref'],
@@ -154,7 +155,7 @@ async def prepared(sessions, tmp_path, platform_inputs, publication):
         def public(request):
             assert request.headers['Authorization'] == 'Bearer ' + token
             return httpx.Response(200, json={'status': 'ready', 'postgres': 'ready', 'object_store': 'ready',
-                'environment': 'development', 'namespace': 'app-red', 'blockers': []})
+                'environment': kind, 'namespace': 'app-red', 'blockers': []})
 
         async with httpx.AsyncClient(base_url='https://api.cluster.test', transport=httpx.MockTransport(remote.http)) as kube, \
                 httpx.AsyncClient(transport=httpx.MockTransport(public)) as public_http:
@@ -181,10 +182,77 @@ async def test_qualified_publication_and_observed_foundation_reach_real_closed_e
         assert len(api.creates) == 2 and remote.writes == original_writes
 
 
+@pytest.mark.parametrize('damage', [None, 'owner', 'target', 'storage'])
+async def test_production_enrollment_requires_real_publication_promotion_and_exact_foundation(
+        sessions, tmp_path, platform_inputs, publication, promotion_fixture, damage):
+    from scripts.ops.nebius_environment_foundation import _load as load_foundation
+    from scripts.ops.nebius_pool_administration_dispatch import _load
+    from scripts.ops.nebius_production_promotion import (
+        production_authority,
+        require_production_foundation,
+    )
+
+    async with prepared(sessions, tmp_path, platform_inputs, publication, kind='production') as (
+            module, policy, inputs, remote, api):
+        fixture = promotion_fixture
+        report = fixture['release_report']
+        row = policy.foundation.identity
+        selected = report['targets']['production']
+        selected.update(scope=policy.host.scope.model_dump(mode='json'), namespace=row.application_namespace,
+            execution_namespace=row.execution_namespace, public_url='https://' + row.public_host,
+            database_identity=f'kubernetes:{row.cluster_id}/{row.application_namespace}/loom-postgres/loom',
+            object_storage={key: 'red-canonical' for key in ('task_bucket', 'trajectories_bucket', 'artifacts_bucket')})
+        if damage == 'target':
+            selected['scope'] = dict(selected['scope'], participant_id=str(uuid4()))
+        elif damage == 'storage':
+            selected['object_storage'] = {key: 'foreign-canonical' for key in selected['object_storage']}
+        isolation = report['checks']['prod_staging_isolation']
+        isolation['state_profiles']['production'].update({key: selected[key] for key in ('scope', 'namespace',
+            'database_identity', 'database_name', 'object_storage', 'provider_connection_namespace')})
+        isolation['frontend']['production'].update(route=selected['public_url'], api_base=selected['public_url'] + '/api')
+        isolation['workers']['production'].update(api_url=selected['public_url'] + '/api', k8s_namespace=selected['execution_namespace'])
+        report['checks']['frontend_route_evidence'].update(production_route=selected['public_url'],
+            production_api_base=selected['public_url'] + '/api')
+        if damage == 'owner':
+            report['checks']['release_owner_approval']['status'] = 'skip'
+        promotion = fixture['freeze']()
+        declaration = EnvironmentFoundationDeclarationV2.model_validate(load_foundation(policy.foundation_dir, policy.foundation)['declaration'])
+        writes = copy.deepcopy(remote.writes)
+        with pytest.raises(ValueError, match='enrollment'):
+            await module.issue_enrollment(policy=policy, operation_id=uuid4(), **inputs)
+        assert not api.creates
+        async with httpx.AsyncClient(transport=fixture['transport']) as github:
+            catalog = GitHubCandidateCatalog(github, token='test-github-secret', publications=[policy.application_publication],
+                keyring=ImageAdmissionKeyring.from_json(fixture['keyring']), registry_prefix=fixture['candidate']['registry_prefix'])
+
+            async def enroll():
+                async with production_authority(promotion=promotion, scope=policy.host.scope,
+                        publication=policy.application_publication, catalog=catalog):
+                    require_production_foundation(scope=policy.host.scope, publication=policy.application_publication,
+                        declaration=declaration)
+                    reference = await module.issue_enrollment(policy=policy, operation_id=uuid4(), **dict(inputs, catalog=catalog))
+                    job = _load(policy.host, reference)
+                    async with sessions.begin() as session:
+                        result = await administer(session, job.request.model_dump_json().encode(), job.authorization, action='apply')
+                    assert result['receipt']['state'] == 'enrolled'
+                    assert result['receipt']['participant_id'] == str(policy.participant.participant_id)
+
+            if damage:
+                with pytest.raises(ValueError, match='production_promotion_unqualified'):
+                    await enroll()
+                assert not api.creates and not policy.host.anchor_root.exists()
+            else:
+                await enroll()
+                assert len(api.creates) == 2
+            assert remote.writes == writes
+        with pytest.raises(ValueError, match='production_promotion_required'):
+            module._scope(policy)
+
+
 async def test_issued_enrollment_can_be_read_after_expiry_without_renewal(sessions, tmp_path, platform_inputs, publication, monkeypatch):
     from datetime import UTC, datetime, timedelta
 
-    async with prepared(sessions, tmp_path, platform_inputs, publication) as (module, policy, clients, remote, api):
+    async with prepared(sessions, tmp_path, platform_inputs, publication) as (module, policy, clients, _remote, api):
         operation_id = uuid4()
         reference = await module.issue_enrollment(policy=policy, operation_id=operation_id, **clients)
         frozen = (policy.host.state_root / ('enrollment-' + str(operation_id)) / 'issued.json').read_bytes()

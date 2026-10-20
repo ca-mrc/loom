@@ -103,11 +103,16 @@ def _scope(policy: PoolEnrollmentPolicyV2) -> None:
             or selected.binding_revision != 1 or selected.execution_namespace.name != row.execution_namespace
             or selected.build_namespace.name != row.build_namespace):
         raise ValueError('pool_enrollment_scope_unqualified')
-    # Promotion must be separately verified, not inferred from a dev publication
-    # or the ability to choose a production-looking hostname. No production
-    # enrollment is issued until that separate protected adapter is connected.
+    # The installed entry activates a task-local capability only after exact
+    # release/main gate and unchanged publication qualification. A declared
+    # production kind or caller-supplied boolean cannot grant this authority.
     if row.kind == 'production':
-        raise ValueError('pool_enrollment_production_promotion_required')
+        from scripts.ops.nebius_production_promotion import require_production_authority
+        target = require_production_authority(scope=host.scope, publication=policy.application_publication)
+        if (target.namespace != row.application_namespace or target.execution_namespace != row.execution_namespace
+                or target.public_url != 'https://' + row.public_host or target.database_name != 'loom'
+                or target.database_identity != f'kubernetes:{row.cluster_id}/{row.application_namespace}/loom-postgres/loom'):
+            raise ValueError('pool_enrollment_production_target_changed')
 
 
 def _published_profiles(policy: PoolEnrollmentPolicyV2, app: CandidateBundle, catalog: GitHubCandidateCatalog,
@@ -166,12 +171,14 @@ def _retain_issued(policy: PoolEnrollmentPolicyV2, operation_id: UUID, retained:
 
 
 def _inspect(policy: PoolEnrollmentPolicyV2, operation_id: UUID, directory: Path, connect: Connection, *,
-        require_capacity: bool = False, platform_authorization_id: UUID | None = None) -> dict[str, Any] | None:
+        require_capacity: bool = False, platform_authorization_id: UUID | None = None,
+        include_workload_counts: bool = False) -> dict[str, Any] | None:
     selected = policy.participant
     request = PoolInspectionV2(schema_version='loom.pool-inspection.v2', operation_id=uuid5(operation_id, 'inspect'),
         installation_id=selected.installation_id, pool_id=selected.pool_id, participant_id=selected.participant_id,
         environment_id=selected.environment_id, incarnation=selected.incarnation, environment_class=selected.environment_class,
-        require_capacity=require_capacity, platform_authorization_id=platform_authorization_id)
+        require_capacity=require_capacity, platform_authorization_id=platform_authorization_id,
+        include_workload_counts=include_workload_counts)
     with state._locked_state(directory):
         path = directory / 'inspection.json'
         if path.exists():
