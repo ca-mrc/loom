@@ -15,9 +15,9 @@
 > Labels may add validation but cannot remove path-inferred validation. The
 > developer or maintainer enables GitHub's native squash auto-merge for every
 > non-draft PR, independent of author or reviewer identity. GitHub waits for
-> every required gate on that current head SHA before adding it to the `dev`
-> merge queue. The queue validates a merge group against the latest `dev` and
-> earlier queued changes before performing the squash merge.
+> every required gate on that current head SHA. When the `dev` merge queue is
+> enabled, it also validates a merge group against the latest `dev` and earlier
+> queued changes before performing the squash merge.
 > Static documentation is a location-and-format allowlist; unknown runtime
 > paths fail safe to the full validation set. Manual runs report `*-manual`
 > contexts and cannot satisfy protected PR contexts. These four strict,
@@ -30,6 +30,15 @@
 > the templates below. Workflows that need publish or deployment secrets
 > must use protected GitHub Environments and must not expose secrets to
 > pull request code.
+
+Merge-queue operation is coordinated in [#2416](https://github.com/ca-mrc/loom/issues/2416);
+check the live `dev` rules before integration. While the queue is disabled,
+native squash auto-merge uses the same four app-bound checks with strict
+latest-base protection. An outdated branch must be updated by its writer and
+pass checks on the new head. Follow the coordinated integration order to avoid
+repeated base updates and CI runs; local repairs and applicable verification
+can proceed while another PR integrates. The queue's review window is not an
+automatic re-enable deadline.
 
 ## Active Workflow
 
@@ -183,14 +192,15 @@ secrets.
 - For a completed non-draft `dev` PR, a trusted collaborator enables GitHub's
   native squash auto-merge. No workflow or custom controller enables or performs
   the merge. All four required gates must be visible and successful on the
-  current head SHA of the PR before queue admission. GitHub's native merge queue then
-  requires those same four app-bound gates on its generated merge-group SHA,
-  which includes the latest `dev` and any earlier queued changes. If another PR
-  advances `dev`, GitHub rebuilds and validates the affected merge group;
-  authors do not need to rebase solely because the base advanced. Update the
-  branch when its code conflicts or needs an amendment, then validate its new
-  head. Keep the four strict, app-bound checks as the
-  only merge authority: `dev` requires no human approval, no CODEOWNER
+  current head SHA of the PR. When the merge queue is enabled, GitHub then
+  requires those same four app-bound gates on its generated merge-group SHA
+  before merging. That SHA includes the latest `dev` and any earlier queued
+  changes. If another PR advances `dev`, GitHub rebuilds and validates the
+  affected merge group; in that mode, authors do not need to rebase solely
+  because the base advanced. With the queue disabled, follow the latest-base
+  update procedure above. Update a branch when its code conflicts or needs an
+  amendment, then validate its new head. Keep the four strict, app-bound checks
+  as the only merge authority: `dev` requires no human approval, no CODEOWNER
   approval, and no conversation resolution. Do not hand-merge an eligible
   `dev` PR just because CI is green.
 - Every non-draft PR event, including unrelated label changes, starts a
@@ -198,8 +208,10 @@ secrets.
   native auto-merge blocked even when older checks on the same head are green.
   The changed-path planner still selects the applicable work; reporting all
   four gates does not force every heavy lane. Title and description edits do
-  not trigger the gate workflows, so they no longer restart validation; a base
-  retarget is revalidated by the merge-group run against the actual base.
+  not trigger the gate workflows, so they no longer restart validation. With
+  the queue enabled, a base retarget is revalidated by the merge-group run
+  against the actual base; queue-off integration must earn current-head checks
+  against the actual protected target.
   Finish label updates before the final CI cycle. Draft events remain filtered
   and cannot authorize a merge.
 - Do not assume labels are the only way to select validation. For example,
