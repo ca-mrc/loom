@@ -78,9 +78,16 @@ def test_local_server_requires_model(
         ])
 
 
+@pytest.mark.parametrize("models,parallel", [
+    (["meta-llama/Llama-3.1-8B-Instruct"], False),
+    (["llama3"], False),
+    (["llama3", "qwen3"], False),
+    (["llama3", "qwen3"], True),
+])
 def test_local_server_smoke_runs_through_with_inline_dispatch(
     tmp_xdg_home: Path, tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    models: list[str], parallel: bool,
 ) -> None:
     """Smoke: with --local-server set, the trial runs through the fake
     backend (which no-ops the LLM call) and the output dir is
@@ -91,6 +98,17 @@ def test_local_server_smoke_runs_through_with_inline_dispatch(
         registry.REGISTRY, "stub-loc-4", _StubAdapter(name="stub-loc-4"),
     )
     monkeypatch.setenv("LOOM_LOCAL_API_KEY", "env-key-fallback")
+    from loom_cli import run_cmd
+
+    seen = []
+    original = run_cmd._patch_agent
+
+    def capture_model(config, agent, model):
+        patched = original(config, agent, model)
+        seen.append(patched.agent.model)
+        return patched
+
+    monkeypatch.setattr(run_cmd, "_patch_agent", capture_model)
 
     main([
         "run",
@@ -98,7 +116,8 @@ def test_local_server_smoke_runs_through_with_inline_dispatch(
         "--agent", "oracle",
         "--backend", "fake",
         "--local-server", "http://localhost:8000/v1",
-        "--model", "meta-llama/Llama-3.1-8B-Instruct",
+        *[arg for model in models for arg in ("--model", model)],
+        *(["--parallel-models"] if parallel else []),
         "--output-dir", str(tmp_path / "out"),
     ])
 
@@ -106,3 +125,5 @@ def test_local_server_smoke_runs_through_with_inline_dispatch(
     assert (tmp_path / "out").is_dir()
     assert any((tmp_path / "out").iterdir()), \
         "expected at least one trial sub-dir in output"
+    assert {model.name for model in seen} == {f"_inline/{model}" for model in models}
+    assert all(model.provider == "local" for model in seen)
