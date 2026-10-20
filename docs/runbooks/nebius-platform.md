@@ -1283,6 +1283,12 @@ registered-pool path retains its workload-class/age ordering. There is no fixed
 split between build and execution capacity. Cleanup-pending resources remain
 charged until their release is acknowledged.
 
+Queued execution heads are read in bounded pages per target. Expired hints are
+skipped in PostgreSQL; invalid heads advance to the next page without treating
+their cached inputs as authority. Once a valid oldest head is found, younger
+pages are not transferred. Actual timestamp ordering and the claimant's own
+waiting age are retained, including when it is not the target's oldest head.
+
 An optional positive integer adds an operator ceiling on unfinished builds,
 including cleanup. There is no built-in maximum of 16. An explicit integer also
 renders a matching build-namespace quota; `null` renders the same owned quota with

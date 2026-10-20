@@ -1,12 +1,15 @@
 """Waiting native builds keep their place across real capacity transactions."""
 
 import asyncio
-from datetime import UTC, datetime, timedelta
+import json
+from copy import deepcopy
+from datetime import UTC, datetime, timedelta, timezone
+from time import perf_counter
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import event, func, select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy import event, func, insert, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from loom.db.schema import (
     ExecutionCapacityPolicy,
@@ -25,6 +28,7 @@ from loom_control_plane.execution_capacity import (
     ExecutionProvisioningBlockedError,
     reserve_execution_provisioning,
 )
+from loom_control_plane.execution_capacity_wait import read_execution_capacity_waits
 from loom_control_plane.service_execution import (
     _bind_kubernetes_execution_route,
     set_execution_target_health,
@@ -259,6 +263,177 @@ async def test_only_one_execution_waiting_head_per_target_is_projected(waiting_e
     await controller.run_once()
     _, attempts = await rows(sessions, image_id)
     assert len(attempts) == 1 and attempts[0].native_build["capacity_reserved_at"]
+
+
+async def _copy_execution_wait(session, original, *, first=None, **changes):
+    observation = deepcopy(original.scheduling_observation)
+    if first is not None:
+        observation["capacity_wait"]["first_waited_at"] = first
+    observation["capacity_wait"].update(changes)
+    trial = Trial(id=uuid4(), team_id=original.team_id, task_id=original.task_id,
+        batch_id=original.batch_id, config=original.config, requires_caps=original.requires_caps,
+        state="queued", attempt_count=0, next_attempt_at=original.next_attempt_at,
+        scheduling_observation=observation)
+    session.add(trial)
+    await session.flush()
+    return trial
+
+
+async def _copy_many_waits(session, original, count):
+    await session.execute(insert(Trial), [{
+        "id": uuid4(), "team_id": original.team_id, "task_id": original.task_id,
+        "batch_id": original.batch_id, "config": original.config, "requires_caps": original.requires_caps,
+        "state": "queued", "attempt_count": 0, "next_attempt_at": original.next_attempt_at,
+        "scheduling_observation": original.scheduling_observation,
+    } for _ in range(count)])
+
+
+async def test_execution_head_reader_bounds_backlog_payloads(waiting_execution):
+    _, sessions, _, _, _, trial_id, _, now = waiting_execution
+    async with sessions() as session, session.begin():
+        original = await session.get(Trial, trial_id)
+        await _copy_many_waits(session, original, 999)
+    decoded = 0
+
+    def decode(value):
+        nonlocal decoded
+        result = json.loads(value)
+        if isinstance(result, dict) and "capacity_wait" in result:
+            decoded += 1
+        return result
+
+    # Count actual driver JSON deserialization, not a particular SQL spelling.
+    engine = create_async_engine(sessions.kw["bind"].url, json_deserializer=decode)
+    try:
+        async with async_sessionmaker(engine)() as session:
+            heads, _ = await read_execution_capacity_waits(session, now=now + timedelta(seconds=1))
+        assert len(heads) == 1
+        assert decoded <= 100, "younger backlog payloads crossed the database boundary after one head was sufficient"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("invalid", ["expired", "malformed", "fingerprint"])
+async def test_execution_head_reader_batches_invalid_backlog(waiting_execution, invalid, record_property):
+    _, sessions, _, _, _, trial_id, _, now = waiting_execution
+    async with sessions() as session, session.begin():
+        original = await session.get(Trial, trial_id)
+        observation = deepcopy(original.scheduling_observation)
+        if invalid == "expired":
+            observation["capacity_wait"]["expires_at"] = (now - timedelta(seconds=1)).isoformat()
+        elif invalid == "malformed":
+            observation["capacity_wait"]["first_waited_at"] = "malformed"
+        else:
+            observation["capacity_wait"]["input_fingerprint"] = "stale"
+        original.scheduling_observation = observation
+        await _copy_many_waits(session, original, 9999)
+    decoded = statements = 0
+
+    def decode(value):
+        nonlocal decoded
+        result = json.loads(value)
+        if isinstance(result, dict) and "capacity_wait" in result:
+            decoded += 1
+        return result
+
+    def count(*args):
+        nonlocal statements
+        statements += 1
+
+    engine = create_async_engine(sessions.kw["bind"].url, json_deserializer=decode)
+    event.listen(engine.sync_engine, "before_cursor_execute", count)
+    try:
+        started = perf_counter()
+        async with async_sessionmaker(engine)() as session:
+            heads, _ = await read_execution_capacity_waits(session, now=now + timedelta(seconds=1))
+        record_property("reader_budget", json.dumps({"population": invalid, "hints": 10000,
+            "elapsed_ms": round((perf_counter() - started) * 1000, 3),
+            "sql_events": statements, "decoded_wait_payloads": decoded}))
+        assert heads == []
+        if invalid == "expired":
+            assert statements <= 2 and decoded == 0
+        else:
+            assert statements <= 205, "invalid hints caused a database round trip per queued Trial"
+            assert decoded == (10000 if invalid == "fingerprint" else 0)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("invalid", ["expired", "first", "expiry", "fingerprint", "cancelled", "resources",
+                                    "null_target", "list_target", "number_target"])
+async def test_execution_head_reader_advances_past_invalid_oldest(waiting_execution, invalid):
+    _, sessions, _, _, _, trial_id, _, now = waiting_execution
+    async with sessions() as session, session.begin():
+        original = await session.get(Trial, trial_id)
+        younger = await _copy_execution_wait(session, original)
+        observation = deepcopy(original.scheduling_observation)
+        hint = observation["capacity_wait"]
+        hint["first_waited_at"] = (now - timedelta(seconds=2)).isoformat()
+        if invalid == "expired":
+            hint["expires_at"] = (now - timedelta(seconds=1)).isoformat()
+        elif invalid == "first":
+            hint["first_waited_at"] = "2026-99-99T25:90:90+00:00"
+        elif invalid == "expiry":
+            hint["expires_at"] = "malformed"
+        elif invalid == "fingerprint":
+            hint["input_fingerprint"] = "stale"
+        elif invalid == "cancelled":
+            original.cancellation_requested_at = now
+        elif invalid.endswith("_target"):
+            hint["target_id"] = {"null_target": None, "list_target": [], "number_target": 3}[invalid]
+        else:
+            hint["resources"] = {**hint["resources"], "cpu_millis": 99999999}
+        original.scheduling_observation = observation
+        expected = younger.id
+    async with sessions() as session:
+        heads, _ = await read_execution_capacity_waits(session, now=now + timedelta(seconds=1))
+    assert [head.trial_id for head in heads] == [expected]
+
+
+@pytest.mark.parametrize("format", ["offset", "python_iso", "tie"])
+async def test_execution_head_reader_uses_actual_age_and_uuid_ties(waiting_execution, format):
+    _, sessions, _, _, _, trial_id, _, now = waiting_execution
+    async with sessions() as session, session.begin():
+        original = await session.get(Trial, trial_id)
+        earlier = now - timedelta(seconds=1)
+        if format == "offset":
+            first = earlier.astimezone(timezone(timedelta(hours=5))).isoformat()
+        elif format == "python_iso":
+            # fromisoformat accepts a separator PostgreSQL does not parse.
+            first = earlier.isoformat().replace("T", "X")
+            assert await session.scalar(select(func.pg_input_is_valid(first, "timestamptz"))) is False
+        else:
+            first = original.scheduling_observation["capacity_wait"]["first_waited_at"]
+        another = await _copy_execution_wait(session, original, first=first)
+        expected = min(original.id, another.id) if format == "tie" else another.id
+    async with sessions() as session:
+        heads, _ = await read_execution_capacity_waits(session, now=now + timedelta(seconds=1))
+    assert [head.trial_id for head in heads] == [expected]
+
+
+async def test_execution_head_reader_retains_nonhead_claim_order(waiting_execution, monkeypatch):
+    _, sessions, _, _, _, trial_id, target, now = waiting_execution
+    async with sessions() as session, session.begin():
+        original = await session.get(Trial, trial_id)
+        older = await _copy_execution_wait(session, original, first=(now - timedelta(seconds=1)).isoformat())
+        older_id = older.id
+        own_first = datetime.fromisoformat(original.scheduling_observation["capacity_wait"]["first_waited_at"])
+    await _free(sessions, target, now, quota_nodes=2)
+    import loom_control_plane.execution_capacity_wait as waits
+    observed = []
+
+    async def read(*args, **kwargs):
+        result = await read_execution_capacity_waits(*args, **kwargs)
+        observed.append(result)
+        return result
+
+    monkeypatch.setattr(waits, "read_execution_capacity_waits", read)
+    async with sessions() as session, session.begin():
+        lease = await reserve_next_service_execution(session, environment="staging", pool_id="nebius-cpu",
+            image_admission_keyring=IMAGE_ADMISSION_KEYRING, now=now + timedelta(seconds=30))
+        assert lease is not None and lease.trial_id == trial_id
+    assert any([head.trial_id for head in heads] == [older_id]
+               and own == (own_first, f"execution-wait:{trial_id}") for heads, own in observed)
 
 
 async def test_execution_wait_renewal_keeps_first_age_and_protects_matching_backoff(waiting_execution):
