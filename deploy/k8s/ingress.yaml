@@ -6,9 +6,9 @@ metadata:
   annotations:
     # Adjust to match your cluster's ingress controller (nginx, traefik,
     # gke-ingress, alb, etc.). Defaults assume nginx.
-    # TaskSet bundles are uploaded through this ingress. 800m covers a full
+    # TaskSet bundles are uploaded through this ingress. 2g covers a full
     # Terminal-Bench 4.0.0 archive (~431MB gzipped). The service quota stays 5 GiB.
-    nginx.ingress.kubernetes.io/proxy-body-size: "800m"
+    nginx.ingress.kubernetes.io/proxy-body-size: "2g"
 spec:
   ingressClassName: nginx
   tls:

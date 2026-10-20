@@ -5,9 +5,9 @@ metadata:
   annotations:
     # Adjust to match your cluster's ingress controller (nginx, traefik,
     # gke-ingress, alb, etc.). Defaults assume nginx.
-    # TaskSet bundles are uploaded through this ingress. 800m covers a full
+    # TaskSet bundles are uploaded through this ingress. 2g covers a full
     # Terminal-Bench 4.0.0 archive (~431MB gzipped). The service quota stays 5 GiB.
-    nginx.ingress.kubernetes.io/proxy-body-size: "800m"
+    nginx.ingress.kubernetes.io/proxy-body-size: "2g"
 {% if frontend_prefixed_route %}
     nginx.ingress.kubernetes.io/use-regex: "true"
     nginx.ingress.kubernetes.io/rewrite-target: /$1
@@ -111,7 +111,7 @@ kind: Ingress
 metadata:
   name: loom-frontend-prefix-redirect
   annotations:
-    nginx.ingress.kubernetes.io/proxy-body-size: "800m"
+    nginx.ingress.kubernetes.io/proxy-body-size: "2g"
     nginx.ingress.kubernetes.io/use-regex: "true"
 spec:
   ingressClassName: {{ ingress_class_name }}
