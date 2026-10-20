@@ -26,7 +26,13 @@ from loom.execution_runtime_contract import (
     validate_runtime_plan_requirements,
 )
 from loom.hosted_harness import SANDBOX_CONTROLLER_MODULE, HostedHarnessSpec, NativeOutput
-from loom.models.networking import NetworkPolicy, PublicWeb
+from loom.models.networking import (
+    GatewayOnly,
+    NetworkPolicy,
+    PublicWeb,
+    WebAllowlist,
+    WebDestination,
+)
 from loom.models.trial import TrialConfig
 from loom.models.types import ModelSpec
 from loom.pipeline.keys import canonical_digest
@@ -59,10 +65,12 @@ def _registered(monkeypatch: pytest.MonkeyPatch) -> None:
     ))
 
 
-def _request(*, guest: bool = False, shared: bool = False, policy: NetworkPolicy | None = None):
+def _request(*, guest: bool = False, shared: bool = False, policy: NetworkPolicy | None = None,
+             override: NetworkPolicy | None = None):
     task, _, profile = _guest_inputs("nested_docker") if guest else _inputs()
     trial = TrialConfig(
         agent_name="test-only-harness", agent_model=ModelSpec(provider="openai", name="gpt-5"),
+        baseline_network_policy_override=override,
         **({"verifier_env_mode": "shared"} if shared else {}),
     )
     if policy is not None:
@@ -255,6 +263,24 @@ def test_planner_attaches_the_frozen_network_contract() -> None:
     assert '"public-web"' in plan.main.environment["LOOM_EFFECTIVE_NETWORK_POLICY_JSON"]
     # The planner uses the resolved policy, not the task baseline.
     assert task.environment.baseline_network_policy.kind == "gateway-only"
+
+
+@pytest.mark.parametrize("override", [
+    GatewayOnly(),
+    PublicWeb(),
+    WebAllowlist(destinations=(WebDestination(host="example.com", protocol="https"),)),
+], ids=lambda policy: policy.kind)
+@pytest.mark.parametrize("guest", [False, True])
+def test_controller_trial_json_keeps_the_network_override(override: NetworkPolicy, guest: bool) -> None:
+    # The in-pod controller re-validates this exact env value before the agent
+    # starts. A dropped union tag failed every overridden trial with no LLM call.
+    _, trial, request = _request(guest=guest, policy=override, override=override)
+
+    plan = compile_task_sandbox_plan(request)
+
+    received = TrialConfig.model_validate_json(plan.main.environment["LOOM_TASK_TRIAL_JSON"])
+    assert received.baseline_network_policy_override == override
+    assert received == trial
 
 
 @pytest.mark.parametrize("name", [name for name in _CASES if not name.startswith(("direct", "litellm"))])
