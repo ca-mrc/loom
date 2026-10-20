@@ -18,6 +18,11 @@ as native trials and records renewable waits when capacity is unavailable.
 A waiting record is not a reservation or proof of executable capacity. See
 [native capacity fairness](nebius-shared-pools.md#native-task-image-capacity-fairness).
 
+The slim actuator image includes the queued execution-wait reader used by this
+shared admission path. Its image-build smoke imports that reader explicitly:
+process startup alone does not exercise the lazy import made when a build first
+requests capacity. The copied-source regression also excludes checkout fallback.
+
 The native renderer owns Job resources, source inputs, build configuration and
 registry output identity. Supported architecture and workload requirements must
 match the selected execution class; unsupported inputs must be rejected rather
