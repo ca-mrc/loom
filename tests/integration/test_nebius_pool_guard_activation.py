@@ -24,12 +24,7 @@ async def test_participant_guard_rejects_unaudited_schema_before_mutation(
     url = make_url(isolated_migration_postgres_url).set(drivername='postgresql').render_as_string(hide_password=False)
     owner, participant = uuid4(), uuid4()
     with psycopg.connect(url, autocommit=True) as db:
-<<<<<<< HEAD
-        assert db.execute('SELECT version_num FROM alembic_version').fetchall() == [('0177',)]
-        db.execute("UPDATE alembic_version SET version_num='0178'")
-=======
         assert db.execute('SELECT version_num FROM alembic_version').fetchall() == [('0178',)]
->>>>>>> 3069a916e (feat(pool): resolve immutable participant catalogs transactionally)
         with pytest.raises(psycopg.errors.RaiseException, match='pool activation schema unqualified'):
             db.execute(pool_guard_activation_sql(owner, participant, 'a' * 40, action=action), prepare=False)
         db.rollback()
