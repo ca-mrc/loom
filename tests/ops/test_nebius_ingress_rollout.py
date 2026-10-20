@@ -193,8 +193,9 @@ def test_wheel_failure_note_retains_only_safe_boundary_evidence(tmp_path, monkey
         return subprocess.CompletedProcess(args, 0, b"", b"")
 
     monkeypatch.setattr(subprocess, "run", run)
+    uv = Path("/credential-location/uv")
     with pytest.raises(module().RolloutError) as caught:
-        module().build_wheels(tmp_path, uv=Path("/credential-location/uv"))
+        module().build_wheels(tmp_path, uv=uv)
     error = caught.value
     assert str(error) == "exact-source ingress wheels could not be built"
     assert error.__cause__ is None and error.__suppress_context__

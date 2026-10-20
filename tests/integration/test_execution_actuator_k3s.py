@@ -9,6 +9,7 @@ import ssl
 import subprocess
 import tempfile
 import time
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -621,11 +622,45 @@ def _wait_for_pod(core: object, namespace: str, name: str) -> object:
         ):
             return pod
         time.sleep(0.25)
-    raise AssertionError(
+    error = AssertionError(
         f"Pod {namespace}/{name} did not become ready: {last_phase}; "
         f"reason={pod.status.reason}; message={pod.status.message}; "
         f"conditions={pod.status.conditions}; containers={_pod_container_details(pod)}"
     )
+    # ContainerCreating predates container logs. Retain the sandbox/CNI and
+    # image-pull events before callers tear down this disposable cluster.
+    # Read only on failure; never retry readiness or dump Pod specs/Secrets.
+    try:
+        from kubernetes import client
+
+        uid = pod.metadata.uid if pod.metadata else None
+        selector = f"involvedObject.uid={uid}" if uid else f"involvedObject.name={name}"
+        configuration = deepcopy(core.api_client.configuration)
+        # Socket timeouts alone do not bound urllib3 Retry-After delays. Keep
+        # the shared readiness client untouched; this failure-only read has no
+        # retries and releases its separate transport immediately afterward.
+        configuration.retries = 0
+        with client.ApiClient(configuration=configuration) as diagnostic_client:
+            # The pinned urllib3 otherwise drops pools without closing them
+            # until GC; an exception traceback can keep those pools alive.
+            diagnostic_client.rest_client.pool_manager.pools.dispose_func = lambda pool: pool.close()
+            try:
+                events = client.CoreV1Api(diagnostic_client).list_namespaced_event(
+                    namespace, limit=32, _request_timeout=(2, 3),
+                    field_selector="involvedObject.kind=Pod," + selector)
+            finally:
+                # This SDK's ApiClient.close() closes only its thread pool.
+                diagnostic_client.rest_client.pool_manager.clear()
+        detail = json.dumps([{
+            "type": (event.type or "")[:32], "reason": (event.reason or "")[:128],
+            "message": (event.message or "")[:1024], "count": event.count,
+            "first_timestamp": event.first_timestamp.isoformat() if event.first_timestamp else None,
+            "last_timestamp": event.last_timestamp.isoformat() if event.last_timestamp else None,
+        } for event in events.items[:32]])[:16384]
+    except Exception as diagnostic_error:
+        detail = type(diagnostic_error).__name__
+    error.add_note("Pod events: " + detail)
+    raise error
 
 
 def _pod_probe(core: object, namespace: str, name: str, url: str) -> str:
