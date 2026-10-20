@@ -8,7 +8,6 @@ import pytest
 from fastapi import HTTPException
 
 from loom.execution_contract import workload_requirements_from_task
-from loom.execution_selection import execution_selection_readback
 from loom.execution_requirements import GUEST_EXECUTION_CAPABILITIES
 from loom.execution_resource_allocation import allocate_node_resources
 from loom.execution_runtime_contract import (
@@ -17,6 +16,7 @@ from loom.execution_runtime_contract import (
     runtime_pod_resources,
     validate_runtime_plan_requirements,
 )
+from loom.execution_selection import execution_selection_readback
 from loom.models.networking import WebAllowlist, WebDestination
 from loom.models.task import TaskConfig
 from loom.pipeline.keys import canonical_digest
