@@ -625,11 +625,12 @@ Core pages include:
   provider health, benchmark readiness, active workers, recent batch/trial
   activity, and next actions so the SPA does not fan out across multiple
   resources on first load.
-- **TrialsList** — keyset cursor pagination, state filter
+- **Monitor** — batch/trial views with cursor pagination and URL-backed filters;
+  legacy `/trials` and `/batches` list links redirect to the corresponding view.
 - **TrialDetail** — header + artifact download links + Debug evidence card +
   paginated trajectory viewer + EventTimeline (one row per event,
   click-to-expand JSON) + ATIF download button
-- **BatchesList** + **BatchDetail** — `refetchInterval: 5000`
+- **BatchDetail** — `refetchInterval: 5000`
   while state ∈ {submitted, running}. BatchDetail also refreshes after parent
   cancellation while children are active, output is uploading/materializing,
   or latest execution attempts have not reached `deleted`. The bounded summary
@@ -656,8 +657,8 @@ Core pages include:
   changes synchronously reset to page one; guarded `aria-disabled` controls
   block concurrent page changes without dropping keyboard focus, and later-page
   errors retain Previous and Retry actions.
-- **NewBatch** — textarea JSON parse for `task_filter` +
-  `trial_config` with local validation
+- **NewBatch** — guided task-source, agent/model/provider and execution-option
+  selection, with local validation and authoritative server admission.
 - **Tasks** — cluster task catalog
 - **Benchmarks** — registered adapters
 - **RateCardsAdmin** — list + create form (gated on
@@ -681,12 +682,19 @@ Core pages include:
   server resolves its timestamp and applies the stable timestamp/id predicate.
 - **NotFound**
 
+Delivery downloads accept API-relative paths and server-issued absolute URLs
+within the current service origin and API prefix. Trial and Run Library download
+controls show pending state and request failures, and allow retry after a failure.
+Leaving TaskSet submission retires that page's navigation callback; a later
+successful response does not redirect the user back to the imported TaskSet.
+The request may still have committed on the server.
+
 Auth model: browser users sign in through `/api/v1/auth/login` with username
 and password. The service sets an HttpOnly session cookie; auth responses return
 a CSRF token that the API client keeps in memory, sends with
 `credentials: "include"`, and attaches to unsafe methods through the configured
 CSRF header. A 401 from `/auth/me` means signed out, and later 401s clear
-session state/query cache before returning the user to Settings. User-owned
+session state/query cache before returning the user to `/auth/login`. User-owned
 bearer tokens remain supported for CLI/API automation, but the production SPA
 does not store normal bearer-token login state in `localStorage`.
 

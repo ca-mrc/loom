@@ -20,7 +20,7 @@
  *                   reconnect, but caller should consider polling
  *                   fallback for persistent failures
  *
- * Caller pairs with the legacy `/trajectory?cursor=N` path as a
+ * Caller pairs with PostgreSQL-first `/events?after_seq=N` replay as a
  * fallback for environments where `EventSource` is unavailable or
  * blocked (some corp proxies strip `text/event-stream`).
  */

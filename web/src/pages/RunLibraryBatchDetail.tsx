@@ -17,6 +17,7 @@ import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import { DebugEvidenceCard } from "../components/DebugEvidenceCard";
 import { DiagnosisCard } from "../components/DiagnosisCard";
+import { DownloadButton } from "../components/DownloadButton";
 import ErrorState from "../components/ErrorState";
 import LoadingState from "../components/LoadingState";
 import { StatCard } from "../components/StatCard";
@@ -210,21 +211,20 @@ function ArtifactRow({
         <div className="flex flex-wrap gap-2">
           {actionsAllowed ? (
             <>
-              <Button
+              <DownloadButton
+                actionKey={`${artifact.trial_id}/${artifact.key}`}
                 size="sm"
                 title="Download this artifact through the Loom API."
-                onClick={() =>
-                  artifact.trial_id
-                    ? void api.downloadRunLibraryArtifact(
-                        artifact.trial_id,
-                        artifact.key,
-                        artifactDownloadName(artifact),
-                      )
-                    : undefined
+                download={() =>
+                  api.downloadRunLibraryArtifact(
+                    artifact.trial_id!,
+                    artifact.key,
+                    artifactDownloadName(artifact),
+                  )
                 }
               >
-                Download {label}
-              </Button>
+                {`Download ${label}`}
+              </DownloadButton>
               <Button
                 size="sm"
                 title="Copy the authenticated Loom API artifact URL."
@@ -632,26 +632,28 @@ export default function RunLibraryBatchDetail(): JSX.Element {
                       {bundle.task_id} · {bundle.materialization_state} · {bundle.file_count} files · {formatBytes(bundle.size_bytes)}
                     </p>
                   </div>
-                  <Button
+                  <DownloadButton
+                    actionKey={bundle.trial_id}
                     size="sm"
                     variant="secondary"
                     disabled={!bundle.canonical_ready}
                     title={bundle.canonical_ready ? "Download this complete canonical Trial bundle." : "Canonical transfer has not completed."}
-                    onClick={() => void api.downloadTrialBundle(bundle.trial_id)}
+                    download={() => api.downloadTrialBundle(bundle.trial_id)}
                   >
                     {bundle.canonical_ready ? "Download complete bundle" : "Bundle pending"}
-                  </Button>
+                  </DownloadButton>
                 </div>
               ))}
             </section>
           ) : null}
           <div className="flex justify-end">
-            <Button
+            <DownloadButton
+              actionKey={batch.id}
               size="sm"
               variant="secondary"
               title="Export safe typed artifact metadata for this shared run."
-              onClick={() =>
-                void api.exportRunLibraryArtifacts(
+              download={() =>
+                api.exportRunLibraryArtifacts(
                   {
                     scope: "all",
                     source_batch_id: batch.id,
@@ -662,7 +664,7 @@ export default function RunLibraryBatchDetail(): JSX.Element {
               }
             >
               Export artifact metadata
-            </Button>
+            </DownloadButton>
           </div>
           {artifactInventoryTruncated ? (
             <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">

@@ -17,6 +17,7 @@ import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import { DebugEvidenceCard } from "../components/DebugEvidenceCard";
 import { DiagnosisCard } from "../components/DiagnosisCard";
+import { DownloadButton } from "../components/DownloadButton";
 import { ExecutionSelectionSection } from "../components/ExecutionSelectionSection";
 import ErrorState from "../components/ErrorState";
 import EventTimeline from "../components/EventTimeline";
@@ -424,7 +425,7 @@ function TrialHeader({
           </div>
         ) : null}
 
-        {trial.materialization?.canonical_ready && trial.materialization.bundle ? <Button variant="primary" onClick={() => void api.downloadTrialBundle(trial.id)}>Download complete Trial bundle</Button> : null}
+        {trial.materialization?.canonical_ready && trial.materialization.bundle ? <DownloadButton actionKey={trial.id} variant="primary" download={() => api.downloadTrialBundle(trial.id)}>Download complete Trial bundle</DownloadButton> : null}
         <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-5">
           <StatCard
             label="Owner"
@@ -516,13 +517,14 @@ function TrialArtifacts({ trial }: { trial: components["schemas"]["TrialDetail"]
   return <Card><Card.Header title="Artifacts" description="Complete bundle is the primary delivery. Individual files and reports are available below." /><Card.Body className="stack-y-4">
         <div className="flex flex-wrap gap-2">
           {trial.atif_ready ? (
-            <Button
+            <DownloadButton
+              actionKey={trial.id}
               variant="secondary"
               title="Download the finalized ATIF artifact for this trial."
-              onClick={() => void api.downloadATIF(trial.id)}
+              download={() => api.downloadATIF(trial.id)}
             >
               Download ATIF report
-            </Button>
+            </DownloadButton>
           ) : (
             <Button
               variant="secondary"
@@ -533,13 +535,14 @@ function TrialArtifacts({ trial }: { trial: components["schemas"]["TrialDetail"]
             </Button>
           )}
           {trial.trajectory_ready ? (
-            <Button
+            <DownloadButton
+              actionKey={trial.id}
               variant="secondary"
               title="Download the raw trajectory events for this trial."
-              onClick={() => void api.downloadTrajectory(trial.id)}
+              download={() => api.downloadTrajectory(trial.id)}
             >
               Download trajectory log
-            </Button>
+            </DownloadButton>
           ) : (
             <Button
               variant="secondary"
@@ -568,25 +571,26 @@ function TrialArtifacts({ trial }: { trial: components["schemas"]["TrialDetail"]
                     key={`${artifact.key}-${index}`}
                     className="rounded-md border border-slate-200 bg-white px-3 py-2"
                   >
-                    <button
-                      title={`Download artifact ${label}.`}
-                      type="button"
-                      onClick={() =>
-                        void api.downloadArtifact(
-                          trial.id,
-                          artifact.key,
-                          artifactDownloadName(artifact),
-                        )
-                      }
-                      className="flex w-full items-center justify-between gap-3 text-sm"
-                    >
-                      <span className="min-w-0 truncate font-medium text-slate-700">
-                        Download artifact {label}
-                      </span>
-                      <span className="shrink-0 font-mono text-xs text-slate-600">
+                    <div className="flex items-start justify-between gap-3">
+                      <DownloadButton
+                        actionKey={`${trial.id}/${artifact.key}`}
+                        title={`Download artifact ${label}.`}
+                        download={() =>
+                          api.downloadArtifact(
+                            trial.id,
+                            artifact.key,
+                            artifactDownloadName(artifact),
+                          )
+                        }
+                        size="sm"
+                        className="max-w-full break-all text-left"
+                      >
+                        {`Download artifact ${label}`}
+                      </DownloadButton>
+                      <span className="shrink-0 py-1 font-mono text-xs text-slate-600">
                         {artifact.size == null ? "Size unknown" : formatBytes(artifact.size)}
                       </span>
-                    </button>
+                    </div>
                     <p className="mt-1 text-xs text-slate-500">{artifact.step_name || "Trial output"}{/stderr|stdout|debug|\.log$/i.test(label) ? " · Execution diagnostic" : artifact.size === 0 ? " · Empty file" : " · Output file"}</p>
                     <details className="mt-2 text-xs text-slate-500"><summary className="cursor-pointer">Storage and sharing details</summary><code className="break-all">{artifact.key}</code></details>
                     <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
@@ -621,20 +625,16 @@ function mergeTrajectoryEvents(current: TrajEvent[], incoming: TrajEvent[]): Tra
   })];
 }
 
-function Trajectory({ trialId, terminal, trajectoryReady }: { trialId: string; terminal: boolean; trajectoryReady: boolean }): JSX.Element {
-  // #5 Slice 6: switch the trajectory viewer from manual-paginate
-  // `/trajectory?cursor=N` to SSE `/stream`. Events stream in live
-  // while the trial is non-terminal; the connection closes itself
-  // on the server's `complete` event. The legacy paginated path is
-  // retained as a fallback for environments where EventSource is
-  // unavailable (some corp proxies strip text/event-stream).
+function Trajectory({ trialId, terminal }: { trialId: string; terminal: boolean }): JSX.Element {
+  // SSE and fallback polling share the Postgres-first sequence-cursor
+  // source, including its stored-object fallback for legacy trials.
   const stream = useTrialEventStream(trialId);
   const events = stream.events as TrajEvent[];
 
   const useFallback = stream.status === "error";
 
   const [fallbackEvents, setFallbackEvents] = useState<TrajEvent[]>([]);
-  const fallbackCursor = useRef(0);
+  const fallbackCursor = useRef(-1);
   const [fallbackHasMore, setFallbackHasMore] = useState(false);
   const [fallbackDone, setFallbackDone] = useState(false);
   const polling = useAdaptivePolling({ baseIntervalMs: 4_000, hiddenBehavior: "pause" });
@@ -645,12 +645,13 @@ function Trajectory({ trialId, terminal, trajectoryReady }: { trialId: string; t
     queryKey: queryKeys["trajectory-fallback"](trialId, terminal),
     queryFn: async ({ signal }) => {
       const cursor = fallbackCursor.current;
-      const result = await api.getTrajectoryPage(trialId, cursor || undefined, 200, signal);
+      const result = await api.getTrialEvents(trialId, cursor, 200, signal);
       if (signal.aborted) throw new DOMException("Trajectory request cancelled", "AbortError");
-      fallbackCursor.current = result.next_cursor ?? cursor + result.events.length;
+      const hasMore = result.next_after_seq !== null && result.next_after_seq > cursor;
+      if (hasMore) fallbackCursor.current = result.next_after_seq!;
       setFallbackEvents((previous) => mergeTrajectoryEvents(previous, result.events));
-      setFallbackHasMore(result.next_cursor !== null);
-      setFallbackDone(terminal && result.next_cursor === null);
+      setFallbackHasMore(hasMore);
+      setFallbackDone(terminal && !hasMore);
       return result;
     },
     enabled: useFallback && !fallbackDone,
@@ -685,7 +686,7 @@ function Trajectory({ trialId, terminal, trajectoryReady }: { trialId: string; t
         {useFallback && fallback.isError ? (
           <ErrorState error={fallback.error} />
         ) : null}
-        {terminal && renderedEvents.length === 0 && (!trajectoryReady || stream.status === "complete" || (useFallback && fallbackDone)) ? (
+        {terminal && renderedEvents.length === 0 && (stream.status === "complete" || (useFallback && fallbackDone)) ? (
           <p className="text-sm text-slate-600">This trial ended without recorded trajectory events. <TrialSectionLink section="diagnostics" className="text-accent underline">Open build and execution diagnostics</TrialSectionLink> for the final reason and available evidence.</p>
         ) : <EventTimeline events={renderedEvents} />}
         {useFallback && fallback.isError ? (
@@ -780,7 +781,7 @@ export default function TrialDetail(): JSX.Element {
         <TrialSectionLink section="overview">Overview</TrialSectionLink><TrialSectionLink section="trajectory">Trajectory</TrialSectionLink><TrialSectionLink section="artifacts">Artifacts</TrialSectionLink><TrialSectionLink section="diagnostics">Diagnostics</TrialSectionLink>
       </nav>
       <section id="overview"><TrialHeader trial={trial.data} /></section>
-      <section id="trajectory"><Trajectory key={trialId} trialId={trialId} terminal={!ACTIVE_TRIAL_STATES.has(trial.data.state)} trajectoryReady={trial.data.trajectory_ready} /></section>
+      <section id="trajectory"><Trajectory key={trialId} trialId={trialId} terminal={!ACTIVE_TRIAL_STATES.has(trial.data.state)} /></section>
       <section id="artifacts"><TrialArtifacts trial={trial.data} /></section>
       <section id="diagnostics" className="stack-y-4"><h2 className="text-lg font-semibold">Diagnostics</h2>
       <TrialProgressTimeline progress={trial.data.progress} />
