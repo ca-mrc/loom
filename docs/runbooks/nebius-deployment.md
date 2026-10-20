@@ -2618,6 +2618,14 @@ schema is `loom.nebius-management-refresh-private-inputs.v1`, with:
   does not apply that quota or change build budgets. This reference neither
   applies cloud resources nor proves disk size, placement or deletion of an
   earlier node generation.
+  The same proof may qualify the primary control-plane's addition of the
+  `recovery-platform-config` volume when the retained snapshot predates it.
+  Only `loom-platform-config`'s `profile.json` and `environment.json` items and
+  the single read-only mount at `/var/run/loom-platform` are accepted. The
+  existing ConfigMap identity and current configuration still qualify through
+  the shared prerequisites. Other volume sources and `imagePullSecrets` remain
+  pinned; arbitrary ConfigMaps, Secret/projected credentials, PVC additions,
+  writable or alternate mounts and other workload scopes remain rejected.
 - `deployment`, `candidate` and `profile`: the target manager configuration and
   protected publication. The tooling source and candidate SHA must be identical.
 - `manager_revision` and `target_manager_revision`: the expected management DB

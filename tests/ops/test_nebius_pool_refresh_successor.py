@@ -59,6 +59,16 @@ def private_cutover(completed_upgrade, cutover_inputs, database_guard):
     from scripts.ops.nebius_pool_cutover_entry import load_pool_cutover_inputs
     from tests.ops.test_nebius_pool_dormant import dormant_consumer
     metadata, inputs, root = cutover_fixture.private_cutover.__wrapped__(completed_upgrade, cutover_inputs, database_guard)
+    # Retain the real historical CP shape before any pool history is created.
+    # The current ordinary source adds this recovery-only public config mount.
+    namespace = root.deployment.installation.foundation.platform_config['namespace']
+    controller, = (row['controller'] for row in inputs['guards'] if row['namespace'] == namespace)
+    pod = controller['spec']['template']['spec']
+    pod['volumes'] = [row for row in pod['volumes'] if row['name'] != 'recovery-platform-config']
+    container, = pod['containers']
+    container['volumeMounts'] = [row for row in container['volumeMounts']
+        if row['name'] != 'recovery-platform-config']
+    cutover_fixture.save_private(metadata, inputs)
     retirement = load_pool_cutover_inputs(metadata).request.fencing.retirement
     registration = retirement.migration.registration
     participants = registration.spec.participants
@@ -159,6 +169,88 @@ def ordinary_rollout(private_cutover, monkeypatch, request):
         return await resolve_platform_rollout(reference=reference, catalog=catalog, config=config,
             keyring=root.deployment.installation.keyring, previous_sha='a' * 40)
     return selected, state
+
+
+@pytest.mark.asyncio
+async def test_completed_ordinary_successor_restores_historical_control_plane_recovery_config(private_cutover, ordinary_rollout):
+    from scripts.ops.nebius_pool_refresh import PoolManagerRefresh
+
+    _, inputs, root = private_cutover
+    namespace = root.deployment.installation.foundation.platform_config['namespace']
+    original, = (row['controller'] for row in inputs['guards'] if row['namespace'] == namespace)
+    retained = copy.deepcopy(original)
+    proven = await ordinary_rollout[0]()
+    bound = PoolManagerRefresh(None, SimpleNamespace(pool_baseline=SimpleNamespace(context=SimpleNamespace(
+        request=SimpleNamespace(fencing=SimpleNamespace(retirement=SimpleNamespace(dormant_consumers=())))))),
+        None, Path('/unused'), successor=proven)
+    assert len(original['spec']['template']['spec']['volumes']) == 3
+    expected = bound.successor_document(original)
+    assert expected == {**proven.resources[_key(original)],
+        'metadata': {**proven.resources[_key(original)]['metadata'], 'uid': original['metadata']['uid']}}
+    assert bound.matches_workload(expected, expected, original)
+    assert original == retained
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('damage', ['secret', 'projected_secret', 'pvc', 'image_pull_secret',
+    'unknown_config_volume', 'mount_name', 'extra_recovery_mount', 'initializer_mount',
+    'old_dangling_mount', 'writable_mount', 'reference', 'items', 'mount_path',
+    'service_scope', 'execution_scope'])
+async def test_recovery_config_addition_cannot_widen_retained_authority(private_cutover, ordinary_rollout, damage):
+    from scripts.ops.nebius_platform_rollout_successor import PlatformRolloutSuccessor
+    from scripts.ops.nebius_pool_refresh import PoolManagerRefresh
+
+    _, inputs, root = private_cutover
+    namespace = root.deployment.installation.foundation.platform_config['namespace']
+    original = copy.deepcopy(next(row['controller'] for row in inputs['guards'] if row['namespace'] == namespace))
+    proven = await ordinary_rollout[0]()
+    desired = copy.deepcopy(proven.resources[_key(original)])
+    pod = desired['spec']['template']['spec']
+    container, = pod['containers']
+    volume, = (row for row in pod['volumes'] if row['name'] == 'recovery-platform-config')
+    mount, = (row for row in container['volumeMounts'] if row['name'] == 'recovery-platform-config')
+    if damage == 'secret':
+        next(row['secret'] for row in pod['volumes'] if 'secret' in row)['secretName'] = 'foreign'
+    elif damage == 'projected_secret':
+        pod['volumes'].append({'name': 'foreign', 'projected': {'sources': [{'secret': {'name': 'foreign'}}]}})
+    elif damage == 'pvc':
+        pod['volumes'].append({'name': 'foreign', 'persistentVolumeClaim': {'claimName': 'foreign'}})
+    elif damage == 'image_pull_secret':
+        pod['imagePullSecrets'] = [*pod.get('imagePullSecrets', []), {'name': 'foreign'}]
+    elif damage == 'unknown_config_volume':
+        pod['volumes'].append({'name': 'foreign', 'configMap': {'name': 'loom-platform-config'}})
+    elif damage == 'mount_name':
+        mount['name'] = 'foreign'
+    elif damage == 'extra_recovery_mount':
+        container['volumeMounts'].append({**mount, 'mountPath': '/var/run/foreign'})
+    elif damage == 'initializer_mount':
+        pod['initContainers'][0]['volumeMounts'].append(copy.deepcopy(mount))
+    elif damage == 'old_dangling_mount':
+        original['spec']['template']['spec']['containers'][0]['volumeMounts'].append(copy.deepcopy(mount))
+    elif damage == 'writable_mount':
+        mount['readOnly'] = False
+    elif damage == 'reference':
+        volume['configMap']['name'] = 'foreign'
+    elif damage == 'items':
+        volume['configMap']['items'][0]['key'] = 'foreign.json'
+    elif damage == 'mount_path':
+        mount['mountPath'] = '/var/run/foreign'
+    elif damage == 'service_scope':
+        for row in (original, desired):
+            row['metadata']['name'] = 'loom-service'
+            row['spec']['selector'] = {'matchLabels': {'app': 'loom-service'}}
+            row['spec']['template']['spec']['containers'][0]['name'] = 'loom-service'
+    else:
+        for row in (original, desired):
+            row['metadata']['namespace'] = proven.config['execution_namespace']
+    successor = PlatformRolloutSuccessor(proven.reference, proven.config, {_key(original): desired})
+    bound = PoolManagerRefresh(None, SimpleNamespace(pool_baseline=SimpleNamespace(context=SimpleNamespace(
+        request=SimpleNamespace(fencing=SimpleNamespace(retirement=SimpleNamespace(dormant_consumers=())))))),
+        None, Path('/unused'), successor=successor)
+    retained, selected = copy.deepcopy(original), copy.deepcopy(desired)
+    with pytest.raises(ValueError):
+        bound.successor_document(original)
+    assert original == retained and desired == selected
 
 
 @pytest.mark.asyncio

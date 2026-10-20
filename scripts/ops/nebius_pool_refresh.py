@@ -193,9 +193,34 @@ class PoolManagerRefresh:
                 if 'valueFrom' in e or e['name'].endswith('_DB_URL')} for c in new.get(field, [])}
             if not _exact_pod(before, after, (field,)):
                 raise ValueError
-        for field in ('volumes', 'imagePullSecrets'):
-            if not _exact_pod(old.get(field, []), new.get(field, []), (field,)):
+        old_volumes, new_volumes = old.get('volumes', []), new.get('volumes', [])
+        recovery = 'recovery-platform-config'
+        added = [volume for volume in new_volumes if volume.get('name') == recovery]
+        if added and not any(volume.get('name') == recovery for volume in old_volumes):
+            # A qualified ordinary release may add the controller's read-only
+            # recovery configuration. Its existing credential/storage volumes
+            # remain frozen; this is not permission to add arbitrary sources.
+            volume = {'name': recovery, 'configMap': {'name': 'loom-platform-config', 'items': [
+                {'key': 'profile.json', 'path': 'profile.json'},
+                {'key': 'environment.json', 'path': 'environment.json'}]}}
+            mount = {'name': recovery, 'mountPath': '/var/run/loom-platform', 'readOnly': True}
+            containers = new.get('containers', [])
+            if (original['kind'] != 'Deployment' or original['metadata']['name'] != 'loom-control-plane'
+                    or original['metadata']['namespace'] != successor.config['namespace']
+                    or len(added) != 1 or not _exact_pod(added[0], volume, ('volumes', '*'))
+                    or len(containers) != 1 or containers[0]['name'] != 'loom-control-plane'
+                    or not _exact_pod([row for row in containers[0].get('volumeMounts', [])
+                        if row.get('name') == recovery], [mount], ('containers', '*', 'volumeMounts'))
+                    or any(row.get('name') == recovery for container in new.get('initContainers', [])
+                        for row in container.get('volumeMounts', []))
+                    or any(row.get('name') == recovery
+                        for field in ('containers', 'initContainers') for container in old.get(field, [])
+                        for row in container.get('volumeMounts', []))):
                 raise ValueError
+            new_volumes = [volume for volume in new_volumes if volume.get('name') != recovery]
+        if (not _exact_pod(old_volumes, new_volumes, ('volumes',))
+                or not _exact_pod(old.get('imagePullSecrets', []), new.get('imagePullSecrets', []), ('imagePullSecrets',))):
+            raise ValueError
         desired['metadata']['uid'] = _uid(original)
         return desired
 
