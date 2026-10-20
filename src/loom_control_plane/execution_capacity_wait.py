@@ -7,7 +7,18 @@ from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Select, exists, or_, select
+from sqlalchemy import (
+    DateTime,
+    Select,
+    Text,
+    case,
+    cast,
+    exists,
+    func,
+    literal,
+    or_,
+    select,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import (
@@ -101,6 +112,8 @@ async def _eligible(session: AsyncSession, row: Any, payload: Any, now: datetime
                 or _time(payload["retry_at"]) != row["next_attempt_at"]):
             return None
         target_id, pool_id = payload["target_id"], payload["pool_id"]
+        if not isinstance(target_id, str) or not isinstance(pool_id, str):
+            return None
         if (row["requires_caps"].get("worker_pool") != pool_id
                 or row["execution_route_pool_name"] not in (None, pool_id)):
             return None
@@ -146,53 +159,86 @@ async def read_execution_capacity_waits(
     claiming = await session.get(ServiceExecutionLease, claiming_lease_id) if claiming_lease_id else None
     own_order = None
     heads: dict[str, ExecutionCapacityWait] = {}
-    hint = Trial.scheduling_observation["capacity_wait"]
-    query = select(Trial.id, Trial.scheduling_observation).where(
-        Trial.state == "queued", Trial.cancellation_requested_at.is_(None), hint.astext.is_not(None),
-    ).order_by(hint["target_id"].astext, hint["first_waited_at"].astext, Trial.id)
-    result = await session.stream(query.execution_options(yield_per=100))
-    async for item in result.mappings():
-        payload = (item["scheduling_observation"] or {}).get("capacity_wait")
-        own = claiming is not None and item["id"] == claiming.trial_id
-        if not isinstance(payload, dict):
-            continue
-        try:
-            if _time(payload["expires_at"]) <= now:
-                continue
-            previous = heads.get(payload["target_id"])
-            if (not own and previous is not None
-                    and previous.order <= (_time(payload["first_waited_at"]), f"execution-wait:{item['id']}")):
-                continue  # Younger hints need no image/provider reads once a valid head exists.
-        except (KeyError, TypeError, ValueError):
-            continue
+    if claiming is not None:
         row = (await session.execute(_candidate_rows(claiming_lease_id).where(
-            Trial.id == item["id"],
+            Trial.id == claiming.trial_id,
         ))).mappings().one_or_none()
-        if row is None:
-            continue
-        # Re-read the hint with the inputs; the first pass never renews or
-        # treats its cached JSON as acquired capacity.
-        payload = (row["scheduling_observation"] or {}).get("capacity_wait")
-        candidate = dict(row)
-        if claiming is not None and row["id"] == claiming.trial_id and claiming_inputs is not None:
-            # Route binding inside the uncommitted claim is expected. Compare
-            # the original queued route, while checking all current task inputs.
-            for key in ("execution_route_generation", "execution_route_pool_name"):
-                candidate[key] = claiming_inputs[key]
-        wait = await _eligible(session, candidate, payload, now)
-        if wait is None:
-            continue
-        if claiming is not None and wait.trial_id == claiming.trial_id:
-            # A target/resource change is a new demand, even if its source task
-            # remained unchanged. Never inherit another envelope's age.
-            if (wait.target_id == claiming.target_id
+        if row is not None:
+            payload = (row["scheduling_observation"] or {}).get("capacity_wait")
+            candidate = dict(row)
+            if claiming_inputs is not None:
+                # Route binding inside this uncommitted claim is expected.
+                for key in ("execution_route_generation", "execution_route_pool_name"):
+                    candidate[key] = claiming_inputs[key]
+            wait = await _eligible(session, candidate, payload, now)
+            if (wait is not None and wait.target_id == claiming.target_id
                     and isinstance(payload, dict)
                     and payload.get("runtime_contract_sha256") == claiming.runtime_contract_sha256):
                 own_order = wait.order
-            continue
-        previous = heads.get(wait.target_id)
-        if previous is None or wait.order < previous.order:
-            heads[wait.target_id] = wait
+
+    hint = Trial.scheduling_observation["capacity_wait"]
+    target = hint["target_id"].astext
+
+    def timestamp(key: str) -> Any:
+        value = hint[key].astext
+        # PostgreSQL 16 is the deployed/tested baseline. Malformed disposable
+        # hints must not make a cast abort another workload's admission.
+        return case((func.pg_input_is_valid(value, "timestamptz"), cast(value, DateTime(timezone=True))))
+
+    first, expiry = timestamp("first_waited_at"), timestamp("expires_at")
+    order_time = func.coalesce(first, cast(literal("-infinity"), DateTime(timezone=True)))
+    filters = [Trial.state == "queued", Trial.cancellation_requested_at.is_(None),
+               func.jsonb_typeof(hint["target_id"]) == "string",
+               target.is_not(None), or_(expiry.is_(None), expiry > now)]
+    if claiming is not None:
+        filters.append(Trial.id != claiming.trial_id)
+    targets = (await session.scalars(select(target).where(*filters).distinct().order_by(target))).all()
+    for target_id in targets:
+        query = select(Trial.id, cast(first, Text).label("order_at"), Trial.next_attempt_at,
+            *(hint[key].astext.label(key) for key in ("first_waited_at", "renewed_at", "expires_at", "retry_at")),
+        ).where(*filters, target == target_id).order_by(order_time, Trial.id)
+        result = await session.stream(query.execution_options(yield_per=100))
+        try:
+            async for page in result.mappings().partitions(100):
+                plausible = []
+                for item in page:
+                    try:
+                        waited, renewed, expires = (_time(item[key]) for key in ("first_waited_at", "renewed_at", "expires_at"))
+                        if (waited <= renewed < expires <= renewed + timedelta(seconds=WAIT_LEASE_SECONDS)
+                                and renewed <= now + timedelta(seconds=60) and expires > now
+                                and _time(item["retry_at"]) == item["next_attempt_at"]):
+                            plausible.append(item["id"])
+                    except (KeyError, TypeError, ValueError, OverflowError):
+                        continue
+                # Batch invalid-head fallback, rather than a round trip per stale
+                # fingerprint. Only this page's plausible rows need rich context.
+                rows = (await session.execute(_candidate_rows(claiming_lease_id).where(
+                    Trial.id.in_(plausible),
+                ))).mappings().all() if plausible else []
+                contexts = {row["id"]: row for row in rows}
+                finished = False
+                for item in page:
+                    row = contexts.get(item["id"])
+                    if row is None:
+                        continue
+                    payload = (row["scheduling_observation"] or {}).get("capacity_wait")
+                    wait = await _eligible(session, row, payload, now)
+                    if wait is None:
+                        continue
+                    previous = heads.get(wait.target_id)
+                    if previous is None or wait.order < previous.order:
+                        heads[wait.target_id] = wait
+                    # Python accepts some ISO forms PostgreSQL does not. Their
+                    # null-first prefix must all be compared before stopping at
+                    # the oldest valid normalized timestamp; never sort by text.
+                    if item["order_at"] is not None:
+                        finished = True
+                        break
+                if finished:
+                    break
+        finally:
+            # Do not fetch younger pages once this target's head is known.
+            await result.close()
     return list(heads.values()), own_order
 
 
