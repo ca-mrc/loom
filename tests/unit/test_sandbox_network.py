@@ -171,11 +171,15 @@ async def test_create_non_recoverable_error_propagates() -> None:
 
 
 @pytest.mark.parametrize("created", [True, False])
-async def test_cancelled_create_drains_before_releasing_its_subnet(created: bool) -> None:
+@pytest.mark.parametrize("future_runner", [False, True])
+async def test_cancelled_create_drains_before_releasing_its_subnet(
+    created: bool, future_runner: bool,
+) -> None:
     allocator = SandboxNetworkAllocator()
     entered, finish = asyncio.Event(), asyncio.Event()
     removing, removed = asyncio.Event(), asyncio.Event()
     calls: list[list[str]] = []
+    commands: list[asyncio.Task[str]] = []
 
     async def docker(argv: Sequence[str]) -> str:
         calls.append(list(argv))
@@ -191,8 +195,16 @@ async def test_cancelled_create_drains_before_releasing_its_subnet(created: bool
         await removed.wait()
         return "exact-created-id"
 
+    def run_command(argv: Sequence[str]):
+        operation = docker(argv)
+        if future_runner:
+            command = asyncio.create_task(operation)
+            commands.append(command)
+            return command
+        return operation
+
     task = asyncio.create_task(create_sandbox_bridge(
-        trial_id=_TRIAL, allocator=allocator, docker_runner=docker,
+        trial_id=_TRIAL, allocator=allocator, docker_runner=run_command,
     ))
     try:
         await asyncio.wait_for(entered.wait(), 1)
@@ -214,6 +226,7 @@ async def test_cancelled_create_drains_before_releasing_its_subnet(created: bool
         finish.set()
         removed.set()
         await asyncio.gather(task, return_exceptions=True)
+        await asyncio.gather(*commands, return_exceptions=True)
         allocator.release(1)  # Only this test's fake slot can remain on RED.
 
 
