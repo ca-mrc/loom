@@ -5,7 +5,11 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Callable
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from datetime import UTC, datetime
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
+from threading import Lock
+from time import monotonic
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
@@ -13,12 +17,15 @@ from loom.nebius_kubernetes import (
     NebiusKubernetesConnection,
     NebiusKubernetesCredentials,
     create_api_client,
+    read_kubelet_summary,
+    read_sdk_before_close,
 )
 from loom_execution_capacity_collector.contracts import (
     CapacityTargetScopeV1,
     DaemonSetPlacement,
     KubernetesCapacitySnapshot,
     ManagedPodPlacement,
+    NodeIOPressure,
     NodePlacement,
     NodeTemplateSample,
     ResourceTotals,
@@ -31,6 +38,10 @@ _MIB = Decimal(1024 * 1024)
 _TARGET_ANNOTATION = "loom.openai.com/target-id"
 _MANAGED_BY = "loom-execution-actuator"
 _IMAGE_PULL_REASONS = {"ErrImagePull", "ImagePullBackOff"}
+# Optional telemetry must leave the 120-second Job budget for core inventory,
+# provider capture and publication. This is a probe limit, never a build cap.
+_IO_PROBE_BUDGET_SECONDS = 10.0
+_IO_PROBE_WORKERS = 4
 
 
 class KubernetesObservationError(RuntimeError):
@@ -240,6 +251,32 @@ def _node_ready(node: Any) -> bool:
         and getattr(node.metadata, "deletion_timestamp", None) is None
         and not bool(getattr(node.spec, "unschedulable", False))
     )
+
+
+def _node_io_pressure(
+    core_api: Any, node: Any, *, timeout_seconds: float = 10.0,
+) -> NodeIOPressure | None:
+    """Project fresh, UID-bound node evidence without retaining raw Pod stats."""
+    try:
+        summary = read_kubelet_summary(
+            core_api, node_name=node.metadata.name, expected_node_uid=node.metadata.uid,
+            timeout_seconds=timeout_seconds,
+        )
+        if summary["node"]["nodeName"] != node.metadata.name:
+            return None
+        io = summary["node"]["io"]
+        pressure = NodeIOPressure(
+            sampled_at=datetime.fromisoformat(io["time"]),
+            full_avg10=io["psi"]["full"]["avg10"],
+        )
+        # One ordinary collector interval is the maximum age at capture. The
+        # admission reader must additionally qualify freshness at use time.
+        age = (datetime.now(UTC) - pressure.sampled_at).total_seconds()
+        return pressure if 0 <= age <= 60 else None
+    except Exception:
+        # Failed telemetry must not erase independent provider/request facts or
+        # leak endpoints, credentials or foreign Pod details into observations.
+        return None
 
 
 def _identity(value: object, *, name: str) -> str:
@@ -512,14 +549,92 @@ class InClusterKubernetesCapacityReader:
             apps_api = client.AppsV1Api()
         self._apps = apps_api
         self._request_timeout = request_timeout_seconds
+        self._io_executor: ThreadPoolExecutor | None = None
+        self._io_reads: set[Future[NodeIOPressure | None]] = set()
+        self._io_lock = Lock()
+        self._io_cursor = 0
+        self._closed = False
+
+    def _close_sync(self) -> None:
+        with self._io_lock:
+            self._closed = True
+            executor = self._io_executor
+        # Timed-out capture probes still own the shared API/credential objects.
+        # Drain before closing either, including when close itself is cancelled.
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
+        with self._io_lock:
+            self._io_reads.clear()
+        if self._api_client is not None:
+            self._api_client.close()
 
     async def close(self) -> None:
         try:
-            if self._api_client is not None:
-                await asyncio.to_thread(self._api_client.close)
+            await read_sdk_before_close(self._close_sync)
         finally:
             if self._credentials is not None:
                 await self._credentials.close()
+
+    def _probe_node_io(self, node: Any, deadline: float) -> NodeIOPressure | None:
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            return None
+        return _node_io_pressure(self._core, node, timeout_seconds=min(10.0, remaining))
+
+    def _node_io_pressures(self, nodes: list[Any]) -> dict[str, NodeIOPressure | None]:
+        """Best effort within one budget; at most four owned, unqueued reads.
+
+        Completed samples after the deadline are discarded. A later capture
+        cannot accumulate another batch behind outstanding reads. Close drains
+        them before API/token cleanup; no executor context exit delays capture.
+        """
+        if not nodes:
+            return {}
+        deadline = monotonic() + _IO_PROBE_BUDGET_SECONDS
+        with self._io_lock:
+            if self._closed:
+                return {}
+            if self._io_executor is None:
+                self._io_executor = ThreadPoolExecutor(
+                    max_workers=_IO_PROBE_WORKERS, thread_name_prefix="loom-node-io",
+                )
+            offset = self._io_cursor % len(nodes)
+            self._io_cursor += _IO_PROBE_WORKERS
+        ordered = iter(nodes[offset:] + nodes[:offset])
+        pending: dict[Future[NodeIOPressure | None], str] = {}
+        samples: dict[str, NodeIOPressure | None] = {}
+        exhausted = False
+        try:
+            while monotonic() < deadline:
+                with self._io_lock:
+                    self._io_reads = {future for future in self._io_reads if not future.done()}
+                    while (not self._closed and not exhausted
+                           and len(self._io_reads) < _IO_PROBE_WORKERS and monotonic() < deadline):
+                        node = next(ordered, None)
+                        if node is None:
+                            exhausted = True
+                            break
+                        future = self._io_executor.submit(self._probe_node_io, node, deadline)
+                        self._io_reads.add(future)
+                        pending[future] = node.metadata.uid
+                if not pending:
+                    break
+                completed, _ = wait(pending, timeout=max(0.0, deadline - monotonic()),
+                                    return_when=FIRST_COMPLETED)
+                if not completed:
+                    break
+                for future in completed:
+                    uid = pending.pop(future)
+                    if monotonic() < deadline:
+                        try:
+                            samples[uid] = future.result()
+                        except Exception:
+                            samples[uid] = None
+        finally:
+            # Only four in-flight calls can survive capture; no unbounded queue.
+            for future in pending:
+                future.cancel()
+        return samples
 
     def _list_all(
         self,
@@ -675,10 +790,13 @@ class InClusterKubernetesCapacityReader:
                 reasons[reason] = reasons.get(reason, 0) + 1
         placements: list[NodePlacement] = []
         samples: list[NodeTemplateSample] = []
+        io_pressures = self._node_io_pressures(nodes)
         for node in nodes:
             assigned = by_node[node.metadata.name]
             placement = NodePlacement(
                 uid=_identity(getattr(node.metadata, "uid", None), name="Node UID"),
+                name=_identity(node.metadata.name, name="Node name"),
+                io_pressure=io_pressures.get(node.metadata.uid),
                 provider_id=_identity(
                     getattr(node.spec, "provider_id", None), name="Node provider ID"
                 ),
@@ -756,13 +874,12 @@ class InClusterKubernetesCapacityReader:
         node_label_selector: str,
         target_scope: CapacityTargetScopeV1 | None = None,
     ) -> KubernetesCapacitySnapshot:
-        return await asyncio.to_thread(
-            self._capture_sync,
+        return await read_sdk_before_close(lambda: self._capture_sync(
             namespace=namespace,
             target_id=target_id,
             node_label_selector=node_label_selector,
             target_scope=target_scope,
-        )
+        ))
 
     async def capture_pool(self, *, scope: PoolObservationScope) -> KubernetesCapacitySnapshot:
         """One physical inventory; never combine per-environment snapshots.

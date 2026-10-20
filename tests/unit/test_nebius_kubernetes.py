@@ -17,6 +17,7 @@ from loom.nebius_kubernetes import (
     NebiusKubernetesCredentials,
     connection_from_fields,
     create_api_client,
+    read_kubelet_summary,
 )
 from loom_execution_actuator.config import ExecutionActuatorSettings
 from loom_execution_actuator.kubernetes_api import InClusterKubernetesJobApi
@@ -188,6 +189,132 @@ async def test_remote_clients_share_explicit_target_without_local_loader(
     assert sdk.closed
 
 
+def _kubelet_core(connection, read, auth=None):
+    node = SimpleNamespace(
+        metadata=SimpleNamespace(name="node-1", uid="aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa",
+                                 deletion_timestamp=None),
+        status=SimpleNamespace(addresses=[SimpleNamespace(type="InternalIP", address="10.23.0.4")]),
+    )
+    configuration = SimpleNamespace(
+        verify_ssl=True, ssl_ca_cert=str(connection.ca_file),
+        auth_settings=auth or (lambda: {"BearerToken": {"value": "Bearer fixture-runtime-token"}}),
+    )
+
+    def read_node(**kwargs):
+        read(kwargs["_request_timeout"])
+        return node
+
+    return SimpleNamespace(read_node=read_node, api_client=SimpleNamespace(configuration=configuration))
+
+
+def test_kubelet_optional_deadline_shares_remaining_time_across_sdk_auth_and_http(
+    connection, monkeypatch,
+):
+    import httpx
+
+    import loom.nebius_kubernetes as module
+
+    clock, sdk_timeouts, http_timeouts = [0.0], [], []
+
+    def read(timeout):
+        sdk_timeouts.append(timeout)
+        clock[0] += 2
+
+    def auth():
+        clock[0] += 1
+        return {"BearerToken": {"value": "Bearer fixture-runtime-token"}}
+
+    def request(value):
+        assert str(value.url) == "https://10.23.0.4:10250/stats/summary"
+        assert value.headers["Authorization"] == "Bearer fixture-runtime-token"
+        http_timeouts.append(value.extensions["timeout"]["read"])
+        clock[0] += 1
+        return httpx.Response(200, json={"node": {"nodeName": "node-1"}})
+
+    original = httpx.Client
+    monkeypatch.setattr(module, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(httpx, "Client", lambda **kwargs: original(
+        transport=httpx.MockTransport(request), **kwargs,
+    ))
+    result = read_kubelet_summary(_kubelet_core(connection, read, auth), node_name="node-1",
+                                  timeout_seconds=5)
+    assert result["node"]["nodeName"] == "node-1"
+    assert sdk_timeouts == [5] and http_timeouts == [2]
+
+
+@pytest.mark.parametrize("timeout", [0, -1, 10.01, float("nan"), float("inf"), True])
+def test_kubelet_optional_deadline_rejects_invalid_or_extended_timeouts(timeout):
+    with pytest.raises(ValueError, match="positive and at most ten seconds"):
+        read_kubelet_summary(SimpleNamespace(), node_name="node-1", timeout_seconds=timeout)
+
+
+@pytest.mark.parametrize("stage", ["node", "auth"])
+def test_kubelet_expired_deadline_never_starts_another_network_stage(connection, monkeypatch, stage):
+    import httpx
+
+    import loom.nebius_kubernetes as module
+
+    clock = [0.0]
+
+    def read(_timeout):
+        if stage == "node":
+            clock[0] = 6
+
+    def auth():
+        clock[0] = 6
+        return {"BearerToken": {"value": "Bearer fixture-runtime-token"}}
+
+    monkeypatch.setattr(module, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(httpx, "Client", lambda **_: pytest.fail("deadline reached kubelet"))
+    with pytest.raises(TimeoutError, match="observation deadline exceeded"):
+        read_kubelet_summary(_kubelet_core(connection, read, auth), node_name="node-1",
+                              timeout_seconds=5)
+
+
+def test_kubelet_stream_trickle_cannot_renew_deadline_and_response_is_closed(connection, monkeypatch):
+    import httpx
+
+    import loom.nebius_kubernetes as module
+
+    clock, chunks, closed = [0.0], [], []
+
+    class Trickle(httpx.SyncByteStream):
+        def __iter__(self):
+            for _ in range(20):
+                clock[0] += 3
+                chunks.append(1)
+                yield b" "
+
+        def close(self):
+            closed.append(True)
+
+    original = httpx.Client
+    monkeypatch.setattr(module, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(httpx, "Client", lambda **kwargs: original(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, stream=Trickle())), **kwargs,
+    ))
+    with pytest.raises(TimeoutError, match="observation deadline exceeded"):
+        read_kubelet_summary(_kubelet_core(connection, lambda _: None), node_name="node-1",
+                              timeout_seconds=5)
+    assert len(chunks) == 2 and closed == [True]
+
+
+@pytest.mark.parametrize("extra_byte", [False, True])
+def test_kubelet_stream_enforces_exact_sixteen_mib_boundary(connection, monkeypatch, extra_byte):
+    import httpx
+
+    prefix = b'{"node":{"nodeName":"node-1"}}'
+    payload = prefix + b" " * (16 * 1024**2 - len(prefix) + int(extra_byte))
+    original = httpx.Client
+    monkeypatch.setattr(httpx, "Client", lambda **kwargs: original(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, content=payload)), **kwargs,
+    ))
+    core = _kubelet_core(connection, lambda _: None)
+    if extra_byte:
+        with pytest.raises(ValueError, match="summary exceeds its bound"):
+            read_kubelet_summary(core, node_name="node-1")
+    else:
+        assert read_kubelet_summary(core, node_name="node-1")["node"]["nodeName"] == "node-1"
 @pytest.mark.parametrize(
     "reader_type", [InClusterKubernetesJobApi, InClusterKubernetesCapacityReader]
 )

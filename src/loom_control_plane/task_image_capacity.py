@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -21,6 +22,39 @@ from loom_control_plane.execution_capacity import (
     admit_capacity_resources,
     native_build_resources,
 )
+
+
+def _bind_io_job(native: dict[str, Any], binding: dict[str, Any]) -> dict[str, Any]:
+    """Freeze the placement decision into the original Job before publication.
+
+    Keep the execution target's selector/tolerations and intersect any required
+    affinity rather than replacing its scheduling rules. metadata.name affinity
+    remains visible to the scheduler/autoscaler; nodeName would bypass both.
+    """
+    native = deepcopy(native)
+    job = native["job"]
+    pod = job["spec"]["template"]["spec"]
+    if binding["mode"] == "node":
+        fields = [{"key": "metadata.name", "operator": "In", "values": [binding["node_name"]]}]
+        job["metadata"].setdefault("annotations", {}).update({
+            "loom.openai.com/build-node-name": binding["node_name"],
+            "loom.openai.com/build-node-uid": binding["node_uid"],
+        })
+    elif binding["mode"] == "bootstrap":
+        excluded = binding["excluded_node_names"]
+        # Kubernetes field requirements accept exactly one value each. Multiple
+        # exclusions are ANDed within each existing selector term.
+        fields = [{"key": "metadata.name", "operator": "NotIn", "values": [name]} for name in excluded]
+    else:
+        raise ValueError("invalid native I/O binding mode")
+    if fields:
+        required = pod.setdefault("affinity", {}).setdefault("nodeAffinity", {}).setdefault(
+            "requiredDuringSchedulingIgnoredDuringExecution", {"nodeSelectorTerms": [{}]},
+        )
+        for term in required["nodeSelectorTerms"]:
+            term.setdefault("matchFields", []).extend(deepcopy(fields))
+    native["io_binding"] = deepcopy(binding)
+    return native
 
 
 async def reserve_native_task_image_capacity(
@@ -67,6 +101,8 @@ async def reserve_native_task_image_capacity(
         already_reserved=existing, exclude_native_attempt_id=attempt.id,
     )
     if not existing:
+        if "io_binding" in decision:
+            native = _bind_io_job(native, decision["io_binding"])
         native.update(capacity_reserved_at=current_time.isoformat(),
                       capacity_observation_id=decision["observation_id"],
                       capacity_policy_version=decision["policy_version"],

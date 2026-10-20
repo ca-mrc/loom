@@ -150,6 +150,20 @@ class NativeBuildKubernetesApi:
     async def ensure(self, configmap: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
         def run() -> dict[str, Any]:
             ns, name = job["metadata"]["namespace"], job["metadata"]["name"]
+            annotations = job["metadata"].get("annotations", {})
+            node_uid = annotations.get("loom.openai.com/build-node-uid")
+            if node_uid is not None:
+                node_name = annotations.get("loom.openai.com/build-node-name")
+                if not isinstance(node_uid, str) or not node_uid or not isinstance(node_name, str) or not node_name:
+                    raise ExecutionProvisioningBlockedError("execution_capacity_native_io_binding_invalid")
+                try:
+                    node = self._json(self._core.read_node(node_name, _request_timeout=20))
+                except Exception:
+                    raise ExecutionProvisioningBlockedError("execution_capacity_native_io_observation_unavailable") from None
+                metadata = node.get("metadata", {})
+                if (metadata.get("name") != node_name or metadata.get("uid") != node_uid
+                        or metadata.get("deletionTimestamp")):
+                    raise ExecutionProvisioningBlockedError("execution_capacity_native_io_node_identity_changed")
             try:
                 self._core.create_namespaced_config_map(ns, configmap, _request_timeout=20)
             except Exception as error:
@@ -546,6 +560,8 @@ class NativeTaskImageController:
         assert attempt is not None
         try:
             claim = {**task_image_materialization_payload(row), **self.settings.runtime_configuration()}
+            if self.settings.snapshotter == "native":
+                claim["io_full_avg10_max"] = self.settings.io_full_avg10_max
             if (
                 self.settings.compatible_revision_cache == "same_task"
                 and self.settings.cache_bucket is not None
@@ -580,6 +596,8 @@ class NativeTaskImageController:
             "deadline_at": (now + timedelta(seconds=job["spec"]["activeDeadlineSeconds"])).isoformat(),
             "configmap": cm, "job": job,
         }
+        if self.settings.snapshotter == "native":
+            attempt.native_build = {**attempt.native_build, "io_full_avg10_max": self.settings.io_full_avg10_max}
         await session.flush()
         return attempt
 

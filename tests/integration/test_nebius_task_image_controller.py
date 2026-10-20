@@ -164,12 +164,16 @@ async def test_restart_recovers_ambiguous_create_once_and_persists_success_befor
         await controller.run_once()
     row, attempts = await rows(sessions, image_id)
     assert row.state == "claimed" and attempts[0].native_build["job_uid"] is None
+    frozen_claim = json.loads(attempts[0].native_build["configmap"]["data"]["claim.json"])
+    assert frozen_claim["io_full_avg10_max"] == controller.settings.io_full_avg10_max
+    assert attempts[0].native_build["io_full_avg10_max"] == frozen_claim["io_full_avg10_max"]
     if normalized_api:
         kube.jobs = {name: canonical_api_job(job) for name, job in kube.jobs.items()}
     expected_uid = next(iter(kube.jobs.values()))["metadata"]["uid"]
     await controller.run_once()
     row, attempts = await rows(sessions, image_id)
     assert row.state == "running" and attempts[0].native_build["job_uid"] == expected_uid
+    assert json.loads(attempts[0].native_build["configmap"]["data"]["claim.json"]) == frozen_claim
     assert kube.ensure_calls == 1
     kube.finish()
     kube.allow_delete = False
