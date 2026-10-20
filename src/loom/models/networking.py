@@ -6,15 +6,33 @@ Spec §4.2 (Supporting types).
 from __future__ import annotations
 
 import re
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from loom.models.types import NetworkPolicyKind
 
 
 class _BasePolicy(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
+
+    @model_serializer(mode="wrap")
+    def _keep_union_tag(self, handler: Any) -> dict[str, Any]:
+        # ``kind`` is the union discriminator and also each member's default,
+        # so ``exclude_defaults`` would otherwise drop it and the payload
+        # could not be validated back into a NetworkPolicy.
+        payload: dict[str, Any] = handler(self)
+        kind = getattr(self, "kind", None)
+        if kind is not None and "kind" not in payload:
+            payload = {"kind": kind, **payload}
+        return payload
 
 
 class Public(_BasePolicy):

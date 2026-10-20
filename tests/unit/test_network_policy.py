@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
@@ -45,6 +47,27 @@ def test_tagged_union_discriminates():
     )
     assert isinstance(allow, Allowlist)
     assert allow.domains == ("a",)
+
+
+_EVERY_POLICY = (
+    Public(),
+    NoNetwork(),
+    GatewayOnly(),
+    Allowlist(domains=("example.com",)),
+    WebAllowlist(destinations=(WebDestination(host="example.com", protocol="https"),)),
+    PublicWeb(),
+)
+
+
+@pytest.mark.parametrize("policy", _EVERY_POLICY, ids=lambda policy: policy.kind)
+@pytest.mark.parametrize("exclude", ["exclude_defaults", "exclude_unset"])
+def test_tag_survives_default_excluding_dumps(policy, exclude) -> None:
+    adapter = TypeAdapter(NetworkPolicy)
+    encoded = policy.model_dump_json(**{exclude: True})
+
+    assert json.loads(encoded)["kind"] == policy.kind
+    assert adapter.validate_json(encoded) == policy
+    assert adapter.validate_python(policy.model_dump(**{exclude: True})) == policy
 
 
 def test_tagged_union_rejects_unknown_kind():
