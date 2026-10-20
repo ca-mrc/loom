@@ -13,10 +13,10 @@ test("an active trajectory appears after the fallback initially reaches an empty
   await apiHarness.install({ role: "user", overrides: [
     { name: "running trial", method: "GET", path: "/api/v1/trials/fallback-trial", count: 2,
       response: { kind: "json", status: 200, body: trial } },
-    { name: "empty current trajectory tail", method: "GET", path: "/api/v1/trials/fallback-trial/trajectory?limit=200",
-      response: { kind: "json", status: 200, body: { events: [], next_cursor: null } } },
-    { name: "new trajectory event", method: "GET", path: "/api/v1/trials/fallback-trial/trajectory?limit=200",
-      response: { kind: "json", status: 200, body: { events: [{ seq: 0, kind: "trial_start", trial_id: "fallback-trial" }], next_cursor: null } } },
+    { name: "empty current trajectory tail", method: "GET", path: "/api/v1/trials/fallback-trial/events?after_seq=-1&limit=200",
+      response: { kind: "json", status: 200, body: { events: [], next_after_seq: null } } },
+    { name: "new trajectory event", method: "GET", path: "/api/v1/trials/fallback-trial/events?after_seq=-1&limit=200",
+      response: { kind: "json", status: 200, body: { events: [{ seq: 0, kind: "trial_start", trial_id: "fallback-trial" }], next_after_seq: 0 } } },
   ] });
   await page.goto(`${browserHarness.baseURL}/trials/fallback-trial`);
   await expect(page.getByText("0 events · fallback polling")).toBeVisible();

@@ -812,7 +812,7 @@ describe("RunLibraryBatchDetail", () => {
     });
     const button = await screen.findByRole("button", { name: label });
     act(() => { button.click(); button.click(); });
-    expect(download).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(download).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(button).toBeDisabled());
     await act(async () => { reject(new Error("Download temporarily unavailable")); });
     expect(await screen.findByText("Download temporarily unavailable")).toBeInTheDocument();

@@ -1,15 +1,12 @@
 /**
- * TrialCompare URL routing + picker behaviour. We don't try to
- * exercise the trial-column data path here — the existing
- * TrialDetail tests would cover that, and mocking two separate
- * endpoint shapes inside a single fetch spy is fragile. Focus on:
+ * TrialCompare routing, picker behaviour and sequence-cursor replay.
+ * The picker-only cases leave column requests pending; replay cases
+ * exercise the real API client with distinct per-trial responses.
  *
  *   - no `?a=…` → empty-state prompt
  *   - `?a=` set but no `?b=` → second column is the picker
  *   - typing into the picker enables the Compare button
  *
- * `TrialColumn` queries are stubbed to never resolve (pending forever)
- * so the column renders its LoadingState rather than the error path.
  */
 import { act, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -64,7 +61,7 @@ describe("TrialCompare", () => {
   });
 });
 
-it("flags different tasks and continues beyond 200 events", async () => {
+it.each(["empty", "replay"])("compares sequence pages and stops at a %s tail", async (tail) => {
   const calls: string[] = [];
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
     const url = String(input); calls.push(url);
@@ -78,7 +75,8 @@ it("flags different tasks and continues beyond 200 events", async () => {
         ? { events: Array.from({ length: 200 }, (_, step) => ({ seq: step * 3, step, kind: "trial_start", timestamp: "2026-09-23T00:00:00Z" })), next_after_seq: 597 }
         : after === 597
           ? { events: [{ seq: 597, kind: "trial_start" }, { seq: 900, kind: "trial_end", final_state: "succeeded" }], next_after_seq: 900 }
-          : { events: [], next_after_seq: null };
+          : tail === "empty" ? { events: [], next_after_seq: null }
+            : { events: [{ seq: 900, kind: "trial_end", final_state: "succeeded" }], next_after_seq: 900 };
     } else if (url.includes("/trials/")) {
       const id = parsed.pathname.split("/").at(-1);
       payload = { id, task_id: id === "aaa" ? "task-one" : "task-two", state: "succeeded", agent_name: "oracle", model: null, aggregate_reward: id === "aaa" ? 0 : 1, llm_calls_count: 1, total_prompt_tokens: 2, total_completion_tokens: 3 };
@@ -100,5 +98,32 @@ it("flags different tasks and continues beyond 200 events", async () => {
   expect(calls.some((url) => url.includes("after_seq=900"))).toBe(true);
   expect(calls.some((url) => url.includes("/trajectory"))).toBe(false);
   await user.click(screen.getByRole("button", { name: "Remove second Trial" }));
+  expect(screen.getByLabelText("Search comparison trial")).toBeInTheDocument();
+});
+
+it("aborts retired comparison requests and ignores their late events", async () => {
+  let release!: (response: Response) => void;
+  const pending = new Promise<Response>((resolve) => { release = resolve; });
+  let retiredSignal: AbortSignal | null | undefined;
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const path = new URL(String(input), "http://localhost").pathname;
+    if (path.endsWith("/bbb/events")) {
+      retiredSignal = init?.signal;
+      return pending;
+    }
+    if (path.endsWith("/events")) return new Response(JSON.stringify({ events: [], next_after_seq: null }));
+    return new Response(JSON.stringify({ id: path.split("/").at(-1), task_id: "task", state: "succeeded",
+      agent_name: "oracle", aggregate_reward: 1, llm_calls_count: 1,
+      total_prompt_tokens: 0, total_completion_tokens: 0 }));
+  });
+  renderWithProviders(<TrialCompare />, { route: "/trials/compare?a=aaa&b=bbb" });
+  await waitFor(() => expect(retiredSignal).toBeDefined());
+  await userEvent.click(screen.getByRole("button", { name: "Remove second Trial" }));
+  expect(retiredSignal?.aborted).toBe(true);
+  await act(async () => {
+    release(new Response(JSON.stringify({ events: [{ seq: 100, kind: "step_start", step_id: "retired" }], next_after_seq: 100 })));
+    await pending;
+  });
+  expect(screen.queryByText("Step retired started")).not.toBeInTheDocument();
   expect(screen.getByLabelText("Search comparison trial")).toBeInTheDocument();
 });

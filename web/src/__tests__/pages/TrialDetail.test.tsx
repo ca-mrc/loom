@@ -1,14 +1,8 @@
 /**
- * TrialDetail trajectory-section button-state regression. Bug:
- * before the backend started returning {events: [], next_after_seq: null}
- * for not-yet-written trajectories (returned 404 instead), the
- * "Load more" button stayed active on a trial with no events. Now
- * that the backend returns an empty page, `next_after_seq: null` sets
- * `done = true` and the button MUST disappear.
- *
- * Also pins the new error-state UX: when the trajectory page errors,
- * we surface a "Retry" button rather than the regular "Load more"
- * (which mis-implies more pages exist).
+ * TrialDetail event replay and download ownership regressions. Active event
+ * replay keeps polling through empty tails; terminal replay finishes only
+ * after its source confirms completion. Failed reads expose a retry action.
+ * Downloads retain per-target pending, failure, and retry state.
  */
 import { act, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -224,7 +218,7 @@ describe("TrialDetail trajectory section", () => {
     });
     const button = await screen.findByRole("button", { name: (name) => name.startsWith(label) });
     act(() => { button.click(); button.click(); });
-    expect(download).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(download).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(button).toBeDisabled());
     await act(async () => { reject(new Error("Download temporarily unavailable")); });
     expect(await screen.findByText("Download temporarily unavailable")).toBeInTheDocument();
@@ -232,6 +226,28 @@ describe("TrialDetail trajectory section", () => {
     await waitFor(() => expect(download).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(screen.queryByText("Download temporarily unavailable")).not.toBeInTheDocument());
     expect(screen.getByRole("button", { name: label })).toBeEnabled();
+  });
+
+  it("keeps a retired download failure out of the next trial's controls", async () => {
+    fetchSpy({ ok: true, body: { events: [], next_after_seq: null } });
+    vi.spyOn(api, "getTrial").mockImplementation(async (id) => ({
+      ...TRIAL_BODY, id, state: "succeeded", atif_ready: true,
+    }));
+    vi.spyOn(api, "getTrialEvents").mockResolvedValue({ events: [], next_after_seq: null });
+    let reject!: (reason: Error) => void;
+    const pending = new Promise<void>((_resolve, fail) => { reject = fail; });
+    const download = vi.spyOn(api, "downloadATIF").mockReturnValueOnce(pending).mockResolvedValue(undefined);
+    renderWithProviders(<><Link to="/trials/second">Next trial</Link><Routes>
+      <Route path="/trials/:trialId" element={<TrialDetail />} />
+    </Routes></>, { route: `/trials/${TRIAL_ID}` });
+    await userEvent.click(await screen.findByRole("button", { name: "Download ATIF report" }));
+    await waitFor(() => expect(download).toHaveBeenCalledWith(TRIAL_ID));
+    await userEvent.click(screen.getByText("Next trial"));
+    expect(await screen.findByRole("button", { name: "Download ATIF report" })).toBeEnabled();
+    await act(async () => { reject(new Error("Retired download failed")); });
+    expect(screen.queryByText("Retired download failed")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Download ATIF report" }));
+    await waitFor(() => expect(download).toHaveBeenLastCalledWith("second"));
   });
 
   it("polls an active fallback through an empty tail, deduplicates events, and drains on completion", async () => {
@@ -271,7 +287,8 @@ describe("TrialDetail trajectory section", () => {
       page = 3;
       await act(async () => { await vi.advanceTimersByTimeAsync(4_000); });
       await screen.findByText("Trial ended — succeeded");
-      await userEvent.click(await screen.findByRole("button", { name: "Load more" }));
+      const loadMore = screen.queryByRole("button", { name: "Load more" });
+      if (loadMore) await userEvent.click(loadMore);
       await screen.findByText("3 events · complete");
       expect(cursors).toContain("27");
       expect(cursors.at(-1)).toBe("42");
@@ -294,7 +311,7 @@ describe("TrialDetail trajectory section", () => {
         oldSignal = init?.signal;
         return pending;
       }
-      if (path.includes("/trials/second/events")) return new Response(JSON.stringify({ events: [{ seq: 0, kind: "step_start", step_id: "second-trial" }], next_after_seq: null }));
+      if (path.includes("/trials/second/events")) return new Response(JSON.stringify({ events: [{ seq: 0, kind: "step_start", step_id: "second-trial" }], next_after_seq: 0 }));
       return new Response(JSON.stringify({ ...TRIAL_BODY, id: path.includes("second") ? "second" : TRIAL_ID, state: "succeeded" }));
     });
     renderWithProviders(<><Link to="/trials/second">Next trial</Link><Routes><Route path="/trials/:trialId" element={<TrialDetail />} /></Routes></>, { route: `/trials/${TRIAL_ID}` });
@@ -302,7 +319,7 @@ describe("TrialDetail trajectory section", () => {
     await userEvent.click(screen.getByText("Next trial"));
     await screen.findByText("Step second-trial started");
     expect(oldSignal?.aborted).toBe(true);
-    await act(async () => { releaseOld(new Response(JSON.stringify({ events: [{ seq: 0, kind: "trial_start" }], next_after_seq: null }))); await pending; });
+    await act(async () => { releaseOld(new Response(JSON.stringify({ events: [{ seq: 0, kind: "trial_start" }], next_after_seq: 0 }))); await pending; });
     expect(screen.queryByText("Trial started")).not.toBeInTheDocument();
     expect(screen.getByText("Step second-trial started")).toBeInTheDocument();
   });
@@ -368,6 +385,30 @@ describe("TrialDetail trajectory section", () => {
     expect(screen.getByRole("link", { name: "Open build and execution diagnostics" })).toHaveAttribute("href", `/trials/${TRIAL_ID}#diagnostics`);
     expect(screen.queryByText("Trajectory pending")).not.toBeInTheDocument();
     expect(screen.queryByText("No events yet")).not.toBeInTheDocument();
+  });
+
+  it("waits for terminal event replay before declaring an unpublished trajectory empty", async () => {
+    vi.stubGlobal("EventSource", undefined);
+    fetchSpy({ ok: true, body: { events: [], next_after_seq: null } }, {
+      ...TRIAL_BODY, state: "succeeded", trajectory_ready: false,
+    });
+    let resolve!: (page: Awaited<ReturnType<typeof api.getTrialEvents>>) => void;
+    const pending = new Promise<Awaited<ReturnType<typeof api.getTrialEvents>>>((done) => {
+      resolve = done;
+    });
+    const replay = vi.spyOn(api, "getTrialEvents").mockReturnValue(pending);
+    renderWithProviders(<Routes><Route path="/trials/:trialId" element={<TrialDetail />} /></Routes>, {
+      route: `/trials/${TRIAL_ID}`,
+    });
+
+    await waitFor(() => expect(replay).toHaveBeenCalled());
+    expect(screen.queryByText(/This trial ended without recorded trajectory events/)).not.toBeInTheDocument();
+    await act(async () => {
+      resolve({ events: [{ seq: 0, kind: "trial_start", trial_id: TRIAL_ID }], next_after_seq: 0 });
+      await pending;
+    });
+    expect(await screen.findByText("Trial started")).toBeInTheDocument();
+    expect(screen.queryByText(/This trial ended without recorded trajectory events/)).not.toBeInTheDocument();
   });
 
   it("hides Load more when the trajectory is empty", async () => {

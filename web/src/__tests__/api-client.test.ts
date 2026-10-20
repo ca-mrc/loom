@@ -238,7 +238,7 @@ describe("delivery downloads", () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("archive"));
     vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:delivery");
     vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
-    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function () {
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
       expect(this.download).toBe("delivery.tar.gz");
     });
 
@@ -262,9 +262,8 @@ describe("delivery downloads", () => {
     vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
     vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
 
-    await expect(api.downloadBatchDeliveryExport(url, "delivery.tar.gz")).rejects.toMatchObject({
-      detail: "Download URL does not belong to this Loom service.",
-    });
+    await expect(api.downloadBatchDeliveryExport(url, "delivery.tar.gz"))
+      .rejects.toThrow("Download URL does not belong to this Loom service.");
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
