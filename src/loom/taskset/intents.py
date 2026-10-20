@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from loom.models.taskset import UserTaskSetManifest
+from loom.models.taskset import TaskSetLimits, UserTaskSetManifest
 
 _TRAJECTORY = "trajectory_generation"
 _EVALUATION = "evaluation"
@@ -67,6 +67,18 @@ def normalize_intents(
                     ),
                 ),
             )
+
+    limits = manifest.limits or TaskSetLimits()
+    if "max_instances" not in limits.model_fields_set:
+        warnings.append(IntentWarning(
+            code="default_max_instances_applied",
+            message=(
+                "limits.max_instances was omitted; materialization selects "
+                f"at most {limits.max_instances} tasks. If the source contains more, "
+                "additional tasks are not imported. For a larger source or bundle, "
+                "set limits.max_instances explicitly to the intended maximum."
+            ),
+        ))
 
     effective_sorted = sorted(effective)
     return NormalizedIntents(

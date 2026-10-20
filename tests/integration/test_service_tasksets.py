@@ -10,6 +10,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import create_engine, insert, text
 
 from loom.db.schema import Task
+from loom.models.taskset import TaskSetLimits
 from loom_service.taskset_intake import get_latest_job
 from tests.integration.taskset_fixtures import _manifest_bytes
 
@@ -57,6 +58,29 @@ async def test_post_taskset_happy_path(tasksets_setup) -> None:
         ).scalar_one()
     sync_engine.dispose()
     assert job_state == "queued"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limits,default_applied", [
+    ("", True), ("limits: {}\n", True), ("limits:\n  timeout_per_task_s: 10\n", True),
+    ("limits:\n  max_instances: 500\n", False), ("limits:\n  max_instances: 1000\n", False),
+])
+async def test_default_selection_limit_warning_survives_intake_and_get(tasksets_setup, limits, default_applied) -> None:
+    app, tokens, _teams = tasksets_setup
+    headers = {"Authorization": f"Bearer {tokens['team_a']}"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        post = await client.post("/api/v1/tasksets", headers=headers,
+            files={"manifest": ("manifest.yaml", _manifest_bytes() + limits.encode(), "application/x-yaml")})
+        assert post.status_code == 202, post.text
+        detail = await client.get(f"/api/v1/tasksets/{post.json()['task_set_id']}", headers=headers)
+        assert detail.status_code == 200, detail.text
+    for body in (post.json(), detail.json()):
+        warnings = [warning for warning in body["warnings"] if warning["code"] == "default_max_instances_applied"]
+        assert bool(warnings) is default_applied
+        if default_applied:
+            assert f"at most {TaskSetLimits().max_instances} tasks" in warnings[0]["message"]
+            assert "limits.max_instances" in warnings[0]["message"]
+    assert post.json()["warnings"] == detail.json()["warnings"]
 
 
 @pytest.mark.asyncio
