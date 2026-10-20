@@ -1,6 +1,6 @@
-// TLS server config. Loaded from disk at startup; rotation is via
-// SIGTERM + restart (the worker manages the singleton's lifecycle
-// — PR-B2 — and cycles it when the cert changes).
+// TLS server config is loaded from disk at startup. Certificate changes
+// require restarting the gateway process or container; the worker does not
+// watch the certificate files or restart running singletons when they change.
 
 package main
 
@@ -37,6 +37,5 @@ func loadServerTLS(certFile, keyFile string) (*tls.Config, error) {
 			tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
 			tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
 		},
-		PreferServerCipherSuites: true,
 	}, nil
 }

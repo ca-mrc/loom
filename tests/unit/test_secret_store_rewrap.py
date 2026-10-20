@@ -24,7 +24,6 @@ from loom.security.secret_store import (
     DecryptError,
     LocalEncryptedSecretStore,
     SecretStoreError,
-    _decode_b64_key,
     assert_existing_secrets_decryptable,
     load_master_keys_from_env,
 )
@@ -104,15 +103,19 @@ def test_neither_env_var_set_raises(monkeypatch: pytest.MonkeyPatch) -> None:
         load_master_keys_from_env()
 
 
-def test_decode_b64_key_wrong_length() -> None:
+def test_load_singular_key_rejects_wrong_length(monkeypatch: pytest.MonkeyPatch) -> None:
     short = base64.b64encode(b"tooshort").decode()
+    monkeypatch.setenv("LOOM_SECRET_STORE_MASTER_KEY", short)
+    monkeypatch.delenv("LOOM_SECRET_STORE_MASTER_KEYS", raising=False)
     with pytest.raises(SecretStoreError, match="8 bytes"):
-        _decode_b64_key(short, "test")
+        load_master_keys_from_env()
 
 
-def test_decode_b64_key_invalid_base64() -> None:
+def test_load_singular_key_rejects_invalid_base64(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LOOM_SECRET_STORE_MASTER_KEY", "!!!not-base64!!!")
+    monkeypatch.delenv("LOOM_SECRET_STORE_MASTER_KEYS", raising=False)
     with pytest.raises(SecretStoreError, match="not valid base64"):
-        _decode_b64_key("!!!not-base64!!!", "test")
+        load_master_keys_from_env()
 
 
 # ── LocalEncryptedSecretStore multi-key integration ────────────────────

@@ -52,7 +52,6 @@ from loom.pipeline.spec import (
 )
 from loom.pipeline.state import PipelineStageRunState, RetryClass
 
-LEASE_SECONDS = 60
 PICKER_BATCH = 50
 
 

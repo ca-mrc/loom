@@ -13,7 +13,11 @@ from loom_benchmark_terminal_bench_2.upstream import load_tb21_lock
 from loom_benchmarks.util import sha256_of_dir
 
 from loom.trajectory.storage import bundle_file_metadata_sha256
-from loom.trial.workspace import WorkspaceStagingPolicy, materialize_workspace
+from loom.trial.workspace import (
+    WorkspaceStagingPolicy,
+    materialize_workspace,
+    require_tb21_workspace_staging_policy,
+)
 from loom_benchmark_tool.audit_cmd import (
     AuditResult,
     ProfileActivationError,
@@ -26,7 +30,6 @@ from loom_benchmark_tool.manifest import (
 )
 from loom_worker import main_loop as worker_main_loop
 from loom_worker.main_loop import (
-    _tb21_workspace_staging_policy_from_provenance,
     _verify_materialized_tb21_bundle_checksum,
 )
 from loom_worker.runner_pool import RunnerPool
@@ -400,7 +403,7 @@ def test_worker_tb21_gate_rejects_a_well_formed_noncanonical_policy() -> None:
     }
 
     with pytest.raises(ValueError, match="canonical"):
-        _tb21_workspace_staging_policy_from_provenance(noncanonical)
+        require_tb21_workspace_staging_policy(noncanonical)
 
 
 @pytest.mark.asyncio

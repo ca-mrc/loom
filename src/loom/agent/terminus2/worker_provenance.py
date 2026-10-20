@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from functools import lru_cache
-from importlib import resources
 from pathlib import Path
 from typing import Any
 
@@ -64,19 +63,3 @@ def worker_image_provenance_summary() -> dict[str, Any]:
             for name, entry in wheels.get("packages", {}).items()
         },
     }
-
-
-def harbor_template_hashes_from_package() -> dict[str, str]:
-    """Re-export for callers that need template hashes at runtime."""
-    from loom.agent.terminus2.provenance import harbor_template_hashes
-
-    return harbor_template_hashes()
-
-
-def bundled_worker_wheels_json() -> str | None:
-    """Return wheels JSON from package data if bundled; else None."""
-    try:
-        data = resources.files("loom.agent.terminus2").joinpath("worker_wheels.json")
-        return data.read_text(encoding="utf-8")
-    except (FileNotFoundError, OSError, TypeError):
-        return None

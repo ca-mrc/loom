@@ -341,11 +341,8 @@ def _row_to_response(row: ProviderConnection) -> ProviderConnectionResponse:
 def _make_secret_store(session: AsyncSession) -> SecretStore:
     """Construct a SecretStore from the request's session.
 
-    Today: always `LocalEncryptedSecretStore` (the data-path default
-    per cluster-deploy.md). When the k8s-secret backend lands, this
-    dispatches by an env var or per-deployment-mode config. The route
-    code doesn't care which backend — it gets back an object satisfying
-    the SecretStore Protocol.
+    Provider credentials use `LocalEncryptedSecretStore`; callers access
+    it through the SecretStore Protocol.
     """
     return LocalEncryptedSecretStore(session)
 

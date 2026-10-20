@@ -129,10 +129,12 @@ Feature branches, including Nebius work, cut from `dev`. PRs target `dev`.
 for release promotion PRs from `dev`.
 
 The [Nebius CI integration](docs/contributing/ci.md) retains `dev`'s four protected
-checks and uses GitHub-hosted runners with amd64 PR image builds. Python tests
-normally run without coverage instrumentation. Use `ci:coverage-summary` or the
-CI dispatch input `coverage_summary` for coverage accounting within the selected
-scope. The historical 70% floor applies only to all-platform compatibility runs. `ci:integration` requests full functional integration tests
+checks and AMD64 PR image builds. Development validation and normal candidate
+publication can use the [unified native runner queue](docs/contributing/ci-unified-runners.md)
+when `LOOM_CI_UNIFIED_RUNNERS=true`; otherwise they use GitHub-hosted runners.
+Python tests normally run without coverage instrumentation. Use
+`ci:coverage-summary` or the CI dispatch input `coverage_summary` for coverage
+accounting within the selected scope. The historical 70% floor applies only to all-platform compatibility runs. `ci:integration` requests full functional integration tests
 without coverage. Independent test-only edits select their owning test files;
 shared-fixture, deleted-test and cross-module fixture changes select all Python
 test consumers and retain complete lanes, including in mixed source/test diffs. Audited component

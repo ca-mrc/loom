@@ -74,11 +74,8 @@ router = APIRouter()
 _TERMINAL_TRIAL_STATES = frozenset({"succeeded", "failed", "cancelled"})
 # Migration 0041's NOTIFY channel; payload is `<trial_id>:<seq>`.
 _LISTEN_CHANNEL = "trial_events_inserted"
-# Default SSE polling cadence — the backend reads the MinIO object on
-# this interval to detect new events. Phase 2 (Postgres event table +
-# LISTEN/NOTIFY) makes this push-based; until then this trades a few
-# seconds of latency for zero new infra. Kept small enough that the
-# user-visible "live" feel is preserved.
+# Poll Postgres-first event pages (with the stored-trajectory fallback) and
+# terminal state at this cadence when LISTEN/NOTIFY has not already woken us.
 _DEFAULT_SSE_POLL_INTERVAL_SEC = 1.5
 # Cap any single SSE response at this long to bound resource cost
 # from forgotten browser tabs and to give the client a deterministic
@@ -511,14 +508,14 @@ async def stream_events(
 ) -> StreamingResponse:
     """SSE live event stream for `trial_id`, starting at `after_seq + 1`.
 
-    The connection drains all available event pages, then
-    polls MinIO every `_DEFAULT_SSE_POLL_INTERVAL_SEC` for new events,
-    and completes only after a terminal trial has no remaining events. It also
-    stops if the client disconnects or the connection has been open for longer
+    The connection drains Postgres-first event pages with the stored MinIO
+    trajectory as a fallback, then waits for notifications or the polling
+    interval. It completes only after a terminal trial has no remaining events.
+    It also stops if the client disconnects or the connection has been open for longer
     than `_DEFAULT_SSE_MAX_CONNECTION_SEC` (clients reconnect with
     the last seen seq as `after_seq`).
 
-    Slice 3e: when a worker insert commits, migration 0041's trigger
+    When an event insert commits, migration 0041's trigger
     fires NOTIFY on `trial_events_inserted` and the inner loop wakes
     immediately to read+ship the new rows. The fixed `poll_interval`
     fallback still ticks as a safety valve for missed notifications
