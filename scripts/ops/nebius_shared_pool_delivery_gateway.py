@@ -23,6 +23,21 @@ from scripts.ops.nebius_shared_pool_command import (
 )
 
 SOURCES = RUNTIME_SOURCES + tuple("scripts/ops/" + name + ".py" for name in (
+    "nebius_development_runtime_selection",
+    "nebius_development_schema_catalog",
+    "nebius_development_schema_jobs",
+    "nebius_development_schema_projection",
+    "nebius_development_schema_resources",
+    "nebius_development_schema_upgrade",
+    "nebius_environment_foundation",
+    "nebius_environment_release_contracts",
+    "nebius_environment_runtime",
+    "nebius_environment_runtime_install",
+    "nebius_foundation_readiness",
+    "nebius_platform_namespace",
+    "nebius_pool_administration_dispatch",
+    "nebius_pool_administration_job",
+    "nebius_pool_enrollment_issuer",
     "nebius_pool_participant_catalog",
     "nebius_pool_participant_release",
     "nebius_pool_preactivation_database",

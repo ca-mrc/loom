@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from loom.db.nebius_pool_schema import NebiusPoolBinding
 from loom.nebius_pool_allocation import PoolNodeAllocationRequestV1, PoolNodeAllocationV1
 from loom.nebius_pool_application_image import PoolApplicationImagePrepareV1
 from loom.nebius_pool_contract import (
@@ -43,6 +44,7 @@ from loom_service.pool_management.observations import (
     issue_pool_capture,
     record_pool_observation,
 )
+from loom_service.pool_management.profile_registry import registry_enabled
 from loom_service.pool_management.registry import (
     _WORKLOAD,
     PoolAdmissionError,
@@ -130,6 +132,11 @@ async def _participant(request: Request, pool_id: UUID,
                 raise _error(403, "pool_participant_scope_unavailable")
             result: PoolReceiptV1 | PoolWaitingV1 | PoolNativeRuntimeV1 | PoolExecutionRuntimeV1 | PoolNodeAllocationV1
             profiles = getattr(request.app.state, "pool_profiles", None)
+            if operation in {'prepare', 'activate'} and not isinstance(profiles, PoolProfiles):
+                pool = await session.get(NebiusPoolBinding, pool_id)
+                if pool is None or not registry_enabled(pool):
+                    raise _error(503, 'pool_profiles_unavailable')
+                profiles = None
             if operation == "node-allocation":
                 allocation_request = PoolNodeAllocationRequestV1.model_validate_json(body)
                 if allocation_request.pool_id != pool_id or allocation_request.participant_id != principal.participant_id:
@@ -139,8 +146,6 @@ async def _participant(request: Request, pool_id: UUID,
                 workload = _WORKLOAD.validate_json(body)
                 if workload.pool_id != pool_id or workload.key.participant_id != principal.participant_id:
                     raise _error(403, "pool_participant_scope_unavailable")
-                if not isinstance(profiles, PoolProfiles):
-                    raise _error(503, "pool_profiles_unavailable")
                 if isinstance(workload, PoolExecutionPrepareV1):
                     result = await prepare_execution(session, principal, workload, profiles=profiles)
                 elif isinstance(workload, PoolApplicationImagePrepareV1):
@@ -168,8 +173,6 @@ async def _participant(request: Request, pool_id: UUID,
                 elif operation == "cancel-unstarted":
                     result = await cancel_unstarted_pool_request(session, principal, action)
                 else:
-                    if not isinstance(profiles, PoolProfiles):
-                        raise _error(503, "pool_profiles_unavailable")
                     assert activation is not None
                     result = await activate_pool_request(session, principal, activation, profiles=profiles)
             encoded = result.model_dump_json().encode()

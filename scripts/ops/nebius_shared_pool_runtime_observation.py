@@ -103,7 +103,7 @@ class HTTPSSharedPoolRuntimeProbes(HTTPSDevelopmentRuntimeProbes):
         self._process_observation: _ProcessObservation | None = None
         super().__init__(request=self.shared_bindings.plan.development.runtime.request,
             api_server=api_server, ssl_context=ssl_context, token=token, private_files=private_files,
-            preactivation=self.shared_bindings.plan.preactivation)
+            preactivation=self.shared_bindings.plan.preactivation, schema_successor=self.shared_bindings.plan.development.schema_successor)
 
     def _process_receipts(self, bindings: SharedPoolGuardBindings, state: Path) -> dict[str, dict[str, str]]:
         completed = bindings.plan.development.runtime

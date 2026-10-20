@@ -1086,6 +1086,7 @@ def runtime_private_reader(request, tmp_path):
     if name == 'HTTPSDevelopmentRuntimeObserver':
         # Match the constructor's original-catalog selection for this file guard.
         reader.preactivation = reader._preactivation_origin = None
+        reader.schema_successor = reader._schema_origin = None
     files = {}
     for name, raw in (('manager', b'manager'), ('foundation', b'foundation'), ('operator', b'')):
         path = tmp_path / name

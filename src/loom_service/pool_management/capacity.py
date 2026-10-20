@@ -37,6 +37,8 @@ from loom_execution_capacity_collector.contracts import (
     ResourceTotals,
 )
 from loom_execution_capacity_collector.pool import PoolObservationScope, PoolPodClassifier
+from loom_service.pool_management.locks import require_pool_read_snapshot
+from loom_service.pool_management.observation_binding import qualify_capture_binding
 from loom_service.pool_management.observations import read_pool_registration
 
 CHARGED_PHASES = ("reserved", "create_intent", "observed", "cleanup_intent")
@@ -96,8 +98,8 @@ def _placement(payload: dict[str, Any]) -> tuple[CapacityPlacement, ProviderCapa
     ), provider, kubernetes
 
 
-async def _read_capacity(session: AsyncSession, pool: NebiusPoolBinding, now: datetime) -> PoolCapacity:
-    participants, registration = await read_pool_registration(session, pool)
+async def _read_capacity(session: AsyncSession, pool: NebiusPoolBinding, now: datetime, *, lock: bool = True) -> PoolCapacity:
+    participants, registration = await read_pool_registration(session, pool, lock=lock)
     if pool.binding_json["node_selector"].get("nebius.com/node-group-id") != pool.node_group_id:
         raise ValueError("pool_physical_selector_unavailable")
     policy = PoolCapacityPolicyV1.model_validate(pool.binding_json["admission"])
@@ -111,9 +113,9 @@ async def _read_capacity(session: AsyncSession, pool: NebiusPoolBinding, now: da
     observation, capture = result
     payload = observation.observation_json
     scope = PoolObservationScope.model_validate(capture.scope_json)
+    qualify_capture_binding(pool, capture, scope, registration)
     fingerprint = PoolPodClassifier(scope).fingerprint
-    if (capture.registration_sha256 != registration or capture.admission_epoch != pool.admission_epoch
-            or capture.scope_sha256 != fingerprint.removeprefix("sha256:")
+    if (capture.scope_sha256 != fingerprint.removeprefix("sha256:")
             or observation.observation_sha256 != digest(payload)
             or payload["capture_id"] != str(capture.capture_id)
             or datetime.fromisoformat(payload["observed_at"]) != observation.observed_at
@@ -142,8 +144,24 @@ async def _read_capacity(session: AsyncSession, pool: NebiusPoolBinding, now: da
 
 async def read_connected_capacity(session: AsyncSession, pool_id: UUID, now: datetime) -> dict[UUID, PoolCapacity]:
     """Qualify the connected quota component; unrelated stale pools cannot block."""
-    pools = list((await session.scalars(select(NebiusPoolBinding).order_by(
-        NebiusPoolBinding.pool_id).limit(1001).with_for_update().execution_options(populate_existing=True))).all())
+    return await _connected_capacity(session, pool_id, now, lock=True)
+
+
+async def observe_connected_capacity(session: AsyncSession, pool_id: UUID, now: datetime) -> dict[UUID, PoolCapacity]:
+    """Same physical qualification in one read-only snapshot, never admission.
+
+    Admission retains its row locks and must re-read at the mutation boundary.
+    This entrypoint cannot be substituted inside a read/write admission transaction.
+    """
+    await require_pool_read_snapshot(session)
+    return await _connected_capacity(session, pool_id, now, lock=False)
+
+
+async def _connected_capacity(session: AsyncSession, pool_id: UUID, now: datetime, *, lock: bool) -> dict[UUID, PoolCapacity]:
+    query = select(NebiusPoolBinding).order_by(NebiusPoolBinding.pool_id).limit(1001).execution_options(populate_existing=True)
+    if lock:
+        query = query.with_for_update()
+    pools = list((await session.scalars(query)).all())
     if len(pools) > 1000:
         raise ValueError("pool_registry_bound_exceeded")
     identities = {pool.pool_id: _quota_ids(pool) for pool in pools}
@@ -156,7 +174,7 @@ async def read_connected_capacity(session: AsyncSession, pool_id: UUID, now: dat
                 connected.add(key)
         if len(connected) == before:
             break
-    return {pool.pool_id: await _read_capacity(session, pool, now) for pool in pools if pool.pool_id in connected}
+    return {pool.pool_id: await _read_capacity(session, pool, now, lock=lock) for pool in pools if pool.pool_id in connected}
 
 
 def resources(row: NebiusPoolRequest) -> ResourceTotals:

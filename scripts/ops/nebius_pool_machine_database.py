@@ -70,9 +70,8 @@ def pool_machine_retirement_sql(spec: PoolInstallation, *, action: Literal['obse
     if action not in {'observe', 'revoke'}:
         raise ValueError('pool_machine_retirement_action_unqualified')
     write = action == 'revoke'
-    if write and manager_revision != '0176':
-        raise ValueError('pool machine retirement write revision unqualified')
-    header = _header(read_only=False) if write else _manager_observation_header(manager_revision)
+    header = (_header(read_only=False, manager_revision=manager_revision) if write
+        else _manager_observation_header(manager_revision))
     locks = f"""DO $pool_machine_locks$
 BEGIN
 PERFORM pg_advisory_xact_lock(hashtextextended('nebius-global-pool-mutation',1915));
@@ -110,7 +109,7 @@ SELECT json_build_object('schema','loom.pool-machine-retirement.v1',
 """
 
 
-def pool_recovery_machine_state_sql(spec: PoolInstallation) -> str:
+def pool_recovery_machine_state_sql(spec: PoolInstallation, *, manager_revision: str = '0176') -> str:
     """Inspect exact authority before/after fencing while cleanup may proceed.
 
     This is not retirement readiness: it neither requires nor proves drain.
@@ -119,7 +118,7 @@ def pool_recovery_machine_state_sql(spec: PoolInstallation) -> str:
     The anchored parent separately qualifies mode and active/revoked alternatives.
     """
     spec = PoolInstallation.model_validate(spec.model_dump())
-    return _header(read_only=True) + f"""SELECT json_build_object('schema','loom.pool-recovery-machine-state.v1',
+    return _manager_observation_header(manager_revision) + f"""SELECT json_build_object('schema','loom.pool-recovery-machine-state.v1',
     'operation_id','{spec.operation_id}', 'installation_sha256','{digest(spec.model_dump(mode='json'))}',
     'read_only',current_setting('transaction_read_only')='on',
     'state',authority.state) AS report FROM ({_state_sql(spec, recovering=True)}) authority;
