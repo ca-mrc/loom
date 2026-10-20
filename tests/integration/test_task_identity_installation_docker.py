@@ -358,10 +358,13 @@ async def test_deferred_installed_harness_grades_without_agent_setup(sandboxes, 
     )
     workspace = tmp_path / "controller"
     (workspace / ".loom").mkdir(parents=True)
+    (workspace / "tests").mkdir()
+    (workspace / "tests/private-marker").write_text("grading-input")
     (workspace / "verifier").mkdir()
     (workspace / "verifier/run.sh").write_bytes(offline_verifier_run_sh_bytes())
     (workspace / "verifier/harbor-offline.sh").write_text(
         "set -eu\ntest \"$(cat /app/answer)\" = retained-answer\n"
+        "test \"$(cat /tests/private-marker)\" = grading-input\n"
         "echo 1 > /logs/verifier/reward.txt\necho '{}' > /logs/verifier/ctrf.json\n"
     )
     assert (await agent.exec("mkdir /app; printf retained-answer > /app/answer")).return_code == 0
