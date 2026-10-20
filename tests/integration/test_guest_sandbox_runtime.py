@@ -320,6 +320,26 @@ def test_existing_docker_plugin_layout_does_not_block_guest(layout: str) -> None
         assert execute(client, "echo $DOCKER_CONFIG").strip() == "/loom/docker-client"
 
 
+def _add_container_guest_failure_diagnostics(name: str, error: BaseException) -> None:
+    """Read this fixture's evidence before teardown, preserving the failure."""
+    if isinstance(error, httpx.HTTPStatusError):
+        error.add_note(f"guest HTTP {error.response.status_code}: {error.response.text[:1024]}")
+    commands = [
+        ["docker", "inspect", "--format", "{{json .State}}", name],
+        ["docker", "exec", name, "/bin/busybox", "cat",
+         "/sys/fs/cgroup/memory.events", "/sys/fs/cgroup/memory.current",
+         "/sys/fs/cgroup/memory.peak", "/sys/fs/cgroup/cpu.stat"],
+        ["docker", "logs", "--tail", "80", name],
+    ]
+    for command in commands:
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=5)
+            detail = f"exit={result.returncode}\n{(result.stdout + result.stderr)[-16300:]}"
+        except Exception as diagnostic_error:
+            detail = type(diagnostic_error).__name__
+        error.add_note(" ".join(command) + "\n" + detail)
+
+
 def test_container_guest_failure_diagnostics_retain_bounded_evidence(monkeypatch) -> None:
     commands = []
 
@@ -424,6 +444,9 @@ def container_guest(*, memory_mib: int = 1024, storage_mib: int = 160,
                         assert time.monotonic() < deadline, (directory / "console.log").read_text()
                         time.sleep(0.05)
                     yield client, name
+            except BaseException as error:
+                _add_container_guest_failure_diagnostics(name, error)
+                raise
             finally:
                 subprocess.run(["docker", "stop", "--time=5", name], capture_output=True, check=False)
                 process.wait(timeout=10)
