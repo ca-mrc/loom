@@ -1011,6 +1011,7 @@ id = "nebius-pool-ops"
 language = "python"
 lane = "nebius-pool"
 include_paths = ["tests/ops/test_nebius*pool*.py"]
+exclude_paths = ["tests/ops/test_nebius_shared_pool_*.py"]
 # These recovery CLIs have dedicated lifecycle/archive/idle-protection tests in
 # tests-root; they do not operate the legacy pool transition state machine.
 unaffected_paths = [
@@ -1020,18 +1021,11 @@ unaffected_paths = [
   # Read-only retired-feature inventory has dedicated integration coverage.
   "scripts/ops/inventory_legacy_structures.py",
 ]
-component_sources = [
-  "scripts/ops/nebius_pool_activation_*.py",
-  "scripts/ops/nebius_pool_cutover*.py",
-  "scripts/ops/nebius_pool_startup*.py",
-  "scripts/ops/nebius_pool_participant_*.py",
-  "scripts/ops/nebius_pool_*retirement*.py",
-  "scripts/ops/nebius_pool_*restoration*.py",
-  "scripts/ops/nebius_pool_role_fencing*.py",
-  "scripts/ops/install_nebius*pool*.py",
-]
+component_sources = ["scripts/ops/**/*.py", "scripts/ops/**/*.sh"]
 affected_paths = [
-  "scripts/ops/**",
+  "scripts/ops/nebius_pool_*.py",
+  "scripts/ops/nebius_development_pool_*.py",
+  "scripts/ops/install_nebius*pool*.py",
   "deploy/k8s/**",
   "deploy/nebius/**",
   "tests/__init__.py",
@@ -1040,6 +1034,35 @@ affected_paths = [
   "config/component-ownership.toml",
   "scripts/component_ownership.py",
   "scripts/plan_ci_validations.py",
+  "scripts/ops/nebius_pool_test_plan.py",
+  ".github/workflows/ci.yml",
+  ".github/workflows/nebius-candidate.yml",
+  "pyproject.toml",
+  "uv.lock",
+]
+
+[[test_suites]]
+# Handoff/recovery is expensive and is not a dependency of every pool operator.
+# Discover referenced operators through these tests and their fixture imports;
+# direct shared-pool entrypoints without known consumers keep the whole suite.
+# Keep the same lane/shards and candidate coverage-reuse contract.
+id = "nebius-shared-pool-ops"
+language = "python"
+lane = "nebius-pool"
+include_paths = ["tests/ops/test_nebius_shared_pool_*.py"]
+component_sources = ["scripts/ops/**/*.py", "scripts/ops/**/*.sh"]
+affected_paths = [
+  "scripts/ops/nebius_shared_pool_*.py",
+  "scripts/ops/install_nebius_shared_pool_entrypoint.py",
+  "deploy/k8s/**",
+  "deploy/nebius/**",
+  "tests/__init__.py",
+  "tests/conftest.py",
+  "tests/ops/conftest.py",
+  "config/component-ownership.toml",
+  "scripts/component_ownership.py",
+  "scripts/plan_ci_validations.py",
+  "scripts/ops/nebius_pool_test_plan.py",
   ".github/workflows/ci.yml",
   ".github/workflows/nebius-candidate.yml",
   "pyproject.toml",

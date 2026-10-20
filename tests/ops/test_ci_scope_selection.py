@@ -164,6 +164,11 @@ def test_shared_pool_scope_follows_operator_dependencies_and_preserves_unknown_e
     # Deleting a referenced operator is not evidence of no dependency.
     (tmp_path / "scripts/ops/component.py").unlink()
     assert select("scripts/ops/component.py") == tests
+    (tmp_path / "tests/support/fixture.py").unlink()
+    assert select("tests/support/fixture.py") == tests
+    # Unavailable dependency evidence must not classify an edit as unrelated.
+    (tmp_path / "tests/support/fixture.py").write_text("not python !")
+    assert select("scripts/ops/unrelated.py") == tests
 
 
 def test_staging_workflow_passes_the_same_changed_paths_to_its_owner():

@@ -152,6 +152,8 @@ def test_shared_pool_scope_tracks_consumers_not_the_entire_operator_lane(changes
     selected = selected_test_paths(manifest, tracked_paths=_tracked_paths(root),
         lane="nebius-pool", repo_root=root, changed_paths=changes, test_scope="nebius")
     assert any(Path(path).name.startswith("test_nebius_shared_pool_") for path in selected) is retained
+    if not retained:
+        assert selected == ()
 
 
 @pytest.mark.parametrize("changes", [

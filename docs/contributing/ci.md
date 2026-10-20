@@ -286,12 +286,18 @@ writer workflow changes (including its first introduction), and daily. It syncs 
 per lock. `test_ci_wheel_cache_has_one_trusted_writer_and_complete_contents`
 keeps readers read-only and covered by that superset.
 
-Shared-pool handoff and recovery tests run whenever the existing test planner
-selects their files. They require no opt-in environment variable: source and
-candidate verification must cover activation before enabling
-`NEBIUS_ROLLOUT_MODE=shared`. The existing path selection and operator shards
-continue to control scope; no separate acceptance job is added. These simulations
-do not establish installed readiness or authorize a live handoff.
+Shared-pool handoff and recovery tests have a separate ownership group within
+the existing pool lane and shards. Direct shared-pool changes and their
+transitively referenced operator/test-fixture dependencies select the affected
+tests; an unrelated operator edit does not select them just because it selects
+the pool lane. Common fixtures, deployment inputs, CI/dependency changes and
+explicit full regressions retain the full shared-pool suite. New shared-pool
+entrypoints without known consumers and unavailable dependency evidence also
+retain coverage. Candidate publication uses the same selection for both pool
+groups and reuses only exact-commit coverage. No opt-in variable or separate job
+is required: activation must be tested before enabling
+`NEBIUS_ROLLOUT_MODE=shared`. These simulations do not establish installed
+readiness or authorize a live handoff.
 
 Go checks validate the retained execution runtime, gateway sandbox, and sandbox
 runtime. JWT and execution-materialization producer contracts also retain Go
