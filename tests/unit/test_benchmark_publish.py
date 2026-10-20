@@ -169,6 +169,39 @@ async def test_both_inputs_use_same_publication_backend(adapter_source, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_harbor_publication_prepares_cold_cache_and_refresh(monkeypatch, tmp_path):
+    adapter = FakeAdapter()
+    adapter.upstream_source = UpstreamSource(
+        kind="harbor-package", locator="terminal-bench/terminal-bench-2-1", revision="6"
+    )
+    monkeypatch.setitem(benchmark_prepare.REGISTRY, adapter.name, adapter)
+    downloads = []
+
+    async def download(source, output_dir):
+        downloads.append((source, output_dir))
+        (output_dir / "harbor-materialization.json").write_text("{}")
+
+    async def publish(root, *, prepared_adapter):
+        assert prepared_adapter.task_count == 2
+        assert all(path.is_file() for path in prepared_adapter.task_tomls)
+        return SimpleNamespace(task_count=2)
+
+    backend = AsyncMock(side_effect=publish)
+    monkeypatch.setattr("loom_benchmarks.harbor_dataset.download_harbor_dataset", download)
+    monkeypatch.setattr(
+        benchmark_publish.local_benchmark_publish, "publish_local_benchmark", backend
+    )
+    for refresh in (False, False, True):
+        result = await benchmark_publish.publish_benchmark(
+            benchmark=adapter.name, cache_dir=tmp_path / "cache", refresh=refresh
+        )
+        assert result.task_count == 2
+        assert not backend.call_args.args[0].exists()
+    assert len(downloads) == 2
+    assert all(source == adapter.upstream_source for source, _ in downloads)
+
+
+@pytest.mark.asyncio
 async def test_input_selection_does_not_guess_from_path(monkeypatch, tmp_path):
     with pytest.raises(ValueError, match="exactly one"):
         await benchmark_publish.publish_benchmark(tmp_path, benchmark="adapter-bench")
