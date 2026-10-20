@@ -37,6 +37,9 @@ class NativeTaskImageSettings(BaseModel):
     # Preserve filesystem semantics for unchanged authored Dockerfiles. The
     # faster OverlayFS backend is opt-in after qualifying the task workload.
     snapshotter: Literal["overlayfs", "native"] = "native"
+    # A pressure policy, not a build-count limit. Qualify for the installed
+    # node/storage shape; actual resource and shared-cloud quota admission apply.
+    io_full_avg10_max: float = Field(default=50.0, ge=0, le=100, allow_inf_nan=False, strict=True)
     # When "same_task", prepare may import BuildKit cache from a prior ready
     # revision of the same task_id+cpu_arch. Results still use this mat key.
     compatible_revision_cache: Literal["off", "same_task"] = "off"

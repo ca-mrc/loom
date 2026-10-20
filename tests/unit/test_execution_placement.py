@@ -3,6 +3,7 @@ from copy import deepcopy
 import pytest
 
 from loom_control_plane.execution_placement import (
+    PlacementConstraint,
     PlacementUnavailableError,
     cold_sample,
     plan_placement,
@@ -14,6 +15,24 @@ from tests.execution_placement_fixtures import placement_fixture
 
 def _resources(cpu: int = 2_000, memory: int = 1_024, storage: int = 1_024):
     return ResourceTotals(cpu_millis=cpu, memory_mib=memory, storage_mib=storage)
+
+
+def test_bound_reservations_cannot_borrow_another_nodes_spare_resources():
+    placement = CapacityPlacement.model_validate(placement_fixture(target_id="io", nodes=2))
+    node = placement.nodes[0]
+    request = ResourceTotals(cpu_millis=node.allocatable.cpu_millis,
+                            memory_mib=1024, storage_mib=1024)
+    constraint = PlacementConstraint(frozenset({node.uid}))
+    with pytest.raises(PlacementUnavailableError, match="bound_node_unavailable"):
+        plan_placement(placement, [("a", request), ("b", request)], sample=cold_sample(placement),
+                       constraints={"a": constraint, "b": constraint})
+
+
+def test_bootstrap_affinity_accounts_for_real_additional_node_quota():
+    placement = CapacityPlacement.model_validate(placement_fixture(target_id="io", nodes=1, used_nodes=1))
+    result = plan_placement(placement, [("bootstrap", _resources())], sample=cold_sample(placement),
+                            constraints={"bootstrap": PlacementConstraint(frozenset(), allow_cold=True)})
+    assert result.cold_nodes == result.additional_nodes == 1
 
 
 @pytest.mark.parametrize("dimension,limit", [("nodes", 4), ("vcpu", 12000), ("memory", 6144), ("storage", 12288)])
@@ -274,6 +293,62 @@ def test_registered_not_ready_node_is_already_charged_to_provider():
     placement = CapacityPlacement.model_validate(data)
     result = plan_placement(placement, [("new:1", _resources())], sample=cold_sample(placement))
     assert result.cold_nodes == 1 and result.additional_nodes == 0
+
+
+def test_bootstrap_excluded_not_ready_node_does_not_hide_new_provider_charge():
+    data = placement_fixture(target_id="a", quota_nodes=1, used_nodes=1)
+    data["nodes"][0]["ready"] = False
+    placement = CapacityPlacement.model_validate(data)
+    plan = plan_placement(placement, [("bootstrap", _resources())], sample=cold_sample(placement),
+                          constraints={"bootstrap": PlacementConstraint(frozenset(), allow_cold=True)})
+    assert plan.cold_nodes == 1 and plan.additional_nodes == 1
+    from loom_control_plane.execution_placement import require_provider_quota_headroom
+
+    with pytest.raises(PlacementUnavailableError, match="provider_quota_nodes_exceeded"):
+        require_provider_quota_headroom(placement, additional_nodes=plan.additional_nodes, peers=[])
+
+
+def test_fixed_node_reservation_precedes_flexible_provisioning_demand():
+    data = placement_fixture(target_id="a", nodes=2, node_cpu=2000,
+                             node_memory=4096, node_storage=4096)
+    placement = CapacityPlacement.model_validate(data)
+    plan = plan_placement(placement, [("fixed", _resources(1000)), ("flexible", _resources(2000))],
+                          sample=cold_sample(placement), constraints={
+                              "fixed": PlacementConstraint(frozenset({"a-node-0"})),
+                              "flexible": PlacementConstraint(frozenset({"a-node-0", "a-node-1"}),
+                                                              allow_cold=True),
+                          })
+    assert plan.cold_nodes == plan.additional_nodes == 0
+
+
+def test_mixed_cold_bin_only_credits_pending_nodes_all_its_demands_can_use():
+    data = placement_fixture(target_id="a", node_cpu=3000, node_memory=4096, node_storage=4096)
+    data["nodes"][0]["ready"] = False
+    placement = CapacityPlacement.model_validate(data)
+    plan = plan_placement(placement, [("ordinary", _resources()), ("bootstrap", _resources(1000))],
+                          sample=cold_sample(placement), constraints={
+                              "bootstrap": PlacementConstraint(frozenset(), allow_cold=True),
+                          })
+    assert plan.cold_nodes == 1 and plan.additional_nodes == 1
+
+
+@pytest.mark.parametrize("anonymous_nodes,additional", [(0, 1), (1, 0)])
+def test_pending_node_credit_is_unique_and_anonymous_capacity_still_offsets_new_bins(
+    anonymous_nodes, additional,
+):
+    data = placement_fixture(target_id="a", nodes=2, node_cpu=2000)
+    for node in data["nodes"]:
+        node["ready"] = False
+    data["node_group"]["node_count"] += anonymous_nodes
+    placement = CapacityPlacement.model_validate(data)
+    plan = plan_placement(placement, [(key, _resources()) for key in ("first", "second")],
+                          sample=cold_sample(placement), constraints={
+                              key: PlacementConstraint(frozenset({"a-node-0"}), allow_cold=True)
+                              for key in ("first", "second")
+                          })
+    # Both future bins can use a-node-0, neither can use observed a-node-1.
+    # The same provider node must never offset two bins; an unnamed new one can.
+    assert plan.cold_nodes == 2 and plan.additional_nodes == additional
 
 
 def test_duplicate_pending_pod_authority_is_visible_instead_of_silently_deduplicated():
