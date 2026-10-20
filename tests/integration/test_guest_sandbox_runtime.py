@@ -320,6 +320,48 @@ def test_existing_docker_plugin_layout_does_not_block_guest(layout: str) -> None
         assert execute(client, "echo $DOCKER_CONFIG").strip() == "/loom/docker-client"
 
 
+def test_container_guest_failure_diagnostics_retain_bounded_evidence(monkeypatch) -> None:
+    commands = []
+
+    def run(command, **kwargs):
+        assert 0 < kwargs["timeout"] <= 5
+        commands.append(command)
+        output = {
+            "inspect": '{"OOMKilled":true}',
+            "exec": "oom_kill 1\n",
+            "logs": "old console output\n" * 2000 + "guest channel lost\n",
+        }[command[1]]
+        return subprocess.CompletedProcess(command, 0, output, "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    response = httpx.Response(502, text="guest unavailable", request=httpx.Request("POST", "http://sandbox/exec"))
+    error = httpx.HTTPStatusError("archive failed", request=response.request, response=response)
+    _add_container_guest_failure_diagnostics("owned-guest", error)
+    notes = "\n".join(error.__notes__)
+    assert '"OOMKilled":true' in notes and "oom_kill 1" in notes
+    assert "guest channel lost" in notes and "502" in notes and "guest unavailable" in notes
+    assert len(notes) < 52000
+    assert all("owned-guest" in command for command in commands)
+
+
+@pytest.mark.parametrize("original", [AssertionError("archive failed"), pytest.fail.Exception("test deadline")])
+def test_container_guest_diagnostics_do_not_replace_failure(monkeypatch, original) -> None:
+    def unavailable(command, **kwargs):
+        assert 0 < kwargs["timeout"] <= 5
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr(subprocess, "run", unavailable)
+    with pytest.raises(type(original)) as caught:
+        try:
+            raise original
+        except BaseException as error:
+            _add_container_guest_failure_diagnostics("owned-guest", error)
+            raise
+    assert caught.value is original
+    assert len(original.__notes__) == 3
+    assert all("TimeoutExpired" in note for note in original.__notes__)
+
+
 @contextlib.contextmanager
 def container_guest(*, memory_mib: int = 1024, storage_mib: int = 160,
                     disk_state: bool = False, cpus: int = 1) -> Iterator[tuple[httpx.Client, str]]:
