@@ -47,13 +47,13 @@ def _report_sql(request: PoolParticipantRefresh) -> str:
 """
 
 
-def pool_preactivation_state_sql(request: PoolParticipantRefresh) -> str:
+def pool_preactivation_state_sql(request: PoolParticipantRefresh, *, manager_revision: str = '0176') -> str:
     """Lock-free readback of exact predecessor/successor, never permission to write."""
     request = PoolParticipantRefresh.model_validate(request.model_dump())
-    return _header(read_only=True) + _report_sql(request) + 'ROLLBACK;\n'
+    return _header(read_only=True, manager_revision=manager_revision) + _report_sql(request) + 'ROLLBACK;\n'
 
 
-def refresh_closed_pool_sql(request: PoolParticipantRefresh) -> str:
+def refresh_closed_pool_sql(request: PoolParticipantRefresh, *, manager_revision: str = '0176') -> str:
     """One atomic release-only update while CLOSED; repeats require readback.
 
     Take the existing admission lock before any authority read. Row locks also
@@ -63,7 +63,7 @@ def refresh_closed_pool_sql(request: PoolParticipantRefresh) -> str:
     request = PoolParticipantRefresh.model_validate(request.model_dump())
     pool = request.before.pool_id
     after = _expected_authority(request.after, mode='closed')
-    return _header(read_only=False) + f"""DO $pool_preactivation_refresh$
+    return _header(read_only=False, manager_revision=manager_revision) + f"""DO $pool_preactivation_refresh$
 DECLARE
     current_state text;
     successor jsonb := convert_from(decode('{_hex(after)}','hex'),'UTF8')::jsonb;

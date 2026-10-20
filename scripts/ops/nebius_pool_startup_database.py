@@ -27,9 +27,10 @@ END $pool_startup_schema$;
 """
 
 
-def pool_startup_closed_sql(spec: PoolInstallation) -> str:
+def pool_startup_closed_sql(spec: PoolInstallation, *, manager_revision: str = '0176') -> str:
     """Require exact closed registration; this remains a startup-only proof."""
-    return _pool_authority_sql(spec, mode="closed")
+    prefix = _READ_ONLY_PREFIX if manager_revision == '0176' else _manager_observation_header(manager_revision)
+    return _pool_authority_sql(spec, mode="closed", prefix=prefix)
 
 
 def pool_active_authority_sql(spec: PoolInstallation, *, manager_revision: str = '0176') -> str:

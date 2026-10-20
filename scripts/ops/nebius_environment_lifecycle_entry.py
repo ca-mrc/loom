@@ -27,7 +27,7 @@ class _Strict(BaseModel):
 
 
 class LifecycleOperationV2(_Strict):
-    kind: Literal['provision', 'enroll', 'activate', 'suspend', 'resume', 'retire', 'release', 'rollback', 'import']
+    kind: Literal['provision', 'enroll', 'activate', 'suspend', 'resume', 'retire', 'release', 'rollback', 'import', 'schema-upgrade']
     inputs_path: Path
     inputs_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
 

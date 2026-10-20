@@ -58,10 +58,12 @@ END $pool_activation_schema$;
 """
 
 
-def _header(*, read_only: bool) -> str:
-    """Management SQL stays pinned to its immutable installed image/schema."""
+def _header(*, read_only: bool, manager_revision: str = '0176') -> str:
+    """Exact installed revision; newer writes require an explicit bound successor."""
+    if manager_revision not in ('0176', '0177', '0178'):
+        raise ValueError('pool manager mutation revision unqualified')
     return _transaction_header(read_only=read_only,
-        schema_unqualified="(SELECT version_num FROM public.alembic_version) IS DISTINCT FROM '0176'")
+        schema_unqualified=f"(SELECT version_num FROM public.alembic_version) IS DISTINCT FROM '{manager_revision}'")
 
 
 def _manager_observation_header(manager_revision: str) -> str:
@@ -92,12 +94,12 @@ def pool_activation_state_sql(spec: PoolInstallation, *, manager_revision: str =
     return _manager_observation_header(manager_revision) + _report_sql(spec) + "ROLLBACK;\n"
 
 
-def fence_pool_activation_sql(spec: PoolInstallation) -> str:
+def fence_pool_activation_sql(spec: PoolInstallation, *, manager_revision: str = '0176') -> str:
     """Close and cancel one opening authority, retaining charged work and effects."""
     spec = PoolInstallation.model_validate(spec.model_dump())
     if spec.policy_revision >= MAX_SAFE_INTEGER:
         raise ValueError("pool_activation_revision_exhausted")
-    return _header(read_only=False) + f"""
+    return _header(read_only=False, manager_revision=manager_revision) + f"""
 SELECT pg_advisory_xact_lock(hashtextextended('nebius-global-pool-mutation',1915));
 DO $pool_activation_fence$
 DECLARE

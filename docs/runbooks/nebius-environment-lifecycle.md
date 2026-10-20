@@ -26,8 +26,10 @@ or readiness hash. Adding an operation requires a new pinned configuration and
 dedicated forced-command grant. Preserve original inputs and journals for recovery;
 do not edit them in place. Loading checks every operation's input file.
 
-The installed input schemas are defined in
-[`nebius_environment_lifecycle_inputs.py`](../../scripts/ops/nebius_environment_lifecycle_inputs.py):
+The normal installed input schemas are defined in
+[`nebius_environment_lifecycle_inputs.py`](../../scripts/ops/nebius_environment_lifecycle_inputs.py).
+The closed-development schema operation uses the separate retained inputs
+described [below](#upgrade-an-unactivated-shared-development-runtime).
 
 | Input | Authority and material |
 | --- | --- |
@@ -126,6 +128,66 @@ qualifies current ledger/process state. Import does not migrate a database or
 grant admission. Qualify historical manager observation, current manager runtime
 and application database roles separately; image approval is not installed schema
 compatibility.
+
+## Upgrade an unactivated shared-development runtime
+
+Use installed operation `kind: schema-upgrade` for the connected successor of an
+already completed independent development runtime. This route supports the
+retained shared database at `0175` and independent manager database at `0176`.
+Each database selects its own protected candidate and exact published schema;
+the destination is derived from those publications. It requires a configured
+application builder, a never-used closed pool and no shared handoff, recovery or
+preactivation dispatch. Active personal applications, unretired database access,
+unfinished source uploads, builds and tasks must be resolved through their normal
+lifecycle before attempting this operation.
+
+Pin `loom.development-schema-inputs.v1`, defined in
+[`nebius_development_schema_upgrade.py`](../../scripts/ops/nebius_development_schema_upgrade.py),
+as the operation's private input file. It contains:
+
+- `runtime`: the original completed runtime's `operation_path` and
+  `operation_sha256`.
+- `data_runtime` and `manager_runtime`: independently selected `source`,
+  `publication`, `candidate` and `profile` objects, using the same publication
+  shape as development runtime installation.
+- `connection`: the explicit cluster endpoint, CA and operator credential files.
+
+The configured lifecycle scope must match the original development participant,
+environment, incarnation, installation and pool. Use the existing protected
+workflow's `prepare`, `apply`, `recover` and `status` actions. Preparation performs
+read-only live qualification. Keep the same operation UUID and input bytes during
+recovery; neither the runner nor the operator supplies SQL or migration commands.
+
+The parent stops all selected development and manager writers and scheduled
+Jobs, verifies their descendants have exited, and probes both stopped databases.
+It then verifies recoverable backups in the retained manager backup bucket before
+running each candidate's normal Alembic chain. The migration holds the existing
+application-schema advisory lock, preserves role identities and credentials,
+and grants the bounded privileges required by new tables. No new bucket or IAM
+identity is required. A shared-database backup uses a separate key prefix and a
+minimal operation-specific backup Secret in `loom-dev`.
+
+Immutable configuration, personal release and build recipes, participant profiles,
+native build policy and stopped runtime templates advance together. The catalog
+transaction commits before the manager restarts. Completion verifies the actual
+settings, schemas, grants and catalog; the gateway and admission remain closed.
+Staging resources and original installation receipts remain unchanged.
+
+Retain the original runtime plus the completed `schema_successor` reference
+(`operation_id`, `inputs_path`, `inputs_sha256`) in subsequent shared-pool private
+inputs version 3. If a staging catalog must also advance before handoff, use
+preactivation inputs version 2 rooted in that same successor. Activation and
+handoff reconstruct the upgraded selections from the completed journals; changing
+the old installation's advertised schema or rewriting its receipts is invalid.
+
+After a lost reply, recovery observes the original Job, resource UID and catalog
+transaction. An incomplete migration requires explicit recovery using the retained
+checkpoint; it is never automatically rerun or downgraded. Preserve backup bytes,
+private journals and fixed Job evidence until recovery and installed acceptance
+are complete. Separately authorized installed acceptance must demonstrate a current
+source build, application deployment/login and real task/result journey for
+multiple owners. A completed source implementation or closed successor receipt
+does not establish that acceptance.
 
 ## Release, rollback and production
 

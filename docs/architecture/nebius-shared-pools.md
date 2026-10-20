@@ -75,6 +75,26 @@ execution quota permits reader Pods but still denies task Jobs; build Pods remai
 closed. UID/resource-version checks and anchored phase journals reconcile lost
 replies without repeating successful startup or accepting replacement resources.
 
+An unactivated independent development installation has a separate coordinated
+schema successor. The original runtime remains immutable ancestry. The successor
+binds independently published shared-data and manager candidates, qualified
+backups of both stopped databases, normal Alembic migration and preserved role
+identities. It advances shared settings, personal releases, application-build
+recipes, participant profiles and native build policy together. The exact closed
+catalog commits before the manager restarts. Its gateway remains stopped and
+admission remains closed; activation and shared-pool handoff must explicitly select
+the completed successor, including any later preactivation catalog rooted in it.
+
+The schema parent shares the existing handoff mutation lock and rejects prior
+handoff/recovery/preactivation dispatch. It requires idle work and retired personal
+access, proves stopped workload descendants and client sessions, and retains intent
+before every effect. Unknown resource and catalog results use exact readback;
+ambiguous migrations require checkpoint recovery without automatic retry or
+downgrade. This route neither widens ordinary participant refresh nor relaxes
+image-only release's schema equality. The
+[schema runbook](../runbooks/nebius-environment-lifecycle.md#upgrade-an-unactivated-shared-development-runtime)
+defines retained inputs and the separate installed acceptance boundary.
+
 Read-only process qualification reconstructs those exact completed successors,
 rechecks the environment's database/storage/public route, and challenges each
 running image's typed settings, machine token and database URL. Full owned

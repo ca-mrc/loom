@@ -727,6 +727,15 @@ incompatible image to bypass this check. The source-bound protected bundle still
 pins the installer independently. Existing v1 inputs keep their single-source
 contract and cannot contain either v2 selection field.
 
+After that exact-schema installation is complete, an unactivated shared-dev
+runtime with a configured application builder can use the protected
+[closed-development schema successor](nebius-environment-lifecycle.md#upgrade-an-unactivated-shared-development-runtime).
+It upgrades the shared and independent manager databases under separate candidate
+selections, and advances the runtime, personal releases, build recipe and catalog
+together. Its retained successor feeds later activation/handoff while preserving
+these original installation receipts. Image-only release still rejects a schema
+change.
+
 Preflight performs read-only qualification and writes no installation state.
 Installation stages the fixed SQL setup, material, read-only authority and build
 isolation, then records each stopped/replaced/started workload transition. It may

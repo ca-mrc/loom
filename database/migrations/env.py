@@ -150,7 +150,43 @@ if hasattr(context, "config"):
         with context.begin_transaction():
             context.run_migrations()
 
+    def _run_connection(connection: Connection) -> None:
+        with connection.begin():
+            if owner_role is not None:
+                _assume_application_owner(connection, owner_role)
+            context.configure(connection=connection, target_metadata=target_metadata)
+            options = context.get_context().opts
+            plan_migrations = options["fn"]
+
+            def guarded_steps(revisions: tuple[str, ...], migration_context: MigrationContext) -> list[Any]:
+                # Inspect every actual step, not the destination argument:
+                # Alembic's revision-argument helper truncates stamp tuples,
+                # and relative/no-op targets cannot be compared as strings.
+                steps = list(plan_migrations(revisions, migration_context))
+                if steps:
+                    guard_shared_application_schema(connection, changing_schema=True)
+                return steps
+
+            context.configure(connection=connection, target_metadata=target_metadata, fn=guarded_steps)
+            with context.begin_transaction():
+                # Alembic purges the version table before invoking fn, so
+                # that path requires quiescence before run_migrations too.
+                guard_shared_application_schema(connection, changing_schema=bool(options.get("purge")))
+                _assert_compatible_migration_lineage(connection)
+                context.run_migrations()
+
     def run_migrations_online() -> None:
+        supplied = config.attributes.get("connection")
+        if supplied is not None:
+            # A protected upgrade can retain its schema lock across predecessor
+            # proof, ordinary Alembic and post-migration grants. The owner must
+            # close this physical NullPool connection, including after failure.
+            if (not isinstance(supplied, Connection) or supplied.in_transaction()
+                    or not isinstance(supplied.engine.pool, pool.NullPool)):
+                raise RuntimeError("migration requires an idle disposable connection")
+            _assert_direct_postgres_connection(supplied.engine)
+            _run_connection(supplied)
+            return
         connectable = engine_from_config(
             config.get_section(config.config_ini_section, {}),
             prefix="sqlalchemy.",
@@ -158,29 +194,8 @@ if hasattr(context, "config"):
         )
         try:
             _assert_direct_postgres_connection(connectable)
-            with connectable.connect() as connection, connection.begin():
-                if owner_role is not None:
-                    _assume_application_owner(connection, owner_role)
-                context.configure(connection=connection, target_metadata=target_metadata)
-                options = context.get_context().opts
-                plan_migrations = options["fn"]
-
-                def guarded_steps(revisions: tuple[str, ...], migration_context: MigrationContext) -> list[Any]:
-                    # Inspect every actual step, not the destination argument:
-                    # Alembic's revision-argument helper truncates stamp tuples,
-                    # and relative/no-op targets cannot be compared as strings.
-                    steps = list(plan_migrations(revisions, migration_context))
-                    if steps:
-                        guard_shared_application_schema(connection, changing_schema=True)
-                    return steps
-
-                context.configure(connection=connection, target_metadata=target_metadata, fn=guarded_steps)
-                with context.begin_transaction():
-                    # Alembic purges the version table before invoking fn, so
-                    # that path requires quiescence before run_migrations too.
-                    guard_shared_application_schema(connection, changing_schema=bool(options.get("purge")))
-                    _assert_compatible_migration_lineage(connection)
-                    context.run_migrations()
+            with connectable.connect() as connection:
+                _run_connection(connection)
         finally:
             connectable.dispose()
 

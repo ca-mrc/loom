@@ -31,7 +31,7 @@ MAX_BUNDLE, MAX_WHEEL, MAX_COMMAND, MAX_SOURCE = 100 * 1024**2, 16 * 1024**2, 16
 MAX_MEMBERS = 512  # Includes the complete protected lifecycle/release import closure.
 COMMANDS = {'loom-environment-lifecycle-' + action + '-v2': action for action in ('prepare', 'apply', 'recover', 'status')}
 PHASES = frozenset({'request', 'selection', 'installation', 'execution', 'provision', 'enroll', 'start',
-    'activate', 'suspend', 'resume', 'retire', 'release', 'rollback', 'import', 'status', 'recovery', 'complete'})
+    'activate', 'suspend', 'resume', 'retire', 'release', 'rollback', 'import', 'schema-upgrade', 'status', 'recovery', 'complete'})
 
 
 def member_limit(name: str) -> int:

@@ -458,6 +458,8 @@ def test_preactivation_preparation_preserves_completed_runtime_and_is_immutable(
     parameters = dict(runtime=reference, source=source, operation_id=uuid4(), repo_root=ROOT)
     retained = parent.retain_preactivation_catalog(**parameters)
     assert retained.runtime == args['runtime']
+    # v1 byte identity must survive tooling upgrades and repeated preparation.
+    assert 'schema_successor' not in json.loads((retained.state_dir / 'inputs.json').read_bytes())
     assert retained.inputs.refresh.before == args['runtime'].database.manager.retained.request.registration.spec
     assert retained.inputs.refresh.after.policy_revision == retained.inputs.refresh.before.policy_revision + 1
     assert retained.inputs.source.candidate['candidate_sha'] == 'e' * 40
@@ -1748,7 +1750,8 @@ def test_shared_private_entry_dispatches_real_parent_and_preserves_uncertain_int
             assert options['bindings'] == bindings
         return SimpleNamespace(plan=bindings.plan, bindings=bindings, pending_workloads=(),
             pool_state='closed', guard_states={target.namespace: 'held' if target.namespace in model.held else 'open'
-                for target in bindings.migration.guards}, input_digest=bindings.input_digest, authority={})
+                for target in bindings.migration.guards}, input_digest=bindings.input_digest,
+            authority={}, application_scopes={})
 
     async def publication(**options):
         assert options['request'] == args['runtime']

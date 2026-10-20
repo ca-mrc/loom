@@ -341,6 +341,11 @@ async def resume_released_environment(*, policy: PoolEnrollmentPolicyV2, transit
 
 async def execute_lifecycle(*, configuration: LifecycleConfigurationV2, request: LifecycleCommandV2,
         operation: LifecycleOperationV2, unchanged: Callable[[], Any]) -> dict[str, Any]:
+    if operation.kind == 'schema-upgrade':
+        from scripts.ops.nebius_development_schema_entry import execute_development_schema_lifecycle
+
+        return await asyncio.to_thread(execute_development_schema_lifecycle,
+            configuration=configuration, request=request, operation=operation, unchanged=unchanged)
     if operation.kind in {'provision', 'import'}:
         foundation_inputs = FoundationInputsV2.model_validate(_json(_private(operation.inputs_path)))
         return await execute_foundation_lifecycle(configuration=configuration, request=request, operation=operation,

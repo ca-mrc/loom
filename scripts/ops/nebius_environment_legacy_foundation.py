@@ -207,7 +207,7 @@ def _source(source: LegacyFoundationReferenceV1, operation_id: UUID) -> tuple[di
     if any(hashlib.sha256(state._private_read(Path(path), limit=16 * 1024**2)).hexdigest() != checksum
             for path, checksum in history.items()):
         raise ValueError('legacy_foundation_history_changed')
-    publication = database.data_runtime.bundle
+    publication = handoff.development.selection.data_publication.bundle
     identities = {'k8s:' + key: _uid(document) for key, document in originals.items()}
     if len(set(identities.values())) != len(identities):
         raise ValueError('legacy_foundation_resource_ambiguous')
