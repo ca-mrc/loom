@@ -332,6 +332,11 @@ async def test_execution_head_reader_bounds_backlog_payloads(waiting_execution):
 
 
 @pytest.mark.parametrize("invalid", ["expired", "malformed", "fingerprint"])
+# Deleting the 10,000 copied Trials cascades to llm_call_intents, whose trial_id
+# has no index: each row scans that table. After the gateway tests earlier in
+# the shard, fixture teardown took 32s locally and 56s on CI, against the 60s
+# default. An index on llm_call_intents(trial_id) removes it (teardown <12s).
+@pytest.mark.timeout(180)
 async def test_execution_head_reader_batches_invalid_backlog(waiting_execution, invalid, record_property):
     _, sessions, _, _, _, trial_id, _, now = waiting_execution
     async with sessions() as session, session.begin():

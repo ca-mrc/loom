@@ -1487,20 +1487,34 @@ def narrow_test_only_changes(
         affected.update(added)
 
 
+@lru_cache(maxsize=4096)
+def _direct_test_imports(file: Path, mtime_ns: int, size: int) -> tuple[str, ...]:
+    """Return the ``tests.*`` module paths one file imports.
+
+    Keyed by modification time and size so an edited file is parsed again;
+    sharding re-selects the same lane once per shard in one process.
+    """
+    found: list[str] = []
+    for node in ast.walk(ast.parse(file.read_text(encoding="utf-8"))):
+        names = ([alias.name for alias in node.names] if isinstance(node, ast.Import)
+                 else [node.module, *(f"{node.module}.{alias.name}" for alias in node.names)]
+                 if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module else [])
+        found.extend(name.replace(".", "/") + ".py" for name in names if name.startswith("tests."))
+    return tuple(found)
+
+
 def _imported_test_modules(paths: tuple[str, ...], *, repo_root: Path) -> frozenset[str]:
     """Return the test helper modules these tests import, transitively."""
     seen: set[str] = set()
     pending = list(paths)
     while pending:
         path = pending.pop()
-        if path in seen or not (repo_root / path).is_file():
+        file = repo_root / path
+        if path in seen or not file.is_file():
             continue
         seen.add(path)
-        for node in ast.walk(ast.parse((repo_root / path).read_text(encoding="utf-8"))):
-            names = ([alias.name for alias in node.names] if isinstance(node, ast.Import)
-                     else [node.module, *(f"{node.module}.{alias.name}" for alias in node.names)]
-                     if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module else [])
-            pending.extend(name.replace(".", "/") + ".py" for name in names if name.startswith("tests."))
+        stat = file.stat()
+        pending.extend(_direct_test_imports(file.resolve(), stat.st_mtime_ns, stat.st_size))
     return frozenset(seen)
 
 
