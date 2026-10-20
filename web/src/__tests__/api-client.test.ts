@@ -218,6 +218,57 @@ describe("apiFetch", () => {
   });
 });
 
+describe("delivery downloads", () => {
+  beforeEach(() => {
+    setFrontendConfigForTests(null);
+    setCsrfToken(null);
+    setUnauthorizedHandler(() => undefined);
+    vi.restoreAllMocks();
+  });
+
+  it.each([
+    ["", "relative"], ["", "absolute"], ["/dev", "relative"], ["/dev", "absolute"],
+  ])("downloads an authenticated %s delivery using a %s URL", async (prefix, kind) => {
+    setFrontendConfigForTests({
+      environment: prefix ? "development" : "local", environmentLabel: "Test",
+      routePath: prefix, apiBase: prefix, apiRouteBase: `${window.location.origin}${prefix}/api`,
+    });
+    const endpoint = "/api/v1/batches/batch-a/delivery-export/artifact-a/download?format=tar.gz";
+    const absolute = `${window.location.origin}${prefix}${endpoint}`;
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("archive"));
+    vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:delivery");
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function () {
+      expect(this.download).toBe("delivery.tar.gz");
+    });
+
+    await api.downloadBatchDeliveryExport(kind === "absolute" ? absolute : endpoint, "delivery.tar.gz");
+
+    expect(fetchSpy).toHaveBeenCalledWith(kind === "absolute" ? absolute : `${prefix}${endpoint}`,
+      expect.objectContaining({ credentials: "include" }));
+  });
+
+  it.each([
+    "https://other.example/dev/api/v1/download",
+    "//other.example/dev/api/v1/download",
+    `${window.location.origin}/prod/api/v1/download`,
+  ])("rejects a delivery URL outside the current service: %s", async (url) => {
+    setFrontendConfigForTests({
+      environment: "development", environmentLabel: "Development",
+      routePath: "/dev", apiBase: "/dev", apiRouteBase: `${window.location.origin}/dev/api`,
+    });
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("archive"));
+    vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:delivery");
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+
+    await expect(api.downloadBatchDeliveryExport(url, "delivery.tar.gz")).rejects.toMatchObject({
+      detail: "Download URL does not belong to this Loom service.",
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
 describe("auth session loader", () => {
   beforeEach(() => {
     setFrontendConfigForTests(null);
