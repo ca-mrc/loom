@@ -301,9 +301,9 @@ def _load_completed_refresh(selector: RefreshPredecessorV1, *, original: Complet
                 if ancestry.get(str(path)) != checksum:
                     raise ValueError
                 read(path, checksum)
-        from scripts.ops.nebius_management_refresh import platform_disk_type
+        from scripts.ops.nebius_management_refresh import platform_references_changed
 
-        if (platform_disk_type(render.before) != platform_disk_type(render.after)
+        if (platform_references_changed(render.before, render.after)
                 and (request.platform_rollout is None or pool_baseline is None
                     or pool_baseline.completion.outcome != 'legacy')):
             raise ValueError

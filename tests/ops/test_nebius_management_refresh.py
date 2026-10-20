@@ -73,6 +73,78 @@ def test_refresh_accepts_explicit_default_disk_reference_without_changing_runtim
 
 
 @pytest.fixture
+def builder_limit_request(refresh_request, request):
+    from loom_service.environment_management.deployment import ManagementDeployment
+
+    before_limit, after_limit = getattr(request, 'param', (16, None))
+    raw = refresh_request.before.model_dump(mode='json')
+    config = json.loads(raw['installation']['foundation']['platform_config_json'])
+    config['task_image_builder'] = {
+        'registry_repository': 'cr.eu-north1.nebius.cloud/test/task-images', 'max_concurrent': before_limit}
+    raw['installation']['foundation']['platform_config_json'] = json.dumps(config)
+    before = ManagementDeployment.model_validate(raw)
+    config['task_image_builder']['max_concurrent'] = after_limit
+    raw['installation']['foundation']['platform_config_json'] = json.dumps(config)
+    after = ManagementDeployment.model_validate(raw)
+    return replace(refresh_request, before=before, after=after)
+
+
+@pytest.mark.parametrize('builder_limit_request', [(16, None), (None, 7), (16, 3)], indirect=True)
+def test_refresh_renders_only_manager_delta_for_observed_builder_limit(builder_limit_request, refresh_request):
+    request = builder_limit_request
+    original = copy.deepcopy(request)
+    result = build(request)
+    expected = build(refresh_request).deployment['spec']['template']['spec']
+    pod = copy.deepcopy(result.deployment['spec']['template']['spec'])
+    for volume, prior in zip(pod['volumes'], expected['volumes'], strict=True):
+        if volume['name'] == 'management-config':
+            assert volume['configMap']['name'] == result.config['metadata']['name']
+            volume['configMap']['name'] = prior['configMap']['name']
+    assert pod == expected
+    assert json.loads(result.config['data']['installation.json']) == request.after.installation.model_dump(mode='json')
+    assert request == original
+
+
+@pytest.mark.parametrize('field,value', [
+    ('registry_repository', 'cr.eu-north1.nebius.cloud/test/foreign/task-images'),
+    ('cpu_millis', 2000), ('memory_mib', 4096), ('ephemeral_storage_mib', 32768),
+    ('cache_bucket', 'foreign-build-cache'), ('remove', None), ('add', None),
+])
+def test_refresh_builder_limit_reference_keeps_other_builder_settings_frozen(builder_limit_request, field, value):
+    from loom_service.environment_management.deployment import ManagementDeployment
+
+    request = builder_limit_request
+    raw = request.after.model_dump(mode='json')
+    config = json.loads(raw['installation']['foundation']['platform_config_json'])
+    if field == 'remove':
+        config.pop('task_image_builder')
+    elif field == 'add':
+        before = request.before.model_dump(mode='json')
+        previous = json.loads(before['installation']['foundation']['platform_config_json'])
+        previous.pop('task_image_builder')
+        before['installation']['foundation']['platform_config_json'] = json.dumps(previous)
+        request = replace(request, before=ManagementDeployment.model_validate(before))
+    else:
+        config['task_image_builder'][field] = value
+    raw['installation']['foundation']['platform_config_json'] = json.dumps(config)
+    after = ManagementDeployment.model_validate(raw)
+    with pytest.raises(ValueError, match='refresh'):
+        build(replace(request, after=after))
+
+
+@pytest.mark.parametrize('limit', [True, 0, -1])
+def test_refresh_builder_limit_rejects_invalid_observed_values(builder_limit_request, limit):
+    from loom_service.environment_management.deployment import ManagementDeployment
+
+    raw = builder_limit_request.after.model_dump(mode='json')
+    config = json.loads(raw['installation']['foundation']['platform_config_json'])
+    config['task_image_builder']['max_concurrent'] = limit
+    raw['installation']['foundation']['platform_config_json'] = json.dumps(config)
+    with pytest.raises(ValueError):
+        ManagementDeployment.model_validate(raw)
+
+
+@pytest.fixture
 def builder_refresh_request(builder_management_inputs):
     from scripts.ops.nebius_management_refresh import ManagementRefreshRenderRequest
 

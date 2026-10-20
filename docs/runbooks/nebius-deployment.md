@@ -2600,16 +2600,24 @@ schema is `loom.nebius-management-refresh-private-inputs.v1`, with:
   A change of `execution_disk_type` requires this same protected ordinary-rollout
   reference and a legacy baseline. An absent value means `NETWORK_SSD`;
   `NETWORK_SSD_NON_REPLICATED` selects the source-rendered NRD storage quota.
-  The primary collector's observed ConfigMap may differ from the frozen baseline
-  only in that exact quota name. Its UID, other data, fixed cloud credentials,
-  tenant/region/node-group/cluster identities and CPU/memory quota identities
+  A change of `task_image_builder.max_concurrent` requires the same reference
+  and legacy baseline. A positive integer is an optional operator limit; null
+  (or an omitted limit in an existing builder) follows capacity. Builder
+  existence, registry, resource limits, cache and all other settings remain
+  fixed. The primary collector's observed ConfigMap may differ from the frozen
+  baseline only in that exact storage quota name and the source-rendered
+  `LOOM_EXECUTION_CAPACITY_COLLECTOR_BUILD_CONCURRENCY_LIMIT` key (including its
+  removal for capacity-following builds). Its UID, other data, fixed cloud
+  credentials, tenant/region/node-group/cluster identities and CPU/memory quota identities
   remain pinned; the native disk and capacity reader still qualify current
   provider observations before and after the read. The stopped pool-created
   observer and historical receipts remain unchanged. A canonical-config-only
   edit is insufficient workload proof: finish a genuine backed-up ordinary
   rollout using the current configuration before selecting its deployment here.
-  This reference neither applies cloud resources nor proves disk size,
-  placement or deletion of an earlier node generation.
+  The builder ResourceQuota belongs to the ordinary rollout; management refresh
+  does not apply that quota or change build budgets. This reference neither
+  applies cloud resources nor proves disk size, placement or deletion of an
+  earlier node generation.
 - `deployment`, `candidate` and `profile`: the target manager configuration and
   protected publication. The tooling source and candidate SHA must be identical.
 - `manager_revision` and `target_manager_revision`: the expected management DB
