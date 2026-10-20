@@ -6077,7 +6077,16 @@ async def test_cancel_during_upload_preserves_partial_canonical_evidence(
     )
 
 
-async def test_cancelled_pod_without_output_closes_at_bounded_deadline(postgres_url: str) -> None:
+@pytest.mark.parametrize(
+    ("desired_state", "exhausted_command"),
+    [("cancel", False), ("cancel", True), ("timeout", True), ("retry", True)],
+)
+async def test_cleanup_without_output_recovers_exhausted_command_at_bounded_deadline(
+    postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    desired_state: str,
+    exhausted_command: bool,
+) -> None:
     engine = create_async_engine(postgres_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     now = datetime.now(UTC)
@@ -6096,25 +6105,119 @@ async def test_cancelled_pod_without_output_closes_at_bounded_deadline(postgres_
             "pod_ip": "10.24.7.25", "resource_version": "2",
         })
         await actuator.reconcile_full_once(now=now)
+        if desired_state == "cancel":
+            assert await cancel_trial_under_authority(
+                session_factory=sessions, trial_id=trial_id, team_id=lease.team_id,
+            ) is not None
         async with sessions() as session:
-            await request_trial_execution_cancellation(session, trial_id=trial_id, now=now)
+            if desired_state == "cancel":
+                command = await session.scalar(select(ServiceExecutionCommand).where(
+                    ServiceExecutionCommand.lease_id == lease.id,
+                    ServiceExecutionCommand.command_type == "cancel",
+                ))
+                current = await session.get(ServiceExecutionLease, lease.id)
+                assert current is not None and current.cleanup_requested_at is not None
+                now = current.cleanup_requested_at
+            else:
+                command = await enqueue_execution_transition(
+                    session, lease_id=lease.id, expected_generation=1,
+                    desired_state=desired_state, now=now,
+                )
+            assert command is not None
+            if exhausted_command:
+                # Exercise the real final delivery and dead-letter transition
+                # without replaying nineteen equivalent API outages.
+                command.delivery_count = 19
             await session.commit()
-        await actuator.run_commands_once(now=now)
-        assert kube.delete_count == 1 and not kube.jobs
+
+        async def unavailable_job(*, namespace: str, job_name: str) -> None:
+            raise KubernetesApiError("temporary API outage", status_code=503)
+
+        async def pending_delete(
+            *, namespace: str, job_name: str, expected_uid: str, grace_period_seconds: int,
+        ) -> None:
+            current = kube.jobs[job_name]
+            assert namespace == target.namespace_name and job_name == lease.job_name
+            assert expected_uid == current.job_uid == f"job-uid-{lease.job_name}"
+            assert 0 <= grace_period_seconds <= 300
+            kube.delete_count += 1
+            kube.jobs[job_name] = current.model_copy(update={
+                "normalized_state": NormalizedJobState.TERMINATING, "resource_version": "3",
+            })
+
+        if exhausted_command:
+            monkeypatch.setattr(kube, "delete_job", pending_delete)
+        with monkeypatch.context() as outage:
+            if exhausted_command:
+                outage.setattr(kube, "get_job", unavailable_job)
+            assert await actuator.run_commands_once(now=command.available_at) == 1
+
+        async def assert_cleanup_pending() -> None:
+            async with sessions() as session:
+                current = await session.get(ServiceExecutionLease, lease.id)
+                trial = await session.get(Trial, trial_id)
+                assert current is not None and trial is not None
+                assert current.desired_state == desired_state
+                assert current.cleanup_state == "pending" and current.deleted_at is None
+                assert trial.cancellation_observed_at is None
+                for model, key in (
+                    (ExecutionAdmissionReservation, ExecutionAdmissionReservation.owner_id),
+                    (ExecutionProvisioningAuthorization, ExecutionProvisioningAuthorization.lease_id),
+                    (ExecutionCostReservation, ExecutionCostReservation.lease_id),
+                ):
+                    reservation = (await session.execute(select(model).where(key == lease.id))).scalar_one()
+                    assert reservation.released_at is None and reservation.state != "released"
+
+        await assert_cleanup_pending()
+        async with sessions() as session:
+            current_command = await session.get(ServiceExecutionCommand, command.id)
+            assert current_command is not None
+            assert current_command.state == ("dead_letter" if exhausted_command else "acknowledged")
+            if exhausted_command:
+                assert current_command.delivery_count == 20
+                assert current_command.last_error_code == "kubernetes_5xx"
+        assert await actuator.run_commands_once(now=now + timedelta(seconds=1)) == 0
+
+        # Recovery must signal cancellation before its output window closes.
+        # Timeout/retry retain that window before requesting deletion.
+        assert await actuator.reconcile_full_once(now=now + timedelta(seconds=1)) == 1
+        assert (kube.delete_count > 0) == (desired_state == "cancel")
         await actuator.reconcile_full_once(now=now + timedelta(seconds=299))
         async with sessions() as session:
             current = await session.get(ServiceExecutionLease, lease.id)
             assert current is not None and current.output_commit_state == "not_started"
-            assert current.cleanup_state == "pending" and current.deleted_at is None
+        await assert_cleanup_pending()
         await actuator.reconcile_full_once(now=now + timedelta(seconds=300))
+        assert kube.delete_count > 0
+        if exhausted_command:
+            assert kube.jobs[lease.job_name].normalized_state == NormalizedJobState.TERMINATING
+            await assert_cleanup_pending()
+            # Accepted deletion is not resource absence; reservations and cancellation
+            # acknowledgement remain held until an authoritative list excludes it.
+            del kube.jobs[lease.job_name]
+            assert await actuator.reconcile_full_once(now=now + timedelta(seconds=301)) == 1
+        assert await actuator.reconcile_full_once(now=now + timedelta(seconds=302)) == 0
         async with sessions() as session:
             current = await session.get(ServiceExecutionLease, lease.id)
             trial = await session.get(Trial, trial_id)
             assert current is not None and trial is not None
             assert current.cleanup_state == "complete" and current.deleted_at is not None
             assert current.output_unavailable_reason == "cleanup_deadline_elapsed"
-            assert trial.state == "cancelled" and trial.attempt_count == 1
-            assert trial.result["reward"] is None
-            assert trial.result["output_unavailable_reason"] == "cleanup_deadline_elapsed"
+            assert current.desired_state == "deleted" and trial.attempt_count == 1
+            if desired_state == "cancel":
+                assert trial.state == "cancelled"
+                assert trial.cancellation_observed_at == current.deleted_at
+                assert trial.result["reward"] is None
+                assert trial.result["output_unavailable_reason"] == "cleanup_deadline_elapsed"
+            for model, key in (
+                (ExecutionAdmissionReservation, ExecutionAdmissionReservation.owner_id),
+                (ExecutionProvisioningAuthorization, ExecutionProvisioningAuthorization.lease_id),
+                (ExecutionCostReservation, ExecutionCostReservation.lease_id),
+            ):
+                reservation = (await session.execute(select(model).where(key == lease.id))).scalar_one()
+                assert reservation.state == "released" and reservation.released_at is not None
+            current_command = await session.get(ServiceExecutionCommand, command.id)
+            assert current_command is not None
+            assert current_command.state == ("dead_letter" if exhausted_command else "acknowledged")
     finally:
         await engine.dispose()

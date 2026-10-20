@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 import pytest
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.db.schema import (
     Batch,
+    ExecutionAdmissionPolicy,
     ExecutionAdmissionReservation,
     ExecutionBudgetPolicy,
     ExecutionCostReservation,
@@ -17,7 +19,11 @@ from loom.db.schema import (
     TeamQuota,
     Trial,
 )
+from loom_control_plane import service_execution
 from loom_control_plane import service_execution_scheduler as scheduler
+from loom_control_plane.execution_admission import ExecutionAdmissionBlockedError
+from loom_control_plane.execution_finance import ExecutionFinanceBlockedError
+from loom_control_plane.service_execution import ServiceExecutionConflict
 from loom_control_plane.service_execution_scheduler import (
     ServiceExecutionConfigurationError,
     reserve_next_service_execution,
@@ -25,6 +31,7 @@ from loom_control_plane.service_execution_scheduler import (
 from tests.integration.test_service_execution_leases import (
     _cleanup_service_execution_test_rows,  # noqa: F401
     _configure_scheduler_trial,
+    _reserve,
     _seed_ready_trial,
 )
 from tests.support.execution_image_admission import IMAGE_ADMISSION_KEYRING
@@ -173,6 +180,7 @@ async def test_scheduler_isolates_unsupported_deadline_and_respects_configured_b
 
 @pytest.mark.parametrize("error", [
     ServiceExecutionConfigurationError("unsupported configured deadline"),
+    ServiceExecutionConflict("reservation request_id was reused with different inputs"),
     ValueError("unexpected data failure"),
     RuntimeError("transient platform failure"),
 ])
@@ -220,5 +228,165 @@ async def test_scheduler_rolls_back_candidate_writes_and_only_classifies_known_c
             else:
                 assert trial.state == "queued"
                 assert trial.failure_reason is None and trial.finished_at is None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("denial", ["admission", "finance"])
+async def test_scheduler_policy_denial_rolls_back_and_allows_an_unrelated_candidate(
+    postgres_url: str, denial: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    policy_id = uuid4()
+    next_id = uuid4()
+    try:
+        async with sessions() as session:
+            blocked_id, target = await _seed_ready_trial(session, now=now)
+            await _configure_scheduler_trial(session, trial_id=blocked_id, now=now)
+            blocked = await session.get(Trial, blocked_id)
+            assert blocked is not None
+            blocked.submit_priority = 200
+            blocked.submitted_at = now - timedelta(minutes=1)
+            team_id = blocked.team_id
+            task = await session.get(Task, blocked.task_id)
+            assert task is not None
+            # Keep both candidates in the same fair-share scope. The denied
+            # batch sorts first, while the independent batch remains eligible.
+            next_task_id = f"service-execution/{uuid4().hex}"
+            next_batch_id = uuid4()
+            session.add_all((
+                Task(id=next_task_id, checksum=task.checksum, config=deepcopy(task.config)),
+                Batch(
+                    id=next_batch_id, team_id=team_id, name="independent scheduler candidate",
+                    task_filter={}, trial_config={}, backend="nebius", state="submitted",
+                    created_by_token_prefix="test", expected_trial_count=1,
+                ),
+                Trial(
+                    id=next_id, team_id=team_id, batch_id=next_batch_id, task_id=next_task_id,
+                    config=deepcopy(blocked.config), requires_caps=deepcopy(blocked.requires_caps),
+                    state="queued", attempt_count=0, submitted_at=now,
+                ),
+            ))
+            if denial == "admission":
+                occupied_id = uuid4()
+                session.add_all((
+                    ExecutionAdmissionPolicy(
+                        id=policy_id, scope_kind="batch", scope_key=str(blocked.batch_id),
+                        max_concurrent=1, enabled=True, reason="scheduler isolation test",
+                    ),
+                    Trial(
+                        id=occupied_id, team_id=team_id, batch_id=blocked.batch_id,
+                        task_id=blocked.task_id, config=deepcopy(blocked.config),
+                        requires_caps=deepcopy(blocked.requires_caps), state="queued", attempt_count=0,
+                    ),
+                ))
+                await _reserve(session, trial_id=occupied_id, target=target, now=now)
+                reason = "execution_admission_batch_ceiling_reached"
+            else:
+                config = deepcopy(task.config)
+                config["service_execution"]["runtime_template"]["main"]["timeout_seconds"] = 3600
+                task.config = config
+                await session.execute(update(ExecutionBudgetPolicy).where(
+                    ExecutionBudgetPolicy.scope_kind == "pool",
+                    ExecutionBudgetPolicy.scope_key == "nebius-cpu",
+                ).values(max_estimate_duration_seconds=1000))
+                reason = "execution_budget_pool_duration_exceeded"
+            await session.commit()
+
+        async with sessions() as session:
+            lease = await reserve_next_service_execution(
+                session, environment="staging", pool_id="nebius-cpu",
+                image_admission_keyring=IMAGE_ADMISSION_KEYRING, now=now,
+            )
+            assert lease is not None and lease.trial_id == next_id
+            await session.commit()
+
+        async with sessions() as session:
+            blocked = await session.get(Trial, blocked_id)
+            assert blocked is not None and blocked.state == "queued"
+            assert blocked.attempt_count == 0 and blocked.claimed_at is None
+            assert blocked.started_at is None and blocked.finished_at is None
+            assert blocked.failure_reason is None
+            assert blocked.execution_route_generation == 0
+            assert blocked.execution_route_pool_name is None
+            assert blocked.next_attempt_at is not None and blocked.next_attempt_at > now
+            retry_at = blocked.next_attempt_at
+            assert blocked.scheduling_observation is not None
+            assert blocked.scheduling_observation["reason"] == reason
+            for model in (ServiceExecutionLease, ExecutionCostReservation, ExecutionAdmissionReservation):
+                assert await session.scalar(select(func.count()).select_from(model).where(
+                    model.trial_id == blocked_id,
+                )) == 0
+            quota = await session.get(TeamQuota, team_id)
+            assert quota is not None and quota.in_flight_count == (2 if denial == "admission" else 1)
+            if denial == "admission":
+                policy = await session.get(ExecutionAdmissionPolicy, policy_id)
+                assert policy is not None and policy.active_count == 1
+                policy.max_concurrent = 2
+            else:
+                await session.execute(update(ExecutionBudgetPolicy).where(
+                    ExecutionBudgetPolicy.scope_kind == "pool",
+                    ExecutionBudgetPolicy.scope_key == "nebius-cpu",
+                ).values(max_estimate_duration_seconds=7200))
+            await session.commit()
+
+        async with sessions() as session:
+            assert await reserve_next_service_execution(
+                session, environment="staging", pool_id="nebius-cpu",
+                image_admission_keyring=IMAGE_ADMISSION_KEYRING, now=now,
+            ) is None
+            recovered = await reserve_next_service_execution(
+                session, environment="staging", pool_id="nebius-cpu",
+                image_admission_keyring=IMAGE_ADMISSION_KEYRING, now=retry_at,
+            )
+            assert recovered is not None and recovered.trial_id == blocked_id
+            assert recovered.attempt == 1
+            await session.commit()
+    finally:
+        async with sessions() as session, session.begin():
+            await session.execute(delete(ExecutionAdmissionPolicy).where(
+                ExecutionAdmissionPolicy.id == policy_id,
+            ))
+        await engine.dispose()
+
+
+@pytest.mark.parametrize(("function", "error"), [
+    ("reserve_execution_admission", ExecutionAdmissionBlockedError("reservation", "nebius-cpu", 0, 0)),
+    ("reserve_execution_cost", ExecutionFinanceBlockedError("execution_cost_price_snapshot_mismatch")),
+])
+async def test_scheduler_preserves_admission_and_finance_invariant_conflicts(
+    postgres_url: str, monkeypatch: pytest.MonkeyPatch, function: str, error: Exception,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    try:
+        async with sessions() as session:
+            trial_id, _ = await _seed_ready_trial(session, now=now)
+            await _configure_scheduler_trial(session, trial_id=trial_id, now=now)
+            await session.commit()
+
+        async def reject(*args, **kwargs):
+            raise error
+
+        monkeypatch.setattr(service_execution, function, reject)
+        async with sessions() as session:
+            with pytest.raises(ServiceExecutionConflict) as caught:
+                await reserve_next_service_execution(
+                    session, environment="staging", pool_id="nebius-cpu",
+                    image_admission_keyring=IMAGE_ADMISSION_KEYRING, now=now,
+                )
+            assert type(caught.value) is ServiceExecutionConflict
+            await session.commit()
+            trial = await session.get(Trial, trial_id)
+            assert trial is not None and trial.state == "queued"
+            assert trial.next_attempt_at is None and trial.attempt_count == 0
+            assert trial.execution_route_generation == 0
+            for model in (ServiceExecutionLease, ExecutionCostReservation, ExecutionAdmissionReservation):
+                assert await session.scalar(select(func.count()).select_from(model).where(
+                    model.trial_id == trial_id,
+                )) == 0
     finally:
         await engine.dispose()

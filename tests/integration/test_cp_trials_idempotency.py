@@ -7,12 +7,14 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from threading import Event
 from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, delete, insert, select
+from sqlalchemy import create_engine, delete, insert, select, update
 from sqlalchemy.orm import sessionmaker
 
 from loom.db.schema import (
@@ -72,6 +74,7 @@ def seed_team(postgres_url: str) -> Iterator[tuple[UUID, str]]:
     finally:
         with session_factory() as s:
             s.execute(delete(Trial))
+            s.execute(delete(Batch))
             s.execute(delete(Token))
             s.execute(delete(TeamQuota))
             s.execute(delete(User).where(User.username_normalized.like("cp-submit-user-%")))
@@ -289,6 +292,73 @@ def test_unknown_batch_id_returns_400(
         )
     assert r.status_code == 400
     assert "unknown batch" in r.json()["detail"]
+
+
+@pytest.mark.parametrize("terminal_state", ["cancelled", "finished"])
+def test_batch_terminal_transition_fences_captured_submission(
+    app,  # type: ignore[no-untyped-def]
+    seed_team: tuple[UUID, str],
+    postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    terminal_state: str,
+) -> None:
+    from loom_control_plane.routes import trials as trials_route
+
+    team_id, raw = seed_team
+    batch_id = uuid4()
+    engine = create_engine(postgres_url)
+    sessions = sessionmaker(engine)
+    with sessions() as session:
+        session.add(Batch(
+            id=batch_id, team_id=team_id, name="cancel fanout race",
+            task_filter={}, trial_config={}, state="submitted", backend="docker",
+            created_by_token_prefix="abcdef12", expected_trial_count=2,
+        ))
+        session.commit()
+    payload = {
+        "task_id": "hello", "config": {"agent_name": "oracle", "agent_model": None},
+        "batch_id": str(batch_id), "idempotency_key": f"{batch_id}:existing",
+    }
+    headers = {"Authorization": f"Bearer {raw}"}
+    validated = Event()
+    original_validate = trials_route.validate_submission_agent_task_compatibility
+
+    async def capture_submission(*args, **kwargs):  # type: ignore[no-untyped-def]
+        await original_validate(*args, **kwargs)
+        validated.set()
+
+    try:
+        with TestClient(app) as client:
+            existing = client.post("/trials", headers=headers, json=payload)
+            assert existing.status_code == 201, existing.text
+            monkeypatch.setattr(
+                trials_route, "validate_submission_agent_task_compatibility", capture_submission,
+            )
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                with sessions() as cancelling:
+                    cancelling.execute(select(Batch).where(Batch.id == batch_id).with_for_update())
+                    submission = executor.submit(
+                        client.post, "/trials", headers=headers,
+                        json={**payload, "idempotency_key": f"{batch_id}:late"},
+                    )
+                    # The request has read the active parent and passed preflight;
+                    # cancellation now commits before authoritative child admission.
+                    assert validated.wait(timeout=5)
+                    cancelling.execute(update(Batch).where(Batch.id == batch_id).values(
+                        state=terminal_state, finished_at=datetime.now(UTC),
+                    ))
+                    cancelling.commit()
+                late = submission.result(timeout=5)
+            assert late.status_code == 409, late.text
+            replay = client.post("/trials", headers=headers, json=payload)
+            assert replay.status_code == 201, replay.text
+            assert replay.json() == existing.json()
+        with sessions() as session:
+            assert session.scalars(select(Trial.id).where(Trial.batch_id == batch_id)).all() == [
+                UUID(existing.json()["trial_id"]),
+            ]
+    finally:
+        engine.dispose()
 
 
 def test_team_token_cannot_submit_trial_for_other_team_batch(
