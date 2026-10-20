@@ -180,8 +180,10 @@ class KubernetesEnvironmentProvider:
                 'stdin': False, 'stdinOnce': False, 'tty': False}
             for field in ('containers', 'initContainers'):
                 for actual_container, expected_container in zip(observed.get(field, []), wanted.get(field, []), strict=True):
+                    # Preserve the env path: the API omits empty literal values,
+                    # but an injected valueFrom must still fail qualification.
                     if any(not _contains(actual_container.get(key, default), expected_container.get(key, default),
-                            exact=key == 'securityContext') for key, default in container_defaults.items()):
+                            (field, '*', key), exact=key == 'securityContext') for key, default in container_defaults.items()):
                         raise ProviderBlockedError('kubernetes_resource_identity_conflict')
         return uid
 
