@@ -181,6 +181,26 @@ async def test_qualified_publication_and_observed_foundation_reach_real_closed_e
         assert len(api.creates) == 2 and remote.writes == original_writes
 
 
+async def test_issued_enrollment_can_be_read_after_expiry_without_renewal(sessions, tmp_path, platform_inputs, publication, monkeypatch):
+    from datetime import UTC, datetime, timedelta
+
+    async with prepared(sessions, tmp_path, platform_inputs, publication) as (module, policy, clients, remote, api):
+        operation_id = uuid4()
+        reference = await module.issue_enrollment(policy=policy, operation_id=operation_id, **clients)
+        frozen = (policy.host.state_root / ('enrollment-' + str(operation_id)) / 'issued.json').read_bytes()
+        effects = len(api.creates)
+        class Later(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime.now(tz or UTC) + timedelta(hours=2)
+        from scripts.ops import nebius_pool_administration_dispatch as dispatcher
+        monkeypatch.setattr(dispatcher, 'datetime', Later)
+        monkeypatch.setattr(module, 'datetime', Later)
+        assert await module.issue_enrollment(policy=policy, operation_id=operation_id, **clients) == reference
+        assert (policy.host.state_root / ('enrollment-' + str(operation_id)) / 'issued.json').read_bytes() == frozen
+        assert len(api.creates) == effects
+
+
 @pytest.mark.parametrize('damage', ['failed_ci', 'manager_image', 'host_class', 'namespace_uid', 'cluster_uid',
     'profile_image', 'physical_pool', 'publication_binding'])
 async def test_unqualified_evidence_never_retains_an_apply_grant(sessions, tmp_path, platform_inputs, publication, damage):

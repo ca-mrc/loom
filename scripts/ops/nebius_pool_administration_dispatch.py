@@ -163,8 +163,7 @@ def retain_authorized_operation(*, host: PoolAdministrationHostV2, request: _Req
     """Issuer-only append of exact qualified intent; never called by dispatch."""
     _host(host)
     _qualified(PoolAdministrationJobV2(runtime=host.runtime, request=request, authorization=authorization, action='apply'))
-    if (_scope(authorization) != _scope(host.scope) or re.fullmatch(r'[0-9a-f]{64}', evidence_sha256) is None
-            or not authorization.issued_at <= datetime.now(UTC) < authorization.expires_at):
+    if _scope(authorization) != _scope(host.scope) or re.fullmatch(r'[0-9a-f]{64}', evidence_sha256) is None:
         raise ValueError('pool_administration_grant_unqualified')
     document = dict(schema_version='loom.pool-authorized-operation.v2', runtime=asdict(host.runtime),
         request=request.model_dump(mode='json'), authorization=authorization.model_dump(mode='json'), evidence_sha256=evidence_sha256)
@@ -178,6 +177,11 @@ def retain_authorized_operation(*, host: PoolAdministrationHostV2, request: _Req
         if anchor.exists() or state.exists():
             _load(host, reference)
             return reference
+        # Existing issuance is historical retrieval, never renewed authority.
+        # Freshness is mandatory only when creating a new retained grant; the
+        # apply boundary independently refuses expired mutation authority.
+        if not authorization.issued_at <= datetime.now(UTC) < authorization.expires_at:
+            raise ValueError('pool_administration_grant_expired')
         private_state._private_directory(state)
         private_state._write_private(state / 'authorized.json', json.dumps(document, sort_keys=True).encode())
         private_state._sync_directory(state)
