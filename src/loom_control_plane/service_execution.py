@@ -19,6 +19,7 @@ from loom.db.schema import (
     Artifact,
     ArtifactUploadFile,
     ArtifactUploadSession,
+    Batch,
     ExecutionAdmissionReservation,
     ExecutionCostReservation,
     ExecutionProvisioningAuthorization,
@@ -154,10 +155,17 @@ class ServiceExecutionConflict(ServiceExecutionError):  # noqa: N818 - contract 
 class ServiceExecutionPolicyBlockedError(ServiceExecutionConflict):
     """A candidate must wait for admission or paid-execution policy to allow it."""
 
-    def __init__(self, reason: str, *, retry_after_seconds: int = 15) -> None:
+    def __init__(
+        self, reason: str, *, scope_kind: str | None = None, retry_after_seconds: int = 15,
+    ) -> None:
         super().__init__(reason)
         self.reason = reason
+        self.scope_kind = scope_kind
         self.retry_after_seconds = retry_after_seconds
+
+
+class ServiceExecutionParentTerminalError(ServiceExecutionConflict):
+    """The parent stopped accepting new execution after candidate selection."""
 
 
 class ServiceExecutionFenceError(ServiceExecutionConflict):
@@ -883,7 +891,7 @@ async def reserve_trial_execution(
         if exc.scope_kind in {
             "global", "environment", "region", "team", "batch", "execution_class", "pool",
         }:
-            raise ServiceExecutionPolicyBlockedError(exc.reason) from exc
+            raise ServiceExecutionPolicyBlockedError(exc.reason, scope_kind=exc.scope_kind) from exc
         raise ServiceExecutionConflict(exc.reason) from exc
     # The lease row is still uncommitted and cannot become executable without
     # the deferred outbox constraint. Persisting its identity first lets the
@@ -901,19 +909,22 @@ async def reserve_trial_execution(
             now=current_time,
         )
     except ExecutionFinanceBlockedError as exc:
-        policy_reasons = {
-            f"execution_budget_{scope}_{reason}"
+        policy_scopes = {
+            f"execution_budget_{scope}_{reason}": scope
             for scope in ("pool", "target")
             for reason in (
                 "emergency_stop", "duration_exceeded", "attempt_limit_exceeded",
                 "daily_limit_exceeded", "monthly_limit_exceeded",
             )
         }
-        if exc.reason in policy_reasons | {
-            "execution_cost_price_binding_unavailable",
-            "execution_cost_price_snapshot_not_effective",
-        }:
-            raise ServiceExecutionPolicyBlockedError(exc.reason) from exc
+        policy_scopes.update({
+            "execution_cost_price_binding_unavailable": "target",
+            "execution_cost_price_snapshot_not_effective": "target",
+        })
+        if exc.reason in policy_scopes:
+            raise ServiceExecutionPolicyBlockedError(
+                exc.reason, scope_kind=policy_scopes[exc.reason],
+            ) from exc
         raise ServiceExecutionConflict(exc.reason) from exc
     # Capacity waits remain queued: reservation, budget and admission writes are
     # rolled back together before any outbox command or execution attempt exists.
@@ -983,6 +994,16 @@ async def reserve_trial_execution(
         trial.pre_start_heartbeat_at = None
         trial.worker_id = None
     await session.flush()
+    if trial.batch_id is not None:
+        # Trial/image/admission writes precede the parent fence, matching child
+        # publication's lock order. Hold it until commit: cancellation either
+        # follows this existing lease or wins and rolls back this new reservation.
+        # An exact request replay returned above and still owns cleanup authority.
+        parent_state = await session.scalar(
+            select(Batch.state).where(Batch.id == trial.batch_id).with_for_update(key_share=True),
+        )
+        if parent_state not in {"submitted", "running"}:
+            raise ServiceExecutionParentTerminalError("batch no longer accepts execution")
     return lease
 
 

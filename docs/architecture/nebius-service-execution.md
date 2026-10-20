@@ -221,10 +221,16 @@ candidate, after partial compilation writes roll back. Temporary
 capacity and image-readiness waits retain their existing retry behavior.
 
 The environment-local scheduler also isolates admission ceilings and paid-execution
-policy denials. It rolls back the candidate's route, lease, admission and spend
-writes, keeps the Trial queued with a diagnostic and bounded retry time, and
-continues its scan of at most 32 candidates. Reservation identity conflicts and
-price-snapshot mismatches still propagate as errors.
+policy denials. Region admission limits and target-specific budget or price waits
+roll back that target's route, lease, admission and spend writes before trying an
+eligible alternative. Broader policies retain their scope. If no target can admit
+the candidate, the Trial remains queued with a diagnostic and bounded retry time;
+the scheduler continues its scan of at most 32 candidates. Reservation identity
+conflicts and price-snapshot mismatches still propagate as errors. A parent that
+became terminal after selection rejects the new reservation under the parent row
+lock, without preventing admission of an unrelated candidate.
+Capacity-wait projections also exclude terminal parents, so undelivered child
+cancellation cannot retain their former place ahead of eligible work.
 
 Shared and separate verification are properties of the private-sandbox plan,
 not of the Terminus harness. Shared grading injects private inputs and verifies

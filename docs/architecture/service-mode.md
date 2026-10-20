@@ -571,6 +571,10 @@ cancellation request has not yet reached the Control Plane, including after an
 HTTP failure or service restart. Hard-budget cancellation uses the same fence and
 recovery path. A cancelled batch therefore stops further fanout immediately while
 its existing children finish their normal cancellation and cleanup.
+New native execution reservations also lock and recheck the parent before
+committing, so an already queued child cannot start after that fence while its
+cancellation HTTP request is delayed or unavailable. Exact lease replays and
+cleanup of already owned executions remain valid.
 
 Cancel requests (`POST /trials/{id}/cancel`) check the trial's current
 state before propagating:

@@ -12,6 +12,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
+from loom.db.nebius_pool_outbox_schema import NebiusPoolBuildOutbox
 from loom.db.schema import (
     Batch,
     ServiceExecutionLease,
@@ -383,6 +384,16 @@ async def claim_task_image_materialization(
                 TaskImageMaterializationAttempt.materialization_id == TaskImageMaterialization.id,
                 TaskImageMaterializationAttempt.native_build["capacity_reserved_at"].astext.is_not(None),
                 TaskImageMaterializationAttempt.native_build["capacity_released_at"].astext.is_(None),
+            ),
+            # Global ownership is committed in the outbox before native_build
+            # is observed and never uses the legacy capacity reservation field.
+            # An unclaimed selection must still attach its own first attempt;
+            # an attached attempt remains owned until confirmed cancellation or
+            # release, even after its local lease expires or budget is refunded.
+            ~exists().where(
+                NebiusPoolBuildOutbox.materialization_id == TaskImageMaterialization.id,
+                NebiusPoolBuildOutbox.attempt_id.is_not(None),
+                NebiusPoolBuildOutbox.phase.not_in(("cancelled", "released")),
             ),
             or_(
                 and_(
