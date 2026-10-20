@@ -72,4 +72,11 @@ jobs:
             --candidate-sha "${CANDIDATE_SHA}" \
             --dispatch-sha "${DISPATCH_SHA}" \
             --pr-number "${PR_NUMBER}" \
-            --release-gate-run-id "${RELEASE_GATE_RUN_ID}"
+            --release-gate-run-id "${RELEASE_GATE_RUN_ID}" \
+            --output-json main-promotion-evidence.json
+      - name: Preserve exact main promotion authority
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: main-promotion-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: main-promotion-evidence.json
+          if-no-files-found: error

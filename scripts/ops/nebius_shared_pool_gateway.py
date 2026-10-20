@@ -281,7 +281,8 @@ class HTTPSSharedGateway(HTTPSDevelopmentRuntimeResources, HTTPSDevelopmentRunti
         evidence = validate_shared_gateway(bindings=self.bindings, state_dir=self.state, complete=False)
         if not evidence['authority_ready']:
             raise ValueError('shared gateway grants are incomplete')
-        review_development_gateway_permissions(self.request, transport=self, granted=True)
+        review_development_gateway_permissions(self.request, transport=self, granted=True,
+            schema_successor=self.bindings.plan.development.schema_successor)
         if validate_shared_gateway(bindings=self.bindings, state_dir=self.state, complete=False) != evidence:
             raise ValueError('shared gateway grants changed during review')
         self._qualify(writing=False)

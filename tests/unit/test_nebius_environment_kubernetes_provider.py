@@ -252,6 +252,25 @@ async def test_api_empty_list_omission_preserves_default_deny_readback():
         assert await provider.apply(ctx, ProvisioningStep("policy", "kubernetes", doc)) == "uid-default-deny"
 
 
+def test_controller_readback_allows_omitted_empty_env_value_but_rejects_value_from():
+    from loom_service.environment_management.kubernetes_provider import (
+        KubernetesEnvironmentProvider,
+    )
+    from loom_service.environment_management.provider import ProviderBlockedError
+
+    expected = {"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": "web"},
+                "spec": {"template": {"spec": {"containers": [{"name": "web", "image": "fixed",
+                    "env": [{"name": "OPTIONAL_SETTING", "value": ""}]}]}}}}
+    actual = copy.deepcopy(expected)
+    actual["metadata"]["uid"] = "retained"
+    variable = actual["spec"]["template"]["spec"]["containers"][0]["env"][0]
+    variable.pop("value")  # Kubernetes omits the optional empty string.
+    assert KubernetesEnvironmentProvider._identity(actual, expected, "retained") == "retained"
+    variable["valueFrom"] = {"secretKeyRef": {"name": "foreign", "key": "credential"}}
+    with pytest.raises(ProviderBlockedError, match="identity_conflict"):
+        KubernetesEnvironmentProvider._identity(actual, expected, "retained")
+
+
 @pytest.mark.parametrize("kind,spec,change", [
     ("NetworkPolicy", {"podSelector": {}, "policyTypes": ["Ingress", "Egress"], "ingress": [], "egress": []},
      {"podSelector": {"matchLabels": {"app": "unrelated"}}}),

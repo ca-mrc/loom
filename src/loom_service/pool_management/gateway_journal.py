@@ -176,13 +176,23 @@ class PoolGatewayJournal:
         participant = (await session.scalars(select(NebiusPoolParticipant).where(
             NebiusPoolParticipant.participant_id == request.participant_id).with_for_update(read=True))).one()
         binding = PoolParticipantV1.model_validate(participant.binding_json)
+        # The plan belongs to a charged request, not the latest participant
+        # release. Qualify its immutable original catalog without changing the
+        # frozen document or relaxing the legacy exact-revision fence.
+        from loom_service.pool_management.profile_registry import registry_enabled, resolve_profiles
+
+        if registry_enabled(pool):
+            original, _ = await resolve_profiles(session, pool, binding, request.request_json['participant_revision'],
+                retained=True, fallback=None)
+        else:
+            original = binding
         namespace = (binding.build_namespace if request.workload_kind in {"task_image_build", "application_image_build"}
                      else binding.execution_namespace)
         if (request.phase != "create_intent" or pool.mode != "global" or request.deadline_at <= now
                 or request.admission_epoch != pool.admission_epoch or participant.phase != "active"
                 or participant.admission_epoch != pool.admission_epoch or binding.admission_epoch != pool.admission_epoch
                 or binding.participant_id != request.participant_id or binding.pool_id != pool.pool_id
-                or participant.binding_revision != request.request_json["participant_revision"]
+                or original.binding_revision != request.request_json["participant_revision"]
                 or digest(participant.binding_json) != participant.binding_sha256 or namespace.uid != request.namespace_uid
                 or request.plan_json is None or request.plan_json["job"]["metadata"]["namespace"] != namespace.name):
             raise PoolGatewayError

@@ -31,6 +31,8 @@ class PoolEnvironmentBinding(BaseModel):
     execution_namespace: str = Field(pattern=_NAMESPACE)
     build_namespace: str = Field(pattern=_NAMESPACE)
     target_ids: tuple[_TargetId, ...] = Field(min_length=1, max_length=64)
+    execution_namespace_uid: UUID | None = Field(default=None, exclude_if=lambda value: value is None)
+    build_namespace_uid: UUID | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @model_validator(mode="after")
     def identities(self) -> PoolEnvironmentBinding:
@@ -40,6 +42,12 @@ class PoolEnvironmentBinding(BaseModel):
             raise ValueError("execution and build namespaces must differ")
         if len(set(self.target_ids)) != len(self.target_ids):
             raise ValueError("duplicate environment-local target")
+        if ((self.execution_namespace_uid is None) != (self.build_namespace_uid is None)
+                or any(value is not None and not value.int
+                       for value in (self.execution_namespace_uid, self.build_namespace_uid))
+                or (self.execution_namespace_uid is not None
+                    and self.execution_namespace_uid == self.build_namespace_uid)):
+            raise ValueError("invalid environment namespace identities")
         return self
 
 
@@ -64,6 +72,27 @@ class GatewayJobBinding(BaseModel):
         return self
 
 
+class PoolObservationAuthority(BaseModel):
+    """Physical authority, distinct from the historical participant roster."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["loom.pool-observation-authority.v1"] = "loom.pool-observation-authority.v1"
+    pool_id: UUID
+    installation_id: UUID
+    cluster_id: str = Field(min_length=1, max_length=253)
+    node_group_id: str = Field(min_length=1, max_length=253)
+    admission_epoch: int = Field(gt=0, strict=True)
+    physical_binding_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    registration_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def identities(self) -> PoolObservationAuthority:
+        if not self.pool_id.int or not self.installation_id.int:
+            raise ValueError("nil pool observation authority")
+        return self
+
+
 class PoolObservationScope(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -72,6 +101,7 @@ class PoolObservationScope(BaseModel):
     node_selector: dict[str, str] = Field(min_length=1, max_length=32)
     environments: tuple[PoolEnvironmentBinding, ...] = Field(max_length=10_000)
     jobs: tuple[GatewayJobBinding, ...] = Field(max_length=200_000)
+    authority: PoolObservationAuthority | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @field_validator("node_selector")
     @classmethod
@@ -88,6 +118,11 @@ class PoolObservationScope(BaseModel):
 
     @model_validator(mode="after")
     def unambiguous_scope(self) -> PoolObservationScope:
+        if self.authority is not None and (
+                self.node_selector.get("nebius.com/node-group-id") != self.authority.node_group_id
+                or any(row.execution_namespace_uid is None or row.build_namespace_uid is None
+                       for row in self.environments)):
+            raise ValueError("physical observation scope is not identity bound")
         for values in (
             [row.environment_id for row in self.environments],
             [row.incarnation for row in self.environments],
@@ -95,6 +130,8 @@ class PoolObservationScope(BaseModel):
             [row.reservation_id for row in self.jobs],
             [row.job_uid for row in self.jobs],
             [(row.namespace, row.job_name) for row in self.jobs],
+            [uid for row in self.environments
+             for uid in (row.execution_namespace_uid, row.build_namespace_uid) if uid is not None],
         ):
             if len(values) != len(set(values)):
                 raise ValueError("duplicate pool binding identity")

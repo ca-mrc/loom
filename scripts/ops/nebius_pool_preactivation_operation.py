@@ -23,7 +23,16 @@ from scripts.ops.nebius_development_runtime_retained import (
     RetainedRuntimeReference,
     load_completed_runtime,
 )
+from scripts.ops.nebius_development_runtime_selection import (
+    DevelopmentRuntimeSelection,
+    select_development_runtime,
+)
 from scripts.ops.nebius_development_runtime_transition import DevelopmentRuntimeWorkloadAPI
+from scripts.ops.nebius_development_schema_upgrade import (
+    CompletedDevelopmentSchemaSuccessor,
+    DevelopmentSchemaReference,
+    load_completed_development_schema_successor,
+)
 from scripts.ops.nebius_management_stage import ManagementStageAPI
 from scripts.ops.nebius_pool_participant_catalog import (
     AppliedCatalogResources,
@@ -68,8 +77,9 @@ class PreactivationReference(BaseModel):
 
 class PreactivationInputs(BaseModel):
     model_config = ConfigDict(extra='forbid', frozen=True, hide_input_in_errors=True)
-    schema_version: Literal['loom.pool-preactivation-inputs.v1'] = 'loom.pool-preactivation-inputs.v1'
+    schema_version: Literal['loom.pool-preactivation-inputs.v1', 'loom.pool-preactivation-inputs.v2'] = 'loom.pool-preactivation-inputs.v1'
     runtime: RetainedRuntimeReference
+    schema_successor: DevelopmentSchemaReference | None = None
     predecessor: PreactivationReference | None
     source: StagingPoolSource
     refresh: PoolParticipantRefresh
@@ -88,8 +98,17 @@ class RetainedPreactivationCatalog:
     files: dict[Path, bytes]
 
     @property
+    def schema_successor(self) -> CompletedDevelopmentSchemaSuccessor | None:
+        if self.inputs.schema_successor is None:
+            return None
+        return load_completed_development_schema_successor(runtime=self.runtime, reference=self.inputs.schema_successor)
+
+    @property
     def registration(self) -> PoolRegistrationRequest:
         original = self.runtime.database.manager.retained.request.registration
+        successor = self.schema_successor
+        if successor is not None:
+            original = DevelopmentRuntimeSelection(successor.runtime, successor).registration
         return replace(original, spec=self.inputs.refresh.after)
 
     @property
@@ -131,7 +150,8 @@ def _anchor(reference: PreactivationReference, state: Path) -> dict[str, Any]:
 
 
 def _basis(*, runtime: RetainedRuntimeReference, predecessor: PreactivationReference | None,
-        repo_root: Path, seen: frozenset[UUID]) -> tuple[DevelopmentRuntimeInstallRequest,
+        repo_root: Path, seen: frozenset[UUID], schema_successor: DevelopmentSchemaReference | None
+        ) -> tuple[DevelopmentRuntimeInstallRequest,
             PoolRegistrationRequest, dict[str, Any], dict[str, Any], dict[Path, bytes]]:
     from scripts.ops.nebius_shared_pool_entry import _retained_runtime
 
@@ -141,17 +161,29 @@ def _basis(*, runtime: RetainedRuntimeReference, predecessor: PreactivationRefer
     if predecessor is not None:
         prior = _load(runtime=runtime, reference=predecessor, repo_root=repo_root, seen=seen)
         completed = _completed(prior)
+        if prior.inputs.schema_successor != schema_successor:
+            raise ValueError
         files = dict(completed.files)
         return request, prior.registration, completed.resources.manager, completed.resources.catalog, files
     original = load_completed_runtime(request)
+    successor = (None if schema_successor is None else
+        load_completed_development_schema_successor(runtime=request, reference=schema_successor))
+    selected = select_development_runtime(original, successor)
+    registration = selected.registration
+    if successor is not None:
+        for path, raw in successor.files.items():
+            if path in files and files[path] != raw:
+                raise ValueError
+            files[path] = raw
     namespace = registration.binding.namespace
-    manager = original.resources['Deployment:' + namespace + ':loom-service']
-    catalog = original.resources['ConfigMap:' + namespace + ':loom-pool-profiles-' + registration.spec.operation_id.hex]
+    manager = selected.resources['Deployment:' + namespace + ':loom-service']
+    catalog = selected.resources['ConfigMap:' + namespace + ':loom-pool-profiles-' + registration.spec.operation_id.hex]
     return request, registration, copy.deepcopy(manager), copy.deepcopy(catalog), files
 
 
 def _inputs(*, runtime: RetainedRuntimeReference, predecessor: PreactivationReference | None,
-        source: StagingPoolSource, operation_id: UUID, repo_root: Path, seen: frozenset[UUID]
+        source: StagingPoolSource, operation_id: UUID, repo_root: Path, seen: frozenset[UUID],
+        schema_successor: DevelopmentSchemaReference | None = None
         ) -> tuple[PreactivationInputs, DevelopmentRuntimeInstallRequest, dict[Path, bytes]]:
     if operation_id in seen or len(seen) >= 32 or not operation_id.int:
         raise ValueError
@@ -162,12 +194,14 @@ def _inputs(*, runtime: RetainedRuntimeReference, predecessor: PreactivationRefe
             or source.publication.run_id != source.candidate.get('run_id')):
         raise ValueError
     request, registration, manager, catalog, files = _basis(runtime=runtime, predecessor=predecessor,
-        repo_root=repo_root, seen=seen)
+        repo_root=repo_root, seen=seen, schema_successor=schema_successor)
     if operation_id == request.database.manager.retained.request.registration.spec.operation_id:
         raise ValueError
     refresh = prepare_staging_preactivation_refresh(registration=registration,
         observation=source.observation, candidate=source.candidate, operation_id=operation_id, repo_root=repo_root)
     result = PreactivationInputs(runtime=runtime, predecessor=predecessor, source=source, refresh=refresh,
+        schema_version='loom.pool-preactivation-inputs.v2' if schema_successor is not None else 'loom.pool-preactivation-inputs.v1',
+        schema_successor=schema_successor,
         manager=manager, catalog=catalog, history={path: hashlib.sha256(raw).hexdigest() for path, raw in files.items()})
     _unchanged(files)
     return result, request, files
@@ -191,7 +225,8 @@ def _load(*, runtime: RetainedRuntimeReference, reference: PreactivationReferenc
     if supplied.runtime != runtime:
         raise ValueError
     expected, request, files = _inputs(runtime=runtime, predecessor=supplied.predecessor,
-        source=supplied.source, operation_id=reference.operation_id, repo_root=repo_root, seen=seen)
+        source=supplied.source, operation_id=reference.operation_id, repo_root=repo_root, seen=seen,
+        schema_successor=supplied.schema_successor)
     if supplied != expected or any(path in files for path in (marker, state / 'inputs.json')):
         raise ValueError
     files.update({marker: marker_raw, state / 'inputs.json': raw})
@@ -238,13 +273,16 @@ def load_completed_preactivation(*, runtime: RetainedRuntimeReference, reference
 
 
 def retain_preactivation_catalog(*, runtime: RetainedRuntimeReference, source: dict[str, Any],
-        operation_id: UUID, repo_root: Path, predecessor: PreactivationReference | None = None) -> RetainedPreactivationCatalog:
+        operation_id: UUID, repo_root: Path, predecessor: PreactivationReference | None = None,
+        schema_successor: DevelopmentSchemaReference | None = None) -> RetainedPreactivationCatalog:
     """Local source-qualified preparation, never a cluster/SQL or guard operation."""
     try:
         inputs, request, files = _inputs(runtime=runtime, predecessor=predecessor,
             source=StagingPoolSource.model_validate(copy.deepcopy(source)), operation_id=operation_id,
-            repo_root=repo_root, seen=frozenset())
-        raw = json.dumps(inputs.model_dump(mode='json'), sort_keys=True).encode()
+            repo_root=repo_root, seen=frozenset(), schema_successor=schema_successor)
+        # Preserve original v1 bytes and their pinned preparation reference.
+        value = inputs.model_dump(mode='json', exclude={'schema_successor'} if schema_successor is None else set())
+        raw = json.dumps(value, sort_keys=True).encode()
         if len(raw) > _LIMIT:
             raise ValueError
         reference = PreactivationReference(operation_id=operation_id, inputs_sha256=hashlib.sha256(raw).hexdigest())
@@ -266,7 +304,7 @@ def retain_preactivation_catalog(*, runtime: RetainedRuntimeReference, source: d
                 if _read(path) != raw:
                     raise ValueError
             else:
-                private_state._atomic_json(path, inputs.model_dump(mode='json'))
+                private_state._atomic_json(path, value)
             _unchanged(files)
             private_state._atomic_json(marker, _anchor(reference, state))
             return load_preactivation_catalog(runtime=runtime, reference=reference, repo_root=repo_root)

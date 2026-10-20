@@ -20,7 +20,7 @@ from loom_service.pool_management.profiles import PoolProfileCatalog
 
 
 def _literal(value: Any) -> str:
-    return json.dumps(value, separators=(',', ':'))
+    return json.dumps(value, separators=(',', ':'), sort_keys=True)
 
 
 def _mount(name: str, path: str, *, readonly: bool = False) -> str:

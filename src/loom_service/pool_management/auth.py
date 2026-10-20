@@ -19,6 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.base import Base
+from loom.db.nebius_pool_lifecycle_schema import NebiusPoolParticipantLifecycle
 from loom.db.nebius_pool_schema import (
     NebiusPoolBinding,
     NebiusPoolMachine,
@@ -73,7 +74,7 @@ async def _resolve_hash(session: AsyncSession, token_hash: bytes, *, locked: boo
         # Re-reading must not erase pending ORM revocation/registration edits,
         # and authentication must not flush them on the caller's behalf.
         authority_rows = (Token, NebiusPoolBinding, NebiusPoolParticipant,
-                          NebiusPoolMachine, NebiusPoolMachineCredential)
+                          NebiusPoolMachine, NebiusPoolMachineCredential, NebiusPoolParticipantLifecycle)
         if any(isinstance(row, authority_rows) for row in session.new | session.dirty | session.deleted):
             return None
         # Immutable scope pointers are read first solely to locate lock targets.

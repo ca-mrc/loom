@@ -22,13 +22,16 @@ from scripts.ops.nebius_pool_migration import PoolMigrationRequest, migration_co
 from loom.execution_image_admission import ImageAdmissionKeyring, verify_execution_image_admission
 from loom.nebius_guest_target import guest_target_id
 from loom.nebius_platform_render import _obj, _replace_tree
+from loom.nebius_pool_contract import PoolParticipantV1
 from loom.nebius_pool_priority import PoolSubmissionSourceV1
 from loom.nebius_pool_settings import PoolRuntimeSettings
 from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1
 from loom_execution_actuator.task_image_settings import NativeTaskImageSettings
 from loom_execution_capacity_collector.config import PoolCapacityCollectorSettings
 from loom_service.environment_management.deployment import mount_pool_profiles
+from loom_service.pool_management.installation import PoolMachineInstallation
 from loom_service.pool_management.installation_render import mount_machine_token
+from loom_service.pool_management.profiles import PoolProfileCatalog
 
 
 class _RetainedPoolCollectorSettings(PoolCapacityCollectorSettings):
@@ -59,7 +62,11 @@ class PoolCollectorCredential(BaseModel):
 
 
 def _image(request: PoolMigrationRequest, component: str) -> str:
-    value = request.registration.candidate["images"][component]["image_ref"]
+    return _candidate_image(request.registration.candidate, component)
+
+
+def _candidate_image(candidate: dict[str, Any], component: str) -> str:
+    value = candidate["images"][component]["image_ref"]
     if not isinstance(value, str) or re.fullmatch(r".+@sha256:[0-9a-f]{64}", value) is None:
         raise ValueError("unqualified pool runtime image")
     return value
@@ -69,6 +76,12 @@ def _disabled(original: dict[str, Any], *, namespace: str, name: str,
               container_name: str, image: str) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     _uid(original)
     _snapshot(original)
+    return _disabled_template(original, namespace=namespace, name=name, container_name=container_name, image=image)
+
+
+def _disabled_template(original: dict[str, Any], *, namespace: str, name: str,
+              container_name: str, image: str) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Pure template wiring; only the installed legacy wrapper claims UIDs."""
     if (original.get("apiVersion") != "apps/v1" or original.get("kind") != "Deployment"
             or original["metadata"].get("namespace") != namespace or original["metadata"].get("name") != name
             or type(original["spec"].get("replicas")) is not int or original["spec"]["replicas"] != 1):
@@ -106,8 +119,22 @@ This check does not discover controllers or authorize arbitrary Deployment names
 """
     try:
         participant, = (row for row in request.registration.spec.participants if row.participant_id == participant_id)
-        _, _, container = _disabled(actuator, namespace=participant.execution_namespace.name,
-            name="loom-execution-actuator", container_name="actuator", image=_image(request, "execution_actuator"))
+        for doc in (actuator, *guests):
+            _uid(doc)
+            _snapshot(doc)
+        if len({_uid(doc) for doc in (actuator, *guests)}) != 1 + len(guests):
+            raise ValueError
+        _qualify_participant_templates(participant=participant, profiles=request.registration.spec.profiles,
+            image=_image(request, 'execution_actuator'), actuator=actuator, guests=guests)
+    except Exception:
+        raise ValueError("pool_actuator_roster_unqualified") from None
+
+
+def _qualify_participant_templates(*, participant: PoolParticipantV1, profiles: PoolProfileCatalog,
+        image: str, actuator: dict[str, Any], guests: tuple[dict[str, Any], ...]) -> None:
+    try:
+        _, _, container = _disabled_template(actuator, namespace=participant.execution_namespace.name,
+            name="loom-execution-actuator", container_name="actuator", image=image)
         original_name = "loom-execution-actuator"
         if (actuator["spec"]["selector"] != {"matchLabels": {"app.kubernetes.io/name": original_name}}
                 or actuator["spec"]["template"]["metadata"]["labels"].get("app.kubernetes.io/name") != original_name
@@ -120,8 +147,7 @@ This check does not discover controllers or authorize arbitrary Deployment names
         if settings["LOOM_EXECUTION_ACTUATOR_NAMESPACE"].get("value") != participant.execution_namespace.name:
             raise ValueError
         seen = {target_id}
-        seen_uids = {_uid(actuator)}
-        primary_profile, = (row for row in request.registration.spec.profiles.execution if row.profile_id == primary.profile_id)
+        primary_profile, = (row for row in profiles.execution if row.profile_id == primary.profile_id)
         for guest in guests:
             guest_container, = guest["spec"]["template"]["spec"]["containers"]
             guest_settings = _environment(guest_container)
@@ -133,11 +159,8 @@ This check does not discover controllers or authorize arbitrary Deployment names
                 raise ValueError
             seen.add(guest_id)
             name = guest_id + "-actuator"
-            _disabled(guest, namespace=participant.execution_namespace.name, name=name,
-                container_name="actuator", image=_image(request, "execution_actuator"))
-            if _uid(guest) in seen_uids:
-                raise ValueError
-            seen_uids.add(_uid(guest))
+            _disabled_template(guest, namespace=participant.execution_namespace.name, name=name,
+                container_name="actuator", image=image)
             # The installed renderer clones the ordinary Pod, changing only
             # target/labels/affinity and removing the native builder. Comparing
             # that complete spec also binds DB references, SA, mounts and image.
@@ -153,7 +176,7 @@ This check does not discover controllers or authorize arbitrary Deployment names
             _environment(expected_container)["LOOM_EXECUTION_ACTUATOR_TARGET_ID"]["value"] = guest_id
             if guest["spec"] != expected:
                 raise ValueError
-            guest_profile, = (row for row in request.registration.spec.profiles.execution if row.profile_id == target.profile_id)
+            guest_profile, = (row for row in profiles.execution if row.profile_id == target.profile_id)
             if any(getattr(guest_profile, key) != getattr(primary_profile, key)
                     for key in ("candidate_sha", "runtime_image_ref", "runtime_binary_sha256")):
                 raise ValueError
@@ -193,12 +216,49 @@ def wire_participant(*, request: PoolMigrationRequest, participant_id: UUID, man
         participant, = (row for row in spec.participants if row.participant_id == participant_id)
         guard, = (row for row in request.guards if row.participant_id == participant_id)
         machine, = (row for row in spec.machines if row.participant_id == participant_id and row.workload_scope == "environment")
-        cp, cp_pod, cp_container = _disabled(guard.controller, namespace=guard.namespace, name="loom-control-plane",
-            container_name="loom-control-plane", image=_image(request, "control_plane"))
-        worker, worker_pod, worker_container = _disabled(actuator, namespace=participant.execution_namespace.name,
-            name="loom-execution-actuator", container_name="actuator", image=_image(request, "execution_actuator"))
-        api, _, api_container = _disabled(service, namespace=guard.namespace, name="loom-service",
-            container_name="loom-service", image=_image(request, "service"))
+        for doc in (guard.controller, service):
+            _uid(doc)
+            _snapshot(doc)
+        ids = {target.profile_id for target in participant.targets}
+        profiles = PoolProfileCatalog.model_validate({
+            **spec.profiles.model_dump(), **{family: tuple(row for row in getattr(spec.profiles, family) if row.profile_id in ids)
+                for family in ('execution', 'task_images', 'application_images')}})
+        return wire_scoped_participant(participant=participant, machine=machine, profiles=profiles,
+            candidate=request.registration.candidate, application_namespace=guard.namespace,
+            controller=guard.controller, actuator=actuator, service=service, runtime_profile=runtime_profile,
+            management_origin=management_origin, guest_actuators=guest_actuators)
+    except Exception:
+        raise ValueError("pool_participant_runtime_unqualified") from None
+
+
+def wire_scoped_participant(*, participant: PoolParticipantV1, machine: PoolMachineInstallation,
+        profiles: PoolProfileCatalog, candidate: dict[str, Any], application_namespace: str, management_origin: str,
+        controller: dict[str, Any], actuator: dict[str, Any], service: dict[str, Any],
+        runtime_profile: ServiceExecutionRuntimeProfileV1,
+        guest_actuators: tuple[dict[str, Any], ...] = ()) -> dict[str, dict[str, Any]]:
+    """Wire one protected participant's templates without a legacy migration.
+
+    This is pure rendering, not observed identity, publication or writer authority.
+    The installer must qualify exact live UIDs and enrolled state separately.
+    """
+    try:
+        participant = PoolParticipantV1.model_validate(participant.model_dump())
+        machine = PoolMachineInstallation.model_validate(machine.model_dump())
+        profiles = PoolProfileCatalog.model_validate(profiles.model_dump())
+        profiles.profiles()
+        ids = {row.profile_id for row in participant.targets}
+        if (machine.role != 'participant' or machine.participant_id != participant.participant_id
+                or machine.workload_scope != 'environment'
+                or ids != {row.profile_id for family in ('execution', 'task_images', 'application_images') for row in getattr(profiles, family)}):
+            raise ValueError
+        _qualify_participant_templates(participant=participant, profiles=profiles,
+            image=_candidate_image(candidate, 'execution_actuator'), actuator=actuator, guests=guest_actuators)
+        cp, cp_pod, cp_container = _disabled_template(controller, namespace=application_namespace, name="loom-control-plane",
+            container_name="loom-control-plane", image=_candidate_image(candidate, "control_plane"))
+        worker, worker_pod, worker_container = _disabled_template(actuator, namespace=participant.execution_namespace.name,
+            name="loom-execution-actuator", container_name="actuator", image=_candidate_image(candidate, "execution_actuator"))
+        api, _, api_container = _disabled_template(service, namespace=application_namespace, name="loom-service",
+            container_name="loom-service", image=_candidate_image(candidate, "service"))
         cp_env, worker_env, api_env = (_environment(row) for row in (cp_container, worker_container, api_container))
         cp_setting = "LOOM_CP_SERVICE_EXECUTION_GLOBAL_POOL_JSON"
         worker_setting = "LOOM_EXECUTION_ACTUATOR_GLOBAL_POOL"
@@ -210,7 +270,7 @@ def wire_participant(*, request: PoolMigrationRequest, participant_id: UUID, man
             raise ValueError
         target_id = worker_env["LOOM_EXECUTION_ACTUATOR_TARGET_ID"]["value"]
         execution_target = participant.target(target_id, "trial")
-        execution_profile, = (row for row in spec.profiles.execution if row.profile_id == execution_target.profile_id)
+        execution_profile, = (row for row in profiles.execution if row.profile_id == execution_target.profile_id)
         runtime_profile = ServiceExecutionRuntimeProfileV1.model_validate(runtime_profile.model_dump())
         previous_profile = ServiceExecutionRuntimeProfileV1.model_validate_json(api_env["LOOM_SVC_SERVICE_EXECUTION_RUNTIME_PROFILE_JSON"]["value"])
         publication_fields = {"candidate_sha", "task_image_ref", "agent_image_ref", "runtime_image_ref", "runtime_binary_sha256", "image_admission", "prebuilt_image_pins"}
@@ -218,21 +278,21 @@ def wire_participant(*, request: PoolMigrationRequest, participant_id: UUID, man
                 != {key: value for key, value in runtime_profile.model_dump().items() if key not in publication_fields}
                 or (runtime_profile.candidate_sha, runtime_profile.execution_class_id, runtime_profile.runtime_image_ref, runtime_profile.runtime_binary_sha256)
                     != (execution_profile.candidate_sha, execution_profile.execution_class_id, execution_profile.runtime_image_ref, execution_profile.runtime_binary_sha256)
-                or runtime_profile.candidate_sha != request.registration.candidate["candidate_sha"]
-                or runtime_profile.task_image_ref != _image(request, "service")
-                or runtime_profile.runtime_image_ref != _image(request, "execution_runtime")
+                or runtime_profile.candidate_sha != candidate["candidate_sha"]
+                or runtime_profile.task_image_ref != _candidate_image(candidate, "service")
+                or runtime_profile.runtime_image_ref != _candidate_image(candidate, "execution_runtime")
                 or runtime_profile.logical_pool_id != cp_env["LOOM_CP_SERVICE_EXECUTION_SCHEDULER_POOL_ID"]["value"]):
             raise ValueError
-        agent_component = next((key for key in ("harbor_runtime", "worker") if key in request.registration.candidate["images"]), None)
-        if runtime_profile.agent_image_ref != (_image(request, agent_component) if agent_component else None):
+        agent_component = next((key for key in ("harbor_runtime", "worker") if key in candidate["images"]), None)
+        if runtime_profile.agent_image_ref != (_candidate_image(candidate, agent_component) if agent_component else None):
             raise ValueError
-        keyring_json = json.dumps(spec.profiles.image_admission_keyring, sort_keys=True, separators=(",", ":"))
+        keyring_json = json.dumps(profiles.image_admission_keyring, sort_keys=True, separators=(",", ":"))
         verify_execution_image_admission(runtime_profile.image_admission, keyring=ImageAdmissionKeyring.from_json(keyring_json),
             required_image_refs=runtime_profile.published_image_refs())
         build_target = participant.target(target_id, "task_image_build")
-        profile, = (row for row in spec.profiles.task_images if row.profile_id == build_target.profile_id)
+        profile, = (row for row in profiles.task_images if row.profile_id == build_target.profile_id)
         existing = NativeTaskImageSettings.model_validate_json(worker_env["LOOM_EXECUTION_ACTUATOR_TASK_IMAGE_BUILDER"]["value"])
-        service_image = _image(request, "service")
+        service_image = _candidate_image(candidate, "service")
         # Only the qualified candidate may replace the trusted preparation image;
         # source/storage/registry/sandbox and local pool identity remain unchanged.
         expected = existing.model_copy(update={"service_image": service_image})
@@ -260,8 +320,8 @@ def wire_participant(*, request: PoolMigrationRequest, participant_id: UUID, man
         api_container["env"].append({"name": api_setting, "value": source.model_dump_json()})
         result = {"control_plane": cp, "actuator": worker, "service": api}
         for guest in guest_actuators:
-            wired_guest, guest_pod, guest_container = _disabled(guest, namespace=participant.execution_namespace.name,
-                name=guest["metadata"]["name"], container_name="actuator", image=_image(request, "execution_actuator"))
+            wired_guest, guest_pod, guest_container = _disabled_template(guest, namespace=participant.execution_namespace.name,
+                name=guest["metadata"]["name"], container_name="actuator", image=_candidate_image(candidate, "execution_actuator"))
             guest_id = _environment(guest_container)["LOOM_EXECUTION_ACTUATOR_TARGET_ID"]["value"]
             mount_machine_token(guest_pod, machine_id=machine.machine_id, service_image=service_image, default_uid=65532)
             guest_container["env"] = copy.deepcopy(worker_container["env"])

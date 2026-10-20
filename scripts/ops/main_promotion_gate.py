@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any, Protocol
 
 SHA_RE = re.compile(r"[0-9a-f]{40}")
@@ -134,6 +136,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--dispatch-sha", required=True)
     parser.add_argument("--pr-number", required=True, type=int)
     parser.add_argument("--release-gate-run-id", required=True, type=int)
+    parser.add_argument('--output-json', type=Path, help='Retain exact successful gate selection for production qualification')
     return parser
 
 
@@ -148,7 +151,17 @@ def main() -> int:
             pr_number=args.pr_number,
             release_gate_run_id=args.release_gate_run_id,
         )
-    except PromotionGateError as exc:
+        if args.output_json is not None:
+            try:
+                identity = {name: int(os.environ[key]) for name, key in
+                    (('run_id', 'GITHUB_RUN_ID'), ('run_attempt', 'GITHUB_RUN_ATTEMPT'))}
+            except (KeyError, ValueError):
+                raise PromotionGateError('main gate run identity unavailable') from None
+            if any(value <= 0 for value in identity.values()):
+                raise PromotionGateError('main gate run identity unavailable')
+            args.output_json.write_text(json.dumps(dict(result, schema_version='loom.main-promotion-evidence.v2',
+                gate_run=identity), sort_keys=True) + '\n', encoding='utf-8')
+    except (PromotionGateError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     print(json.dumps(result, sort_keys=True))

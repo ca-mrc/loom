@@ -176,8 +176,12 @@ async def test_retirement_real_defaulting_and_scoped_service_account(
                 return make_url(isolated_migration_postgres_url)
 
             monkeypatch.setattr("loom_service.environment_management.retirement.retirement_database_url", disposable_database)
-            async with asyncio.timeout(75):
-                await run_retirement(settings, database_url)
+            try:
+                async with asyncio.timeout(75):
+                    await run_retirement(settings, database_url)
+            except Exception as error:
+                operation = await registry.get_operation(target.operation_id, principal=alice)
+                raise AssertionError(f"retirement failed: {operation.phase}: {operation.error_code}") from error
             operation = await registry.get_operation(target.operation_id, principal=alice)
             assert operation.phase == "completed", operation.error_code
             assert await reconcile_retirement(factory, target, KubernetesEnvironmentProvider(runtime)) == "completed"

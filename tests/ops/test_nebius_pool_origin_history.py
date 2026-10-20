@@ -576,3 +576,45 @@ def test_refresh_schema_readback_rejects_replacement_or_unqualified_result(manag
         state.report = {}
     with pytest.raises(PoolMigrationError):
         api.management_schema_revision(('0174',))
+
+
+def test_schema_successor_target_pins_read_and_recovery_queries(management_history, monkeypatch):
+    from scripts.ops.nebius_pool_origin_history import KubectlPoolHistoryAPI
+
+    from loom_service.pool_management.capacity import digest
+
+    original, state = management_history
+    target = replace(state.target, manager_revision='0178')
+    api = KubectlPoolHistoryAPI(request=original.request, target=target,
+        kubeconfig=original.kubeconfig, executable=Path('/usr/bin/kubectl'))
+    monkeypatch.setattr(api, '_run', original._run)
+    spec = state.request.registration.spec
+    identity = {'operation_id': str(spec.operation_id), 'installation_sha256': digest(spec.model_dump(mode='json'))}
+    state.report = {**identity, 'schema': 'loom.pool-startup-closed.v1', 'read_only': True, 'qualified': True}
+    api.qualify_closed_pool()
+    state.report = {**identity, 'schema': 'loom.pool-active-authority.v1', 'read_only': True, 'qualified': True}
+    api.qualify_active_pool()
+    state.report = {'schema': 'loom.pool-management-history.v1', 'schema_revision': '0178', 'read_only': True,
+        'rows': [{'ordinal': 1, 'origin': state.origin.model_dump(mode='json'), 'application': None, 'operation': None}]}
+    api.qualify_pending_origins(state.participant, (state.origin,))
+    state.report = {**identity, 'schema': 'loom.pool-activation-state.v1', 'state': 'fenced'}
+    assert api.activation_pool('fence') == 'fenced'
+    state.report = {**identity, 'schema': 'loom.pool-recovery-machine-state.v1', 'read_only': True, 'state': 'active'}
+    assert api.recovery_machine_state() == 'active'
+    state.report = {**identity, 'schema': 'loom.pool-machine-retirement.v1', 'state': 'revoked'}
+    assert api.machine_retirement('revoke') == 'revoked'
+    commands = [row for row in state.calls if row[0] == 'exec']
+    assert len(commands) == 6
+    assert all("IS DISTINCT FROM '0178'" in row[-1] and "IS DISTINCT FROM '0176'" not in row[-1] for row in commands)
+    state.calls.clear()
+    state.report = {**identity, 'schema': 'loom.pool-activation-state.v1', 'state': 'fenced'}
+    with pytest.raises(PoolMigrationError):
+        api.activation_pool('fence', manager_revision='0177')
+    state.report = {**identity, 'schema': 'loom.pool-machine-retirement.v1', 'state': 'revoked'}
+    with pytest.raises(PoolMigrationError):
+        api.machine_retirement('revoke', manager_revision='0177')
+    assert not state.calls
+    object.__setattr__(target, 'manager_revision', '0176')
+    with pytest.raises(PoolMigrationError):
+        api.qualify_closed_pool()
+    assert not state.calls
