@@ -165,10 +165,24 @@ class KubernetesEnvironmentProvider:
             observed, wanted = observed['template']['spec'], wanted['template']['spec']
             defaults: dict[str, Any] = {'initContainers': [], 'ephemeralContainers': [],
                 'hostNetwork': False, 'hostPID': False, 'hostIPC': False, 'shareProcessNamespace': False,
-                'serviceAccountName': 'default', 'securityContext': {}}
+                'serviceAccountName': 'default', 'securityContext': {}, 'volumes': [], 'imagePullSecrets': [],
+                'hostAliases': [], 'runtimeClassName': None, 'nodeName': '', 'priorityClassName': '',
+                'schedulerName': 'default-scheduler', 'dnsConfig': {}, 'affinity': {}}
             if any(not _contains(observed.get(key, default), wanted.get(key, default), exact=key == 'securityContext')
                     for key, default in defaults.items()):
                 raise ProviderBlockedError('kubernetes_resource_identity_conflict')
+            # An omitted command/env source/mount is part of the frozen image
+            # contract. A mutating admission webhook must not inject a command,
+            # credential source or privileged context under the same UID and
+            # otherwise matching requested fields. API decoration remains valid.
+            container_defaults: dict[str, Any] = {'command': [], 'args': [], 'env': [], 'envFrom': [],
+                'volumeMounts': [], 'volumeDevices': [], 'securityContext': {}, 'lifecycle': {},
+                'stdin': False, 'stdinOnce': False, 'tty': False}
+            for field in ('containers', 'initContainers'):
+                for actual_container, expected_container in zip(observed.get(field, []), wanted.get(field, []), strict=True):
+                    if any(not _contains(actual_container.get(key, default), expected_container.get(key, default),
+                            exact=key == 'securityContext') for key, default in container_defaults.items()):
+                        raise ProviderBlockedError('kubernetes_resource_identity_conflict')
         return uid
 
     async def apply(self, context: ProvisioningContext, step: ProvisioningStep, *, create: bool = True) -> str:

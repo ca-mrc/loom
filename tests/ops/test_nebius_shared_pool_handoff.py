@@ -1572,6 +1572,16 @@ def test_shared_history_refuses_synthetic_completion_without_opening_a_connectio
     with pytest.raises(ValueError, match='completed shared pool history'):
         entry.load_completed_history(**options)
     assert {path: path.read_bytes() for path in state.rglob('*') if path.is_file()} == before
+    from scripts.ops.nebius_environment_legacy_foundation import (
+        LegacyFoundationReferenceV1,
+        prepare_legacy_foundation_import,
+    )
+
+    participant, = (row for row in bindings.migration.registration.spec.participants if row.environment_class == 'development')
+    with pytest.raises(ValueError, match='legacy_foundation_import_unqualified'):
+        prepare_legacy_foundation_import(state_dir=root / 'foundation-import', operation_id=uuid4(),
+            source=LegacyFoundationReferenceV1(**options, participant_id=participant.participant_id))
+    assert not (root / 'foundation-import' / 'plan.json').exists()
     # The actual normal-release host entry must use this semantic loader before
     # credentials or reference data can reach a release connection. In particular,
     # an initial handoff's parent status plus checksums is insufficient.
@@ -1585,6 +1595,120 @@ def test_shared_history_refuses_synthetic_completion_without_opening_a_connectio
             executable=root / 'kubectl')
     assert not (root / 'participant-releases').exists() and not (root / 'participant-anchors').exists()
     assert {path: path.read_bytes() for path in state.rglob('*') if path.is_file()} == before
+
+
+@pytest.mark.timeout(180)
+async def test_legacy_foundation_import_keeps_exact_data_and_independent_observation(shared_operation, tmp_path, monkeypatch):
+    """Real retained foundation/runtime inputs; terminal history is a narrow test boundary.
+
+    The preceding test exercises the real semantic loader's rejection. Here the
+    terminal projection is supplied explicitly so import/readback failures can be
+    tested without repeating every handoff transport and mutation.
+    """
+    from types import SimpleNamespace
+
+    import httpx
+    from httpx._client import AsyncClient
+    from scripts.ops import nebius_environment_legacy_foundation as subject
+    from scripts.ops.nebius_environment_foundation import (
+        _read,
+        prepare_foundation_import,
+        reconcile_foundation,
+    )
+
+    from loom_service.environment_management.kubernetes_provider import (
+        _RESOURCES,
+        KubernetesEnvironmentProvider,
+    )
+    from loom_service.environment_management.provider import ProviderBlockedError
+
+    args, bindings = shared_operation
+    runtime = args['runtime']
+    spec = bindings.migration.registration.spec
+    participant, = (row for row in spec.participants if row.environment_class == 'development')
+    source = subject.LegacyFoundationReferenceV1(operation_path=tmp_path / 'operation.json',
+        operation_sha256='a' * 64, participant_id=participant.participant_id)
+    completed = SimpleNamespace(migration=bindings.migration, state_dir=tmp_path / 'handoff', history=bindings.plan.history)
+    history = SimpleNamespace(runtime=runtime, bindings=bindings, files={})
+    frame = {'outcome': 'shared_pool_handoff_complete'}
+    build = copy.deepcopy(bindings.plan.development.build_namespace_target)
+    build['metadata']['uid'] = bindings.plan.development.build_namespace_original['metadata']['uid']
+    monkeypatch.setattr(subject, 'load_completed_history', lambda **_: (history, completed))
+    monkeypatch.setattr(subject, '_forward_options', lambda *args: (frame, {}, {}, {}))
+    monkeypatch.setattr(subject, 'shared_forward_build_namespace_view', lambda **_: (frame, {}, {_key(build): (build,)}))
+    destination = tmp_path / 'imported'
+    operation_id = uuid4()
+    staging, = (row for row in spec.participants if row.environment_class == 'staging')
+    with pytest.raises(ValueError, match='legacy_foundation_import_unqualified'):
+        subject.prepare_legacy_foundation_import(state_dir=tmp_path / 'unsupported',
+            source=source.model_copy(update={'participant_id': staging.participant_id}), operation_id=uuid4())
+    assert not (tmp_path / 'unsupported' / 'plan.json').exists()
+    reference = subject.prepare_legacy_foundation_import(state_dir=destination, source=source, operation_id=operation_id)
+    plan, material = _read(destination / 'plan.json'), _read(destination / 'material.json')
+    assert reference.identity.environment_id == participant.environment_id
+    assert plan['publication_sha256'] == subject.digest(runtime.database.data_runtime.bundle.candidate)
+    assert material['loom-platform-db'] == runtime.database.foundation.bootstrap['material']['loom-platform-db']
+    assert all(doc['metadata'].get('namespace') in {None, *reference.identity.namespaces}
+        for doc in plan['legacy']['resources'].values())
+    assert plan['legacy']['resources']['Namespace:-:' + participant.build_namespace.name] == build
+    source_bytes = (destination / 'plan.json').read_bytes()
+    # After a completed import, ordinary observations do not replay or require
+    # staging history, the retired manager, or the old operator credential files.
+    monkeypatch.setattr(subject, 'load_completed_history', lambda **_: pytest.fail('import replayed legacy ancestry'))
+    assert subject.prepare_legacy_foundation_import(state_dir=destination, source=source, operation_id=operation_id) == reference
+    resources = copy.deepcopy(plan['legacy']['resources'])
+    namespace = resources['Namespace:-:loom-dev']
+    namespace['metadata']['labels']['kubernetes.io/metadata.name'] = 'loom-dev'
+    namespace['spec'] = {'finalizers': ['kubernetes']}
+    pvc = resources['PersistentVolumeClaim:loom-dev:data-loom-postgres-0']
+    pvc['status'] = {'phase': 'Bound'}
+    volume = plan['legacy']['volume']
+    resources['volume'] = {'apiVersion': 'v1', 'kind': 'PersistentVolume',
+        'metadata': {'name': volume['name'], 'uid': volume['uid']}, 'spec': volume['spec'], 'status': {'phase': 'Bound'}}
+    requests = []
+    def remote(request):
+        requests.append(request)
+        assert request.method == 'GET', 'legacy import must never create, rotate or reinstall'
+        name = request.url.path.split('/')[-1]
+        if name == 'kube-system':
+            value = {'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': name,
+                'uid': str(runtime.database.foundation.binding.bootstrap.kube_system_uid)}}
+        else:
+            scope = request.url.path.split('/namespaces/')[-1].split('/')[0] if '/namespaces/' in request.url.path else None
+            collection = request.url.path.split('/')[-2]
+            if collection == 'namespaces':
+                value = resources['Namespace:-:' + name]
+            elif collection == 'persistentvolumes':
+                value = resources['volume']
+            else:
+                value, = (row for row in resources.values() if row['metadata']['name'] == name
+                    and row['metadata'].get('namespace') == scope
+                    and _RESOURCES.get(row['kind'], (None, None))[1] == collection)
+        return httpx.Response(200, json=value)
+    clouds = []
+    class Cloud:
+        async def qualify_legacy_foundation(self, **kwargs):
+            clouds.append(kwargs)
+    async with AsyncClient(base_url=plan['legacy']['config']['kubernetes_api_server'], transport=httpx.MockTransport(remote)) as http:
+        provider = KubernetesEnvironmentProvider(http)
+        observed = await reconcile_foundation(state_dir=destination, reference=reference, kubernetes=provider, cloud=Cloud())
+        assert observed.phase == 'legacy_bindings_verified' and observed.execution_enabled is None
+        assert observed.namespace_uids[participant.build_namespace.name] == str(participant.build_namespace.uid)
+        assert clouds[0]['material'] == material['loom-platform-storage']
+        copied = tmp_path / 'copied'
+        copied_ref = prepare_foundation_import(state_dir=copied, source_dir=destination,
+            source_reference=reference, source_observation=observed, operation_id=uuid4())
+        copied_observation = await reconcile_foundation(state_dir=copied, reference=copied_ref, kubernetes=provider, cloud=Cloud())
+        assert copied_observation.identities == observed.identities
+        assert copied_observation.execution_enabled is None
+        for key in ('Secret:loom-dev:loom-platform-db', 'PersistentVolumeClaim:loom-dev:data-loom-postgres-0', 'volume'):
+            original = resources[key]['metadata']['uid']
+            resources[key]['metadata']['uid'] = str(uuid4())
+            with pytest.raises(ProviderBlockedError, match='legacy_foundation_observation_unqualified'):
+                await reconcile_foundation(state_dir=destination, reference=reference, kubernetes=provider, cloud=Cloud())
+            resources[key]['metadata']['uid'] = original
+    assert (destination / 'plan.json').read_bytes() == source_bytes
+    assert requests and clouds
 
 
 @pytest.mark.timeout(420)

@@ -12,7 +12,7 @@ import json
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, cast
 from uuid import UUID
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
@@ -61,7 +61,7 @@ class FoundationObservationV2(_Strict):
     identity: EnvironmentFoundationIdentityV2
     plan_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
     observed_at: AwareDatetime
-    phase: Literal['resources_verified', 'runtime_bindings_verified'] = 'resources_verified'
+    phase: Literal['resources_verified', 'runtime_bindings_verified', 'legacy_bindings_verified'] = 'resources_verified'
     execution_enabled: Literal[False] | None = False
     namespace_uids: dict[str, str]
     identities: dict[str, str]
@@ -126,7 +126,7 @@ def prepare_foundation_import(*, state_dir: Path, source_dir: Path, source_refer
         material = _read(source_dir / 'material.json')
         if source_observation.identities.get('credentials:material') != digest(material):
             raise ValueError('foundation_material_conflict')
-        plan.update(operation_id=str(operation_id), mode='import',
+        plan.update(operation_id=str(operation_id), mode='legacy-import' if plan['mode'] == 'legacy-import' else 'import',
             import_identities=source_observation.identities, material_sha256=digest(material))
     with state._locked_state(state_dir):
         _retain(state_dir / 'plan.json', plan)
@@ -216,6 +216,14 @@ async def reconcile_foundation(*, state_dir: Path, reference: FoundationReferenc
     with state._locked_state(state_dir):
         observed_at = datetime.now(UTC)
         plan = _load(state_dir, reference)
+        if plan['mode'] == 'legacy-import':
+            from scripts.ops.nebius_environment_legacy_foundation import (
+                LegacyFoundationCloud,
+                observe_legacy_foundation,
+            )
+
+            return await observe_legacy_foundation(state_dir=state_dir, reference=reference, plan=plan,
+                kubernetes=kubernetes, cloud=cast(LegacyFoundationCloud, cloud), successors=_runtime_successors)
         declaration = EnvironmentFoundationDeclarationV2.model_validate(plan['declaration'])
         async def qualify_cluster() -> None:
             if str(kubernetes.http.base_url).rstrip('/') != declaration.platform_config['kubernetes_api_server'].rstrip('/'):
@@ -265,6 +273,7 @@ async def reconcile_foundation(*, state_dir: Path, reference: FoundationReferenc
             row = reference.identity
             allowed = {f'k8s:Deployment:{row.application_namespace}:{name}' for name in (
                 'loom-service', 'loom-control-plane', 'loom-web', 'loom-llm-gateway')}
+            allowed.add(f'k8s:ConfigMap:{row.application_namespace}:loom-platform-config')
             allowed.add('k8s:Namespace:-:' + row.build_namespace)
             allowed.update(f'k8s:ResourceQuota:{namespace}:loom-execution-disabled'
                 for namespace in (row.execution_namespace, row.build_namespace))
@@ -275,6 +284,11 @@ async def reconcile_foundation(*, state_dir: Path, reference: FoundationReferenc
                         key != 'k8s:' + _key(doc)
                         or _uid(doc) != identities[key] for doc in options)):
                     raise ValueError('foundation_runtime_successor_invalid')
+                if key == f'k8s:ConfigMap:{row.application_namespace}:loom-platform-config':
+                    from scripts.ops.nebius_environment_legacy_foundation import _qualify_successor
+                    for option in options:
+                        original = kubernetes._expected(context, ProvisioningStep(key, 'kubernetes', context.documents[key]))
+                        _qualify_successor(original, option, application_namespace=row.application_namespace)
         cloud_provider = NebiusEnvironmentCloudProvider(cloud)
         for index, step in enumerate(steps):
             # Retain each intended effect before attempting it, including the

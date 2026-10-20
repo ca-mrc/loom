@@ -139,8 +139,45 @@ IDs. A lost reply is reconciled against the original intent. Foreign collisions,
 missing recorded resources, replaced UIDs and incomplete retained history fail
 closed. There is no patch/delete fallback. An explicit import of a retained v2
 foundation re-observes every exact source ID without reinstalling workloads or
-rotating credentials; legacy installations require their separate ancestry
-adapter, not name-only adoption.
+rotating credentials.
+
+`scripts.ops.nebius_environment_legacy_foundation` imports the full development
+foundation from a completed v1 shared-pool handoff, selected by its pinned private
+operation and exact participant ID. It validates the real terminal children and
+freezes their selected workload/namespace successors alongside the original
+Secrets, database PVC/PV and cloud account/bucket identities. Import performs no
+provider writes, label changes, credential rotation or manager restart. Historical
+manager evidence establishes ancestry; current manager and participant version
+compatibility still require their separate qualification. A standalone or partial
+handoff is rejected. A historical staging workload attachment lacks complete
+Secret/PVC ancestry and cannot alone authorize a full-foundation import.
+
+Existing development, staging and production installations can instead use
+`scripts.ops.nebius_environment_installed_import`. The protected lifecycle
+installation pins a private `loom.installed-legacy-foundation.v2` snapshot with
+the full declaration, protected publication, exact resource UIDs and manifests,
+PVC/PV binding, and cloud project, disk, bucket and credential-subject IDs.
+Ordinary runners supply only the installed operation ID. Import compares actual
+Secret bytes, exact Kubernetes objects, the disk's provider project, active key
+subjects, exclusive object-access groups and all selected bucket grants.
+Production snapshots include the backup subject and bucket. Name matches,
+caller-provided hashes and a partial workload attachment do not establish this
+installed authority.
+
+Subsequent observations use the imported immutable plan and current protected
+credentials without loading peer release history or retired operator files. They
+recheck exact Kubernetes UIDs and configuration, bound storage and the original
+cloud credential subjects. `legacy_bindings_verified` leaves execution state
+unspecified: importing an already running participant cannot claim closed intake,
+grant enrollment, or establish an application/schema upgrade. Public routing and
+runtime qualification remain separate checks against the imported data binding.
+An installed snapshot may also retain its existing participant, catalog,
+publication and active administration head. This explicit runtime predecessor is
+consumed by the release workflow without creating enrollment, staging or startup
+receipts. The workflow must freshly prove the actual binding/head, process and
+platform state before issuing a release. It preserves all data/credential
+objects; only journaled workload, publication-profile and generated native-policy
+successors can relax their retained comparisons.
 
 `scripts.ops.nebius_foundation_readiness` performs a read-only check of completed
 resources, the owned bound PVC, PostgreSQL Pod/StatefulSet/Service/EndpointSlice

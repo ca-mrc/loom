@@ -102,7 +102,8 @@ async def test_kubernetes_create_success_rejects_replacement_before_readback():
     assert calls == ['GET', 'POST', 'GET']
 
 
-@pytest.mark.parametrize('damage', ['owner', 'init_container', 'host_network', 'privileged', 'service_account'])
+@pytest.mark.parametrize('damage', ['owner', 'init_container', 'host_network', 'privileged', 'service_account',
+    'command', 'environment_source', 'secret_volume', 'container_security_context'])
 def test_controller_readback_rejects_added_execution_authority(damage):
     expected = {'apiVersion': 'apps/v1', 'kind': 'Deployment', 'metadata': {'name': 'service'},
         'spec': {'template': {'spec': {'containers': [{'name': 'service', 'image': 'fixed',
@@ -118,7 +119,16 @@ def test_controller_readback_rejects_added_execution_authority(damage):
         pod['hostNetwork'] = True
     elif damage == 'privileged':
         pod['containers'][0]['securityContext']['privileged'] = True
-    else:
+    elif damage == 'service_account':
         pod['serviceAccountName'] = 'foreign'
+    elif damage == 'command':
+        pod['containers'][0]['command'] = ['unapproved-command']
+    elif damage == 'environment_source':
+        pod['containers'][0]['envFrom'] = [{'secretRef': {'name': 'foreign'}}]
+    elif damage == 'secret_volume':
+        pod['volumes'] = [{'name': 'foreign', 'secret': {'secretName': 'foreign'}}]
+    else:
+        expected['spec']['template']['spec']['containers'][0].pop('securityContext')
+        pod['containers'][0]['securityContext'] = {'privileged': True}
     with pytest.raises(ProviderBlockedError, match='identity_conflict'):
         KubernetesEnvironmentProvider._identity(actual, expected, 'retained')
