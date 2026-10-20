@@ -404,7 +404,7 @@ async def test_retry_clears_harbor_fixed_tmux_session_before_each_setup(
                 step_id="main",
             )
 
-    cleanup = "tmux kill-session -t terminus-2 2>/dev/null || true"
+    cleanup = "tmux kill-session -t =terminus-2 2>/dev/null || true"
     assert lifecycle == [cleanup, "setup", cleanup, "setup"]
     assert tokens_seen == ["token-1", "token-2"]
     await driver.stop()
@@ -654,6 +654,8 @@ class _RecoverableSession:
         self.exec_commands.append(command)
         if command.strip() == "pwd":
             return _FakeExecResult(stdout="/app\n")
+        if "pane_dead" in command:
+            return _FakeExecResult(stdout="0\n" if self._alive else "1\n")
         if "new-session" in command:
             if not self._recreate_ok:
                 return _FakeExecResult(return_code=1, stderr="boom")
@@ -673,15 +675,15 @@ async def test_tmux_alive_guard_soft_recovers_once_then_fails_closed() -> None:
 
     session._alive = False
     await agent._session.send_keys("chmod +x /tmp/x\n")
-    # Failed keystrokes are not replayed; original send_keys still ran once
-    # before the post-check discovered death, then soft-recovered.
-    assert session.calls == 2
+    # The exact-target precheck detects an already missing session before keys
+    # are sent. Recovery never replays that command.
+    assert session.calls == 1
     assert any("new-session" in cmd for cmd in session.exec_commands)
     assert session._previous_buffer is None
 
     # Remaining keys in the same batch are suppressed (no replay / no follow-ons).
     await agent._session.send_keys("echo should-skip\n")
-    assert session.calls == 2
+    assert session.calls == 1
 
     output = await agent._session.get_incremental_output()
     assert "recreated once" in output
@@ -691,12 +693,12 @@ async def test_tmux_alive_guard_soft_recovers_once_then_fails_closed() -> None:
 
     # After the notice is emitted, later turns can send keys again.
     await agent._session.send_keys("ls\n")
-    assert session.calls == 3
+    assert session.calls == 2
 
     session._alive = False
     with pytest.raises(AgentError, match="lost mid-dispatch"):
         await agent._session.send_keys("second-death\n")
-    assert session.calls == 4
+    assert session.calls == 2
 
 
 @pytest.mark.asyncio
@@ -706,6 +708,7 @@ async def test_tmux_alive_guard_soft_recovers_from_no_server_send_keys_error() -
     async def _raise_no_server(*args: object, **kwargs: object) -> None:
         del args, kwargs
         session.calls += 1
+        session._alive = False
         raise RuntimeError(
             "loom-trial-main: failed to send non-blocking keys: "
             "return_code=1, stderr='no server running on /tmp/tmux-0/default\\n'"
@@ -733,7 +736,7 @@ async def test_tmux_alive_guard_fails_closed_when_recreate_fails() -> None:
     session._alive = False
     with pytest.raises(AgentError, match="lost mid-dispatch") as excinfo:
         await agent._session.send_keys("chmod +x /tmp/x\n")
-    assert session.calls == 1
+    assert session.calls == 0
     # Acceptance: actionable agent_error, not empty internal_error (#1068 / #1075).
     from loom.errors import classify_failure
     from loom.models.result import FailureReason
@@ -799,4 +802,4 @@ async def test_tmux_alive_guard_fails_closed_without_environment() -> None:
 
     with pytest.raises(AgentError, match="lost mid-dispatch"):
         await agent._session.send_keys("echo x\n")
-    assert session.calls == 1
+    assert session.calls == 0

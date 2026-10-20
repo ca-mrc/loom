@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shlex
 import tempfile
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -15,6 +16,7 @@ from uuid import UUID
 
 from loom.agent.direct_provider import DirectCallLedger, DirectProviderConnection
 from loom.agent.terminus2.checkpoint_bridge import HarborCheckpointBridge
+from loom.agent.terminus2.dispatch_checkpoint import install_dispatch_checkpoint
 from loom.agent.terminus2.gateway_ledger import CheckpointBridgeError
 from loom.agent.terminus2.harbor_environment import (
     LoomHarborEnvironment,
@@ -44,6 +46,7 @@ from loom.models.trajectory import (
 from loom.models.trial import MultiModelSwitchSpec
 from loom.models.types import OS, ModelSpec
 from loom.request_params import sanitize_request_extras
+from loom.security.redaction import redact_mapping, redact_text
 from loom.trajectory.attempt_guard import AttemptTrajectoryFencedError
 
 if TYPE_CHECKING:
@@ -111,17 +114,36 @@ async def _reset_harbor_tmux_session(env: Driver) -> None:
     session error. Each trial owns its sandbox; target only Harbor's fixed name.
     """
     await env.exec(
-        f"tmux kill-session -t {_HARBOR_TMUX_SESSION} 2>/dev/null || true",
+        f"tmux kill-session -t ={_HARBOR_TMUX_SESSION} 2>/dev/null || true",
     )
 
 
-def _tmux_loss_error_text(exc: BaseException) -> str:
-    return str(exc)
+def _harbor_tmux_name(session: Any) -> str:
+    return getattr(session, "_loom_canonical_session_name", None) or getattr(
+        session, "_session_name", None,
+    ) or _HARBOR_TMUX_SESSION
 
 
-def _is_tmux_server_lost_error(exc: BaseException) -> bool:
-    text = _tmux_loss_error_text(exc).lower()
-    return "no server running" in text or "lost mid-dispatch" in text
+def _bind_exact_harbor_tmux_target(session: Any) -> None:
+    """Bind operations to an exact target, retaining the creation identity.
+
+    Pinned Harbor uses _session_name in send-keys, paste-buffer and capture.
+    A permanent instance-local binding closes the check/send race: after the
+    owned session exits, tmux must not fall back to a same-prefix session.
+    Render the creation command first; '=name' is a target, not a new name.
+    """
+    if getattr(session, "_loom_canonical_session_name", None) is not None:
+        return
+    name = _harbor_tmux_name(session)
+    start = getattr(session, "_tmux_start_session", None)
+    start = start() if callable(start) else start
+    if isinstance(start, str):
+        # Pinned Harbor creates the literal name, then attaches its log pipe.
+        # The latter is a target operation and must be exact as well.
+        start = start.replace(f"pipe-pane -t {name} ", f"pipe-pane -t {shlex.quote('=' + name + ':')} ")
+    session._loom_tmux_start_command = start
+    session._loom_canonical_session_name = name
+    session._session_name = "=" + name + ":"
 
 
 async def _recreate_harbor_tmux_session(session: Any) -> str:
@@ -135,22 +157,10 @@ async def _recreate_harbor_tmux_session(session: Any) -> str:
     if environment is None:
         raise AgentError(_TMUX_SESSION_LOST_MID_DISPATCH)
 
-    session_name = getattr(session, "_session_name", None) or _HARBOR_TMUX_SESSION
-    user = getattr(session, "_user", None)
-    exec_kwargs: dict[str, Any] = {}
-    if user is not None:
-        exec_kwargs["user"] = user
+    session_name = _harbor_tmux_name(session)
+    await _tmux_exec(session, f"tmux kill-session -t {shlex.quote('=' + session_name)} 2>/dev/null || true")
 
-    kill = await environment.exec(
-        command=(
-            f"tmux kill-session -t {session_name} 2>/dev/null || true; "
-            f"tmux kill-server 2>/dev/null || true"
-        ),
-        **exec_kwargs,
-    )
-    del kill
-
-    start_cmd = getattr(session, "_tmux_start_session", None)
+    start_cmd = getattr(session, "_loom_tmux_start_command", None) or getattr(session, "_tmux_start_session", None)
     if isinstance(start_cmd, str) and start_cmd.strip():
         command = start_cmd
     elif callable(start_cmd):
@@ -161,26 +171,70 @@ async def _recreate_harbor_tmux_session(session: Any) -> str:
             f"tmux new-session -d -s {session_name} 'bash --login'"
         )
 
-    started = await environment.exec(command=command, **exec_kwargs)
+    started = await _tmux_exec(session, command)
     return_code = getattr(started, "return_code", None)
     if return_code not in (0, None):
         stderr = getattr(started, "stderr", "") or ""
         raise AgentError(f"{_TMUX_SESSION_LOST_MID_DISPATCH} Recreate failed: {stderr}".strip())
 
+    await _retain_harbor_dead_pane(session)
+
     # Incremental capture state from the dead pane is meaningless.
     if hasattr(session, "_previous_buffer"):
         session._previous_buffer = None
 
-    is_alive = getattr(session, "is_session_alive", None)
+    is_alive = getattr(session, "_loom_is_alive_without_recovery", None) or getattr(session, "is_session_alive", None)
     if is_alive is not None and not await is_alive():
         raise AgentError(_TMUX_SESSION_LOST_MID_DISPATCH)
 
-    pwd = await environment.exec(command="pwd", **exec_kwargs)
+    pwd = await _tmux_exec(session, "pwd")
     cwd = (getattr(pwd, "stdout", None) or "").strip() or "unknown"
     return cwd
 
 
-def _install_tmux_session_alive_guard(agent: Any) -> None:
+async def _tmux_exec(session: Any, command: str) -> Any:
+    environment = getattr(session, "environment", None)
+    if environment is None:
+        raise AgentError(_TMUX_SESSION_LOST_MID_DISPATCH)
+    require_active = getattr(session, "_loom_require_attempt_active", lambda: None)
+    require_active()
+    deadline = getattr(session, "_loom_attempt_deadline", None)
+    timeout = min(5.0, deadline.require_remaining()) if deadline is not None else 5.0
+    user = getattr(session, "_user", None)
+    async with asyncio.timeout(timeout):
+        result = await environment.exec(
+            command=command, timeout_sec=timeout,
+            **({"user": user} if user is not None else {}),
+        )
+    require_active()
+    return result
+
+
+async def _retain_harbor_dead_pane(session: Any) -> None:
+    target = shlex.quote("=" + _harbor_tmux_name(session) + ":")
+    result = await _tmux_exec(session, f"tmux set-option -w -t {target} remain-on-exit on")
+    if getattr(result, "return_code", 0) != 0:
+        raise AgentError("Failed to retain Terminus2 shell-exit diagnostics")
+
+
+async def _capture_harbor_session_loss(session: Any) -> str:
+    target = shlex.quote("=" + _harbor_tmux_name(session) + ":")
+    # Query only this trial's pane, never another session or server-wide state.
+    result = await _tmux_exec(session, (
+        f"tmux list-panes -t {target} -F "
+        "'pane_id=#{pane_id} pane_dead=#{pane_dead} exit=#{pane_dead_status} signal=#{pane_dead_signal}' "
+        f"2>&1; tmux capture-pane -p -t {target} -S -80 2>&1"
+    ))
+    text = "Terminus2 session loss before recovery:\n" + (getattr(result, "stdout", "") or "")
+    text += getattr(result, "stderr", "") or ""
+    # The bridge applies known-credential redaction before its 16 KiB bound.
+    return redact_text(text)
+
+
+def _install_tmux_session_alive_guard(
+    agent: Any, *, record_loss: Callable[[str], Awaitable[None]] | None = None,
+    require_active: Callable[[], None] = lambda: None,
+) -> None:
     """Soft-recover once if Harbor's tmux session dies mid-dispatch (#1068).
 
     After ``send_keys``, if the session/server is gone (or ``send_keys`` raises
@@ -200,8 +254,23 @@ def _install_tmux_session_alive_guard(agent: Any) -> None:
     session = getattr(agent, "_session", None)
     if session is None:
         return
+    _bind_exact_harbor_tmux_target(session)
     original_send_keys = session.send_keys
     original_get_incremental = getattr(session, "get_incremental_output", None)
+    original_is_alive = getattr(session, "is_session_alive", None)
+
+    async def is_alive_with_dead_pane_check() -> bool:
+        require_active()
+        if original_is_alive is not None and not await original_is_alive():
+            return False
+        if getattr(session, "environment", None) is None:
+            return True
+        target = shlex.quote("=" + _harbor_tmux_name(session) + ":")
+        result = await _tmux_exec(session, f"tmux display-message -p -t {target} '#{{pane_dead}}'")
+        require_active()
+        return getattr(result, "return_code", 0) == 0 and (getattr(result, "stdout", "") or "").strip() == "0"
+
+    session._loom_is_alive_without_recovery = is_alive_with_dead_pane_check
 
     recovered_once = False
     suppress_keys = False
@@ -209,6 +278,27 @@ def _install_tmux_session_alive_guard(agent: Any) -> None:
 
     async def _soft_recover_or_raise(cause: BaseException | None = None) -> None:
         nonlocal recovered_once, suppress_keys, pending_notice
+        require_active()
+        if record_loss is not None:
+            # Persistence failure must preserve the dead pane and stop recovery.
+            try:
+                text = await _capture_harbor_session_loss(session)
+                policy = (
+                    "Failed keystrokes are not replayed; remaining commands in "
+                    "this batch are suppressed.\n"
+                    + ("Recovery budget exhausted; fail closed.\n" if recovered_once
+                       else "One session recreation may be attempted after persistence.\n")
+                )
+                await record_loss(policy + text)
+            except (AttemptDeadlineExceededError, AttemptTrajectoryFencedError):
+                raise
+            except Exception as exc:
+                # Harbor treats TimeoutError from send_keys as a normal
+                # command timeout and continues. A failed diagnostic is terminal.
+                raise AgentError(
+                    "Terminus2 tmux session loss detected; diagnostic persistence unavailable",
+                ) from exc
+        require_active()
         if recovered_once:
             raise AgentError(_TMUX_SESSION_LOST_MID_DISPATCH) from cause
         try:
@@ -222,23 +312,35 @@ def _install_tmux_session_alive_guard(agent: Any) -> None:
         pending_notice = _TMUX_SOFT_RECOVER_NOTICE.format(cwd=cwd)
 
     async def _send_keys_with_alive_check(*args: Any, **kwargs: Any) -> Any:
+        require_active()
         if suppress_keys:
             # Remainder of the in-flight command batch after a soft recover.
+            return None
+        if not await is_alive_with_dead_pane_check():
+            await _soft_recover_or_raise()
             return None
         try:
             result = await original_send_keys(*args, **kwargs)
         except Exception as exc:
-            if _is_tmux_server_lost_error(exc):
+            if not await is_alive_with_dead_pane_check():
                 await _soft_recover_or_raise(exc)
                 return None
             raise
-        is_alive = getattr(session, "is_session_alive", None)
-        if is_alive is not None and not await is_alive():
+        if not await is_alive_with_dead_pane_check():
             await _soft_recover_or_raise()
             return None
         return result
 
     session.send_keys = _send_keys_with_alive_check
+
+    async def _alive_with_recovery() -> bool:
+        # A long-running command can exit after send_keys' immediate check.
+        # Harbor's next loop must retain diagnostics instead of silently return.
+        if not await is_alive_with_dead_pane_check():
+            await _soft_recover_or_raise()
+        return True
+
+    session.is_session_alive = _alive_with_recovery
 
     if original_get_incremental is None:
         return
@@ -634,6 +736,18 @@ class LoomTerminus2Runtime:
         trial_paths = make_trial_paths(logs_root)
         trial_paths.mkdir()
 
+        def redact_payload(value: Any) -> Any:
+            value = redact_mapping(value)
+            if self.direct_provider is not None:
+                value = self.direct_provider.redact(value)
+            if isinstance(value, str):
+                return value.replace(step_token, "[REDACTED:step-token]") if step_token else value
+            if isinstance(value, dict):
+                return {key: redact_payload(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [redact_payload(item) for item in value]
+            return value
+
         bridge = HarborCheckpointBridge(
             trajectory=trajectory,
             trial_id=self.trial_id,
@@ -641,7 +755,7 @@ class LoomTerminus2Runtime:
             model=self.model,
             cp_client=self.direct_ledger if self.direct_provider else self.cp_client,
             emit_llm_call_events=self.direct_provider is None,
-            redact_payload=self.direct_provider.redact if self.direct_provider else None,
+            redact_payload=redact_payload,
         )
         _require_attempt_mutation_active(trajectory, self._attempt_deadline)
         # These compatibility overrides are observable behavior, independent
@@ -937,7 +1051,39 @@ class LoomTerminus2Runtime:
         async def _run_session() -> None:
             await _reset_harbor_tmux_session(env)
             await agent.setup(harbor_env)
-            _install_tmux_session_alive_guard(agent)
+            session = getattr(agent, "_session", None)
+            if session is not None:
+                def require_active() -> None:
+                    _require_attempt_mutation_active(trajectory, self._attempt_deadline)
+
+                async def record_dispatch(step: dict[str, Any], episode: int) -> None:
+                    require_active()
+                    previous = [entry.model_dump(mode="json") for entry in agent._trajectory_steps]
+                    if self._attempt_deadline is None:
+                        await bridge.record_dispatch(step, episode=episode, preceding_steps=previous)
+                    else:
+                        async with asyncio.timeout(self._attempt_deadline.require_remaining()):
+                            await bridge.record_dispatch(step, episode=episode, preceding_steps=previous)
+                    require_active()
+
+                async def record_loss(text: str) -> None:
+                    require_active()
+                    if self._attempt_deadline is None:
+                        await bridge.record_session_loss(text)
+                    else:
+                        async with asyncio.timeout(self._attempt_deadline.require_remaining()):
+                            await bridge.record_session_loss(text)
+                    require_active()
+
+                session._loom_require_attempt_active = require_active
+                session._loom_attempt_deadline = self._attempt_deadline
+                require_active()
+                await _retain_harbor_dead_pane(session)
+                require_active()
+                install_dispatch_checkpoint(agent, record=record_dispatch, require_active=require_active)
+                _install_tmux_session_alive_guard(
+                    agent, record_loss=record_loss, require_active=require_active,
+                )
             await agent.run(instruction, harbor_env, context)
 
         async def _supervise_session() -> None:

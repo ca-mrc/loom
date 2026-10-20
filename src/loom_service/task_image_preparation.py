@@ -18,6 +18,7 @@ from loom.db.schema import (
     Trial,
     TrialTaskImageMaterialization,
 )
+from loom.task_image_failure import image_preparation_failure
 
 _REASONS = {
     "build_prepare_failed": "Task image source preparation failed. Check that the task source and build context are available.",
@@ -85,7 +86,10 @@ def preparation_response(
         native = attempt.native_build
     phases = _phases(native)
     reason = row.failure_reason
+    typed_failure = image_preparation_failure(reason)
     message = _REASONS.get(reason) if reason is not None else None
+    if typed_failure is not None:
+        message = typed_failure["message"]
     if reason and message is None:
         reason, message = (
             "build_failed",
@@ -109,6 +113,8 @@ def preparation_response(
         "state": row.state,
         "attempt_count": row.attempt_count,
         "failure_reason": reason,
+        **({"retryable": typed_failure["retryable"], "attribution": typed_failure["attribution"]}
+           if typed_failure is not None else {}),
         "message": message,
         "next_attempt_at": row.next_attempt_at.isoformat() if row.next_attempt_at else None,
         "phases": phases,

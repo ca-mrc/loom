@@ -16,6 +16,7 @@ COPY src/loom/__init__.py src/loom/dockerfile_instructions.py src/loom/nebius_te
     src/loom/execution_diagnosis_store.py src/loom/execution_failure_diagnosis.py \
     src/loom/execution_requirements.py src/loom/mutable_paths.py src/loom/sandbox_identity.py src/loom/task_fixtures.py \
     src/loom/task_image_materialization.py src/loom/task_image_build_plan.py \
+    src/loom/task_image_compatibility.py src/loom/task_image_errors.py src/loom/task_image_failure.py \
     src/loom/task_image_metadata.py src/loom/task_environment_handoff.py src/loom/runtime_environment.py \
     src/loom/nebius_rollout_guard.py src/loom/nebius_kubernetes.py src/loom/startup_retry.py src/loom/terminal_result_semantics.py src/loom/resource_usage_store.py ./src/loom/
 COPY src/loom/agent_runtime.py src/loom/request_params.py src/loom/service_execution_materialization.py \

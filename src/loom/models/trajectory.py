@@ -412,6 +412,10 @@ class Terminus2CommandEvent(_EventBase):
     index: int = Field(ge=0)
     keystrokes: str
     duration_sec: float = Field(ge=0)
+    # True records parsed intent before keystrokes are sent. It does not prove
+    # execution; a loss may suppress the remainder of that command batch.
+    # Historical checkpoint-only records did not capture this boundary.
+    recorded_before_dispatch: bool | None = None
 
 
 class Terminus2TerminalObservationEvent(_EventBase):

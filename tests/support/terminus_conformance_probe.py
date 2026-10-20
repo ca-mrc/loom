@@ -13,6 +13,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -80,6 +81,10 @@ class Session:
     def __init__(self):
         self.commands = []
         self.fail_next = False
+        self.environment = self
+
+    async def exec(self, command, **kwargs):
+        return SimpleNamespace(return_code=0, stdout="0\n", stderr="")
 
     async def is_session_alive(self):
         return True

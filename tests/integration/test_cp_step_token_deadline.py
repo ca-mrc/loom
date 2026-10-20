@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 from collections.abc import Iterator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, tzinfo
 from uuid import UUID, uuid4
 
 import pytest
@@ -16,6 +16,7 @@ from loom.auth import verify_step_jwt
 from loom.db.schema import Task, Team, TeamQuota, Token, Trial
 from loom_control_plane.app import create_app
 from loom_control_plane.config import ControlPlaneSettings
+from loom_control_plane.routes import step_tokens
 from loom_control_plane.routes.step_tokens import _execution_attempt_step_token_ttl
 
 
@@ -160,9 +161,24 @@ def test_endpoint_rejects_numeric_monotonic_deadline(deadline_app) -> None:  # t
     assert response.status_code == 422
 
 
-def test_endpoint_rejects_expiry_without_deadline_grace(deadline_app) -> None:  # type: ignore[no-untyped-def]
+@pytest.fixture
+def step_token_wall_clock(monkeypatch: pytest.MonkeyPatch) -> datetime:
+    now = datetime.now(UTC).replace(microsecond=0)
+
+    class RouteClock(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> datetime:
+            return now.astimezone(tz) if tz is not None else now.replace(tzinfo=None)
+
+    # Startup/authentication delays must not turn a deliberately short token
+    # into one that covers the deadline; freeze only the owning route's clock.
+    monkeypatch.setattr(step_tokens, "datetime", RouteClock)
+    return now
+
+
+def test_endpoint_rejects_expiry_without_deadline_grace(deadline_app, step_token_wall_clock) -> None:  # type: ignore[no-untyped-def]
     app, raw_token, team_id, trial_id = deadline_app
-    deadline = datetime.now(UTC) + timedelta(seconds=60)
+    deadline = step_token_wall_clock + timedelta(seconds=60)
     with TestClient(app) as client:
         response = client.post(
             "/admin/step-tokens",
@@ -181,10 +197,10 @@ def test_endpoint_rejects_expiry_without_deadline_grace(deadline_app) -> None:  
 
 
 def test_endpoint_rejects_attempt_above_30000_second_token_ceiling(
-    deadline_app,
+    deadline_app, step_token_wall_clock,
 ) -> None:  # type: ignore[no-untyped-def]
     app, raw_token, team_id, trial_id = deadline_app
-    deadline = datetime.now(UTC) + timedelta(seconds=29_710)
+    deadline = step_token_wall_clock + timedelta(seconds=29_710)
     with TestClient(app) as client:
         response = client.post(
             "/admin/step-tokens",

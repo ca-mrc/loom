@@ -2699,6 +2699,7 @@ async def test_post_accepts_ordinary_task_from_deployment_runtime_profile(
     use_combinations: bool,
     agent_name: str,
     dockerfile: bool,
+    shared_minio,
 ) -> None:
     app, raw, team_id = camp_setup
     suffix = "combinations" if use_combinations else "single"
@@ -2733,6 +2734,27 @@ async def test_post_accepts_ordinary_task_from_deployment_runtime_profile(
         environment.update({
             "dockerfile": "environment/Dockerfile", "cpu_arch": "any",
         })
+    source = "s3://artifacts/task-inputs/task/"
+    provenance = {"service_execution_input": {
+        "schema_version": "loom.service-execution-input.v1",
+        "manifest_uri": "s3://artifacts/task-inputs/task.json",
+        "manifest_sha256": "sha256:" + "d" * 64, "file_count": 3, "total_bytes": 4096,
+    }}
+    storage_client = None
+    if dockerfile and agent_name == "terminus-2":
+        from pydantic import SecretStr
+
+        from loom_service.storage import create_minio_client
+        from tests.support.task_image_source import publish_dockerfile
+        storage = shared_minio.get_config()
+        app.state.settings = app.state.settings.model_copy(update={
+            "minio_endpoint": f"http://{storage['endpoint']}",
+            "minio_access_key": SecretStr(storage["access_key"]),
+            "minio_secret_key": SecretStr(storage["secret_key"]),
+        })
+        storage_client = create_minio_client(app.state.settings, endpoint_url=app.state.settings.minio_endpoint)
+        source, provenance = publish_dockerfile(storage_client,
+            bucket=app.state.settings.artifacts_bucket, prefix=f"admission/{uuid4().hex}/", checksum="c" * 64)
     execution_class_spec = NEBIUS_CPU_EXECUTION_CLASS_V1.model_dump(mode="json")
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
@@ -2771,16 +2793,8 @@ async def test_post_accepts_ordinary_task_from_deployment_runtime_profile(
                 id=task_id,
                 checksum="c" * 64,
                 config=task_config,
-                source="s3://artifacts/task-inputs/task/",
-                source_provenance={
-                    "service_execution_input": {
-                        "schema_version": "loom.service-execution-input.v1",
-                        "manifest_uri": "s3://artifacts/task-inputs/task.json",
-                        "manifest_sha256": "sha256:" + "d" * 64,
-                        "file_count": 3,
-                        "total_bytes": 4096,
-                    }
-                },
+                source=source,
+                source_provenance=provenance,
                 license="MIT",
             )
         )
@@ -2866,6 +2880,11 @@ async def test_post_accepts_ordinary_task_from_deployment_runtime_profile(
                 )
             )
             s.commit()
+        if storage_client is not None:
+            prefix = source.split("/", 3)[3].removesuffix("task/")
+            for key in (prefix + "manifest.json", prefix + "task/environment/Dockerfile"):
+                storage_client.delete_object(Bucket=app.state.settings.artifacts_bucket, Key=key)
+            storage_client.close()
         sync_engine.dispose()
 
 

@@ -452,12 +452,26 @@ jobs:
               print(json.load(archive.extractfile('manifest.json'))[0]['RepoTags'][0])
           PY
           )")
-          for probe in terminus_conformance_probe.py terminus_continuation_probe.py; do
+          # Ephemeral tool fixture for this Harbor component's own probe.
+          docker build --build-arg "HARBOR_RUNTIME_IMAGE=$image" \
+            -t loom-terminus-tmux-probe:ci - <<'DOCKERFILE'
+          ARG HARBOR_RUNTIME_IMAGE
+          FROM ${HARBOR_RUNTIME_IMAGE}
+          USER root
+          RUN apt-get update -qq && apt-get install -y --no-install-recommends tmux && \
+              rm -rf /var/lib/apt/lists/*
+          USER 65532:65532
+          DOCKERFILE
+          for probe in terminus_conformance_probe.py terminus_continuation_probe.py terminus_dispatch_diagnostics_probe.py; do
+            probe_image="$image"
+            if [[ "$probe" == terminus_dispatch_diagnostics_probe.py ]]; then
+              probe_image=loom-terminus-tmux-probe:ci
+            fi
             docker run --rm --network none --cap-drop ALL \
               --security-opt no-new-privileges --memory 1g --cpus 1 \
               -e LITELLM_LOCAL_MODEL_COST_MAP=True \
               -v "$PWD/tests/support/$probe:/probe.py:ro" \
-              --entrypoint python "$image" -I -B /probe.py
+              --entrypoint python "$probe_image" -I -B /probe.py
           done
 
       - name: Generate controlled Trivy policy

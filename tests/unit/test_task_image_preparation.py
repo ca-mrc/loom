@@ -117,3 +117,11 @@ def test_build_budget_and_job_deadline_use_structured_evidence_only():
     assert "private" not in str(result)
     native.clear()
     assert preparation_response(row, attempt)["message"] == "Task image preparation exceeded its deadline."
+
+
+def test_platform_preparation_incompatibility_keeps_typed_reason_without_raw_logs():
+    result = preparation_response(materialization(failure_reason="image_preparation_base_unsupported"), None)
+    assert result["failure_reason"] == "image_preparation_base_unsupported"
+    assert result["attribution"] == "platform"
+    assert result["retryable"] is False
+    assert "secret" not in str(result) and "registry.private" not in str(result)

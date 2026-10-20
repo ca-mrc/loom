@@ -453,6 +453,9 @@ source_paths = [
   "src/loom/task_environment_handoff.py",
   "src/loom/task_image_build_plan.py",
   "src/loom/task_image_bundle_manifest.py",
+  "src/loom/task_image_compatibility.py",
+  "src/loom/task_image_errors.py",
+  "src/loom/task_image_failure.py",
   "src/loom/task_image_materialization.py",
   "src/loom/task_image_metadata.py",
   "src/loom/task_fixtures.py",
@@ -737,6 +740,7 @@ source_paths = [
   "scripts/ops/harbor_upstream.py",
   "tests/support/terminus_conformance_probe.py",
   "tests/support/terminus_continuation_probe.py",
+  "tests/support/terminus_dispatch_diagnostics_probe.py",
   "src/loom/**",
 ]
 smoke_owner = "worker-runtime-conformance"

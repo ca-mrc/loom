@@ -477,3 +477,19 @@ def test_active_work_is_not_a_failure_or_supplemental_target(state: str) -> None
         SimpleNamespace(id=uuid4()), [active], supplemental_trials=[replacement],
     )
     assert plan["final_trial_selection"][0]["selected_trial_id"] == str(active.id)
+
+
+@pytest.mark.parametrize("reason,attribution,retryable", [
+    ("image_preparation_base_unsupported", "platform", False),
+    ("image_preparation_source_unavailable", "platform", True),
+    ("image_preparation_input_invalid", "unknown", False),
+])
+def test_typed_preparation_failure_is_unscored_without_invented_task_fault(reason, attribution, retryable):
+    trial = _trial(task_id="synthetic/preparation", state="failed", failure_reason="task_image_build_failed",
+        result={"task_image_preparation_failure": {"reason": reason, "message": "private raw detail"}})
+    result = classify_trial_outcome(trial)
+    assert result["attribution"] == attribution
+    assert result["score_outcome"] == "unscored"
+    assert result["requires_task_change"] is False
+    assert result["rerunnable"] is retryable
+    assert "private raw detail" not in str(result)

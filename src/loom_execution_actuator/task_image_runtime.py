@@ -27,7 +27,10 @@ from uuid import uuid4
 
 import boto3
 from botocore.config import Config
-from botocore.exceptions import BotoCoreError, ClientError
+from botocore.exceptions import (
+    BotoCoreError,
+    ClientError,
+)
 from loom_bundle_checksum import sha256_of_dir
 
 from loom.nebius_terminus_image import append_terminus_runtime_tools
@@ -38,6 +41,7 @@ from loom.service_execution_materialization import (
 )
 from loom.task_image_build_plan import derive_task_image_build_components
 from loom.task_image_bundle_manifest import capture_task_image_bundle_manifest
+from loom.task_image_errors import TaskImagePreparationError, classify_preparation_failure
 from loom.task_image_materialization import task_bundle_content_manifest_digest
 from loom.task_image_metadata import TaskImageRuntimeMetadataV1
 from loom.trajectory.storage import (
@@ -67,8 +71,9 @@ _KEY = re.compile(r"[0-9a-f]{64}\Z")
 _STAGE_KEY = "loom_task_image_stage"
 
 
-class BuildPreparationError(ValueError):
-    pass
+class BuildPreparationError(TaskImagePreparationError):
+    def __init__(self, message: str, *, code: str = "image_preparation_input_invalid") -> None:
+        super().__init__(code, message)
 
 
 def emit_stage(stage: str, event: str, **fields: Any) -> None:
@@ -777,6 +782,8 @@ def _install_terminus_runtime_tools(claim: dict[str, Any], context: Path) -> Non
         dockerfile = context / component.dockerfile_path
         try:
             rewritten = append_terminus_runtime_tools(dockerfile.read_text())
+        except TaskImagePreparationError as exc:
+            raise BuildPreparationError(str(exc), code=exc.code) from exc
         except (OSError, UnicodeError, ValueError) as exc:
             raise BuildPreparationError(str(exc)) from exc
         dockerfile.write_text(rewritten)
@@ -1116,6 +1123,8 @@ def main() -> None:
         except (OSError, ValueError):
             pass
         error_receipt.update(phase=args.phase, error=reason[:500])
+        if args.phase == "prepare":
+            error_receipt.update(classify_preparation_failure(error).receipt())
         Path("/dev/termination-log").write_text(json.dumps(error_receipt))
         raise SystemExit(1) from None
 

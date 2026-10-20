@@ -21,6 +21,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 from loom_service.pool_submission import submission_origin
+from loom_service.task_image_admission import image_preparation_reader
 
 if TYPE_CHECKING:
     from loom.family_run.spec import FamilyRunSpec
@@ -1442,6 +1443,7 @@ async def _create_batch_record(
         trial_config=trial_config,
         combinations=payload.combinations,
         runtime_profile_json=request.app.state.settings.service_execution_runtime_profile_json,
+        image_preparation_reader=image_preparation_reader(request.app.state.settings),
     )
     service_execution_runtime_profile = await freeze_task_resource_requests(
         s, backend=payload.backend, task_ids=valid_task_ids,
@@ -3043,6 +3045,7 @@ async def rerun_failed_batch(
         runtime_profile_json=runtime_profile_json,
         resolve_versions=request_payload.use_current_runtime,
         automatic_only=request_payload.use_current_runtime,
+        image_preparation_reader=image_preparation_reader(request.app.state.settings),
     )
     inherited_requests = (b.service_execution_runtime_profile or {}).get("task_resource_requests", {})
     service_execution_runtime_profile = await freeze_task_resource_requests(
