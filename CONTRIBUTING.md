@@ -21,9 +21,9 @@
 > Static documentation is a location-and-format allowlist; unknown runtime
 > paths fail safe to the full validation set. Manual runs report `*-manual`
 > contexts and cannot satisfy protected PR contexts. These four strict,
-> GitHub-Actions-app-bound checks on PR heads and queued merge groups are the
-> only merge authority for
-> `dev`: it requires no human approval, no CODEOWNER approval, and no
+> GitHub-Actions-app-bound checks on PR heads and, when the queue is enabled,
+> merge groups are the only merge authority for `dev`: it requires no human
+> approval, no CODEOWNER approval, and no
 > conversation resolution. CI or release-authority changes select full CI but
 > add no human merge gate.
 > External pull requests are accepted for issue-scoped work that follows
@@ -320,14 +320,15 @@ have one place to audit them.
 - **Publish and deploy workflows use protected GitHub Environments.**
   Secrets for benchmark-bundle publish or infrastructure deploy live in
   protected Environments so they are not available to pull request code.
-- **The active `dev protected admission` ruleset** requires the native merge
-  queue and the strict, GitHub-Actions-app-bound contexts `repository-checks`,
+- **The active `dev protected admission` ruleset** requires the strict,
+  GitHub-Actions-app-bound contexts `repository-checks`,
   `images-gate`, `cluster-smoke-gate`, and `staging-smoke-gate`, blocks direct
   pushes, deletion, and force-pushes, and enforces squash-only linear-history
   merges. It has no bypass actors and requires zero human approvals, zero
-  CODEOWNER approvals, and zero conversation resolution; these four CI checks
-  are required on both PR heads and the queue's merge groups. The initial queue
-  builds one merge group at a time and merges one PR per group.
+  CODEOWNER approvals, and zero conversation resolution. When the native merge
+  queue is enabled, these four checks are also required on its merge groups.
+  Queue enablement and configuration follow the live rules and #2416 coordination
+  described above.
 - **The active `main protected promotion` ruleset** requires a pull request,
   and only the GitHub-Actions-app-bound `main-promotion-gate` context. That
   direct job binds the current `dev` head, same-repository PR, successful
@@ -337,8 +338,10 @@ have one place to audit them.
   candidate freshness is enforced by the composite gate itself.
 - **Auto-merge is native and author-neutral.** `allow_auto_merge=true` lets a
   developer or maintainer enable GitHub's squash auto-merge on every eligible
-  non-draft PR. For `dev`, this requests queue admission once its PR checks pass;
-  the queue performs the squash merge after its merge-group checks pass.
+  non-draft PR. For `dev` with the queue enabled, this requests queue admission
+  once its PR checks pass; the queue performs the squash merge after its
+  merge-group checks pass. With the queue disabled, native auto-merge waits for
+  the current-head checks and strict latest-base protection.
   Enabling auto-merge grants no bypass. `main` uses the separate protected
   promotion ruleset described above.
   Verify remote rulesets through the GitHub API or repository settings rather
