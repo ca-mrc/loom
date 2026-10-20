@@ -77,7 +77,15 @@ apple,1,3
 pear,4,2
 """
 
+# `user = "agent"` is the deployed non-root UID/GID 65532, as in prepared
+# Terminal-Bench images. A root-owned workdir refuses staged inputs
+# (`file_permission_denied`), and a root image user refuses Terminus' agent
+# exec (`exec_user_mismatch`) (#2054).
 _WORKSPACE_DOCKERFILE = b"""FROM python:3.12-slim
+RUN groupadd --gid 65532 agent && useradd --uid 65532 --gid 65532 --create-home --home-dir /home/agent agent \\
+    && mkdir -p /workspace && chown 65532:65532 /workspace
+ENV HOME=/home/agent
+USER 65532:65532
 WORKDIR /workspace
 """
 

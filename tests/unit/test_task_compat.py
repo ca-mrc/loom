@@ -6,6 +6,8 @@ mid-trial (the original case: oracle vs. non-pytest benchmarks)."""
 
 from __future__ import annotations
 
+import pytest
+
 from loom_service import task_compat
 from loom_service.agent_catalog import get_agent
 from loom_service.task_compat import (
@@ -83,6 +85,21 @@ def test_immutable_tb21_profile_requires_workspace_exec_without_config_mutation(
     assert result.compatible is False
     assert result.missing_from_agent == frozenset({"workspace_exec"})
     assert result.missing_from_task == frozenset()
+
+
+@pytest.mark.parametrize(("dockerfile", "requires_workspace"), [
+    ("environment/Dockerfile.loom-nebius", True), (None, False),
+])
+def test_task_that_builds_its_own_image_requires_workspace_exec(
+    dockerfile: str | None, requires_workspace: bool,
+) -> None:
+    # Response-only direct-completion never runs in a task-built image (#2054).
+    cfg = {**_config("script"), "environment": {"dockerfile": dockerfile}}
+    for provides, compatible in ((frozenset(), not requires_workspace), (frozenset({"workspace_exec"}), True)):
+        result = task_compat.agent_task_compatibility(
+            cfg, agent_requires=frozenset(), agent_provides=provides,
+        )
+        assert result.compatible is compatible
 
 
 def test_agent_task_compatibility_requires_both_directions() -> None:
