@@ -19,7 +19,9 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+@pytest.mark.timeout(120)
 def test_node_share_memory_is_enforced_and_oom_has_kernel_evidence(capsys):
+    # Include API/Pod startup and the disposable node's 30-second graceful stop.
     # Scale memory down for a cheap local check; production 4 -> 7 GiB is also
     # checked through the full renderer. This is not the original paid task.
     _, _, plan = _plan(64)
