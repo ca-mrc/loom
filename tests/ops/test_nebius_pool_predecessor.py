@@ -706,16 +706,25 @@ def pool_refresh_http(bound):
         if external.failure == 'provider':
             raise ValueError('private-provider-marker')
 
-    def active():
+    def revision(expected):
+        actual = '0175' if external.failure == 'manager_schema' else bound.request.resources.manager_revision
+        if actual not in expected:
+            raise ValueError('unqualified manager revision')
+        return actual
+
+    def active(*, manager_revision):
+        assert manager_revision == bound.request.resources.manager_revision
         assert pool.completion.outcome == 'global'
         if external.failure in {'pool', 'credentials'}:
             raise ValueError('private-database-marker')
 
-    def pool_state(action):
+    def pool_state(action, *, manager_revision):
+        assert manager_revision == bound.request.resources.manager_revision
         assert action == 'observe'
         return 'closed' if external.failure == 'pool' else 'fenced' if pool.completion.outcome == 'legacy' else 'global'
 
-    def machines(action):
+    def machines(action, *, manager_revision):
+        assert manager_revision == bound.request.resources.manager_revision
         assert action == 'observe'
         return 'active' if external.failure == 'credentials' else 'revoked'
 
@@ -738,8 +747,9 @@ def pool_refresh_http(bound):
         from scripts.ops.nebius_pool_refresh_live import HTTPSPoolRefreshAPI
 
         history = SimpleNamespace(qualify_binding=qualify_binding, qualify_active_pool=active,
+            management_schema_revision=revision,
             activation_pool=pool_state, machine_retirement=machines,
-            recovery_pool_drained=lambda: external.failure != 'global_busy', qualify_closed_pool=no_idle)
+            recovery_pool_drained=lambda **kwargs: external.failure != 'global_busy', qualify_closed_pool=no_idle)
         guards = SimpleNamespace(request=migration, activation_guard=guard, runtime_role=runtime_role,
             guard=no_idle, recovery_participant_drained=no_idle, cutover_readiness_page=no_idle)
         with HTTPSPoolCutoverAPI(request=request, tokens=tokens, migration=SimpleNamespace(), guards=guards,

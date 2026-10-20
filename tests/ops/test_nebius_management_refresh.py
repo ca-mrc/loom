@@ -52,6 +52,26 @@ def build(request):
     return render_refresh(request)
 
 
+def test_refresh_accepts_explicit_default_disk_reference_without_changing_runtime(refresh_request):
+    from scripts.ops.nebius_management_refresh import _configuration, platform_disk_type
+
+    from loom_service.environment_management.deployment import ManagementDeployment
+
+    raw = refresh_request.after.model_dump(mode='json')
+    config = json.loads(raw['installation']['foundation']['platform_config_json'])
+    config.pop('execution_disk_type', None)
+    raw['installation']['foundation']['platform_config_json'] = json.dumps(config)
+    implicit = ManagementDeployment.model_validate(raw)
+    config['execution_disk_type'] = 'NETWORK_SSD'
+    raw['installation']['foundation']['platform_config_json'] = json.dumps(config)
+    explicit = ManagementDeployment.model_validate(raw)
+    assert platform_disk_type(implicit) == platform_disk_type(explicit) == 'NETWORK_SSD'
+    _configuration(implicit, explicit)
+    result = build(replace(refresh_request, before=implicit, after=explicit))
+    assert [row for row in result.deployment['spec']['template']['spec']['volumes'] if 'secret' in row] == (
+        [row for row in refresh_request.active['spec']['template']['spec']['volumes'] if 'secret' in row])
+
+
 @pytest.fixture
 def builder_refresh_request(builder_management_inputs):
     from scripts.ops.nebius_management_refresh import ManagementRefreshRenderRequest
@@ -127,10 +147,16 @@ def test_builder_refresh_cannot_change_source_runtime(builder_refresh_request):
         build(replace(builder_refresh_request, after=changed))
 
 
-def test_refresh_changes_only_image_config_and_revision(refresh_request):
+@pytest.mark.parametrize('shared_guest', [False, True])
+def test_refresh_changes_only_image_config_and_revision(refresh_request, shared_guest):
     from scripts.ops.nebius_ingress_stage import _snapshot
 
     request = refresh_request
+    if shared_guest:
+        profile = {**request.profile, 'guest_runtime': 'qemu-tcg-v1', 'guest_runtime_volume_mib': 1024,
+                   'guest_max_artifact_bytes': 64 * 1024**2, 'supports_task_identity': True,
+                   'supports_shared_guest': True}
+        request = replace(request, profile=profile)
     before = copy.deepcopy(request)
     result = build(request)
     original = request.active['spec']['template']

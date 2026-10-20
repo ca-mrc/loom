@@ -39,7 +39,17 @@ class RenderedManagementRefresh:
     revision: str
 
 
+def platform_disk_type(deployment: ManagementDeployment) -> str:
+    """Normalize the canonical reference; cloud capacity remains live-qualified."""
+    value = deployment.installation.foundation.platform_config.get('execution_disk_type', 'NETWORK_SSD')
+    if value not in {'NETWORK_SSD', 'NETWORK_SSD_NON_REPLICATED'}:
+        raise ValueError
+    return str(value)
+
+
 def _configuration(before: ManagementDeployment, after: ManagementDeployment) -> None:
+    for deployment in (before, after):
+        platform_disk_type(deployment)
     old, new = (ManagementDeployment.model_validate(value.model_dump()).model_dump(mode='json')
         for value in (before, after))
     previous, current = old['installation'], new['installation']
@@ -64,6 +74,9 @@ def _configuration(before: ManagementDeployment, after: ManagementDeployment) ->
         # infrastructure. The connected preflight must qualify its current value.
         config.pop('guest_execution_target', None)
         config.pop('emulated_auth_execution_target', None)
+        # This is a reference to the ordinary rollout's execution disk. Entry
+        # binds a change to its protected publication; refresh creates no disk.
+        config.pop('execution_disk_type', None)
         foundation['platform_config_json'] = json.dumps(config, sort_keys=True)
     if old != new:
         raise ValueError

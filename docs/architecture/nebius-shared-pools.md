@@ -2682,6 +2682,15 @@ rollback instead retains the fenced and drained global ledger, revoked machine
 credentials and a stopped, process-drained read-only gateway; reopened legacy
 owners may keep working. Fresh full workload and authority readbacks bracket
 each qualification. The result is not a persisted or reusable write permit.
+Manager ledger observations select the exact schema from the immutable refresh
+request and its existing phase journal. Before migration dispatch they require
+the original revision; a bound migration Job create intent permits observing
+either original or target, including a lost create response. A qualified
+post-migration probe narrows observation to the target. The read-only ledger
+queries support audited manager schemas 0174, 0176 and 0177 with identical pool
+layouts, while requiring the single selected revision on each read. Default
+pool readers and all fence/revoke/startup writes retain their exact0176 contract.
+This does not widen participant schemas or advance shared handoff.
 The refresh installer requalifies it in preflight, immediately before actual
 resource creation and manager patches, around activation qualification and
 before public completion. It does not require child journals during earlier

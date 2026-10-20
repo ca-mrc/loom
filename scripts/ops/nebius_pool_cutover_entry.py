@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import hashlib
 import json
 import re
@@ -304,12 +305,14 @@ class PoolCutoverEntryChecks:
             if request != self.context.request:
                 raise ValueError
             self.current()
-            qualify_pool_runtime_databases(self.context, self.readers.guards)
+            qualify_pool_runtime_databases(self.context, self.readers.guards,
+                **({} if self.refresh is None else {'refresh': self.refresh}))
             if self.refresh is None:
                 qualify_pool_manager_database(self.context, self.readers.history)
             else:
                 qualify_pool_manager_database(self.context, self.readers.history, refresh=self.refresh)
-            qualify_pool_provider(self.context, self.readers.base)
+            qualify_pool_provider(self.context, self.readers.base,
+                **({} if self.refresh is None else {'refresh': self.refresh}))
             self.current()
         except Exception:
             raise EntryError("pool cutover connected prerequisites unqualified") from None
@@ -381,7 +384,8 @@ def _runtime_workload_options(context: PoolCutoverContext) -> tuple[dict[str, tu
         state_dir=state, anchor_dir=anchor).items()}, False
 
 
-def qualify_pool_runtime_databases(context: PoolCutoverContext, guards: KubectlPoolGuardAPI) -> None:
+def qualify_pool_runtime_databases(context: PoolCutoverContext, guards: KubectlPoolGuardAPI, *,
+        refresh: PoolManagerRefresh | None = None) -> None:
     """Bind retained consumers to their database and running actuator telemetry.
 
     Fresh operations require original running Pods. Recovery instead selects
@@ -393,7 +397,8 @@ def qualify_pool_runtime_databases(context: PoolCutoverContext, guards: KubectlP
         migration = context.request.fencing.retirement.migration
         if guards.request != migration or load_pool_cutover_inputs(context.operation) != context:
             raise ValueError
-        expected, startup = _runtime_workload_options(context)
+        expected, startup = (_runtime_workload_options(context) if refresh is None or refresh.successor is None else
+            (refresh.workload_options(), False))
         for target in migration.guards:
             database = target.database
             if database is None or database.actuator_credential_uid is None or database.actuator_credential_resource_version is None:
@@ -405,15 +410,21 @@ def qualify_pool_runtime_databases(context: PoolCutoverContext, guards: KubectlP
             for original in (target.controller, service, *actuators):
                 namespace, name = original["metadata"]["namespace"], original["metadata"]["name"]
                 current = guards._get("deployment", name, namespace)
-                desired, = (row for row in expected[_key(original)] if _matches(current, row, _uid(original)))
+                desired, = (row for row in expected[_key(original)] if (
+                    refresh.matches_workload(current, row, original) if refresh is not None else
+                    _matches(current, row, _uid(original))))
+                replacement = None
+                if refresh is not None and refresh.successor is not None:
+                    replacement = copy.deepcopy(current)
                 actuator = namespace != target.namespace
                 uid = database.actuator_credential_uid if actuator else database.credential_uid
                 version = database.actuator_credential_resource_version if actuator else database.credential_resource_version
                 if desired["spec"]["replicas"] == 1 and not startup:
+                    extra = {} if replacement is None else {'expected': replacement}
                     guards.qualify_runtime_database(target, original=original,
-                        credential_uid=uid, credential_resource_version=version)
+                        credential_uid=uid, credential_resource_version=version, **extra)
                     if actuator:
-                        guards.qualify_runtime_telemetry(target, original=original)
+                        guards.qualify_runtime_telemetry(target, original=original, **extra)
                 else:
                     if type(desired["spec"]["replicas"]) is not int or desired["spec"]["replicas"] not in ({0, 1} if startup else {0}):
                         raise ValueError
@@ -425,9 +436,12 @@ def qualify_pool_runtime_databases(context: PoolCutoverContext, guards: KubectlP
                     if (_uid(guards._database(target)) != _uid(backend)
                             or guards._workload_database_url(original, url_variable=variable,
                                 credential_uid=uid, credential_resource_version=version) != url
-                            or not _matches(guards._get("deployment", name, namespace), desired, _uid(original))):
+                            or not (refresh.matches_workload(guards._get("deployment", name, namespace), desired, original)
+                                if refresh is not None else
+                                _matches(guards._get("deployment", name, namespace), desired, _uid(original)))):
                         raise ValueError
-        if (_runtime_workload_options(context) != (expected, startup)
+        if ((_runtime_workload_options(context) if refresh is None or refresh.successor is None else
+                (refresh.workload_options(), False)) != (expected, startup)
                 or load_pool_cutover_inputs(context.operation) != context):
             raise ValueError
     except PoolMigrationError as error:
@@ -500,7 +514,8 @@ def _collector_cloud_credential(context: PoolCutoverContext, base: HTTPSManageme
     return value
 
 
-def qualify_pool_provider(context: PoolCutoverContext, base: HTTPSManagementPrerequisites) -> None:
+def qualify_pool_provider(context: PoolCutoverContext, base: HTTPSManagementPrerequisites, *,
+        refresh: PoolManagerRefresh | None = None) -> None:
     """Qualify the actual collector principal, physical group and quota scope.
 
     This read neither requests nodes nor reserves a share of provider headroom.
@@ -510,12 +525,17 @@ def qualify_pool_provider(context: PoolCutoverContext, base: HTTPSManagementPrer
     """
     try:
         original = context.request.collector_config
+        expected, quota_identities = original, context.inputs.installation.quota_identities
+        if refresh is not None:
+            if refresh.qualify().context != context:
+                raise ValueError
+            expected, quota_identities = refresh.provider_options()
         namespace, name = original["metadata"]["namespace"], original["metadata"]["name"]
         path = "/api/v1/namespaces/" + namespace + "/configmaps/" + name
         current = base._request("GET", path)
-        if current is None or not _matches(current, original, _uid(original)):
+        if current is None or not _matches(current, expected, _uid(original)):
             raise ValueError
-        raw, spec = original["data"], context.inputs.installation
+        raw, spec = expected["data"], context.inputs.installation
         foundation = context.original.deployment.installation.foundation.platform_config
         values: dict[str, Any] = {}
         for field, definition in NebiusCapacitySourceSettings.model_fields.items():
@@ -550,7 +570,7 @@ def qualify_pool_provider(context: PoolCutoverContext, base: HTTPSManagementPrer
                 try:
                     snapshot = await reader.capture_pool(expected_cluster_id=spec.cluster_id)
                     if (snapshot.node_group is None or snapshot.node_group.id != spec.node_group_id
-                            or {key: quota_identity(value) for key, value in snapshot.quota_resources.items()} != spec.quota_identities
+                            or {key: quota_identity(value) for key, value in snapshot.quota_resources.items()} != quota_identities
                             or snapshot.provider_capacity_state != "available"
                             or snapshot.autoscaler_state not in {"ready", "scaling"}):
                         raise ValueError
@@ -569,7 +589,8 @@ def qualify_pool_provider(context: PoolCutoverContext, base: HTTPSManagementPrer
                 raise ValueError
         current = base._request("GET", path)
         if (_collector_cloud_credential(context, base) != before
-                or current is None or not _matches(current, original, _uid(original))):
+                or current is None or not _matches(current, expected, _uid(original))
+                or (refresh is not None and refresh.provider_options() != (expected, quota_identities))):
             raise ValueError
     except Exception:
         raise EntryError("pool cutover provider unqualified") from None
@@ -669,12 +690,12 @@ def connected_pool_readers(context: PoolCutoverContext, *, refresh: PoolManagerR
                 guards = KubectlPoolGuardAPI(request=migration, kubeconfig=kubeconfig, executable=executable)
                 history = KubectlPoolHistoryAPI(request=migration, target=target, kubeconfig=kubeconfig, executable=executable)
                 history.qualify_binding(migration, context.request.manager)
-                qualify_pool_runtime_databases(context, guards)
+                qualify_pool_runtime_databases(context, guards, **({} if refresh is None else {'refresh': refresh}))
                 if refresh is None:
                     qualify_pool_manager_database(context, history)
                 else:
                     qualify_pool_manager_database(context, history, refresh=refresh)
-                qualify_pool_provider(context, base)
+                qualify_pool_provider(context, base, **({} if refresh is None else {'refresh': refresh}))
                 if load_pool_cutover_inputs(context.operation) != context:
                     raise ValueError
             except EntryError:

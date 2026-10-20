@@ -263,7 +263,7 @@ func runGuest(parent context.Context, c guestConfig) (failure error) {
 	target := &url.URL{Scheme: "http", Host: "guest"}
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	transport := &http.Transport{DialContext: channel.DialContext, MaxConnsPerHost: 128, MaxIdleConnsPerHost: 16}
-	defer transport.CloseIdleConnections()
+	defer closeGuestTransport(channel, transport)
 	proxy.Transport = transport
 	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, _ error) {
 		http.Error(w, "guest unavailable", http.StatusBadGateway)

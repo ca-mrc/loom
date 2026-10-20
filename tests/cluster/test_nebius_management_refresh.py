@@ -61,6 +61,55 @@ pytestmark = pytest.mark.skipif(os.environ.get('LOOM_RUN_DISPOSABLE_K3S') != '1'
     reason='requires explicitly disposable Kubernetes')
 
 
+def _add_refresh_diagnostics(core, apps, namespace, iteration: int | None, error):
+    """Keep bounded native controller status, never manifests or provider text."""
+    def conditions(status):
+        return [{key: getattr(row, key, None) for key in ('type', 'status', 'reason')}
+            for row in (getattr(status, 'conditions', None) or [])[:16]]
+
+    def identity(row):
+        return {key: getattr(row.metadata, key, None) for key in ('name', 'uid', 'generation')}
+
+    def workload(row):
+        return {'metadata': identity(row), 'desired_replicas': row.spec.replicas,
+            'status': {key: getattr(row.status, key, None) for key in (
+                'observed_generation', 'replicas', 'updated_replicas', 'ready_replicas', 'available_replicas')},
+            'conditions': conditions(row.status)}
+
+    def pod(row):
+        statuses = (row.status.init_container_statuses or []) + (row.status.container_statuses or [])
+        return {'metadata': identity(row), 'phase': row.status.phase, 'conditions': conditions(row.status),
+            'containers': [{'name': item.name, 'ready': item.ready,
+                'waiting_reason': item.state.waiting.reason if item.state and item.state.waiting else None}
+                for item in statuses[:32]]}
+
+    def warnings():
+        rows = core.list_namespaced_event(namespace, field_selector='type=Warning', limit=64,
+            _request_timeout=(2, 3)).items
+        return [{'metadata': identity(row), 'reason': row.reason, 'count': row.count,
+            'object': {key: getattr(row.involved_object, key, None) for key in ('kind', 'name', 'uid')}}
+            for row in rows[:64] if row.type == 'Warning' and row.involved_object
+            and (row.involved_object.name == 'loom-service' or (row.involved_object.name or '').startswith('loom-service-'))
+            and row.involved_object.namespace in (None, namespace)]
+
+    error.add_note('native refresh iteration: ' + json.dumps(iteration if type(iteration) is int else None))
+    reads = (
+        ('Deployment', lambda: workload(apps.read_namespaced_deployment('loom-service', namespace,
+            _request_timeout=(2, 3)))),
+        ('ReplicaSets', lambda: [workload(row) for row in apps.list_namespaced_replica_set(namespace,
+            label_selector='app=loom-service', limit=64, _request_timeout=(2, 3)).items[:64]]),
+        ('Pods', lambda: [pod(row) for row in core.list_namespaced_pod(namespace,
+            label_selector='app=loom-service', limit=64, _request_timeout=(2, 3)).items[:64]]),
+        ('Warning events', warnings),
+    )
+    for label, read in reads:
+        try:
+            detail = json.dumps(read())
+        except Exception as diagnostic_error:
+            detail = type(diagnostic_error).__name__
+        error.add_note(f'native refresh {label}: ' + detail[:16384])
+
+
 @pytest.mark.timeout(240)
 def test_completed_refresh_with_native_api_quantities_loads_as_next_predecessor(completed_upgrade, monkeypatch):
     """Exercise the API quantity spelling across the real receipt/journal boundary."""
@@ -129,8 +178,13 @@ def test_repeat_refresh_preserves_retained_identity_and_observes_native_drain(re
     from loom_service.environment_management.deployment import ManagementDeployment
 
     cluster = _start_k3s(ephemeral_storage_floor='2Gi')
+    core = apps = None
+    namespace = refresh_request.after.namespace
+    iteration: int | None = None
     try:
-        _, core, _ = _load_client(cluster)
+        # API discovery can precede Deployment/ReplicaSet reconciliation. The
+        # native DNS Deployment witnesses that startup within the same budget.
+        _, core, _ = _load_client(cluster, required_addons=('dns',))
         apps = client.AppsV1Api(core.api_client)
         endpoint = 'https://127.0.0.1:' + str(cluster.get_exposed_port(6443))
         kube = yaml.safe_load(cluster.exec(['cat', '/etc/rancher/k3s/k3s.yaml']).output)
@@ -226,6 +280,12 @@ def test_repeat_refresh_preserves_retained_identity_and_observes_native_drain(re
             for path, content in prior_states.items():
                 assert path.read_bytes() == content
             prior_states.update({path: path.read_bytes() for path in (tmp_path / str(iteration)).rglob('*.json')})
+    except Exception as error:
+        try:
+            _add_refresh_diagnostics(core, apps, namespace, iteration, error)
+        except Exception as diagnostic_error:
+            error.add_note(f'native refresh diagnostics unavailable: {type(diagnostic_error).__name__}')
+        raise
     finally:
         cluster.stop()
 

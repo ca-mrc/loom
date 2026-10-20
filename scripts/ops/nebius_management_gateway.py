@@ -49,6 +49,7 @@ SOURCES = (*( "scripts/ops/" + name + ".py" for name in (
     "nebius_pool_manager_image", "nebius_pool_manager_image_history", "nebius_pool_manager_image_stage",
     "nebius_pool_manager_image_live", "nebius_pool_image_entry", "nebius_pool_runtime_image",
     "nebius_pool_refresh", "nebius_pool_refresh_live", "nebius_pool_registration",
+    "nebius_platform_rollout_successor", "nebius_candidate_render", "nebius_staging_pool_attachment",
     "nebius_pool_retirement", "nebius_pool_retirement_live", "nebius_pool_role_fencing",
     "nebius_pool_role_fencing_live", "nebius_pool_role_restoration", "nebius_pool_runtime",
     "nebius_pool_runtime_settings", "nebius_pool_shutdown", "nebius_pool_startup",

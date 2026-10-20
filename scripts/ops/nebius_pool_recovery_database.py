@@ -11,7 +11,11 @@ import re
 from typing import Any
 from uuid import UUID
 
-from scripts.ops.nebius_pool_activation_database import _binding_hex, _header, _participant_header
+from scripts.ops.nebius_pool_activation_database import (
+    _binding_hex,
+    _manager_observation_header,
+    _participant_header,
+)
 
 from loom.nebius_rollout_guard import ACTIVITY_SQL
 from loom_service.pool_management.capacity import digest
@@ -46,9 +50,9 @@ SELECT jsonb_build_object(
                 AND r.drain_json->>'stop_sha256'=r.stop_json->>'request_sha256')))) AS counts"""
 
 
-def pool_recovery_drain_sql(spec: PoolInstallation) -> str:
+def pool_recovery_drain_sql(spec: PoolInstallation, *, manager_revision: str = '0176') -> str:
     spec = PoolInstallation.model_validate(spec.model_dump())
-    return _header(read_only=True) + f"""DO $pool_recovery_binding$
+    return _manager_observation_header(manager_revision) + f"""DO $pool_recovery_binding$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM public.nebius_pool_bindings b
         WHERE b.pool_id='{spec.pool_id}'::uuid AND b.mode='closed'

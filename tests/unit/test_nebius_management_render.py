@@ -148,8 +148,11 @@ def test_manager_has_only_its_own_database_api_backup_and_shared_ingress(managem
     assert management_inputs == before
 
 
-@pytest.mark.parametrize('guest', [False, True])
-def test_manager_accepts_current_publication_without_inheriting_standalone_task_policy(management_inputs, guest):
+@pytest.mark.parametrize(('guest', 'shared'), [(False, None), (True, None), (True, False), (True, True)])
+def test_manager_accepts_current_publication_without_inheriting_standalone_task_policy(management_inputs, guest, shared):
+    from loom.nebius_platform_render import digest
+    from loom_service.environment_management.deployment import ManagementDeployment
+
     deployment, _, profile = management_inputs
     foundation = deployment["installation"]["foundation"]
     config = json.loads(foundation["platform_config_json"])
@@ -162,9 +165,16 @@ def test_manager_accepts_current_publication_without_inheriting_standalone_task_
                        guest_max_artifact_bytes=64 * 1024**2, supports_emulated_pkcs11=True)
     foundation["platform_config_json"] = json.dumps(config)
     profile["supports_task_identity"] = True
+    if shared is not None:
+        profile['supports_shared_guest'] = shared
     before = copy.deepcopy(management_inputs)
     result = render(management_inputs)
     assert management_inputs == before
+    assert result.revision == digest({'deployment': ManagementDeployment.model_validate(deployment).model_dump(mode='json'),
+                                     'candidate': management_inputs[1], 'profile': profile})
+    assert [(doc['kind'], doc['metadata']['name']) for doc in documents(result)
+            if doc['kind'] in {'Deployment', 'StatefulSet'}] == [
+        ('StatefulSet', 'loom-postgres'), ('Deployment', 'loom-service')]
     assert not any(doc["kind"].startswith("ValidatingAdmissionPolicy") for doc in documents(result))
     assert all(doc["metadata"].get("namespace", deployment["namespace"]) == deployment["namespace"]
                for doc in documents(result))

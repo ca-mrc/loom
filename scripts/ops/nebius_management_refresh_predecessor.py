@@ -282,8 +282,11 @@ def _load_completed_refresh(selector: RefreshPredecessorV1, *, original: Complet
         resources = ManagementRefreshResourcesRequest(ManagementRefreshSwitchRequest(render, selector.operation_id,
             contract.get('initial_stopped')),
             setup.binding, setup.shared_namespace_uid, contract['manager_revision'], contract['target_manager_revision'])
+        from scripts.ops.nebius_platform_rollout_successor import OrdinaryPlatformRollout
+
         request = ManagementRefreshInstallRequest(resources, {}, original.upgrade.original_anchor,
-            contract.get('pool_baseline'))
+            contract.get('pool_baseline'), OrdinaryPlatformRollout.model_validate(contract['platform_rollout'])
+            if contract.get('platform_rollout') is not None else None)
         if (refresh_contract(request) != contract or _uid(render.active) != _uid(original.active)
                 or receipt['active_uid'] != _uid(original.active)):
             raise ValueError
@@ -298,6 +301,12 @@ def _load_completed_refresh(selector: RefreshPredecessorV1, *, original: Complet
                 if ancestry.get(str(path)) != checksum:
                     raise ValueError
                 read(path, checksum)
+        from scripts.ops.nebius_management_refresh import platform_disk_type
+
+        if (platform_disk_type(render.before) != platform_disk_type(render.after)
+                and (request.platform_rollout is None or pool_baseline is None
+                    or pool_baseline.completion.outcome != 'legacy')):
+            raise ValueError
         _configuration(baseline.deployment, render.before)
         rendered = render_refresh(render)
         identity = {'schema': 'loom.nebius-management-refresh-install.v1', 'state_dir': str(state),

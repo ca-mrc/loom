@@ -289,7 +289,34 @@ class KubectlPoolHistoryAPI(KubectlPoolGuardAPI):
         except Exception:
             raise PoolMigrationError("startup_closed_registration") from None
 
-    def qualify_active_pool(self) -> None:
+    def management_schema_revision(self, expected: tuple[str, ...]) -> str:
+        """Read the exact retained backend, without accepting an unbound revision."""
+        try:
+            if (not expected or len(expected) > 2 or len(set(expected)) != len(expected)
+                    or digest(migration_contract(self.request)) != self.contract_sha256
+                    or digest(_target_contract(self.target)) != self.history_sha256
+                    or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
+                raise ValueError
+            before = self._database(self.target, url_variable='LOOM_SVC_DB_URL')
+            query = """BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
+SET LOCAL statement_timeout='10s'; SET LOCAL lock_timeout='2s';
+SELECT json_build_object('revision', version_num) FROM public.alembic_version;
+ROLLBACK;
+"""
+            report = self._run(['exec', '-n', self.target.namespace, 'pod/' + before['metadata']['name'], '-c', 'loom-postgres', '--',
+                'psql', '-X', '-qAt', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', 'loom', '-c', query])
+            revision = report.get('revision')
+            if (set(report) != {'revision'} or not isinstance(revision, str) or revision not in expected
+                    or _uid(self._database(self.target, url_variable='LOOM_SVC_DB_URL')) != _uid(before)
+                    or digest(migration_contract(self.request)) != self.contract_sha256
+                    or digest(_target_contract(self.target)) != self.history_sha256
+                    or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
+                raise ValueError
+            return revision
+        except Exception:
+            raise PoolMigrationError('management_schema_revision') from None
+
+    def qualify_active_pool(self, *, manager_revision: str = '0176') -> None:
         """Read exact open-pool authority without draining or changing any work."""
         try:
             if (digest(migration_contract(self.request)) != self.contract_sha256
@@ -297,7 +324,7 @@ class KubectlPoolHistoryAPI(KubectlPoolGuardAPI):
                     or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
                 raise ValueError
             spec = self.request.registration.spec
-            query = pool_active_authority_sql(spec)
+            query = pool_active_authority_sql(spec, manager_revision=manager_revision)
             before = self._database(self.target, url_variable="LOOM_SVC_DB_URL")
             report = self._run(["exec", "-n", self.target.namespace, "pod/" + before["metadata"]["name"], "-c", "loom-postgres", "--",
                 "psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "loom", "-c", query])
@@ -325,16 +352,17 @@ class KubectlPoolHistoryAPI(KubectlPoolGuardAPI):
         except Exception:
             raise PoolMigrationError("management_runtime_database") from None
 
-    def activation_pool(self, action: Literal["observe", "fence"]) -> str:
+    def activation_pool(self, action: Literal["observe", "fence"], *, manager_revision: str = '0176') -> str:
         """Observe/fence the retained installation without a healthy gateway."""
         try:
-            if (action not in {"observe", "fence"}
+            if (action not in {"observe", "fence"} or (action == 'fence' and manager_revision != '0176')
                     or digest(migration_contract(self.request)) != self.contract_sha256
                     or digest(_target_contract(self.target)) != self.history_sha256
                     or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
                 raise ValueError
             spec = self.request.registration.spec
-            query = pool_activation_state_sql(spec) if action == "observe" else fence_pool_activation_sql(spec)
+            query = (pool_activation_state_sql(spec, manager_revision=manager_revision)
+                if action == "observe" else fence_pool_activation_sql(spec))
             before = self._database(self.target, url_variable="LOOM_SVC_DB_URL")
             report = self._run(["exec", "-n", self.target.namespace, "pod/" + before["metadata"]["name"], "-c", "loom-postgres", "--",
                 "psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "loom", "-c", query])
@@ -349,7 +377,7 @@ class KubectlPoolHistoryAPI(KubectlPoolGuardAPI):
         except Exception:
             raise PoolMigrationError("activation_pool") from None
 
-    def recovery_pool_drained(self) -> bool:
+    def recovery_pool_drained(self, *, manager_revision: str = '0176') -> bool:
         """Read current journal drain, never trust gateway health or a saved zero."""
         try:
             def scope() -> None:
@@ -361,7 +389,8 @@ class KubectlPoolHistoryAPI(KubectlPoolGuardAPI):
             spec = self.request.registration.spec
             before = self._database(self.target, url_variable="LOOM_SVC_DB_URL")
             report = self._run(["exec", "-n", self.target.namespace, "pod/" + before["metadata"]["name"], "-c", "loom-postgres", "--",
-                "psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "loom", "-c", pool_recovery_drain_sql(spec)])
+                "psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "loom", "-c",
+                pool_recovery_drain_sql(spec, manager_revision=manager_revision)])
             drained = qualify_pool_recovery_drain(spec, report)
             if _uid(self._database(self.target, url_variable="LOOM_SVC_DB_URL")) != _uid(before):
                 raise ValueError
@@ -391,7 +420,7 @@ class KubectlPoolHistoryAPI(KubectlPoolGuardAPI):
         except Exception:
             raise PoolMigrationError('recovery_machine_state') from None
 
-    def machine_retirement(self, action: Literal['observe', 'revoke']) -> MachineRetirementState:
+    def machine_retirement(self, action: Literal['observe', 'revoke'], *, manager_revision: str = '0176') -> MachineRetirementState:
         """Fixed exact-scope revocation/readback; the parent owns durable intent."""
         try:
             def scope() -> None:
@@ -401,7 +430,7 @@ class KubectlPoolHistoryAPI(KubectlPoolGuardAPI):
                     raise ValueError
             scope()
             spec = self.request.registration.spec
-            query = pool_machine_retirement_sql(spec, action=action)
+            query = pool_machine_retirement_sql(spec, action=action, manager_revision=manager_revision)
             before = self._database(self.target, url_variable='LOOM_SVC_DB_URL')
             report = self._run(['exec', '-n', self.target.namespace, 'pod/' + before['metadata']['name'], '-c', 'loom-postgres', '--',
                 'psql', '-X', '-qAt', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', 'loom', '-c', query])

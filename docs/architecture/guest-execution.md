@@ -109,6 +109,10 @@ an incomplete environment. Kubernetes ownership and cleanup reconciliation
 remain authoritative; local process tests do not establish controller-restart
 or hosted cleanup qualification.
 
+During shutdown, the launcher closes the guest channel before the HTTP
+transport's idle streams. This interrupts pending channel I/O so an idle
+stream's FIN cannot delay QEMU cleanup while the guest is unresponsive.
+
 Startup is bounded separately from task commands. Disk preparation has 30 seconds;
 the subsequent guest boot has 90 seconds, including up to 60 seconds for Docker
 to expose its private readiness API. The Kubernetes startup probe allows 150

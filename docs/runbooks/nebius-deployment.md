@@ -2575,10 +2575,41 @@ schema is `loom.nebius-management-refresh-private-inputs.v1`, with:
   Receipt qualification compares Kubernetes resource quantities numerically
   (for example, `100m` and `0.1`) without rewriting frozen receipt bytes or
   accepting changed resource amounts or other runtime configuration.
-- `pool_baseline`, when inherited from a completed cutover: the exact qualified
-  pool selector. Keep it through subsequent refreshes; omitting it cannot restore
-  legacy writer authority. The separately scoped pool reader requalifies workloads,
+- The operation derives `pool_baseline` from the completed pool predecessor or
+  preceding refresh and records it in the refresh contract. It is not a separate
+  private-input field. Subsequent refreshes retain that exact qualified pool
+  selector; omitting it cannot restore legacy writer authority. The separately
+  scoped pool reader requalifies workloads,
   credentials, mode and effective permissions around refresh writes and completion.
+- Optional `platform_rollout`, for a **legacy** pool baseline whose application
+  workloads advanced through an ordinary completed platform rollout: an object
+  with `deployment_id` (the numeric GitHub deployment ID) and `publication` (the
+  existing exact `ProtectedPublication` selector for that platform candidate).
+  This publication may differ from the target manager publication. Qualification
+  requires a successful protected `nebius-rollout` run and its complete native
+  deployment artifact, including pre-upgrade backup, HTTPS smoke and candidate
+  readback. The selected candidate's pinned source renders the expected current
+  workloads using the validated target foundation configuration. Existing UID,
+  namespace, DB/credential, writer inventory, role and runtime checks still apply.
+  Unrelated image, environment, template or credential changes remain blockers.
+  This does not synthesize a shared-pool participant completion. Prepare a new
+  refresh operation and retain this selector through later refreshes while the
+  frozen pool baseline still predates that rollout; never edit the old baseline,
+  refresh inputs, or completed receipts. `management-refresh-preflight` performs
+  these checks without persisting Kubernetes or database changes.
+  A change of `execution_disk_type` requires this same protected ordinary-rollout
+  reference and a legacy baseline. An absent value means `NETWORK_SSD`;
+  `NETWORK_SSD_NON_REPLICATED` selects the source-rendered NRD storage quota.
+  The primary collector's observed ConfigMap may differ from the frozen baseline
+  only in that exact quota name. Its UID, other data, fixed cloud credentials,
+  tenant/region/node-group/cluster identities and CPU/memory quota identities
+  remain pinned; the native disk and capacity reader still qualify current
+  provider observations before and after the read. The stopped pool-created
+  observer and historical receipts remain unchanged. A canonical-config-only
+  edit is insufficient workload proof: finish a genuine backed-up ordinary
+  rollout using the current configuration before selecting its deployment here.
+  This reference neither applies cloud resources nor proves disk size,
+  placement or deletion of an earlier node generation.
 - `deployment`, `candidate` and `profile`: the target manager configuration and
   protected publication. The tooling source and candidate SHA must be identical.
 - `manager_revision` and `target_manager_revision`: the expected management DB
@@ -2599,6 +2630,12 @@ installation, namespace, private-input digest and path fields, plus `operation_i
 The workflow has no fallback to bootstrap, diagnostic or recovery credentials.
 Authority installation preserves other grants and does not create private inputs
 or reset operation state. Private credentials never pass through Actions.
+
+A shared-guest-capable publication does not give the manager execution authority.
+Rendering retains the approved profile and its revision inputs, while projecting
+guest-runtime and enabled shared-guest fields out of the non-execution templates.
+Previously valid templates with absent or false shared-guest readiness retain
+their existing representation and immutable migration Pod identities.
 
 Preflight qualifies the completed predecessor, retained resource identities,
 publication and live shared prerequisites. Installation serializes on the original

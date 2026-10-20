@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import shlex
 import ssl
@@ -321,9 +322,80 @@ def _start_k3s(*, node_name: str | None = None, ephemeral_storage_floor: str | N
     return container
 
 
-def _load_client(container: object) -> tuple[object, object, object]:
+_NATIVE_ADDONS = {'dns': 'coredns', 'storage': 'local-path-provisioner'}
+
+
+def _native_addon_diagnostics(core: object, required: tuple[str, ...]) -> str:
+    """Bounded native-system status only; no Pod specs, credentials or logs."""
+    result: dict[str, object] = {}
+    names = tuple(_NATIVE_ADDONS[name] for name in required)
+    try:
+        pods = core.list_namespaced_pod('kube-system', limit=64, _request_timeout=(2, 3)).items
+        result['pods'] = [{'name': pod.metadata.name, 'phase': pod.status.phase, 'reason': pod.status.reason,
+            'containers': [{'name': status.name, 'ready': status.ready,
+                'waiting': status.state.waiting.reason if status.state and status.state.waiting else None}
+                for status in (pod.status.init_container_statuses or []) + (pod.status.container_statuses or [])]}
+            for pod in pods if any(pod.metadata.name.startswith(name + '-') for name in names)]
+    except Exception as error:
+        result['pods'] = type(error).__name__
+    try:
+        events = core.list_namespaced_event('kube-system', limit=64,
+            field_selector='type=Warning', _request_timeout=(2, 3)).items
+        result['events'] = [{'object': event.involved_object.name, 'reason': event.reason,
+            'message': (event.message or '')[:1024], 'count': event.count}
+            for event in events if any(event.involved_object.name == name
+                or (event.involved_object.name or '').startswith(name + '-') for name in names)]
+    except Exception as error:
+        result['events'] = type(error).__name__
+    return json.dumps(result)[-16384:]
+
+
+def _wait_for_native_addons(core: object, required: tuple[str, ...], *, deadline: float) -> None:
+    """Read native addon readiness within the client's original startup budget."""
+    from kubernetes import client
+
+    apps = client.AppsV1Api(core.api_client)
+    discovery = client.DiscoveryV1Api(core.api_client)
+    pending = list(required)
+    while deadline - time.monotonic() > 0:
+        pending = []
+        for name in required:
+            try:
+                deployment = apps.read_namespaced_deployment(_NATIVE_ADDONS[name], 'kube-system',
+                    _request_timeout=min(5, max(0.01, deadline - time.monotonic())))
+            except client.exceptions.ApiException as error:
+                if error.status != 404:
+                    raise
+                pending.append(name + ': Deployment absent')
+                continue
+            count = deployment.spec.replicas or 0
+            status = deployment.status
+            if (count < 1 or (status.observed_generation or 0) < deployment.metadata.generation
+                    or (status.updated_replicas or 0) < count or (status.ready_replicas or 0) < count
+                    or (status.available_replicas or 0) < count
+                    or not any(row.type == 'Available' and row.status == 'True' for row in status.conditions or [])):
+                pending.append(name + ': Deployment not ready/available')
+                continue
+            if name == 'dns':
+                slices = discovery.list_namespaced_endpoint_slice('kube-system',
+                    label_selector='kubernetes.io/service-name=kube-dns',
+                    _request_timeout=min(5, max(0.01, deadline - time.monotonic())))
+                if not any(endpoint.conditions and endpoint.conditions.ready is True and endpoint.addresses
+                        for item in slices.items for endpoint in item.endpoints or []):
+                    pending.append('dns: kube-dns has no ready endpoint')
+        if not pending:
+            return
+        time.sleep(min(0.25, max(0, deadline - time.monotonic())))
+    error = AssertionError(f'disposable k3s native addons did not become ready: {pending}')
+    error.add_note(_native_addon_diagnostics(core, required))
+    raise error
+
+
+def _load_client(container: object, *, required_addons: tuple[str, ...] = ()) -> tuple[object, object, object]:
     from kubernetes import client, config
 
+    if not isinstance(required_addons, tuple) or any(name not in _NATIVE_ADDONS for name in required_addons):
+        raise ValueError('unknown disposable k3s native addon')
     deadline = time.monotonic() + 90
     # K3s PID 1 evacuates the root cgroup and enables subtree controllers before
     # its startup banner. Docker exec during that window inserts another root
@@ -373,6 +445,8 @@ def _load_client(container: object) -> tuple[object, object, object]:
                         last_error = "bootstrap Service allocation pending"
                     else:
                         if service.spec.cluster_ip not in (None, "", "None"):
+                            if required_addons:
+                                _wait_for_native_addons(core, required_addons, deadline=deadline)
                             return client, core, batch
                         last_error = "bootstrap Service has no allocated ClusterIP"
         time.sleep(1)
