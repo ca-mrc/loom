@@ -136,6 +136,36 @@ def test_component_scope_follows_indirect_and_string_consumers(tmp_path):
     assert select(("scripts/ops/component.py", "uv.lock")) == frozenset(tests)
 
 
+def test_shared_pool_scope_follows_operator_dependencies_and_preserves_unknown_entrypoints(tmp_path):
+    files = {
+        "scripts/ops/component.py": "VALUE=1\n",
+        "scripts/ops/adapter.py": "from scripts.ops.component import VALUE\n",
+        "scripts/ops/unrelated.py": "VALUE=2\n",
+        "scripts/ops/nebius_shared_pool_new.py": "VALUE=3\n",
+        "tests/support/fixture.py": "SCRIPT='scripts/ops/adapter.py'\n",
+        "tests/ops/test_nebius_shared_pool_alpha.py": "from tests.support.fixture import SCRIPT\n",
+        "tests/ops/test_nebius_shared_pool_beta.py": "def test_other(): pass\n",
+    }
+    for name, source in files.items():
+        target = tmp_path / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(source)
+    tests = tuple(name for name in files if Path(name).name.startswith("test_"))
+    manifest = ownership.load_manifest(ROOT / "config/component-ownership.toml")
+
+    def select(*changes):
+        return ownership.select_affected_test_suites(manifest, tests,
+            changed_paths=changes, repo_root=tmp_path)
+
+    assert select("scripts/ops/component.py") == tests[:1]
+    assert select("scripts/ops/unrelated.py") == ()
+    assert select("scripts/ops/nebius_shared_pool_new.py") == tests
+    assert select("scripts/ops/component.py", "uv.lock") == tests
+    # Deleting a referenced operator is not evidence of no dependency.
+    (tmp_path / "scripts/ops/component.py").unlink()
+    assert select("scripts/ops/component.py") == tests
+
+
 def test_staging_workflow_passes_the_same_changed_paths_to_its_owner():
     workflow = yaml.safe_load((ROOT / ".github/workflows/staging-smoke.yml").read_text())
     job = workflow["jobs"]["system-smoke"]

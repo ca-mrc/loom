@@ -131,9 +131,33 @@ def test_pool_operator_suite_runs_on_operator_inputs_only(changes, retained):
     assert regular in selected
 
 
+@pytest.mark.parametrize(("changes", "retained"), [
+    (("scripts/ops/ci_reliability_metrics.py",), False),
+    (("scripts/ops/ci_hosted_worker.py", "src/loom/config.py"), False),
+    (("scripts/ops/nebius_shared_pool_api.py",), True),
+    (("scripts/ops/nebius_management_transport.py",), True),
+    (("scripts/ops/nebius_closed_registry.py",), True),
+    (("tests/ops/nebius_participant_external_fixture.py",), True),
+    (("tests/ops/conftest.py",), True),
+    (("uv.lock",), True),
+    ((), True),
+])
+def test_shared_pool_scope_tracks_consumers_not_the_entire_operator_lane(changes, retained):
+    from pathlib import Path
+
+    from scripts.component_ownership import _tracked_paths, load_manifest, selected_test_paths
+
+    root = Path(__file__).resolve().parents[2]
+    manifest = load_manifest(root / "config/component-ownership.toml")
+    selected = selected_test_paths(manifest, tracked_paths=_tracked_paths(root),
+        lane="nebius-pool", repo_root=root, changed_paths=changes, test_scope="nebius")
+    assert any(Path(path).name.startswith("test_nebius_shared_pool_") for path in selected) is retained
+
+
 @pytest.mark.parametrize("changes", [
     ("tests/ops/nebius_participant_external_fixture.py",),
     ("scripts/ops/nebius_shared_pool_api.py",),
+    ("scripts/ops/ci_reliability_metrics.py",),
     ("src/loom/config.py",),
 ])
 @pytest.mark.parametrize("lane", ["tests-root", "nebius-pool"])

@@ -71,6 +71,14 @@ def test_complete_native_coverage_schedules_no_duplicate_tests(actions):
     assert value["missing_files"] == 0 and value["reused_runs"] == [10]
 
 
+def test_candidate_preserves_shared_pool_coverage_without_reintroducing_it_for_unrelated_changes(monkeypatch):
+    for change, retained in (("scripts/ops/nebius_shared_pool_api.py", True),
+                             ("scripts/ops/ci_reliability_metrics.py", False)):
+        monkeypatch.setattr(planner, "candidate_changes", lambda *_, path=change: (path,))
+        value = planner.plan(ROOT, SHA, read=lambda _: [])
+        assert any(Path(path).name.startswith("test_nebius_shared_pool_") for path in pending(value)) is retained
+
+
 def test_job_only_retry_retains_other_successful_jobs_on_same_commit(actions):
     actions.run["run_attempt"] = 2
     assert planner.plan(ROOT, SHA, read=actions.read)["required"] is False
