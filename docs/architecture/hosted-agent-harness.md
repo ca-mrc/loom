@@ -239,6 +239,13 @@ phase. Egress is enforced twice:
 
 A failed install is classified `setup_error`, not an agent failure.
 
+Harness installation runs only in the agent execution. A deferred verifier
+grades the committed workspace in its fresh `verifier-sandbox`; its plan does
+not inherit the agent's setup command, install egress or install-cache binding.
+It does not need the agent CLI, and has no `task-sandbox` socket for that
+installation. The task's verifier dependencies and declared task network policy
+remain unchanged.
+
 ### Install cache
 
 A `HarnessSetup` that declares `install_root` (a dedicated absolute directory

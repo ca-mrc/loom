@@ -463,6 +463,12 @@ def compile_deferred_verifier_plan(
     module = argv[3] if argv[:3] == ("python", "-I", "-m") and len(argv) > 3 else SANDBOX_CONTROLLER_MODULE
     deferred = agent_plan.model_copy(update={
         "execution_role": "verifier",
+        # Harness installation belongs to the agent's task-sandbox. This pod
+        # grades the committed workspace in verifier-sandbox; it neither runs
+        # the agent CLI nor owns the task-sandbox socket used by its setup.
+        "setup": (),
+        "setup_egress": None,
+        "setup_cache": None,
         "verifier_execution": "skipped",
         "verifier": None,
         "verifier_after_agent_timeout": False,
