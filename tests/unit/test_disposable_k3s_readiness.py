@@ -269,6 +269,45 @@ def test_pod_timeout_reports_container_states_without_dumping_workload_data(load
     assert len(bounded) <= 4096 and bounded.endswith("... (truncated)")
 
 
+@pytest.mark.parametrize("events_unavailable", [False, True])
+def test_pod_timeout_retains_bounded_sandbox_and_pull_events(loading_client, events_unavailable):
+    _, core, _, clock = loading_client
+    pod = client.V1Pod(metadata=client.V1ObjectMeta(name="broker", uid="current-pod"),
+        status=client.V1PodStatus(phase="Pending"))
+    core.read_namespaced_pod = lambda name, namespace: pod
+    timestamp = datetime(2026, 10, 20, tzinfo=UTC)
+
+    def events(namespace, **kwargs):
+        assert namespace == "test"
+        assert kwargs == {"limit": 32, "_request_timeout": (2, 3),
+            "field_selector": "involvedObject.kind=Pod,involvedObject.uid=current-pod"}
+        if events_unavailable:
+            raise ApiException(status=500, reason="private response body")
+        return client.CoreV1EventList(items=[client.CoreV1Event(
+            metadata=client.V1ObjectMeta(annotations={"private": "private annotation"}),
+            involved_object=client.V1ObjectReference(kind="Pod", name="broker", uid="current-pod"),
+            type=event_type, reason=reason, message=message, count=3,
+            first_timestamp=timestamp, last_timestamp=timestamp,
+        ) for event_type, reason, message in (
+            ("Warning", "FailedCreatePodSandBox", "flannel subnet.env unavailable"),
+            ("Normal", "Pulling", "Pulling sandbox image"),
+            ("Normal", "Pulled", "x" * 100000),
+        )])
+
+    core.list_namespaced_event = events
+    with pytest.raises(AssertionError, match="did not become ready: Pending") as caught:
+        fixture._wait_for_pod(core, "test", "broker")
+    notes = "\n".join(caught.value.__notes__)
+    assert clock[0] == 60 and len(notes) <= 16400
+    assert "private" not in notes
+    if events_unavailable:
+        assert "ApiException" in notes
+    else:
+        for detail in ("FailedCreatePodSandBox", "flannel subnet.env unavailable", "Pulling sandbox image",
+                       timestamp.isoformat(), '"count": 3'):
+            assert detail in notes
+
+
 def test_ready_pod_does_not_build_failure_diagnostics(loading_client, monkeypatch):
     _, core, _, clock = loading_client
     pod = client.V1Pod(status=client.V1PodStatus(phase="Running", conditions=[
@@ -276,10 +315,11 @@ def test_ready_pod_does_not_build_failure_diagnostics(loading_client, monkeypatc
     ]))
     core.read_namespaced_pod = lambda name, namespace: pod
 
-    def unexpected(_pod):
+    def unexpected(*args, **kwargs):
         pytest.fail("successful readiness must not collect failure diagnostics")
 
     monkeypatch.setattr(fixture, "_pod_container_details", unexpected)
+    core.list_namespaced_event = unexpected
     assert fixture._wait_for_pod(core, "test", "ingress") is pod
     assert clock[0] == 0
 
