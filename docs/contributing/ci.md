@@ -326,6 +326,15 @@ execution test also proves that the pool lane has identical `all` and `nebius`
 module sets before exercising its 20 shards once, instead of repeating identical
 selector/subprocess coverage. Root scopes still execute independently.
 
+Run 39471175183 (October 20) exhausted shard 8's budget after its handoff module
+alone took 2445 seconds. Activation, cutover, gateway retirement and recovery
+release now use two existing lightly loaded shards (288 and 280 seconds in that
+run). The development installation module also moves off the 2706-second census
+shard to an existing eight-minute shard. These five whole-file pin changes
+preserve test selection and all scenarios; they add no jobs or runner capacity.
+Their hosted timing must be verified on the new head, not inferred from a local
+pass or a censored timeout.
+
 The pool job limit remains 50 minutes; individual lifecycle and transport limits
 remain unchanged. Every selected successful shard runs all its tests, other
 shards are not cancelled, and `repository-checks` still requires their results.

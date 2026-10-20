@@ -132,7 +132,7 @@ strategy = "stable-hash"
 # predecessors, moving two off their nearly full shards. No scenario is removed.
 # Separation contracts in test_ci_test_selection.py remain enforced. Hash the
 # remaining files; subsequent file additions do not move existing files.
-# Every selected file still runs once; the 40m job limit stays unchanged.
+# Every selected file still runs once; the current 50m job limit stays unchanged.
 # Censored CI tails are not duration evidence. Verify the new balance in CI.
 salt = "tests-root-v2-8275"
 # Candidate 38793279887: shards 1/5/6 took 1825/1607/1635s,
@@ -142,6 +142,12 @@ salt = "tests-root-v2-8275"
 # Keep the measured scenario-boundary splits. After removing repeated target
 # topology products, compare complete 20-shard costs rather than retaining
 # placements chosen for the old counts. See pytest-efficiency-verification.md.
+# Run 39471175183 exhausted shard 8's 50m budget: handoff alone took 2445s,
+# before recovery release could finish. Keep that module apart from activation,
+# cutover, gateway retirement and recovery release. Shards 6/7 took 288/280s
+# in the same run and have room for those companions. Shard 19 took 2706s;
+# move its ~11m installation module to shard 3 (an 8m job), leaving census room.
+# These are whole-module moves within the same 20 shards, not extra selection.
 pins = [
   { path = "tests/ops/test_nebius_pool_application_connected.py", shard_index = 0 },
   { path = "tests/ops/test_nebius_pool_image_transport.py", shard_index = 0 },
@@ -170,14 +176,14 @@ pins = [
   { path = "tests/ops/test_nebius_pool_operation.py", shard_index = 6 },
   { path = "tests/ops/test_nebius_pool_refresh_connected.py", shard_index = 14 },
   { path = "tests/ops/test_nebius_pool_role_restoration.py", shard_index = 15 },
-  { path = "tests/ops/test_nebius_pool_activation_live.py", shard_index = 7 },
-  { path = "tests/ops/test_nebius_pool_cutover.py", shard_index = 7 },
-  { path = "tests/ops/test_nebius_pool_gateway_retirement_live.py", shard_index = 7 },
+  { path = "tests/ops/test_nebius_pool_activation_live.py", shard_index = 5 },
+  { path = "tests/ops/test_nebius_pool_cutover.py", shard_index = 5 },
+  { path = "tests/ops/test_nebius_pool_gateway_retirement_live.py", shard_index = 5 },
   { path = "tests/ops/test_nebius_pool_participant_observation.py", shard_index = 10 },
   { path = "tests/ops/test_nebius_pool_participant_resource.py", shard_index = 1 },
   { path = "tests/ops/test_nebius_pool_participant_processes.py", shard_index = 1 },
   { path = "tests/ops/test_nebius_development_pool_retained.py", shard_index = 2 },
-  { path = "tests/ops/test_nebius_development_pool_install.py", shard_index = 18 },
+  { path = "tests/ops/test_nebius_development_pool_install.py", shard_index = 2 },
   { path = "tests/ops/test_nebius_development_pool_registration.py", shard_index = 5 },
   { path = "tests/ops/test_nebius_pool_participant_release.py", shard_index = 5 },
   { path = "tests/ops/test_nebius_pool_machine_retirement.py", shard_index = 5 },
@@ -195,7 +201,7 @@ pins = [
   { path = "tests/ops/test_nebius_shared_pool_handoff_census_recovery.py", shard_index = 19 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_fences.py", shard_index = 4 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_authority.py", shard_index = 11 },
-  { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_release.py", shard_index = 7 },
+  { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_release.py", shard_index = 6 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_stop.py", shard_index = 12 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_stop_committed.py", shard_index = 14 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_gateway.py", shard_index = 13 },
