@@ -50,6 +50,20 @@ _TERMINUS_TOOL_PROBE = (
     "! command -v asciinema >/dev/null; then "
     "echo 'task image must preinstall bash, tmux and asciinema' >&2; exit 1; fi"
 )
+# Leap's tmux package normally relies on systemd-tmpfiles at boot. Task
+# containers do not run that service. Preserve authored paths and socket env.
+_SUSE_TMUX_RUNTIME_SETUP = (
+    "if [ ! -e /run/tmux ] && [ ! -L /run/tmux ]; then "
+    "install -d -m 1777 -o 0 -g 0 /run/tmux; fi"
+)
+# Run after restoring the task USER. A version/binary probe misses an unusable
+# default socket directory. -L isolates our server without overriding its root;
+# -f avoids executing an authored tmux config during image preparation.
+_SUSE_TMUX_STARTUP_PROBE = r'''loom_tmux_probe="loom-preparation-$$" && \
+    trap 'timeout 5 tmux -L "$loom_tmux_probe" kill-server >/dev/null 2>&1 || true' EXIT && \
+    timeout 10 tmux -f /dev/null -L "$loom_tmux_probe" new-session -d -s loom-preparation 'exec sleep 30' && \
+    timeout 5 tmux -L "$loom_tmux_probe" has-session -t =loom-preparation && \
+    timeout 5 tmux -L "$loom_tmux_probe" kill-server && trap - EXIT'''
 _DOCKERFILE_SUFFIX = ".loom-nebius"
 _PACKAGE = re.compile(r"[a-z0-9][a-z0-9+.-]*(?:=[A-Za-z0-9.+:~_-]+)?\Z")
 _REQUIREMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*(?:==[A-Za-z0-9][A-Za-z0-9_.+!-]*)?\Z")
@@ -614,7 +628,7 @@ def _terminus_package_install(
     *, arch: bool, alpine: bool, apt_packages: set[str], apk_packages: set[str], suse: bool = False,
 ) -> str:
     if suse:
-        return _suse_package_install()
+        return f"{_suse_package_install()} && {_SUSE_TMUX_RUNTIME_SETUP}"
     if arch:
         return _arch_package_install()
     if alpine:
@@ -661,6 +675,8 @@ def append_terminus_runtime_tools(dockerfile: str) -> str:
     )
     if last_user and last_user not in {"root", "0"}:
         prepared += f"USER {last_user}\n"
+    if suse:
+        prepared += _run_instruction(_SUSE_TMUX_STARTUP_PROBE, custom_shell=custom_shell)
     return prepared
 
 
@@ -763,6 +779,7 @@ def _preparation_dockerfile(
 USER {uid}:{gid}
 WORKDIR {workdir}
 """
+        + (run(_SUSE_TMUX_STARTUP_PROBE) if suse else "")
     )
 
 
