@@ -588,7 +588,10 @@ with `--purpose trajectory_generation`; the CLI stores it as
 is no `--skip-verifier` flag; use `"verification": "skipped"` or
 `--verifier-env-mode skipped`. Delivery export and canonical archive already
 accept a succeeded trial without a numeric reward when that boolean is true.
-Hosted Nebius still rejects skip at admission (`verifier_mode_required`).
+Hosted trajectory generation admits the same boolean and runs the agent sandbox
+without a verifier phase. Missing verifier artifacts are valid for that trial.
+Evaluation still rejects skip, and a graded trial still requires its verifier
+artifacts.
 
 ```bash
 loom eval batch create --purpose evaluation \

@@ -247,7 +247,7 @@ func (p plan) residentPrivateRoles() map[string]bool {
 	if p.ExecutionRole == "verifier" {
 		return map[string]bool{"verifier-sandbox": true}
 	}
-	if p.InPlaceVerifier || p.VerifierExecution == "separate_execution" {
+	if p.InPlaceVerifier || p.VerifierExecution == "separate_execution" || p.VerifierExecution == "skipped" {
 		return map[string]bool{"task-sandbox": true}
 	}
 	return map[string]bool{"task-sandbox": true, "verifier-sandbox": true}

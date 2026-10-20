@@ -455,6 +455,11 @@ def automatic_service_execution_rejections(
     task = normalize_steps(task)
     declared_rejections = task_runtime_rejections(task, agent_name=trial.agent_name)
     env = task.environment
+    # A skipped trial never starts the verifier sandbox, so only the agent identity is checked.
+    identity_users = (
+        (env.user,) if trial.skip_verifier
+        else (env.user, inherited_sandbox_user(env.user, task.verifier.user))
+    )
     # The harness spec supplies only harness-owned facts; checks keyed on
     # `controller` belong to the common private-sandbox path (#2288).
     spec = hosted_harness(trial.agent_name)
@@ -489,14 +494,24 @@ def automatic_service_execution_rejections(
         # The guest path grades in a fresh verifier guest, not the agent's live
         # sandbox. Reject an explicit request for that until it is supported;
         # task-authored shared guest tasks keep their historical topology.
-        if not supports_shared_guest and resolve_verifier_env_mode(task, trial) == "shared" and (
-            trial.isolation == "guest" or trial.verifier_env_mode == "shared"
-            or env.single_service_compose is not None
+        # Skip does not grade, so the task file's shared mode is not a request for it.
+        if (
+            not trial.skip_verifier
+            and not supports_shared_guest
+            and resolve_verifier_env_mode(task, trial) == "shared"
+            and (
+                trial.isolation == "guest" or trial.verifier_env_mode == "shared"
+                or env.single_service_compose is not None
+            )
         ):
             reasons.append("isolation_guest_shared_unsupported")
         if env.sidecars:
             reasons.append("guest_sidecars_unsupported")
-        if resolve_verifier_env_mode(task, trial) == "shared" and task.verifier.user is not None:
+        if (
+            not trial.skip_verifier
+            and resolve_verifier_env_mode(task, trial) == "shared"
+            and task.verifier.user is not None
+        ):
             # One VM cannot be two users. An unresolved user is recorded once
             # below as unsupported_task_identity.
             compatible = guest_shared_identity_compatible(
@@ -560,7 +575,7 @@ def automatic_service_execution_rejections(
             if env.user == "image":
                 if not (allow_task_image_preparation and env.dockerfile is not None):
                     reasons.append("task_image_runtime_metadata_required")
-            for user in (env.user, inherited_sandbox_user(env.user, task.verifier.user)):
+            for user in identity_users:
                 concrete = concrete_sandbox_user(user)
                 if concrete is None:
                     continue
@@ -624,20 +639,21 @@ def automatic_service_execution_rejections(
         )
     ):
         reasons.append("terminus2_multi_model_policy_unsupported")
-    if task.verifier.name != "script" or task.verifier.env_mode not in {"shared", "separate"}:
-        reasons.append("script_verifier_required")
     verifier_path = task.verifier.args.get("script_path")
-    if (
-        not isinstance(verifier_path, str)
-        or not verifier_path
-        or PurePosixPath(verifier_path).is_absolute()
-        or ".." in PurePosixPath(verifier_path).parts
-        or _GLOB_MAGIC.search(verifier_path)
-    ):
-        reasons.append("exact_verifier_path_required")
-    if trial.skip_verifier or trial.verifier_env_mode not in {None, "shared", "separate"}:
+    if not trial.skip_verifier:
+        if task.verifier.name != "script" or task.verifier.env_mode not in {"shared", "separate"}:
+            reasons.append("script_verifier_required")
+        if (
+            not isinstance(verifier_path, str)
+            or not verifier_path
+            or PurePosixPath(verifier_path).is_absolute()
+            or ".." in PurePosixPath(verifier_path).parts
+            or _GLOB_MAGIC.search(verifier_path)
+        ):
+            reasons.append("exact_verifier_path_required")
+    if trial.verifier_env_mode not in {None, "shared", "separate"}:
         reasons.append("verifier_mode_required")
-    if controller:
+    if controller and not trial.skip_verifier:
         if not isinstance(verifier_path, str) or not verifier_path.startswith("verifier/"):
             reasons.append("private_verifier_directory_required")
     if task.steps:
@@ -760,6 +776,7 @@ def compile_service_execution_plan(
             "artifacts": step.artifacts,
             "required_artifacts": step.required_artifacts,
             "verifier": task.verifier.model_dump(mode="json"),
+            **({"skip_verifier": True} if trial.skip_verifier else {}),
         }
     )
     if spec.workspace:
@@ -799,7 +816,7 @@ def compile_service_execution_plan(
         del main_environment["LOOM_TASK_ARTIFACTS_JSON"]
         main_environment["LOOM_TASK_ARTIFACTS_FROM_INPUT"] = "1"
     verifier_path = str(task.verifier.args.get("script_path", ""))
-    verifier = ProcessPhaseV1(
+    verifier = None if trial.skip_verifier else ProcessPhaseV1(
         role="verifier",
         argv=("/bin/sh", verifier_path),
         working_directory="/workspace",
@@ -840,11 +857,15 @@ def compile_service_execution_plan(
             kind="usage",
             required=True,
         ),
-        RuntimeOutputDeclarationV1(
-            source_path=".loom/verifier/output.json",
-            relative_path="verifier/output.json",
-            kind="verifier",
-            required=True,
+        *(
+            () if trial.skip_verifier else (
+                RuntimeOutputDeclarationV1(
+                    source_path=".loom/verifier/output.json",
+                    relative_path="verifier/output.json",
+                    kind="verifier",
+                    required=True,
+                ),
+            )
         ),
     )
     if hosted_http_egress(effective_network_policy) is not None:
@@ -888,7 +909,7 @@ def compile_service_execution_plan(
             ),
             environment=main_environment,
         ),
-        verifier_execution="in_attempt",
+        verifier_execution="skipped" if trial.skip_verifier else "in_attempt",
         verifier=verifier,
         max_log_bytes_per_stream=profile.max_log_bytes_per_stream,
         max_artifact_bytes=profile.max_artifact_bytes,

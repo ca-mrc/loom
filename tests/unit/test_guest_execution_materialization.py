@@ -8,6 +8,7 @@ import pytest
 from fastapi import HTTPException
 
 from loom.execution_contract import workload_requirements_from_task
+from loom.execution_selection import execution_selection_readback
 from loom.execution_requirements import GUEST_EXECUTION_CAPABILITIES
 from loom.execution_resource_allocation import allocate_node_resources
 from loom.execution_runtime_contract import (
@@ -515,3 +516,34 @@ def test_shared_guest_keeps_one_live_sandbox_and_requires_deployment_readiness()
     raw["sidecars"][0]["role_name"] = "verifier-sandbox"
     with pytest.raises(ValueError):
         ExecutionRuntimePlanV1.model_validate(raw)
+
+
+def test_skipped_guest_keeps_the_agent_sandbox_only():
+    task, trial, profile = _guest_inputs()
+    shared_task = task.model_copy(update={
+        "verifier": task.verifier.model_copy(update={"env_mode": "shared"}),
+    })
+    skipped = trial.model_copy(update={"skip_verifier": True})
+    reasons = automatic_service_execution_rejections(
+        shared_task, skipped, source_provenance=_provenance(),
+    )
+    assert "isolation_guest_shared_unsupported" not in reasons
+    assert "verifier_mode_required" not in reasons
+    assert "guest_root_identity_required" not in reasons
+    plan = _compile(shared_task, skipped, profile)
+    assert plan.verifier_execution == "skipped"
+    assert plan.verifier is None
+    assert plan.in_place_verifier is False
+    assert [sidecar.role_name for sidecar in plan.sidecars] == ["task-sandbox"]
+    assert plan.sidecars[0].guest_execution is not None
+    assert not any(item.kind == "verifier" for item in plan.output_declarations)
+    assert any(
+        item.relative_path == "artifacts/workspace.tar" and item.required
+        for item in plan.output_declarations
+    )
+    validate_runtime_plan_requirements(plan, workload_requirements_from_task(shared_task, skipped))
+    assert ExecutionRuntimePlanV1.model_validate(plan.canonical_payload()) == plan
+    effective = execution_selection_readback(skipped.model_dump(mode="json"), plan)["effective"]
+    assert effective["verification"] == "skipped"
+    assert effective["isolation"] == "guest"
+    assert effective["fresh_sandbox_grading"] is False

@@ -450,6 +450,7 @@ def test_ordinary_task_compiles_to_profile_owned_nebius_plan() -> None:
     assert plan.main.environment["LOOM_TASK_MODEL"] == "openai/gpt-5"
     assert plan.verifier is not None
     assert plan.verifier.argv == ("/bin/sh", "verifier/check.sh")
+    assert plan.verifier_execution == "in_attempt"
     assert plan.task_resources.cpu_millis == 1000
     assert plan.workspace_mib == 2048
     assert [item.model_dump(mode="json") for item in plan.output_declarations] == [
@@ -477,6 +478,24 @@ def test_ordinary_task_compiles_to_profile_owned_nebius_plan() -> None:
             "kind": "verifier",
             "required": True,
         },
+    ]
+
+
+def test_skipped_direct_completion_omits_the_verifier_phase() -> None:
+    plan = compile_service_execution_plan(
+        task=_task(),
+        trial=_trial().model_copy(update={"skip_verifier": True}),
+        task_revision_sha256=_REVISION,
+        source_provenance=_provenance(),
+        profile=_profile(),
+    )
+
+    assert plan.verifier_execution == "skipped"
+    assert plan.verifier is None
+    assert [item.relative_path for item in plan.output_declarations] == [
+        "artifacts/answer.txt",
+        "trajectory/events.jsonl",
+        "accounting/usage.json",
     ]
 
 

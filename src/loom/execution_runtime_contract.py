@@ -431,6 +431,7 @@ class ExecutionRuntimePlanV1(_Strict):
         if (
             self.in_place_verifier
             or self.verifier_execution == VerifierExecution.SEPARATE_EXECUTION
+            or self.verifier_execution == VerifierExecution.SKIPPED
         ):
             return {"task-sandbox"}
         return {"task-sandbox", "verifier-sandbox"}
@@ -452,13 +453,24 @@ class ExecutionRuntimePlanV1(_Strict):
                     raise ValueError("guest capabilities do not match the immutable class")
         if guest_class != bool(guests):
             raise ValueError("guest execution class and guest plan must be selected together")
+        skipped_guest = (
+            self.verifier_execution == VerifierExecution.SKIPPED
+            and self.verifier is None
+            and not self.in_place_verifier
+            and not self.verifier_after_agent_timeout
+        )
+        single_guest = self.in_place_verifier or skipped_guest
         if guests and (
             {sidecar.role_name for sidecar in guests} != (
-                {"task-sandbox"} if self.in_place_verifier else {"task-sandbox", "verifier-sandbox"}
+                {"task-sandbox"} if single_guest else {"task-sandbox", "verifier-sandbox"}
             )
-            or len(self.sidecars) != (1 if self.in_place_verifier else 2)
+            or len(self.sidecars) != (1 if single_guest else 2)
             or self.execution_role != "attempt" or self.composition != RuntimeComposition.INIT_PAYLOAD
-            or self.verifier_execution != VerifierExecution.IN_ATTEMPT
+            or (
+                self.verifier_execution != VerifierExecution.SKIPPED
+                if skipped_guest
+                else self.verifier_execution != VerifierExecution.IN_ATTEMPT
+            )
             or self.runtime_volume_mib < 1024
             or self.controller_resources is None
             or any(sidecar.guest_execution != guests[0].guest_execution
@@ -866,6 +878,7 @@ def validate_runtime_plan_requirements(
         expected_verifier = {
             VerifierTopology.IN_ATTEMPT: VerifierExecution.IN_ATTEMPT,
             VerifierTopology.SEPARATE_EXECUTION: VerifierExecution.SEPARATE_EXECUTION,
+            VerifierTopology.SKIPPED: VerifierExecution.SKIPPED,
         }[requirements.verifier_topology]
         if plan.verifier_execution != expected_verifier:
             raise ValueError("runtime plan verifier topology does not match workload requirements")
