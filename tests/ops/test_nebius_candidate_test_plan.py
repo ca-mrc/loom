@@ -13,6 +13,7 @@ from scripts.ops import nebius_pool_test_plan as planner
 
 ROOT = Path(__file__).resolve().parents[2]
 SHA, BASE = "a" * 40, "b" * 40
+SOURCE, TREE, CHECKOUT = "c" * 40, "d" * 40, "e" * 40
 
 
 class Actions:
@@ -45,8 +46,82 @@ class Actions:
             return [dict(total_count=1, workflow_runs=[self.run])]
         if endpoint.startswith("check-suites/"):
             return [self.suite]
+        if endpoint.startswith("git/commits/"):
+            return []
         assert endpoint == "actions/runs/10/jobs?filter=latest&per_page=100"
         return [dict(total_count=len(self.jobs), jobs=self.jobs)]
+
+
+class PullRequestActions(Actions):
+    def __init__(self):
+        super().__init__(SOURCE)
+        self.run.update(
+            event="pull_request",
+            head_branch="fix/own-branch",
+            display_title=f"gate=full / head={SOURCE} / base={BASE} / updated=none / pull=7",
+        )
+        self.pr = dict(
+            number=7,
+            state="closed",
+            merged_at="2026-10-20T20:00:00Z",
+            merge_commit_sha=SHA,
+            base=dict(ref="dev", sha=BASE, repo={"id": 1281629473}),
+            head=dict(sha=SOURCE, ref="fix/own-branch", repo={"id": 1281629473}),
+        )
+        self.commit = dict(sha=SHA, tree={"sha": TREE}, parents=[{"sha": BASE}])
+        self.checked = dict(
+            sha=CHECKOUT, tree={"sha": TREE}, parents=[{"sha": BASE}, {"sha": SOURCE}]
+        )
+        for index, job in enumerate(self.jobs):
+            job.update(
+                id=100 + index,
+                steps=[
+                    dict(
+                        number=2,
+                        name="Run actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd",
+                        status="completed",
+                        conclusion="success",
+                        started_at="2026-10-20T19:00:00Z",
+                        completed_at="2026-10-20T19:00:02Z",
+                    ),
+                    dict(
+                        number=8,
+                        name="Pytest — manifest-owned pool shard",
+                        status="completed",
+                        conclusion="success",
+                    ),
+                ],
+            )
+
+    def read(self, endpoint):
+        if "event=merge_group" in endpoint:
+            return [dict(workflow_runs=[])]
+        if endpoint.startswith(f"git/commits/{SHA}"):
+            return [self.commit]
+        if endpoint.startswith(f"git/commits/{CHECKOUT}"):
+            return [self.checked]
+        if endpoint.startswith(f"commits/{SHA}/pulls"):
+            return [self.pr]
+        if endpoint.startswith("git/commits/"):
+            return []
+        return super().read(endpoint)
+
+    def log(self, job_id):
+        assert job_id in {job["id"] for job in self.jobs}
+        return "\n".join(
+            f"2026-10-20T19:00:01.1234567Z {line}"
+            for line in [
+                "##[group]Run actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd",
+                "  CI_TEST_SCOPE: nebius",
+                "  CI_PYTEST_MARKERS: not legacy_pool",
+                "  TEST_CHANGED_PATHS: []",
+                f"[command]/usr/bin/git fetch origin +{CHECKOUT}:refs/remotes/pull/7/merge",
+                "[command]/usr/bin/git checkout --progress --force refs/remotes/pull/7/merge",
+                "[command]/usr/bin/git log -1 --format=%H",
+                CHECKOUT,
+                "##[group]Run python3 scripts/configure_ci_registry_mirror.py",
+            ]
+        )
 
 
 @pytest.fixture
@@ -77,6 +152,169 @@ def test_candidate_preserves_shared_pool_coverage_without_reintroducing_it_for_u
         assert any(Path(path).name.startswith("test_nebius_shared_pool_") for path in pending(value)) is retained
         if not retained:
             assert value["required"] is False
+
+
+def test_native_squash_reuses_the_actual_tested_merge_tree(actions, monkeypatch):
+    pr = PullRequestActions()
+    monkeypatch.setattr(planner, "github_job_log", pr.log, raising=False)
+    value = planner.plan(ROOT, SHA, read=pr.read)
+    assert value["required"] is False
+    assert value["reused_files"] == value["required_files"] > 0
+    assert value["reused_runs"] == [10]
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "unmerged",
+        "other_candidate",
+        "other_target",
+        "fork",
+        "old_head",
+        "old_base",
+        "filtered",
+        "other_workflow",
+        "other_app",
+        "other_branch",
+        "other_pull",
+        "tree",
+        "parent",
+        "source_parent",
+        "extra_parent",
+        "candidate_merge",
+    ],
+)
+def test_squash_unqualified_identity_or_tested_content_retains_tests(actions, damage):
+    pr = PullRequestActions()
+    if damage == "unmerged":
+        pr.pr["merged_at"] = None
+    elif damage == "other_candidate":
+        pr.pr["merge_commit_sha"] = BASE
+    elif damage == "other_target":
+        pr.pr["base"]["ref"] = "main"
+    elif damage == "fork":
+        pr.pr["head"]["repo"]["id"] = 1
+    elif damage == "old_head":
+        pr.pr["head"]["sha"] = "f" * 40
+    elif damage == "old_base":
+        pr.run["display_title"] = pr.run["display_title"].replace(BASE, "f" * 40)
+    elif damage == "filtered":
+        pr.run["display_title"] = pr.run["display_title"].replace("gate=full", "gate=filtered")
+    elif damage == "other_workflow":
+        pr.run["path"] = ".github/workflows/images.yml"
+    elif damage == "other_app":
+        pr.suite["app"]["id"] = 1
+    elif damage == "other_branch":
+        pr.run["head_branch"] = "foreign"
+    elif damage == "other_pull":
+        pr.run["display_title"] = pr.run["display_title"].replace("pull=7", "pull=8")
+    elif damage == "tree":
+        pr.checked["tree"]["sha"] = "f" * 40
+    elif damage == "parent":
+        pr.checked["parents"][0]["sha"] = "f" * 40
+    elif damage == "source_parent":
+        pr.checked["parents"][1]["sha"] = "f" * 40
+    elif damage == "extra_parent":
+        pr.checked["parents"].append({"sha": SHA})
+    elif damage == "candidate_merge":
+        pr.commit["parents"].append({"sha": SOURCE})
+    result = planner.plan(ROOT, SHA, read=pr.read, read_log=pr.log)
+    assert result["reused_files"] == 0
+    assert len(pending(result)) == result["required_files"] > 0
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "missing_log",
+        "different_pin",
+        "wrong_ref",
+        "unbounded_time",
+        "missing_sha",
+        "late_spoof",
+        "scope",
+        "markers",
+        "selection",
+        "failed_pytest",
+        "missing_checkout",
+    ],
+)
+def test_squash_unproven_job_checkout_or_selection_retains_its_modules(actions, damage):
+    pr = PullRequestActions()
+    original = pr.log
+    if damage == "failed_pytest":
+        pr.jobs[0]["steps"][1]["conclusion"] = "skipped"
+    elif damage == "missing_checkout":
+        pr.jobs[0]["steps"].pop(0)
+
+    def log(job_id):
+        value = original(job_id)
+        if job_id != 100:
+            return value
+        if damage == "missing_log":
+            raise OSError("unavailable")
+        if damage == "different_pin":
+            return value.replace(planner.CHECKOUT_ACTION, "actions/checkout@other")
+        if damage == "wrong_ref":
+            return value.replace("pull/7/merge", "pull/8/merge")
+        if damage == "unbounded_time":
+            return value.replace("19:00:01.", "19:01:01.")
+        if damage == "missing_sha":
+            return value.replace(f"Z {CHECKOUT}\n", "Z short-sha\n")
+        if damage == "late_spoof":
+            # A later repository command cannot repair missing checkout output.
+            return value.replace(f"Z {CHECKOUT}\n", "Z short-sha\n") + (
+                f"\n2026-10-20T19:00:02Z [command]/usr/bin/git log -1 --format=%H"
+                f"\n2026-10-20T19:00:02Z {CHECKOUT}"
+            )
+        if damage == "scope":
+            return value.replace("CI_TEST_SCOPE: nebius", "CI_TEST_SCOPE: all")
+        if damage == "markers":
+            return value.replace("not legacy_pool", "legacy_pool")
+        if damage == "selection":
+            return value.replace("TEST_CHANGED_PATHS: []", 'TEST_CHANGED_PATHS: "unknown"')
+        return value
+
+    value = planner.plan(ROOT, SHA, read=pr.read, read_log=log)
+    manifest = planner.load_manifest(ROOT / "config/component-ownership.toml")
+    expected = set(
+        planner.selected_test_paths(
+            manifest,
+            tracked_paths=planner._tracked_paths(ROOT),
+            lane="nebius-pool",
+            repo_root=ROOT,
+            test_scope="nebius",
+            suite="nebius-pool-ops",
+            shard_index=0,
+            shard_count=20,
+        )
+    )
+    assert pending(value) == expected
+    assert value["reused_files"] + len(expected) == value["required_files"]
+
+
+def test_squash_reconstructs_the_jobs_actual_narrowed_selection(actions):
+    pr = PullRequestActions()
+    path = "tests/ops/" + "_".join(("test_nebius_pool", "activation_transport")) + ".py"
+    value = planner.plan(
+        ROOT,
+        SHA,
+        read=pr.read,
+        read_log=lambda job_id: pr.log(job_id).replace(
+            "TEST_CHANGED_PATHS: []", "TEST_CHANGED_PATHS: " + json.dumps([path])
+        ),
+    )
+    full = planner.plan(ROOT, SHA, read=lambda _: [])
+    assert value["reused_files"] == 1
+    assert pending(value) == pending(full) - {path}
+
+
+def test_squash_does_not_guess_between_duplicate_job_names(actions):
+    pr = PullRequestActions()
+    pr.jobs.append(copy.deepcopy(pr.jobs[0]))
+    value = planner.plan(ROOT, SHA, read=pr.read, read_log=pr.log)
+    assert 0 < value["missing_files"] < value["required_files"]
+    assert [row["shard_index"] for row in value["matrix"]["include"]] == [0]
 
 
 def test_job_only_retry_retains_other_successful_jobs_on_same_commit(actions):
