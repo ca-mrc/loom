@@ -1,9 +1,9 @@
 /**
  * TrialDetail trajectory-section button-state regression. Bug:
- * before the backend started returning {events: [], next_cursor: null}
+ * before the backend started returning {events: [], next_after_seq: null}
  * for not-yet-written trajectories (returned 404 instead), the
  * "Load more" button stayed active on a trial with no events. Now
- * that the backend returns an empty page, `next_cursor: null` sets
+ * that the backend returns an empty page, `next_after_seq: null` sets
  * `done = true` and the button MUST disappear.
  *
  * Also pins the new error-state UX: when the trajectory page errors,
@@ -15,6 +15,7 @@ import userEvent from "@testing-library/user-event";
 import { Link, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { api } from "../../api";
 import type { components } from "../../api/schema";
 import TrialDetail from "../../pages/TrialDetail";
 import type { FetchMock } from "../../test-utils/fetchMock";
@@ -147,7 +148,10 @@ function fetchSpy(
           }),
         );
       }
-      if (url.includes(`/trials/${TRIAL_ID}/trajectory`)) {
+      if (url.includes(`/trials/${TRIAL_ID}/trajectory?`)) {
+        return Promise.resolve(new Response(JSON.stringify({ events: [], next_cursor: null })));
+      }
+      if (url.includes(`/trials/${TRIAL_ID}/events`)) {
         if (trajectory.ok) {
           return Promise.resolve(
             new Response(JSON.stringify(trajectory.body), {
@@ -189,6 +193,47 @@ describe("TrialDetail trajectory section", () => {
     vi.restoreAllMocks();
   });
 
+  it.each([
+    ["Download complete Trial bundle", "downloadTrialBundle"],
+    ["Download ATIF report", "downloadATIF"],
+    ["Download trajectory log", "downloadTrajectory"],
+    ["Download artifact main/result.txt", "downloadArtifact"],
+  ] as const)("owns pending, failure and retry for %s", async (label, method) => {
+    fetchSpy({ ok: true, body: { events: [], next_after_seq: null } }, {
+      ...TRIAL_BODY, state: "succeeded", atif_ready: true, trajectory_ready: true,
+      artifacts: [{ step_name: "main", key: "main/result.txt", size: 17, download_url: "/download" }],
+      materialization: {
+        backend: "nebius", pool_id: "test", state: "committed", lifecycle_stage: "succeeded",
+        compute_state: "succeeded", output_commit_state: "committed", canonical_ready: true,
+        execution_state: "finalized", submitted_at: "2026-10-01T00:00:00Z", attempts: 1,
+        next_attempt_at: null, started_at: null, committed_at: null, error: null,
+        pod_scheduled_at: null, pod_started_at: null, pod_terminated_at: null, output_committed_at: null,
+        source_bundle: null, atif_sha256: null, trajectory_sha256: null,
+        source_cleanup_state: "retained", source_cleanup_attempts: 0,
+        source_cleanup_error_message: null, source_retain_until: null,
+        bundle: { schema_version: "loom.canonical-trial-bundle-export.v1", artifact_id: "bundle",
+          file_count: 1, size_bytes: 17, manifest_sha256: "a".repeat(64), content_sha256: "b".repeat(64),
+          download_url: `/api/v1/trials/${TRIAL_ID}/bundle/download` },
+      },
+    });
+    let reject!: (reason: Error) => void;
+    const pending = new Promise<void>((_resolve, fail) => { reject = fail; });
+    const download = vi.spyOn(api, method).mockReturnValueOnce(pending).mockResolvedValue(undefined);
+    renderWithProviders(<Routes><Route path="/trials/:trialId" element={<TrialDetail />} /></Routes>, {
+      route: `/trials/${TRIAL_ID}`,
+    });
+    const button = await screen.findByRole("button", { name: (name) => name.startsWith(label) });
+    act(() => { button.click(); button.click(); });
+    expect(download).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(button).toBeDisabled());
+    await act(async () => { reject(new Error("Download temporarily unavailable")); });
+    expect(await screen.findByText("Download temporarily unavailable")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: `Retry ${label}` }));
+    await waitFor(() => expect(download).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByText("Download temporarily unavailable")).not.toBeInTheDocument());
+    expect(screen.getByRole("button", { name: label })).toBeEnabled();
+  });
+
   it("polls an active fallback through an empty tail, deduplicates events, and drains on completion", async () => {
     vi.stubGlobal("EventSource", undefined);
     vi.spyOn(document, "hasFocus").mockReturnValue(true);
@@ -198,13 +243,14 @@ describe("TrialDetail trajectory section", () => {
     const cursors: string[] = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = new URL(String(input), "http://localhost");
-      if (url.pathname.endsWith("/trajectory")) {
-        cursors.push(url.searchParams.get("cursor") ?? "0");
+      if (url.pathname.endsWith("/trajectory")) return new Response(JSON.stringify({ events: [], next_cursor: null }));
+      if (url.pathname.endsWith("/events")) {
+        cursors.push(url.searchParams.get("after_seq") ?? "-1");
         const events = page === 0 ? [] : page === 1
           ? [{ seq: 0, kind: "trial_start", trial_id: TRIAL_ID }]
-          : page === 2 ? [{ seq: 0, kind: "trial_start", trial_id: TRIAL_ID }, { seq: 1, kind: "step_start", step_id: "live", trial_id: TRIAL_ID }]
-          : [{ seq: 2, kind: "trial_end", final_state: "succeeded", trial_id: TRIAL_ID }];
-        return new Response(JSON.stringify({ events, next_cursor: null }));
+          : page === 2 ? [{ seq: 0, kind: "trial_start", trial_id: TRIAL_ID }, { seq: 27, kind: "step_start", step_id: "live", trial_id: TRIAL_ID }]
+          : url.searchParams.get("after_seq") === "27" ? [{ seq: 42, kind: "trial_end", final_state: "succeeded", trial_id: TRIAL_ID }] : [];
+        return new Response(JSON.stringify({ events, next_after_seq: events.at(-1)?.seq ?? null }));
       }
       return new Response(JSON.stringify({ ...TRIAL_BODY, state: terminal ? "succeeded" : "running", trajectory_ready: terminal }));
     });
@@ -219,12 +265,16 @@ describe("TrialDetail trajectory section", () => {
       await screen.findByText("Step live started");
       expect(screen.getAllByText("Trial started")).toHaveLength(1);
       expect(screen.getByText("2 events · fallback polling")).toBeInTheDocument();
-      expect(cursors).toContain("1");
+      expect(cursors).toContain("0");
+      expect(cursors[0]).toBe("-1");
       terminal = true;
       page = 3;
       await act(async () => { await vi.advanceTimersByTimeAsync(4_000); });
       await screen.findByText("Trial ended — succeeded");
+      await userEvent.click(await screen.findByRole("button", { name: "Load more" }));
       await screen.findByText("3 events · complete");
+      expect(cursors).toContain("27");
+      expect(cursors.at(-1)).toBe("42");
       const finalRequests = cursors.length;
       await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
       expect(cursors).toHaveLength(finalRequests);
@@ -239,19 +289,20 @@ describe("TrialDetail trajectory section", () => {
     const pending = new Promise<Response>((resolve) => { releaseOld = resolve; });
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const path = String(input);
-      if (path.includes(`/trials/${TRIAL_ID}/trajectory`)) {
+      if (path.includes("/trajectory?")) return new Response(JSON.stringify({ events: [], next_cursor: null }));
+      if (path.includes(`/trials/${TRIAL_ID}/events`)) {
         oldSignal = init?.signal;
         return pending;
       }
-      if (path.includes("/trials/second/trajectory")) return new Response(JSON.stringify({ events: [{ seq: 0, kind: "step_start", step_id: "second-trial" }], next_cursor: null }));
+      if (path.includes("/trials/second/events")) return new Response(JSON.stringify({ events: [{ seq: 0, kind: "step_start", step_id: "second-trial" }], next_after_seq: null }));
       return new Response(JSON.stringify({ ...TRIAL_BODY, id: path.includes("second") ? "second" : TRIAL_ID, state: "succeeded" }));
     });
     renderWithProviders(<><Link to="/trials/second">Next trial</Link><Routes><Route path="/trials/:trialId" element={<TrialDetail />} /></Routes></>, { route: `/trials/${TRIAL_ID}` });
-    await waitFor(() => expect(globalThis.fetch).toHaveBeenCalledWith(expect.stringContaining(`/trials/${TRIAL_ID}/trajectory`), expect.anything()));
+    await waitFor(() => expect(globalThis.fetch).toHaveBeenCalledWith(expect.stringContaining(`/trials/${TRIAL_ID}/events`), expect.anything()));
     await userEvent.click(screen.getByText("Next trial"));
     await screen.findByText("Step second-trial started");
     expect(oldSignal?.aborted).toBe(true);
-    await act(async () => { releaseOld(new Response(JSON.stringify({ events: [{ seq: 0, kind: "trial_start" }], next_cursor: null }))); await pending; });
+    await act(async () => { releaseOld(new Response(JSON.stringify({ events: [{ seq: 0, kind: "trial_start" }], next_after_seq: null }))); await pending; });
     expect(screen.queryByText("Trial started")).not.toBeInTheDocument();
     expect(screen.getByText("Step second-trial started")).toBeInTheDocument();
   });
@@ -273,7 +324,7 @@ describe("TrialDetail trajectory section", () => {
       }
     }
     vi.stubGlobal("EventSource", TrialEventSource);
-    const fetchMock = fetchSpy({ ok: true, body: { events: [], next_cursor: null } });
+    const fetchMock = fetchSpy({ ok: true, body: { events: [], next_after_seq: null } });
     renderWithProviders(<Routes><Route path="/trials/:trialId" element={<TrialDetail />} /></Routes>, {
       route: `/trials/${TRIAL_ID}`,
     });
@@ -303,7 +354,7 @@ describe("TrialDetail trajectory section", () => {
   });
 
   it("shows the exact Harbor version returned for a Trial", async () => {
-    fetchSpy({ ok: true, body: { events: [], next_cursor: null } }, {
+    fetchSpy({ ok: true, body: { events: [], next_after_seq: null } }, {
       ...TRIAL_BODY, agent_name: "terminus-2", agent_version: "harbor-v2",
     });
     renderWithProviders(<Routes><Route path="/trials/:trialId" element={<TrialDetail />} /></Routes>, { route: `/trials/${TRIAL_ID}` });
@@ -311,7 +362,7 @@ describe("TrialDetail trajectory section", () => {
   });
 
   it("explains terminal zero-event trials and links to the final diagnostics", async () => {
-    fetchSpy({ ok: true, body: { events: [], next_cursor: null } }, { ...TRIAL_BODY, state: "failed", failure_reason: "task_image_build_failed" } as typeof TRIAL_BODY);
+    fetchSpy({ ok: true, body: { events: [], next_after_seq: null } }, { ...TRIAL_BODY, state: "failed", failure_reason: "task_image_build_failed" } as typeof TRIAL_BODY);
     renderWithProviders(<Routes><Route path="/trials/:trialId" element={<TrialDetail />} /></Routes>, { route: `/trials/${TRIAL_ID}` });
     expect(await screen.findByText(/This trial ended without recorded trajectory events/)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Open build and execution diagnostics" })).toHaveAttribute("href", `/trials/${TRIAL_ID}#diagnostics`);
@@ -320,7 +371,7 @@ describe("TrialDetail trajectory section", () => {
   });
 
   it("hides Load more when the trajectory is empty", async () => {
-    fetchSpy({ ok: true, body: { events: [], next_cursor: null } });
+    fetchSpy({ ok: true, body: { events: [], next_after_seq: null } });
     renderWithProviders(
       <Routes>
         <Route path="/trials/:trialId" element={<TrialDetail />} />
@@ -351,7 +402,7 @@ describe("TrialDetail trajectory section", () => {
   });
 
   it("shows submitting user owner, share status, and provenance", async () => {
-    fetchSpy({ ok: true, body: { events: [], next_cursor: null } });
+    fetchSpy({ ok: true, body: { events: [], next_after_seq: null } });
     renderWithProviders(
       <Routes>
         <Route path="/trials/:trialId" element={<TrialDetail />} />
@@ -369,7 +420,7 @@ describe("TrialDetail trajectory section", () => {
 
   it("shows token-only trial cost as not applicable instead of zero dollars", async () => {
     fetchSpy(
-      { ok: true, body: { events: [], next_cursor: null } },
+      { ok: true, body: { events: [], next_after_seq: null } },
       {
         ...TRIAL_BODY,
         llm_calls_count: 1,
@@ -401,7 +452,7 @@ describe("TrialDetail trajectory section", () => {
 
   it("shows user-facing debug evidence when the API includes it", async () => {
     fetchSpy(
-      { ok: true, body: { events: [], next_cursor: null } },
+      { ok: true, body: { events: [], next_after_seq: null } },
       {
         ...TRIAL_BODY,
         state: "failed",
@@ -432,7 +483,7 @@ describe("TrialDetail trajectory section", () => {
   });
 
   it.each(["accounting/usage.json", "artifacts/result.json"])("distinguishes canonical and original bundle files: %s", async (relativePath) => {
-    fetchSpy({ ok: true, body: { events: [], next_cursor: null } }, {
+    fetchSpy({ ok: true, body: { events: [], next_after_seq: null } }, {
       ...TRIAL_BODY,
       artifacts: ["canonical", "files"].map((kind, index) => ({
         key: `trials/team/${TRIAL_ID}/attempts/1/bundles/bundle-id/${kind}/${relativePath}`,
@@ -448,7 +499,7 @@ describe("TrialDetail trajectory section", () => {
 
   it("downloads artifacts through the authenticated service endpoint", async () => {
     const fetchMock = fetchSpy(
-      { ok: true, body: { events: [], next_cursor: null } },
+      { ok: true, body: { events: [], next_after_seq: null } },
       {
         ...TRIAL_BODY,
         state: "succeeded",
@@ -504,7 +555,7 @@ describe("TrialDetail trajectory section", () => {
 
   it("labels artifacts blocked from org-wide sharing", async () => {
     fetchSpy(
-      { ok: true, body: { events: [], next_cursor: null } },
+      { ok: true, body: { events: [], next_after_seq: null } },
       {
         ...TRIAL_BODY,
         state: "succeeded",
@@ -573,9 +624,9 @@ describe("TrialDetail trajectory section", () => {
             }),
           );
         }
-        if (url.includes(`/trials/${TRIAL_ID}/trajectory`)) {
+        if (url.includes(`/trials/${TRIAL_ID}/events`)) {
           return Promise.resolve(
-            new Response(JSON.stringify({ events: [], next_cursor: null }), {
+            new Response(JSON.stringify({ events: [], next_after_seq: null }), {
               status: 200,
               headers: { "Content-Type": "application/json" },
             }),
@@ -616,7 +667,7 @@ describe("TrialDetail trajectory section", () => {
 
   it("shows platform outcome and humanized failure reason for failed trials", async () => {
     fetchSpy(
-      { ok: true, body: { events: [], next_cursor: null } },
+      { ok: true, body: { events: [], next_after_seq: null } },
       {
         ...TRIAL_BODY,
         state: "failed",
@@ -661,7 +712,7 @@ describe("TrialDetail trajectory section", () => {
 
   it("keeps a protected pending trial active while awaiting admission", async () => {
     fetchSpy(
-      { ok: true, body: { events: [], next_cursor: null } },
+      { ok: true, body: { events: [], next_after_seq: null } },
       {
         ...TRIAL_BODY,
         state: "protected-pending",
@@ -679,7 +730,7 @@ describe("TrialDetail trajectory section", () => {
   });
 
   it("shows a final unavailable diagnostic for cancelled output instead of a pending bundle", async () => {
-    fetchSpy({ ok: true, body: { events: [], next_cursor: null } }, {
+    fetchSpy({ ok: true, body: { events: [], next_after_seq: null } }, {
       ...TRIAL_BODY, state: "cancelled", finished_at: "2026-09-28T21:48:40Z",
       materialization: {
         state: "not_started", lifecycle_stage: "cancelled", compute_state: null,
@@ -709,7 +760,7 @@ describe("TrialDetail trajectory section", () => {
       finished_at: "2026-09-28T21:41:38Z", released_at: "2026-09-28T21:41:40Z",
       estimated_cost_microusd: null, allocated_cost_microusd: null, cost_state: "reserved",
     };
-    fetchSpy({ ok: true, body: { events: [], next_cursor: null } }, {
+    fetchSpy({ ok: true, body: { events: [], next_after_seq: null } }, {
       ...TRIAL_BODY, state: "running",
       materialization: {
         state: "not_started", lifecycle_stage: "verifying", compute_state: "succeeded",
@@ -754,7 +805,7 @@ describe("TrialDetail trajectory section", () => {
 
   it("keeps a Nebius trial active while materializing and downloads the complete bundle", async () => {
     const fetchMock = fetchSpy(
-      { ok: true, body: { events: [], next_cursor: null } },
+      { ok: true, body: { events: [], next_after_seq: null } },
       {
         ...TRIAL_BODY,
         state: "materializing",

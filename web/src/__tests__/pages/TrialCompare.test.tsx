@@ -11,7 +11,7 @@
  * `TrialColumn` queries are stubbed to never resolve (pending forever)
  * so the column renders its LoadingState rather than the error path.
  */
-import { screen } from "@testing-library/react";
+import { act, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -70,9 +70,15 @@ it("flags different tasks and continues beyond 200 events", async () => {
     const url = String(input); calls.push(url);
     const parsed = new URL(url, "http://localhost");
     let payload: unknown = {};
-    if (url.includes("/trajectory")) {
-      const next = parsed.searchParams.has("cursor");
-      payload = { events: next ? [{ step: 201, kind: "trial_end", final_state: "succeeded", observation: "last event", timestamp: "2026-09-23T00:00:00Z" }] : Array.from({ length: 200 }, (_, step) => ({ step, kind: "trial_start", timestamp: "2026-09-23T00:00:00Z" })), next_cursor: next ? null : 200 };
+    if (parsed.pathname.endsWith("/trajectory")) {
+      payload = { events: [], next_cursor: null };
+    } else if (parsed.pathname.endsWith("/events")) {
+      const after = Number(parsed.searchParams.get("after_seq"));
+      payload = after === -1
+        ? { events: Array.from({ length: 200 }, (_, step) => ({ seq: step * 3, step, kind: "trial_start", timestamp: "2026-09-23T00:00:00Z" })), next_after_seq: 597 }
+        : after === 597
+          ? { events: [{ seq: 597, kind: "trial_start" }, { seq: 900, kind: "trial_end", final_state: "succeeded" }], next_after_seq: 900 }
+          : { events: [], next_after_seq: null };
     } else if (url.includes("/trials/")) {
       const id = parsed.pathname.split("/").at(-1);
       payload = { id, task_id: id === "aaa" ? "task-one" : "task-two", state: "succeeded", agent_name: "oracle", model: null, aggregate_reward: id === "aaa" ? 0 : 1, llm_calls_count: 1, total_prompt_tokens: 2, total_completion_tokens: 3 };
@@ -87,7 +93,12 @@ it("flags different tasks and continues beyond 200 events", async () => {
   expect(screen.getAllByRole("link", { name: /Open full Trial details/ })).toHaveLength(2);
   await user.click((await screen.findAllByRole("button", { name: "Load more events" }))[0]);
   expect(await screen.findByText("Trial ended — succeeded")).toBeInTheDocument();
-  expect(calls.some((url) => url.includes("cursor=200"))).toBe(true);
+  expect(calls.some((url) => url.includes("after_seq=597"))).toBe(true);
+  expect(screen.getAllByText("Trial started")).toHaveLength(400);
+  await user.click(screen.getAllByRole("button", { name: "Load more events" })[0]);
+  await waitFor(() => expect(screen.getAllByRole("button", { name: "Load more events" })).toHaveLength(1));
+  expect(calls.some((url) => url.includes("after_seq=900"))).toBe(true);
+  expect(calls.some((url) => url.includes("/trajectory"))).toBe(false);
   await user.click(screen.getByRole("button", { name: "Remove second Trial" }));
   expect(screen.getByLabelText("Search comparison trial")).toBeInTheDocument();
 });

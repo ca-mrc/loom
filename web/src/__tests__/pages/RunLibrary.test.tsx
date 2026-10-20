@@ -792,6 +792,36 @@ describe("RunLibrary", () => {
 });
 
 describe("RunLibraryBatchDetail", () => {
+  it.each([
+    ["Download complete bundle", "downloadTrialBundle"],
+    ["Download report.json", "downloadRunLibraryArtifact"],
+    ["Export artifact metadata", "exportRunLibraryArtifacts"],
+  ] as const)("owns pending, failure and retry for %s", async (label, method) => {
+    mockRunLibrary({ detailOverride: {
+      ...detailBatch,
+      trial_bundles: [{ trial_id: "trial-alpha", task_id: "task", trial_state: "succeeded",
+        materialization_state: "committed", attempts: 1, canonical_ready: true, file_count: 1,
+        size_bytes: 17, manifest_sha256: "a".repeat(64), content_sha256: "b".repeat(64),
+        download_url: "/api/v1/trials/trial-alpha/bundle/download" }],
+    } });
+    let reject!: (reason: Error) => void;
+    const pending = new Promise<void>((_resolve, fail) => { reject = fail; });
+    const download = vi.spyOn(api, method).mockReturnValueOnce(pending).mockResolvedValue(undefined);
+    renderWithProviders(<Routes><Route path="/library/batches/:batchId" element={<RunLibraryBatchDetail />} /></Routes>, {
+      route: "/library/batches/batch-alpha",
+    });
+    const button = await screen.findByRole("button", { name: label });
+    act(() => { button.click(); button.click(); });
+    expect(download).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(button).toBeDisabled());
+    await act(async () => { reject(new Error("Download temporarily unavailable")); });
+    expect(await screen.findByText("Download temporarily unavailable")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: `Retry ${label}` }));
+    await waitFor(() => expect(download).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByText("Download temporarily unavailable")).not.toBeInTheDocument());
+    expect(screen.getByRole("button", { name: label })).toBeEnabled();
+  });
+
   beforeEach(() => {
     vi.restoreAllMocks();
   });
