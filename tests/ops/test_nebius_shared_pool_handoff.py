@@ -2451,6 +2451,11 @@ def test_shared_private_entry_dispatches_real_parent_and_preserves_uncertain_int
                 for target in bindings.migration.guards}, input_digest=bindings.input_digest,
             authority={}, application_scopes={})
 
+    def checked_writers(**options):
+        if 'bindings' in options:
+            assert options['bindings'] == bindings
+        return concrete.SharedPoolWriterObservation(bindings.plan, '501', {}, {}, bindings.input_digest)
+
     async def publication(**options):
         assert options['request'] == args['runtime']
 
@@ -2460,8 +2465,9 @@ def test_shared_private_entry_dispatches_real_parent_and_preserves_uncertain_int
 
     monkeypatch.setattr(concrete, 'qualify_runtime_publication', publication)
     monkeypatch.setattr(concrete, 'observe_shared_pool_provider', provider)
-    for name in ('observe_shared_pool_writers', 'observe_shared_pool_forward_writers',
-            'observe_shared_pool_processes', 'observe_shared_pool_forward_processes'):
+    for name in ('observe_shared_pool_writers', 'observe_shared_pool_forward_writers'):
+        monkeypatch.setattr(concrete, name, checked_writers)
+    for name in ('observe_shared_pool_processes', 'observe_shared_pool_forward_processes'):
         monkeypatch.setattr(concrete, name, checked)
     real_api = concrete.HTTPSSharedPoolOperationAPI
 
