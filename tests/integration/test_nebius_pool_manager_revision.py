@@ -27,7 +27,7 @@ from scripts.ops.nebius_pool_startup_database import (
     pool_active_authority_sql,
     qualify_active_authority_report,
 )
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -147,8 +147,30 @@ async def test_bound_manager_revision_preserves_busy_journals_and_retirement_ref
     assert await snapshot(sessions) == before
 
 
-@pytest.mark.parametrize('revision', ['0174', '0177', '0175', '0178', '0199', "0176'; COMMIT; --", None])
-def test_manager_observation_revision_never_broadens_revocation(revision):
+@pytest.mark.parametrize('manager_database', ['0177', '0178'], indirect=True)
+async def test_successor_revocation_requires_exact_installed_revision_and_scope(manager_database):
+    from tests.integration.test_nebius_pool_activation_fence import read_sql
+
+    spec, sessions, url, revision = manager_database
+    read_sql(url, fence_pool_activation_sql(spec, manager_revision=revision))
+    for selected in ('0176', '0177' if revision == '0178' else '0178'):
+        with pytest.raises(psycopg.Error, match='schema unqualified'):
+            read_sql(url, pool_machine_retirement_sql(spec, action='revoke', manager_revision=selected))
+    foreign = spec.model_copy(update={'policy_revision': spec.policy_revision + 2})
+    with pytest.raises(psycopg.Error, match='scope unqualified'):
+        read_sql(url, pool_machine_retirement_sql(foreign, action='revoke', manager_revision=revision))
+    assert qualify_machine_retirement_report(spec, _read(url,
+        pool_machine_retirement_sql(spec, action='observe', manager_revision=revision))) == 'active'
+    report = read_sql(url, pool_machine_retirement_sql(spec, action='revoke', manager_revision=revision))
+    assert qualify_machine_retirement_report(spec, report) == 'revoked'
+    async with sessions() as session:
+        assert set(await session.scalars(select(NebiusPoolMachine.phase))) == {'revoked'}
+        assert all(value is not None for value in await session.scalars(
+            select(Token.revoked_at).where(Token.type == 'pool_machine')))
+
+
+@pytest.mark.parametrize('revision', ['0174', '0175', '0199', "0176'; COMMIT; --", None])
+def test_manager_revision_rejects_unqualified_observations_and_writes(revision):
     value, _ = installation()
     spec = PoolInstallation.model_validate(value)
     with pytest.raises(ValueError):
