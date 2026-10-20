@@ -49,6 +49,46 @@ contract against provider SDKs in-process. See [`cli-mode.md`](cli-mode.md).
    Gateway denies a request if its `model` field isn't in the team's
    allowlist.
 
+## Retained Pipeline dispatch accounting
+
+Pipeline execution-attempt calls retain a separate durable dispatch ledger.
+Before any upstream call, the Gateway reserves the Attempt's remaining provider
+cost bound and a request slot, then commits `dispatched` before opening the
+network request. Settlement correlates one `LLMCall` with the dispatch and updates
+both the Attempt budget and run ledger in the same transaction.
+
+Every 15 seconds, the Gateway sweeps up to 100 old dispatches, using the configured
+upstream timeout (at least one second) plus a five-second grace period. Age starts
+at creation for `reserved` rows and at send marking for `dispatched` rows. A
+reserved row proves no upstream send: recovery releases its allowance and cost
+as `not_dispatched` without creating an `LLMCall`. A dispatched row has an uncertain
+provider outcome: recovery charges its full reserved cost as `uncertain` and
+creates one correlated `LLMCall`. Replays cannot send or settle a recovered row
+again. Recovery and send marking serialize on database row locks; recovery skips
+Attempts and dispatches currently locked by live senders or worker cleanup.
+It also skips a busy run ledger inside the candidate's savepoint. Ordinary
+settlement acquires the ledger without waiting while it holds an Attempt lock;
+on contention, it rolls back first, waits for the ledger alone for at most one
+second, and retries the whole transaction. It makes at most three attempts. A
+wait timeout or exhausted retries raises `provider_dispatch_accounting_busy`
+with accounting unchanged for later settlement or recovery. The existing Responses
+HTTP boundary returns `502` when an upstream result cannot be durably accounted;
+replaying its dispatch does not authorize another upstream send. These boundaries
+accommodate both worker cleanup's Attempt-before-ledger order and terminal-cause
+cancellation's ledger-before-Attempt order; they do not change either authority.
+
+Cancellation and worker-loss cleanup preserve dispatch-owned reservations for
+ordinary Gateway settlement or this sweep. Accounting can therefore converge
+after worker cleanup, and run terminal projection continues to wait for active
+reservations. The sweep isolates recognized accounting drift in a per-candidate
+savepoint, logs the dispatch ID and stable error category, and lets healthy
+candidates in the same bounded batch progress. It leaves corrupt accounting
+unchanged for investigation; unrelated failures still roll back the sweep.
+
+These retained ledger guarantees are tested against disposable PostgreSQL. They
+do not enable the retired hosted Pipeline execution path or establish live
+provider or deployment acceptance.
+
 ## Deadline dispatch audit
 
 Ordinary Trial requests have a non-billing `gateway_dispatch_receipts` audit
