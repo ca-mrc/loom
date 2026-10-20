@@ -886,6 +886,7 @@ def test_fixed_telemetry_probe_runs_real_settings_and_direct_reader_without_cred
     import os
     import ssl
     import sys
+    from contextlib import contextmanager
 
     import httpx
     from kubernetes import client, config
@@ -1017,8 +1018,21 @@ def test_fixed_telemetry_probe_runs_real_settings_and_direct_reader_without_cred
         if damage == 'unreadable_ca':
             raise PermissionError('private-unreadable-ca.crt')
         return ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    @contextmanager
+    def stream(self, method, url, **kwargs):
+        assert method == 'GET'
+        response = summary(self, url, **kwargs)
+        try:
+            yield response
+        finally:
+            response.close()
+
+    def forbidden_transport(*args, **kwargs):
+        pytest.fail('telemetry fixture reached real HTTP transport')
+
     monkeypatch.setattr(client.ApiClient, 'request', node_read)
-    monkeypatch.setattr(httpx.Client, 'get', summary)
+    monkeypatch.setattr(httpx.Client, 'stream', stream)
+    monkeypatch.setattr(httpx.HTTPTransport, 'handle_request', forbidden_transport)
     if damage == 'http_close':
         actual_exit = httpx.Client.__exit__
         def failed_exit(self, *args):

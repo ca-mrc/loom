@@ -374,8 +374,10 @@ def test_wait_materialization_fails_fast_when_builder_container_exits(
 
 def test_stack_up_cleans_partial_compose_state_on_setup_failure(
     monkeypatch: Any,
+    tmp_path: Path,
 ) -> None:
     compose_calls: list[tuple[str, ...]] = []
+    diagnostics = tmp_path / "setup-failure.log"
 
     def fake_compose(*args: str, **kwargs: Any) -> subprocess.CompletedProcess[str]:
         compose_calls.append(args)
@@ -384,9 +386,17 @@ def test_stack_up_cleans_partial_compose_state_on_setup_failure(
     def fail_wait(services: list[str], timeout_sec: float) -> None:
         raise RuntimeError(f"failed waiting for {services} after {timeout_sec}")
 
+    def fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        assert command[:3] == ["docker", "ps", "-a"]
+        return subprocess.CompletedProcess(
+            command, 0, stdout="fixture-postgres-1\tfixture-image\tUp 1 second\n", stderr="",
+        )
+
+    monkeypatch.setenv(docker_compose.DIAGNOSTICS_ENV, str(diagnostics))
     monkeypatch.setattr(docker_compose, "prepare_test_image", lambda image: "local-minio-source")
     monkeypatch.setattr(docker_compose, "_compose", fake_compose)
     monkeypatch.setattr(docker_compose, "_wait_services_healthy", fail_wait)
+    monkeypatch.setattr(docker_compose.subprocess, "run", fake_run)
 
     with pytest.raises(RuntimeError, match="failed waiting"):
         docker_compose.stack_up(timeout_sec=17)
@@ -419,6 +429,7 @@ def test_stack_up_cleans_partial_compose_state_on_setup_failure(
             "--tail=300",
         ),
     ]
+    assert "fixture-postgres-1" in diagnostics.read_text(encoding="utf-8")
 
 
 def _worker_compose_result(state: str = "running") -> subprocess.CompletedProcess[str]:
