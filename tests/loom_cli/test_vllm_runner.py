@@ -201,6 +201,59 @@ def test_launch_vllm_end_to_end_with_mocks(
     assert fake_proc in vr._LIVE_PROCESSES
 
 
+@pytest.mark.parametrize("outcome", ["complete", "setup_failed", "cancelled"])
+def test_single_model_keep_alive_transfers_only_completed_process(
+    tmp_xdg_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str,
+) -> None:
+    import asyncio
+
+    from loom_benchmarks import registry
+
+    from loom_cli import run_cmd
+    from loom_cli.__main__ import main
+    from tests.loom_cli.test_task_loader import _StubAdapter
+
+    monkeypatch.setitem(registry.REGISTRY, "keepalive", _StubAdapter(name="keepalive"))
+    monkeypatch.setattr(vr.shutil, "which", lambda _: "/usr/bin/vllm")
+    monkeypatch.setattr(vr.time, "sleep", lambda _: None)
+    monkeypatch.setattr(vr, "_wait_for_ready", lambda *args, **kwargs: None)
+    monkeypatch.setattr(vr, "_query_served_model_name", lambda _: "model")
+    monkeypatch.setattr(vr.signal, "signal", lambda *args: None)
+    exit_callbacks = []
+    monkeypatch.setattr(vr.atexit, "register", exit_callbacks.append)
+    proc = MagicMock()
+    proc.pid = 91919
+    proc.poll.return_value = None
+    launch = MagicMock(return_value=proc)
+    monkeypatch.setattr(vr.subprocess, "Popen", launch)
+    if outcome != "complete":
+        async def fail_setup(*args, **kwargs):
+            raise (asyncio.CancelledError("cancelled") if outcome == "cancelled" else RuntimeError("setup failed"))
+
+        monkeypatch.setattr(run_cmd, "_driver_factory", fail_setup)
+    args = ["run", "--dataset", "keepalive", "--agent", "oracle", "--backend", "fake",
+            "--model", "hf:org/model", "--keep-alive", "--output-dir", str(tmp_path / "out")]
+    try:
+        if outcome == "complete":
+            assert main(args) in {0, 1}
+        else:
+            with pytest.raises(asyncio.CancelledError if outcome == "cancelled" else RuntimeError):
+                main(args)
+        assert proc not in vr._LIVE_PROCESSES
+        for cleanup in exit_callbacks:
+            cleanup()
+        if outcome == "complete":
+            proc.terminate.assert_not_called()
+            assert launch.call_args.kwargs.get("start_new_session") is True
+            assert launch.call_args.kwargs.get("stdin") == subprocess.DEVNULL
+            assert (tmp_path / "out" / "vllm.log").exists()
+        else:
+            proc.terminate.assert_called_once()
+    finally:
+        if proc in vr._LIVE_PROCESSES:
+            vr._LIVE_PROCESSES.remove(proc)
+
+
 def test_launch_vllm_cleans_up_on_startup_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
