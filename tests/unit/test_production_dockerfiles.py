@@ -146,6 +146,10 @@ class PackagedSourceOnly(importlib.abc.MetaPathFinder):
 sys.meta_path.insert(0, PackagedSourceOnly())
 import loom_execution_actuator.__main__
 import loom_execution_capacity_collector.__main__
+from loom_control_plane.execution_capacity_wait import (
+    execution_target_fingerprint,
+    read_execution_capacity_waits,
+)
 """
     result = subprocess.run([sys.executable, "-I", "-c", script, str(tmp_path / "src")],
                             cwd=tmp_path, capture_output=True, text=True, timeout=30)

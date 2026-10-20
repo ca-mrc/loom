@@ -49,7 +49,7 @@ COPY src/loom/models/__init__.py src/loom/models/healthcheck.py src/loom/models/
 COPY src/loom/pipeline/__init__.py src/loom/pipeline/keys.py ./src/loom/pipeline/
 COPY src/loom_control_plane/__init__.py src/loom_control_plane/execution_admission.py \
     src/loom_control_plane/execution_capacity.py src/loom_control_plane/execution_finance.py \
-    src/loom_control_plane/execution_capacity_targets.py \
+    src/loom_control_plane/execution_capacity_targets.py src/loom_control_plane/execution_capacity_wait.py \
     src/loom_control_plane/execution_placement.py \
     src/loom_control_plane/task_image_materializations.py src/loom_control_plane/task_image_capacity.py \
     src/loom_control_plane/task_image_capacity_wait.py \
@@ -72,6 +72,7 @@ import loom.execution_diagnosis_store
 from loom.models.task import EnvironmentConfig, TaskSidecarConfig, TaskConfig
 from loom.harbor_task_import import project_harbor_task
 from loom.task_runtime_compatibility import task_runtime_rejections
+from loom_control_plane.execution_capacity_wait import execution_target_fingerprint, read_execution_capacity_waits
 
 EnvironmentConfig(os="linux", docker_image="registry.example/task@sha256:" + "a" * 64)
 fixture = TaskSidecarConfig(
