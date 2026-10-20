@@ -13,7 +13,12 @@ from collections.abc import Iterator
 
 import pytest
 
-from tests.system.docker_compose import database_url, stack_down_with_diagnostics, stack_up
+from tests.system.docker_compose import (
+    database_url,
+    service_urls,
+    stack_down_with_diagnostics,
+    stack_up,
+)
 
 
 @pytest.fixture(scope="session")
@@ -23,9 +28,7 @@ def compose_stack(request: pytest.FixtureRequest) -> Iterator[dict[str, str]]:
     team_token, worker_token = stack_up()
     try:
         yield {
-            "control_plane": "http://localhost:58080",
-            "gateway": "http://localhost:59100",
-            "minio": "http://localhost:59000",
+            **service_urls(),
             "team_token": team_token,
             "worker_token": worker_token,
             # Plan 16 smoke tests drive `run_import` directly, which

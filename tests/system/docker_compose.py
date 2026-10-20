@@ -42,6 +42,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_FILE = REPO_ROOT / "deploy" / "docker-compose.test.yml"
 ALEMBIC_CONFIG = REPO_ROOT / "database" / "migrations" / "alembic.ini"
 CONTROL_PLANE_URL = "http://localhost:58080"
+GATEWAY_URL = "http://localhost:59100"
+MINIO_URL = "http://localhost:59000"
 DIAGNOSTICS_ENV = "LOOM_SYSTEM_SMOKE_DIAGNOSTICS"
 _CANARY_MAX_TIMEOUT_SEC = 30.0
 _CANARY_POLL_INTERVAL_SEC = 0.25
@@ -70,9 +72,10 @@ def _compose(
     # in compose only triggers when the service is selected.
     env.setdefault("LOOM_WORKER_TOKEN", "unused-no-profile")
     env.setdefault("LOOM_TASK_IMAGE_BUILDER_TOKEN", "unused-no-profile")
-    # Let Docker allocate the host database port atomically; other local
-    # fixtures or services may already own the manual-compose default 55432.
-    env.setdefault("LOOM_SYSTEM_POSTGRES_PORT", "0")
+    # Docker reserves each loopback port atomically. Keep these mappings at
+    # zero across up/build/restart; discovered endpoints have separate values.
+    for service in ("POSTGRES", "MINIO", "REGISTRY", "GATEWAY", "CONTROL_PLANE"):
+        env.setdefault(f"LOOM_SYSTEM_{service}_PORT", "0")
     if env_extra:
         env.update(env_extra)
     return subprocess.run(
@@ -86,13 +89,23 @@ def _compose(
     )
 
 
-def database_url() -> str:
-    """Resolve this stack's loopback database binding for host-side clients."""
-    result = _compose("port", "postgres", "5432", timeout_sec=_COMPOSE_INSPECT_TIMEOUT_SEC)
+def _published_port(service: str, container_port: str) -> int:
+    result = _compose("port", service, container_port, timeout_sec=_COMPOSE_INSPECT_TIMEOUT_SEC)
     binding = re.fullmatch(r"127\.0\.0\.1:([0-9]+)", result.stdout.strip())
     if binding is None or not 1 <= int(binding[1]) <= 65535:
-        raise RuntimeError("system-smoke database port must have one valid loopback binding")
-    return f"postgresql+psycopg://loom:loom@127.0.0.1:{binding[1]}/loom"
+        label = "database" if service == "postgres" else service
+        raise RuntimeError(f"system-smoke {label} port must have one valid loopback binding")
+    return int(binding[1])
+
+
+def database_url() -> str:
+    """Resolve this stack's loopback database binding for host-side clients."""
+    return f"postgresql+psycopg://loom:loom@127.0.0.1:{_published_port('postgres', '5432')}/loom"
+
+
+def service_urls() -> dict[str, str]:
+    """Endpoints resolved once at startup; canary polling never shells out."""
+    return {"control_plane": CONTROL_PLANE_URL, "gateway": GATEWAY_URL, "minio": MINIO_URL}
 
 
 def _wait_services_healthy(
@@ -148,6 +161,7 @@ def _stack_up(
     timeout_sec: float,
 ) -> tuple[str, str]:
     """Ordered system-stack bootstrap. Returns (team_token, worker_token)."""
+    global CONTROL_PLANE_URL, GATEWAY_URL, MINIO_URL
     minio_env = {"LOOM_SYSTEM_MINIO_IMAGE": prepare_test_image(MINIO_TEST_IMAGE)}
     # Stage 1: start stateful dependencies, then apply migrations explicitly.
     # Long-running services validate schema-at-head and intentionally never
@@ -177,6 +191,17 @@ def _stack_up(
     _wait_services_healthy(
         ["postgres", "minio", "registry", "llm-gateway", "control-plane"],
         timeout_sec=timeout_sec,
+    )
+    # Resolve only after the full default stack is healthy. Keep the Docker
+    # mappings unchanged; only the builder's repository uses the actual port.
+    registry_repo = f"localhost:{_published_port('registry', '5000')}/loom-task-images"
+    urls = {
+        "control_plane": f"http://127.0.0.1:{_published_port('control-plane', '8080')}",
+        "gateway": f"http://127.0.0.1:{_published_port('llm-gateway', '9100')}",
+        "minio": f"http://127.0.0.1:{_published_port('minio', '9000')}",
+    }
+    CONTROL_PLANE_URL, GATEWAY_URL, MINIO_URL = (
+        urls["control_plane"], urls["gateway"], urls["minio"],
     )
 
     # Stage 3: mint a team + worker token (and seed the fixture).
@@ -208,7 +233,8 @@ def _stack_up(
         "--build",
         "--no-deps",
         "task-image-builder",
-        env_extra={**minio_env, "LOOM_TASK_IMAGE_BUILDER_TOKEN": builder_token},
+        env_extra={**minio_env, "LOOM_TASK_IMAGE_BUILDER_TOKEN": builder_token,
+                   "LOOM_SYSTEM_REGISTRY_REPO": registry_repo},
     )
     _wait_task_image_materialization_ready(task_id, timeout_sec=timeout_sec, db_url=db_url)
 

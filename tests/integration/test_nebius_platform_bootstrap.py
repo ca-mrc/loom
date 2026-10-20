@@ -345,6 +345,12 @@ def test_fresh_bootstrap_repeat_and_database_privileges(
                 "SELECT has_table_privilege(current_user, 'nebius_rollout_guard', 'INSERT,UPDATE,DELETE')",
             ).fetchone() == (False,)
             if role == "actuator":
+                # Generic native claims also inspect retained global-build
+                # ownership before global-pool activation grants are installed.
+                connection.execute("SELECT 1 FROM nebius_pool_build_outbox LIMIT 0")
+                assert connection.execute(
+                    "SELECT has_table_privilege(current_user, 'nebius_pool_build_outbox', 'INSERT,UPDATE,DELETE')",
+                ).fetchone() == (False,)
                 for privilege in ("SELECT", "INSERT", "UPDATE"):
                     assert connection.execute(
                         "SELECT has_table_privilege(current_user, 'trial_resource_usage', %s)", (privilege,),
@@ -356,7 +362,10 @@ def test_fresh_bootstrap_repeat_and_database_privileges(
                 with pytest.raises(psycopg.errors.InsufficientPrivilege):
                     connection.execute("DELETE FROM gateway_dispatch_receipts")
                 connection.rollback()
-                for table in ("batches", "task_image_materialization_attempts", "task_image_publication_evidence"):
+                for table in (
+                    "batches", "task_image_materialization_attempts",
+                    "task_image_publication_evidence", "nebius_pool_build_outbox",
+                ):
                     with pytest.raises(psycopg.errors.InsufficientPrivilege):
                         connection.execute("SELECT 1 FROM " + table + " LIMIT 0")
                     connection.rollback()

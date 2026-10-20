@@ -34,6 +34,15 @@ def test_optional_build_count_has_no_default_or_sixteen_ceiling_and_preserves_ol
         assert type(settings).model_validate_json(settings.model_dump_json()) == settings
 
 
+def test_native_io_policy_is_finite_configurable_pressure_not_a_build_count():
+    assert _builder_settings().io_full_avg10_max == 50.0
+    for value in (0, 25.0, 100):
+        assert _builder_settings(io_full_avg10_max=value).io_full_avg10_max == value
+    for value in (True, None, "50", -1, 101, float("nan"), float("inf")):
+        with pytest.raises(ValueError):
+            _builder_settings(io_full_avg10_max=value)
+
+
 @pytest.mark.parametrize("value", [0, -1, True, 1.5, "17"])
 def test_optional_operator_build_limit_rejects_nonpositive_or_noninteger(value):
     with pytest.raises(ValueError):
@@ -335,6 +344,48 @@ async def test_create_conflict_recovers_same_objects_but_rejects_changed_configu
     clients.cm["data"]["claim.json"] = "changed"
     with pytest.raises(ValueError, match="configuration"):
         await api.ensure(cm, job)
+
+
+async def test_bound_build_rejects_replaced_node_before_any_create(monkeypatch):
+    from loom_control_plane.execution_capacity import ExecutionProvisioningBlockedError
+
+    api, clients = fake_api()
+    cm, job = copy.deepcopy(clients.cm), copy.deepcopy(clients.job)
+    job["metadata"]["annotations"] = {
+        "loom.openai.com/build-node-name": "compute-1",
+        "loom.openai.com/build-node-uid": "original-uid",
+    }
+    creates = []
+    monkeypatch.setattr(clients, "read_node", lambda *a, **kw: {
+        "metadata": {"name": "compute-1", "uid": "replacement-uid"},
+    }, raising=False)
+    monkeypatch.setattr(clients, "create_namespaced_config_map", lambda *a, **kw: creates.append("cm"))
+    def create(*args, **kwargs):
+        creates.append("job")
+        return copy.deepcopy(job)
+
+    monkeypatch.setattr(clients, "create_namespaced_job", create)
+    with pytest.raises(ExecutionProvisioningBlockedError, match="node_identity_changed"):
+        await api.ensure(cm, job)
+    assert creates == []
+
+
+async def test_bound_build_checks_current_node_uid_and_keeps_frozen_job(monkeypatch):
+    api, clients = fake_api()
+    job = clients.job
+    job["metadata"]["annotations"] = {
+        "loom.openai.com/build-node-name": "compute-1",
+        "loom.openai.com/build-node-uid": "original-uid",
+    }
+    reads = []
+
+    def node(name, **kwargs):
+        reads.append(name)
+        return {"metadata": {"name": name, "uid": "original-uid"}}
+
+    monkeypatch.setattr(clients, "read_node", node, raising=False)
+    assert (await api.ensure(copy.deepcopy(clients.cm), copy.deepcopy(job)))["metadata"]["uid"] == "job-uid"
+    assert reads == ["compute-1"]
 
 
 async def test_create_conflict_recovers_api_normalized_native_job(request):
