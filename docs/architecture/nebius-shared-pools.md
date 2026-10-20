@@ -10,6 +10,197 @@ shared execution without owning its capacity or credentials. Native attempt and
 publication semantics remain in [service execution](nebius-service-execution.md).
 Source implementation does not establish installed target acceptance.
 
+## Independent platform and participant lifecycle (v2)
+
+The platform owns the allocator, physical policy, observer, gateway and durable
+registry. No application environment owns that authority. An empty platform is
+valid and starts closed; it needs no dummy staging/development participant.
+Environment operations select an exact participant/environment/incarnation, not
+the first matching class or a namespace prefix. Production, staging and shared
+development use the same lifecycle. Personal applications remain submission
+origins under the shared-development data environment, not separate allocators.
+
+Opted-in pools use three explicit binding fields: `observation_binding=physical-v1`,
+`profile_source=registry-v1`, and `lifecycle_source=scoped-v1`. Omitted fields retain
+v1 semantics. Physical-v1 observations bind the full physical policy/topology and
+authority epoch, plus immutable historical namespace UID and Job attribution.
+Adding a participant or releasing its images does not invalidate an otherwise
+fresh physical capture. Actual authority/topology/policy changes still do. Unknown
+or removed-participant Pods remain conservatively accounted; roster removal never
+proves reclaimed capacity. Legacy captures still require exact registration
+equality, including their existing post-transition freshness barriers.
+
+Immutable participant catalogs and scoped lifecycle heads live in the management
+database. Admission and gateway execution resolve retained profile identities
+there, preserving exact old profiles for already retained waiting/charged work.
+An ordinary participant release does not replace peer catalogs, rewrite the
+platform binding or require a global controller restart.
+
+Enrollment starts with admission closed. Qualified transitions are
+`enrolled -> ready -> active`, suspension/resumption, and
+`retiring -> retired`. Suspension closes **new admission**, not dispatch or cleanup
+of already charged work. Waiting demand retains its identity but cannot reserve
+priority headroom while suspended. Image-only releases first check support for
+retained requests, then suspend only the selected participant and wait for charged
+work to drain. Incompatible schema/protocol changes are not image-only releases.
+Retirement refuses unresolved work; cancelling waiting requests requires an exact
+protected list of retained request generations. Running-work cancellation needs
+separate authority and verified cleanup. Tombstones and history remain, and a new
+incarnation cannot reuse old credentials. Retirement does not authorize data
+deletion.
+
+Protected platform opening is separate from participant activation. It requires
+fresh physical evidence and qualified observer/gateway/sole-writer authority;
+closing refuses outstanding charged work. Platform transitions advance the full
+physical binding and require fresh observations before later admissions. Neither
+transition repeats writer transfer or changes a participant's application release.
+
+The administration process and fixed Kubernetes Jobs enforce bounded,
+exact-request authorization, predecessor checks, transaction serialization and
+immutable operation/grant audit. The isolated forced-command launcher accepts only
+previously retained references for prepare/apply/recover/status; it cannot accept
+runner-selected paths, Secrets, grant contents, code or target authority. Recovery
+reads the original Job, and status uses a separately identified read-only Job.
+Historical completion receipts are not current readiness. The installed lifecycle
+entry connects the evidence issuers and foundation/runtime adapters through
+private, checksum-pinned operation inputs. Its runner sends only the exact scope,
+operation UUID and action. See the [lifecycle runbook](../runbooks/nebius-environment-lifecycle.md)
+for installation, delivery and recovery.
+
+The independent runtime adapter consumes a committed closed enrollment and
+verified publication/foundation evidence. It stages scoped credentials, read-only
+actuators, build isolation and additive gateway grants, then journals stopping,
+replacing and starting only that environment's API/controller/readers. The
+execution quota permits reader Pods but still denies task Jobs; build Pods remain
+closed. UID/resource-version checks and anchored phase journals reconcile lost
+replies without repeating successful startup or accepting replacement resources.
+
+An unactivated independent development installation has a separate coordinated
+schema successor. The original runtime remains immutable ancestry. The successor
+binds independently published shared-data and manager candidates, qualified
+backups of both stopped databases, normal Alembic migration and preserved role
+identities. It advances shared settings, personal releases, application-build
+recipes, participant profiles and native build policy together. The exact closed
+catalog commits before the manager restarts. Its gateway remains stopped and
+admission remains closed; activation and shared-pool handoff must explicitly select
+the completed successor, including any later preactivation catalog rooted in it.
+
+The schema parent shares the existing handoff mutation lock and rejects prior
+handoff/recovery/preactivation dispatch. It requires idle work and retired personal
+access, proves stopped workload descendants and client sessions, and retains intent
+before every effect. Unknown resource and catalog results use exact readback;
+ambiguous migrations require checkpoint recovery without automatic retry or
+downgrade. This route neither widens ordinary participant refresh nor relaxes
+image-only release's schema equality. The
+[schema runbook](../runbooks/nebius-environment-lifecycle.md#upgrade-an-unactivated-shared-development-runtime)
+defines retained inputs and the separate installed acceptance boundary.
+
+Read-only process qualification reconstructs those exact completed successors,
+rechecks the environment's database/storage/public route, and challenges each
+running image's typed settings, machine token and database URL. Full owned
+Deployment/ReplicaSet/Pod lineage is checked before and after the probes, with a
+final cross-component restart check. Probe commands use an ephemeral private,
+explicit-trust connection; no ambient kubeconfig or arbitrary command is accepted.
+`runtime_processes_verified_closed` is deliberately **not** activation: installed
+platform writer/observer/gateway/capacity qualification, worker/build boundaries,
+protected grant issuance and connected release/workflow delivery remain separate.
+These source adapters do not prove installed task or multi-owner acceptance.
+
+Protected inspection can additionally require current physical capacity. It uses
+the same authenticated, connected provider-quota accounting as admission, inside
+a repeatable-read, read-only snapshot. Its expiry cannot outlive any connected
+physical observation. Ordinary inventory requests retain their original serialized
+form. This observation proves neither spare slots nor exclusive writer authority;
+admission still takes its existing locks and rechecks capacity when it commits.
+
+An optional platform-authorization selector binds that inspection to the immutable
+audit of the current protected opening or global import. It returns reference
+hashes, not legacy participant material, and rejects an older opening after a
+close/reopen. The internal platform-runtime reader matches this reference to its
+pinned private authority, checks current manager/gateway resources and loaded
+settings against the same ledger database, and rechecks resources after process
+qualification. A fresh authenticated physical capture supplies observer evidence;
+the observer need not be a long-running Pod. This reader does not establish
+sole-writer ownership itself: that remains the protected platform open/import
+issuer's responsibility. It cannot turn an unaudited `mode=global` into authority.
+
+The internal preactivation parent connects completed environment startup to these
+platform checks using a fresh selected-participant inspection. It rejects a
+changed participant head, pool authority, data material or application process
+during the combined observation. The result
+`preactivation_runtime_verified_closed` still grants no admission: the protected
+activation parent must issue scoped ready/activate operations. Selected boundary
+preparation now consumes this evidence and journals the exact build-namespace PSA
+exception, followed by removal of both temporary closed-intake quota limits. It
+retains quota UIDs; shared capacity remains the allocator's responsibility, not
+per-environment budgets. It requires a policy-specific invalid-Pod dry-run denial
+before and after the build PSA change, and complete namespace inventory containing
+only the exact running readers, with no dormant Jobs or other task producers.
+Lost write replies permit readback, not blind retries. Readiness accepts changed
+foundation resources only through anchored boundary successor journals, preserving
+original startup/creation receipts. `runtime_boundaries_prepared_closed` does not
+open participant admission.
+
+The protected activation issuer re-observes the application, platform, completed
+boundaries and empty task inventory before issuing an exact short-lived `ready`
+or `activate` operation. After boundary IO it rechecks the original application
+and platform process identities and pinned configuration; a newly healthy
+replacement cannot inherit an earlier process challenge. Activation selects the
+committed ready predecessor by its private administration reference, not a
+caller-provided state bypass. The existing
+fixed administration Job commits that operation with participant-head CAS and fresh
+physical accounting; issuance alone performs no database mutation. Re-reading an
+issued grant preserves its original request and expiry, even after activation or
+expiration. A new attempt needs a new explicit operation identity. Production
+additionally requires independently verified target-specific release evidence,
+release-owner approval and protected main promotion of the same immutable
+publication. Installed multi-owner execution remains separate acceptance.
+
+The internal activation parent now connects completed startup, selected boundary
+preparation, ready/active issuance and fixed administration dispatch under one
+retained attempt. Child operation IDs are deterministic. A valid original grant
+can resume interrupted Job staging through its existing create/readback journal;
+an uncertain create remains readback-only and is never blindly resubmitted.
+Expired authority permits only readback of an already-started attempt, never a
+replacement Job or renewed grant. A new attempt after ready must select the exact
+private ready predecessor. Completed replay verifies the current active head and
+physical evidence without rerunning closed startup or requiring empty task
+namespaces. Its `environment_active` result proves admission state, explicitly
+not executed build/task acceptance. The protected
+`nebius-environment-lifecycle.yml` workflow invokes this parent through a dedicated
+forced-command key. Its allowlist pins tooling source, target and operation; both
+workflow and host serialize operations for the selected participant. Different
+participants retain independent delivery while sharing transactional capacity.
+
+The same entry provides foundation provision/import, enrollment, suspension,
+resume, retirement and compatible release/rollback. Provisioning precedes UID-bound
+enrollment: the foundation records observed namespace identities before a separate
+enrollment operation selects them. Retirement closes active admission, preserves
+charged work until cleanup, cancels only explicitly selected waiting generations,
+and commits the retired tombstone after authenticated workload-count readback.
+
+Release and rollback preserve application/data identities and frozen request
+profiles. They resolve an exact protected publication, check equal service schema
+and unchanged runtime capabilities/resources, drain only the selected participant,
+then journal UID-bound stop/update/start transitions. Native build policy retains
+the qualified historical contracts needed by waiting work. Fresh application,
+database, platform and process proof precedes catalog commit and reactivation.
+Rollback selects previously qualified publication bytes from the retained release
+chain; it does not rebuild images or implicitly downgrade the database.
+
+Production uses the same lifecycle under the protected `production` environment.
+Its version-2 release manifest binds exact staging/production identities, separate
+databases/storage/credentials and public routes while retaining every existing
+release check. Authenticated release/main run attempts, artifact digests, merged
+main lineage and identical candidate image digests must agree. Development
+publication alone grants no production capability; the qualifier installs only a
+short-lived task-local authority for the selected target and publication.
+
+Explicit legacy adoption preserves qualified v1 authority, credentials and
+history. A completed global handoff is not repeated; standalone allocation cannot
+be adopted as global sole-writer authority. Ordinary v2 lifecycle operations do
+not use the historical staging plan or completed development-runtime ancestry.
+
 ## Physical pool observation for managed environments
 
 Each environment binding lists its local target aliases; different environments
@@ -2687,8 +2878,9 @@ request and its existing phase journal. Before migration dispatch they require
 the original revision; a bound migration Job create intent permits observing
 either original or target, including a lost create response. A qualified
 post-migration probe narrows observation to the target. The read-only ledger
-queries support audited manager schemas 0174, 0176 and 0177 with identical pool
-layouts, while requiring the single selected revision on each read. Default
+queries support audited manager schemas 0174, 0176, 0177 and 0178 with identical
+legacy pool layouts, while requiring the single selected revision on each read.
+A scoped lifecycle binding cannot pass the exact legacy binding comparison. Default
 pool readers and all fence/revoke/startup writes retain their exact0176 contract.
 This does not widen participant schemas or advance shared handoff.
 The refresh installer requalifies it in preflight, immediately before actual

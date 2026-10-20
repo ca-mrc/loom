@@ -33,6 +33,56 @@ def desired_profile(request, service):
         "image_admission": signed_image_admission_bundle(refs)})
 
 
+@pytest.mark.parametrize('runtime_inputs', [('development',), ('staging', 'staging'), ('production',)], indirect=True)
+def test_fresh_scoped_runtime_needs_no_migration_or_installed_uids(runtime_inputs, monkeypatch):
+    from scripts.ops import nebius_pool_runtime as runtime
+
+    from loom_control_plane.config import ControlPlaneSettings
+    from loom_service.pool_management.profiles import PoolProfileCatalog
+
+    request, actuators, services, _ = runtime_inputs
+    selected = request.registration.spec.participants[-1]
+    selected_id = selected.participant_id
+    machine, = [row for row in request.registration.spec.machines if row.participant_id == selected_id]
+    ids = {target.profile_id for target in selected.targets}
+    catalog = request.registration.spec.profiles.model_dump(mode='json')
+    for family in ('execution', 'task_images', 'application_images'):
+        catalog[family] = [row for row in catalog.get(family, []) if row['profile_id'] in {str(value) for value in ids}]
+    controller = request.guards[-1].controller
+    templates = copy.deepcopy(dict(controller=controller, actuator=actuators[selected_id], service=services[selected_id]))
+    for template in templates.values():
+        template['metadata'].pop('uid')
+        template['metadata'].pop('resourceVersion')
+    before = copy.deepcopy(templates)
+    wire = getattr(runtime, 'wire_scoped_participant', None)
+    assert callable(wire), 'fresh runtime still requires a whole legacy migration'
+    result = wire(participant=selected, machine=machine, profiles=PoolProfileCatalog.model_validate(catalog),
+        candidate=request.registration.candidate, application_namespace=request.guards[-1].namespace,
+        management_origin='https://manage.example.com', runtime_profile=desired_profile(request, services[selected_id]), **templates)
+    assert templates == before
+    assert {row['metadata']['namespace'] for row in result.values()} == {
+        request.guards[-1].namespace, selected.execution_namespace.name}
+    assert all(row['spec']['replicas'] == 0 and 'uid' not in row['metadata'] for row in result.values())
+    for name, row in env(result['control_plane']).items():
+        if 'value' in row:
+            monkeypatch.setenv(name, row['value'])
+    monkeypatch.setenv('LOOM_CP_DB_URL', 'postgresql+psycopg://test:test@localhost/test')
+    monkeypatch.setenv('LOOM_CP_MINIO_ACCESS_KEY', 'fixture')
+    monkeypatch.setenv('LOOM_CP_MINIO_SECRET_KEY', 'fixture')
+    settings = ControlPlaneSettings(_env_file=None)
+    assert settings.global_pool.participant == selected
+    assert settings.global_pool.environment == selected.catalog_environment
+    assert settings.global_pool.bearer_token_file == Path('/var/run/loom-pool-token/token')
+    for key in ('control_plane', 'actuator'):
+        sources = result[key]['spec']['template']['spec']['volumes']
+        assert next(row for row in sources if row['name'] == 'pool-token-source')['secret']['secretName'] == 'loom-pool-machine-' + machine.machine_id.hex
+    foreign = machine.model_copy(update={'participant_id': uuid4()})
+    with pytest.raises(ValueError, match='pool_participant_runtime_unqualified'):
+        wire(participant=selected, machine=foreign, profiles=PoolProfileCatalog.model_validate(catalog),
+            candidate=request.registration.candidate, application_namespace=request.guards[-1].namespace,
+            management_origin='https://manage.example.com', runtime_profile=desired_profile(request, services[selected_id]), **templates)
+
+
 def test_new_published_task_pins_are_consumed_by_protected_runtime_wiring(runtime_inputs):
     from scripts.ops.nebius_pool_runtime import wire_participant
 

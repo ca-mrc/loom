@@ -20,7 +20,8 @@ from loom_service.environment_management.candidates import _json
 def read_runtime_job(*, client: httpx.Client, read: Callable[[str], dict[str, Any] | None],
         recorded: Callable[[], dict[str, dict[str, Any]]], private_inputs: Callable[[], None],
         region: str, report_field: Literal['database', 'catalog'],
-        validate: Callable[[dict[str, Any]], None]) -> dict[str, Any] | None:
+        validate: Callable[[dict[str, Any]], None],
+        namespace: Literal['loom-dev', 'loom-nebius-management-dev'] = 'loom-dev') -> dict[str, Any] | None:
     """Prove one unrestarted completed Pod, then recheck every recorded resource.
 
     `recorded` must qualify live prerequisites and exact staged resource UIDs,
@@ -28,9 +29,11 @@ def read_runtime_job(*, client: httpx.Client, read: Callable[[str], dict[str, An
     the selected phase, request digest and Job UID. Neither can authorize writes.
     """
     try:
+        if namespace not in {'loom-dev', 'loom-nebius-management-dev'}:
+            raise ValueError
         resources = recorded()
         job, = (row for row in resources.values() if row['kind'] == 'Job')
-        if (job.get('apiVersion') != 'batch/v1' or job['metadata'].get('namespace') != 'loom-dev'
+        if (job.get('apiVersion') != 'batch/v1' or job['metadata'].get('namespace') != namespace
                 or job['metadata'].get('deletionTimestamp') or report_field not in {'database', 'catalog'}):
             raise ValueError
         status = job.get('status', {})
@@ -43,14 +46,14 @@ def read_runtime_job(*, client: httpx.Client, read: Callable[[str], dict[str, An
                 for key, count in (('succeeded', 1), ('active', 0), ('failed', 0))):
             raise ValueError
         name, uid = job['metadata']['name'], _uid(job)
-        base = '/api/v1/namespaces/loom-dev/pods'
+        base = '/api/v1/namespaces/' + namespace + '/pods'
         listing = read(base + '?' + urlencode({'labelSelector': 'batch.kubernetes.io/controller-uid=' + uid, 'limit': 2}))
         if (listing is None or listing.get('apiVersion') != 'v1' or listing.get('kind') != 'PodList'
                 or listing.get('metadata', {}).get('continue') or len(listing.get('items', [])) != 1):
             raise ValueError
         pod = {'apiVersion': 'v1', 'kind': 'Pod', **listing['items'][0]}
         meta, pod_uid = pod['metadata'], _uid(pod)
-        if (pod['apiVersion'] != 'v1' or pod['kind'] != 'Pod' or meta.get('namespace') != 'loom-dev'
+        if (pod['apiVersion'] != 'v1' or pod['kind'] != 'Pod' or meta.get('namespace') != namespace
                 or meta.get('deletionTimestamp') or not re.fullmatch(r'[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?', meta['name'])):
             raise ValueError
         owners = meta.get('ownerReferences', [])

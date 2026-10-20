@@ -21,7 +21,7 @@ from loom_execution_actuator.renderer import ExecutionTargetRuntime
 from loom_execution_actuator.task_image_settings import NativeTaskImageSettings
 from loom_execution_capacity_collector.contracts import ResourceTotals
 from loom_service.pool_management.application_images import PoolApplicationImageProfile
-from loom_service.pool_management.registry import PoolProfiles
+from loom_service.pool_management.profile_types import PoolProfiles
 from loom_service.pool_management.render import PoolExecutionProfile
 from loom_service.pool_management.task_images import PoolTaskImageProfile
 

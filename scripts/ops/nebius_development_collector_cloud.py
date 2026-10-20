@@ -34,10 +34,18 @@ def collector_public_key(*, scope: DevelopmentCollectorCloudScope, config: dict[
     """Validate an inline SDK credential and dev binding, not its live authority."""
     from nebius.base.service_account.credentials_file import ServiceAccountCredentials
 
+    from loom.nebius_platform_render import validate_environment
+
     try:
         scope = DevelopmentCollectorCloudScope.model_validate(scope.model_dump())
+        if config.get('schema_version') == 'loom.nebius-environment-platform.v2':
+            # V2 carries an explicit environment identity, not the legacy
+            # loom-dev alias. This is key/IAM qualification only; production
+            # deployment still requires its separate protected promotion grant.
+            validate_environment(config)
+        else:
+            _require(config['namespace'] == 'loom-dev' and config['environment'] == 'development')
         _require(isinstance(credential, bytes) and 0 < len(credential) <= 1024**2
-            and config['namespace'] == 'loom-dev' and config['environment'] == 'development'
             and (config['project_id'], config['quota_parent_id'], config['region']) == (
                 scope.project_id, scope.tenant_id, scope.region))
         raw = _json(credential)

@@ -53,7 +53,7 @@ def _contains(
             kind = expected["kind"]
         exact = exact or (kind in _RESOURCES and (
             (path == ("spec",) and kind in {"NetworkPolicy", "ResourceQuota"})
-            or (bool(path) and path[-1] in {"selector", "podSelector", "namespaceSelector"})
+            or (bool(path) and path[-1] in {"selector", "podSelector", "namespaceSelector", "securityContext"})
         ))
         if not isinstance(actual, dict):
             return False
@@ -155,12 +155,42 @@ class KubernetesEnvironmentProvider:
         metadata = actual.get("metadata", {})
         uid = metadata.get("uid")
         if (not isinstance(uid, str) or not uid or metadata.get("deletionTimestamp")
+                or metadata.get('ownerReferences', []) != expected.get('metadata', {}).get('ownerReferences', [])
                 or (recorded is not None and recorded != uid) or not _contains(actual, expected)):
             raise ProviderBlockedError("kubernetes_resource_identity_conflict")
+        if expected.get('kind') in {'Deployment', 'StatefulSet', 'Job', 'CronJob'}:
+            observed, wanted = actual['spec'], expected['spec']
+            if expected['kind'] == 'CronJob':
+                observed, wanted = observed['jobTemplate']['spec'], wanted['jobTemplate']['spec']
+            observed, wanted = observed['template']['spec'], wanted['template']['spec']
+            defaults: dict[str, Any] = {'initContainers': [], 'ephemeralContainers': [],
+                'hostNetwork': False, 'hostPID': False, 'hostIPC': False, 'shareProcessNamespace': False,
+                'serviceAccountName': 'default', 'securityContext': {}, 'volumes': [], 'imagePullSecrets': [],
+                'hostAliases': [], 'runtimeClassName': None, 'nodeName': '', 'priorityClassName': '',
+                'schedulerName': 'default-scheduler', 'dnsConfig': {}, 'affinity': {}}
+            if any(not _contains(observed.get(key, default), wanted.get(key, default), exact=key == 'securityContext')
+                    for key, default in defaults.items()):
+                raise ProviderBlockedError('kubernetes_resource_identity_conflict')
+            # An omitted command/env source/mount is part of the frozen image
+            # contract. A mutating admission webhook must not inject a command,
+            # credential source or privileged context under the same UID and
+            # otherwise matching requested fields. API decoration remains valid.
+            container_defaults: dict[str, Any] = {'command': [], 'args': [], 'env': [], 'envFrom': [],
+                'volumeMounts': [], 'volumeDevices': [], 'securityContext': {}, 'lifecycle': {},
+                'stdin': False, 'stdinOnce': False, 'tty': False}
+            for field in ('containers', 'initContainers'):
+                for actual_container, expected_container in zip(observed.get(field, []), wanted.get(field, []), strict=True):
+                    # Preserve the env path: the API omits empty literal values,
+                    # but an injected valueFrom must still fail qualification.
+                    if any(not _contains(actual_container.get(key, default), expected_container.get(key, default),
+                            (field, '*', key), exact=key == 'securityContext') for key, default in container_defaults.items()):
+                        raise ProviderBlockedError('kubernetes_resource_identity_conflict')
         return uid
 
-    async def apply(self, context: ProvisioningContext, step: ProvisioningStep) -> str:
+    async def apply(self, context: ProvisioningContext, step: ProvisioningStep, *, create: bool = True) -> str:
         if step.kind == "kubernetes":
+            if not create and not context.identities.get(step.key):
+                raise ProviderBlockedError("kubernetes_import_identity_missing")
             expected = self._expected(context, step)
             collection, path = self._path(context, expected)
             namespace = expected["metadata"].get("namespace")
@@ -177,9 +207,16 @@ class KubernetesEnvironmentProvider:
                 }}}, recorded_namespace)
             actual = await self._request("GET", path)
             if actual is None:
-                if step.key in context.identities:
+                if not create or step.key in context.identities:
                     raise ProviderBlockedError("kubernetes_recorded_resource_missing")
-                actual = await self._request("POST", collection, body=expected)
+                reply = await self._request("POST", collection, body=expected)
+                if reply is None:
+                    raise ProviderRetryError("kubernetes_create_unconfirmed")
+                created_uid = self._identity(reply, expected, None)
+                actual = await self._request("GET", path)
+                if actual is None:
+                    raise ProviderRetryError("kubernetes_create_unconfirmed")
+                self._identity(actual, expected, created_uid)
             assert actual is not None
             if actual.get("metadata", {}).get("annotations", {}).get("loom.nebius/retained-by") is not None:
                 raise ProviderBlockedError("kubernetes_resource_retained")

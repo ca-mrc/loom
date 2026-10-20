@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import re
 import sys
 from pathlib import Path
@@ -20,8 +21,10 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+if (REPO_ROOT / 'src').is_dir() and str(REPO_ROOT / 'src') not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT / 'src'))
 
-from scripts.component_ownership import NEBIUS_PLATFORM_IMAGES  # noqa: E402
+from loom.nebius_candidate_contract import NEBIUS_PLATFORM_IMAGES  # noqa: E402
 
 REQUIRED_IMAGE_DIGESTS = tuple(NEBIUS_PLATFORM_IMAGES.values())
 
@@ -756,6 +759,14 @@ def validate_manifest(
     candidate_sha: str | None = None,
     image_tag: str | None = None,
 ) -> list[str]:
+    if type(manifest.get('schema_version')) is int and manifest['schema_version'] == 2:
+        from scripts.ops.nebius_production_release_gate import validation_view
+        try:
+            view = validation_view(manifest, routes=CANONICAL_FRONTEND_ROUTES,
+                identities=CANONICAL_STATE_IDENTITIES, secret_fields=PROD_STAGING_SECRET_REF_FIELDS)
+        except (ValueError, KeyError, TypeError, AttributeError):
+            return ['independent production target evidence is missing, mismatched or not isolated']
+        return validate_manifest(view, candidate_sha=candidate_sha, image_tag=image_tag) + _validate_no_leaks(manifest)
     errors = _validate_top_level(manifest, candidate_sha=candidate_sha, image_tag=image_tag)
     errors.extend(_validate_checks(manifest))
     errors.extend(_validate_no_leaks(manifest))
@@ -763,7 +774,7 @@ def validate_manifest(
 
 
 def _evidence_report(manifest: dict[str, Any]) -> dict[str, Any]:
-    return {
+    result = {
         "schema_version": manifest["schema_version"],
         "status": "pass",
         "candidate_sha": manifest["candidate_sha"],
@@ -773,6 +784,18 @@ def _evidence_report(manifest: dict[str, Any]) -> dict[str, Any]:
         "image_digests": manifest["image_digests"],
         "checks": _redact_value(manifest["checks"]),
     }
+    if manifest['schema_version'] == 2:
+        result['targets'] = _redact_value(manifest['targets'])
+        # Only the protected producer's environment can attest its attempt.
+        try:
+            run = {name: int(os.environ[key]) for name, key in
+                (('run_id', 'GITHUB_RUN_ID'), ('run_attempt', 'GITHUB_RUN_ATTEMPT'))}
+        except (KeyError, ValueError):
+            raise ValueError('release gate run identity unavailable') from None
+        if any(value <= 0 for value in run.values()):
+            raise ValueError('release gate run identity unavailable')
+        result['gate_run'] = run
+    return result
 
 
 def _render_markdown(report: dict[str, Any]) -> str:
@@ -858,11 +881,15 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if args.command == "validate":
-        _write_outputs(
-            manifest=manifest,
-            output_json=args.output_json,
-            output_markdown=args.output_markdown,
-        )
+        try:
+            _write_outputs(
+                manifest=manifest,
+                output_json=args.output_json,
+                output_markdown=args.output_markdown,
+            )
+        except (ValueError, OSError) as exc:
+            print(f'Release gate validation: FAIL\n- failed to retain evidence: {exc}', file=sys.stderr)
+            return 1
 
     print("Release gate validation: PASS")
     return 0

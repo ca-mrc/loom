@@ -529,7 +529,13 @@ BEGIN
     END LOOP;
     FOR item IN SELECT unnest(ARRAY['nebius_pool_bindings','nebius_pool_participants','nebius_pool_requests',
         'nebius_pool_machines','nebius_pool_machine_credentials','nebius_pool_captures','nebius_pool_observations',
-        'nebius_pool_effects','nebius_pool_cleanup_observations','nebius_pool_cancellations']) AS name LOOP
+        'nebius_pool_effects','nebius_pool_cleanup_observations','nebius_pool_cancellations',
+        'nebius_pool_participant_catalogs','nebius_pool_profile_documents',
+        'nebius_pool_lifecycle_operations','nebius_pool_participant_lifecycle']) AS name LOOP
+        IF item.name IN ('nebius_pool_participant_catalogs','nebius_pool_profile_documents',
+            'nebius_pool_lifecycle_operations','nebius_pool_participant_lifecycle')
+          AND (SELECT version_num FROM public.alembic_version) IN ('0176','0177')
+          AND to_regclass('public.' || item.name) IS NULL THEN CONTINUE; END IF;
         IF has_table_privilege('loom_actuator',item.name,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
           OR has_any_column_privilege('loom_actuator',item.name,'SELECT,INSERT,UPDATE,REFERENCES')
         THEN RAISE EXCEPTION 'pool runtime management authority unqualified'; END IF;

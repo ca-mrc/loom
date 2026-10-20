@@ -3,7 +3,8 @@
 These functions run inside the caller's management transaction and never perform
 network I/O or commit. Collection happens between those transactions. New requests
 do not invalidate a capture: only its exact represented Job receipts can discount
-reservations later. A new registration requires a fresh capture.
+reservations later. Legacy registration changes require a fresh capture; opted-in
+physical scopes remain usable through independent participant changes.
 """
 from __future__ import annotations
 
@@ -37,7 +38,14 @@ from loom_execution_capacity_collector.pool import (
     PoolPodClassifier,
 )
 from loom_service.pool_management.auth import PoolPrincipal, authorize_pool_machine
-from loom_service.pool_management.locks import acquire_pool_mutation_lock
+from loom_service.pool_management.locks import (
+    acquire_pool_mutation_lock,
+    require_pool_read_snapshot,
+)
+from loom_service.pool_management.observation_binding import (
+    capture_authority,
+    qualify_capture_binding,
+)
 
 _CAPTURE_MAX_AGE = timedelta(minutes=5)
 
@@ -88,19 +96,39 @@ async def _registration(session: AsyncSession, principal: PoolPrincipal) -> tupl
     return pool, bindings, digest
 
 
-async def read_pool_registration(session: AsyncSession, pool: NebiusPoolBinding) -> tuple[tuple[PoolParticipantV1, ...], str]:
-    """Read exact registration under the caller's mutation/pool locks."""
+async def read_pool_registration(session: AsyncSession, pool: NebiusPoolBinding, *, lock: bool = True) -> tuple[tuple[PoolParticipantV1, ...], str]:
+    """Read exact registration under writer locks or a strictly read-only snapshot."""
     if pool is None or pool.mode not in {"closed", "global"} or _digest(pool.binding_json) != pool.binding_sha256:
         raise PoolObservationError
-    rows = list((await session.scalars(select(NebiusPoolParticipant).where(
+    query = select(NebiusPoolParticipant).where(
         NebiusPoolParticipant.pool_id == pool.pool_id,
     ).order_by(NebiusPoolParticipant.participant_id).limit(10_001)
-        .with_for_update(read=True).execution_options(populate_existing=True))).all())
+    if lock:
+        query = query.with_for_update(read=True)
+    else:
+        await require_pool_read_snapshot(session)
+    rows = list((await session.scalars(query.execution_options(populate_existing=True))).all())
     if len(rows) > 10_000:
         raise PoolObservationError
     bindings = []
     identities = []
+    from loom.db.nebius_pool_lifecycle_schema import NebiusPoolParticipantLifecycle
+    from loom_service.pool_management.intake import scoped_lifecycle
+
+    retired = set()
+    if scoped_lifecycle(pool):
+        retired = set(await session.scalars(select(NebiusPoolParticipantLifecycle.participant_id).where(
+            NebiusPoolParticipantLifecycle.pool_id == pool.pool_id, NebiusPoolParticipantLifecycle.state == 'retired')))
+        if retired and await session.scalar(select(NebiusPoolRequest.request_id).where(
+                NebiusPoolRequest.participant_id.in_(retired),
+                NebiusPoolRequest.phase.not_in(('released', 'cancelled_unstarted'))).limit(1)) is not None:
+            raise PoolObservationError
     for row in rows:
+        # Terminal retirement already proved no unresolved work. Historical
+        # captures retain the old UIDs; new inventory treats any old Pods as
+        # foreign. Reused names do not inherit a retired incarnation's authority.
+        if row.participant_id in retired:
+            continue
         binding = PoolParticipantV1.model_validate(row.binding_json)
         if (_digest(row.binding_json) != row.binding_sha256
                 or (binding.participant_id, binding.pool_id, binding.installation_id, binding.environment_id,
@@ -124,6 +152,7 @@ async def issue_pool_capture(session: AsyncSession, principal: PoolPrincipal) ->
     try:
         with session.no_autoflush:
             pool, participants, registration_sha = await _registration(session, principal)
+            authority = capture_authority(pool, registration_sha)
             by_id = {row.participant_id: row for row in participants}
             requests = list((await session.scalars(select(NebiusPoolRequest).where(
                 NebiusPoolRequest.pool_id == pool.pool_id, NebiusPoolRequest.job_uid.is_not(None),
@@ -175,7 +204,9 @@ async def issue_pool_capture(session: AsyncSession, principal: PoolPrincipal) ->
                     environment_id=row.environment_id, incarnation=row.incarnation,
                     execution_namespace=row.execution_namespace.name, build_namespace=row.build_namespace.name,
                     target_ids=tuple(target.target_id for target in row.targets),
-                ) for row in participants), jobs=tuple(jobs),
+                    execution_namespace_uid=row.execution_namespace.uid if authority is not None else None,
+                    build_namespace_uid=row.build_namespace.uid if authority is not None else None,
+                ) for row in participants), jobs=tuple(jobs), authority=authority,
             )
             capture_id = uuid4()
             created = (await session.execute(insert(NebiusPoolCapture).values(
@@ -199,13 +230,12 @@ async def record_pool_observation(session: AsyncSession, principal: PoolPrincipa
             capture = (await session.scalars(select(NebiusPoolCapture).where(
                 NebiusPoolCapture.capture_id == capture_id,
             ).execution_options(populate_existing=True))).one_or_none()
-            if (capture is None or capture.pool_id != pool.pool_id
-                    or capture.admission_epoch != pool.admission_epoch or capture.registration_sha256 != registration_sha
-                    or observed_at.utcoffset() is None):
+            if capture is None or observed_at.utcoffset() is None:
                 raise PoolObservationError
             provider = ProviderCapacitySnapshot.model_validate(provider.model_dump())
             kubernetes = KubernetesCapacitySnapshot.model_validate(kubernetes.model_dump())
             scope = PoolObservationScope.model_validate(capture.scope_json)
+            qualify_capture_binding(pool, capture, scope, registration_sha)
             fingerprint = PoolPodClassifier(scope).fingerprint
             if (fingerprint.removeprefix("sha256:") != capture.scope_sha256
                     or kubernetes.source_versions.get("pool_scope") != fingerprint

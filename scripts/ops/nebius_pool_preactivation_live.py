@@ -134,6 +134,7 @@ class HTTPSPreactivationOperationAPI:
         if self.retained != retained:
             raise ValueError('preactivation connection selection differs')
         self.completed = load_completed_runtime(retained.runtime)
+        self.successor = retained.schema_successor
         spec = retained.inputs.refresh.after
         participant, = (row for row in spec.participants if row.environment_class == 'staging')
         self.staging = prepare_staging_pool_attachment(participant=participant,
@@ -145,7 +146,7 @@ class HTTPSPreactivationOperationAPI:
                 raise ValueError('preactivation connection history differs')
             files[path] = raw
         self.probes = HTTPSDevelopmentRuntimeProbes(request=retained.runtime, api_server=api_server,
-            ssl_context=ssl_context, token=token, private_files=files)
+            ssl_context=ssl_context, token=token, private_files=files, schema_successor=self.successor)
         try:
             self.catalog = HTTPSParticipantCatalogAPI(request=retained.catalog_request, state_dir=retained.state_dir,
                 api_server=api_server, ssl_context=ssl_context, token=token)
@@ -168,7 +169,7 @@ class HTTPSPreactivationOperationAPI:
     async def _external(self) -> None:
         self.probes._private_inputs()
         async with httpx.AsyncClient(trust_env=False, follow_redirects=False, timeout=30) as http:
-            await qualify_runtime_publication(request=self.retained.runtime, http=http)
+            await qualify_runtime_publication(request=self.retained.runtime, http=http, schema_successor=self.successor)
             await qualify_staging_source_publication(request=self.retained.runtime, source=self.retained.inputs.source,
                 runtime_profile=self.staging.runtime_profile, http=http)
         self.probes._private_inputs()
@@ -191,7 +192,7 @@ class HTTPSPreactivationOperationAPI:
                 raise ValueError('staging advanced; capture a new preactivation source')
 
     def _gateway(self) -> None:
-        gateway, = (row for row in self.completed.resources.values()
+        gateway, = (row for row in (self.completed.resources if self.successor is None else self.successor.resources).values()
             if row['kind'] == 'Deployment' and row['metadata']['name'] == 'loom-pool-gateway')
         current = self.probes._get(gateway)
         namespace = gateway['metadata']['namespace']
@@ -231,7 +232,8 @@ class HTTPSPreactivationOperationAPI:
             namespace = self.retained.registration.binding.namespace
             before = self.probes._database(namespace)
             command = ['psql', '-X', '-qAt', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', 'loom', '-c',
-                refresh_closed_pool_sql(request) if writing else pool_preactivation_state_sql(request)]
+                refresh_closed_pool_sql(request, manager_revision=self.probes.manager_revision) if writing
+                else pool_preactivation_state_sql(request, manager_revision=self.probes.manager_revision)]
         except Exception:
             if writing:
                 raise PreactivationNotDispatchedError('preactivation SQL preflight failed') from None

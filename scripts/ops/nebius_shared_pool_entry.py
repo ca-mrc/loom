@@ -35,6 +35,10 @@ from scripts.ops.nebius_development_runtime_retained import (
 )
 from scripts.ops.nebius_development_runtime_retained import load_completed_runtime
 from scripts.ops.nebius_development_runtime_setup import prepare_database_runtime
+from scripts.ops.nebius_development_schema_upgrade import (
+    DevelopmentSchemaReference,
+    load_completed_development_schema_successor,
+)
 from scripts.ops.nebius_pool_cutover_entry import load_pool_cutover_inputs
 from scripts.ops.nebius_pool_migration import PoolGuardTarget, migration_contract
 from scripts.ops.nebius_pool_preactivation_operation import (
@@ -77,8 +81,10 @@ SOURCE_RECORD = ROOT / 'shared-pool-source.json'
 
 class SharedPoolPrivateInputs(BaseModel):
     model_config = ConfigDict(extra='forbid', frozen=True, hide_input_in_errors=True)
-    schema_version: Literal['loom.nebius-shared-pool-inputs.v1', 'loom.nebius-shared-pool-inputs.v2']
+    schema_version: Literal['loom.nebius-shared-pool-inputs.v1', 'loom.nebius-shared-pool-inputs.v2',
+        'loom.nebius-shared-pool-inputs.v3']
     preactivation: PreactivationReference | None = None
+    schema_successor: DevelopmentSchemaReference | None = None
     runtime: RetainedRuntimeReference
     legacy: PoolPredecessorV1
     staging_observation_file: Path
@@ -88,7 +94,8 @@ class SharedPoolPrivateInputs(BaseModel):
 
     @model_validator(mode='after')
     def catalog_selection(self) -> Self:
-        if (self.schema_version.endswith('.v2')) != (self.preactivation is not None):
+        if ((self.schema_version.endswith('.v3')) != (self.schema_successor is not None)
+                or (self.schema_successor is None and (self.schema_version.endswith('.v2')) != (self.preactivation is not None))):
             raise ValueError('shared pool catalog selection differs from input version')
         return self
 
@@ -246,6 +253,13 @@ def _load_inputs(operation: dict[str, Any], *, source_record: Path, include_oper
     try:
         roots = _load_input_roots(operation, source_record=source_record, include_operator=include_operator)
         inputs, runtime, legacy, observation, files = roots.inputs, roots.runtime, roots.legacy, roots.observation, roots.files
+        successor = None
+        if inputs.schema_successor is not None:
+            successor = load_completed_development_schema_successor(runtime=runtime, reference=inputs.schema_successor)
+            for historical, raw in successor.files.items():
+                if historical in files and files[historical] != raw:
+                    raise ValueError
+                files[historical] = raw
         preactivation = None
         if inputs.preactivation is not None:
             preactivation = load_completed_preactivation(runtime=inputs.runtime, reference=inputs.preactivation, repo_root=ROOT)
@@ -254,7 +268,7 @@ def _load_inputs(operation: dict[str, Any], *, source_record: Path, include_oper
                     raise ValueError
                 files[historical] = raw
         plan = prepare_shared_pool_handoff(runtime=runtime, observation=observation, legacy=legacy, repo_root=ROOT,
-            preactivation=preactivation)
+            preactivation=preactivation, schema_successor=successor)
         dev, = (row for row in plan.migration.guards if row.namespace == 'loom-dev')
         guard = inputs.development_guard
         if (guard.participant_id, guard.namespace, guard.namespace_uid) != (dev.participant_id, dev.namespace, dev.namespace_uid):
@@ -277,6 +291,8 @@ def load_preactivation_inputs(operation: dict[str, Any]) -> PreactivationEntryCo
         if inputs.preactivation is None:
             raise ValueError('catalog refresh requires an explicit selection')
         retained = load_preactivation_catalog(runtime=inputs.runtime, reference=inputs.preactivation, repo_root=ROOT)
+        if retained.inputs.schema_successor != inputs.schema_successor:
+            raise ValueError
         if retained.runtime != roots.runtime or retained.inputs.source.model_dump(mode='json') != roots.observation:
             raise ValueError('catalog refresh source differs from captured handoff')
         # Prove this selected successor can satisfy the same pure staging
