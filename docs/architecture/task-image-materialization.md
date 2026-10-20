@@ -21,24 +21,37 @@ A waiting record is not a reservation or proof of executable capacity. See
 Native snapshots copy parent files between layers. Their file-cache and write
 load can saturate a shared node while CPU and requested storage still fit.
 New native claims therefore also use the ordinary collector's UID-qualified
-kubelet Summary `node.io.psi.full.avg10`, with its own sample timestamp. Missing,
-invalid, future or older-than-60-second pressure is unknown, not zero. Collector
-access uses the existing verified direct kubelet transport and read-only
-`nodes/stats`; it does not grant `nodes/proxy` or a token to build containers.
-Optional pressure reads share a ten-second capture budget and at most four
-in-flight reads. A missing or slow node keeps unknown pressure without holding
-up independent CPU, Pod and provider observations. Later captures cannot stack
-more probes behind outstanding reads; shutdown drains readers before closing
-their API and credentials. The existing SDK credential-renewal and in-progress
-socket operations remain bounded separately, so shutdown is not a ten-second
-end-to-end guarantee.
+Nebius OS monitoring. MK8s defaults do not supply a supported verified kubelet
+serving trust path; the Kubernetes API CA must not be assumed to sign kubelet
+serving certificates. The collector instead reuses its existing SDK identity
+and the provider's verified HTTPS [Prometheus query API](https://docs.nebius.com/observability/metrics/grafana).
+No new monitoring
+service, key, permission, Pod or volume is needed.
+
+One bounded request selects `node_pressure_io_stalled_seconds_total` for the
+actual node inventory and retrieves [raw range-vector samples](https://prometheus.io/docs/prometheus/latest/querying/api/)
+over sixty seconds. Two real
+provider timestamps define a ten-to-sixty-second window; full stall percentage
+is `100 * delta(stalled_seconds) / delta(time_seconds)`. The placement records
+its source, both window endpoints and `full_window_percent`; this rectangular
+window is not serialized as the kernel's exponentially weighted `full_avg10`.
+The instance ID must match the current Node's provider ID, and the window must
+start after that Node identity was created. Ambiguous series, resets, missing
+samples, invalid values and future or older-than-sixty-second endpoints remain
+unknown, never zero. Historical kernel `io_pressure` observations retain their
+original meaning.
+
+Optional metrics have a separate ten-second total deadline and bounded response
+size. Failures leave I/O unknown while allowing independent CPU, memory, space,
+Pod and provider quota observations to publish. A later ordinary capture can
+recover without persisted local state or a separate counter-history service.
 
 The existing shared capacity transaction chooses a measured healthy node with
 room for the complete Pod envelope and freezes required node affinity in that
 attempt's Job. Reconciliation revalidates the same binding; it cannot silently
 move the Job to an unchecked node. Creation also checks the current Node UID.
 Prior builds that could share a candidate node need an actual observed Pod and
-at least ten seconds of the heavy `build` phase in the pressure sample before
+an entire pressure window starting after the heavy `build` phase begins before
 another start can be admitted there. This bounds unobserved starts without
 setting an active-build count or a build/execution ratio. Existing trial demand,
 older queue heads, cleanup charges and cross-pool provider quotas still apply.
@@ -54,7 +67,9 @@ build on an assumed healthy node. No new controller, pool or per-task volume is
 required.
 
 `task_image_builder.io_full_avg10_max` is a finite configurable percentage,
-default 50, for both admission and this final local check. It is a qualification
+default 50. The retained setting bounds the provider window percentage at
+admission and the kernel avg10 at the final local check; those windows have
+different definitions and are not claimed equivalent. It is a qualification
 policy rather than a measured optimal throughput target. Keep per-version cold
 build timings and verify first-attempt cold cohorts on the actual node/storage
 shape before claiming long-tail acceptance. Authored component timeouts, Job
