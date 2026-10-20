@@ -18,7 +18,6 @@ from sqlalchemy import (
     literal,
     or_,
     select,
-    tuple_,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -195,55 +194,51 @@ async def read_execution_capacity_waits(
         filters.append(Trial.id != claiming.trial_id)
     targets = (await session.scalars(select(target).where(*filters).distinct().order_by(target))).all()
     for target_id in targets:
-        cursor: tuple[str, UUID] | None = None
-        while True:
-            query = select(Trial.id, cast(first, Text).label("order_at"), Trial.next_attempt_at,
-                *(hint[key].astext.label(key) for key in ("first_waited_at", "renewed_at", "expires_at", "retry_at")),
-            ).where(*filters, target == target_id)
-            if cursor is not None:
-                query = query.where(tuple_(order_time, Trial.id) > tuple_(
-                    cast(literal(cursor[0]), DateTime(timezone=True)), literal(cursor[1])))
-            page = (await session.execute(query.order_by(order_time, Trial.id).limit(100))).mappings().all()
-            if not page:
-                break
-            plausible = []
-            for item in page:
-                try:
-                    waited, renewed, expires = (_time(item[key]) for key in ("first_waited_at", "renewed_at", "expires_at"))
-                    if (waited <= renewed < expires <= renewed + timedelta(seconds=WAIT_LEASE_SECONDS)
-                            and renewed <= now + timedelta(seconds=60) and expires > now
-                            and _time(item["retry_at"]) == item["next_attempt_at"]):
-                        plausible.append(item["id"])
-                except (KeyError, TypeError, ValueError, OverflowError):
-                    continue
-            # Batch invalid-head fallback, rather than a round trip per stale
-            # fingerprint. Only this page's plausible rows need rich context.
-            rows = (await session.execute(_candidate_rows(claiming_lease_id).where(
-                Trial.id.in_(plausible),
-            ))).mappings().all() if plausible else []
-            contexts = {row["id"]: row for row in rows}
-            finished = False
-            for item in page:
-                row = contexts.get(item["id"])
-                if row is None:
-                    continue
-                payload = (row["scheduling_observation"] or {}).get("capacity_wait")
-                wait = await _eligible(session, row, payload, now)
-                if wait is None:
-                    continue
-                previous = heads.get(wait.target_id)
-                if previous is None or wait.order < previous.order:
-                    heads[wait.target_id] = wait
-                # Python accepts some ISO forms PostgreSQL does not. Their
-                # null-first prefix must all be compared before stopping at
-                # the oldest valid normalized timestamp; never sort by text.
-                if item["order_at"] is not None:
-                    finished = True
+        query = select(Trial.id, cast(first, Text).label("order_at"), Trial.next_attempt_at,
+            *(hint[key].astext.label(key) for key in ("first_waited_at", "renewed_at", "expires_at", "retry_at")),
+        ).where(*filters, target == target_id).order_by(order_time, Trial.id)
+        result = await session.stream(query.execution_options(yield_per=100))
+        try:
+            async for page in result.mappings().partitions(100):
+                plausible = []
+                for item in page:
+                    try:
+                        waited, renewed, expires = (_time(item[key]) for key in ("first_waited_at", "renewed_at", "expires_at"))
+                        if (waited <= renewed < expires <= renewed + timedelta(seconds=WAIT_LEASE_SECONDS)
+                                and renewed <= now + timedelta(seconds=60) and expires > now
+                                and _time(item["retry_at"]) == item["next_attempt_at"]):
+                            plausible.append(item["id"])
+                    except (KeyError, TypeError, ValueError, OverflowError):
+                        continue
+                # Batch invalid-head fallback, rather than a round trip per stale
+                # fingerprint. Only this page's plausible rows need rich context.
+                rows = (await session.execute(_candidate_rows(claiming_lease_id).where(
+                    Trial.id.in_(plausible),
+                ))).mappings().all() if plausible else []
+                contexts = {row["id"]: row for row in rows}
+                finished = False
+                for item in page:
+                    row = contexts.get(item["id"])
+                    if row is None:
+                        continue
+                    payload = (row["scheduling_observation"] or {}).get("capacity_wait")
+                    wait = await _eligible(session, row, payload, now)
+                    if wait is None:
+                        continue
+                    previous = heads.get(wait.target_id)
+                    if previous is None or wait.order < previous.order:
+                        heads[wait.target_id] = wait
+                    # Python accepts some ISO forms PostgreSQL does not. Their
+                    # null-first prefix must all be compared before stopping at
+                    # the oldest valid normalized timestamp; never sort by text.
+                    if item["order_at"] is not None:
+                        finished = True
+                        break
+                if finished:
                     break
-            if finished:
-                break
-            last = page[-1]
-            cursor = last["order_at"] or "-infinity", last["id"]
+        finally:
+            # Do not fetch younger pages once this target's head is known.
+            await result.close()
     return list(heads.values()), own_order
 
 

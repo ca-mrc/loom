@@ -265,12 +265,12 @@ async def test_only_one_execution_waiting_head_per_target_is_projected(waiting_e
     assert len(attempts) == 1 and attempts[0].native_build["capacity_reserved_at"]
 
 
-async def _copy_execution_wait(session, original, *, first=None, **changes):
+async def _copy_execution_wait(session, original, *, first=None, trial_id=None, **changes):
     observation = deepcopy(original.scheduling_observation)
     if first is not None:
         observation["capacity_wait"]["first_waited_at"] = first
     observation["capacity_wait"].update(changes)
-    trial = Trial(id=uuid4(), team_id=original.team_id, task_id=original.task_id,
+    trial = Trial(id=trial_id or uuid4(), team_id=original.team_id, task_id=original.task_id,
         batch_id=original.batch_id, config=original.config, requires_caps=original.requires_caps,
         state="queued", attempt_count=0, next_attempt_at=original.next_attempt_at,
         scheduling_observation=observation)
@@ -409,6 +409,20 @@ async def test_execution_head_reader_uses_actual_age_and_uuid_ties(waiting_execu
     async with sessions() as session:
         heads, _ = await read_execution_capacity_waits(session, now=now + timedelta(seconds=1))
     assert [head.trial_id for head in heads] == [expected]
+
+
+async def test_execution_head_reader_compares_entire_python_only_prefix(waiting_execution):
+    _, sessions, _, _, _, trial_id, _, now = waiting_execution
+    # Reverse actual age relative to UUID order across the100-row page boundary.
+    ids = sorted(uuid4() for _ in range(101))
+    async with sessions() as session, session.begin():
+        original = await session.get(Trial, trial_id)
+        for index, current in enumerate(ids):
+            first = (now - timedelta(seconds=1, microseconds=index)).isoformat().replace("T", "X")
+            await _copy_execution_wait(session, original, first=first, trial_id=current)
+    async with sessions() as session:
+        heads, _ = await read_execution_capacity_waits(session, now=now + timedelta(seconds=1))
+    assert [head.trial_id for head in heads] == [ids[-1]]
 
 
 async def test_execution_head_reader_retains_nonhead_claim_order(waiting_execution, monkeypatch):
