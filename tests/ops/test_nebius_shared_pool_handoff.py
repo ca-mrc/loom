@@ -4720,7 +4720,21 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
                     cause = cause.__context__
                 raise ValueError('participant census unqualified; preserve evidence; ' + ', '.join(frames)) from None
 
-        result = observe()
+        from scripts.ops import nebius_shared_pool_forward_census as forward_census
+
+        projections = []
+        original_options = forward_census._forward_options
+
+        def project(*args, **kwargs):
+            projections.append(None)
+            return original_options(*args, **kwargs)
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(forward_census, '_forward_options', project)
+            result = observe()
+        # The immutable completed root needs one semantic projection. All
+        # evidence and live writers must still be reread across this census.
+        assert len(projections) == 1
         assert not writes
         assert result.workloads[_key(manager)] == manager
         assert any(row['metadata']['namespace'] == 'loom-dev' for row in result.workloads.values())
@@ -4795,12 +4809,15 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
             assert len(writes) == 2
         inventory.clear()
         inventory.update(snapshot)
-        record = retained.state_dir / 'candidate-file-writes/dispatch.json'
-        raw = record.read_bytes()
-        mode['during_read'] = lambda: record.write_bytes(raw + b'\n')
-        with pytest.raises(ValueError, match='preserve'):
-            observe()
-        record.write_bytes(raw)
+        # Candidate and completed shared evidence must both remain fresh even
+        # when their already-validated semantic projections are reused.
+        for record in (retained.state_dir / 'candidate-file-writes/dispatch.json',
+                state / 'forward-activate/activation.json'):
+            raw = record.read_bytes()
+            mode['during_read'] = lambda record=record, raw=raw: record.write_bytes(raw + b'\n')
+            with pytest.raises(ValueError, match='preserve'):
+                observe()
+            record.write_bytes(raw)
         assert observe().workloads[key] == resources[key]
 
         # Exercise the real fence/catalog/manager/open/capacity children with
