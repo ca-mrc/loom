@@ -1,9 +1,11 @@
 # Standalone Nebius platform
 
 This lane publishes from `dev`; that Git branch does not determine the deployed
-environment class. CI and candidate publication use GitHub-hosted runners; the
-platform needs no ARC controller or Nebius CI runner pool. The existing Nebius
-installation at `https://nebius.yylx.world`, in `loom-nebius-platform` with execution
+environment class. Development CI and normal candidate publication can use the
+[unified native runner queue](../contributing/ci-unified-runners.md), with
+GitHub-hosted fallback and exclusions. The platform needs no ARC controller or
+Nebius CI runner pool. The existing Nebius installation at
+`https://nebius.yylx.world`, in `loom-nebius-platform` with execution
 in `loom-nebius-platform-execution`, serves **staging**. Its historical input says
 `environment: development`; the old "integration" name is not evidence of a
 separate development environment or permission to attach personal APIs to it.
@@ -135,7 +137,7 @@ publication does not build or admit the Terminal-Bench task image. Task images
 use the ordinary Dockerfile preparation path; the single-task source and local
 regression fixture remain in `deploy/catalog/nebius-terminal-bench/`.
 
-The existing GitHub-hosted `nebius-candidate` workflow also supports manual
+The existing `nebius-candidate` workflow also supports manual
 `mode=harness-only`, with an explicit `agent_version` label. This builds, scans
 and publishes only the Harbor controller through the same native digest and
 image-admission path. Its `nebius-agent-runtime-*` artifact contains
@@ -162,7 +164,7 @@ the candidate publisher's Python calls. The ordinary image matrix and the
 independent Harbor job share these strict scan steps. Omitting the flag retains
 the legacy CLI policy; selecting it only on the writer or only on the validator is invalid.
 
-The GitHub-hosted native image CI selects from the same seven published platform
+The native image CI selects from the same seven published platform
 and Harbor image names. `plan-images --image-set nebius` uses their manifest-owned
 source paths; explicit full/fallback coverage builds those seven AMD64 images.
 The reusable build lane validates each row with `validate-image --image-set nebius`.
@@ -559,8 +561,8 @@ This implementation is the single-region slice of #1884. Cross-region target
 selection, connectivity and provider-fault acceptance remain subsequent work.
 #1538 must use fresh quota and a separately bounded resource/Trial plan to verify
 actual overlap, recovery and native scale-to-zero; passing local tests or raising
-the technical maximum is not live capacity acceptance. CI and publication remain
-GitHub-hosted.
+the technical maximum is not live capacity acceptance. CI and publication use
+the independently configured native Actions runners.
 
 ## Secret prerequisites
 
@@ -1139,7 +1141,7 @@ rerender the same published candidate and runtime profile without rebuilding ima
 
 ### Native task-image preparation
 
-Platform and harness images continue to build and publish on GitHub-hosted CI.
+Platform and harness images build and publish through GitHub Actions.
 Task Dockerfiles are product workloads: the existing execution actuator claims
 `task_image_materializations` and runs one native Kubernetes Job per fenced
 attempt. No additional queue, worker service or autoscaler is required.
@@ -1537,9 +1539,9 @@ the deployment job and do not contact the cluster. A publication failure is
 different from **skipped_busy**, which follows a successful publication and a
 live idle check. A green skip report records a decision, not a deployment.
 
-CI and publication remain on GitHub-hosted runners, with independent concurrency
-from rollout. The runner invokes `kubectl` over the existing Nebius SSH gateway;
-no Nebius runner, new gateway, public Kubernetes API exposure, or old environment
+CI and publication retain independent concurrency from rollout. The rollout
+runner remains GitHub-hosted and invokes `kubectl` over the existing Nebius SSH
+gateway; no Nebius runner, new gateway, public Kubernetes API exposure, or old environment
 integration is needed. A pinned SSH host key is required; do not use live
 `ssh-keyscan` output as trust. Kubernetes credentials stay on the gateway.
 

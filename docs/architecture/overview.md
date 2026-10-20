@@ -15,9 +15,11 @@ Jobs, using immutable task images and a reusable harness runtime. Output
 publication is fenced by attempt and generation identity.
 
 Nebius provides the database, object storage, registry, backups and monitoring
-specified by the [platform contract](nebius-primary-platform.md). GitHub-hosted
-CI performs validation, builds and publication. A test passing in CI does not
-establish live deployment or workload acceptance.
+specified by the [platform contract](nebius-primary-platform.md). GitHub Actions
+performs validation, builds and publication. Development jobs can opt into the
+[unified runner queue](../contributing/ci-unified-runners.md), with GitHub-hosted
+routing retained when disabled and for excluded jobs. A test passing in CI does
+not establish live deployment or workload acceptance.
 
 | Component | Path | Responsibility |
 |---|---|---|

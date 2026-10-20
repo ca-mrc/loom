@@ -6,7 +6,7 @@ This prepares one task, not a claim that all 90 tasks support Nebius.
 
 ## Prepare Dockerfile upload files
 
-The existing GitHub-hosted `nebius-candidate` publication builds the trusted
+The existing [`nebius-candidate` publication](nebius-candidate.md) builds the trusted
 `images.harbor_runtime` controller with the platform components. It does not
 build or admit this task image. The ordinary task-image queue prepares the
 submitted Dockerfile and binds the ready image to the Trial's frozen task

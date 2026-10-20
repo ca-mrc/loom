@@ -52,22 +52,3 @@ def union_entries(
     for e in builtin:
         seen[e.slug] = e
     return sorted(seen.values(), key=lambda x: x.slug)
-
-
-def discover_all(
-    *,
-    catalog_url: str | None,
-    server_url: str | None,
-    token: str | None,
-) -> list[DatasetEntry]:
-    from loom_cli.builtin import load_builtin_entries
-    from loom_cli.catalog import CatalogFetchError, load_catalog_entries
-    from loom_cli.remote import load_remote_entries
-
-    builtin = load_builtin_entries()
-    try:
-        catalog = load_catalog_entries(url=catalog_url)
-    except CatalogFetchError:
-        catalog = []
-    remote = load_remote_entries(server_url=server_url, token=token)
-    return union_entries(builtin=builtin, catalog=catalog, remote=remote)

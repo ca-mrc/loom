@@ -6,9 +6,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import and_, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.sql.elements import ColumnElement
 
 from loom.db.schema import Task
 from loom.execution_architecture import execution_cpu_arch
@@ -19,24 +18,6 @@ from loom.models.task import TaskConfig
 class InvalidTaskConfig:
     task_id: str
     detail: str
-
-
-_REQUIRED_TASK_CONFIG_SECTIONS = (
-    "task",
-    "environment",
-    "agent",
-    "verifier",
-)
-
-
-def has_required_task_config_sections() -> ColumnElement[bool]:
-    """DB-level prefilter for task rows that are at least published.
-
-    Full `TaskConfig` validation stays in Python because Pydantic owns
-    the schema. Catalog counts use this cheap predicate to avoid
-    advertising placeholder rows like `config={}` as runnable.
-    """
-    return and_(*(Task.config.op("?")(section) for section in _REQUIRED_TASK_CONFIG_SECTIONS))
 
 
 async def split_valid_task_configs(

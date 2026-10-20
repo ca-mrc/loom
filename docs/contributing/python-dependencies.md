@@ -69,8 +69,13 @@ benchmark compatibility.
 A runtime migration must name its OS/glibc, GPU/driver/CUDA and model matrix;
 qualify model loading, chat/tool/structured-output requests, cancellation and
 benchmark behavior; then re-audit the graph. Keep default/dev platforms usable.
-The separate cryptography and fsspec/datasets work is tracked in
-[#2487](https://github.com/ca-mrc/loom/issues/2487).
+
+The cryptography 50, fsspec 2026.6 and datasets 5 migrations landed in
+[#2508](https://github.com/ca-mrc/loom/pull/2508). The benchmark package now uses
+reviewed local data readers for its pinned MATH and LiveCodeBench script-based
+sources; it does not execute Hugging Face loader scripts. Preserve the
+[loader compatibility contract](../../packages/loom-benchmarks/README.md#hugging-face-loader-compatibility)
+when updating those dependencies.
 
 ## Repeatable checks
 

@@ -5,9 +5,10 @@ paths and one push-based Server-Sent Events (SSE) stream. Together
 they cover pull-mode replay (dashboards, batch analytics) and live
 observation (Trial Detail viewer, custom tooling).
 
-All three endpoints require a bearer token with the `read:own` scope
-and enforce the standard team-scoping rules: admins see every trial;
-team tokens only see their own team's trials.
+All three endpoints accept a bearer token or an authenticated browser session.
+Non-admin callers need the `read:own` scope and can read only their team's
+trials; platform administrators can read across teams. The SPA's EventSource
+uses the session cookie with `withCredentials: true`.
 
 ## Endpoints
 

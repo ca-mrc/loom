@@ -7,7 +7,7 @@ boundary while retaining the four protected admission contexts.
 
 ## Workflow inventory
 
-The repository retains twelve workflows. Low run frequency or no recorded runs
+The repository retains the workflows below. Low run frequency or no recorded runs
 does not make an operator entry point obsolete: promotion, retry, and catalog
 publication run when needed. In particular, `main-promotion-gate` remains the
 required check protecting promotion into `main`. The GitHub-managed Dependency
@@ -21,7 +21,8 @@ Graph entry has no workflow YAML in this repository and is maintained separately
 | Required CI | `staging-smoke.yml` | Credential-free Compose system checks on PRs, merge groups, and manual dispatch. |
 | Contributor compatibility | `macos-locked-environment.yml` | macOS ARM64 locked workspace installation, daily at 09:17 UTC or manually. |
 | CI operations | `ci-retry.yml` | Manual bounded, classified retry by default; an explicit read-only capacity branch supplies disposable single-job hosted workers. |
-| Maintenance | `nebius-image-retention.yml` | Scheduled/manual bounded image maintenance with separate concurrency and idle protection. |
+| CI operations | `ci-dependency-cache.yml` | Writes the full uv wheel cache on relevant `dev` pushes, daily at 07:41 UTC, or manually; PR and merge-group jobs only read it. |
+| Dependency maintenance | `harbor-upstream.yml` | Discovers Harbor drift daily at 09:41 UTC or manually. Draft candidate creation requires repository activation and is skipped by manual `check_only=true`; see [Harbor upgrades](terminus2-upgrades.md). |
 | Production promotion | `release-promotion-gate.yml` | Manual validation of release evidence for an exact candidate SHA and image. |
 | Production promotion | `main-promotion-gate.yml` | Manual verification that the open `dev` to `main` PR, current candidate SHA, and successful release evidence agree. |
 | Nebius publication | `nebius-candidate.yml` | Automatic `dev` push publication or manual platform/Harbor runtime publication, controlled by `NEBIUS_RELEASE_ENABLED`. |
@@ -109,8 +110,8 @@ transport failures with at most three attempts and stops reading the version
 list after the selected version. This addresses the observed single five-second
 manifest lookup failure before Python or pytest starts. uv remains 0.11.26 with
 the existing platform checksums; locked installs and PR/merge-group cache-write
-restrictions are unchanged. `prune-cache: true` explicitly preserves the previous
-cache-pruning behavior. A persistent manifest error still fails setup; this is
+restrictions are unchanged. Test jobs use the full, unpruned wheel cache
+described below. A persistent manifest error still fails setup; this is
 not a workflow or failed-test rerun policy.
 
 The public Google mirror serves cached Docker Hub images over TLS, without
@@ -396,10 +397,11 @@ The 75-minute integration budget retains room for optional coverage and runner
 variation. File counts alone do not measure shard balance; use the per-shard
 duration reports from the current head.
 
-All four source workflows use GitHub-hosted runners directly. The OLDLAB route
-action, lease broker, controller, custom CheckRun publisher and dedicated KVM
-runner assets have been removed. This does not stop existing host services or
-cancel in-flight jobs. See [runner placement](../architecture/ci-runner-acceleration.md).
+All four development validation workflows support the opt-in unified native
+runner queue, with GitHub-hosted fallback and exclusions as described in
+[runner supply](ci-unified-runners.md). GitHub owns job assignment and CheckRuns;
+the retired route action, lease broker and custom CheckRun publisher are not
+part of this interface. See [runner placement](../architecture/ci-runner-acceleration.md).
 
 Harbor runtime builds follow manifest-owned inputs rather than every image change.
 

@@ -146,17 +146,20 @@ isolation commands run only in main or manual compatibility scope. These checks
 are credential-free candidate evidence; real model-backed tasks and live
 environment readiness require deployment acceptance rather than PR jobs.
 
-Changed paths select static checks, up to twenty nonempty root-test shards and
-package tests as needed, in parallel on GitHub-hosted runners. Web-only changes
-skip backend baseline jobs; dependency, shared and unknown changes retain them.
+Changed paths select static checks, up to four root-test shards and twenty
+pool-operator shards, plus package tests as needed. Only nonempty shards run.
+Eligible development jobs use the [unified runner queue](ci-unified-runners.md) when enabled and
+GitHub-hosted runners otherwise. Web-only changes skip backend baseline jobs;
+dependency, shared and unknown changes retain them.
 `repository-checks` verifies every selected result. Coverage instrumentation and
 aggregation run when requested with `ci:coverage-summary` or
 `coverage_summary=true`, and in the daily full Nebius regression. Nebius coverage
 is reported without the historical all-platform 70% floor; main and manual
 compatibility coverage retain that floor. Report errors still fail. Independent
 test-only edits select their owning files; shared fixtures and runtime changes
-retain full lanes. Root shards have a 40-minute budget and integration shards
-have a 75-minute budget; selection does not relax per-test timeouts or failures.
+retain full lanes. Root and pool shards have a 50-minute budget; integration
+shards have 75 minutes and Docker integration shards have 40 minutes. Selection
+does not relax per-test timeouts or failures.
 `repository-checks` enforces every selected result after the independent lanes
 finish. Docs-only PRs preserve the stable required contexts while unselected
 functional lanes remain skipped. Python jobs restore uv's package/download cache
@@ -381,8 +384,9 @@ and shared Python/runtime changes rebuild the affected Python images. Relevant
 pull requests, merge groups, and manual dispatches use the checked-in read-only
 build path, do not log in to GHCR, and do not use a publication cache. Manual
 dispatch is build-only. Image validation builds the seven-image Nebius AMD64 set
-on GitHub-hosted native CPUs. `nebius-candidate` publishes immutable images from
-`dev`; the existing production gates promote that same candidate into `main`.
+on native CPUs through the configured runner route. `nebius-candidate` publishes
+immutable images from `dev`; the existing production gates promote that same
+candidate into `main`.
 There is no GHCR publisher, ARM64 manifest joiner, or personal-dev publication
 controller. `images` requests no publication credentials. See the
 [workflow inventory](ci.md#workflow-inventory) for the remaining entry points.

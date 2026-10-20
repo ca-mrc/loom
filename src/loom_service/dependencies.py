@@ -14,7 +14,7 @@ threaded through every site.
 
 This module centralizes the three jobs:
 
-- **`authed_session`** — open a session, verify the bearer token,
+- **`authed_session`** — open a session, verify the bearer token or browser session,
   enforce human-or-admin, yield `(session, auth_context)`. Async
   generator so the session stays open for the whole request.
 - **`authed_admin`** — same, but additionally rejects non-admin
@@ -88,7 +88,7 @@ async def authed_session(
     request: Request,
     authorization: Annotated[str | None, Header()] = None,
 ) -> AsyncIterator[tuple[AsyncSession, AuthContext]]:
-    """Open a session, verify the bearer token, enforce human/admin.
+    """Open a session, authenticate a bearer token or cookie, enforce human/admin.
 
     Yields the open session + the auth context so handlers can use
     both. The session closes on request teardown (FastAPI manages

@@ -73,8 +73,6 @@ from loom.trajectory.storage import (
     bundle_file_metadata_sha256,
 )
 from loom.trial.workspace import (
-    WorkspaceStagingPolicy,
-    require_tb21_workspace_staging_policy,
     resolve_trial_workspace_staging_policy,
 )
 from loom.verifier.factory import task_verifier_factory
@@ -133,13 +131,6 @@ _SETUP_FAILURE_TRUNCATION_MARKER = (
 _WORKER_SLICE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*\.slice$")
 
 logger = logging.getLogger(__name__)
-
-
-def _tb21_workspace_staging_policy_from_provenance(
-    raw_policy: object,
-) -> WorkspaceStagingPolicy:
-    """Compat wrapper; prefer ``require_tb21_workspace_staging_policy``."""
-    return require_tb21_workspace_staging_policy(raw_policy)
 
 
 def _host_cpu_arch() -> str:

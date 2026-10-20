@@ -55,14 +55,3 @@ export function rateCardExampleJson(): string {
     2,
   );
 }
-
-export function containsUnsafeSnippetValue(value: string): boolean {
-  const patterns = [
-    /\bsk-[A-Za-z0-9_-]+/i,
-    /\bapi[_-]?key\s*[:=]\s*['"]?[A-Za-z0-9_-]{12,}/i,
-    /\bAuthorization:\s*Bearer\s+\S+/i,
-    /X-Amz-(Algorithm|Credential|Signature|Security-Token)=/i,
-    /([?&]token=|[?&]signature=|[?&]X-Amz-Signature=)/i,
-  ];
-  return patterns.some((pattern) => pattern.test(value));
-}

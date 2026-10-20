@@ -60,8 +60,8 @@ func verifyStepJWT(token string, signingKey []byte) (*stepSessionClaims, error) 
 	if claims.TeamID == "" || claims.TrialID == "" || claims.StepID == "" {
 		return nil, errors.New("missing required claim (team_id/trial_id/step_id)")
 	}
-	// RegisteredClaims doesn't enforce a NotBefore check by default;
-	// belt-and-braces.
+	// ParseWithClaims validates exp and nbf when present. Recheck expiry
+	// before returning in case it elapsed during the remaining checks.
 	if claims.ExpiresAt != nil && time.Now().After(claims.ExpiresAt.Time) {
 		return nil, errors.New("token expired")
 	}

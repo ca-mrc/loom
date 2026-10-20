@@ -1,8 +1,8 @@
 # Shared-cluster retirement — September 2026
 
 The repository retirement decision of 2026-09-17 makes Nebius the only supported
-hosted platform. OLDLAB, GB10 and Slurm execution are retired: they are not
-fallbacks, expansion targets or release prerequisites. The purpose is to remove
+hosted platform. OLDLAB, GB10 and Slurm hosted workload execution is retired:
+these are not fallbacks, expansion targets or release prerequisites. The purpose is to remove
 parallel infrastructure and execution paths from the supported product.
 
 The preceding architecture combined Kubernetes platform services with remote
@@ -28,9 +28,12 @@ Hosted deployment uses `scripts/ops/deploy_nebius_platform.py`, preserving
 its target, backup and migration checks. The old broker entrypoint is retired;
 `loom cluster up` refuses hosted targets. Cluster release evidence no longer
 requires external worker pools, Slurm authority, GB10 status or GB10 mirror probes.
-CI, image builds and publication use GitHub-hosted runners. The current
-ordinary hosted image workflow selects AMD64 builds; ARM64 publication is not
-a current hosted release prerequisite. This does not remove local development
+At the September 2026 retirement, CI, image builds and publication moved to
+GitHub-hosted runners. The October 2026 [native runner queue](../contributing/ci-unified-runners.md)
+adds opt-in disposable OLDLAB KVM and GitHub-hosted execution for eligible CI
+jobs; it does not restore the retired hosted workload backends. The ordinary
+image workflow selects AMD64 builds; ARM64 publication is not
+a hosted release prerequisite. This does not remove local development
 on Apple Silicon. See the [image workflow](../../.github/workflows/images.yml)
 for the current build selection.
 The retired manager, executor and personal-development images are no longer

@@ -20,11 +20,9 @@ import (
 )
 
 const (
-	// Max time the sandbox has to send a CONNECT after the TLS
-	// handshake completes. The default http.ReadTimeout would also
-	// limit the post-CONNECT tunnel, which we don't want — so we
-	// only impose this on the initial headers via the http.Server's
-	// ReadHeaderTimeout in main.
+	// Maximum time to establish the upstream TCP connection after a
+	// CONNECT request is authenticated. Initial request headers have a
+	// separate ReadHeaderTimeout on the http.Server in main.
 	connectDialTimeout = 10 * time.Second
 )
 
