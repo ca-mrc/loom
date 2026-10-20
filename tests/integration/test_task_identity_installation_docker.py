@@ -325,6 +325,68 @@ echo '{}' > /logs/verifier/ctrf.json
     assert result["rewards"] == {"resolved": 1, "passed": 1}
 
 
+async def test_deferred_installed_harness_grades_without_agent_setup(sandboxes, tmp_path, monkeypatch):
+    """#2538: execute a compiled Codex verifier against its only real socket.
+
+    The completed agent workspace is supplied directly; no CLI install or
+    model call is needed to exercise the failed deferred grading boundary.
+    """
+    from loom.execution_runtime_contract import RuntimeHandoffInputV1
+    from loom.models.trial import TrialConfig
+    from loom.models.types import ModelSpec
+    from loom.nebius_terminus_ingest import offline_verifier_run_sh_bytes
+    from loom.service_execution_materialization import (
+        compile_deferred_verifier_plan,
+        compile_service_execution_plan,
+    )
+    from loom.service_execution_sandbox_task import run_setup, run_verifier
+    from loom.trial.workspace_snapshot import _export_workspace_archive
+    from tests.unit.test_service_execution_materialization import _REVISION, _provenance
+    from tests.unit.test_service_execution_terminus_plan import _inputs
+
+    agent, verifier, _ = sandboxes
+    task, _, profile = _inputs()
+    trial = TrialConfig(agent_name="codex", agent_model=ModelSpec(provider="openai", name="gpt-4.1-mini"))
+    task.verifier.args["script_path"] = "verifier/run.sh"
+    parent = compile_service_execution_plan(
+        task=task, trial=trial, profile=profile, source_provenance=_provenance(),
+        task_revision_sha256=_REVISION,
+    )
+    plan = compile_deferred_verifier_plan(
+        parent, task, verifier_timeout_seconds=60,
+        handoff_input=RuntimeHandoffInputV1(manifest_sha256="sha256:" + "5" * 64, file_count=1, total_bytes=1),
+    )
+    workspace = tmp_path / "controller"
+    (workspace / ".loom").mkdir(parents=True)
+    (workspace / "verifier").mkdir()
+    (workspace / "verifier/run.sh").write_bytes(offline_verifier_run_sh_bytes())
+    (workspace / "verifier/harbor-offline.sh").write_text(
+        "set -eu\ntest \"$(cat /app/answer)\" = retained-answer\n"
+        "echo 1 > /logs/verifier/reward.txt\necho '{}' > /logs/verifier/ctrf.json\n"
+    )
+    assert (await agent.exec("mkdir /app; printf retained-answer > /app/answer")).return_code == 0
+    await agent.stop_processes()
+    await _export_workspace_archive(agent, PurePosixPath("/app"), workspace / ".loom/workspace.tar")
+    await verifier.stop()
+
+    def connection(role, *_):
+        # A deferred pod has no task-sandbox socket. Let a wrong role fail at
+        # the real UDS connection instead of silently reusing the agent driver.
+        directory = "verifier" if role == "verifier-sandbox" else "absent-task-sandbox"
+        return ServiceSandboxDriver(tmp_path / directory / "sandbox.sock",
+                                    capabilities=verifier.capabilities, network_policy=NoNetwork())
+
+    monkeypatch.setattr("loom.service_execution_sandbox_task.sandbox_driver", connection)
+    monkeypatch.setenv("LOOM_TASK_EGRESS_PROXY", "http://127.0.0.1:1")
+    for phase in (*plan.setup, plan.main):
+        entrypoint = run_setup if phase.argv[4] == "setup" else run_verifier
+        await entrypoint(workspace, task, trial)
+
+    result = json.loads((workspace / ".loom/verifier/output.json").read_bytes())
+    assert result["rewards"] == {"resolved": 1, "passed": 1}
+    assert not (workspace / ".loom/harness-cache").exists()
+
+
 @pytest.mark.parametrize("mode", ["shared", "separate"])
 @pytest.mark.parametrize("uid", [0, 65532], ids=["root", "nonroot"])
 async def test_native_script_can_write_report_without_creating_its_directory(
