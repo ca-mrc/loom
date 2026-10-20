@@ -23,12 +23,14 @@ from loom.db.schema import (
 from loom.pipeline.keys import canonical_digest
 from loom_control_plane.execution_capacity_targets import resolve_capacity_targets
 from loom_control_plane.execution_placement import (
+    PlacementConstraint,
     PlacementUnavailableError,
     cold_sample,
     plan_placement,
     quota_identity,
     require_provider_quota_headroom,
 )
+from loom_control_plane.task_image_io_capacity import NativeIOUnavailable, native_io_candidates
 from loom_execution_capacity_collector.contracts import (
     CapacityPlacement,
     NodeTemplateSample,
@@ -432,6 +434,7 @@ class _NativeCapacityReservation:
     state: str
     reserved_at: datetime
     released: bool
+    native: dict[str, Any]
 
 
 def native_build_resources(native: dict[str, Any]) -> ResourceTotals:
@@ -466,6 +469,7 @@ async def _native_capacity_reservations(
                 resources=native_build_resources(native), state=str(native.get("state", "reserved")),
                 reserved_at=_utc(datetime.fromisoformat(native["capacity_reserved_at"]), name="native reservation time"),
                 released=native.get("capacity_released_at") is not None,
+                native=dict(native),
             ))
         except (KeyError, TypeError, ValueError) as exc:
             raise ExecutionProvisioningBlockedError("execution_capacity_native_reservation_invalid") from exc
@@ -735,30 +739,72 @@ async def admit_capacity_resources(
             for row in rows
         ]
 
+    def binding_constraint(binding: Any, inventory: CapacityPlacement) -> PlacementConstraint:
+        if isinstance(binding, dict) and binding.get("mode") == "node":
+            uid = binding.get("node_uid")
+            name = binding.get("node_name")
+            if isinstance(uid, str) and uid and isinstance(name, str) and name:
+                if any(node.uid == uid and node.name != name for node in inventory.nodes):
+                    raise ExecutionProvisioningBlockedError("execution_capacity_native_io_binding_invalid")
+                return PlacementConstraint(frozenset({uid}))
+        if isinstance(binding, dict) and binding.get("mode") == "bootstrap":
+            names = binding.get("excluded_node_names")
+            if (isinstance(names, list) and all(isinstance(name, str) and name for name in names)
+                    and names == sorted(set(names))):
+                return PlacementConstraint(frozenset(
+                    node.uid for node in inventory.nodes if node.name and node.name not in names
+                ), allow_cold=True)
+        raise ExecutionProvisioningBlockedError("execution_capacity_native_io_binding_invalid")
+
+    def frozen_constraints(inventory: CapacityPlacement, target_ids: frozenset[str]) -> dict[str, PlacementConstraint]:
+        return {row.demand_id: binding_constraint(row.native["io_binding"], inventory)
+                for row in native_active if row.target_id in target_ids and row.native.get("io_binding") is not None}
+
+    io_binding = None
     try:
         sample = await native_allocatable_sample(session, group.owner.id, placement)
         actual_demands = [*demands(same_target), *native_demands(group.target_ids, include_waits=False)]
-        prior = plan_placement(placement, actual_demands, sample=sample)
-        actual_projected = plan_placement(
-            placement, [*actual_demands, (demand_id, resources)], sample=sample,
-        )
-        projected = plan_placement(
-            placement,
-            [
-                *demands(same_target),
-                *native_demands(group.target_ids),
-                (
-                    demand_id,
-                    ResourceTotals(
-                        cpu_millis=requested_cpu,
-                        memory_mib=requested_memory,
-                        storage_mib=requested_storage,
-                    ),
-                ),
-            ],
-            sample=sample,
-        )
-    except PlacementUnavailableError as exc:
+        protected_demands = [*demands(same_target), *native_demands(group.target_ids), (demand_id, resources)]
+        constraints = frozen_constraints(placement, group.target_ids)
+        incoming = claiming.native_build if claiming is not None else None
+        candidates: list[dict[str, Any] | None] = [None]
+        if incoming is not None and "io_full_avg10_max" in incoming:
+            if already_reserved and incoming.get("io_binding") is None:
+                raise ExecutionProvisioningBlockedError("execution_capacity_native_io_binding_invalid")
+            eligible_uids = set()
+            for node in placement.nodes:
+                pinned = {**constraints, demand_id: PlacementConstraint(frozenset({node.uid}))}
+                try:
+                    plan_placement(placement, protected_demands, sample=sample, constraints=pinned)
+                except PlacementUnavailableError:
+                    continue
+                eligible_uids.add(node.uid)
+            candidates = list(native_io_candidates(
+                placement, [(row.demand_id, row.native) for row in native_active if row.target_id in group.target_ids],
+                now=current_time, max_age_seconds=min(60, policy.observation_max_age_seconds),
+                max_full_avg10=incoming["io_full_avg10_max"],
+                existing_binding=incoming.get("io_binding") if already_reserved else None,
+                eligible_node_uids=eligible_uids,
+            ))
+        plans = []
+        last_error = None
+        for index, candidate in enumerate(candidates):
+            bound = dict(constraints)
+            if candidate is not None:
+                bound[demand_id] = binding_constraint(candidate, placement)
+            try:
+                prior = plan_placement(placement, actual_demands, sample=sample, constraints=bound)
+                actual = plan_placement(placement, [*actual_demands, (demand_id, resources)],
+                                        sample=sample, constraints=bound)
+                protected = plan_placement(placement, protected_demands, sample=sample, constraints=bound)
+            except PlacementUnavailableError as exc:
+                last_error = exc
+                continue
+            plans.append((protected.additional_nodes, actual.additional_nodes, index, prior, actual, protected, candidate))
+        if not plans:
+            raise last_error or PlacementUnavailableError("execution_capacity_bound_node_unavailable")
+        _, _, _, prior, actual_projected, projected, io_binding = min(plans, key=lambda row: row[:3])
+    except (PlacementUnavailableError, NativeIOUnavailable) as exc:
         raise ExecutionProvisioningBlockedError(str(exc)) from exc
     total_nodes = projected.additional_nodes
     # Waiting protects headroom but is not an acquired create or cost event.
@@ -867,6 +913,7 @@ async def admit_capacity_resources(
                 [*demands([row for row in authorizations if row.target_id in other_group.target_ids]),
                  *native_demands(other_group.target_ids)],
                 sample=await native_allocatable_sample(session, other_group.owner.id, other),
+                constraints=frozen_constraints(other, other_group.target_ids),
             )
         except PlacementUnavailableError as exc:
             raise ExecutionProvisioningBlockedError(
@@ -892,6 +939,8 @@ async def admit_capacity_resources(
         "decision_reason": decision_reason,
         "authorized_at": current_time.isoformat(),
     }
+    if io_binding is not None:
+        payload["io_binding"] = io_binding
     return payload
 
 

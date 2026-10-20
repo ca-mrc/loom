@@ -332,17 +332,24 @@ def _native_addon_diagnostics(core: object, required: tuple[str, ...]) -> str:
     try:
         pods = core.list_namespaced_pod('kube-system', limit=64, _request_timeout=(2, 3)).items
         result['pods'] = [{'name': pod.metadata.name, 'phase': pod.status.phase, 'reason': pod.status.reason,
+            'pod_ip': pod.status.pod_ip,
+            'conditions': [{'type': condition.type, 'status': condition.status}
+                for condition in pod.status.conditions or []],
             'containers': [{'name': status.name, 'ready': status.ready,
+                'container_id': status.container_id,
                 'waiting': status.state.waiting.reason if status.state and status.state.waiting else None}
                 for status in (pod.status.init_container_statuses or []) + (pod.status.container_statuses or [])]}
             for pod in pods if any(pod.metadata.name.startswith(name + '-') for name in names)]
     except Exception as error:
         result['pods'] = type(error).__name__
     try:
-        events = core.list_namespaced_event('kube-system', limit=64,
-            field_selector='type=Warning', _request_timeout=(2, 3)).items
-        result['events'] = [{'object': event.involved_object.name, 'reason': event.reason,
-            'message': (event.message or '')[:1024], 'count': event.count}
+        # Normal Pulling/Pulled/Created/Started events distinguish image and
+        # container startup from sandbox failures; warnings alone cannot.
+        events = core.list_namespaced_event('kube-system', limit=64, _request_timeout=(2, 3)).items
+        result['events'] = [{'object': event.involved_object.name, 'type': event.type, 'reason': event.reason,
+            'message': (event.message or '')[:1024], 'count': event.count,
+            'first_timestamp': event.first_timestamp.isoformat() if event.first_timestamp else None,
+            'last_timestamp': event.last_timestamp.isoformat() if event.last_timestamp else None}
             for event in events if any(event.involved_object.name == name
                 or (event.involved_object.name or '').startswith(name + '-') for name in names)]
     except Exception as error:
@@ -1076,6 +1083,29 @@ async def test_attempt_network_policy_allows_only_dns_and_gateway(built_images: 
             await asyncio.to_thread(container.stop)
 
 
+async def _runtime_pod_logs(core, namespace, pod_name, runtime_plan):
+    """Capture bounded fixture diagnostics before the disposable cluster exits."""
+    logs: dict[str, str] = {}
+    for container_name in (
+        "runtime-materializer",
+        *(item.role_name for item in runtime_plan.sidecars),
+        "execution",
+    ):
+        try:
+            logs[container_name] = await asyncio.to_thread(
+                core.read_namespaced_pod_log,
+                pod_name,
+                namespace,
+                container=container_name,
+                tail_lines=200,
+                limit_bytes=65536,
+                _request_timeout=5,
+            )
+        except Exception as exc:
+            logs[container_name] = f"unavailable: {exc}"
+    return logs
+
+
 @pytest.mark.timeout(360)
 @pytest.mark.parametrize("prepared_fixture,termination", [(False, None), (True, "deadline"), (True, "fixture_exit")],
                          ids=["trusted-sidecar", "prepared-fixture-deadline", "prepared-fixture-exit"])
@@ -1218,20 +1248,10 @@ async def test_runtime_executes_task_native_sidecar_and_verifier_without_docker_
                     if failed_pods.items:
                         failed_pod = failed_pods.items[0]
                         details = client.ApiClient().sanitize_for_serialization(failed_pod.status)
-                        for container_name in (
-                            "runtime-materializer",
-                            *(item.role_name for item in ExecutionRuntimePlanV1.model_validate(lease.runtime_contract_json).sidecars),
-                            "execution",
-                        ):
-                            try:
-                                logs[container_name] = await asyncio.to_thread(
-                                    core.read_namespaced_pod_log,
-                                    failed_pod.metadata.name,
-                                    namespace,
-                                    container=container_name,
-                                )
-                            except Exception as exc:
-                                logs[container_name] = f"unavailable: {exc}"
+                        logs = await _runtime_pod_logs(
+                            core, namespace, failed_pod.metadata.name,
+                            ExecutionRuntimePlanV1.model_validate(lease.runtime_contract_json),
+                        )
                     raise AssertionError(
                         f"runtime Job failed: {observation} pod={details} logs={logs}"
                     )
@@ -1277,8 +1297,12 @@ async def test_runtime_executes_task_native_sidecar_and_verifier_without_docker_
                     if current_pods.items
                     else None
                 )
+                logs = (await _runtime_pod_logs(
+                    core, namespace, current_pods.items[0].metadata.name,
+                    ExecutionRuntimePlanV1.model_validate(lease.runtime_contract_json),
+                )) if current_pods.items else {}
                 raise AssertionError(
-                    f"runtime Job did not succeed: observation={observation} pod={details}"
+                    f"runtime Job did not succeed: observation={observation} pod={details} logs={logs}"
                 )
 
             pods = await asyncio.to_thread(

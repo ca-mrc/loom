@@ -143,6 +143,51 @@ class PoolManagerRefresh:
         return refresh_manager_revision_options(self.request, state=self.state_dir,
             anchor=self.state_dir.parent / 'anchor')
 
+    def database_documents(self, *, original: dict[str, Any], current: dict[str, Any],
+            service: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Compare only a proven primary DB's ordinary rollout markers differently."""
+        successor = self.successor
+        if (successor is None or original.get('kind') != 'StatefulSet'
+                or original['metadata']['name'] != 'loom-postgres'
+                or original['metadata']['namespace'] != successor.config['namespace']):
+            return current, original
+        # The connected caller has already qualified this refresh's pool context.
+        # Keep the database rooted in that same immutable participant binding.
+        pool = (self.predecessor if isinstance(self.predecessor, CompletedPoolCutover)
+            else self.predecessor.pool_baseline)
+        if pool is None:
+            raise ValueError('pool_refresh_database_projection_unqualified')
+        target, = (row for row in pool.context.request.fencing.retirement.migration.guards
+            if row.namespace == successor.config['namespace'])
+        if (target.database is None or target.database.statefulset != original
+                or target.database.service != service):
+            raise ValueError('pool_refresh_database_projection_unqualified')
+        selected = successor.resources[_key(original)]
+        selected_service = successor.resources[_key(service)]
+        if (selected.get('kind') != 'StatefulSet' or _key(selected) != _key(original)
+                or service.get('kind') != 'Service' or service['metadata']['name'] != 'loom-postgres'
+                or service['metadata']['namespace'] != successor.config['namespace']
+                or selected_service.get('kind') != 'Service' or _key(selected_service) != _key(service)):
+            raise ValueError('pool_refresh_database_projection_unqualified')
+        revision = selected['spec']['template']['metadata']['annotations']['loom.nebius/configuration-revision']
+        if not isinstance(revision, str) or not revision:
+            raise ValueError('pool_refresh_database_projection_unqualified')
+        expected = copy.deepcopy(original)
+        expected['spec']['template']['metadata'].setdefault('annotations', {})[
+            'loom.nebius/configuration-revision'] = revision
+        from scripts.ops.nebius_staging_pool_attachment import _qualified_workload
+
+        # The source selects this identifier, not different DB settings or routing.
+        _qualified_workload(selected, expected)
+        _qualified_workload(selected_service, service)
+        observed = copy.deepcopy(current)
+        for document in (observed, expected):
+            annotations = document['metadata'].get('annotations', {})
+            annotations.pop('kubectl.kubernetes.io/last-applied-configuration', None)
+            if not annotations:
+                document['metadata'].pop('annotations', None)
+        return observed, expected
+
     def workload_options(self) -> dict[str, tuple[dict[str, Any], ...]]:
         """Permit only exact manager journal states; preserve all other workloads."""
         try:

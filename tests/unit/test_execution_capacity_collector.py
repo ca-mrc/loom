@@ -860,7 +860,8 @@ def test_collector_manifest_is_active_configured_and_strictly_read_only() -> Non
             "apiGroups": [""],
             "resources": ["nodes", "pods"],
             "verbs": ["get", "list"],
-        }
+        },
+        {"apiGroups": [""], "resources": ["nodes/stats"], "verbs": ["get"]},
     ]
     config = next(row for row in documents if row["kind"] == "ConfigMap")
     assert config["metadata"]["namespace"] == "loom-nebius-development"
@@ -1030,6 +1031,225 @@ async def _capture_nodes(
         target_id="nebius-eu-north1-staging",
         node_label_selector="target=staging",
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("damage", [None, "absent", "denied", "stale", "future", "naive", "nan", "range", "identity"])
+async def test_capture_projects_uid_bound_fresh_node_io_pressure(monkeypatch, damage) -> None:
+    from datetime import timedelta
+
+    stamp = datetime.now(UTC) - timedelta(seconds=5)
+    if damage == "stale":
+        stamp -= timedelta(seconds=61)
+    elif damage == "future":
+        stamp += timedelta(seconds=60)
+    elif damage == "naive":
+        stamp = stamp.replace(tzinfo=None)
+
+    def summary(core, *, node_name, expected_node_uid, timeout_seconds):
+        assert expected_node_uid == "node-1-uid" and node_name == "node-1"
+        assert 0 < timeout_seconds <= 10
+        if damage == "denied":
+            raise PermissionError("unavailable")
+        return {"node": {
+            "nodeName": "other-node" if damage == "identity" else node_name,
+            "io": {} if damage == "absent" else {
+                "time": stamp.isoformat(),
+                "psi": {"full": {"avg10": float("nan") if damage == "nan" else
+                                           101.0 if damage == "range" else 44.5}},
+            },
+        }, "pods": [{"private": "must not persist"}]}
+
+    monkeypatch.setattr("loom_execution_capacity_collector.kubernetes.read_kubelet_summary",
+                        summary, raising=False)
+    snapshot = await _capture_nodes([_node("node-1")], [])
+    node = snapshot.nodes[0]
+    assert node.name == "node-1"
+    if damage is None:
+        assert node.io_pressure is not None
+        assert node.io_pressure.sampled_at == stamp
+        assert node.io_pressure.full_avg10 == 44.5
+    else:
+        assert node.io_pressure is None
+        assert "io_pressure" not in node.model_dump(mode="json")
+    assert snapshot.allocatable.cpu_millis == 3500
+    assert "private" not in json.dumps(snapshot.model_dump(mode="json"))
+
+
+def test_node_io_pressure_contract_rejects_unqualified_values_and_preserves_history() -> None:
+    from pydantic import ValidationError
+
+    from loom_execution_capacity_collector.contracts import NodeIOPressure, NodePlacement
+
+    for damage in [float("nan"), float("inf"), -1.0, 100.01]:
+        with pytest.raises(ValidationError):
+            NodeIOPressure(sampled_at=datetime.now(UTC), full_avg10=damage)
+    with pytest.raises(ValidationError):
+        NodeIOPressure(sampled_at=datetime(2026, 10, 20), full_avg10=0.0)
+    pressure = NodeIOPressure(sampled_at=datetime.now(UTC), full_avg10=44.5)
+    # CP reads placement from JSONB in Python mode, not model_validate_json.
+    assert NodeIOPressure.model_validate(json.loads(pressure.model_dump_json())) == pressure
+    historical = {"uid": "old-node", "provider_id": "nebius://old", "ready": True,
+                  "unschedulable": False, "deleting": False, "draining": None,
+                  "allocatable": {"cpu_millis": 1000, "memory_mib": 1000, "storage_mib": 1000},
+                  "requested": {"cpu_millis": 0, "memory_mib": 0, "storage_mib": 0},
+                  "pod_slots": 10, "used_pod_slots": 0, "managed_pods": []}
+    assert NodePlacement.model_validate(historical).model_dump(mode="json") == historical
+    stored = {**historical, "name": "node-1", "io_pressure": pressure.model_dump(mode="json")}
+    assert NodePlacement.model_validate(json.loads(json.dumps(stored))).model_dump(mode="json") == stored
+
+
+@pytest.mark.asyncio
+async def test_capture_node_replacement_is_unknown_before_kubelet_transport(monkeypatch) -> None:
+    captured, current = _node("node-1"), _node("node-1")
+    captured.metadata.uid = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa"
+    current.metadata.uid = "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb"
+    reads = []
+
+    def read_node(**kwargs):
+        reads.append(kwargs["name"])
+        return current
+
+    core = SimpleNamespace(
+        list_node=lambda **_: SimpleNamespace(items=[captured],
+                                              metadata=SimpleNamespace(resource_version="n1")),
+        list_pod_for_all_namespaces=lambda **kwargs: _pod_list([], resource_version="p1", **kwargs),
+        read_node=read_node,
+    )
+    monkeypatch.setattr(httpx, "Client", lambda **_: pytest.fail("replacement reached kubelet"))
+    snapshot = await InClusterKubernetesCapacityReader(core_api=core, apps_api=_apps()).capture(
+        namespace="loom-nebius-staging", target_id="nebius-eu-north1-staging",
+        node_label_selector="target=staging",
+    )
+    assert reads == ["node-1"]
+    assert snapshot.nodes[0].uid == captured.metadata.uid
+    assert snapshot.nodes[0].io_pressure is None
+
+
+@pytest.mark.asyncio
+async def test_optional_io_capture_has_one_budget_and_does_not_lose_cpu_quota_publication(
+    monkeypatch, tmp_path,
+):
+    from threading import Lock
+
+    import loom_execution_capacity_collector.kubernetes as module
+
+    clock, calls, lock = [0.0], [], Lock()
+
+    def slow_summary(_core, *, node_name, expected_node_uid, timeout_seconds=None):
+        with lock:
+            calls.append(node_name)
+            # Simulate a request consuming its whole allowance, without sleeping.
+            # Unbounded legacy per-node calls each cost another ten seconds.
+            clock[0] = clock[0] + 10 if timeout_seconds is None else 10.0
+        raise TimeoutError("optional node observation unavailable")
+
+    monkeypatch.setattr(module, "monotonic", lambda: clock[0], raising=False)
+    monkeypatch.setattr(module, "read_kubelet_summary", slow_summary)
+    nodes = [_node(f"node-{index}") for index in range(12)]
+    core = SimpleNamespace(
+        list_node=lambda **_: SimpleNamespace(items=nodes,
+                                              metadata=SimpleNamespace(resource_version="n1")),
+        list_pod_for_all_namespaces=lambda **kwargs: _pod_list([], resource_version="p1", **kwargs),
+    )
+    reader = InClusterKubernetesCapacityReader(core_api=core, apps_api=_apps())
+    control_plane = _ControlPlane()
+    try:
+        await collect_capacity_observation(_settings(tmp_path), control_plane=control_plane,
+                                           provider=_Provider(), kubernetes=reader)
+        assert len(calls) <= 4 and clock[0] <= 10
+        observation = control_plane.observations[0]
+        assert observation.allocatable_cpu_millis == 12 * 3500
+        assert observation.provider_quota_vcpu_millis == 80_000
+    finally:
+        await reader.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pool_path", [False, True])
+async def test_io_probe_budget_keeps_threads_bounded_and_close_retains_client_ownership(
+    monkeypatch, pool_path,
+):
+    import asyncio
+    from threading import Event, Lock
+
+    import loom_execution_capacity_collector.kubernetes as module
+    from loom_execution_capacity_collector.pool import PoolObservationScope
+
+    started, release, lock = Event(), Event(), Lock()
+    calls, finished, closed = [], [], []
+
+    def blocked_summary(_core, *, node_name, expected_node_uid, timeout_seconds):
+        assert 0 < timeout_seconds <= 10
+        with lock:
+            assert closed == []
+            calls.append(node_name)
+            if len(calls) == 4:
+                started.set()
+        try:
+            assert release.wait(2), "test did not release its controlled probe"
+            assert closed == []
+            return {"node": {"nodeName": node_name, "io": {
+                "time": datetime.now(UTC).isoformat(), "psi": {"full": {"avg10": 1.0}},
+            }}}
+        finally:
+            with lock:
+                finished.append(node_name)
+
+    def expire_probe_budget(futures, *, timeout, return_when):
+        assert 0 < timeout <= 10 and return_when == module.FIRST_COMPLETED
+        assert started.wait(1), "probe workers failed to start"
+        return set(), set(futures)
+
+    monkeypatch.setattr(module, "read_kubelet_summary", blocked_summary)
+    monkeypatch.setattr(module, "wait", expire_probe_budget)
+    nodes = [_node(f"node-{index}") for index in range(12)]
+    core = SimpleNamespace(
+        list_node=lambda **_: SimpleNamespace(items=nodes,
+                                              metadata=SimpleNamespace(resource_version="n1")),
+        list_pod_for_all_namespaces=lambda **kwargs: _pod_list([], resource_version="p1", **kwargs),
+    )
+    reader = InClusterKubernetesCapacityReader(core_api=core, apps_api=_apps())
+
+    def close_api():
+        assert len(finished) == 4
+        closed.append("api")
+
+    async def close_credentials():
+        assert closed == ["api"]
+        closed.append("credentials")
+
+    reader._api_client = SimpleNamespace(close=close_api)
+    reader._credentials = SimpleNamespace(close=close_credentials)
+
+    async def capture():
+        if pool_path:
+            return await reader.capture_pool(scope=PoolObservationScope.model_validate({
+                "node_selector": {"kubernetes.io/os": "linux"}, "environments": [], "jobs": [],
+            }))
+        return await reader.capture(namespace="execution", target_id="target", node_label_selector="")
+
+    closing = None
+    try:
+        for _ in range(3):
+            snapshot = await asyncio.wait_for(capture(), timeout=2)
+            assert snapshot.allocatable.cpu_millis == 12 * 3500
+            assert all(node.io_pressure is None for node in snapshot.nodes)
+        assert len(calls) == 4  # Repeated captures never queue another slow batch.
+        executor = reader._io_executor
+        closing = asyncio.create_task(reader.close())
+        await asyncio.sleep(0)
+        assert not closing.done() and closed == []
+        release.set()
+        await asyncio.wait_for(closing, timeout=2)
+        assert closed == ["api", "credentials"]
+        assert executor is not None and all(not thread.is_alive() for thread in executor._threads)
+    finally:
+        release.set()
+        if closing is not None:
+            await closing
+        else:
+            await reader.close()
 
 
 @pytest.mark.asyncio

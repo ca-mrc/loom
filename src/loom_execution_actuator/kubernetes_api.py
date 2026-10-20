@@ -1,20 +1,16 @@
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import json
 import re
-import ssl
 from datetime import UTC, datetime
 from typing import Any
-from uuid import UUID
-
-import httpx
 
 from loom.nebius_kubernetes import (
     NebiusKubernetesConnection,
     NebiusKubernetesCredentials,
     create_api_client,
+    read_kubelet_summary,
     read_sdk_before_close,
 )
 from loom.nebius_pool_contract import PoolNamespaceBindingV1
@@ -411,49 +407,13 @@ class InClusterKubernetesJobApi:
             self._core = client.CoreV1Api()
 
     async def resource_summary(self, *, node_name: str, expected_node_uid: str | None = None) -> dict[str, Any]:
-        """Read verified kubelet statistics with nodes/stats, never nodes/proxy.
-
-        The API's Node binds the fixed private endpoint; the same cluster trust
-        anchor verifies its serving certificate. No redirects, ambient proxy,
-        administrator certificate or broad node-proxy fallback is permitted.
-        """
+        """Read verified kubelet statistics with nodes/stats, never nodes/proxy."""
 
         def read() -> dict[str, Any]:
             try:
-                if (not isinstance(node_name, str) or len(node_name) > 253
-                        or not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", node_name)):
-                    raise ValueError("unqualified kubelet node")
-                if expected_node_uid is not None and (not isinstance(expected_node_uid, str)
-                        or str(UUID(expected_node_uid)) != expected_node_uid or not UUID(expected_node_uid).int):
-                    raise ValueError("unqualified expected kubelet node identity")
-                node = self._core.read_node(name=node_name, _request_timeout=10)
-                if (node.metadata.name != node_name or not node.metadata.uid
-                        or node.metadata.deletion_timestamp is not None
-                        or (expected_node_uid is not None and node.metadata.uid != expected_node_uid)):
-                    raise ValueError("unqualified kubelet node identity")
-                address, = (row.address for row in node.status.addresses if row.type == "InternalIP")
-                endpoint = ipaddress.ip_address(address)
-                if (not endpoint.is_private or endpoint.is_loopback or endpoint.is_link_local
-                        or endpoint.is_unspecified or endpoint.is_multicast):
-                    raise ValueError("unqualified kubelet address")
-                configuration = self._core.api_client.configuration
-                authorization = configuration.auth_settings().get("BearerToken", {}).get("value")
-                if (configuration.verify_ssl is not True or not configuration.ssl_ca_cert
-                        or not isinstance(authorization, str) or authorization[:7].lower() != "bearer "
-                        or not authorization[7:] or any(character.isspace() for character in authorization[7:])):
-                    raise ValueError("unqualified kubelet TLS or bearer authority")
-                trust = ssl.create_default_context(cafile=configuration.ssl_ca_cert)
-                host = "[" + str(endpoint) + "]" if endpoint.version == 6 else str(endpoint)
-                with httpx.Client(verify=trust, timeout=10, trust_env=False, follow_redirects=False) as http:
-                    response = http.get("https://" + host + ":10250/stats/summary",
-                        headers={"Authorization": authorization})
-                    response.raise_for_status()
-                    if len(response.content) > 16 * 1024**2:
-                        raise ValueError("kubelet summary exceeds its bound")
-                    result = response.json()
-                if not isinstance(result, dict) or result.get("node", {}).get("nodeName") != node_name:
-                    raise ValueError("kubelet summary node identity differs")
-                return result
+                return read_kubelet_summary(
+                    self._core, node_name=node_name, expected_node_uid=expected_node_uid,
+                )
             except Exception as exc:
                 raise self._translate(exc, "resource_summary") from exc
 

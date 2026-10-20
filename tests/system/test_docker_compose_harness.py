@@ -16,36 +16,48 @@ from tests.system import docker_compose
 
 
 @pytest.mark.parametrize("requested_port", [None, "61234"])
-def test_compose_database_uses_docker_allocated_loopback_port(
-    monkeypatch: Any, requested_port: str | None
+@pytest.mark.parametrize("service,container_port,setting", [
+    ("postgres", "5432", "POSTGRES"), ("registry", "5000", "REGISTRY"),
+    ("minio", "9000", "MINIO"), ("llm-gateway", "9100", "GATEWAY"),
+    ("control-plane", "8080", "CONTROL_PLANE"),
+])
+def test_compose_services_use_docker_allocated_loopback_ports(
+    monkeypatch: Any, requested_port: str | None, service: str, container_port: str, setting: str,
 ) -> None:
     def run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        assert command[-3:] == ["port", "postgres", "5432"]
-        assert kwargs["env"]["LOOM_SYSTEM_POSTGRES_PORT"] == (requested_port or "0")
+        assert command[-3:] == ["port", service, container_port]
+        assert kwargs["env"][f"LOOM_SYSTEM_{setting}_PORT"] == (requested_port or "0")
         assert 0 < kwargs["timeout"] <= 5
         return subprocess.CompletedProcess(command, 0, stdout="127.0.0.1:61234\n", stderr="")
 
-    monkeypatch.delenv("LOOM_SYSTEM_POSTGRES_PORT", raising=False)
+    monkeypatch.delenv(f"LOOM_SYSTEM_{setting}_PORT", raising=False)
     if requested_port is not None:
-        monkeypatch.setenv("LOOM_SYSTEM_POSTGRES_PORT", requested_port)
+        monkeypatch.setenv(f"LOOM_SYSTEM_{setting}_PORT", requested_port)
     monkeypatch.setattr(docker_compose.subprocess, "run", run)
-    assert docker_compose.database_url() == "postgresql+psycopg://loom:loom@127.0.0.1:61234/loom"
+    if service == "postgres":
+        assert docker_compose.database_url() == "postgresql+psycopg://loom:loom@127.0.0.1:61234/loom"
+    else:
+        assert docker_compose._published_port(service, container_port) == 61234
 
 
 @pytest.mark.parametrize(
     "binding",
     ["", "0.0.0.0:61234", "127.0.0.1:0", "127.0.0.1:65536", "127.0.0.1:61234\n127.0.0.1:61235"],
 )
-def test_compose_database_rejects_missing_or_ambiguous_binding(
-    monkeypatch: Any, binding: str
+@pytest.mark.parametrize("service,port", [("postgres", "5432"), ("registry", "5000")])
+def test_compose_rejects_missing_or_ambiguous_binding(
+    monkeypatch: Any, binding: str, service: str, port: str,
 ) -> None:
     monkeypatch.setattr(
         docker_compose,
         "_compose",
         lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout=binding, stderr=""),
     )
-    with pytest.raises(RuntimeError, match="database port"):
-        docker_compose.database_url()
+    with pytest.raises(RuntimeError, match="database port" if service == "postgres" else "registry port"):
+        if service == "postgres":
+            docker_compose.database_url()
+        else:
+            docker_compose._published_port(service, port)
 
 
 def test_additional_fixture_seed_uses_running_stack_database(monkeypatch: Any) -> None:
@@ -114,14 +126,14 @@ def test_compose_mounts_runtime_fixtures_and_uses_fast_test_cancellation() -> No
         ),
     )
     assert hello_task["environment"]["cpu_arch"] == "any"
-    assert services["registry"]["ports"] == ["55000:5000"]
+    assert services["registry"]["ports"] == ["127.0.0.1:${LOOM_SYSTEM_REGISTRY_PORT:-55000}:5000"]
     assert builder["command"] == ["python", "-m", "loom_worker.task_image_builder"]
     assert builder["environment"]["LOOM_WORKER_TOKEN"] == (
         "${LOOM_TASK_IMAGE_BUILDER_TOKEN:?LOOM_TASK_IMAGE_BUILDER_TOKEN "
         "must be set before builder compose-up}"
     )
     assert builder["environment"]["LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO"] == (
-        "localhost:55000/loom-task-images"
+        "${LOOM_SYSTEM_REGISTRY_REPO:-localhost:55000/loom-task-images}"
     )
     assert builder["environment"]["LOOM_WORKER_TASK_IMAGE_BUILDER_IDLE_EXIT_SECONDS"] == "120"
     assert (
@@ -149,9 +161,15 @@ def test_stack_up_migrates_blank_database_before_starting_services(
 ) -> None:
     events: list[tuple[Any, ...]] = []
     compose_envs: list[tuple[tuple[str, ...], dict[str, str] | None]] = []
+    resolved_ports: list[str] = []
     allocated_database = "postgresql+psycopg://loom:loom@127.0.0.1:61234/loom"
 
     def fake_compose(*args: str, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if args[0] == "port":
+            resolved_ports.append(args[1])
+            port = {"registry": 61235, "control-plane": 61236,
+                    "llm-gateway": 61237, "minio": 61238}[args[1]]
+            return subprocess.CompletedProcess(args, 0, stdout=f"127.0.0.1:{port}\n", stderr="")
         events.append(("compose", *args))
         compose_envs.append((args, kwargs.get("env_extra")))
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
@@ -179,8 +197,12 @@ def test_stack_up_migrates_blank_database_before_starting_services(
         events.append(("materialization-ready", task_id, timeout_sec))
 
     def fake_canary(team_token: str, *, timeout_sec: float) -> None:
+        assert docker_compose.CONTROL_PLANE_URL == "http://127.0.0.1:61236"
+        assert resolved_ports == ["registry", "control-plane", "llm-gateway", "minio"]
         events.append(("claim-canary", team_token, timeout_sec))
 
+    for setting in ("CONTROL_PLANE_URL", "GATEWAY_URL", "MINIO_URL"):
+        monkeypatch.setattr(docker_compose, setting, getattr(docker_compose, setting))
     monkeypatch.setattr(docker_compose, "prepare_test_image", lambda image: "local-minio-source")
     monkeypatch.setattr(docker_compose, "database_url", lambda: allocated_database)
     monkeypatch.setattr(docker_compose, "_compose", fake_compose)
@@ -195,6 +217,10 @@ def test_stack_up_migrates_blank_database_before_starting_services(
     monkeypatch.setattr(docker_compose.subprocess, "run", fake_run)
 
     assert docker_compose.stack_up(timeout_sec=17) == ("team-token", "worker-token")
+    assert docker_compose.service_urls() == {
+        "control_plane": "http://127.0.0.1:61236", "gateway": "http://127.0.0.1:61237",
+        "minio": "http://127.0.0.1:61238",
+    }
 
     assert events[0] == ("compose", "up", "-d", "postgres", "minio", "registry")
     assert events[1] == ("wait", ("postgres", "minio", "registry"), 17)
@@ -248,11 +274,37 @@ def test_stack_up_migrates_blank_database_before_starting_services(
     assert builder_env == {
         "LOOM_TASK_IMAGE_BUILDER_TOKEN": "builder-token",
         "LOOM_SYSTEM_MINIO_IMAGE": "local-minio-source",
+        "LOOM_SYSTEM_REGISTRY_REPO": "localhost:61235/loom-task-images",
     }
     assert worker_env == {
         "LOOM_WORKER_TOKEN": "worker-token",
         "LOOM_SYSTEM_MINIO_IMAGE": "local-minio-source",
     }
+
+
+def test_stack_up_rejects_ambiguous_registry_before_seeding_or_starting_builder(monkeypatch: Any):
+    events = []
+
+    def compose(*args, **kwargs):
+        events.append(args)
+        return subprocess.CompletedProcess(args, 0,
+            stdout="127.0.0.1:61234\n127.0.0.1:61235\n" if args[0] == "port" else "", stderr="")
+
+    def migrate(command, **kwargs):
+        assert command[1:3] == ["-m", "alembic"]
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    cleanup = []
+    monkeypatch.setattr(docker_compose, "prepare_test_image", lambda _: "local-minio-source")
+    monkeypatch.setattr(docker_compose, "database_url", lambda: "postgresql://fixture")
+    monkeypatch.setattr(docker_compose, "_compose", compose)
+    monkeypatch.setattr(docker_compose, "_wait_services_healthy", lambda *args, **kwargs: None)
+    monkeypatch.setattr(docker_compose.subprocess, "run", migrate)
+    monkeypatch.setattr(docker_compose, "stack_down_with_diagnostics", lambda *, failed: cleanup.append(failed))
+    with pytest.raises(RuntimeError, match="registry port"):
+        docker_compose.stack_up()
+    assert cleanup == [True]
+    assert all("task-image-builder" not in args for args in events)
 
 
 def test_wait_services_healthy_bounds_compose_inspection(monkeypatch: Any) -> None:
@@ -322,8 +374,10 @@ def test_wait_materialization_fails_fast_when_builder_container_exits(
 
 def test_stack_up_cleans_partial_compose_state_on_setup_failure(
     monkeypatch: Any,
+    tmp_path: Path,
 ) -> None:
     compose_calls: list[tuple[str, ...]] = []
+    diagnostics = tmp_path / "setup-failure.log"
 
     def fake_compose(*args: str, **kwargs: Any) -> subprocess.CompletedProcess[str]:
         compose_calls.append(args)
@@ -332,9 +386,17 @@ def test_stack_up_cleans_partial_compose_state_on_setup_failure(
     def fail_wait(services: list[str], timeout_sec: float) -> None:
         raise RuntimeError(f"failed waiting for {services} after {timeout_sec}")
 
+    def fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        assert command[:3] == ["docker", "ps", "-a"]
+        return subprocess.CompletedProcess(
+            command, 0, stdout="fixture-postgres-1\tfixture-image\tUp 1 second\n", stderr="",
+        )
+
+    monkeypatch.setenv(docker_compose.DIAGNOSTICS_ENV, str(diagnostics))
     monkeypatch.setattr(docker_compose, "prepare_test_image", lambda image: "local-minio-source")
     monkeypatch.setattr(docker_compose, "_compose", fake_compose)
     monkeypatch.setattr(docker_compose, "_wait_services_healthy", fail_wait)
+    monkeypatch.setattr(docker_compose.subprocess, "run", fake_run)
 
     with pytest.raises(RuntimeError, match="failed waiting"):
         docker_compose.stack_up(timeout_sec=17)
@@ -367,6 +429,7 @@ def test_stack_up_cleans_partial_compose_state_on_setup_failure(
             "--tail=300",
         ),
     ]
+    assert "fixture-postgres-1" in diagnostics.read_text(encoding="utf-8")
 
 
 def _worker_compose_result(state: str = "running") -> subprocess.CompletedProcess[str]:

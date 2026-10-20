@@ -93,6 +93,7 @@ def test_controller_binding_and_gateway_protocol_are_declared() -> None:
     ({"model": "forbidden"}, "Gateway protocol"),
     ({"required_driver_capabilities": frozenset()}, "driver operations"),
     ({"stages_solution": True}, "model-free"),
+    ({"version": "1.0.0"}, "integrity-pinned"),
 ])
 def test_invalid_specs_are_refused(kwargs: dict, message: str) -> None:
     with pytest.raises(ValueError, match=message):
@@ -246,3 +247,17 @@ def test_materializer_trace_format_comes_from_the_spec() -> None:
     assert _trace_format("oracle") == "oracle"
     assert _trace_format("litellm") == "completion-calls"
     assert _trace_format("unknown") == "completion-calls"
+
+
+def test_canonical_agent_version_records_the_pinned_install() -> None:
+    # A Codex Trial selects no version; its ATIF records what was installed (#2054).
+    from types import SimpleNamespace
+
+    from loom_control_plane.service_execution_materializer import canonical_agent_version
+
+    task = SimpleNamespace(agent=SimpleNamespace(version=None))
+    assert CODEX.version == hosted.CODEX_VERSION
+    assert canonical_agent_version(TrialConfig(agent_name="codex", agent_model=_MODEL), task) == hosted.CODEX_VERSION
+    assert canonical_agent_version(TrialConfig(agent_name="codex", agent_model=_MODEL, agent_version="9"), task) == "9"
+    assert TERMINUS_2.version is None
+    assert canonical_agent_version(TrialConfig(agent_name="terminus-2", agent_model=_MODEL), task) == "service-execution-v1"

@@ -93,6 +93,7 @@ def _candidate_rows(exclude_lease_id: UUID | None = None) -> Select[Any]:
             Trial.state == "queued", Trial.cancellation_requested_at.is_(None),
             Trial.attempt_count < TeamQuota.max_attempts_ceiling, Trial.family_key.is_(None),
             Batch.backend == "nebius",
+            Batch.state.in_(("submitted", "running")),
             ~exists(select(ServiceExecutionLease.id).where(
                 ServiceExecutionLease.trial_id == Trial.id,
                 ServiceExecutionLease.execution_role == "attempt",

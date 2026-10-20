@@ -944,6 +944,7 @@ def _task_image_builder_settings(config: dict[str, Any], *, service_image: str) 
         "active_deadline_seconds",
         "max_concurrent",
         "snapshotter",
+        "io_full_avg10_max",
         "compatible_revision_cache",
         "export_cache_mode",
         "cache_transfer",

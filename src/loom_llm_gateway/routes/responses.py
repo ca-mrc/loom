@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 from uuid import UUID
@@ -246,6 +247,7 @@ async def _dispatch_via_chat_translator(
         provider=row.provider_type,
         attempt=attempt,
         request_payload=payload,
+        gateway_route="chat_translation",
     )
     return _responses_result(
         synthetic_responses_http_response(body_or_stream),
@@ -456,6 +458,7 @@ async def responses(
             provider=row.provider_type,
             attempt=attempt,
             request_payload=payload,
+            gateway_route="native_responses",
         )
         return _responses_result(upstream_response, body_or_stream, request=request)
 
@@ -1011,7 +1014,11 @@ async def _record_responses_call(
     provider: str,
     attempt: int,
     request_payload: dict[str, Any],
+    gateway_route: Literal["native_responses", "chat_translation"],
 ) -> None:
+    # Both routes share the Responses dialect; the route says whether the
+    # upstream answered natively or through the Chat translation (#2054).
+    usage = replace(usage, provider_extras={**usage.provider_extras, "_loom_gateway_route": gateway_route})
     async with request.app.state.session_factory() as session:
         await record_call(
             session,

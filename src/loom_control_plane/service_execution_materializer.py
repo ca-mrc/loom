@@ -211,6 +211,16 @@ def _trace_format(agent_name: str | None) -> TraceFormat:
     return spec.trace_format if spec is not None else "completion-calls"
 
 
+def canonical_agent_version(trial_config: TrialConfig, task_config: TaskConfig) -> str:
+    """The agent version canonical exports record: the Trial's selection, else
+    the version a pinned installed harness ran, else the task's (#2054)."""
+    spec = hosted_harness(trial_config.agent_name)
+    return (
+        trial_config.agent_version or (spec.version if spec is not None else None)
+        or task_config.agent.version or "service-execution-v1"
+    )
+
+
 def _model_matches(source: str, trial_config: TrialConfig) -> bool:
     model = trial_config.agent_model
     return model is not None and source == model.to_gateway_model_string()
@@ -1307,7 +1317,7 @@ class ServiceExecutionMaterializer:
             events,
             task_id=trial_task_id,
             agent_name=trial_config.agent_name,
-            agent_version=trial_config.agent_version or task_config.agent.version or "service-execution-v1",
+            agent_version=canonical_agent_version(trial_config, task_config),
             codex_session=derivation_inputs.get(_CODEX_SESSION_PATH),
         )
         identity = TrajectoryObjectIdentity(

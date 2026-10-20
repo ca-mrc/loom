@@ -214,6 +214,9 @@ class HostedHarnessSpec:
     # How the harness gets into the task sandbox; None means it is already
     # there (task image or trusted controller).
     setup: HarnessSetup | None = None
+    # The one version an integrity-pinned setup installs, recorded as the
+    # Trial's agent version when the Trial does not select one (#2054).
+    version: str | None = None
     # Whether a task that declares this harness, with `env_mode: separate`,
     # projects a separate verifier when its requirements are derived without
     # a Trial. Frozen: stored requirement digests depend on it (#2296).
@@ -243,6 +246,8 @@ class HostedHarnessSpec:
             self.execution_kind != "workspace" or "exec_streaming" not in self.required_driver_capabilities
         ):
             raise ValueError(f"{self.name}: setup installs into a task sandbox through exec_streaming")
+        if self.version is not None and (self.setup is None or self.setup.archive is None):
+            raise ValueError(f"{self.name}: only an integrity-pinned archive setup fixes one version")
         object.__setattr__(self, "names", frozenset({self.name, *self.aliases}))
 
     @property
@@ -361,6 +366,7 @@ CODEX = HostedHarnessSpec(
         # guest's disk is ext4) and room for Codex's own session files.
         disk_mib=768,
     ),
+    version=CODEX_VERSION,
 )
 
 HOSTED_HARNESSES: Mapping[str, HostedHarnessSpec] = _index((DIRECT_COMPLETION, TERMINUS_2, ORACLE, CODEX))
