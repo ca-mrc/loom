@@ -59,9 +59,11 @@ def test_local_server_rejects_path_model(
         ])
 
 
+@pytest.mark.parametrize("models", [[], [""], ["  "]])
 def test_local_server_requires_model(
     tmp_xdg_home: Path, tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    models: list[str],
 ) -> None:
     from loom_benchmarks import registry
     monkeypatch.setitem(
@@ -74,6 +76,7 @@ def test_local_server_requires_model(
             "--agent", "oracle",
             "--backend", "fake",
             "--local-server", "http://localhost:8000/v1",
+            *[arg for model in models for arg in ("--model", model)],
             "--output-dir", str(tmp_path / "out"),
         ])
 

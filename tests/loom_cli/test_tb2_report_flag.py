@@ -1,10 +1,4 @@
-"""--tb2-report flag invokes to_tb2_report and writes JSON to disk.
-
-Plan 25 Task 12. The flag is wired in __main__.py's argparse + a
-_maybe_write_tb2_report hook in run_cmd._run_async. Tests adapted
-from the plan's hypothetical run_cmd.parse_args / main entry points
-to Plan 23's actual __main__.main argparse-subparser surface.
-"""
+"""--tb2-report publishes completed results through the public CLI entry point."""
 
 from __future__ import annotations
 
