@@ -426,9 +426,9 @@ async def test_scheduler_isolates_target_denials_and_preserves_capacity_wait(
                 ))
                 spare_trial_id, secondary = await _seed_ready_trial(session, now=now)
             await _observe(session, primary, now + timedelta(seconds=1),
-                           quota=0 if denial == "capacity-then-policy" else 2)
+                           quota=2, stock=denial != "capacity-then-policy")
             await _observe(session, secondary, now + timedelta(seconds=1),
-                           quota=0 if denial == "policy-then-capacity" else 2)
+                           quota=2, stock=denial != "policy-then-capacity")
             primary_policy = await session.scalar(select(ExecutionBudgetPolicy).where(
                 ExecutionBudgetPolicy.scope_kind == "target",
                 ExecutionBudgetPolicy.scope_key == primary.target_id,

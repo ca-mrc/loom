@@ -1317,6 +1317,9 @@ async def test_execution_reservation_rechecks_parent_after_candidate_lock(
             trial = await session.get(Trial, trial_id)
             assert trial is not None
             batch_id = trial.batch_id
+            trial.submit_priority = 200
+            following_id, _ = await _seed_ready_trial(session, now=now)
+            await _configure_scheduler_trial(session, trial_id=following_id, now=now)
 
         async def reserve() -> ServiceExecutionLease | None:
             async with sessions.begin() as session:
@@ -1335,7 +1338,8 @@ async def test_execution_reservation_rechecks_parent_after_candidate_lock(
                 state=parent_state, finished_at=now,
             ))
         parent_committed.set()
-        assert await asyncio.wait_for(reservation, timeout=10) is None
+        admitted = await asyncio.wait_for(reservation, timeout=10)
+        assert admitted is not None and admitted.trial_id == following_id
         async with sessions() as session:
             child = await session.get(Trial, trial_id)
             assert child is not None and child.state == "queued" and child.attempt_count == 0
