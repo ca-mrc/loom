@@ -14,6 +14,10 @@ from loom.db.schema import (
     ExecutionAdmissionReservation,
     ExecutionBudgetPolicy,
     ExecutionCostReservation,
+    ExecutionPriceSnapshot,
+    ExecutionProvisioningAuthorization,
+    ExecutionTargetPriceBinding,
+    ServiceExecutionCommand,
     ServiceExecutionLease,
     Task,
     TeamQuota,
@@ -22,18 +26,24 @@ from loom.db.schema import (
 from loom_control_plane import service_execution
 from loom_control_plane import service_execution_scheduler as scheduler
 from loom_control_plane.execution_admission import ExecutionAdmissionBlockedError
-from loom_control_plane.execution_finance import ExecutionFinanceBlockedError
+from loom_control_plane.execution_finance import (
+    ExecutionFinanceBlockedError,
+    create_execution_price_snapshot,
+    upsert_target_price_binding,
+)
 from loom_control_plane.service_execution import ServiceExecutionConflict
 from loom_control_plane.service_execution_scheduler import (
     ServiceExecutionConfigurationError,
     reserve_next_service_execution,
 )
+from tests.integration import test_service_execution_leases as fixtures
 from tests.integration.test_service_execution_leases import (
     _cleanup_service_execution_test_rows,  # noqa: F401
     _configure_scheduler_trial,
     _reserve,
     _seed_ready_trial,
 )
+from tests.integration.test_service_execution_regions import _observe
 from tests.support.execution_image_admission import IMAGE_ADMISSION_KEYRING
 from tests.unit.test_service_execution_materialization import _profile, _provenance, _task, _trial
 
@@ -389,4 +399,144 @@ async def test_scheduler_preserves_admission_and_finance_invariant_conflicts(
                     model.trial_id == trial_id,
                 )) == 0
     finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("denial", [
+    "target-budget", "region", "price-unavailable", "price-not-effective",
+    "capacity-then-policy", "policy-then-capacity", "all-target-budgets",
+])
+async def test_scheduler_isolates_target_denials_and_preserves_capacity_wait(
+    postgres_url: str, monkeypatch: pytest.MonkeyPatch, denial: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    scheduled_at = now + timedelta(seconds=2)
+    policy_id = uuid4()
+    original_target = fixtures._target
+    try:
+        async with sessions() as session:
+            trial_id, primary = await _seed_ready_trial(session, now=now)
+            await _configure_scheduler_trial(session, trial_id=trial_id, now=now)
+            with monkeypatch.context() as patch:
+                patch.setattr(fixtures, "_target", lambda suffix: original_target(suffix).model_copy(
+                    update={"region": "eu-west1", "health_role": "secondary",
+                            "failure_domain": "west-b", "cluster_scope_id": "regional-west"},
+                ))
+                spare_trial_id, secondary = await _seed_ready_trial(session, now=now)
+            await _observe(session, primary, now + timedelta(seconds=1),
+                           quota=0 if denial == "capacity-then-policy" else 2)
+            await _observe(session, secondary, now + timedelta(seconds=1),
+                           quota=0 if denial == "policy-then-capacity" else 2)
+            primary_policy = await session.scalar(select(ExecutionBudgetPolicy).where(
+                ExecutionBudgetPolicy.scope_kind == "target",
+                ExecutionBudgetPolicy.scope_key == primary.target_id,
+            ))
+            assert primary_policy is not None
+            if denial in {"target-budget", "policy-then-capacity", "all-target-budgets"}:
+                primary_policy.emergency_stop = True
+            if denial in {"capacity-then-policy", "all-target-budgets"}:
+                await session.execute(update(ExecutionBudgetPolicy).where(
+                    ExecutionBudgetPolicy.scope_kind == "target",
+                    ExecutionBudgetPolicy.scope_key == secondary.target_id,
+                ).values(emergency_stop=True))
+            if denial == "region":
+                session.add(ExecutionAdmissionPolicy(
+                    id=policy_id, scope_kind="region", scope_key=primary.region,
+                    max_concurrent=1, enabled=True, reason="regional fallback regression",
+                ))
+                await _reserve(session, trial_id=spare_trial_id, target=primary, now=scheduled_at)
+            if denial.startswith("price-"):
+                binding = await session.get(ExecutionTargetPriceBinding, primary.target_id)
+                assert binding is not None
+                if denial == "price-unavailable":
+                    binding.enabled = False
+                else:
+                    price = await session.get(ExecutionPriceSnapshot, binding.price_snapshot_id)
+                    assert price is not None
+                    future_price, _ = await create_execution_price_snapshot(
+                        session,
+                        provider=price.provider, region=price.region, sku=price.sku,
+                        source=price.source, source_version=f"{primary.target_id}-future",
+                        source_uri=price.source_uri,
+                        effective_at=scheduled_at + timedelta(hours=1), observed_at=now,
+                        base_microusd_per_hour=price.base_microusd_per_hour,
+                        vcpu_microusd_per_hour=price.vcpu_microusd_per_hour,
+                        memory_gib_microusd_per_hour=price.memory_gib_microusd_per_hour,
+                        ephemeral_storage_gib_microusd_per_hour=price.ephemeral_storage_gib_microusd_per_hour,
+                    )
+                    await upsert_target_price_binding(
+                        session, target_id=primary.target_id, price_snapshot_id=future_price.id,
+                        enabled=True, reason="future price regression", now=now,
+                    )
+            primary_reserved = (primary_policy.daily_reserved_microusd,
+                                primary_policy.monthly_reserved_microusd)
+            await session.commit()
+
+        async with sessions() as session:
+            lease = await reserve_next_service_execution(
+                session, environment="staging", pool_id="nebius-cpu",
+                image_admission_keyring=IMAGE_ADMISSION_KEYRING, now=scheduled_at,
+            )
+            await session.commit()
+
+        async with sessions() as session:
+            trial = await session.get(Trial, trial_id)
+            assert trial is not None
+            quota = await session.get(TeamQuota, trial.team_id)
+            assert quota is not None
+            waiting = denial in {"capacity-then-policy", "policy-then-capacity", "all-target-budgets"}
+            expected_count = 0 if waiting else 1
+            for model in (ServiceExecutionLease, ExecutionCostReservation, ExecutionAdmissionReservation):
+                assert await session.scalar(select(func.count()).select_from(model).where(
+                    model.trial_id == trial_id,
+                )) == expected_count
+            assert trial.attempt_count == quota.in_flight_count == expected_count
+            if waiting:
+                assert lease is None and trial.state == "queued"
+                assert trial.execution_route_generation == 0
+                assert trial.execution_route_pool_name is None
+                assert trial.claimed_at is None and trial.started_at is None
+                assert trial.next_attempt_at == scheduled_at + timedelta(seconds=15)
+                observation = trial.scheduling_observation
+                assert observation is not None
+                if denial == "all-target-budgets":
+                    assert observation["reason"] == "execution_budget_target_emergency_stop"
+                    assert "capacity_wait" not in observation
+                else:
+                    waiting_target = primary if denial == "capacity-then-policy" else secondary
+                    assert observation["reason"].startswith("execution_capacity_")
+                    assert observation["capacity_wait"]["target_id"] == waiting_target.target_id
+            else:
+                assert lease is not None and lease.target_id == secondary.target_id
+                assert trial.state == "claimed" and trial.execution_route_generation == 1
+                assert trial.execution_route_pool_name == "nebius-cpu"
+                cost = await session.scalar(select(ExecutionCostReservation).where(
+                    ExecutionCostReservation.trial_id == trial_id,
+                ))
+                admission = await session.scalar(select(ExecutionAdmissionReservation).where(
+                    ExecutionAdmissionReservation.trial_id == trial_id,
+                ))
+                assert cost is not None and cost.target_id == secondary.target_id
+                assert admission is not None and admission.region == secondary.region
+                for model in (ExecutionProvisioningAuthorization, ServiceExecutionCommand):
+                    assert await session.scalar(select(func.count()).select_from(model).where(
+                        model.lease_id == lease.id,
+                    )) == 1
+            primary_policy = await session.scalar(select(ExecutionBudgetPolicy).where(
+                ExecutionBudgetPolicy.scope_kind == "target",
+                ExecutionBudgetPolicy.scope_key == primary.target_id,
+            ))
+            assert primary_policy is not None
+            assert (primary_policy.daily_reserved_microusd,
+                    primary_policy.monthly_reserved_microusd) == primary_reserved
+            if denial == "region":
+                policy = await session.get(ExecutionAdmissionPolicy, policy_id)
+                assert policy is not None and policy.active_count == 1
+    finally:
+        async with sessions() as session, session.begin():
+            await session.execute(delete(ExecutionAdmissionPolicy).where(
+                ExecutionAdmissionPolicy.id == policy_id,
+            ))
         await engine.dispose()
