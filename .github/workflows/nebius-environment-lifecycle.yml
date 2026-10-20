@@ -1,0 +1,125 @@
+name: nebius-environment-lifecycle
+
+# Explicit installed operations only. Publication, provisioning authority and
+# production promotion are independently checked by the pinned private entry.
+on:
+  workflow_dispatch:
+    inputs:
+      authority:
+        description: Protected environment authority
+        type: choice
+        options: [development, staging, production]
+        required: true
+      target_id:
+        description: Exact alias in the protected lifecycle target allowlist
+        type: string
+        required: true
+      operation_id:
+        description: Original UUID of an operator-installed operation plan
+        type: string
+        required: true
+      action:
+        description: Validate or apply the installed plan, recover its original attempt, or observe status
+        type: choice
+        options: [prepare, apply, recover, status]
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  select:
+    if: >-
+      github.repository_id == '1281629473' &&
+      github.event_name == 'workflow_dispatch' &&
+      ((inputs.authority != 'production' && github.ref == 'refs/heads/dev') ||
+       (inputs.authority == 'production' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment:
+      name: ${{ inputs.authority == 'production' && 'production' || inputs.authority == 'staging' && 'staging' || 'nebius-integration' }}
+      deployment: false
+    outputs:
+      scope_key: ${{ steps.target.outputs.scope_key }}
+      source_sha: ${{ steps.target.outputs.source_sha }}
+      environment: ${{ steps.target.outputs.environment }}
+      ssh_key_secret: ${{ steps.target.outputs.ssh_key_secret }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+      - name: Resolve the exact protected participant and operation
+        id: target
+        env:
+          NEBIUS_ENVIRONMENT_LIFECYCLE_TARGETS_JSON: ${{ vars.NEBIUS_ENVIRONMENT_LIFECYCLE_TARGETS_JSON }}
+          TARGET_ID: ${{ inputs.target_id }}
+          AUTHORITY: ${{ inputs.authority }}
+          OPERATION_ID: ${{ inputs.operation_id }}
+        run: >-
+          python3 -m scripts.ops.nebius_environment_lifecycle_rollout select
+          --target-id "$TARGET_ID" --authority "$AUTHORITY" --operation-id "$OPERATION_ID"
+
+  run:
+    needs: select
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    environment:
+      name: ${{ needs.select.outputs.environment }}
+      deployment: false
+    concurrency:
+      group: nebius-environment-${{ needs.select.outputs.scope_key }}
+      queue: max
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify the installed tooling source entered dev
+        env:
+          SOURCE_SHA: ${{ needs.select.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          test "${#SOURCE_SHA}" -eq 40
+          git merge-base --is-ancestor "$SOURCE_SHA" refs/remotes/origin/dev
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ needs.select.outputs.source_sha }}
+          persist-credentials: false
+      - name: Invoke the fixed installed lifecycle command once
+        env:
+          NEBIUS_ENVIRONMENT_LIFECYCLE_TARGETS_JSON: ${{ vars.NEBIUS_ENVIRONMENT_LIFECYCLE_TARGETS_JSON }}
+          TARGET_ID: ${{ inputs.target_id }}
+          AUTHORITY: ${{ inputs.authority }}
+          OPERATION_ID: ${{ inputs.operation_id }}
+          ACTION: ${{ inputs.action }}
+          NEBIUS_LIFECYCLE_SCOPE_KEY: ${{ needs.select.outputs.scope_key }}
+          NEBIUS_LIFECYCLE_SOURCE_SHA: ${{ needs.select.outputs.source_sha }}
+          NEBIUS_LIFECYCLE_SSH_KEY_SECRET: ${{ needs.select.outputs.ssh_key_secret }}
+          DEPLOY_SSH_KEY: ${{ secrets[needs.select.outputs.ssh_key_secret] }}
+          DEPLOY_KNOWN_HOSTS: ${{ vars.NEBIUS_DEPLOY_SSH_KNOWN_HOSTS }}
+          LOOM_DEPLOY_SSH_TARGET: ${{ vars.NEBIUS_DEPLOY_SSH_TARGET }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          export LOOM_DEPLOY_SSH_KEY_FILE="$RUNNER_TEMP/environment-lifecycle-key"
+          export LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE="$RUNNER_TEMP/environment-lifecycle-hosts"
+          trap 'rm -f -- "$LOOM_DEPLOY_SSH_KEY_FILE" "$LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE"' EXIT
+          test -n "$DEPLOY_SSH_KEY"
+          test -n "$DEPLOY_KNOWN_HOSTS"
+          test -n "$LOOM_DEPLOY_SSH_TARGET"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$LOOM_DEPLOY_SSH_KEY_FILE"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE"
+          unset DEPLOY_SSH_KEY DEPLOY_KNOWN_HOSTS
+          python3 -m scripts.ops.nebius_environment_lifecycle_rollout run \
+            --target-id "$TARGET_ID" --authority "$AUTHORITY" --operation-id "$OPERATION_ID" \
+            --action "$ACTION" --evidence-dir "$RUNNER_TEMP/environment-lifecycle-evidence"
+      - name: Preserve the original intent and bounded result
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: environment-lifecycle-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/environment-lifecycle-evidence/*.json
+          if-no-files-found: ignore
+          retention-days: 30
