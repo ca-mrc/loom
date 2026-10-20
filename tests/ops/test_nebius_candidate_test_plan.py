@@ -450,6 +450,16 @@ print(json.dumps(out))
     assert "required=false\n" in output.read_text()
 
 
+def test_metadata_reader_can_read_merged_prs_without_write_authority():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/nebius-candidate.yml").read_text())
+    assert workflow["jobs"]["pool-ops-plan"]["permissions"] == {
+        "contents": "read",
+        "actions": "read",
+        "checks": "read",
+        "pull-requests": "read",
+    }
+
+
 def test_publication_shell_executes_only_missing_modules(actions, monkeypatch, tmp_path):
     path = "tests/ops/" + "_".join(("test_nebius_pool", "activation_transport")) + ".py"
     monkeypatch.setattr(planner, "source_changes", lambda *_: (path,))
