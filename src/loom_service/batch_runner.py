@@ -5,14 +5,15 @@ The runner is a single asyncio task spawned from the service lifespan.
 On each tick it:
 
 1. `SELECT FOR UPDATE SKIP LOCKED` rows from `batches` where
-   `state IN ('submitted', 'running')`. SKIP LOCKED makes concurrent
-   instances safe — each replica processes a disjoint slice.
+   `state IN ('submitted', 'running')`, plus cancelled batches with
+   undelivered child cancellations. SKIP LOCKED keeps concurrent
+   materialization transactions from processing the same rows.
 2. For each batch, resolves the `task_filter` into the live task
    list, subtracts task_ids already submitted under this batch,
    and POSTs the remainder to Control Plane. Each submission carries
    an `idempotency_key = "{batch_id}::{task_id}::{sample_idx}"` so
    re-running the loop (or a CP retry) never produces duplicate
-   trial rows.
+   trial rows. Cancelled batches retry cancellation without submitting work.
 3. Recomputes the batch's state from current trial counts and
    advances the row.
 
@@ -32,7 +33,7 @@ from typing import Any
 from uuid import UUID
 
 import httpx
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from loom.db.schema import (
@@ -68,12 +69,9 @@ class _SubmitResult:
 
 
 @dataclass(frozen=True)
-class _HardBudgetCancellation:
+class _BatchCancellation:
     batch_id: UUID
     trial_ids: tuple[UUID, ...]
-    diagnostic: dict[str, Any]
-    consumed: Decimal
-    budget: Decimal
 
 
 @dataclass(frozen=True)
@@ -721,10 +719,23 @@ async def _advance_batch_state(
         )
 
 
+async def _pending_batch_cancellation(
+    session: AsyncSession, batch: Batch,
+) -> _BatchCancellation:
+    trial_ids = tuple((await session.scalars(
+        select(Trial.id).where(
+            Trial.batch_id == batch.id,
+            Trial.state.in_(list(_IN_FLIGHT)),
+            Trial.cancellation_requested_at.is_(None),
+        ),
+    )).all())
+    return _BatchCancellation(batch_id=batch.id, trial_ids=trial_ids)
+
+
 async def _cancel_batch_for_hard_budget(
     session: AsyncSession,
     batch: Batch,
-) -> _HardBudgetCancellation | None:
+) -> _BatchCancellation | None:
     if batch.state == "cancelled":
         return None
     if str(getattr(batch, "budget_policy", "none") or "none") != "hard":
@@ -755,76 +766,47 @@ async def _cancel_batch_for_hard_budget(
         budget_usd=float(budget),
         estimated_cost_usd=float(consumed),
     )
-    trial_ids = tuple(
-        (
-            await session.execute(
-                select(Trial.id).where(
-                    Trial.batch_id == batch.id,
-                    Trial.state.in_(list(_IN_FLIGHT)),
-                ),
-            )
-        )
-        .scalars()
-        .all()
+    # The caller holds the parent lock. Persist the fence and its diagnostic
+    # before HTTP, just as for user cancellation; later ticks recover delivery.
+    diagnostics = [
+        item for item in (batch.budget_diagnostics or []) if isinstance(item, dict)
+    ]
+    await session.execute(
+        update(Batch)
+        .where(Batch.id == batch.id)
+        .values(
+            state="cancelled",
+            result_status="cancelled",
+            finished_at=datetime.now(UTC),
+            budget_diagnostics=[*diagnostics, diagnostic],
+        ),
     )
-    return _HardBudgetCancellation(
-        batch_id=batch.id,
-        trial_ids=trial_ids,
-        diagnostic=diagnostic,
-        consumed=consumed,
-        budget=budget,
+    logger.warning(
+        "batch %s cancelled after hard budget exceeded: cost=%s budget=%s",
+        batch.id,
+        consumed,
+        budget,
     )
+    return await _pending_batch_cancellation(session, batch)
 
 
-async def _request_hard_budget_cancellation(
+async def _request_batch_cancellation(
     http_client: httpx.AsyncClient,
-    cancellation: _HardBudgetCancellation,
+    cancellation: _BatchCancellation,
     *,
     authorization: str | None,
 ) -> None:
     headers = {"Authorization": authorization} if authorization else {}
     for trial_id in cancellation.trial_ids:
         try:
-            response = await http_client.post(
-                f"/trials/{trial_id}/cancel",
-                headers=headers,
-            )
-        except httpx.HTTPError as exc:
-            raise RuntimeError("hard-budget trial cancellation is unavailable") from exc
+            response = await http_client.post(f"/trials/{trial_id}/cancel", headers=headers)
+        except httpx.HTTPError:
+            logger.warning("batch %s trial %s cancellation unavailable; will retry",
+                           cancellation.batch_id, trial_id)
+            continue
         if response.status_code not in {200, 409}:
-            raise RuntimeError("hard-budget trial cancellation was rejected")
-
-
-async def _finalize_hard_budget_cancellation(
-    session: AsyncSession,
-    cancellation: _HardBudgetCancellation,
-) -> None:
-    batch = (
-        await session.execute(
-            select(Batch).where(Batch.id == cancellation.batch_id).with_for_update(),
-        )
-    ).scalar_one_or_none()
-    if batch is None or batch.state == "cancelled":
-        return
-    diagnostics = [
-        item for item in (batch.budget_diagnostics or []) if isinstance(item, dict)
-    ]
-    await session.execute(
-        update(Batch)
-        .where(Batch.id == cancellation.batch_id)
-        .values(
-            state="cancelled",
-            result_status="cancelled",
-            finished_at=datetime.now(UTC),
-            budget_diagnostics=[*diagnostics, cancellation.diagnostic],
-        ),
-    )
-    logger.warning(
-        "batch %s cancelled after hard budget exceeded: cost=%s budget=%s",
-        cancellation.batch_id,
-        cancellation.consumed,
-        cancellation.budget,
-    )
+            logger.warning("batch %s trial %s cancellation returned %s; will retry",
+                           cancellation.batch_id, trial_id, response.status_code)
 
 
 async def run_once(
@@ -835,7 +817,7 @@ async def run_once(
     submit_rate_per_sec: int,
     cp_authorization: str | None = None,
 ) -> None:
-    """Process all non-terminal batches once. Safe to call from a loop.
+    """Process active batches and recover pending cancellations once.
 
     The locking strategy splits each tick into three short transactions:
 
@@ -871,18 +853,31 @@ async def run_once(
     # Each work item is (batch_id, pending units). A PendingUnit carries the
     # effective provider route for that task/combination/sample.
     work: list[tuple[UUID, list[PendingUnit]]] = []
-    hard_budget_cancellations: list[_HardBudgetCancellation] = []
+    cancellations: list[_BatchCancellation] = []
     fanout_errors_by_batch: dict[UUID, list[dict[str, Any]]] = {}
     async with session_factory() as s:
         batches_to_process = (await s.execute(
             select(Batch)
-            .where(Batch.state.in_(["submitted", "running"]))
+            .where(or_(
+                Batch.state.in_(["submitted", "running"]),
+                and_(
+                    Batch.state == "cancelled",
+                    select(Trial.id).where(
+                        Trial.batch_id == Batch.id,
+                        Trial.state.in_(list(_IN_FLIGHT)),
+                        Trial.cancellation_requested_at.is_(None),
+                    ).exists(),
+                ),
+            ))
             .with_for_update(skip_locked=True),
         )).scalars().all()
         for b in batches_to_process:
+            if b.state == "cancelled":
+                cancellations.append(await _pending_batch_cancellation(s, b))
+                continue
             hard_budget_cancellation = await _cancel_batch_for_hard_budget(s, b)
             if hard_budget_cancellation is not None:
-                hard_budget_cancellations.append(hard_budget_cancellation)
+                cancellations.append(hard_budget_cancellation)
                 continue
             existing_fanout_errors = _fanout_errors(b)
             failed_fanout_keys = _fanout_error_keys(existing_fanout_errors)
@@ -1088,16 +1083,12 @@ async def run_once(
         await s.commit()
 
     # Phase 2: cancellation and fanout HTTP calls. No DB locks.
-    for cancellation in hard_budget_cancellations:
-        await _request_hard_budget_cancellation(
+    for cancellation in cancellations:
+        await _request_batch_cancellation(
             http_client,
             cancellation,
             authorization=cp_authorization,
         )
-        async with session_factory() as s:
-            await _finalize_hard_budget_cancellation(s, cancellation)
-            await s.commit()
-
     for batch_id, pending_units in work:
         for chunk_start in range(0, len(pending_units), batch_size):
             chunk = pending_units[chunk_start:chunk_start + batch_size]
@@ -1177,7 +1168,7 @@ async def run_once(
     async with session_factory() as s:
         for batch_id, _ in work:
             row = (await s.execute(
-                select(Batch).where(Batch.id == batch_id),
+                select(Batch).where(Batch.id == batch_id).with_for_update(),
             )).scalar_one_or_none()
             if row is None:
                 continue

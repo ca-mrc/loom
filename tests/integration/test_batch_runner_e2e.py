@@ -567,6 +567,7 @@ async def test_runner_hard_cancels_batch_when_live_usage_exceeds_budget(
         async_sessionmaker, httpx.AsyncClient, UUID, list[str], list[dict],
     ],
     postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session_factory, http_client, team_id, task_ids, captured = runner_setup
     batch_id = uuid4()
@@ -620,6 +621,29 @@ async def test_runner_hard_cancels_batch_when_live_usage_exceeds_budget(
         s.commit()
     sync_engine.dispose()
 
+    original_request = http_client.request
+    unavailable = True
+
+    async def inspect_budget_fence(*args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal unavailable
+        async with session_factory() as session:
+            batch = (await session.execute(
+                select(Batch).where(Batch.id == batch_id).with_for_update(nowait=True),
+            )).scalar_one()
+            assert batch.state == "cancelled"
+        if unavailable:
+            unavailable = False
+            raise httpx.ConnectError("CP temporarily unavailable")
+        return await original_request(*args, **kwargs)
+
+    monkeypatch.setattr(http_client, "request", inspect_budget_fence)
+    await run_once(
+        session_factory=session_factory,
+        http_client=http_client,
+        batch_size=10,
+        submit_rate_per_sec=100,
+    )
+    assert captured == []
     await run_once(
         session_factory=session_factory,
         http_client=http_client,
@@ -644,6 +668,7 @@ async def test_runner_hard_cancels_batch_when_live_usage_exceeds_budget(
     assert trial_row.state == "cancelled"
     assert trial_row.cancellation_requested_at is not None
     assert batch_row.budget_diagnostics
+    assert len(batch_row.budget_diagnostics) == 1
     diagnostic = batch_row.budget_diagnostics[-1]
     assert diagnostic["reason"] == "budget_hard_limit_exceeded"
     assert diagnostic["estimated_cost_usd"] == pytest.approx(0.02)

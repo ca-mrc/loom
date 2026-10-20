@@ -646,6 +646,16 @@ async def submit_trial(
                 inherit_from_trial_id=inherit_from,
                 provider_connection=conn_row,
             )
+        if batch_id is not None:
+            # Fence new publication against cancellation/terminal projection.
+            # Acquire this after child/image locks and skip it for replays:
+            # schedulers lock existing children before their parent. NO KEY
+            # UPDATE still excludes parent state writers but permits FK reads.
+            parent_state = await session.scalar(
+                select(Batch.state).where(Batch.id == batch_id).with_for_update(key_share=True),
+            )
+            if parent_state not in {"submitted", "running"}:
+                raise HTTPException(status_code=409, detail="batch no longer accepts trials")
         await session.commit()
 
     return {

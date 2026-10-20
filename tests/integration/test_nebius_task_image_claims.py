@@ -234,6 +234,46 @@ async def test_native_claim_recovers_expired_lease_and_fences_previous_builder(c
         await session.commit()
 
 
+@pytest.mark.parametrize("claim_kind", ["native", "default", "exact"])
+async def test_claim_waits_for_every_prior_native_reservation(claim_setup, claim_kind) -> None:
+    sessions, team_id = claim_setup
+    now = datetime.now(UTC)
+    async with sessions() as session, session.begin():
+        image_id, _ = await _seed(session, team_id, snapshot_values={
+            "lease_epoch": 2, "attempt_count": 2,
+        })
+        old = TaskImageMaterializationAttempt(
+            materialization_id=image_id, attempt_number=1, lease_epoch=1,
+            builder_id="old", claimed_at=now,
+            native_build={"capacity_reserved_at": now.isoformat(), "capacity_released_at": None},
+        )
+        session.add_all([old, TaskImageMaterializationAttempt(
+            materialization_id=image_id, attempt_number=2, lease_epoch=2,
+            builder_id="newer", claimed_at=now,
+            native_build={"capacity_reserved_at": now.isoformat(), "capacity_released_at": now.isoformat()},
+        )])
+        await session.flush()
+        old_id = old.id
+    options = {"nebius_pool_id": POOL} if claim_kind == "native" else (
+        {"materialization_id": image_id, "expected_lease_epoch": 2} if claim_kind == "exact" else {}
+    )
+    async with sessions() as session, session.begin():
+        assert await claim_task_image_materialization(
+            session, builder_id="successor", cpu_arch="x86_64", **options,
+        ) is None
+        row = await session.get(TaskImageMaterialization, image_id)
+        assert (row.state, row.lease_epoch, row.attempt_count) == ("queued", 2, 2)
+    async with sessions() as session, session.begin():
+        old = await session.get(TaskImageMaterializationAttempt, old_id)
+        old.native_build = {**old.native_build, "capacity_released_at": now.isoformat()}
+    async with sessions() as session, session.begin():
+        row = await claim_task_image_materialization(
+            session, builder_id="successor", cpu_arch="x86_64", **options,
+        )
+        assert row is not None and row.id == image_id
+        assert (row.state, row.lease_epoch, row.attempt_count) == ("claimed", 3, 3)
+
+
 async def test_native_expiry_limit_cleanup_keeps_unrelated_builds_untouched(claim_setup) -> None:
     sessions, team_id = claim_setup
     expired = {
