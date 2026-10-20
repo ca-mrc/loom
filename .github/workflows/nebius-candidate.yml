@@ -29,8 +29,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # A successful native CI job on this exact commit already owns its selected
-  # coverage. Reconstruct that selection and run only missing complete modules.
+  # Successful native CI on this candidate tree already owns its selected
+  # coverage. Verify its checkout and run only missing complete modules.
   # Missing/unreadable evidence retains tests; image qualification stays below.
   pool-ops-plan:
     name: Plan missing pool operator tests
@@ -46,6 +46,7 @@ jobs:
       contents: read
       actions: read
       checks: read
+      pull-requests: read
     outputs:
       required: ${{ steps.plan.outputs.required }}
       matrix: ${{ steps.plan.outputs.matrix }}
@@ -57,7 +58,7 @@ jobs:
           # An unavailable base leaves coverage missing and runs the tests.
           fetch-depth: 2
           persist-credentials: false
-      - name: Reuse exact-commit native CI coverage
+      - name: Reuse verified candidate-tree native CI coverage
         id: plan
         env:
           GH_TOKEN: ${{ github.token }}

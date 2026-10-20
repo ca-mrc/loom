@@ -222,7 +222,7 @@ def test_pool_operator_suite_gates_every_platform_candidate():
     assert 'os.environ["TEST_PATHS_JSON"]' in run
     assert "mapfile -t test_paths" in run and '"${test_paths[@]}"' in run
     assert jobs["pool-ops-plan"]["permissions"] == {
-        "contents": "read", "actions": "read", "checks": "read"}
+        "contents": "read", "actions": "read", "checks": "read", "pull-requests": "read"}
     assert "environment" not in jobs["pool-ops-plan"]
     assert jobs["publish"]["needs"] == ["pool-ops-plan", "pool-ops-tests"]
     assert "needs.pool-ops-plan.result == 'success'" in jobs["publish"]["if"]
