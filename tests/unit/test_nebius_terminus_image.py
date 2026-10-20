@@ -846,13 +846,95 @@ def test_alpine_rejects_apt_update_even_without_apt_packages(tmp_path):
 
 
 def test_leap_preparation_retains_authored_source_identity_and_uses_only_zypper():
+    from loom.nebius_terminus_image import _SUSE_TMUX_STARTUP_PROBE
     authored = 'FROM opensuse/leap:15.5\nRUN echo authored > /task-input\nUSER 1001:1001\n'
     derived = append_terminus_runtime_tools(authored)
     assert derived.startswith(authored)
-    assert derived.endswith('USER 1001:1001\n')
+    assert derived.endswith('USER 1001:1001\nRUN ' + _SUSE_TMUX_STARTUP_PROBE + '\n')
+    assert 'install -d -m 1777 -o 0 -g 0 /run/tmux' in derived
+    assert 'ENV TMUX_TMPDIR' not in derived
     assert 'zypper' in derived and 'apt-get' not in derived
     assert '--dry-run' in derived and '--no-refresh' in derived
     assert 'addrepo' not in derived and 'dist-upgrade' not in derived
+
+
+def test_leap_offline_preparation_also_probes_startup_as_the_task_user(tmp_path):
+    from loom.nebius_terminus_image import _SUSE_TMUX_STARTUP_PROBE
+    environment = bundle(tmp_path)
+    environment['user'] = '1001:1001'
+    environment['environment'] = {'HOME': '/home/task'}
+    (tmp_path / 'environment/Dockerfile').write_text('FROM opensuse/leap:15.5\nUSER 1001:1001\n')
+    (tmp_path / 'tests/test.sh').write_text('uvx --with pytest==8.4.1 pytest /tests/test_state.py\n')
+    assert prepare_nebius_terminus_image(tmp_path, environment)
+    derived = (tmp_path / environment['dockerfile']).read_text()
+    assert 'install -d -m 1777 -o 0 -g 0 /run/tmux' in derived
+    assert derived.endswith('USER 1001:1001\nWORKDIR /app\nRUN ' + _SUSE_TMUX_STARTUP_PROBE + '\n')
+
+
+@pytest.mark.parametrize('existing', ['missing', 'directory', 'file', 'symlink', 'dangling-symlink'])
+def test_leap_runtime_directory_setup_preserves_authored_paths(tmp_path, existing):
+    from loom.nebius_terminus_image import _SUSE_TMUX_RUNTIME_SETUP
+    runtime = tmp_path / 'runtime'
+    target = tmp_path / 'target'
+    target.mkdir(mode=0o750)
+    if existing == 'directory':
+        runtime.mkdir(mode=0o750)
+    elif existing == 'file':
+        runtime.write_text('authored')
+    elif 'symlink' in existing:
+        runtime.symlink_to(target if existing == 'symlink' else tmp_path / 'absent')
+    # The Linux qualification checks real root ownership; this local installer
+    # records that requested contract without requiring macOS root privileges.
+    called = tmp_path / 'install-called'
+    installer = tmp_path / 'install'
+    installer.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$LOOM_TEST_INSTALL_CALLED"\n')
+    installer.chmod(0o755)
+    env = {**os.environ, 'PATH': f"{tmp_path}:{os.environ['PATH']}",
+           'LOOM_TEST_INSTALL_CALLED': str(called)}
+    command = _SUSE_TMUX_RUNTIME_SETUP.replace('/run/tmux', str(runtime))
+    result = subprocess.run(['/bin/sh', '-c', command], capture_output=True, text=True, env=env)
+    assert result.returncode == 0, result.stderr
+    assert called.exists() is (existing == 'missing')
+    if existing == 'missing':
+        assert called.read_text().splitlines() == ['-d', '-m', '1777', '-o', '0', '-g', '0', str(runtime)]
+    elif existing == 'directory':
+        assert runtime.stat().st_mode & 0o7777 == 0o750
+    elif existing == 'file':
+        assert runtime.read_text() == 'authored'
+    else:
+        assert runtime.is_symlink()
+    assert target.stat().st_mode & 0o7777 == 0o750
+
+
+@pytest.mark.parametrize('startup_exit,cleanup_timeout,expected_exit', [(0, False, 0), (1, False, 1), (0, True, 124)])
+def test_leap_startup_probe_fails_closed_and_cleans_only_its_own_server(tmp_path, startup_exit, cleanup_timeout, expected_exit):
+    from loom.nebius_terminus_image import _SUSE_TMUX_STARTUP_PROBE
+    calls = tmp_path / 'calls'
+    tmux = tmp_path / 'tmux'
+    tmux.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$LOOM_TEST_TMUX_CALLS"\n'
+                    'case "$*" in *new-session*) exit "$LOOM_TEST_STARTUP_EXIT" ;; esac\n')
+    timeout = tmp_path / 'timeout'
+    timeout_calls = tmp_path / 'timeout-calls'
+    timeout.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$LOOM_TEST_TIMEOUT_CALLS"\n'
+                       'if [ "$LOOM_TEST_CLEANUP_TIMEOUT" = 1 ]; then '
+                       'case "$*" in *kill-server*) exit 124 ;; esac; fi\nshift\nexec "$@"\n')
+    tmux.chmod(0o755)
+    timeout.chmod(0o755)
+    env = {**os.environ, 'PATH': f"{tmp_path}:{os.environ['PATH']}",
+           'LOOM_TEST_TMUX_CALLS': str(calls), 'LOOM_TEST_STARTUP_EXIT': str(startup_exit),
+           'LOOM_TEST_TIMEOUT_CALLS': str(timeout_calls), 'LOOM_TEST_CLEANUP_TIMEOUT': str(int(cleanup_timeout))}
+    result = subprocess.run(['/bin/sh', '-c', _SUSE_TMUX_STARTUP_PROBE], capture_output=True, text=True, env=env)
+    assert result.returncode == expected_exit, result.stderr
+    commands = calls.read_text().splitlines()
+    label = commands[0].split()[3]
+    assert label.startswith('loom-preparation-')
+    bounded_commands = timeout_calls.read_text().splitlines()
+    assert bounded_commands[0].startswith('10 tmux ')
+    assert all(command.startswith('5 tmux ') for command in bounded_commands[1:])
+    assert bounded_commands[-1] == f'5 tmux -L {label} kill-server'
+    if not cleanup_timeout:
+        assert commands[-1] == f'-L {label} kill-server'
+    assert any('has-session' in command for command in commands) is (startup_exit == 0)
 
 
 @pytest.mark.parametrize('transaction,drift,accepted', [

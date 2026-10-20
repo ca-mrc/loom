@@ -62,6 +62,27 @@ unknown-key auto-import and GPG bypass flags are not used. Qualification records
 the key metadata before and after separately. A required authored-package change fails the build; no ready image
 is published. The original USER is restored after the platform layer.
 
+Leap's tmux package declares `/run/tmux` as a `1777 root:root` directory in
+`/usr/lib/tmpfiles.d/tmux.conf`. Containers do not run systemd-tmpfiles at boot,
+so both preparation paths create this directory only when the path is absent.
+Existing directories, files and symlinks are preserved. Preparation does not run
+global tmpfiles rules or set `TMUX_TMPDIR`. After restoring the task USER, a
+bounded real tmux startup probe must succeed using the image's default socket
+root; a private server label isolates the probe and cleanup. The probe bypasses
+authored tmux configuration only for this build check. It cannot publish a ready
+image merely because `tmux -V` succeeds. Qualification also exercises the
+original image's default environment, non-root startup and Harbor recording and
+command round trips. Current private sandbox mounts preserve `/run` and use a
+writable root; a future runtime that masks `/run` must initialize the package
+directory at that mount boundary. Read-only roots additionally need writable
+socket and temporary storage.
+
+Existing ready images retain their cached platform layer. After deploying a
+preparation fix, use the documented single-materialization admin retry for an
+affected image before the owner's authorized targeted execution. Keep its task
+checksum and historical trials intact; ordinary new task images receive the
+directory setup and startup check automatically.
+
 Preparation termination receipts carry schema
 `loom.task-image-preparation-error.v1`, a stable `image_preparation_*` code and
 its explicit retry classification. Unsupported bases, invalid Dockerfiles or
