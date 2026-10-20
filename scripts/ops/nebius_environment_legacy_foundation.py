@@ -13,6 +13,7 @@ import base64
 import copy
 import hashlib
 import json
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -75,9 +76,18 @@ class NebiusFoundationCloud(NebiusSdkEnvironmentApi):
     """Current protected SDK credentials, never the source's retired credentials."""
 
     def __init__(self, sdk: Any, *, clients: dict[str, Any] | None = None,
-            legacy_clients: dict[str, Any] | None = None):
+            legacy_clients: dict[str, Any] | None = None, qualify_mutation: Callable[[], None] | None = None):
         super().__init__(sdk, clients=clients)
         self.sdk, self.legacy_clients = sdk, legacy_clients
+        self.qualify_mutation = qualify_mutation
+
+    async def _call(self, method: Any, request: Any, *, key: str | None = None, missing: bool = False) -> Any:
+        # Every SDK create/delete (including key revocation) carries its frozen
+        # idempotency key. Read-only token/resource qualification remains usable
+        # before production contexts exist and after they expire.
+        if key is not None and self.qualify_mutation is not None:
+            self.qualify_mutation()
+        return await super()._call(method, request, key=key, missing=missing)
 
     async def qualify_legacy_foundation(self, *, scope: DevelopmentCloudScope,
             config: dict[str, Any], material: dict[str, str]) -> None:

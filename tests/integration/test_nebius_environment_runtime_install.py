@@ -29,16 +29,19 @@ from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_candidate_catalog import publication as publication
 
 
-@pytest.mark.parametrize('committed_enrollment', [False, True])
+@pytest.mark.parametrize('committed_enrollment,complete_release', [(False, False), (True, False), (True, True)])
 @pytest.mark.timeout(180)
 async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact_effects(
-        sessions, tmp_path, platform_inputs, publication, publisher_cloud, committed_enrollment, running, monkeypatch):
+        sessions, tmp_path, platform_inputs, publication, publisher_cloud, committed_enrollment, complete_release, running, monkeypatch):
     name = 'scripts.ops.nebius_environment_runtime_install'
     assert importlib.util.find_spec(name), 'protected independent runtime installer is missing'
     module = importlib.import_module(name)
     cloud = publisher_cloud
     inputs = copy.deepcopy(platform_inputs)
     inputs[0].update(project_id=cloud.scope['project_id'], quota_parent_id=cloud.scope['tenant_id'], region=cloud.scope['region'])
+    if complete_release:
+        from tests.support.nebius_environment_release import signed_publication
+        publication = signed_publication(publication, tmp_path / 'signer.pem')
     async with prepared(sessions, tmp_path, inputs, publication) as (issuer, policy, clients, remote, api):
         profiles = policy.profiles.model_dump(mode='json')
         profiles['task_images'][0]['settings']['registry_repository'] = cloud.repositories[0]
@@ -402,6 +405,7 @@ async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact
             loop = asyncio.get_running_loop()
             mutation_apis = {}
             lose_ready_reply = True
+            lose_release_reply = complete_release
             interrupt_ready_job = True
             class MutationAPI(PhaseAPI):
                 committed = None
@@ -412,7 +416,7 @@ async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact
                         raise OSError('interrupted during Job preflight, before any create intent')
                     return super().default_resource(doc)
                 def administration_report(self, state_dir):
-                    nonlocal lose_ready_reply
+                    nonlocal lose_ready_reply, lose_release_reply
                     from scripts.ops.nebius_pool_administration_job import (
                         HTTPSPoolAdministrationJobAPI,
                     )
@@ -428,10 +432,17 @@ async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact
                     if self.request.request.action == 'ready' and lose_ready_reply:
                         lose_ready_reply = False
                         return None  # Commit succeeded; parent must recover this same Job.
+                    if self.request.request.action == 'begin_release' and lose_release_reply:
+                        lose_release_reply = False
+                        return None
                     return {'job_uid': str(uuid4()), 'pod_uid': str(uuid4()), 'receipt': self.committed}
             @contextmanager
             def activation_connection(request):
                 if request.action == 'status':
+                    # Model the continuously running observer through its real
+                    # capture API; this long connected path outlives one sample.
+                    if request.request.require_capacity:
+                        asyncio.run_coroutine_threadsafe(platform.capture(), loop).result(timeout=20)
                     with clients['connect'](request) as observation_api:
                         yield observation_api
                     return
@@ -524,13 +535,84 @@ async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact
             # A historical success is not a statement about the current head.
             # Use a real authorized suspend, not a direct test-table rewrite.
             active_operation = _load(policy.host, issued[-1][1]).request
-            suspend = type(active_operation).model_validate(active_operation.model_dump() | {
-                'operation_id': uuid4(), 'expected_head': active_operation.operation_id, 'action': 'suspend', 'readiness': None})
-            grant = activation._grant(policy, suspend, uuid4(), issued_at=datetime.now(UTC),
-                expires_at=datetime.now(UTC) + timedelta(minutes=1))
-            async with sessions.begin() as session:
-                await administer(session, suspend.model_dump_json().encode(), grant, action='apply')
+            lifecycle_name = 'scripts.ops.nebius_environment_lifecycle'
+            assert importlib.util.find_spec(lifecycle_name), 'public lifecycle operation parent missing'
+            lifecycle = importlib.import_module(lifecycle_name)
+            suspend_id = uuid4()
+            transition = dict(policy=policy, operation_id=suspend_id, action='suspend',
+                expected_head=active_operation.operation_id, connect=activation_connection)
+            suspended = await lifecycle.transition_participant(**transition)
+            assert suspended['status'] == 'complete' and suspended['admission_open'] is False
+            effects = len(mutation_apis)
+            assert await lifecycle.transition_participant(**transition) == suspended
+            assert len(mutation_apis) == effects, 'completed suspend must recover original fixed Job'
             with pytest.raises(ValueError, match='environment_activation_unqualified'):
                 await parent.activate_environment_runtime(**parent_inputs)
             assert all(len(row.creates) == 2 for row in mutation_apis.values())
             assert len(changes) == 11
+            from scripts.ops.nebius_pool_administration_dispatch import (
+                PoolAdministrationReferenceV2,
+            )
+            assert hasattr(lifecycle, 'resume_environment'), 'connected scoped resume missing'
+            resumed = await lifecycle.resume_environment(**{**final_inputs, 'connect': activation_connection},
+                boundary_connection=boundary_connection,
+                transition_id=uuid4(), predecessor=PoolAdministrationReferenceV2.model_validate(suspended['reference']))
+            assert resumed['status'] == 'complete' and resumed['admission_open'] is True
+            assert len(changes) == 11, 'admission resume must preserve running application and peer processes'
+            if complete_release:
+                from tests.support.nebius_environment_release import exercise_release
+                await exercise_release(original_publication=publication, private=tmp_path / 'signer.pem',
+                    final_inputs=final_inputs, runtime_id=kwargs['operation_id'], predecessor=resumed['reference'],
+                    remote=remote, workload_class=Workloads, activation_connection=activation_connection, changes=changes)
+                return
+            # Exercise the installed parent with real typed private inputs and
+            # the same SQL/Job boundary. Retirement closes admission and reaches
+            # retired only after a fresh selected-workload observation.
+            from contextlib import asynccontextmanager
+
+            from scripts.ops.nebius_environment_lifecycle_entry import (
+                LifecycleCommandV2,
+                LifecycleConfigurationV2,
+                load_lifecycle_configuration,
+            )
+            from scripts.ops.nebius_environment_lifecycle_inputs import LifecycleClients
+            from scripts.ops.nebius_pool_enrollment_issuer import _policy
+
+            def private_input(path, value):
+                raw = json.dumps(value, sort_keys=True).encode()
+                path.write_bytes(raw)
+                path.chmod(0o600)
+                return dict(path=str(path), sha256=hashlib.sha256(raw).hexdigest())
+
+            retire_id = uuid4()
+            lifecycle_inputs = dict(schema_version='loom.environment-lifecycle-inputs.v2',
+                enrollment=_policy(policy), registry_prefix=clients['catalog'].registry_prefix,
+                github_token=private_input(tmp_path / 'lifecycle-github', 'fixture-github'),
+                cloud_credentials=private_input(tmp_path / 'lifecycle-cloud', 'fixture-cloud'),
+                runtime_operation_id=str(kwargs['operation_id']), enrollment_operation_id=str(enrollment.operation_id),
+                expected_head=resumed['reference']['operation_id'])
+            pinned = private_input(tmp_path / 'retire-inputs.json', lifecycle_inputs)
+            config = LifecycleConfigurationV2.model_validate(dict(schema_version='loom.environment-lifecycle-configuration.v2',
+                scope=policy.host.scope.model_dump(mode='json'), operations={str(retire_id): dict(kind='retire',
+                    inputs_path=pinned['path'], inputs_sha256=pinned['sha256'])}))
+            config_file = private_input(tmp_path / 'lifecycle-config.json', config.model_dump(mode='json'))
+            @asynccontextmanager
+            async def connected_clients(inputs, selected_policy, unchanged):
+                assert selected_policy == policy
+                unchanged()
+                yield LifecycleClients(**{**clients, 'connect': activation_connection}, registry_sdk=None)
+                unchanged()
+            monkeypatch.setattr(lifecycle, 'lifecycle_clients', connected_clients)
+            command = LifecycleCommandV2(schema_version='loom.environment-lifecycle-command.v2', action='apply',
+                operation_id=retire_id, scope=policy.host.scope)
+            execution = dict(configuration=config, request=command, operation=config.operations[retire_id],
+                unchanged=lambda: load_lifecycle_configuration(tmp_path / 'lifecycle-config.json', config_file['sha256']))
+            retired = await lifecycle.execute_lifecycle(**execution)
+            assert retired['status'] == 'complete' and retired['admission_open'] is False
+            count = len(mutation_apis)
+            recovered = await lifecycle.execute_lifecycle(**{**execution, 'request': command.model_copy(update={'action': 'recover'})})
+            assert recovered['status'] == 'complete' and recovered['admission_open'] is False
+            assert len(mutation_apis) == count and len(changes) == 11
+            observed = await lifecycle.execute_lifecycle(**{**execution, 'request': command.model_copy(update={'action': 'status'})})
+            assert observed['status'] == 'observed' and observed['admission_open'] is False
+            assert any(row.committed['receipt'].get('state') == 'retired' for row in mutation_apis.values())

@@ -41,7 +41,7 @@ def select_target(raw: str, *, target_id: str, authority: str, operation_id: str
         gateway.validate_scope(row['scope'])
         for identity in row['operations']:
             gateway._uuid(identity)
-        lock = tuple(row['scope'][key] for key in ('pool_id', 'participant_id', 'incarnation'))
+        lock = tuple(row['scope'][key] for key in ('pool_id', 'participant_id'))
         if row['target_id'] in aliases or lock in identities or len(set(row['operations'])) != len(row['operations']):
             raise ValueError('environment_lifecycle_target_ambiguous')
         aliases.add(row['target_id'])
@@ -54,7 +54,7 @@ def select_target(raw: str, *, target_id: str, authority: str, operation_id: str
 
 def scope_key(scope: dict[str, Any]) -> str:
     gateway.validate_scope(scope)
-    return '-'.join(scope[key] for key in ('pool_id', 'participant_id', 'incarnation'))
+    return '-'.join(scope[key] for key in ('pool_id', 'participant_id'))
 
 
 def transfer(request: dict[str, Any], *, action: str, target: str, key: Path, known_hosts: Path) -> dict[str, Any]:

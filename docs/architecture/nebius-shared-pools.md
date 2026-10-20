@@ -61,9 +61,11 @@ immutable operation/grant audit. The isolated forced-command launcher accepts on
 previously retained references for prepare/apply/recover/status; it cannot accept
 runner-selected paths, Secrets, grant contents, code or target authority. Recovery
 reads the original Job, and status uses a separately identified read-only Job.
-Historical completion receipts are not current readiness. The source launcher
-and foundation adapters require a protected evidence issuer and installed workflow
-integration before operators can use this as an end-to-end deployment path.
+Historical completion receipts are not current readiness. The installed lifecycle
+entry connects the evidence issuers and foundation/runtime adapters through
+private, checksum-pinned operation inputs. Its runner sends only the exact scope,
+operation UUID and action. See the [lifecycle runbook](../runbooks/nebius-environment-lifecycle.md)
+for installation, delivery and recovery.
 
 The independent runtime adapter consumes a committed closed enrollment and
 verified publication/foundation evidence. It stages scoped credentials, read-only
@@ -129,9 +131,10 @@ caller-provided state bypass. The existing
 fixed administration Job commits that operation with participant-head CAS and fresh
 physical accounting; issuance alone performs no database mutation. Re-reading an
 issued grant preserves its original request and expiry, even after activation or
-expiration. A new attempt needs a new explicit operation identity. Public issuer
-configuration/host/workflow delivery and installed multi-owner execution remain
-separate requirements; the generic production promotion adapter is not yet wired.
+expiration. A new attempt needs a new explicit operation identity. Production
+additionally requires independently verified target-specific release evidence,
+release-owner approval and protected main promotion of the same immutable
+publication. Installed multi-owner execution remains separate acceptance.
 
 The internal activation parent now connects completed startup, selected boundary
 preparation, ready/active issuance and fixed administration dispatch under one
@@ -143,8 +146,35 @@ replacement Job or renewed grant. A new attempt after ready must select the exac
 private ready predecessor. Completed replay verifies the current active head and
 physical evidence without rerunning closed startup or requiring empty task
 namespaces. Its `environment_active` result proves admission state, explicitly
-not executed build/task acceptance. This parent is not yet a public installed
-workflow.
+not executed build/task acceptance. The protected
+`nebius-environment-lifecycle.yml` workflow invokes this parent through a dedicated
+forced-command key. Its allowlist pins tooling source, target and operation; both
+workflow and host serialize operations for the selected participant. Different
+participants retain independent delivery while sharing transactional capacity.
+
+The same entry provides foundation provision/import, enrollment, suspension,
+resume, retirement and compatible release/rollback. Provisioning precedes UID-bound
+enrollment: the foundation records observed namespace identities before a separate
+enrollment operation selects them. Retirement closes active admission, preserves
+charged work until cleanup, cancels only explicitly selected waiting generations,
+and commits the retired tombstone after authenticated workload-count readback.
+
+Release and rollback preserve application/data identities and frozen request
+profiles. They resolve an exact protected publication, check equal service schema
+and unchanged runtime capabilities/resources, drain only the selected participant,
+then journal UID-bound stop/update/start transitions. Native build policy retains
+the qualified historical contracts needed by waiting work. Fresh application,
+database, platform and process proof precedes catalog commit and reactivation.
+Rollback selects previously qualified publication bytes from the retained release
+chain; it does not rebuild images or implicitly downgrade the database.
+
+Production uses the same lifecycle under the protected `production` environment.
+Its version-2 release manifest binds exact staging/production identities, separate
+databases/storage/credentials and public routes while retaining every existing
+release check. Authenticated release/main run attempts, artifact digests, merged
+main lineage and identical candidate image digests must agree. Development
+publication alone grants no production capability; the qualifier installs only a
+short-lived task-local authority for the selected target and publication.
 
 Explicit legacy adoption preserves qualified v1 authority, credentials and
 history. A completed global handoff is not repeated; standalone allocation cannot

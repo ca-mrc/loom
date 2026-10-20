@@ -1,5 +1,11 @@
 # Independent Nebius deployment
 
+For full environments on a platform-owned shared pool, use the
+[independent lifecycle procedure](nebius-environment-lifecycle.md). It covers
+protected target installation, provision/import, enrollment, activation,
+release/rollback and recovery. The procedures below also retain historical
+deployment and shared-handoff paths.
+
 Nebius is the image publication path for both development and production.
 `nebius-candidate` publishes the seven manifest-owned AMD64 images from an exact
 `dev` commit. Production promotes those same immutable digest references through

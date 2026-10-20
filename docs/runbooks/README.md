@@ -12,6 +12,7 @@ Begin with the [operator runbook](operator-runbook.md). Use the architecture
 - [Candidate publication](nebius-candidate.md): immutable images and candidate records.
 - [Image retention](nebius-image-retention.md): reference-aware cleanup of published platform and task images.
 - [Deployment](nebius-deployment.md): target binding, backup, migrations and readiness.
+- [Independent environment lifecycle](nebius-environment-lifecycle.md): protected provisioning, adoption, activation, release and recovery on shared pools.
 - [Staging credentials](nebius-staging-credentials.md): scoped identities and PostgreSQL trust.
 - [Staging release validation](staging-launch.md): candidate-bound promotion evidence.
 

@@ -182,6 +182,9 @@ class _Resources(ManagementKubernetesTransport):
         self.policy, self.documents, self.namespaces, self.guard = policy, copy.deepcopy(documents), dict(namespaces), qualify
         super().__init__(api_server=policy.host.connection.endpoint,
             ssl_context=credentials.ssl_context, token=credentials.get_token_sync())
+        from scripts.ops.nebius_production_promotion import production_request_hook
+
+        self.client.event_hooks['request'].append(production_request_hook(policy.host.scope))
 
     def verify_identity(self, binding: ManagementBinding) -> None:
         if binding != self.policy.host.runtime.binding:
@@ -249,7 +252,8 @@ def _resources(policy: PoolEnrollmentPolicyV2, documents: dict[str, dict[str, An
 
 
 def _observe(policy: PoolEnrollmentPolicyV2, directory: Path, connect: Connection, *,
-        require_capacity: bool = False, platform_authorization_id: UUID | None = None) -> dict[str, Any] | None:
+        require_capacity: bool = False, platform_authorization_id: UUID | None = None,
+        include_workload_counts: bool = False) -> dict[str, Any] | None:
     # Refresh a completed observation on each invocation; never renew a mutation
     # grant or silently change its expected participant/head. Pending read Jobs
     # retain their own identity, unlike fire-and-forget repeated inspections.
@@ -263,7 +267,7 @@ def _observe(policy: PoolEnrollmentPolicyV2, directory: Path, connect: Connectio
         target = directory / str(identity)
         try:
             report = _inspect(policy, identity, target, connect, require_capacity=require_capacity,
-                platform_authorization_id=platform_authorization_id)
+                platform_authorization_id=platform_authorization_id, include_workload_counts=include_workload_counts)
         except ValueError as error:
             if str(error) != 'pool_enrollment_inspection_expired':
                 raise
@@ -278,7 +282,7 @@ def _observe(policy: PoolEnrollmentPolicyV2, directory: Path, connect: Connectio
             state._atomic_json(path, current)
             target = directory / str(identity)
             report = _inspect(policy, identity, target, connect, require_capacity=require_capacity,
-                platform_authorization_id=platform_authorization_id)
+                platform_authorization_id=platform_authorization_id, include_workload_counts=include_workload_counts)
         if report is not None:
             current['status'] = 'complete'
             state._atomic_json(path, current)

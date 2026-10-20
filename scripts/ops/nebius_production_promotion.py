@@ -13,7 +13,7 @@ import re
 import stat
 import time
 import zipfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from typing import Any, Literal
@@ -154,17 +154,19 @@ async def qualify_production_promotion(*, promotion: ProductionPromotionV2, scop
         promotion = ProductionPromotionV2.model_validate(promotion.model_dump())
         _require(scope.authority == 'production' and promotion.target.scope == scope
             and promotion.publication == publication and catalog.publications.get(publication.candidate_id) == publication)
-        bundle, release_report, main_report, pull, candidate_commit, release_commit, main = await asyncio.gather(
+        bundle, reports = await asyncio.gather(
             catalog.resolve(publication.candidate_id),
-            _artifact(catalog, promotion.release_gate, candidate_sha=publication.source_sha,
-                workflow='release-promotion-gate.yml', name='release-gate-evidence', filename='release-gate-evidence.json'),
-            _artifact(catalog, promotion.main_gate, candidate_sha=publication.source_sha,
-                workflow='main-promotion-gate.yml',
-                name=f'main-promotion-evidence-{promotion.main_gate.run_id}-{promotion.main_gate.run_attempt}',
-                filename='main-promotion-evidence.json'),
-            catalog._api(f'pulls/{promotion.release_pull_request}'),
-            catalog._api(f'git/commits/{publication.source_sha}'),
-            catalog._api(f'git/commits/{promotion.release_sha}'), catalog._api('branches/main'))
+            asyncio.gather(
+                _artifact(catalog, promotion.release_gate, candidate_sha=publication.source_sha,
+                    workflow='release-promotion-gate.yml', name='release-gate-evidence', filename='release-gate-evidence.json'),
+                _artifact(catalog, promotion.main_gate, candidate_sha=publication.source_sha,
+                    workflow='main-promotion-gate.yml',
+                    name=f'main-promotion-evidence-{promotion.main_gate.run_id}-{promotion.main_gate.run_attempt}',
+                    filename='main-promotion-evidence.json'),
+                catalog._api(f'pulls/{promotion.release_pull_request}'),
+                catalog._api(f'git/commits/{publication.source_sha}'),
+                catalog._api(f'git/commits/{promotion.release_sha}'), catalog._api('branches/main')))
+        release_report, main_report, pull, candidate_commit, release_commit, main = reports
         _require(pull['number'] == promotion.release_pull_request and pull['merged'] is True and pull['state'] == 'closed'
             and pull['base']['ref'] == 'main' and pull['head']['ref'] == 'dev'
             and is_loom_repository(pull['base']['repo']) and is_loom_repository(pull['head']['repo'])
@@ -216,6 +218,28 @@ def require_production_authority(*, scope: PoolAdministrationScopeV2, publicatio
         if (time.monotonic() < retained[2] and retained[0].scope == scope and retained[0].publication == publication):
             return retained[1]
     raise ValueError('production_promotion_required')
+
+
+def require_production_effect(scope: PoolAdministrationScopeV2) -> None:
+    """Recheck every selected publication immediately before an installed write.
+
+    The installed parent first qualifies the exact baseline/current/replacement
+    set. Contexts propagate through asyncio.to_thread; an absent or expired
+    production context cannot silently turn a worker into an unguarded writer.
+    """
+    if scope.authority != 'production':
+        return
+    selected = [row for row in _AUTHORITY.get() if row[0].scope == scope]
+    if not selected or any(time.monotonic() >= row[2] for row in selected):
+        raise ValueError('production_promotion_required')
+
+
+def production_request_hook(scope: PoolAdministrationScopeV2) -> Callable[[httpx.Request], None]:
+    """Also cover runtime patchers that stream directly through the HTTP client."""
+    def check(request: httpx.Request) -> None:
+        if request.method not in {'GET', 'HEAD', 'OPTIONS'}:
+            require_production_effect(scope)
+    return check
 
 
 def require_production_foundation(*, scope: PoolAdministrationScopeV2, publication: ProtectedPublication,

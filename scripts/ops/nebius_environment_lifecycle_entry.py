@@ -97,10 +97,10 @@ def main(configuration: str, checksum: str, action: str, command: str) -> int:
         request = LifecycleCommandV2.model_validate(_json(command.encode()))
         if request.action != action:
             raise ValueError
+        result.update(operation_id=str(request.operation_id), scope=request.scope.model_dump(mode='json'), action=action)
         path = Path(configuration)
         config = load_lifecycle_configuration(path, checksum)
         operation = select_operation(config, request.model_dump(mode='json'))
-        result.update(operation_id=str(request.operation_id), scope=request.scope.model_dump(mode='json'), action=action)
         from scripts.ops.nebius_environment_lifecycle import execute_lifecycle
         with open(os.devnull, 'w') as output, redirect_stdout(output), redirect_stderr(output):
             result = asyncio.run(execute_lifecycle(configuration=config, request=request, operation=operation,
@@ -109,6 +109,8 @@ def main(configuration: str, checksum: str, action: str, command: str) -> int:
             raise ValueError
     except Exception:
         result = dict(result, status='blocked', phase='execution')
+        result.pop('admission_open', None)
+    if result.get('admission_open') is None:
         result.pop('admission_open', None)
     print(json.dumps(result, sort_keys=True, allow_nan=False))
     return int(result['status'] == 'blocked')

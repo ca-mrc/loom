@@ -28,6 +28,7 @@ RENDER_SOURCES = ('deploy/k8s/nebius-execution-actuator.yaml', 'deploy/k8s/nebiu
 LIMITS = {**dict.fromkeys(RENDER_SOURCES, 262144), 'uv': 80 * 1024**2, 'requirements.txt': 262144,
     'lifecycle-tooling.json': 4096, 'manifest.json': 65536}
 MAX_BUNDLE, MAX_WHEEL, MAX_COMMAND, MAX_SOURCE = 100 * 1024**2, 16 * 1024**2, 16384, 262144
+MAX_MEMBERS = 512  # Includes the complete protected lifecycle/release import closure.
 COMMANDS = {'loom-environment-lifecycle-' + action + '-v2': action for action in ('prepare', 'apply', 'recover', 'status')}
 PHASES = frozenset({'request', 'selection', 'installation', 'execution', 'provision', 'enroll', 'start',
     'activate', 'suspend', 'resume', 'retire', 'release', 'rollback', 'import', 'status', 'recovery', 'complete'})
@@ -61,7 +62,7 @@ def _json(raw: bytes) -> dict[str, Any]:
 def _members(names: list[str]) -> None:
     wheels = {name for name in names if name.startswith('wheels/')}
     scripts = {name for name in names if re.fullmatch(r'scripts/ops/[a-z][a-z0-9_]+\.py', name)}
-    if (len(names) != len(set(names)) or len(names) > 256 or not CORE_SOURCES <= scripts
+    if (len(names) != len(set(names)) or len(names) > MAX_MEMBERS or not CORE_SOURCES <= scripts
             or set(names) != set(LIMITS) | scripts | wheels or len(wheels) != 2
             or any(sum(bool(re.fullmatch(r'wheels/' + package + r'-[0-9][0-9.]*-py3-none-any\.whl', name))
                 for name in wheels) != 1 for package in ('loom', 'loom_bundle_checksum'))):

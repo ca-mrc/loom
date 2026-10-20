@@ -275,7 +275,8 @@ def dispatch_administration(content: bytes, *, action: str, host: PoolAdministra
 
 
 @contextmanager
-def authenticated_administration(host: PoolAdministrationHostV2, request: PoolAdministrationJobV2) -> Iterator[AdministrationAPI]:
+def authenticated_administration(host: PoolAdministrationHostV2, request: PoolAdministrationJobV2, *,
+        qualify_mutation: Callable[[], None] | None = None) -> Iterator[AdministrationAPI]:
     _host(host)
     material = {path: private_state._private_read(path, limit=1024**2)
         for path in (host.connection.ca_file, host.connection.credentials_file)}
@@ -283,6 +284,11 @@ def authenticated_administration(host: PoolAdministrationHostV2, request: PoolAd
     try:
         with HTTPSPoolAdministrationJobAPI(request=request, api_server=host.connection.endpoint,
                 ssl_context=credentials.ssl_context, token=credentials.get_token_sync()) as api:
+            if qualify_mutation is not None:
+                def guard_mutation(outgoing: Any) -> None:
+                    if outgoing.method not in {'GET', 'HEAD', 'OPTIONS'}:
+                        qualify_mutation()
+                api.client.event_hooks['request'].append(guard_mutation)
             yield api
         if any(private_state._private_read(path, limit=1024**2) != raw for path, raw in material.items()):
             raise ValueError('pool_administration_connection_changed')

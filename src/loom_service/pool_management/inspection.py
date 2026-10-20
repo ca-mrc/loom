@@ -19,7 +19,7 @@ from pydantic import (
     model_serializer,
     model_validator,
 )
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.nebius_pool_catalog_schema import NebiusPoolParticipantCatalog
@@ -27,9 +27,14 @@ from loom.db.nebius_pool_lifecycle_schema import (
     NebiusPoolLifecycleOperation,
     NebiusPoolParticipantLifecycle,
 )
-from loom.db.nebius_pool_schema import NebiusPoolBinding, NebiusPoolMachine, NebiusPoolParticipant
+from loom.db.nebius_pool_schema import (
+    NebiusPoolBinding,
+    NebiusPoolMachine,
+    NebiusPoolParticipant,
+    NebiusPoolRequest,
+)
 from loom.nebius_pool_contract import PoolParticipantV1
-from loom_service.pool_management.capacity import digest, observe_connected_capacity
+from loom_service.pool_management.capacity import CHARGED_PHASES, digest, observe_connected_capacity
 from loom_service.pool_management.control import _clock
 from loom_service.pool_management.lifecycle_contracts import PoolRuntimeReadinessV2
 from loom_service.pool_management.locks import require_pool_read_snapshot
@@ -53,6 +58,7 @@ class PoolInspectionV2(_Strict):
     incarnation: UUID | None = None
     environment_class: Literal['development', 'staging', 'production'] | None = None
     require_capacity: bool = Field(default=False, strict=True)
+    include_workload_counts: bool = Field(default=False, strict=True)
     platform_authorization_id: UUID | None = None
 
     @model_serializer(mode='wrap')
@@ -60,6 +66,8 @@ class PoolInspectionV2(_Strict):
         value: dict[str, Any] = handler(self)
         if not self.require_capacity:
             value.pop('require_capacity', None)
+        if not self.include_workload_counts:
+            value.pop('include_workload_counts', None)
         if self.platform_authorization_id is None:
             value.pop('platform_authorization_id', None)
         return value
@@ -69,7 +77,7 @@ class PoolInspectionV2(_Strict):
         ids = (self.participant_id, self.environment_id, self.incarnation)
         if (not all(row.int for row in (self.operation_id, self.installation_id, self.pool_id))
                 or (self.platform_authorization_id is not None and not self.platform_authorization_id.int)
-                or (self.environment_class is None and any(row is not None for row in ids))
+                or (self.environment_class is None and (any(row is not None for row in ids) or self.include_workload_counts))
                 or (self.environment_class is not None and any(row is None or not row.int for row in ids))):
             raise ValueError('pool_inspection_scope_unqualified')
         return self
@@ -112,11 +120,17 @@ class _Head(_Strict):
     binding_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
 
 
+class PoolParticipantWorkloadCountsV2(_Strict):
+    charged: int = Field(ge=0, strict=True)
+    waiting: int = Field(ge=0, strict=True)
+
+
 class _Participant(_Strict):
     binding: PoolParticipantV1
     head: _Head
     profiles: PoolProfileCatalog
     catalog_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
+    workload_counts: PoolParticipantWorkloadCountsV2 | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class PoolCapacityObservationV2(_Strict):
@@ -209,6 +223,7 @@ def qualify_inspection(result: Any, request: PoolInspectionV2, authorization_id:
             or (snapshot.pool.installation_id, snapshot.pool.pool_id) != (request.installation_id, request.pool_id)
             or (request.participant_id is None and selected is not None)
             or request.require_capacity != (snapshot.capacity is not None)
+            or (selected is not None and request.include_workload_counts != (selected.workload_counts is not None))
             or request.platform_authorization_id != (
                 snapshot.platform_authority.authorization_id if snapshot.platform_authority is not None else None)):
         raise ValueError('pool_inspection_report_unqualified')
@@ -296,6 +311,13 @@ async def inspect_pool(session: AsyncSession, request: PoolInspectionV2, authori
                 head=_Head(operation_id=head.head_operation_id, generation=head.generation, state=head.state,
                     binding_sha256=head.binding_sha256), profiles=PoolProfileCatalog.model_validate(catalog.document_json['profiles']),
                 catalog_sha256=catalog.document_sha256)
+            if request.include_workload_counts:
+                counts = {phase: count for phase, count in (await session.execute(select(NebiusPoolRequest.phase, func.count()).where(
+                    NebiusPoolRequest.pool_id == request.pool_id, NebiusPoolRequest.participant_id == request.participant_id,
+                    NebiusPoolRequest.phase.in_((*CHARGED_PHASES, 'waiting')),
+                ).group_by(NebiusPoolRequest.phase))).all()}
+                participant = participant.model_copy(update={'workload_counts': PoolParticipantWorkloadCountsV2(
+                    charged=sum(counts.get(phase, 0) for phase in CHARGED_PHASES), waiting=counts.get('waiting', 0))})
     capacity = None
     valid_until = now + timedelta(minutes=5)
     if request.require_capacity:

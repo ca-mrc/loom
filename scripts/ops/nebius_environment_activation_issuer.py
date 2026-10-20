@@ -125,7 +125,8 @@ def _request(*, policy: PoolEnrollmentPolicyV2, transition_id: UUID, action: Lit
     assert selected is not None
     platform = PoolRuntimeReadinessV2.model_validate(observed['platform']['readiness'])
     expires = min(platform.valid_until, datetime.fromisoformat(observed['valid_until']))
-    if ((action == 'ready') != (predecessor is None)
+    if (selected.head.state != ('enrolled' if action == 'ready' else 'ready')
+            or (action == 'ready') != (predecessor is None)
             or observed['status'] != 'preactivation_runtime_verified_closed' or observed['admission_open'] is not False
             or snapshot.capacity is None or snapshot.platform_authority is None
             or platform.pool_authority_sha256 != snapshot.pool_authority_sha256

@@ -51,7 +51,7 @@ def members():
             source_sha='a' * 40, source_archive_sha256='sha256:' + 'b' * 64)).encode()}
 
 
-@pytest.mark.parametrize('damage', [None, 'private', 'path', 'missing', 'extra-wheel'])
+@pytest.mark.parametrize('damage', [None, 'private', 'path', 'missing', 'extra-wheel', 'too-many'])
 def test_tooling_archive_bounds_code_members_and_never_includes_private_configuration(damage):
     files = members()
     if damage == 'private':
@@ -62,6 +62,8 @@ def test_tooling_archive_bounds_code_members_and_never_includes_private_configur
         del files['scripts/ops/nebius_environment_lifecycle_entry.py']
     elif damage == 'extra-wheel':
         files['wheels/foreign-1-py3-none-any.whl'] = b'foreign'
+    elif damage == 'too-many':
+        files.update({f'scripts/ops/extra_{index}.py': b'' for index in range(gateway().MAX_MEMBERS)})
     if damage:
         with pytest.raises(ValueError):
             gateway().unpack_bundle(archive(files))
@@ -223,6 +225,11 @@ def test_allowlist_selects_exact_target_and_disallows_alias_concurrency_escape()
     with pytest.raises(ValueError):
         runner().select_target(raw, target_id='missing', authority='development', operation_id=selected['operations'][0])
     duplicate = dict(selected, target_id='alias')
+    with pytest.raises(ValueError):
+        runner().select_target(json.dumps(dict(schema_version='loom.environment-lifecycle-targets.v2', targets=[selected, duplicate])),
+            target_id='dev-one', authority='development', operation_id=selected['operations'][0])
+    duplicate['scope'] = dict(selected['scope'], incarnation=str(uuid4()))
+    assert runner().scope_key(duplicate['scope']) == runner().scope_key(selected['scope'])
     with pytest.raises(ValueError):
         runner().select_target(json.dumps(dict(schema_version='loom.environment-lifecycle-targets.v2', targets=[selected, duplicate])),
             target_id='dev-one', authority='development', operation_id=selected['operations'][0])

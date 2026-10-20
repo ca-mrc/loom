@@ -64,6 +64,32 @@ async def test_inspection_reports_exact_current_identity_without_audit_or_lifecy
     assert second['snapshot']['pool_authority_sha256'] == snapshot['pool_authority_sha256']
 
 
+async def test_release_drain_counts_are_explicit_read_only_selected_authority(sessions):
+    from loom_service.pool_management.control import cancel_unstarted_pool_request
+    from tests.integration.test_nebius_pool_observation_continuity import workload
+    from tests.integration.test_nebius_pool_participant_http import action
+    from tests.integration.test_nebius_pool_registry import machine, prepare
+
+    module, job, selected, _ = await prepared(sessions)
+    ordinary = await observe(sessions, job)
+    assert 'workload_counts' not in ordinary['snapshot']['participant']
+    request = module.PoolInspectionV2.model_validate(job.request.model_dump() | {'include_workload_counts': True})
+    grant = job.authorization.model_copy(update={'request_sha256': digest(request.model_dump(mode='json'))})
+    job = replace(job, request=request, authorization=grant)
+    principal = await machine(sessions, selected.pool_id, selected.participant_id)
+    work = workload(selected)
+    assert (await prepare(sessions, principal, work, {})).phase == 'reserved'
+    report = await observe(sessions, job)
+    assert report['snapshot']['participant']['workload_counts'] == {'charged': 1, 'waiting': 0}
+    altered = copy.deepcopy(report)
+    altered['snapshot']['participant'].pop('workload_counts')
+    with pytest.raises(ValueError):
+        jobs().validate_administration_report(job, altered)
+    async with sessions.begin() as session:
+        await cancel_unstarted_pool_request(session, principal, action(work))
+    assert (await observe(sessions, job))['snapshot']['participant']['workload_counts'] == {'charged': 0, 'waiting': 0}
+
+
 async def test_unenrolled_selection_is_explicitly_absent_not_a_same_class_peer(sessions):
     _module, job, _selected, _change = await prepared(sessions)
     request = job.request.model_copy(update={'participant_id': uuid4(), 'environment_id': uuid4(), 'incarnation': uuid4()})

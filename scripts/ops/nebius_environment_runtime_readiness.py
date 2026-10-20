@@ -83,14 +83,18 @@ def qualify_readiness_predecessor(*, policy: PoolEnrollmentPolicyV2, enrollment:
             raise ValueError('environment_runtime_not_enrolled')
         return
     previous = _load(policy.host, predecessor).request
-    if (not isinstance(previous, PoolParticipantOperationV2) or previous.action != 'ready'
-            or previous.expected_head != enrollment.operation_id or previous.expected_binding_sha256 != selected.head.binding_sha256
+    if (not isinstance(previous, PoolParticipantOperationV2) or previous.action not in {'ready', 'suspend'}
+            or previous.expected_binding_sha256 != selected.head.binding_sha256
             or previous.pool_authority_sha256 != snapshot.pool_authority_sha256
-            or previous.readiness is None or previous.readiness.catalog_sha256 != selected.catalog_sha256
             or (previous.pool_id, previous.participant_id, previous.incarnation) != (
                 policy.participant.pool_id, policy.participant.participant_id, policy.participant.incarnation)
-            or selected.head.operation_id != predecessor.operation_id or selected.head.state != 'ready'):
+            or selected.head.operation_id != predecessor.operation_id
+            or selected.head.state != ('ready' if previous.action == 'ready' else 'suspended')):
         raise ValueError('environment_runtime_ready_predecessor_unqualified')
+    if previous.action == 'ready' and (previous.expected_head != enrollment.operation_id
+            or previous.readiness is None or previous.readiness.catalog_sha256 != selected.catalog_sha256):
+        raise ValueError('environment_runtime_ready_predecessor_unqualified')
+
 
 
 class FixedProcessTransport:
@@ -323,7 +327,7 @@ async def observe_environment_pre_activation(*, policy: PoolEnrollmentPolicyV2, 
                 UUID(value['input']['authorization']['authorization_id']))
         snapshot, before = inspected(observation), inspected(environment['inspection'])
         if (snapshot.participant != before.participant or snapshot.pool_authority_sha256 != before.pool_authority_sha256
-                or snapshot.participant is None or snapshot.participant.head.state not in {'enrolled', 'ready'}):
+                or snapshot.participant is None or snapshot.participant.head.state not in {'enrolled', 'ready', 'suspended'}):
             raise ValueError
         expires = min(snapshot.valid_until, datetime.fromisoformat(environment['valid_until']))
         material = policy.foundation_dir / 'material.json'
