@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import platform
-import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -200,22 +199,18 @@ def test_minio_fixture_cache_is_read_only_on_untrusted_events() -> None:
         expression = step["if"].replace("steps.manifest.outputs.minio_cache_key", repr(key))
         return _condition(expression, {"github.event_name": event})
 
+    # CI only restores; ci-dependency-cache.yml on protected dev is the sole writer.
     jobs = _workflow(".github/workflows/ci.yml")["jobs"]
     for name in ("integration", "integration-docker"):
         steps = jobs[name]["steps"]
         restore = next(step for step in steps if str(step.get("uses", "")).startswith("actions/cache/restore@"))
-        save = next(step for step in steps if str(step.get("uses", "")).startswith("actions/cache/save@"))
         preparation = next(step["run"] for step in steps if "--cache-dir" in step.get("run", ""))
-        export_guard = re.search(r'--save-cache "\$\{\{(.+?)\}\}"', preparation)
-        assert export_guard is not None
-        assert not any(str(step.get("uses", "")).startswith("actions/cache@") for step in steps)
+        assert "--save-cache" not in preparation
+        assert not any(str(step.get("uses", "")).startswith(("actions/cache@", "actions/cache/save@"))
+                       for step in steps)
         for event in ("pull_request", "merge_group", "push", "schedule", "workflow_dispatch"):
-            assert _condition(export_guard[1], {"github.event_name": event}) is (
-                event not in ("pull_request", "merge_group")
-            )
             for key in ("none", "minio-source-recipe"):
                 assert enabled(restore, key, event) is (key != "none")
-                assert enabled(save, key, event) is (key != "none" and event not in ("pull_request", "merge_group"))
 
 
 def test_staging_pr_gate_is_credential_free_and_does_not_depend_on_real_aws() -> None:

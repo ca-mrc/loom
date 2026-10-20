@@ -235,9 +235,11 @@ def selected_fixture_images(paths: list[str], *, root: Path | None = None,
 
 
 def fixture_cache_key(images: tuple[str, ...]) -> str:
+    # One key per recipe set: ci-dependency-cache.yml saves every source fixture
+    # under it, and each job still prepares only the images it selected.
     if not images:
         return "none"
-    recipes = [_source_tag(spec) for spec in SOURCE_FIXTURES if spec.image in images]
+    recipes = [_source_tag(spec) for spec in SOURCE_FIXTURES]
     return "minio-source-" + hashlib.sha256("\n".join(recipes).encode()).hexdigest()[:24]
 
 
