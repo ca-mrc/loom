@@ -28,6 +28,7 @@ from loom_service.environment_management.candidates import (
 )
 
 if TYPE_CHECKING:
+    from scripts.ops.nebius_development_schema_upgrade import CompletedDevelopmentSchemaSuccessor
     from scripts.ops.nebius_shared_pool_handoff import StagingForwardPlan, StagingPoolSource
 
 # #2443 introduced the protected shared handoff and its participant protocol.
@@ -49,7 +50,7 @@ def _publication_catalog(*, request: DevelopmentRuntimeInstallRequest, http: htt
 
 
 async def qualify_runtime_publication(*, request: DevelopmentRuntimeInstallRequest,
-                                      http: httpx.AsyncClient) -> None:
+                                      http: httpx.AsyncClient, schema_successor: CompletedDevelopmentSchemaSuccessor | None = None) -> None:
     """Resolve the exact protected artifact, using the retained reader identity."""
     try:
         manager = request.database.manager
@@ -57,12 +58,20 @@ async def qualify_runtime_publication(*, request: DevelopmentRuntimeInstallReque
         publications = [manager.publication]
         if request.database.data_publication is not None:
             publications.append(request.database.data_publication)
+        if schema_successor is not None:
+            from scripts.ops.nebius_development_runtime_selection import select_development_runtime
+
+            selected_runtime = select_development_runtime(schema_successor.runtime, schema_successor)
+            if selected_runtime.runtime.request != request:
+                raise ValueError
+            installation = selected_runtime.deployment.installation
+            publications = [selected_runtime.manager_publication, selected_runtime.data_publication]
         for publication in publications:
             selected = publication.validate(installation.registry_prefix)
             catalog = _publication_catalog(request=request, http=http, publications=[selected.publication])
             if await catalog.resolve(selected.publication.candidate_id) != selected.bundle:
                 raise ValueError
-            if (request.database.data_publication is not None
+            if ((request.database.data_publication is not None or schema_successor is not None)
                     and not await catalog.candidate_follows(candidate_id=selected.publication.candidate_id,
                         current_sha=_SHARED_PROTOCOL_BASELINE)):
                 raise ValueError
@@ -100,7 +109,8 @@ async def qualify_staging_source_publication(*, request: DevelopmentRuntimeInsta
 
 
 async def qualify_runtime_cloud(*, request: DevelopmentRuntimeInstallRequest,
-                                operator_credentials: Path) -> ProviderCapacitySnapshot:
+                                operator_credentials: Path,
+                                schema_successor: CompletedDevelopmentSchemaSuccessor | None = None) -> ProviderCapacitySnapshot:
     """Read IAM with the operator, then read the pool with its observer key.
 
     No observation is published, image pushed, permit changed or capacity
@@ -113,6 +123,13 @@ async def qualify_runtime_cloud(*, request: DevelopmentRuntimeInstallRequest,
         original = private_state._private_read(operator_credentials, limit=1024**2)
         config = request.database.foundation.inputs.config
         profiles = development_profile_catalog(request.database.manager.retained.request)
+        if schema_successor is not None:
+            from scripts.ops.nebius_development_runtime_selection import select_development_runtime
+
+            selected_runtime = select_development_runtime(schema_successor.runtime, schema_successor)
+            if selected_runtime.runtime.request != request:
+                raise ValueError
+            profiles = selected_runtime.profiles
         repositories = tuple(sorted({row.settings.registry_repository for row in profiles.task_images}
             | {row.settings.registry_repository for row in profiles.application_images}))
         async with asyncio.timeout(180):

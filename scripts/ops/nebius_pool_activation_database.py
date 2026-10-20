@@ -16,14 +16,18 @@ from loom_service.pool_management.installation import PoolInstallation
 
 PoolActivationState = Literal["closed", "global", "fenced"]
 # Participant databases advance independently of the retained manager. 0177
-# adds publication retention, not a new handoff/outbox/guard layout. This is an
-# audited compatibility set, never the automatically discovered migration head.
-PARTICIPANT_SCHEMA_REVISIONS = ("0176", "0177")
+# adds publication retention; 0178 adds management catalog/lifecycle tables.
+# Neither changes the handoff/outbox/guard layout; the role guard separately
+# rejects access to those management tables. This is an audited compatibility
+# set, never the automatically discovered migration head.
+PARTICIPANT_SCHEMA_REVISIONS = ("0176", "0177", "0178")
 # 0175 changes an Oracle archival trigger; 0176 adds Harbor sessions; 0177 adds
-# source-publication retention. None changes these manager ledger/read predicates.
+# source-publication retention; 0178 adds separate catalog/lifecycle tables.
+# None changes these legacy manager ledger/read predicates. A scoped-v1 binding
+# still fails the exact legacy binding comparison, regardless of schema revision.
 # A refresh must select ONE revision from its bound migration phase; this is not
 # a startup or write compatibility set and is never an automatic schema fallback.
-MANAGER_OBSERVATION_REVISIONS = ("0174", "0176", "0177")
+MANAGER_OBSERVATION_REVISIONS = ("0174", "0176", "0177", "0178")
 
 
 def _binding_hex(spec: PoolInstallation) -> str:
@@ -54,10 +58,12 @@ END $pool_activation_schema$;
 """
 
 
-def _header(*, read_only: bool) -> str:
-    """Management SQL stays pinned to its immutable installed image/schema."""
+def _header(*, read_only: bool, manager_revision: str = '0176') -> str:
+    """Exact installed revision; newer writes require an explicit bound successor."""
+    if manager_revision not in ('0176', '0177', '0178'):
+        raise ValueError('pool manager mutation revision unqualified')
     return _transaction_header(read_only=read_only,
-        schema_unqualified="(SELECT version_num FROM public.alembic_version) IS DISTINCT FROM '0176'")
+        schema_unqualified=f"(SELECT version_num FROM public.alembic_version) IS DISTINCT FROM '{manager_revision}'")
 
 
 def _manager_observation_header(manager_revision: str) -> str:
@@ -88,12 +94,12 @@ def pool_activation_state_sql(spec: PoolInstallation, *, manager_revision: str =
     return _manager_observation_header(manager_revision) + _report_sql(spec) + "ROLLBACK;\n"
 
 
-def fence_pool_activation_sql(spec: PoolInstallation) -> str:
+def fence_pool_activation_sql(spec: PoolInstallation, *, manager_revision: str = '0176') -> str:
     """Close and cancel one opening authority, retaining charged work and effects."""
     spec = PoolInstallation.model_validate(spec.model_dump())
     if spec.policy_revision >= MAX_SAFE_INTEGER:
         raise ValueError("pool_activation_revision_exhausted")
-    return _header(read_only=False) + f"""
+    return _header(read_only=False, manager_revision=manager_revision) + f"""
 SELECT pg_advisory_xact_lock(hashtextextended('nebius-global-pool-mutation',1915));
 DO $pool_activation_fence$
 DECLARE

@@ -16,3 +16,12 @@ async def acquire_pool_mutation_lock(session: AsyncSession) -> None:
     if isolation != "read committed":
         raise ValueError("pool_mutation_requires_read_committed")
     await session.execute(_POOL_MUTATION_LOCK)
+
+
+async def require_pool_read_snapshot(session: AsyncSession) -> None:
+    """Unlocked observation is permitted only in a coherent non-mutable snapshot."""
+    if session.new or session.dirty or session.deleted:
+        raise ValueError('pool_inspection_requires_read_only_snapshot')
+    settings = (await session.execute(text("SELECT current_setting('transaction_read_only'), current_setting('transaction_isolation')"))).one()
+    if tuple(settings) != ('on', 'repeatable read'):
+        raise ValueError('pool_inspection_requires_read_only_snapshot')

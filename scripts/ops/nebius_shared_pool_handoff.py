@@ -20,7 +20,6 @@ from scripts.ops.nebius_development_activation import (
     DevelopmentActivationPlan,
     prepare_development_activation,
 )
-from scripts.ops.nebius_development_pool_registration import retained_development_participant
 from scripts.ops.nebius_development_runtime_install import DevelopmentRuntimeInstallRequest
 from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
 from scripts.ops.nebius_pool_material import machine_documents
@@ -42,6 +41,7 @@ from loom_service.environment_management.candidates import ProtectedPublication
 from loom_service.pool_management.installation import PoolInstallation
 
 if TYPE_CHECKING:
+    from scripts.ops.nebius_development_schema_upgrade import CompletedDevelopmentSchemaSuccessor
     from scripts.ops.nebius_pool_preactivation_operation import CompletedPreactivationCatalog
 
 MARKER = 'loom.nebius/shared-pool-handoff-operation'
@@ -86,7 +86,7 @@ class SharedPoolHandoffPlan:
     @property
     def effective_runtime_resources(self) -> dict[str, dict[str, Any]]:
         """Current catalog/manager overlay; original installation stays intact."""
-        resources = copy.deepcopy(self.development.runtime.resources)
+        resources = copy.deepcopy(self.development.selection.resources)
         if self.preactivation is not None:
             for row in (self.preactivation.resources.manager, self.preactivation.resources.catalog):
                 resources[_key(row)] = copy.deepcopy(row)
@@ -210,7 +210,8 @@ def prepare_staging_forward(*, registration: PoolRegistrationRequest, observatio
 
 def prepare_shared_pool_handoff(*, runtime: DevelopmentRuntimeInstallRequest,
         observation: dict[str, Any], legacy: CompletedPoolCutover, repo_root: Path,
-        preactivation: CompletedPreactivationCatalog | None = None) -> SharedPoolHandoffPlan:
+        preactivation: CompletedPreactivationCatalog | None = None,
+        schema_successor: CompletedDevelopmentSchemaSuccessor | None = None) -> SharedPoolHandoffPlan:
     """Compose completed CLOSED dev and current staging without replaying either.
 
     The complete migration contract is used only for fixed staging projection.
@@ -219,28 +220,28 @@ def prepare_shared_pool_handoff(*, runtime: DevelopmentRuntimeInstallRequest,
     The protected parent still owns live sole-writer and provider qualification.
     """
     try:
-        development = prepare_development_activation(runtime)
+        development = prepare_development_activation(runtime, schema_successor=schema_successor)
         completed = development.runtime
         database = completed.request.database
-        pool = database.manager.retained.request
-        registration = pool.registration
+        registration = development.selection.registration
         if preactivation is not None:
             from scripts.ops.nebius_pool_preactivation_operation import load_completed_preactivation
 
             selected = load_completed_preactivation(runtime=preactivation.retained.inputs.runtime,
                 reference=preactivation.retained.reference, repo_root=repo_root)
-            if selected != preactivation or selected.retained.runtime != runtime:
+            if (selected != preactivation or selected.retained.runtime != runtime
+                    or selected.retained.inputs.schema_successor != (None if schema_successor is None else schema_successor.reference)):
                 raise ValueError
             registration = selected.retained.registration
-        participant = retained_development_participant(pool)
+        participant = development.selection.participant
         # The completed dev runtime retains its own verified registration source.
         # Staging can independently retain a different approved publication.
-        if (database.manager.publication.bundle.candidate != registration.candidate
+        if (development.selection.manager_publication.bundle.candidate != registration.candidate
                 or len(registration.spec.participants) != 2):
             raise ValueError
         staging = prepare_staging_forward(registration=registration, observation=observation,
             legacy=legacy, repo_root=repo_root)
-        controller = completed.resources['Deployment:loom-dev:loom-control-plane']
+        controller = development.selection.resources['Deployment:loom-dev:loom-control-plane']
         dev_guard = PoolGuardTarget(participant_id=participant.participant_id, namespace='loom-dev',
             namespace_uid=UUID(database.foundation.binding.namespace_uid), controller=copy.deepcopy(controller))
         migration = PoolMigrationRequest(registration=registration, guards=(dev_guard, staging.attachment.guard))
@@ -302,7 +303,11 @@ def prepare_shared_pool_handoff(*, runtime: DevelopmentRuntimeInstallRequest,
         if len(originals) != 2 or len(readers) != 2:
             raise ValueError
         history = dict(legacy.history)
-        catalog_files = {} if preactivation is None else preactivation.files
+        catalog_files = {} if schema_successor is None else dict(schema_successor.files)
+        if preactivation is not None:
+            if any(path in catalog_files and catalog_files[path] != raw for path, raw in preactivation.files.items()):
+                raise ValueError
+            catalog_files.update(preactivation.files)
         if any(path in completed.files and completed.files[path] != raw for path, raw in catalog_files.items()):
             raise ValueError
         for path, raw in {**completed.files, **catalog_files}.items():

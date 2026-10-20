@@ -36,7 +36,7 @@ def execution():
         duplicate=False, continued=False, compressed=False, late_drift=False, reads=0)
 
 
-def observe(state):
+def observe(state, *, namespace='loom-dev'):
     name = 'scripts.ops.nebius_development_runtime_job'
     if importlib.util.find_spec(name) is None:
         pytest.fail('shared runtime Job execution evidence is missing')
@@ -55,7 +55,7 @@ def observe(state):
             return httpx.Response(200, json={'apiVersion': 'v1', 'kind': 'PodList',
                 'metadata': {'continue': 'next'} if state.continued else {},
                 'items': [state.pod, state.pod] if state.duplicate else [state.pod]})
-        assert path.startswith('/api/v1/namespaces/loom-dev/pods/loom-dev-catalog-test-abc')
+        assert path.startswith('/api/v1/namespaces/' + namespace + '/pods/loom-dev-catalog-test-abc')
         if path.endswith('/log'):
             assert dict(message.url.params) == {'container': 'setup', 'limitBytes': '16384', 'timestamps': 'false'}
             if state.late_drift:
@@ -74,7 +74,16 @@ def observe(state):
             state.proofs.append(proof)
 
         return importlib.import_module(name).read_runtime_job(client=client, read=read,
-            recorded=recorded, private_inputs=lambda: None, region='eu-north1', report_field='catalog', validate=validate)
+            recorded=recorded, private_inputs=lambda: None, region='eu-north1', report_field='catalog', validate=validate,
+            **({'namespace': namespace} if namespace != 'loom-dev' else {}))
+
+
+def test_independent_manager_job_evidence_is_explicitly_namespace_bound(execution):
+    namespace = 'loom-nebius-management-dev'
+    execution.resources['job']['metadata']['namespace'] = execution.pod['metadata']['namespace'] = namespace
+    assert observe(execution, namespace=namespace)['catalog'] == execution.report
+    with pytest.raises(ValueError):
+        observe(execution)
 
 
 def test_catalog_job_receipt_requires_complete_sole_pod_and_initializer(execution):

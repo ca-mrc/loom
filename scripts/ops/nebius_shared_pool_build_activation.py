@@ -15,7 +15,6 @@ from typing import Any
 from uuid import uuid4
 
 from scripts.ops import nebius_certificates as private_state
-from scripts.ops.nebius_development_pool_registration import development_profile_catalog
 from scripts.ops.nebius_development_runtime_install import _read
 from scripts.ops.nebius_development_runtime_retained import qualify_build_policy_spec
 from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
@@ -204,7 +203,7 @@ class HTTPSSharedBuildActivation(ManagementKubernetesTransport):
         if (not isinstance(checking, dict) or type(generation) is not int or generation < 1
                 or type(status.get('observedGeneration')) is not int or status['observedGeneration'] < generation):
             return False
-        catalog = development_profile_catalog(plan.runtime.request.database.manager.retained.request)
+        catalog = plan.selection.profiles
         profile = catalog.task_images[0] if catalog.task_images else catalog.application_images[0]
         namespace = plan.build_namespace_original['metadata']['name']
         probe = build_policy_rejection_probe(namespace=namespace, service_account=profile.target.service_account_name,

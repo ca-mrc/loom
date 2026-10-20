@@ -503,7 +503,7 @@ def configure_platform(
                 for key, value in _HISTORICAL_CAPACITY_POLICY.items()
             )
         )
-        managed = config.get("schema_version") == "loom.nebius-managed-environment.v1"
+        managed = config.get("schema_version") in {"loom.nebius-managed-environment.v1", "loom.nebius-environment-platform.v2"}
         if managed and retained_operator_policy and existing_policy is not None:
             # Preserve operator resource limits without preserving standalone
             # execution authority during a managed import/reconfigure. The

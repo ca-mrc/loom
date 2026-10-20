@@ -1,5 +1,11 @@
 # Independent Nebius deployment
 
+For full environments on a platform-owned shared pool, use the
+[independent lifecycle procedure](nebius-environment-lifecycle.md). It covers
+protected target installation, provision/import, enrollment, activation,
+release/rollback and recovery. The procedures below also retain historical
+deployment and shared-handoff paths.
+
 Nebius is the image publication path for both development and production.
 `nebius-candidate` publishes the seven manifest-owned AMD64 images from an exact
 `dev` commit. Production promotes those same immutable digest references through
@@ -720,6 +726,15 @@ releases or pool build recipes, relabel a candidate's schema, or select a newer
 incompatible image to bypass this check. The source-bound protected bundle still
 pins the installer independently. Existing v1 inputs keep their single-source
 contract and cannot contain either v2 selection field.
+
+After that exact-schema installation is complete, an unactivated shared-dev
+runtime with a configured application builder can use the protected
+[closed-development schema successor](nebius-environment-lifecycle.md#upgrade-an-unactivated-shared-development-runtime).
+It upgrades the shared and independent manager databases under separate candidate
+selections, and advances the runtime, personal releases, build recipe and catalog
+together. Its retained successor feeds later activation/handoff while preserving
+these original installation receipts. Image-only release still rejects a schema
+change.
 
 Preflight performs read-only qualification and writes no installation state.
 Installation stages the fixed SQL setup, material, read-only authority and build

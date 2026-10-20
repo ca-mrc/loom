@@ -575,6 +575,25 @@ def test_fresh_bootstrap_repeat_and_database_privileges(
             closed = next(item["policy"] for item in policies if item["target_id"] == row.target_id)
             assert closed["enabled"] is False
             assert all(closed[key] == value for key, value in explicit.items() if key != "enabled")
+        # The independent v2 foundation uses the same closed bootstrap policy,
+        # without inheriting the legacy class-to-name registration contract.
+        from loom.nebius_environment_foundation import EnvironmentFoundationIdentityV2
+        from loom.nebius_platform_render import validate_environment
+
+        independent = dict(child.config, schema_version='loom.nebius-environment-platform.v2',
+            registration=EnvironmentFoundationIdentityV2(schema_version='loom.environment-foundation-identity.v2',
+                environment_id=row.environment_id, incarnation=row.incarnation, participant_id=uuid4(),
+                installation_id=uuid4(), pool_id=uuid4(), kind=row.kind, slug='independent',
+                cluster_id=row.cluster_id, physical_pool_id=row.physical_pool_id,
+                application_namespace=row.application_namespace, execution_namespace=row.execution_namespace,
+                build_namespace=row.build_namespace, target_id=row.target_id, public_host=row.public_host).model_dump(mode='json'))
+        validate_environment(independent)
+        api('PUT', capacity_path, explicit)
+        bootstrap.configure_platform(independent, config_dir=tmp_path, admin_secret=admin_path)
+        closed = next(item['policy'] for item in api('GET', 'execution-capacity/status')['targets']
+            if item['target_id'] == row.target_id)
+        assert closed['enabled'] is False
+        assert all(closed[key] == value for key, value in explicit.items() if key != 'enabled')
         regional_environment, regional_candidate, regional_profile = request.getfixturevalue(
             "regional_inputs"
         )
