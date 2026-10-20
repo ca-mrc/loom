@@ -6,6 +6,8 @@ import io
 import json
 import os
 import subprocess
+import tarfile
+import traceback
 import zipfile
 from pathlib import Path
 
@@ -149,6 +151,60 @@ def test_wheels_build_with_locked_hashed_backend_and_stable_timestamps(tmp_path,
     monkeypatch.setattr(subprocess, "run", run)
     module().build_wheels(tmp_path, uv=Path("/qualified/uv"))
     assert calls == ["loom", "loom-bundle-checksum"]
+
+
+@pytest.mark.parametrize("failure,expected", [
+    ("archive-exit", {"phase": "archive", "category": "process_exit", "exit": 128}),
+    ("build-exit", {"phase": "build", "package": "loom", "category": "artifact_download", "exit": 2}),
+    ("checksum-exit", {"phase": "build", "package": "loom-bundle-checksum", "category": "process_exit", "exit": 7}),
+    ("timeout", {"phase": "build", "package": "loom-bundle-checksum", "category": "timeout"}),
+    ("os-error", {"phase": "archive", "category": "os_error", "errno": 28}),
+    ("invalid-archive", {"phase": "extract", "category": "unclassified"}),
+    ("invalid-wheel", {"phase": "canonicalize", "category": "unclassified"}),
+])
+def test_wheel_failure_note_retains_only_safe_boundary_evidence(tmp_path, monkeypatch, failure, expected):
+    private = "secret-marker https://user:password@example.test /credential-location"
+    calls = []
+
+    def run(args, **kwargs):
+        if args[:2] == ["git", "archive"]:
+            calls.append("archive")
+            if failure == "os-error":
+                raise OSError(28, private)
+            if failure == "archive-exit":
+                return subprocess.CompletedProcess(args, 128, private.encode(), private.encode())
+            if failure == "invalid-archive":
+                return subprocess.CompletedProcess(args, 0, private.encode(), b"")
+            output = io.BytesIO()
+            with tarfile.open(fileobj=output, mode="w"):
+                pass
+            return subprocess.CompletedProcess(args, 0, output.getvalue(), b"")
+        package = args[args.index("--package") + 1]
+        calls.append(package)
+        if failure == "build-exit":
+            return subprocess.CompletedProcess(args, 2, private.encode(), b"Failed to download " + private.encode())
+        if package == "loom-bundle-checksum":
+            if failure == "checksum-exit":
+                return subprocess.CompletedProcess(args, 7, private.encode(), private.encode() * 4096)
+            if failure == "timeout":
+                raise subprocess.TimeoutExpired(args, 180, output=private.encode(), stderr=private.encode())
+            if failure == "invalid-wheel":
+                (tmp_path / "wheels" / "secret-marker.whl").write_bytes(private.encode())
+        return subprocess.CompletedProcess(args, 0, b"", b"")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    with pytest.raises(module().RolloutError) as caught:
+        module().build_wheels(tmp_path, uv=Path("/credential-location/uv"))
+    error = caught.value
+    assert str(error) == "exact-source ingress wheels could not be built"
+    assert error.__cause__ is None and error.__suppress_context__
+    notes = getattr(error, "__notes__", [])
+    assert len(notes) == 1, "wheel failure lost its safe boundary evidence"
+    assert notes[0].startswith("wheel-build: ") and len(notes[0]) < 512
+    assert json.loads(notes[0].removeprefix("wheel-build: ")) == expected
+    rendered = "".join(traceback.format_exception(error))
+    assert all(value not in rendered for value in ("secret-marker", "https://", "/credential-location"))
+    assert calls.count("archive") == 1 and len(calls) == len(set(calls)), "failed build retried"
 
 
 @pytest.mark.skipif(not os.environ.get("LOOM_TEST_INGRESS_REQUIREMENTS"), reason="actual reproducible wheel builds")
