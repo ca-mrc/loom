@@ -254,8 +254,10 @@ def test_single_model_keep_alive_transfers_only_completed_process(
             vr._LIVE_PROCESSES.remove(proc)
 
 
+@pytest.mark.parametrize("failure_at", ["process_exit", "settle", "probe"])
 def test_launch_vllm_cleans_up_on_startup_failure(
     monkeypatch: pytest.MonkeyPatch,
+    failure_at: str,
 ) -> None:
     """If wait_for_ready raises (server didn't come up), `_stop_process`
     is invoked on the subprocess rather than being orphaned. (When
@@ -281,12 +283,20 @@ def test_launch_vllm_cleans_up_on_startup_failure(
     stop_calls: list[object] = []
     monkeypatch.setattr(vr, "_stop_process", lambda p: stop_calls.append(p))
 
-    with pytest.raises(RuntimeError, match="exited prematurely"):
+    def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt("startup interrupted")
+
+    if failure_at == "settle":
+        monkeypatch.setattr(vr.time, "sleep", interrupted)
+    elif failure_at == "probe":
+        monkeypatch.setattr(vr, "_wait_for_ready", interrupted)
+    with pytest.raises(RuntimeError if failure_at == "process_exit" else KeyboardInterrupt):
         vr.launch_vllm(vr.VLLMLaunchSpec(
             model="meta-llama/Llama-3.1-8B", port=18235,
         ))
     # _stop_process was called on the failed subprocess
     assert stop_calls == [fake_proc]
+    assert fake_proc not in vr._LIVE_PROCESSES
 
 
 def test_launch_vllm_retries_on_bind_failure(
