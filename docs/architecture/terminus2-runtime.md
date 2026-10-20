@@ -153,6 +153,48 @@ The local step runner always includes `.loom/agent/**` in artifact patterns for
 `terminus-2` trials. The hosted compiler instead declares each canonical and
 native output path in the frozen runtime plan.
 
+### Failed command dispatch and shell-exit evidence
+
+Harbor normally writes each agent step after its command batch completes. Loom
+also persists the parsed turn and commands through the existing trajectory writer
+before dispatch, joined to the actual Gateway call. A failed write, cancellation,
+or expired attempt prevents keystrokes from being sent. The checkpoint poller and
+this dispatch boundary share one bridge lock; a later Harbor checkpoint supplies
+the terminal observation without duplicating the turn, commands or call.
+For the hosted adapter, this boundary closes the trusted local JSONL append
+before dispatch. The existing output archival path owns remote durability;
+dispatch does not wait for a remote object-store commit.
+
+New command events carry `recorded_before_dispatch=true`; this records parsed
+intent and does not prove that a command executed. Historical checkpoint-only
+events leave that field null. A shell-loss diagnostic explicitly records the
+no-replay policy and suppression of remaining commands in the current batch;
+commands already sent may have partially changed the task filesystem.
+
+The trial's tmux window retains a dead pane with `remain-on-exit`. Liveness checks
+inspect `pane_dead`, including shell exits that occur between model turns. Before
+recovery or terminal failure, Loom captures that session's pane exit status,
+signal and last 80 terminal lines. It redacts credentials before bounding the
+diagnostic to 16 KiB and appends a partial `terminus2_terminal_observation` with
+`capture_source=error_feedback` to the current command batch. These events use
+the ordinary canonical archive path. If diagnostics cannot be persisted, Loom
+does not destroy the dead pane or send replacement commands.
+
+Recovery remains limited to once per attempt and never replays failed or
+remaining in-flight keystrokes. It recreates only the trial's fixed session;
+server-wide options and other tmux sessions are not changed. A second loss fails
+closed. A command-caused shell exit is evidence of agent behavior; session loss
+alone is insufficient to claim an infrastructure failure.
+
+After setup, the pinned Harbor session binds its operational target to
+`=canonical-session-name:` permanently for that instance. This applies exact
+session matching to send-keys, oversized-command paste-buffer, captures and
+liveness checks, including a session exit between the check and actual send.
+The cached creation command retains the literal canonical name and uses an exact
+target for pipe-pane; recovery never creates a session named with `=` or `:`.
+Harbor upgrades must preserve this creation/target distinction and pass the real
+same-prefix collision/race acceptance test.
+
 ## Exception identity
 
 Loom embeds Harbor's agent rather than Harbor's Trial orchestrator. When the

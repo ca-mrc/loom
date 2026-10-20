@@ -11,6 +11,7 @@ import httpx
 import pytest
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from fastapi import FastAPI
+from pydantic import SecretStr
 from sqlalchemy import delete, select
 
 from loom.admin_secret import AdminSecretVerifier
@@ -21,6 +22,7 @@ from loom.pipeline.keys import canonical_digest
 from loom_cli.catalog_provision import AgentRow, CatalogRows, PostgresCatalogStore
 from loom_control_plane.routes.admin import router as admin_router
 from loom_service.batch_runner import _materialize_trial_config
+from loom_service.storage import create_minio_client
 from tests.integration.test_service_batches_crud import (
     RAW_ADMIN_TOKEN,
     _automatic_service_execution_task_config,
@@ -31,6 +33,7 @@ from tests.integration.test_service_batches_crud import (
 from tests.integration.test_service_batches_crud import camp_setup as camp_setup
 from tests.support.agent_runtime import release
 from tests.support.execution_image_admission import _PRIVATE_KEY, IMAGE_ADMISSION_KEYRING
+from tests.support.task_image_source import publish_dockerfile
 
 
 def _cp(app: FastAPI) -> FastAPI:
@@ -123,7 +126,7 @@ async def test_registration_real_auth_idempotency_rebind_and_public_catalog(
 @pytest.mark.parametrize("combinations", [False, True])
 @pytest.mark.parametrize("runtime_mode", ["frozen", "current", "unavailable", "no_controller", "prebound", "legacy", "other_agent", "incompatible", "incompatible_frozen"])
 async def test_public_batch_freezes_versions_and_rerun_keeps_snapshot(
-    camp_setup, postgres_url, combinations, runtime_mode,
+    camp_setup, postgres_url, shared_minio, combinations, runtime_mode,
 ):
     app, user_token, team = camp_setup
     a, b = release("a-" + uuid4().hex), release("b-" + uuid4().hex, "9")
@@ -131,12 +134,22 @@ async def test_public_batch_freezes_versions_and_rerun_keeps_snapshot(
     if runtime_mode == "incompatible":
         a = a.model_copy(update={"publisher_source_revision": old_bridge})
     profile = _service_execution_runtime_profile()
+    storage = shared_minio.get_config()
     app.state.settings = app.state.settings.model_copy(
         update={
             "service_execution_runtime_profile_json": profile.model_dump_json(),
+            "minio_endpoint": f"http://{storage['endpoint']}",
+            "minio_access_key": SecretStr(storage["access_key"]),
+            "minio_secret_key": SecretStr(storage["secret_key"]),
         }
     )
     task_id = "local/version-" + uuid4().hex
+    source_client = create_minio_client(app.state.settings, endpoint_url=app.state.settings.minio_endpoint)
+    source_prefix = "runtime-versions/" + uuid4().hex + "/"
+    source, source_provenance = publish_dockerfile(
+        source_client, bucket=app.state.settings.artifacts_bucket,
+        prefix=source_prefix, checksum="c" * 64,
+    )
     target_id = "version-target-" + uuid4().hex
     class_id = NEBIUS_CPU_EXECUTION_CLASS_V1.class_id
     now = datetime.now(UTC)
@@ -178,22 +191,14 @@ async def test_public_batch_freezes_versions_and_rerun_keeps_snapshot(
         )
         task_config = _automatic_service_execution_task_config(task_id)
         task_config["environment"].pop("docker_image")
-        task_config["environment"]["dockerfile"] = "Dockerfile"
+        task_config["environment"]["dockerfile"] = "environment/Dockerfile"
         session.add(
             Task(
                 id=task_id,
                 checksum="c" * 64,
                 config=task_config,
-                source="s3://artifacts/task/",
-                source_provenance={
-                    "service_execution_input": {
-                        "schema_version": "loom.service-execution-input.v1",
-                        "manifest_uri": "s3://artifacts/task.json",
-                        "manifest_sha256": "sha256:" + "d" * 64,
-                        "file_count": 3,
-                        "total_bytes": 4096,
-                    }
-                },
+                source=source,
+                source_provenance=source_provenance,
                 license="MIT",
             )
         )
@@ -394,3 +399,6 @@ async def test_public_batch_freezes_versions_and_rerun_keeps_snapshot(
             await session.execute(
                 delete(Agent).where(Agent.version.in_([a.agent_version, b.agent_version]))
             )
+        for key in (source_prefix + "manifest.json", source_prefix + "task/environment/Dockerfile"):
+            source_client.delete_object(Bucket=app.state.settings.artifacts_bucket, Key=key)
+        source_client.close()

@@ -32,7 +32,7 @@ from loom.models.trajectory import (
     Terminus2UserPromptEvent,
 )
 from loom.models.types import ModelSpec
-from loom.security.redaction import redact_text
+from loom.security.redaction import redact_mapping, redact_text
 from loom.trajectory.llm_call_events import llm_call_row_to_event
 
 if TYPE_CHECKING:
@@ -73,6 +73,7 @@ class HarborCheckpointBridge:
         self._seen_step_ids: set[int] = set()
         self._bridged_agent_episodes = 0
         self._provenance_emitted = False
+        self._dispatched_steps: dict[int, tuple[str, str, int]] = {}
 
     def _next_seq(self) -> int:
         seq = self._seq
@@ -108,6 +109,62 @@ class HarborCheckpointBridge:
         completeness: str = "full",
         allow_incomplete: bool = False,
     ) -> int:
+        async with self._seq_lock:
+            return await self._sync_trajectory_file(
+                path, completeness=completeness, allow_incomplete=allow_incomplete,
+            )
+
+    async def record_dispatch(
+        self, step: dict[str, Any], *, episode: int,
+        preceding_steps: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """Durably record parsed commands before Harbor can send keystrokes.
+
+        Harbor writes an agent step only after command execution. Its failed
+        current turn must instead enter the existing append-only stream here.
+        The later checkpoint contributes its observation, without replaying the
+        turn/commands or consuming a second ledger row.
+        """
+        async with self._seq_lock:
+            step = redact_mapping(step)
+            if self._redact_payload is not None:
+                step = self._redact_payload(step)
+            if self._cp_client is not None:
+                await self._gateway_ledger.refresh(self._cp_client)
+            # Harbor may not dump parsing-error turns until a later successful
+            # episode. Consume those ledger joins before the current turn.
+            previous = redact_mapping(preceding_steps or [])
+            if self._redact_payload is not None:
+                previous = self._redact_payload(previous)
+            await self._sync_steps(previous, completeness="partial", allow_incomplete=False)
+            await self._bridge_agent_step(
+                step, completeness="partial", episode=episode, dispatch_only=True,
+            )
+
+    async def record_session_loss(self, text: str) -> None:
+        """Attach bounded shell-exit evidence to the current command batch."""
+        async with self._seq_lock:
+            if not self._dispatched_steps:
+                raise CheckpointBridgeError("tmux loss without a persisted command turn")
+            turn_id, batch_id, count = self._dispatched_steps[max(self._dispatched_steps)]
+            redacted = redact_text(text)
+            if self._redact_payload is not None:
+                redacted = str(self._redact_payload(redacted))
+            raw = redacted.encode("utf-8")
+            bounded = raw[:16384].decode("utf-8", "ignore")
+            await self._trajectory.append(Terminus2TerminalObservationEvent(
+                emitted_at=datetime.now(UTC), trial_id=self._trial_id,
+                step_id=self._step_id, seq=self._next_seq(), turn_id=turn_id,
+                command_batch_id=batch_id, observation_id=str(uuid4()), text=bounded,
+                capture_source="error_feedback", byte_len=len(bounded.encode("utf-8")),
+                truncated=len(raw) > 16384, completeness="partial",
+                content_hash=hashlib.sha256(bounded.encode("utf-8")).hexdigest(),
+                redaction_applied=bounded != text, is_aggregate=count > 1,
+            ))
+
+    async def _sync_trajectory_file(
+        self, path: Path, *, completeness: str, allow_incomplete: bool,
+    ) -> int:
         if not path.is_file():
             return 0
         if self._cp_client is not None:
@@ -116,9 +173,17 @@ class HarborCheckpointBridge:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             return 0
+        data = redact_mapping(data)
         if self._redact_payload is not None:
             data = self._redact_payload(data)
         steps = data.get("steps") or []
+        return await self._sync_steps(
+            steps, completeness=completeness, allow_incomplete=allow_incomplete,
+        )
+
+    async def _sync_steps(
+        self, steps: list[dict[str, Any]], *, completeness: str, allow_incomplete: bool,
+    ) -> int:
         synced = 0
         for step in steps:
             if not isinstance(step, dict):
@@ -174,6 +239,7 @@ class HarborCheckpointBridge:
         *,
         completeness: str,
         episode: int,
+        dispatch_only: bool = False,
     ) -> None:
         metrics = step.get("metrics") or {}
         if not metrics:
@@ -190,13 +256,8 @@ class HarborCheckpointBridge:
         # step 1, first agent turn is 2). loom_episode / llm_calls.episode
         # count Harbor agent loops. Join on the nth bridged agent step,
         # not Harbor step_id.
-        llm_row = self._gateway_ledger.resolve_for_metrics(
-            metrics,
-            episode=episode,
-        )
-        gateway_request_id = str(llm_row["id"])
-        turn_id = str(uuid4())
-        batch_id = str(uuid4())
+        harbor_step_id = int(step["step_id"])
+        dispatched = self._dispatched_steps.get(harbor_step_id)
         tool_calls = step.get("tool_calls") or []
         observation = step.get("observation") or {}
         obs_results = observation.get("results") or []
@@ -219,9 +280,15 @@ class HarborCheckpointBridge:
         reasoning_text = (
             str(reasoning_content) if isinstance(reasoning_content, str) else ""
         )
-        harbor_step_id = int(step["step_id"])
+        if dispatched is not None:
+            turn_id, batch_id, _ = dispatched
+        else:
+            llm_row = self._gateway_ledger.resolve_for_metrics(metrics, episode=episode)
+            gateway_request_id = str(llm_row["id"])
+            turn_id = str(uuid4())
+            batch_id = str(uuid4())
 
-        if self._emit_llm_call_events:
+        if dispatched is None and self._emit_llm_call_events:
             await self._trajectory.append(
                 llm_call_row_to_event(
                     llm_row,
@@ -230,41 +297,18 @@ class HarborCheckpointBridge:
                 ),
             )
 
-        await self._trajectory.append(
-            Terminus2TurnEvent(
-                emitted_at=datetime.now(UTC),
-                trial_id=self._trial_id,
-                step_id=self._step_id,
-                seq=self._next_seq(),
-                turn_id=turn_id,
-                turn_index=max(0, harbor_step_id - 2),
-                gateway_request_id=gateway_request_id,
-                parse_state="ok",
-                completion_state=completion_state,
-                analysis=analysis,
-                plan=plan,
-                raw_response_excerpt=harbor_message[:2000],
-                reasoning_content=reasoning_text,
-                harbor_step_id=harbor_step_id,
-            ),
-        )
-
-        for idx, tc in enumerate(commands):
-            args = tc.get("arguments") or {}
-            await self._trajectory.append(
-                Terminus2CommandEvent(
-                    emitted_at=datetime.now(UTC),
-                    trial_id=self._trial_id,
-                    step_id=self._step_id,
-                    seq=self._next_seq(),
-                    turn_id=turn_id,
-                    command_batch_id=batch_id,
-                    command_id=str(tc.get("tool_call_id") or uuid4()),
-                    index=idx,
-                    keystrokes=str(args.get("keystrokes") or ""),
-                    duration_sec=float(args.get("duration") or 1.0),
-                ),
+        if dispatched is None:
+            await self._emit_dispatch(
+                step=step, turn_id=turn_id, batch_id=batch_id,
+                gateway_request_id=gateway_request_id, completion_state=completion_state,
+                analysis=analysis, plan=plan, reasoning_text=reasoning_text,
+                harbor_message=harbor_message, commands=commands,
+                recorded_before_dispatch=True if dispatch_only else None,
             )
+            self._dispatched_steps[harbor_step_id] = (turn_id, batch_id, len(commands))
+
+        if dispatch_only:
+            return
 
         if commands and not obs_text and completeness == "full":
             raise CheckpointBridgeError(
@@ -291,6 +335,49 @@ class HarborCheckpointBridge:
                     content_hash=hashlib.sha256(redacted.encode()).hexdigest(),
                     redaction_applied=bool(obs_text) and redacted != obs_text,
                     is_aggregate=len(commands) > 1,
+                ),
+            )
+
+    async def _emit_dispatch(
+        self, *, step: dict[str, Any], turn_id: str, batch_id: str,
+        gateway_request_id: str, completion_state: str, analysis: str, plan: str,
+        reasoning_text: str, harbor_message: str, commands: list[dict[str, Any]],
+        recorded_before_dispatch: bool | None,
+    ) -> None:
+        await self._trajectory.append(
+            Terminus2TurnEvent(
+                emitted_at=datetime.now(UTC),
+                trial_id=self._trial_id,
+                step_id=self._step_id,
+                seq=self._next_seq(),
+                turn_id=turn_id,
+                turn_index=max(0, int(step["step_id"]) - 2),
+                gateway_request_id=gateway_request_id,
+                parse_state="ok",
+                completion_state=completion_state,
+                analysis=analysis,
+                plan=plan,
+                raw_response_excerpt=harbor_message[:2000],
+                reasoning_content=reasoning_text,
+                harbor_step_id=int(step["step_id"]),
+            ),
+        )
+
+        for idx, tc in enumerate(commands):
+            args = tc.get("arguments") or {}
+            await self._trajectory.append(
+                Terminus2CommandEvent(
+                    emitted_at=datetime.now(UTC),
+                    trial_id=self._trial_id,
+                    step_id=self._step_id,
+                    seq=self._next_seq(),
+                    turn_id=turn_id,
+                    command_batch_id=batch_id,
+                    command_id=str(tc.get("tool_call_id") or uuid4()),
+                    index=idx,
+                    keystrokes=str(args.get("keystrokes") or ""),
+                    duration_sec=float(args.get("duration") or 1.0),
+                    recorded_before_dispatch=recorded_before_dispatch,
                 ),
             )
 

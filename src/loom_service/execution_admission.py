@@ -7,6 +7,7 @@ transaction; admission never commits or imports route modules.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
 from typing import Any, NoReturn
 
@@ -34,8 +35,11 @@ from loom.service_execution_materialization import (
     load_service_execution_runtime_profile,
     validate_task_resource_requests,
 )
+from loom.task_image_errors import PREPARATION_ERRORS
+from loom.task_image_failure import image_preparation_failure
 from loom.verifier_runtime import apply_legacy_verifier_default
 from loom_service.metrics import SUBMISSION_REJECTS_TOTAL
+from loom_service.task_image_admission import ImagePreparationReader
 from loom_service.worker_backends import (
     get_active_backends,
     get_service_execution_backend_pools,
@@ -249,6 +253,7 @@ async def admit_execution_backend(
     runtime_profile_json: str,
     resolve_versions: bool = True,
     automatic_only: bool = False,
+    image_preparation_reader: ImagePreparationReader | None = None,
 ) -> ServiceExecutionRuntimeProfileV1 | None:
     """Require a native target, or a worker in explicit local development."""
     reject_unsupported_hosted_backend(backend)
@@ -267,15 +272,16 @@ async def admit_execution_backend(
             select(
                 Task.id, Task.config, Task.source_provenance, Task.checksum,
                 Task.legacy_separate_verifier_checksum,
+                Task.source,
             ).where(Task.id.in_(list(task_ids))),
         )
     ).all()
     configs_by_id = {
         str(task_id): (
             TaskConfig.model_validate(config), dict(source_provenance or {}),
-            checksum, legacy_checksum,
+            checksum, legacy_checksum, source,
         )
-        for task_id, config, source_provenance, checksum, legacy_checksum in task_rows
+        for task_id, config, source_provenance, checksum, legacy_checksum, source in task_rows
     }
     if backend == NEBIUS_BACKEND:
         parsed_trials: tuple[TrialConfig, ...] | None = None
@@ -297,6 +303,7 @@ async def admit_execution_backend(
         incompatible_task_ids: list[str] = []
         rejection_reasons: dict[str, list[str]] = {}
         automatic_profile_used = False
+        image_checks = []
         for task_id in task_ids:
             task_entry = configs_by_id.get(task_id)
             task_config = task_entry[0] if task_entry is not None else None
@@ -345,6 +352,9 @@ async def admit_execution_backend(
                     )
                 if profile is None:
                     reasons = (*reasons, "runtime_profile_unavailable")
+                if not reasons and task_config.environment.dockerfile is not None:
+                    assert task_entry is not None
+                    image_checks.append((task_id, task_config, task_entry[4], provenance, task_entry[2]))
             if (
                 task_config is None
                 or (binding is not None and binding.logical_pool_id != NEBIUS_LOGICAL_POOL_ID)
@@ -353,16 +363,38 @@ async def admit_execution_backend(
                 incompatible_task_ids.append(task_id)
                 if reasons:
                     rejection_reasons[task_id] = list(dict.fromkeys(reasons))
+        semaphore = asyncio.Semaphore(8)
+
+        async def check_image(entry: tuple[str, TaskConfig, str | None, dict[str, Any], str]) -> tuple[str, str | None]:
+            task_id, task, source, provenance, checksum = entry
+            async with semaphore:
+                reason = (await image_preparation_reader(task, source, provenance, checksum)
+                          if image_preparation_reader is not None else "image_preparation_input_invalid")
+            return task_id, reason
+
+        for task_id, reason in await asyncio.gather(*(check_image(entry) for entry in image_checks)):
+            if reason is not None:
+                incompatible_task_ids.append(task_id)
+                rejection_reasons[task_id] = [reason]
         if incompatible_task_ids:
             reject_submission(
                 reason="nebius_task_incompatible",
-                status_code=400,
+                status_code=(503 if rejection_reasons and all(
+                    PREPARATION_ERRORS.get(reason, False)
+                    for reasons in rejection_reasons.values() for reason in reasons
+                ) else 400),
                 detail={
                     "reason": "nebius_task_incompatible",
                     "backend": NEBIUS_BACKEND,
                     "logical_pool_id": NEBIUS_LOGICAL_POOL_ID,
                     "task_ids": incompatible_task_ids,
                     "rejection_reasons": rejection_reasons,
+                    **({"preparation_failures": preparation_failures} if (preparation_failures := {
+                        task_id: failure
+                        for task_id, reasons in rejection_reasons.items()
+                        for reason in reasons
+                        if (failure := image_preparation_failure(reason)) is not None
+                    }) else {}),
                 },
             )
         service_pools = await get_service_execution_backend_pools(session)
