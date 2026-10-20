@@ -1076,6 +1076,29 @@ async def test_attempt_network_policy_allows_only_dns_and_gateway(built_images: 
             await asyncio.to_thread(container.stop)
 
 
+async def _runtime_pod_logs(core, namespace, pod_name, runtime_plan):
+    """Capture bounded fixture diagnostics before the disposable cluster exits."""
+    logs: dict[str, str] = {}
+    for container_name in (
+        "runtime-materializer",
+        *(item.role_name for item in runtime_plan.sidecars),
+        "execution",
+    ):
+        try:
+            logs[container_name] = await asyncio.to_thread(
+                core.read_namespaced_pod_log,
+                pod_name,
+                namespace,
+                container=container_name,
+                tail_lines=200,
+                limit_bytes=65536,
+                _request_timeout=5,
+            )
+        except Exception as exc:
+            logs[container_name] = f"unavailable: {exc}"
+    return logs
+
+
 @pytest.mark.timeout(360)
 @pytest.mark.parametrize("prepared_fixture,termination", [(False, None), (True, "deadline"), (True, "fixture_exit")],
                          ids=["trusted-sidecar", "prepared-fixture-deadline", "prepared-fixture-exit"])
@@ -1218,20 +1241,10 @@ async def test_runtime_executes_task_native_sidecar_and_verifier_without_docker_
                     if failed_pods.items:
                         failed_pod = failed_pods.items[0]
                         details = client.ApiClient().sanitize_for_serialization(failed_pod.status)
-                        for container_name in (
-                            "runtime-materializer",
-                            *(item.role_name for item in ExecutionRuntimePlanV1.model_validate(lease.runtime_contract_json).sidecars),
-                            "execution",
-                        ):
-                            try:
-                                logs[container_name] = await asyncio.to_thread(
-                                    core.read_namespaced_pod_log,
-                                    failed_pod.metadata.name,
-                                    namespace,
-                                    container=container_name,
-                                )
-                            except Exception as exc:
-                                logs[container_name] = f"unavailable: {exc}"
+                        logs = await _runtime_pod_logs(
+                            core, namespace, failed_pod.metadata.name,
+                            ExecutionRuntimePlanV1.model_validate(lease.runtime_contract_json),
+                        )
                     raise AssertionError(
                         f"runtime Job failed: {observation} pod={details} logs={logs}"
                     )
@@ -1277,8 +1290,12 @@ async def test_runtime_executes_task_native_sidecar_and_verifier_without_docker_
                     if current_pods.items
                     else None
                 )
+                logs = (await _runtime_pod_logs(
+                    core, namespace, current_pods.items[0].metadata.name,
+                    ExecutionRuntimePlanV1.model_validate(lease.runtime_contract_json),
+                )) if current_pods.items else {}
                 raise AssertionError(
-                    f"runtime Job did not succeed: observation={observation} pod={details}"
+                    f"runtime Job did not succeed: observation={observation} pod={details} logs={logs}"
                 )
 
             pods = await asyncio.to_thread(

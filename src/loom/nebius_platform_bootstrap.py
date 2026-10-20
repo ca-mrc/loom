@@ -65,6 +65,9 @@ ACTUATOR_TABLES = (
     "artifacts",
     *COMMON_EXECUTION_TABLES,
     "batches",
+    # Generic native claims must observe retained global-build ownership even
+    # before the separate global-pool participant grants are installed.
+    "nebius_pool_build_outbox",
     "trial_task_image_materializations",
     *ACTUATOR_TASK_IMAGE_WRITES,
 )
@@ -258,6 +261,7 @@ def _bootstrap_database(
                     read_only = {
                         "nebius_rollout_guard",
                         "nebius_pool_execution_outbox",
+                        "nebius_pool_build_outbox",
                         "trial_resource_usage",
                         "alembic_version",
                         "users",

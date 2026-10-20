@@ -235,6 +235,9 @@ this ownership exists before native observation and survives local lease expiry.
 An unclaimed global selection can still attach its exact first attempt. Attempts
 that never reserved resources or acquired global ownership do not block a
 successor; unrelated materializations remain eligible when capacity is available.
+The native actuator's bootstrap database role has read-only access to
+`nebius_pool_build_outbox` for this check, including before global-pool
+activation. The separate participant activation path owns write grants.
 
 ## Compatibility and verification
 
