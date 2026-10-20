@@ -176,13 +176,6 @@ def _make_deployment(
     )
 
 
-def _make_daemonset(ready: int, desired: int) -> _Workload:
-    return _Workload(
-        spec=None,
-        status=_Spec(desired_number_scheduled=desired, number_ready=ready),
-    )
-
-
 def _make_statefulset(ready: int, desired: int) -> _Workload:
     return _Workload(
         spec=_Spec(replicas=desired),

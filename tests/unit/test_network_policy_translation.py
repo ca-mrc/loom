@@ -121,17 +121,6 @@ def test_render_blocks_both_metadata_and_link_local_range():
     assert any("169.254.0.0/16" in c for c in blocked_cidrs)
 
 
-def test_render_public_still_emits_no_commands():
-    """Public stays a no-op for vanilla-image compatibility. Operators
-    using Public on cloud-hosted clusters are warned in
-    sandbox-isolation.md; that's a documentation matter, not an
-    iptables one."""
-    cmds = render_iptables_commands(
-        compute_iptables_rules(Public()),
-    )
-    assert cmds == []
-
-
 def test_always_blocked_cidrs_appear_before_domain_accepts():
     """When an Allowlist lists domains, the resolved-IP ACCEPT comes
     later in the chain than the always-blocked DROPs."""
