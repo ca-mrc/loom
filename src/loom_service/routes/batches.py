@@ -3206,7 +3206,7 @@ async def cancel_batch(
     require_scope(ctx, "submit")
     b = (
         await s.execute(
-            select(Batch).where(Batch.id == batch_id),
+            select(Batch).where(Batch.id == batch_id).with_for_update(),
         )
     ).scalar_one_or_none()
     if b is None:
@@ -3227,12 +3227,26 @@ async def cancel_batch(
             )
         )
     ).scalars().all()
+    # Fence fanout before HTTP. CP child admission holds this same parent lock,
+    # so every previously admitted child is in the snapshot above. The runner
+    # retries active children of cancelled batches after partial delivery failure.
+    await s.execute(
+        update(Batch).where(Batch.id == batch_id).values(
+            state="cancelled", result_status="cancelled", finished_at=b.finished_at or now,
+        ),
+    )
+    if actor is not None:
+        await write_admin_audit_event(
+            s, actor=actor, action="batch.cancel", target_type="batch",
+            target_id=str(batch_id), request=request,
+            metadata={"reason": redact_text(payload.reason) if payload and payload.reason else None,
+                      "team_id": str(b.team_id)},
+        )
+    # Also releases session-auth locks before CP independently revalidates them.
+    await s.commit()
     # The Control Plane owns the trial cancellation transition for every
     # backend. In protected staging this is also the only path that can move a
     # live claim to cancel-pending without releasing its concurrency lease.
-    if ctx.auth_kind == "session":
-        # CP session revalidation must not wait on this request's auth-row lock.
-        await s.commit()
     for trial_id in active_trial_ids:
         response = await forward(
             request.app.state.http_client,
@@ -3245,15 +3259,4 @@ async def cancel_batch(
         if response.status_code not in {200, 409}:
             return propagate(response)
 
-    await s.execute(
-        update(Batch).where(Batch.id == batch_id).values(state="cancelled", finished_at=now),
-    )
-    if actor is not None:
-        await write_admin_audit_event(
-            s, actor=actor, action="batch.cancel", target_type="batch",
-            target_id=str(batch_id), request=request,
-            metadata={"reason": redact_text(payload.reason) if payload and payload.reason else None,
-                      "team_id": str(b.team_id)},
-        )
-    await s.commit()
     return {"batch_id": str(batch_id), "state": "cancelled"}

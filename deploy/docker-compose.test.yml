@@ -28,7 +28,7 @@ services:
       MINIO_ROOT_USER: loomtest
       MINIO_ROOT_PASSWORD: loomtest
     ports:
-      - "59000:9000"
+      - "127.0.0.1:${LOOM_SYSTEM_MINIO_PORT:-59000}:9000"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 2s
@@ -38,7 +38,7 @@ services:
   registry:
     image: registry:2
     ports:
-      - "55000:5000"
+      - "127.0.0.1:${LOOM_SYSTEM_REGISTRY_PORT:-55000}:5000"
 
   llm-gateway:
     image: loom-llm-gateway:dev
@@ -59,7 +59,7 @@ services:
       minio:
         condition: service_healthy
     ports:
-      - "59100:9100"
+      - "127.0.0.1:${LOOM_SYSTEM_GATEWAY_PORT:-59100}:9100"
 
   control-plane:
     image: loom-control-plane:dev
@@ -82,7 +82,7 @@ services:
       minio:
         condition: service_healthy
     ports:
-      - "58080:8080"
+      - "127.0.0.1:${LOOM_SYSTEM_CONTROL_PLANE_PORT:-58080}:8080"
 
   worker:
     image: loom-worker:dev
@@ -143,7 +143,7 @@ services:
       # Docker runs on the host through the mounted socket, so loopback reaches
       # the registry's published host port and yields real RepoDigests for the
       # subsequent pull-only trial worker.
-      LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO: localhost:55000/loom-task-images
+      LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO: ${LOOM_SYSTEM_REGISTRY_REPO:-localhost:55000/loom-task-images}
       LOOM_WORKER_TASK_IMAGE_BUILDER_IDLE_EXIT_SECONDS: "120"
       LOOM_WORKER_TASK_IMAGE_STORAGE_PROBE_PATH: /run/loom/docker-storage-probe
     profiles: ["task-image-builder"]

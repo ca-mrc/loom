@@ -481,6 +481,7 @@ source_paths = [
   "src/loom_control_plane/service_execution_task_snapshot.py",
   "src/loom_control_plane/task_image_capacity.py",
   "src/loom_control_plane/task_image_capacity_wait.py",
+  "src/loom_control_plane/task_image_io_capacity.py",
   "src/loom_control_plane/task_image_materializations.py",
   "src/loom_execution_actuator/**",
   "src/loom_execution_capacity_collector/**",

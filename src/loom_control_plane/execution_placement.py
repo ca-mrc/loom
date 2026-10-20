@@ -180,17 +180,29 @@ class PlacementPlan:
     observed_lease_ids: frozenset[str]
 
 
+@dataclass(frozen=True)
+class PlacementConstraint:
+    """Frozen Kubernetes node affinity for a still-unobserved reservation."""
+
+    node_uids: frozenset[str]
+    allow_cold: bool = False
+
+
 def plan_placement(
     placement: CapacityPlacement,
     demands: Iterable[tuple[str, ResourceTotals]],
     *,
     sample: NodeTemplateSample | None,
+    constraints: dict[str, PlacementConstraint] | None = None,
 ) -> PlacementPlan:
     bins: list[list[int]] = []
+    bin_nodes: list[str | None] = []
+    constraints = constraints or {}
     observed: set[str] = set()
     for node in placement.nodes:
         observed.update(f"{pod.lease_id}:{pod.generation}" for pod in node.managed_pods)
         if node.ready and not node.unschedulable and not node.deleting:
+            bin_nodes.append(node.uid)
             bins.append(
                 [
                     *(
@@ -236,22 +248,42 @@ def plan_placement(
         ]
     )
     cold_count = 0
+    pending_node_uids = {
+        node.uid for node in placement.nodes
+        if not node.ready and not node.unschedulable and not node.deleting
+    }
+    # A future bin can count an already-provisioned, NotReady node only if
+    # every demand placed in that bin is allowed to land on that exact node.
+    cold_pending: dict[int, set[str]] = {}
+
+    def demand_order(item: tuple[str, ResourceTotals]) -> tuple[int | str, ...]:
+        key, resources = item
+        constraint = constraints.get(key)
+        # Pack immovable bindings before flexible bootstrap work, then prefer
+        # smaller allowed sets. Unconstrained best-fit ordering stays unchanged.
+        priority = 0 if constraint is None else 1 if constraint.allow_cold else 2
+        choices = 0 if constraint is None else -len(constraint.node_uids)
+        return priority, choices, *vector(resources), key
+
     # Stable best-fit decreasing avoids summing disjoint CPU and memory holes.
     # Preserve a deterministic order across transaction retries.
-    for _key, resources in sorted(
-        queued.items(), key=lambda item: (*vector(item[1]), item[0]), reverse=True
-    ):
+    for key, resources in sorted(queued.items(), key=demand_order, reverse=True):
         request = [*vector(resources), 1]
+        constraint = constraints.get(key)
         fitting = [
             i
             for i, free in enumerate(bins)
             if all(a <= b for a, b in zip(request, free, strict=True))
+            and (constraint is None or bin_nodes[i] in constraint.node_uids
+                 or (bin_nodes[i] is None and constraint.allow_cold))
         ]
         if fitting:
             index = min(
                 fitting, key=lambda i: tuple(b - a for a, b in zip(request, bins[i], strict=True))
             )
         else:
+            if constraint is not None and not constraint.allow_cold:
+                raise PlacementUnavailableError("execution_capacity_bound_node_unavailable")
             if cold is None:
                 raise PlacementUnavailableError("execution_capacity_node_allocatable_unknown")
             if any(a > b for a, b in zip(request, cold, strict=True)):
@@ -259,16 +291,34 @@ def plan_placement(
                     "execution_capacity_workload_exceeds_node_allocatable"
                 )
             bins.append(cold.copy())
+            bin_nodes.append(None)
             index = len(bins) - 1
+            cold_pending[index] = pending_node_uids.copy()
             cold_count += 1
+        if index in cold_pending and constraint is not None:
+            cold_pending[index].intersection_update(constraint.node_uids)
         bins[index] = [b - a for a, b in zip(request, bins[index], strict=True)]
-    # Count only raw nodes already visible to the provider, not its desired max.
-    pending_native = max(0, placement.node_group.node_count - len(placement.nodes))
-    pending_native += sum(
-        not node.ready and not node.unschedulable and not node.deleting for node in placement.nodes
-    )
+    # Distinct compatible NotReady nodes each offset at most one future bin.
+    # Anonymous provider nodes have no excluded Kubernetes name yet and can
+    # offset remaining bins. Never spend an excluded observed node as credit.
+    matched: dict[str, int] = {}
+
+    def match_pending(index: int, seen: set[str]) -> bool:
+        for uid in sorted(cold_pending[index]):
+            if uid in seen:
+                continue
+            seen.add(uid)
+            prior = matched.get(uid)
+            if prior is None or match_pending(prior, seen):
+                matched[uid] = index
+                return True
+        return False
+
+    pending_observed = (sum(match_pending(index, set()) for index in cold_pending)
+                        if constraints else min(cold_count, len(pending_node_uids)))
+    pending_anonymous = max(0, placement.node_group.node_count - len(placement.nodes))
     return PlacementPlan(
         cold_nodes=cold_count,
-        additional_nodes=max(0, cold_count - pending_native),
+        additional_nodes=max(0, cold_count - pending_observed - pending_anonymous),
         observed_lease_ids=frozenset(observed),
     )

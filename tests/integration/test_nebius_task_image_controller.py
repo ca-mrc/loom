@@ -148,11 +148,16 @@ async def test_claim_reserve_transaction_rolls_back_without_job_or_attempt(contr
     async def blocked(*args, **kwargs):
         raise ExecutionProvisioningBlockedError("execution_capacity_provider_quota_nodes_exceeded")
 
-    monkeypatch.setattr(MODULE + ".reserve_native_task_image_capacity", blocked)
-    await controller.run_once()
+    with monkeypatch.context() as waiting:
+        waiting.setattr(MODULE + ".reserve_native_task_image_capacity", blocked)
+        await controller.run_once()
     row, attempts = await rows(sessions, image_id)
     assert (row.state, row.lease_epoch, row.attempt_count) == ("queued", 0, 0)
     assert not attempts and not kube.ensure_calls
+    await controller.run_once()
+    row, attempts = await rows(sessions, image_id)
+    assert (row.state, row.lease_epoch, row.attempt_count) == ("running", 1, 1)
+    assert len(attempts) == 1 and kube.ensure_calls == 1
 
 
 @pytest.mark.parametrize("normalized_api", [False, True])
@@ -164,12 +169,16 @@ async def test_restart_recovers_ambiguous_create_once_and_persists_success_befor
         await controller.run_once()
     row, attempts = await rows(sessions, image_id)
     assert row.state == "claimed" and attempts[0].native_build["job_uid"] is None
+    frozen_claim = json.loads(attempts[0].native_build["configmap"]["data"]["claim.json"])
+    assert frozen_claim["io_full_avg10_max"] == controller.settings.io_full_avg10_max
+    assert attempts[0].native_build["io_full_avg10_max"] == frozen_claim["io_full_avg10_max"]
     if normalized_api:
         kube.jobs = {name: canonical_api_job(job) for name, job in kube.jobs.items()}
     expected_uid = next(iter(kube.jobs.values()))["metadata"]["uid"]
     await controller.run_once()
     row, attempts = await rows(sessions, image_id)
     assert row.state == "running" and attempts[0].native_build["job_uid"] == expected_uid
+    assert json.loads(attempts[0].native_build["configmap"]["data"]["claim.json"]) == frozen_claim
     assert kube.ensure_calls == 1
     kube.finish()
     kube.allow_delete = False
@@ -277,9 +286,6 @@ async def test_cancel_only_last_consumer_and_hold_capacity_until_cleanup(control
     assert (row.state, row.attempt_count) == ("queued", 0)
     await controller.run_once()
     assert (await rows(sessions, image_id))[0].attempt_count == 0
-    kube.allow_delete = True
-    await controller.run_once()
-    assert (await rows(sessions, image_id))[1][0].native_build["capacity_released_at"]
     async with sessions() as session, session.begin():
         first = await session.get(Trial, first_id)
         successor = Trial(id=uuid4(), team_id=team_id, task_id=first.task_id, batch_id=first.batch_id,
@@ -291,8 +297,15 @@ async def test_cancel_only_last_consumer_and_hold_capacity_until_cleanup(control
         await _reference_task_image_materializations(session, rows=[row])
     await controller.run_once()
     row, attempts = await rows(sessions, image_id)
+    assert (row.state, row.attempt_count, row.lease_epoch) == ("queued", 0, 1)
+    assert len(attempts) == 1 and kube.ensure_calls == 1
+    assert not attempts[0].native_build.get("capacity_released_at")
+    kube.allow_delete = True
+    await controller.run_once()
+    row, attempts = await rows(sessions, image_id)
     assert (row.state, row.attempt_count, row.lease_epoch) == ("running", 1, 2)
     assert [(a.attempt_number, a.lease_epoch) for a in attempts] == [(1, 1), (1, 2)]
+    assert attempts[0].native_build["capacity_released_at"]
     kube.finish()
     await controller.run_once()
     assert (await rows(sessions, image_id))[0].state == "ready"
@@ -447,26 +460,40 @@ async def test_multiple_owned_pods_fail_instead_of_renewing_forever(controller_s
     assert (await rows(sessions, image_id))[1][0].native_build["capacity_released_at"]
 
 
-async def test_expired_lease_is_not_renewed_and_cleanup_retains_capacity_until_gone(controller_setup, monkeypatch):
+async def test_expired_lease_waits_for_cleanup_while_unrelated_build_can_start(controller_setup):
     controller, sessions, team_id, kube = controller_setup
     image_id, _ = await seed_image(sessions, team_id)
     await controller.run_once()
+    _, attempts = await rows(sessions, image_id)
+    old_attempt_id = attempts[0].id
+    old_native = attempts[0].native_build
+    other_id, _ = await seed_image(sessions, team_id)
     expired = datetime.now(UTC) - timedelta(seconds=1)
     async with sessions() as session, session.begin():
         (await session.get(TaskImageMaterialization, image_id)).lease_expires_at = expired
-
-    async def no_claim():
-        return None
-
-    monkeypatch.setattr(controller, "_claim", no_claim)
     kube.allow_delete = False
     await controller.run_once()
     row, attempts = await rows(sessions, image_id)
     assert row.lease_expires_at == expired and not attempts[0].native_build.get("capacity_released_at")
+    assert (row.lease_epoch, row.attempt_count, len(attempts)) == (1, 1, 1)
+    assert attempts[0].native_build["capacity_reserved_at"] == old_native["capacity_reserved_at"]
+    assert (await rows(sessions, other_id))[0].state == "running"
+    assert len(kube.jobs) == 2 and kube.ensure_calls == 2
+    assert kube.delete_calls[-1] == (old_native["job_name"], old_native["job_uid"])
+    await controller.run_once()
+    assert (await rows(sessions, image_id))[0].lease_epoch == 1
+    assert kube.ensure_calls == 2
+    kube.finish()
+    stale_result = copy.deepcopy(kube.jobs[old_native["job_name"]])
     kube.allow_delete = True
     await controller.run_once()
     row, attempts = await rows(sessions, image_id)
-    assert row.lease_expires_at == expired and attempts[0].native_build["capacity_released_at"]
+    assert (row.state, row.lease_epoch, row.attempt_count) == ("running", 2, 2)
+    assert len(attempts) == 2 and attempts[0].native_build["capacity_released_at"]
+    assert kube.ensure_calls == 3 and old_native["job_name"] not in kube.jobs
+    await controller._record_result(old_attempt_id, stale_result)
+    row, _ = await rows(sessions, image_id)
+    assert row.state == "running" and not row.registry_images
 
 
 @pytest.mark.parametrize("cause,expected,retryable", [

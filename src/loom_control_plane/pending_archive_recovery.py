@@ -51,6 +51,7 @@ from loom_control_plane.service_execution_materializer import (
     _load_source,
     build_canonical_atif,
     build_canonical_events,
+    canonical_agent_version,
     validate_usage_accounting,
 )
 from loom_control_plane.service_execution_task_snapshot import (
@@ -321,7 +322,7 @@ async def project_oracle(
         trial_config=trial_config, runtime_result=runtime, trace_body=inputs["trajectory/events.jsonl"],
         verifier_body=inputs["verifier/output.json"], gateway_calls=[], exception_info=None)
     atif = build_canonical_atif(events, task_id=trial.task_id, agent_name=trial_config.agent_name,
-        agent_version=trial_config.agent_version or task_config.agent.version or "service-execution-v1")
+        agent_version=canonical_agent_version(trial_config, task_config))
     return {"trial_config_sha256": digest_bytes(canonical_document(trial.config)),
             "task_config_sha256": digest_bytes(canonical_document(snapshot.config)),
             "runtime_result_sha256": digest_bytes(canonical_document(runtime.model_dump(mode="json"))),

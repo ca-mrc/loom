@@ -56,6 +56,11 @@ def task_required_agent_capabilities(
     )
     if benchmark_id in _IMMUTABLE_WORKSPACE_EXEC_BENCHMARK_IDS:
         return declared | {"workspace_exec"}
+    # A task that builds its own image never runs in the response-only runner
+    # image, so only a workspace harness can execute it (#2054).
+    environment = task_config.get("environment")
+    if isinstance(environment, Mapping) and environment.get("dockerfile"):
+        return declared | {"workspace_exec"}
     return declared
 
 

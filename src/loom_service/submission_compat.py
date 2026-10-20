@@ -179,8 +179,9 @@ async def validate_submission_agent_task_pairs(
     raise AgentTaskIncompatibilityError(
         f"agent×task capability mismatch — {'; '.join(pairs)}. The listed agents "
         "cannot run these tasks at the platform level (e.g. oracle requires a "
-        "benchmark adapter that ships `solution/solve.sh`). Choose a compatible "
-        "agent or task.",
+        "benchmark adapter that ships `solution/solve.sh`, and response-only "
+        "direct-completion cannot run a task that builds its own image). Choose "
+        "a compatible agent or task.",
     )
 
 

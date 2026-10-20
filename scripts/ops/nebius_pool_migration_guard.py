@@ -17,7 +17,7 @@ import re
 import secrets
 import subprocess
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 from urllib.parse import urlencode
 from uuid import UUID
 
@@ -70,6 +70,9 @@ from loom.nebius_pool_contract import PoolParticipantV1
 from loom.nebius_pool_priority import PoolWorkOriginV1, pool_request_priority
 from loom.nebius_rollout_guard import ACTIVITY_SQL, LOCK_KEY
 from loom_service.environment_management.candidates import _json
+
+if TYPE_CHECKING:
+    from scripts.ops.nebius_pool_refresh import PoolManagerRefresh
 
 # The same settings instance is checked and used to open SQL. No new option or
 # probe module is required in retained old images: their existing typed settings
@@ -538,12 +541,14 @@ SELECT json_build_object('status','{'staged' if action == 'stage' else 'qualifie
 
 
 class KubectlPoolGuardAPI:
-    def __init__(self, *, request: PoolMigrationRequest, kubeconfig: Path, executable: Path):
+    def __init__(self, *, request: PoolMigrationRequest, kubeconfig: Path, executable: Path,
+                 refresh: PoolManagerRefresh | None = None):
         try:
             if (not kubeconfig.is_absolute() or kubeconfig != kubeconfig.resolve()
                     or not executable.is_absolute()):
                 raise ValueError
             self.request = request
+            self.refresh = refresh
             self.contract_sha256 = digest(migration_contract(request))
             self.kubeconfig = kubeconfig
             self.kubeconfig_sha256 = hashlib.sha256(private_state._private_read(kubeconfig, limit=512 * 1024)).hexdigest()
@@ -1042,8 +1047,12 @@ class KubectlPoolGuardAPI:
         qualify_database_destination(url, target.namespace)
         database = self._get("statefulset", "loom-postgres", target.namespace)
         service = self._get("service", "loom-postgres", target.namespace)
+        retained_database = binding.statefulset
+        if self.refresh is not None:
+            database, retained_database = self.refresh.database_documents(
+                original=retained_database, current=database, service=binding.service)
         pod = qualify_database_pod(namespace=target.namespace, database=database, service=service,
-            retained_database=binding.statefulset, retained_service=binding.service,
+            retained_database=retained_database, retained_service=binding.service,
             listing=self._pods(target.namespace, "loom-postgres"))
         self._database_backend(target, service=service, pod=pod)
         self._namespaces(target)

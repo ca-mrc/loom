@@ -13,6 +13,7 @@ from sqlalchemy import select, update
 
 from loom.db.nebius_pool_schema import NebiusPoolRequest
 from loom.db.schema import TaskImageMaterialization, TaskImageMaterializationAttempt, Trial
+from loom_control_plane.task_image_materializations import claim_task_image_materialization
 from loom_execution_actuator.pool_build_driver import PoolBuildDriver
 from tests.integration.test_nebius_pool_build_driver import selected
 from tests.integration.test_nebius_pool_observation_registry import sessions as sessions
@@ -67,6 +68,47 @@ async def local_rows(sessions, request):
         row = await session.get(TaskImageMaterialization, request.key.local_work_id)
         attempt = (await session.scalars(select(TaskImageMaterializationAttempt))).one()
         return row, attempt
+
+
+@pytest.mark.parametrize("observed", [False, True])
+async def test_generic_claim_waits_for_live_global_build_cleanup(sessions, tmp_path, observed):
+    from loom_execution_actuator.pool_build_runtime import PoolNativeBuildController
+
+    app, token, _, request, journal = await selected(sessions, tmp_path)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as http:
+        driver = PoolBuildDriver(outbox=journal, management=client(http, token))
+        handoff = await driver.advance(request.key)
+        job = await gateway_job(sessions, handoff)
+        if observed:
+            await PoolNativeBuildController(driver=driver, kubernetes=Reader(job)).run_once()
+        async with sessions.begin() as session:
+            await session.execute(update(TaskImageMaterialization).where(
+                TaskImageMaterialization.id == request.key.local_work_id,
+            ).values(lease_expires_at=datetime.now(UTC) - timedelta(seconds=1)))
+        saved = await journal.get(request.key)
+        row, attempt = await local_rows(sessions, request)
+        assert saved.phase == "active" and saved.attempt_id == attempt.id
+        async with sessions() as session:
+            managed = await session.get(NebiusPoolRequest, handoff.reservation_id)
+            assert managed.phase == "observed" and managed.cleanup_observation_id is None
+        if observed:
+            assert attempt.native_build["pool_reservation_id"] == str(handoff.reservation_id)
+            assert "capacity_reserved_at" not in attempt.native_build
+        else:
+            assert attempt.native_build is None
+        async with sessions.begin() as session:
+            successor = await claim_task_image_materialization(
+                session, builder_id="ordinary-builder", cpu_arch="x86_64",
+            )
+            assert successor is None, (
+                "Claimed successor before global cleanup: "
+                f"epoch={successor.lease_epoch} observed={observed}"
+            )
+        after, retained = await local_rows(sessions, request)
+        assert (after.state, after.lease_epoch, after.attempt_count, after.claimed_by) == (
+            row.state, row.lease_epoch, row.attempt_count, row.claimed_by)
+        assert retained.id == attempt.id and retained.native_build == attempt.native_build
+        assert await journal.get(request.key) == saved
 
 
 async def test_waiting_for_gateway_heartbeats_without_inventing_job_or_result(sessions, tmp_path):

@@ -18,6 +18,49 @@ as native trials and records renewable waits when capacity is unavailable.
 A waiting record is not a reservation or proof of executable capacity. See
 [native capacity fairness](nebius-shared-pools.md#native-task-image-capacity-fairness).
 
+Native snapshots copy parent files between layers. Their file-cache and write
+load can saturate a shared node while CPU and requested storage still fit.
+New native claims therefore also use the ordinary collector's UID-qualified
+kubelet Summary `node.io.psi.full.avg10`, with its own sample timestamp. Missing,
+invalid, future or older-than-60-second pressure is unknown, not zero. Collector
+access uses the existing verified direct kubelet transport and read-only
+`nodes/stats`; it does not grant `nodes/proxy` or a token to build containers.
+Optional pressure reads share a ten-second capture budget and at most four
+in-flight reads. A missing or slow node keeps unknown pressure without holding
+up independent CPU, Pod and provider observations. Later captures cannot stack
+more probes behind outstanding reads; shutdown drains readers before closing
+their API and credentials. The existing SDK credential-renewal and in-progress
+socket operations remain bounded separately, so shutdown is not a ten-second
+end-to-end guarantee.
+
+The existing shared capacity transaction chooses a measured healthy node with
+room for the complete Pod envelope and freezes required node affinity in that
+attempt's Job. Reconciliation revalidates the same binding; it cannot silently
+move the Job to an unchecked node. Creation also checks the current Node UID.
+Prior builds that could share a candidate node need an actual observed Pod and
+at least ten seconds of the heavy `build` phase in the pressure sample before
+another start can be admitted there. This bounds unobserved starts without
+setting an active-build count or a build/execution ratio. Existing trial demand,
+older queue heads, cleanup charges and cross-pool provider quotas still apply.
+
+At scale zero, or when measured nodes cannot accept the Pod, one unobserved
+bootstrap per physical capacity family can request ordinary autoscaling. Its
+affinity excludes all already observed nodes; excluded NotReady nodes cannot
+offset the additional-node quota charge. Provisioning is not health evidence.
+The trusted prepare phase waits for a valid, healthy actual node-wide
+`/proc/pressure/io` reading after source/cache work and before BuildKit. Unknown
+or high pressure waits under the existing Job deadline; it cannot start a heavy
+build on an assumed healthy node. No new controller, pool or per-task volume is
+required.
+
+`task_image_builder.io_full_avg10_max` is a finite configurable percentage,
+default 50, for both admission and this final local check. It is a qualification
+policy rather than a measured optimal throughput target. Keep per-version cold
+build timings and verify first-attempt cold cohorts on the actual node/storage
+shape before claiming long-tail acceptance. Authored component timeouts, Job
+deadlines and materialization retry policy are unchanged. Already frozen claims
+without this field retain their historical contract.
+
 The slim actuator image includes the queued execution-wait reader used by this
 shared admission path. Its image-build smoke imports that reader explicitly:
 process startup alone does not exercise the lazy import made when a build first
@@ -185,6 +228,16 @@ Resource reservations remain charged until the controller confirms UID-fenced
 cleanup. Cancellation, expiry and controller restarts must not authorize a new
 attempt while an old resource may still exist. Publication evidence and retained
 image references must remain readable for historical results and recovery.
+The claim transaction checks every prior native attempt for an unreleased
+reservation, including attempts older than the latest epoch. It also checks
+attached global-pool outboxes until their confirmed cancellation or release;
+this ownership exists before native observation and survives local lease expiry.
+An unclaimed global selection can still attach its exact first attempt. Attempts
+that never reserved resources or acquired global ownership do not block a
+successor; unrelated materializations remain eligible when capacity is available.
+The native actuator's bootstrap database role has read-only access to
+`nebius_pool_build_outbox` for this check, including before global-pool
+activation. The separate participant activation path owns write grants.
 
 ## Compatibility and verification
 

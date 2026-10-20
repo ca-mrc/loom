@@ -2626,6 +2626,15 @@ schema is `loom.nebius-management-refresh-private-inputs.v1`, with:
   the shared prerequisites. Other volume sources and `imagePullSecrets` remain
   pinned; arbitrary ConfigMaps, Secret/projected credentials, PVC additions,
   writable or alternate mounts and other workload scopes remain rejected.
+  For the primary PostgreSQL StatefulSet, this same ordinary proof may select
+  only the source-rendered Pod-template `loom.nebius/configuration-revision`
+  rollout identifier. Comparison copies omit the root kubectl `last-applied`
+  bookkeeping annotation; refresh does not modify the database resources.
+  All other retained StatefulSet fields and annotations, the complete Service,
+  UIDs, credentials, PVC binding, ready Pod and actual Service backend still
+  qualify before and after the read. The selected source must retain those
+  database settings. Other participants, manager history and readers without
+  this refresh proof retain their existing strict database comparison.
 - `deployment`, `candidate` and `profile`: the target manager configuration and
   protected publication. The tooling source and candidate SHA must be identical.
 - `manager_revision` and `target_manager_revision`: the expected management DB

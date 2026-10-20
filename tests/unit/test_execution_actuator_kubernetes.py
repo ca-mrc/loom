@@ -897,14 +897,17 @@ async def test_resource_summary_reads_verified_kubelet_json(monkeypatch, malform
         def __exit__(self, *_):
             return None
 
-        def get(self, url, **kwargs):
+        def stream(self, method, url, **kwargs):
+            from contextlib import nullcontext
+
+            assert method == "GET"
             assert url == "https://10.23.0.4:10250/stats/summary"
             assert kwargs["headers"] == {"Authorization": expected_authorization}
             response = httpx.Response(200, content=b'{"pods":' if malformed else
                 b'{"node":{"nodeName":"node-1"},"pods":[{"podRef":{"uid":"pod-1","namespace":"ns"}}]}',
                 request=httpx.Request("GET", url))
             responses.append(response)
-            return response
+            return nullcontext(response)
 
     # Only the TLS trust-file read and network boundary are doubled. The real
     # Kubernetes node deserializer, endpoint selection and HTTP JSON decoder run.

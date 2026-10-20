@@ -40,7 +40,9 @@ from tests.ops.test_nebius_pool_cutover_entry import material as material
 from tests.ops.test_nebius_pool_cutover_entry import private_upgrade as private_upgrade
 from tests.ops.test_nebius_pool_cutover_entry import retirement_inputs as retirement_inputs
 from tests.ops.test_nebius_pool_cutover_entry import runtime_inputs as runtime_inputs
+from tests.ops.test_nebius_pool_database_guard import workload_database as workload_database_fixture
 from tests.ops.test_nebius_pool_predecessor import finish_cutover, pool_refresh_http
+from tests.ops.test_nebius_pool_runtime import guest_runtime_inputs as guest_runtime_inputs
 from tests.support import nebius_platform
 
 
@@ -169,6 +171,195 @@ def ordinary_rollout(private_cutover, monkeypatch, request):
         return await resolve_platform_rollout(reference=reference, catalog=catalog, config=config,
             keyring=root.deployment.installation.keyring, previous_sha='a' * 40)
     return selected, state
+
+
+@pytest.fixture
+async def refresh_database(private_cutover, ordinary_rollout, runtime_inputs, guest_runtime_inputs,
+        platform_inputs, tmp_path, monkeypatch):
+    from scripts.ops.nebius_pool_migration import migration_contract
+    from scripts.ops.nebius_pool_predecessor import PoolPredecessorV1, load_completed_pool
+    from scripts.ops.nebius_pool_refresh import PoolManagerRefresh
+    from tests.ops.test_nebius_management_refresh_entry import context, private_refresh
+
+    from loom.nebius_platform_render import digest
+
+    operation, inputs, root = private_cutover
+    namespace = root.deployment.installation.foundation.platform_config['namespace']
+    migration = runtime_inputs[0]
+    primary, = (row for row in migration.guards if row.namespace == namespace)
+    ordered = (primary, *(row for row in migration.guards if row != primary))
+    directory = tmp_path / 'primary-database'
+    directory.mkdir()
+    base, state = database_guard.__wrapped__((replace(migration, guards=ordered), *runtime_inputs[1:]),
+        platform_inputs, directory, monkeypatch)
+    bookkeeping = 'kubectl.kubernetes.io/last-applied-configuration'
+    state.database['metadata']['annotations'] = {bookkeeping: '{"retained":"apply-bookkeeping"}'}
+    retained = replace(state.target.database, statefulset=copy.deepcopy(state.database))
+    state.target = replace(state.target, database=retained)
+    guest_migration = replace(guest_runtime_inputs[0], guards=(state.target, *ordered[1:]))
+    api, state = workload_database_fixture.__wrapped__(SimpleNamespace(param='controller'), (base, state),
+        (guest_migration, *guest_runtime_inputs[1:]), monkeypatch)
+    # Bind this real transport fixture before creating immutable pool history.
+    primary_input, = (row for row in inputs['guards'] if row['namespace'] == namespace)
+    for field in ('statefulset', 'service', 'credential_uid', 'credential_resource_version'):
+        primary_input['database'][field] = asdict(retained)[field]
+    cutover_fixture.save_private(operation, inputs)
+    _, result = finish_cutover(operation, legacy=True)
+    pool = load_completed_pool(PoolPredecessorV1(operation=operation,
+        completion_sha256=result['completion_sha256']), original=root)
+    successor = await ordinary_rollout[0]()
+    metadata, payload, _ = private_refresh(root, pool)
+    payload['platform_rollout'] = successor.reference.model_dump(mode='json')
+    payload['deployment']['installation']['foundation']['platform_config_json'] = json.dumps(successor.config)
+    cutover_fixture.save_private(metadata, payload)
+    selected = context(metadata)
+    bound = PoolManagerRefresh(root, pool, selected.request, Path(metadata['state_dir']), successor=successor)
+    api.request = pool.context.request.fencing.retirement.migration
+    api.contract_sha256 = digest(migration_contract(api.request))
+    state.target, = (row for row in api.request.guards if row.namespace == namespace)
+    state.original.clear()
+    state.original.update(copy.deepcopy(state.target.controller))
+    state.credential = (state.target.database.credential_uid, state.target.database.credential_resource_version)
+    source = successor.resources['StatefulSet:' + namespace + ':loom-postgres']
+    revision = 'loom.nebius/configuration-revision'
+    assert state.database['spec']['template']['metadata']['annotations'][revision] != source['spec']['template']['metadata']['annotations'][revision]
+    state.database['spec']['template']['metadata']['annotations'][revision] = source['spec']['template']['metadata']['annotations'][revision]
+    state.database['metadata']['annotations'][bookkeeping] = json.dumps(source)
+    transport, calls = api._run, []
+    def read(args):
+        calls.append(args)
+        if args[:2] == ['get', 'namespace']:
+            name = args[2]
+            uid = api.request.registration.binding.kube_system_uid if name == 'kube-system' else str(state.target.namespace_uid)
+            assert name in {'kube-system', namespace}
+            return {'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': name, 'uid': uid}}
+        return transport(args)
+    monkeypatch.setattr(api, '_run', read)
+    # The old implementation ignores this attribute, so RED reaches the actual
+    # snapshot mismatch rather than failing on a not-yet-added constructor kwarg.
+    api.refresh = bound
+    return api, state, bound, pool, calls
+
+
+def test_refresh_database_markers_use_real_pod_backend_and_runtime_settings(refresh_database, monkeypatch):
+    from scripts.ops.nebius_pool_migration_guard import KubectlPoolGuardAPI
+
+    api, state, bound, pool, calls = refresh_database
+    retained = copy.deepcopy(state.target.database)
+    observed = copy.deepcopy((state.database, state.service, state.pod, state.endpoints))
+    history = {path: path.read_bytes() for path in pool.history}
+    assert api._database(state.target) == state.pod
+    connected = KubectlPoolGuardAPI(request=api.request, kubeconfig=api.kubeconfig,
+        executable=Path(api.prefix[0]), refresh=bound)
+    monkeypatch.setattr(connected, '_run', api._run)
+    connected.qualify_runtime_database(state.target, original=state.original, expected=copy.deepcopy(state.controller),
+        credential_uid=state.credential[0], credential_resource_version=state.credential[1])
+    assert len(state.processes) == 1 and state.processes[0].stdout == b'{"status": "qualified"}\n'
+    assert state.target.database == retained
+    assert (state.database, state.service, state.pod, state.endpoints) == observed
+    assert {path: path.read_bytes() for path in history} == history
+    assert not bound.state_dir.exists()
+    assert all(args[0] == 'get' or (args[0] == 'exec' and args[7:9] == ['python', '-c']) for args in calls)
+
+
+def test_refresh_database_marker_projection_keeps_strict_guard_boundaries(refresh_database, monkeypatch):
+    from scripts.ops.nebius_pool_migration import PoolMigrationError
+
+    api, state, bound, pool, calls = refresh_database
+    observed = [state.database, state.service, state.pod, state.secret, state.endpoints, state.runtime_pod]
+    snapshots = [copy.deepcopy(row) for row in observed]
+    retained = copy.deepcopy(state.target.database)
+    selected = copy.deepcopy(bound.successor.resources)
+    history = {path: path.read_bytes() for path in pool.history}
+    revision = 'loom.nebius/configuration-revision'
+    transport = api._run
+    damage = None
+    def read(args):
+        result = transport(args)
+        if args[0] == 'exec':
+            if damage == 'late_revision':
+                state.database['spec']['template']['metadata']['annotations'][revision] += '-drift'
+            elif damage == 'late_pod':
+                state.runtime_pod['metadata']['uid'] = 'e8bd7eef-f5c5-4e91-bc51-cbb54982937d'
+            elif damage == 'late_credential':
+                state.secret['metadata']['resourceVersion'] = '999'
+        return result
+    monkeypatch.setattr(api, '_run', read)
+    for damage in ('no_refresh', 'no_ordinary', 'database_uid', 'source_revision', 'unknown_annotation',
+            'unknown_template_annotation', 'database_image', 'pvc', 'service_uid', 'service_selector',
+            'service_port', 'service_allocation', 'source_database_image', 'source_service_port',
+            'secret_uid', 'secret_version', 'backend_owner', 'backend_target',
+            'backend_address', 'late_revision', 'late_pod', 'late_credential'):
+        for row, saved in zip(observed, snapshots, strict=True):
+            row.clear()
+            row.update(copy.deepcopy(saved))
+        state.commands.clear()
+        state.processes.clear()
+        api.refresh = bound
+        if damage == 'no_refresh':
+            api.refresh = None
+        elif damage == 'no_ordinary':
+            api.refresh = replace(bound, successor=None)
+        elif damage == 'database_uid':
+            state.database['metadata']['uid'] = '22d0e5b5-99a6-4e55-8127-5459e9bf7cd8'
+        elif damage == 'source_revision':
+            state.database['spec']['template']['metadata']['annotations'][revision] += '-drift'
+        elif damage == 'unknown_annotation':
+            state.database['metadata']['annotations']['unrelated'] = 'drift'
+        elif damage == 'unknown_template_annotation':
+            state.database['spec']['template']['metadata']['annotations']['unrelated'] = 'drift'
+        elif damage == 'database_image':
+            state.database['spec']['template']['spec']['containers'][0]['image'] += '-drift'
+        elif damage == 'pvc':
+            state.database['spec']['volumeClaimTemplates'][0]['spec']['storageClassName'] = 'foreign'
+        elif damage == 'service_uid':
+            state.service['metadata']['uid'] = '708cf812-b95b-47eb-a9c9-c3e0fb023ec8'
+        elif damage == 'service_selector':
+            state.service['spec']['selector'] = {'app': 'foreign'}
+        elif damage == 'service_port':
+            state.service['spec']['ports'][0]['targetPort'] = 5433
+        elif damage == 'service_allocation':
+            state.service['spec']['clusterIP'] = '10.96.0.99'
+        elif damage in {'source_database_image', 'source_service_port'}:
+            resources = copy.deepcopy(bound.successor.resources)
+            namespace = state.target.namespace
+            if damage == 'source_database_image':
+                resources['StatefulSet:' + namespace + ':loom-postgres']['spec']['template']['spec']['containers'][0]['image'] += '-drift'
+            else:
+                resources['Service:' + namespace + ':loom-postgres']['spec']['ports'][0]['targetPort'] = 5433
+            api.refresh = replace(bound, successor=replace(bound.successor, resources=resources))
+        elif damage == 'secret_uid':
+            state.secret['metadata']['uid'] = '31a8e991-7665-4102-8d97-ce290123552b'
+        elif damage == 'secret_version':
+            state.secret['metadata']['resourceVersion'] = '999'
+        elif damage == 'backend_owner':
+            state.endpoints['items'][0]['metadata']['ownerReferences'][0]['uid'] = '76947d04-e08f-4466-a215-279fd6988472'
+        elif damage == 'backend_target':
+            state.endpoints['items'][0]['endpoints'][0]['targetRef']['uid'] = 'a2bb56bb-58a1-4376-a15d-1e20be2d59f4'
+        elif damage == 'backend_address':
+            state.endpoints['items'][0]['endpoints'][0]['addresses'] = ['10.20.0.3']
+        with pytest.raises(PoolMigrationError) as error:
+            api.qualify_runtime_database(state.target, original=state.original, expected=copy.deepcopy(state.controller),
+                credential_uid=state.credential[0], credential_resource_version=state.credential[1])
+        assert error.value.stage == 'runtime_database', damage
+        assert len(state.commands) == (1 if damage.startswith('late_') else 0), damage
+        assert state.target.database == retained
+    assert {path: path.read_bytes() for path in history} == history
+    assert bound.successor.resources == selected
+    assert not bound.state_dir.exists()
+    assert all(args[0] == 'get' or (args[0] == 'exec' and args[7:9] == ['python', '-c']) for args in calls)
+
+
+def test_refresh_database_projection_leaves_nonprimary_binding_exact(refresh_database):
+    _, state, bound, _, _ = refresh_database
+    original, current, service = [copy.deepcopy(row) for row in (
+        state.target.database.statefulset, state.database, state.service)]
+    for row in (original, current, service):
+        row['metadata']['namespace'] = 'other-retained-participant'
+    before = copy.deepcopy((original, current, service))
+    observed, expected = bound.database_documents(original=original, current=current, service=service)
+    assert observed == current and expected == original
+    assert (original, current, service) == before
 
 
 @pytest.mark.asyncio
