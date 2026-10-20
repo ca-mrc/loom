@@ -147,10 +147,16 @@ def test_builder_refresh_cannot_change_source_runtime(builder_refresh_request):
         build(replace(builder_refresh_request, after=changed))
 
 
-def test_refresh_changes_only_image_config_and_revision(refresh_request):
+@pytest.mark.parametrize('shared_guest', [False, True])
+def test_refresh_changes_only_image_config_and_revision(refresh_request, shared_guest):
     from scripts.ops.nebius_ingress_stage import _snapshot
 
     request = refresh_request
+    if shared_guest:
+        profile = {**request.profile, 'guest_runtime': 'qemu-tcg-v1', 'guest_runtime_volume_mib': 1024,
+                   'guest_max_artifact_bytes': 64 * 1024**2, 'supports_task_identity': True,
+                   'supports_shared_guest': True}
+        request = replace(request, profile=profile)
     before = copy.deepcopy(request)
     result = build(request)
     original = request.active['spec']['template']

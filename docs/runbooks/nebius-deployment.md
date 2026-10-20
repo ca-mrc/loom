@@ -2631,6 +2631,12 @@ The workflow has no fallback to bootstrap, diagnostic or recovery credentials.
 Authority installation preserves other grants and does not create private inputs
 or reset operation state. Private credentials never pass through Actions.
 
+A shared-guest-capable publication does not give the manager execution authority.
+Rendering retains the approved profile and its revision inputs, while projecting
+guest-runtime and enabled shared-guest fields out of the non-execution templates.
+Previously valid templates with absent or false shared-guest readiness retain
+their existing representation and immutable migration Pod identities.
+
 Preflight qualifies the completed predecessor, retained resource identities,
 publication and live shared prerequisites. Installation serializes on the original
 installation lock, stages only fixed operation resources, and proceeds through:
