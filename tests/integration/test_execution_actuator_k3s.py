@@ -332,17 +332,24 @@ def _native_addon_diagnostics(core: object, required: tuple[str, ...]) -> str:
     try:
         pods = core.list_namespaced_pod('kube-system', limit=64, _request_timeout=(2, 3)).items
         result['pods'] = [{'name': pod.metadata.name, 'phase': pod.status.phase, 'reason': pod.status.reason,
+            'pod_ip': pod.status.pod_ip,
+            'conditions': [{'type': condition.type, 'status': condition.status}
+                for condition in pod.status.conditions or []],
             'containers': [{'name': status.name, 'ready': status.ready,
+                'container_id': status.container_id,
                 'waiting': status.state.waiting.reason if status.state and status.state.waiting else None}
                 for status in (pod.status.init_container_statuses or []) + (pod.status.container_statuses or [])]}
             for pod in pods if any(pod.metadata.name.startswith(name + '-') for name in names)]
     except Exception as error:
         result['pods'] = type(error).__name__
     try:
-        events = core.list_namespaced_event('kube-system', limit=64,
-            field_selector='type=Warning', _request_timeout=(2, 3)).items
-        result['events'] = [{'object': event.involved_object.name, 'reason': event.reason,
-            'message': (event.message or '')[:1024], 'count': event.count}
+        # Normal Pulling/Pulled/Created/Started events distinguish image and
+        # container startup from sandbox failures; warnings alone cannot.
+        events = core.list_namespaced_event('kube-system', limit=64, _request_timeout=(2, 3)).items
+        result['events'] = [{'object': event.involved_object.name, 'type': event.type, 'reason': event.reason,
+            'message': (event.message or '')[:1024], 'count': event.count,
+            'first_timestamp': event.first_timestamp.isoformat() if event.first_timestamp else None,
+            'last_timestamp': event.last_timestamp.isoformat() if event.last_timestamp else None}
             for event in events if any(event.involved_object.name == name
                 or (event.involved_object.name or '').startswith(name + '-') for name in names)]
     except Exception as error:

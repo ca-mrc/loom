@@ -1,6 +1,8 @@
 """Disposable-cluster setup observes actual prerequisites, not discovery alone."""
 
+import json
 import ssl
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -9,6 +11,32 @@ from urllib3.exceptions import MaxRetryError, ProtocolError, SSLError
 
 from tests.integration import test_execution_actuator_k3s as fixture
 from tests.integration.test_execution_actuator_k3s import _wait_for_dns_pods
+
+
+def test_addon_failure_diagnostics_distinguish_sandbox_readiness_and_image_pull():
+    from kubernetes import client
+
+    pod = client.V1Pod(metadata=client.V1ObjectMeta(name="coredns-fixture"),
+        status=client.V1PodStatus(phase="Pending", pod_ip="10.42.0.2",
+            conditions=[client.V1PodCondition(type="PodReadyToStartContainers", status="True")]))
+    timestamp = datetime(2026, 10, 20, tzinfo=UTC)
+    event = client.CoreV1Event(metadata=client.V1ObjectMeta(),
+        involved_object=client.V1ObjectReference(name="coredns-fixture", kind="Pod"),
+        type="Normal", reason="Pulling", message="Pulling addon image", count=1,
+        first_timestamp=timestamp, last_timestamp=timestamp)
+
+    def events(namespace, **kwargs):
+        assert namespace == "kube-system" and kwargs["limit"] <= 64
+        assert kwargs["_request_timeout"] == (2, 3)
+        return client.CoreV1EventList(items=[] if kwargs.get("field_selector") == "type=Warning" else [event])
+
+    core = SimpleNamespace(list_namespaced_pod=lambda *args, **kwargs: client.V1PodList(items=[pod]),
+        list_namespaced_event=events)
+    result = json.loads(fixture._native_addon_diagnostics(core, ("dns",)))
+    assert result["pods"][0]["pod_ip"] == "10.42.0.2"
+    assert result["pods"][0]["conditions"] == [{"type": "PodReadyToStartContainers", "status": "True"}]
+    assert result["events"][0]["reason"] == "Pulling"
+    assert result["events"][0]["last_timestamp"] == timestamp.isoformat()
 
 
 @pytest.fixture

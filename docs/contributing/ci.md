@@ -384,8 +384,14 @@ is ready. Tests that require these addons opt into `_load_client` readiness:
 `kube-dns` endpoint; `('dns', 'storage')` also checks local-path provisioner
 readiness. These reads share the original 90-second startup budget. API-only
 callers keep their existing boundary, and traffic/PVC assertions remain required.
-Addon failures include bounded Pod waiting reasons and warning events; the
-retirement fixture also records PVC status without logging Secrets or Pod specs.
+Addon failures include bounded Pod IPs, readiness conditions, container IDs,
+waiting reasons, and normal/warning events with timestamps. Normal image-pull
+and container-start events help distinguish startup stages after a sandbox
+network error. The shared network failure helper also retains a bounded
+containerd log tail and CRI sandbox/container listings from its disposable node;
+each command has a five-second deadline and a 16-KiB output tail. Diagnostic
+failures preserve the original error. The retirement fixture also records PVC
+status without logging Secrets or Pod specs.
 The repeat-refresh test also requires this native DNS readiness as an existing
 Deployment/ReplicaSet/Pod reconciliation startup witness before its functional
 30-second window; it adds no startup budget or storage prerequisite.
