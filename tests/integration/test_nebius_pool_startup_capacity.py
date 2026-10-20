@@ -128,16 +128,16 @@ async def test_startup_capacity_probe_requires_fresh_exact_scope_and_current_gat
                 await session.scalar(select(func.count()).select_from(NebiusPoolRequest)))
 
     before = await retained_state()
-    result = await asyncio.to_thread(subprocess.run, [sys.executable, '-c', command, nonce, signature],
-        env=environment, cwd=tmp_path, capture_output=True, timeout=35, check=False)
+    result, evidence = await asyncio.to_thread(_run_expiry_probe, command,
+        environment=environment, tmp_path=tmp_path, nonce=nonce, signature=signature)
     success = damage is None or (damage == 'revision_exhausted' and operation != 'activate')
     if not success:
         error = (b'Pool active capacity unqualified\n' if operation == 'active-probe' else
             b'Pool startup capacity unqualified\n' if operation == 'probe' else b'Pool activation unconfirmed; preserve recovery evidence\n')
-        assert result.returncode == 1 and result.stdout == b'' and result.stderr == error
+        assert result.returncode == 1 and result.stdout == b'' and result.stderr == error, evidence
     else:
         report = b'{"status": "global"}\n' if operation == 'activate' else b'{"status": "qualified"}\n'
-        assert (result.returncode, result.stdout, result.stderr) == (0, report, b'')
+        assert (result.returncode, result.stdout, result.stderr) == (0, report, b''), evidence
         assert before[0] == ('global' if operation == 'active-probe' else 'closed') and before[-1] == 0
     assert all(raw not in (result.stdout + result.stderr).decode() for raw in tokens.values())
     assert 'private-' not in (result.stdout + result.stderr).decode()
@@ -183,9 +183,9 @@ async def test_active_capacity_probe_preserves_real_charged_work(sessions, tmp_p
             return pool.mode, pool.admission_epoch, pool.policy_revision, row.phase, row.renewed_at
 
     before = await retained_state()
-    result = await asyncio.to_thread(subprocess.run, [sys.executable, '-c', commands.BOUND_POOL_ACTIVE_CAPACITY_COMMAND, nonce, signature],
-        env=environment, cwd=tmp_path, capture_output=True, timeout=35, check=False)
-    assert (result.returncode, result.stdout, result.stderr) == (0, b'{"status": "qualified"}\n', b'')
+    result, evidence = await asyncio.to_thread(_run_expiry_probe, commands.BOUND_POOL_ACTIVE_CAPACITY_COMMAND,
+        environment=environment, tmp_path=tmp_path, nonce=nonce, signature=signature)
+    assert (result.returncode, result.stdout, result.stderr) == (0, b'{"status": "qualified"}\n', b''), evidence
     assert await retained_state() == before and before[0] == 'global' and before[3] == 'reserved'
 
 
