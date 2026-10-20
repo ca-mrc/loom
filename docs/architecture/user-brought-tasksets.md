@@ -230,6 +230,10 @@ Supported source types are `hf`, `git`, `https`, `jsonl-inline`, and
 `script` verifier. A bundle upload contains complete task directories and can
 use each task's own verifier.
 
+JSONL sources use physical newlines between JSON objects. Escaped newlines
+inside string values are preserved, and a final newline is optional. Literal
+`\n` between records is not a JSONL record delimiter.
+
 `limits.max_instances` bounds how many tasks materialization selects from a
 source, including an uploaded bundle. Omitting it uses the default of 500, even
 when `limits` is empty or contains only `timeout_per_task_s`. Intake and TaskSet
@@ -256,9 +260,22 @@ transform blobs are fetched.
 
 ## Materialization
 
-Submission stores the manifest and uploaded blobs under a team-scoped object
-prefix, creates a `task_sets` row and current `task_set_manifests` row, and
-queues a `task_set_materialization_jobs` record. The materializer claims jobs
+Before uploading blobs, submission durably reserves the TaskSet slug, manifest
+and a non-claimable job. During this interval the TaskSet is `failed` with reason
+`intake_incomplete`; the job explains that upload may still be in progress.
+The reservation has a one-hour expiry and is not held. Upload and final activation
+lock the job before the TaskSet, matching publication and deletion. Activation
+atomically restores the requested lifecycle metadata, clears the incomplete
+reason, and queues the `task_set_materialization_jobs` record.
+
+A failed or interrupted intake retains this identity so its team-scoped blobs
+remain discoverable by expiry and retention garbage collection. A lost commit
+acknowledgement never triggers compensating blob deletion: the final commit may
+have succeeded. Inspect the TaskSet after a submission error. An incomplete
+intake cannot be rebuilt; submit with a new slug, or retry the original slug after
+retention cleanup has removed it. Soft deletion alone does not free the slug.
+
+The materializer claims jobs
 with a lease, converts valid instances into canonical task bundles and `tasks`
 rows, records bounded error summaries, and publishes the resulting status and
 task count.
@@ -266,6 +283,10 @@ task count.
 Rebuild creates a new materialization job for the stored manifest. Claim
 fencing prevents concurrent active jobs for the same TaskSet and allows stale
 claims to be recovered.
+When a previous publication is usable, retryable source errors, exhausted retries
+and worker failures preserve its `ready` or `partial` state and task rows. The
+new job retains the failure diagnostics. Successful replacement still publishes
+the new tasks and status atomically.
 
 ## CLI
 
@@ -281,7 +302,9 @@ loom tasksets delete ID_OR_SLUG [--format text|json]
 
 The service routes are implemented in
 [`src/loom_service/routes/tasksets.py`](../../src/loom_service/routes/tasksets.py).
-Manifest validation and materialization live under `src/loom/taskset_*`, and
+Manifest validation and row conversion live under `src/loom/models/taskset.py`
+and `src/loom/taskset/`; intake and worker orchestration live in
+`src/loom_service/taskset_intake.py` and `src/loom_service/taskset_materializer.py`. The
 the persistence model is in [`src/loom/db/schema.py`](../../src/loom/db/schema.py).
 
 ## Web discovery and import review
