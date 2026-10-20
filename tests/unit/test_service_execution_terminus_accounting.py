@@ -235,6 +235,23 @@ def test_safe_export_preserves_failed_retry_usage_without_provider_logs():
     assert event.thinking_tokens == 2
 
 
+@pytest.mark.parametrize("route,exported", [
+    ("native_responses", True), ("chat_translation", True), ("private-debug", False),
+])
+def test_safe_export_keeps_only_the_bounded_gateway_route(route, exported):
+    # Codex evidence must say which Responses route served each call (#2054).
+    row = LlmCall(
+        id=uuid4(), trial_id=uuid4(), step_id="agent", model="gpt-4.1-mini",
+        dialect="openai_responses", input_tokens=4, output_tokens=2, cost_usd=Decimal("0"),
+        rate_card_hash="rate", captured_at=datetime.now(UTC), attempt=1,
+        provider_extras={"_loom_gateway_route": route},
+    )
+    safe = serialize_execution_accounting_call(row)
+    assert ("_loom_gateway_route" in safe["provider_extras"]) is exported
+    # Typed events keep only numeric counters; the route stays ledger evidence.
+    assert llm_call_row_to_event(safe, trial_id=row.trial_id, seq=0).provider_extras == {}
+
+
 def test_unknown_usage_survives_typed_events_usage_and_atif_without_private_extras():
     trial, trial_id, _native, rows = _case()
     failed = {
