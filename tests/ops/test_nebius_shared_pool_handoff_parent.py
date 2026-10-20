@@ -410,6 +410,8 @@ def test_connected_shared_parent_gates_real_guard_acquisition_and_unknown_replie
             raise ValueError('simulated ' + gate + ' rejection')
         if 'bindings' in options:
             assert options['bindings'] == bindings
+        if gate == 'writers':
+            return module.SharedPoolWriterObservation(bindings.plan, '501', {}, {}, bindings.input_digest)
         return SimpleNamespace(plan=bindings.plan, bindings=bindings, pending_workloads=(),
             pool_state='closed', guard_states={target.namespace: 'held' if target.namespace in model.held else 'open'
                 for target in bindings.migration.guards}, input_digest=bindings.input_digest, authority={})
