@@ -586,6 +586,29 @@ async def _wait_for_dns_pods(core: object, *, timeout: float = 60) -> list[objec
     raise AssertionError("disposable k3s did not create a CoreDNS Pod") from last_error
 
 
+def _pod_container_details(pod: object) -> str:
+    """Bound failure evidence without dumping specs, env, or termination output."""
+    def state_details(state):
+        details = {}
+        for phase in ("waiting", "running", "terminated"):
+            value = getattr(state, phase, None)
+            if value is not None:
+                details[phase] = {"reason": (getattr(value, "reason", None) or "")[:128]}
+                if phase == "terminated":
+                    details[phase].update(exit_code=value.exit_code, signal=value.signal)
+        return details
+
+    details = {}
+    for field in ("init_container_statuses", "container_statuses"):
+        statuses = getattr(pod.status, field, None) or []
+        details[field] = [{
+            "name": item.name[:128], "ready": item.ready, "restart_count": item.restart_count,
+            "state": state_details(item.state), "last_state": state_details(item.last_state),
+        } for item in statuses[:8]]
+    rendered = repr(details)
+    return rendered if len(rendered) <= 4096 else rendered[:4080] + "... (truncated)"
+
+
 def _wait_for_pod(core: object, namespace: str, name: str) -> object:
     deadline = time.monotonic() + 60
     last_phase = "missing"
@@ -601,7 +624,7 @@ def _wait_for_pod(core: object, namespace: str, name: str) -> object:
     raise AssertionError(
         f"Pod {namespace}/{name} did not become ready: {last_phase}; "
         f"reason={pod.status.reason}; message={pod.status.message}; "
-        f"conditions={pod.status.conditions}"
+        f"conditions={pod.status.conditions}; containers={_pod_container_details(pod)}"
     )
 
 

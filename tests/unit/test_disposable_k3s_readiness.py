@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
+from kubernetes import client
 from kubernetes.client.exceptions import ApiException
 from urllib3.exceptions import MaxRetryError, ProtocolError, SSLError
 
@@ -230,3 +231,82 @@ async def test_dns_readiness_does_not_retry_authority_or_other_transport_failure
         await _wait_for_dns_pods(SimpleNamespace(list_namespaced_pod=read))
     assert raised.value is error
     assert len(calls) == 1
+
+
+def test_pod_timeout_reports_container_states_without_dumping_workload_data(loading_client):
+    _, core, _, clock = loading_client
+    terminated = client.V1ContainerStateTerminated(
+        exit_code=137, reason="OOMKilled", signal=9, message="private termination output",
+    )
+    pod = client.V1Pod(
+        spec=client.V1PodSpec(containers=[client.V1Container(
+            name="tls", env=[client.V1EnvVar(name="TOKEN", value="private env value")],
+        )]),
+        status=client.V1PodStatus(phase="Pending", container_statuses=[client.V1ContainerStatus(
+            name="tls", image="fixture", image_id="fixture", ready=False, restart_count=2,
+            state=client.V1ContainerState(waiting=client.V1ContainerStateWaiting(
+                reason="ImagePullBackOff", message="private registry detail",
+            )),
+            last_state=client.V1ContainerState(terminated=terminated),
+        )], init_container_statuses=[client.V1ContainerStatus(
+            name="init", image="fixture", image_id="fixture", ready=False, restart_count=1,
+            state=client.V1ContainerState(terminated=terminated),
+        )]),
+    )
+    core.read_namespaced_pod = lambda name, namespace: pod
+    with pytest.raises(AssertionError, match="did not become ready") as caught:
+        fixture._wait_for_pod(core, "test", "ingress")
+    diagnostic = str(caught.value)
+    for detail in ("tls", "init", "ImagePullBackOff", "OOMKilled", "137", "restart_count", "last_state"):
+        assert detail in diagnostic
+    assert "private" not in diagnostic
+    assert clock[0] == 60
+    terminated.reason = "x" * 10000
+    pod.status.container_statuses[0].state.waiting.reason = "x" * 10000
+    pod.status.container_statuses *= 100
+    pod.status.init_container_statuses *= 100
+    bounded = fixture._pod_container_details(pod)
+    assert len(bounded) <= 4096 and bounded.endswith("... (truncated)")
+
+
+def test_ready_pod_does_not_build_failure_diagnostics(loading_client, monkeypatch):
+    _, core, _, clock = loading_client
+    pod = client.V1Pod(status=client.V1PodStatus(phase="Running", conditions=[
+        client.V1PodCondition(type="Ready", status="True"),
+    ]))
+    core.read_namespaced_pod = lambda name, namespace: pod
+
+    def unexpected(_pod):
+        pytest.fail("successful readiness must not collect failure diagnostics")
+
+    monkeypatch.setattr(fixture, "_pod_container_details", unexpected)
+    assert fixture._wait_for_pod(core, "test", "ingress") is pod
+    assert clock[0] == 0
+
+
+def test_policy_diagnostics_identify_missing_status_and_stale_generation():
+    from tests.cluster import test_nebius_application_authority as authority
+
+    policies = [
+        client.V1ValidatingAdmissionPolicy(metadata=client.V1ObjectMeta(name="missing", generation=1)),
+        client.V1ValidatingAdmissionPolicy(
+            metadata=client.V1ObjectMeta(name="stale", generation=2),
+            status=client.V1ValidatingAdmissionPolicyStatus(
+                observed_generation=1,
+                conditions=[client.V1Condition(type="Ready", status="False", reason="TypeChecking", message="private",
+                                               last_transition_time="2026-10-20T17:00:00Z")],
+                type_checking=client.V1TypeChecking(expression_warnings=[
+                    client.V1ExpressionWarning(field_ref="spec.validations[0].expression", warning="private expression"),
+                ]),
+            ),
+        ),
+    ]
+    diagnostic = authority._policy_typecheck_details(policies)
+    for detail in ("missing", "stale", "generation", "observed_generation", "TypeChecking", "spec.validations[0]"):
+        assert detail in diagnostic
+    assert "'status_present': False" in diagnostic
+    assert "'generation': 2" in diagnostic and "'observed_generation': 1" in diagnostic
+    assert "private" not in diagnostic
+    policies[1].status.type_checking.expression_warnings[0].field_ref = "x" * 10000
+    bounded = authority._policy_typecheck_details(policies * 100)
+    assert len(bounded) <= 4096 and bounded.endswith("... (truncated)")
