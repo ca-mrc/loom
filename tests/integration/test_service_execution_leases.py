@@ -7,10 +7,12 @@ import tarfile
 from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
 from fastapi import FastAPI, HTTPException
 from pydantic import SecretStr
@@ -39,6 +41,7 @@ from loom.db.schema import (
     ExecutionPriceSnapshot,
     ExecutionProvisioningAuthorization,
     ExecutionTargetPriceBinding,
+    LlmCall,
     ServiceExecutionClass,
     ServiceExecutionCommand,
     ServiceExecutionEvent,
@@ -191,6 +194,7 @@ async def _cleanup_service_execution_test_rows(postgres_url: str):  # type: igno
                 )
             )
             owned_trials = select(Trial.id).join(Team).where(Team.name.like("service-execution-%"))
+            await session.execute(delete(LlmCall).where(LlmCall.trial_id.in_(owned_trials)))
             owned_cost_reservations = select(ExecutionCostReservation.id).where(
                 ExecutionCostReservation.trial_id.in_(owned_trials)
             )
@@ -1189,6 +1193,218 @@ async def _configure_scheduler_trial(
         "backend": "nebius",
         "worker_pool": "nebius-cpu",
     }
+
+
+@pytest.mark.parametrize("cause", ["user", "hard_budget"])
+async def test_parent_cancellation_fences_queued_execution_before_http_delivery(
+    postgres_url: str, cause: str,
+) -> None:
+    from loom_service.batch_runner import run_once
+    from loom_service.routes.batches import cancel_batch
+
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    delivery_started = asyncio.Event()
+    release_delivery = asyncio.Event()
+
+    async def unavailable_cp(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith(f"/trials/{trial_id}/cancel")
+        delivery_started.set()
+        await release_delivery.wait()
+        return httpx.Response(503, json={"detail": "CP unavailable"})
+
+    cancellation: asyncio.Task[Any] | None = None
+    try:
+        async with sessions.begin() as session:
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            await _configure_scheduler_trial(session, trial_id=trial_id, now=now)
+            trial = await session.get(Trial, trial_id)
+            assert trial is not None
+            batch_id, team_id = trial.batch_id, trial.team_id
+            assert batch_id is not None
+            if cause == "hard_budget":
+                batch = await session.get(Batch, batch_id)
+                assert batch is not None
+                batch.budget_policy, batch.budget_usd = "hard", Decimal("0.01")
+                session.add(LlmCall(
+                    team_id=team_id, trial_id=trial_id, step_id="main", model="test",
+                    dialect="openai", input_tokens=1, output_tokens=1,
+                    cost_usd=Decimal("0.02"), rate_card_hash="test",
+                ))
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(unavailable_cp), base_url="http://cp",
+        ) as http:
+            async def cancel() -> None:
+                if cause == "hard_budget":
+                    await run_once(session_factory=sessions, http_client=http,
+                                   batch_size=10, submit_rate_per_sec=100)
+                else:
+                    app = FastAPI()
+                    app.state.http_client = http
+                    request = Request({"type": "http", "app": app, "headers": []})
+                    auth = AuthContext(token_hash=b"t" * 32, type="team", scopes=["submit"],
+                                       team_id=team_id, expires_at=None)
+                    async with sessions() as session:
+                        response = await cancel_batch(
+                            request, (session, auth), batch_id, authorization="Bearer test",
+                        )
+                        assert response.status_code == 503
+
+            cancellation = asyncio.create_task(cancel())
+            await asyncio.wait_for(delivery_started.wait(), timeout=10)
+            try:
+                # The parent is committed but child cancellation is still in flight.
+                async with sessions() as session:
+                    batch = await session.get(Batch, batch_id)
+                    child = await session.get(Trial, trial_id)
+                    assert batch is not None and batch.state == "cancelled"
+                    assert child is not None and child.state == "queued"
+                    assert child.cancellation_requested_at is None
+                async with sessions.begin() as session:
+                    lease = await reserve_next_service_execution(
+                        session, environment="staging", pool_id="nebius-cpu",
+                        image_admission_keyring=IMAGE_ADMISSION_KEYRING, now=now,
+                    )
+                    assert lease is None
+                # The authoritative API must also fence callers bypassing selection.
+                async with sessions() as session:
+                    with pytest.raises(ServiceExecutionConflict, match="batch no longer accepts execution"):
+                        await _reserve(session, trial_id=trial_id, target=target, now=now)
+                    await session.rollback()
+            finally:
+                release_delivery.set()
+                await asyncio.wait_for(cancellation, timeout=10)
+            async with sessions() as session:
+                child = await session.get(Trial, trial_id)
+                assert child is not None and child.attempt_count == 0
+                assert child.execution_route_generation == 0
+                for model in (ServiceExecutionLease, ExecutionAdmissionReservation, ExecutionCostReservation):
+                    assert await session.scalar(select(func.count()).select_from(model).where(
+                        model.trial_id == trial_id,
+                    )) == 0
+    finally:
+        release_delivery.set()
+        if cancellation is not None:
+            await asyncio.wait_for(cancellation, timeout=10)
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("parent_state", ["cancelled", "finished"])
+async def test_execution_reservation_rechecks_parent_after_candidate_lock(
+    postgres_url: str, monkeypatch: pytest.MonkeyPatch, parent_state: str,
+) -> None:
+    from loom_control_plane import service_execution_scheduler as scheduler
+
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    selected = asyncio.Event()
+    parent_committed = asyncio.Event()
+    reserve_candidate = scheduler._reserve_service_candidate
+
+    async def delayed_reservation(*args: Any, **kwargs: Any) -> ServiceExecutionLease | None:
+        selected.set()
+        await parent_committed.wait()
+        return await reserve_candidate(*args, **kwargs)
+
+    monkeypatch.setattr(scheduler, "_reserve_service_candidate", delayed_reservation)
+    reservation: asyncio.Task[ServiceExecutionLease | None] | None = None
+    try:
+        async with sessions.begin() as session:
+            trial_id, _ = await _seed_ready_trial(session, now=now)
+            await _configure_scheduler_trial(session, trial_id=trial_id, now=now)
+            trial = await session.get(Trial, trial_id)
+            assert trial is not None
+            batch_id = trial.batch_id
+
+        async def reserve() -> ServiceExecutionLease | None:
+            async with sessions.begin() as session:
+                return await reserve_next_service_execution(
+                    session, environment="staging", pool_id="nebius-cpu",
+                    image_admission_keyring=IMAGE_ADMISSION_KEYRING, now=now,
+                )
+
+        reservation = asyncio.create_task(reserve())
+        await asyncio.wait_for(selected.wait(), timeout=10)
+        # Match cancellation's parent-only transaction while selection holds Trial.
+        async with sessions.begin() as session:
+            await session.execute(text("SET LOCAL lock_timeout = '2s'"))
+            await session.execute(select(Batch).where(Batch.id == batch_id).with_for_update())
+            await session.execute(update(Batch).where(Batch.id == batch_id).values(
+                state=parent_state, finished_at=now,
+            ))
+        parent_committed.set()
+        assert await asyncio.wait_for(reservation, timeout=10) is None
+        async with sessions() as session:
+            child = await session.get(Trial, trial_id)
+            assert child is not None and child.state == "queued" and child.attempt_count == 0
+            assert child.scheduling_observation is None
+            for model in (ServiceExecutionLease, ExecutionAdmissionReservation, ExecutionCostReservation):
+                assert await session.scalar(select(func.count()).select_from(model).where(
+                    model.trial_id == trial_id,
+                )) == 0
+    finally:
+        parent_committed.set()
+        if reservation is not None and not reservation.done():
+            await asyncio.wait_for(reservation, timeout=10)
+        await engine.dispose()
+
+
+async def test_execution_parent_fence_serializes_commit_and_preserves_owned_replay(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    request_id = uuid4()
+    cancelling_pid: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+    cancellation: asyncio.Task[None] | None = None
+    try:
+        async with sessions.begin() as session:
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            await _configure_scheduler_trial(session, trial_id=trial_id, now=now)
+            trial = await session.get(Trial, trial_id)
+            assert trial is not None
+            batch_id = trial.batch_id
+
+        async def cancel_parent() -> None:
+            async with sessions.begin() as session:
+                pid = await session.scalar(text("SELECT pg_backend_pid()"))
+                assert isinstance(pid, int)
+                cancelling_pid.set_result(pid)
+                await session.execute(update(Batch).where(Batch.id == batch_id).values(
+                    state="cancelled", result_status="cancelled", finished_at=now,
+                ))
+
+        async with sessions() as session:
+            lease = await _reserve(session, trial_id=trial_id, target=target, now=now,
+                                   request_id=request_id)
+            cancellation = asyncio.create_task(cancel_parent())
+            pid = await asyncio.wait_for(cancelling_pid, timeout=10)
+            # Observe the real lock wait rather than relying on task timing.
+            async with sessions() as observer, asyncio.timeout(5):
+                while True:
+                    blockers = await observer.scalar(text("SELECT pg_blocking_pids(:pid)"), {"pid": pid})
+                    if blockers:
+                        break
+                    assert not cancellation.done(), "parent changed before reservation commit"
+                    await asyncio.sleep(0.01)
+            await session.commit()
+        await asyncio.wait_for(cancellation, timeout=10)
+        async with sessions.begin() as session:
+            replay = await _reserve(session, trial_id=trial_id, target=target, now=now,
+                                    request_id=request_id)
+            assert replay.id == lease.id
+            command = await request_trial_execution_cancellation(session, trial_id=trial_id, now=now)
+            assert command is not None and command.lease_id == lease.id
+        async with sessions() as session:
+            owned = await session.get(ServiceExecutionLease, lease.id)
+            assert owned is not None and owned.desired_state == "cancel"
+    finally:
+        if cancellation is not None:
+            await asyncio.wait_for(cancellation, timeout=10)
+        await engine.dispose()
 
 
 @pytest.mark.parametrize(
