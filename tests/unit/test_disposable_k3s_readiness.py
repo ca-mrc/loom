@@ -271,15 +271,19 @@ def test_pod_timeout_reports_container_states_without_dumping_workload_data(load
 
 
 @pytest.mark.parametrize("events_unavailable", [False, True])
-def test_pod_timeout_retains_bounded_sandbox_and_pull_events(loading_client, events_unavailable):
+def test_pod_timeout_retains_bounded_sandbox_and_pull_events(loading_client, monkeypatch, events_unavailable):
+    from kubernetes.client.api.core_v1_api import CoreV1Api
+
     _, core, _, clock = loading_client
+    core.api_client = SimpleNamespace(configuration=client.Configuration())
     pod = client.V1Pod(metadata=client.V1ObjectMeta(name="broker", uid="current-pod"),
         status=client.V1PodStatus(phase="Pending"))
     core.read_namespaced_pod = lambda name, namespace: pod
     timestamp = datetime(2026, 10, 20, tzinfo=UTC)
 
-    def events(namespace, **kwargs):
+    def events(api, namespace, **kwargs):
         assert namespace == "test"
+        assert api.api_client.configuration.retries == 0
         assert kwargs == {"limit": 32, "_request_timeout": (2, 3),
             "field_selector": "involvedObject.kind=Pod,involvedObject.uid=current-pod"}
         if events_unavailable:
@@ -295,7 +299,7 @@ def test_pod_timeout_retains_bounded_sandbox_and_pull_events(loading_client, eve
             ("Normal", "Pulled", "x" * 100000),
         )])
 
-    core.list_namespaced_event = events
+    monkeypatch.setattr(CoreV1Api, "list_namespaced_event", events)
     with pytest.raises(AssertionError, match="did not become ready: Pending") as caught:
         fixture._wait_for_pod(core, "test", "broker")
     notes = "\n".join(caught.value.__notes__)
@@ -336,7 +340,7 @@ def test_pod_failure_diagnostics_do_not_honor_retry_after_or_change_readiness_cl
     requests = []
 
     def throttled(pool, connection, method, url, **kwargs):
-        requests.append(url)
+        requests.append((pool, url))
         return HTTPResponse(body=b"{}", status=429, headers={"Retry-After": "600"})
 
     monkeypatch.setattr(HTTPConnectionPool, "_make_request", throttled)
@@ -348,6 +352,7 @@ def test_pod_failure_diagnostics_do_not_honor_retry_after_or_change_readiness_cl
             fixture._wait_for_pod(core, "test", "broker")
         assert len(requests) == 1 and clock[0] == 60
         assert configuration.retries is None
+        assert requests[0][0].pool is None, "failed diagnostics retained their HTTP connection pool"
 
 
 def test_policy_diagnostics_identify_missing_status_and_stale_generation():
