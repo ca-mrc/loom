@@ -13,6 +13,7 @@ from sqlalchemy import event, func, insert, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from loom.db.schema import (
+    Batch,
     ExecutionCapacityPolicy,
     ExecutionCostReservation,
     ExecutionProvisioningAuthorization,
@@ -207,13 +208,15 @@ async def test_execution_waiting_before_successive_build_heads_gets_released_cap
 
 
 @pytest.mark.parametrize("invalidated", ["cancelled", "input", "route", "attempt", "expired",
-                                      "target_environment", "target_region"])
+                                      "target_environment", "target_region", "parent_cancelled", "parent_finished"])
 async def test_invalid_execution_wait_cannot_hold_builder_capacity(waiting_execution, invalidated):
     controller, sessions, _, _, _, trial_id, target, now = waiting_execution
     async with sessions() as session, session.begin():
         trial = await session.get(Trial, trial_id)
         if invalidated == "cancelled":
             trial.cancellation_requested_at = now
+        elif invalidated.startswith("parent_"):
+            (await session.get(Batch, trial.batch_id)).state = invalidated.removeprefix("parent_")
         elif invalidated == "input":
             (await session.get(Task, trial.task_id)).checksum = "f" * 64
         elif invalidated == "route":

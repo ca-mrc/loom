@@ -14,6 +14,7 @@ from sqlalchemy.exc import DBAPIError
 
 from loom.db.nebius_pool_outbox_schema import NebiusPoolBuildOutbox
 from loom.db.schema import TaskImageMaterialization, TaskImageMaterializationAttempt
+from loom_control_plane.task_image_materializations import claim_task_image_materialization
 from loom_execution_actuator.pool_build_driver import PoolBuildDriver
 from loom_execution_actuator.pool_build_runtime import PoolNativeBuildController
 from tests.integration.test_nebius_pool_build_driver import selected
@@ -93,20 +94,33 @@ async def test_restart_reads_manager_release_without_replaying_results_or_budget
         assert (await local_rows(sessions, request))[1].native_build == done.native_build
 
 
-async def test_released_handoff_allows_new_selection_and_preserves_old_replay(sessions, tmp_path):
+@pytest.mark.parametrize("claim_mode", ["pool", "ordinary"])
+async def test_released_handoff_allows_new_selection_and_preserves_old_replay(sessions, tmp_path, claim_mode):
     async with completed(sessions, tmp_path, outcome="cancelled") as (participant, request, journal, driver, reader, receipt):
         following = request.model_copy(update={"key": request.key.model_copy(update={"generation": request.key.generation + 1}),
             "build": request.build.model_copy(update={"expected_lease_epoch": 1})})
         with pytest.raises(ValueError):
             await journal.remember(following)
+        async with sessions.begin() as session:
+            assert await claim_task_image_materialization(
+                session, builder_id="ordinary-builder", cpu_arch="x86_64",
+            ) is None
         await PoolNativeBuildController(driver=driver, kubernetes=reader).run_once()
         released = await journal.get(request.key)
-        assert (await journal.remember(following)).phase == "selected"
-        assert (await driver.advance(following.key)).phase == "active"
+        if claim_mode == "pool":
+            assert (await journal.remember(following)).phase == "selected"
+            assert (await driver.advance(following.key)).phase == "active"
+        else:
+            async with sessions.begin() as session:
+                successor = await claim_task_image_materialization(
+                    session, builder_id="ordinary-builder", cpu_arch="x86_64",
+                )
+                assert successor is not None and successor.id == request.key.local_work_id
         assert await counts(sessions, request.key.local_work_id) == (2, 1, 2)
         assert await outbox(sessions, participant).confirm_release(request.key, receipt) == released
         assert await counts(sessions, request.key.local_work_id) == (2, 1, 2)
-        assert [item.request.key for item in await journal.pending()] == [following.key]
+        assert [item.request.key for item in await journal.pending()] == (
+            [following.key] if claim_mode == "pool" else [])
 
 
 async def test_release_without_dispatched_job_preserves_cancel_refund_and_empty_uid(sessions, tmp_path):

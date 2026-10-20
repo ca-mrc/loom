@@ -611,11 +611,19 @@ class ExecutionActuator:
             observation = resources[0]
             try:
                 self._validate_observation(matched_lease, observation)
-                if matched_lease.desired_state in {"delete_pending", "deleted"}:
+                if (
+                    matched_lease.desired_state in _CLEANUP_DESIRED_STATES
+                    or matched_lease.desired_state == "deleted"
+                ):
                     # Durable cleanup intent survives a lost/dead-letter
                     # command. Reuse its exact-UID delete and output-window
                     # checks; the next absence observation closes the lease.
-                    await self._delete(matched_lease, observation, now=current_time)
+                    await self._delete(
+                        matched_lease,
+                        observation,
+                        now=current_time,
+                        cancel_immediately=matched_lease.desired_state == "cancel",
+                    )
                     drift += 1
                 else:
                     await self._persist_observation(matched_lease, observation, now=current_time)

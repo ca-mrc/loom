@@ -220,6 +220,18 @@ failures commit under the same Trial/task/profile locks used to compile the
 candidate, after partial compilation writes roll back. Temporary
 capacity and image-readiness waits retain their existing retry behavior.
 
+The environment-local scheduler also isolates admission ceilings and paid-execution
+policy denials. Region admission limits and target-specific budget or price waits
+roll back that target's route, lease, admission and spend writes before trying an
+eligible alternative. Broader policies retain their scope. If no target can admit
+the candidate, the Trial remains queued with a diagnostic and bounded retry time;
+the scheduler continues its scan of at most 32 candidates. Reservation identity
+conflicts and price-snapshot mismatches still propagate as errors. A parent that
+became terminal after selection rejects the new reservation under the parent row
+lock, without preventing admission of an unrelated candidate.
+Capacity-wait projections also exclude terminal parents, so undelivered child
+cancellation cannot retain their former place ahead of eligible work.
+
 Shared and separate verification are properties of the private-sandbox plan,
 not of the Terminus harness. Shared grading injects private inputs and verifies
 in the existing task sandbox. Separate grading commits a validated public
@@ -1507,9 +1519,11 @@ existing cleanup path without treating an active create as deleted.
 
 Kubernetes observation event keys and ordinals are allocated under the same
 lease lock, so concurrent command/watch/reconcile deliveries reuse the same
-event without weakening payload validation. Full reconciliation retries
-`delete_pending` through the normal UID and output-window checks even when its
-command became dead-letter. The command history remains intact and cleanup
+event without weakening payload validation. Full reconciliation retries `cancel`,
+`timeout`, `retry` and `delete_pending` through the normal UID and output-window
+checks even when their commands became dead-letter. Cancellation still signals
+termination immediately while preserving the bounded output drain. The command
+history remains intact and cleanup
 completes only after resource absence. A bounded published-code recovery before
 an idle-gated actuator upgrade is described in the
 [terminal recovery runbook](../runbooks/terminal-archive-recovery.md).
