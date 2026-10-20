@@ -344,6 +344,9 @@ back to normal pinned-image preparation. The lazy per-fixture resolver remains
 available for local tests.
 Runtime curl, CA certificates and coreutils follow compatible distribution security
 updates while the MinIO release, source checksum, compiler and base image stay pinned.
+System smoke uses a Compose project per run/attempt and Docker-assigned loopback
+ports; it discovers actual service endpoints once and passes the registry endpoint
+to the image builder without changing the original port mappings.
 
 Both integration lanes also prepare selected `postgres:16`, `postgres:17` and
 `python:3.11-slim` fixtures before pytest, following literal references through
