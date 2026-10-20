@@ -687,7 +687,8 @@ def connected_pool_readers(context: PoolCutoverContext, *, refresh: PoolManagerR
                     "current-context": "loom-pool"})
                 migration = context.request.fencing.retirement.migration
                 executable = Path(original.ingress["kubectl"])
-                guards = KubectlPoolGuardAPI(request=migration, kubeconfig=kubeconfig, executable=executable)
+                guards = KubectlPoolGuardAPI(request=migration, kubeconfig=kubeconfig, executable=executable,
+                    **({} if refresh is None else {'refresh': refresh}))
                 history = KubectlPoolHistoryAPI(request=migration, target=target, kubeconfig=kubeconfig, executable=executable)
                 history.qualify_binding(migration, context.request.manager)
                 qualify_pool_runtime_databases(context, guards, **({} if refresh is None else {'refresh': refresh}))
