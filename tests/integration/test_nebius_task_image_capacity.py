@@ -13,6 +13,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.db.schema import (
+    ExecutionCapacityObservation,
     ExecutionCapacityPolicy,
     ServiceExecutionLease,
     TaskImageMaterialization,
@@ -90,6 +91,122 @@ async def _io_native(session, owned, pair, now, *, cpu=1000):
         }}}},
     }
     return attempt_id, materialization_id
+
+
+def _monitoring_placement(pair, at, *, pressure=0.0):
+    placement = _io_placement(pair, at)
+    node = placement["nodes"][0]
+    node.pop("io_pressure")
+    node.update(created_at=(at - timedelta(hours=1)).isoformat(), io_stall_window={
+        "source": "nebius_io_stalled_counter",
+        "window_started_at": (at - timedelta(seconds=30)).isoformat(),
+        "sampled_at": at.isoformat(), "full_window_percent": pressure,
+    })
+    return placement
+
+
+async def test_monitoring_window_jsonb_binding_requires_complete_post_heavy_feedback(native_setup):
+    sessions, owned = native_setup
+    now = datetime.now(UTC)
+    at = now + timedelta(seconds=1)
+    async with sessions() as session, session.begin():
+        pair = await _seed_ready_trial(session, now=now)
+        placement = _monitoring_placement(pair, at)
+        observation, _ = await _record(session, pair[1].target_id, at, placement)
+        observation_id = observation.id
+        first, _ = await _io_native(session, owned, pair, now)
+        original = await reserve_native_task_image_capacity(session, attempt_id=first, now=at)
+        second, _ = await _io_native(session, owned, pair, now)
+    async with sessions() as session:
+        # Read a new session's persisted JSONB, not the in-memory typed input.
+        stored = (await session.get(ExecutionCapacityObservation, observation_id)).observation_json
+        node = stored["placement"]["nodes"][0]
+        window = node["io_stall_window"]
+        assert window["source"] == "nebius_io_stalled_counter"
+        assert datetime.fromisoformat(window["window_started_at"]) == at - timedelta(seconds=30)
+        assert datetime.fromisoformat(window["sampled_at"]) == at
+        assert datetime.fromisoformat(node["created_at"]) == at - timedelta(hours=1)
+        binding = (await session.get(TaskImageMaterializationAttempt, first)).native_build["io_binding"]
+        assert binding == original["io_binding"]
+        assert binding["provider_id"] == node["provider_id"] and binding["node_uid"] == node["uid"]
+        assert binding["source"] == window["source"] and binding["full_window_percent"] == 0.0
+        assert "full_avg10" not in binding
+        pod = original["job"]["spec"]["template"]["spec"]
+        terms = pod["affinity"]["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]["nodeSelectorTerms"]
+        assert terms[0]["matchFields"] == [{"key": "metadata.name", "operator": "In", "values": ["worker-1"]}]
+        assert pod["nodeSelector"] == {"pool": "shared"}
+    async with sessions() as session, session.begin():
+        attempt = await session.get(TaskImageMaterializationAttempt, first)
+        attempt.native_build = {
+            **attempt.native_build, "state": "running", "pod_uid": "observed-window-pod",
+            "node_name": "worker-1", "phases": [{"name": "build", "state": {
+                "running": {"startedAt": (now + timedelta(seconds=3)).isoformat()},
+            }}],
+        }
+        # The endpoint is 17s after heavy start, but this window includes idle
+        # time before it. It cannot inherit the old avg10 endpoint-only rule.
+        diluted_at = now + timedelta(seconds=20)
+        await _record(session, pair[1].target_id, diluted_at, _monitoring_placement(pair, diluted_at))
+    with pytest.raises(ExecutionProvisioningBlockedError, match="feedback_pending"):
+        async with sessions() as session, session.begin():
+            await reserve_native_task_image_capacity(session, attempt_id=second, now=diluted_at)
+    async with sessions() as session, session.begin():
+        fresh_at = now + timedelta(seconds=40)
+        await _record(session, pair[1].target_id, fresh_at, _monitoring_placement(pair, fresh_at))
+        result = await reserve_native_task_image_capacity(session, attempt_id=second, now=fresh_at)
+        assert result["io_binding"]["node_uid"] == binding["node_uid"]
+        assert datetime.fromisoformat(result["io_binding"]["window_started_at"]) >= now + timedelta(seconds=3)
+        retained = (await session.get(TaskImageMaterializationAttempt, first)).native_build
+        assert retained["io_binding"] == binding and retained.get("capacity_released_at") is None
+        assert result.get("capacity_released_at") is None
+
+
+@pytest.mark.parametrize("damage", ["hot", "missing", "before_node_creation"])
+async def test_monitoring_window_unqualified_input_never_reserves(native_setup, damage):
+    sessions, owned = native_setup
+    now = datetime.now(UTC)
+    at = now + timedelta(seconds=1)
+    async with sessions() as session, session.begin():
+        pair = await _seed_ready_trial(session, now=now)
+        placement = _monitoring_placement(pair, at, pressure=65.0 if damage == "hot" else 0.0)
+        node = placement["nodes"][0]
+        if damage == "hot":
+            node["io_pressure"] = {"sampled_at": at.isoformat(), "full_avg10": 0.0}
+        elif damage == "missing":
+            node.pop("io_stall_window")
+        else:
+            node["created_at"] = (at - timedelta(seconds=29)).isoformat()
+        await _record(session, pair[1].target_id, at, placement)
+        attempt_id, _ = await _io_native(session, owned, pair, now)
+    reason = "provider_quota_nodes_exceeded" if damage == "hot" else "observation_unavailable"
+    with pytest.raises(ExecutionProvisioningBlockedError, match=reason):
+        async with sessions() as session, session.begin():
+            await reserve_native_task_image_capacity(session, attempt_id=attempt_id, now=at)
+    async with sessions() as session:
+        native = (await session.get(TaskImageMaterializationAttempt, attempt_id)).native_build
+        assert "capacity_reserved_at" not in native and "io_binding" not in native
+
+
+@pytest.mark.parametrize("field", ["uid", "provider_id"])
+async def test_monitoring_window_frozen_binding_rejects_node_or_provider_replacement(native_setup, field):
+    sessions, owned = native_setup
+    now = datetime.now(UTC)
+    at = now + timedelta(seconds=1)
+    async with sessions() as session, session.begin():
+        pair = await _seed_ready_trial(session, now=now)
+        placement = _monitoring_placement(pair, at)
+        await _record(session, pair[1].target_id, at, placement)
+        attempt_id, _ = await _io_native(session, owned, pair, now)
+        original = await reserve_native_task_image_capacity(session, attempt_id=attempt_id, now=at)
+    async with sessions() as session, session.begin():
+        placement["nodes"][0][field] = "replaced-" + field
+        await _record(session, pair[1].target_id, at + timedelta(seconds=1), placement)
+    with pytest.raises(ExecutionProvisioningBlockedError, match="node_identity_changed"):
+        async with sessions() as session, session.begin():
+            await reserve_native_task_image_capacity(session, attempt_id=attempt_id,
+                now=at + timedelta(seconds=2), revalidate_existing=True)
+    async with sessions() as session:
+        assert (await session.get(TaskImageMaterializationAttempt, attempt_id)).native_build == original
 
 
 async def test_io_hot_node_cannot_authorize_native_build_without_spare_quota(native_setup):

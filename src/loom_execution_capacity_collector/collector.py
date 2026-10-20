@@ -28,6 +28,23 @@ class CapacityCollectionError(RuntimeError):
     """Complete source snapshots disagree on their shared target identity."""
 
 
+async def _with_node_io(provider: Any, snapshot: KubernetesCapacitySnapshot) -> KubernetesCapacitySnapshot:
+    """Attach optional provider OS windows without changing resource inventory."""
+    read = getattr(provider, "capture_node_io", None)
+    if read is None or not snapshot.nodes:
+        return snapshot
+    try:
+        async with asyncio.timeout(10):
+            windows = await read(snapshot.nodes)
+    except Exception:
+        # Do not retain HTTP bodies, labels, endpoints or credentials in errors.
+        windows = {}
+    return snapshot.model_copy(update={"nodes": [
+        node.model_copy(update={"io_stall_window": windows.get(node.uid)})
+        for node in snapshot.nodes
+    ]})
+
+
 def _matching_samples(
     provider: ProviderCapacitySnapshot, kubernetes: KubernetesCapacitySnapshot
 ) -> list[NodeTemplateSample]:
@@ -133,6 +150,7 @@ async def collect_capacity_observation(
                 target_scope=policy.target_scope,
             ),
         )
+        kubernetes_snapshot = await _with_node_io(provider, kubernetes_snapshot)
         # Nebius quota usage can lag node-group inventory while autoscaling. Use
         # the complete node-group snapshot as a conservative floor so the
         # observation never overstates headroom during that convergence window.

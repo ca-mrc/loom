@@ -6,7 +6,11 @@ from contextlib import AsyncExitStack
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from loom_execution_capacity_collector.collector import CapacityCollectionError, _matching_samples
+from loom_execution_capacity_collector.collector import (
+    CapacityCollectionError,
+    _matching_samples,
+    _with_node_io,
+)
 from loom_execution_capacity_collector.config import PoolCapacityCollectorSettings
 from loom_execution_capacity_collector.kubernetes import InClusterKubernetesCapacityReader
 from loom_execution_capacity_collector.nebius import NebiusCapacityReader
@@ -50,6 +54,7 @@ async def collect_pool_observation(settings: PoolCapacityCollectorSettings, *, m
                 or (native.autoscaler_state == "ready" and (
                     cluster.active_nodes != native.node_count or cluster.ready_nodes != native.ready_node_count))):
             raise CapacityCollectionError("pool physical inventories disagree")
+        cluster = await _with_node_io(provider, cluster)
         cluster = cluster.model_copy(update={"template_samples": _matching_samples(native, cluster)})
         observation = PoolObservationV1(capture_id=capture.capture_id, observed_at=datetime.now(UTC),
                                         provider=native, kubernetes=cluster)
