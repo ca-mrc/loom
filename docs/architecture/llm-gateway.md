@@ -360,6 +360,7 @@ OpenAI-compatible dispatch bypass LiteLLM so:
 | Upstream timeout (>200s)               | 504, failed-attempt `llm_calls` row inserted with zero tokens and `provider_extras._loom_failure_category=upstream_timeout` |
 | Upstream non-2xx                       | Forwarded or surfaced with a redacted excerpt; failed-attempt `llm_calls` row inserted with zero tokens and `provider_extras._loom_failure_category=upstream_http_4xx` or `upstream_http_5xx` |
 | LiteLLM adapter exception or malformed upstream response | 502 with sanitized diagnostic text; failed-attempt `llm_calls` row inserted with `provider_extras._loom_failure_category=upstream_transport`; provider API keys and `Authorization: Bearer` values are redacted before logs or responses |
+| Ordinary OpenAI Chat facade or Responses HTTP-success body fails JSON decoding or required-shape validation | 502; failed-attempt `llm_calls` row with `upstream_invalid_response`, the upstream HTTP status, and missing usage |
 | BYO `/responses` endpoint is actually chat-only | One fallback POST to `/chat/completions`; success returns synthetic Responses JSON/SSE and records normal `openai_responses` usage from chat `usage` tokens |
 | Rate-card missing                      | 422 `RateCardNotFoundError`; no row inserted |
 | Bearer invalid / over RPM              | 401 / 429; no upstream call          |
