@@ -1,5 +1,8 @@
 """The adapter prepares input; publication uses the local-folder backend."""
 
+import asyncio
+import threading
+from contextlib import suppress
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -199,6 +202,63 @@ async def test_harbor_publication_prepares_cold_cache_and_refresh(monkeypatch, t
         assert not backend.call_args.args[0].exists()
     assert len(downloads) == 2
     assert all(source == adapter.upstream_source for source, _ in downloads)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("worker_fails", [False, True])
+async def test_cancelled_preparation_finishes_before_staging_cleanup(
+    monkeypatch, tmp_path, worker_fails
+):
+    loop = asyncio.get_running_loop()
+    started = asyncio.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    staging = []
+    writes = []
+
+    def prepare(benchmark, *, staging_dir, **kwargs):
+        staging.append(staging_dir)
+        loop.call_soon_threadsafe(started.set)
+        try:
+            assert release.wait(timeout=5)
+            marker = staging_dir / "worker-finished"
+            marker.write_text("complete")
+            writes.append(marker.read_text())
+            if worker_fails:
+                raise ValueError("preparation failed after cancellation")
+            return object()
+        finally:
+            finished.set()
+
+    backend = AsyncMock()
+    monkeypatch.setattr(benchmark_prepare, "prepare_adapter_benchmark", prepare)
+    monkeypatch.setattr(
+        benchmark_publish.local_benchmark_publish, "publish_local_benchmark", backend
+    )
+    publication = asyncio.create_task(benchmark_publish.publish_benchmark(
+        benchmark="adapter-bench", cache_dir=tmp_path / "cache"
+    ))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        for _ in range(2):
+            publication.cancel()
+            cancellation_delivered = asyncio.Event()
+            loop.call_soon(cancellation_delivered.set)
+            await cancellation_delivered.wait()
+            assert not publication.done()
+            assert staging[0].is_dir()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await publication
+        assert finished.is_set()
+        assert writes == ["complete"]
+        assert not staging[0].exists()
+        backend.assert_not_awaited()
+    finally:
+        release.set()
+        with suppress(asyncio.CancelledError):
+            await publication
+        assert await asyncio.to_thread(finished.wait, 5)
 
 
 @pytest.mark.asyncio

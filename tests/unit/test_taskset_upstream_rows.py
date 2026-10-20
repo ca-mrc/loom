@@ -23,8 +23,13 @@ def test_jsonl_inline_yields_rows() -> None:
 
 @pytest.mark.parametrize("trailing_newline", ["", "\n"])
 def test_jsonl_preserves_newlines_inside_strings(tmp_path: Path, trailing_newline: str) -> None:
-    row = {"id": "1", "question": "first line\nsecond line", "literal": r"keep\n"}
-    source = TaskSetSource(type="jsonl-inline", locator=json.dumps(row) + trailing_newline)
+    row = {
+        "id": "1", "question": "first line\nsecond line", "literal": r"keep\n",
+        "unicode_separators": "first\u0085second\u2028third\u2029fourth",
+    }
+    source = TaskSetSource(
+        type="jsonl-inline", locator=json.dumps(row, ensure_ascii=False) + trailing_newline
+    )
     assert list(iter_upstream_rows(source, cache_root=tmp_path)) == [row]
 
 
