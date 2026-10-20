@@ -21,6 +21,7 @@ from loom.harbor_bundle import prepare_harbor_bundle
 from loom.models.task import TaskConfig, normalize_steps
 from loom.models.task_checksum import task_checksum
 from loom.models.taskset import (
+    TaskSetLimits,
     TaskSetVerifier,
     UserTaskSetManifest,
     bundle_object_key,
@@ -636,7 +637,7 @@ def materialize_task_set(
         epoch=materialization_epoch,
     )
     has_evaluation = "evaluation" in intents
-    max_instances = (manifest.limits.max_instances if manifest.limits else 500)
+    max_instances = (manifest.limits or TaskSetLimits()).max_instances
 
     # v1 internal-trusted workloads deliberately have no transform execution
     # capability. This guard precedes every blob fetch and subprocess path so

@@ -230,6 +230,16 @@ Supported source types are `hf`, `git`, `https`, `jsonl-inline`, and
 `script` verifier. A bundle upload contains complete task directories and can
 use each task's own verifier.
 
+`limits.max_instances` bounds how many tasks materialization selects from a
+source, including an uploaded bundle. Omitting it uses the default of 500, even
+when `limits` is empty or contains only `timeout_per_task_s`. Intake and TaskSet
+detail responses expose `default_max_instances_applied` in their existing
+`warnings` list with the effective maximum. For a larger source, explicitly set
+the intended selection limit, for example `limits: {max_instances: 1000}`.
+An explicit limit, including 500, does not produce this default warning.
+This selection limit does not set execution concurrency or reserve compute;
+normal resource admission, shared quotas and scheduling still govern execution.
+
 For uploaded bundles, materialization derives the `oracle_eligible` catalog
 tag from the presence of the regular file `solution/solve.sh` in each validated
 task directory. Oracle admission therefore works with a script verifier and
