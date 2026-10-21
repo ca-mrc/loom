@@ -36,6 +36,7 @@ from loom.task_bundle_source_journal import require_task_bundle_transaction
 from loom_control_plane.execution_capacity import ExecutionProvisioningBlockedError
 from loom_control_plane.pool_execution_handoff import (
     execution_selection_snapshot,
+    lock_verifier_source,
     verifier_selection_snapshot,
 )
 from loom_control_plane.service_execution import (
@@ -175,6 +176,7 @@ class PoolExecutionOutbox:
         if verifier_candidate is None:
             return None
         parent, trial = verifier_candidate
+        await lock_verifier_source(session, trial=trial)
         target = await session.get(ServiceExecutionTarget, request.target_id, with_for_update=True)
         waiting_since = _handoff_pending_since(trial) or parent.deleted_at
         if waiting_since is not None and now - waiting_since >= VERIFIER_HANDOFF_TIMEOUT:
@@ -228,6 +230,8 @@ class PoolExecutionOutbox:
                         if waiting_since is not None and now - waiting_since >= VERIFIER_HANDOFF_TIMEOUT:
                             _fail_verifier_handoff(trial, reason="global_verifier_capacity_unavailable", now=now)
                             continue
+                        # Match ordinary proposal/attachment: source -> target -> images.
+                        await lock_verifier_source(session, trial=trial)
                         target = await session.get(ServiceExecutionTarget, target_id, with_for_update=True)
                         if target is None or target.spec_json["namespace_name"] != self.participant.execution_namespace.name:
                             raise ValueError("verifier_parent_target_scope_changed")

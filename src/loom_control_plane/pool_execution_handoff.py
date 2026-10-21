@@ -35,14 +35,20 @@ def execution_selection_snapshot(trial: Trial, candidate: Any, target: ServiceEx
     }
 
 
-async def verifier_selection_snapshot(session: AsyncSession, *, trial: Trial,
-    parent: ServiceExecutionLease, target: ServiceExecutionTarget, runtime: ExecutionRuntimePlanV1,
-) -> dict[str, Any]:
-    """Bind the committed parent and retry before any remote physical grant."""
+async def lock_verifier_source(session: AsyncSession, *, trial: Trial) -> tuple[Task, Batch]:
+    """Pin shared source rows before the target and runtime compilation."""
     task = await session.get(Task, trial.task_id, with_for_update=True)
     batch = await session.get(Batch, trial.batch_id, with_for_update=True) if trial.batch_id else None
     if task is None or batch is None:
         raise ValueError("verifier source unavailable")
+    return task, batch
+
+
+async def verifier_selection_snapshot(session: AsyncSession, *, trial: Trial,
+    parent: ServiceExecutionLease, target: ServiceExecutionTarget, runtime: ExecutionRuntimePlanV1,
+) -> dict[str, Any]:
+    """Bind the committed parent and retry before any remote physical grant."""
+    task, batch = await lock_verifier_source(session, trial=trial)
     snapshot = execution_selection_snapshot(trial, {
         "task_checksum": task.checksum, "task_config": task.config,
         "task_source_provenance": task.source_provenance,
