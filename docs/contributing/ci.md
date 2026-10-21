@@ -354,8 +354,10 @@ module on shard 20, using its existing 1500-second whole-test budget. All eight
 census scenarios and their assertions remain. Shard 20 took 552.05 seconds in
 that run; placing the recovery variant there avoids concentrating both the
 participant and recovery matrices on shard 19. Hosted completion and balance
-still require verification on the updated head; the cause of the run-to-run
-timing variation is not established.
+were verified in follow-up run 39689189236: shard 19 completed 30 tests in
+1728.44 seconds and shard 20 completed 31 in 2484.07 seconds, including the
+1238.96-second preactivation-recovery call. These measurements describe that
+cycle; the cause of the run-to-run timing variation is not established.
 
 The pool job limit remains 50 minutes; other lifecycle and transport limits
 remain unchanged. Every selected successful shard runs all its tests, other
