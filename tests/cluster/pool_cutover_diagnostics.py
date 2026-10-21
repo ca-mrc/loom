@@ -9,10 +9,15 @@ from contextlib import contextmanager
 from typing import Any
 from uuid import UUID
 
+from scripts.ops.nebius_management_prerequisites import inventory_resources
+from scripts.ops.nebius_management_transport import ManagementKubernetesTransport
 from scripts.ops.nebius_pool_cutover import stage_pool_cutover
 from scripts.ops.nebius_pool_cutover_live import HTTPSPoolCutoverAPI
+from scripts.ops.nebius_pool_platform_authority import qualify_platform_authority
 from scripts.ops.nebius_pool_role_fencing import (
+    qualify_pool_writer_bindings,
     qualify_pool_writer_workloads,
+    qualify_retained_writer_bindings,
     qualify_retained_writer_workloads,
 )
 
@@ -22,6 +27,11 @@ _LOCATIONS = {
     stage_pool_cutover.__code__: ("nebius_pool_cutover.py", "stage_pool_cutover"),
     HTTPSPoolCutoverAPI.preflight.__code__: ("nebius_pool_cutover_live.py", "preflight"),
     HTTPSPoolCutoverAPI.qualify_writer_bindings.__code__: ("nebius_pool_cutover_live.py", "qualify_writer_bindings"),
+    inventory_resources.__code__: ("nebius_management_prerequisites.py", "inventory_resources"),
+    ManagementKubernetesTransport._request.__code__: ("nebius_management_transport.py", "_request"),
+    qualify_platform_authority.__code__: ("nebius_pool_platform_authority.py", "qualify_platform_authority"),
+    qualify_retained_writer_bindings.__code__: ("nebius_pool_role_fencing.py", "qualify_retained_writer_bindings"),
+    qualify_pool_writer_bindings.__code__: ("nebius_pool_role_fencing.py", "qualify_pool_writer_bindings"),
     qualify_retained_writer_workloads.__code__: ("nebius_pool_role_fencing.py", "qualify_retained_writer_workloads"),
     qualify_pool_writer_workloads.__code__: ("nebius_pool_role_fencing.py", "qualify_pool_writer_workloads"),
 }
