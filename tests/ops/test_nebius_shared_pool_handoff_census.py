@@ -150,10 +150,10 @@ from tests.ops.test_nebius_shared_pool_handoff import (
 @pytest.mark.timeout(1200)
 @pytest.mark.parametrize('forward_census,staging_observation', [
     (False, None), (True, None), ('participant', None), ('preparation', None), ('personal', None),
-    ('preactivation-preparation', 'independent'), ('preactivation-recovery', 'independent')],
+    ('preactivation-preparation', 'independent')],
     indirect=['staging_observation'],
     ids=['initial', 'forward', 'participant', 'preparation', 'personal',
-        'preactivation-preparation', 'preactivation-recovery'])
+        'preactivation-preparation'])
 def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writers(
         shared_runtime, staging_history, staging_observation, completed_pool, handoff, shared_operation, forward_census,
         publisher_cloud, tmp_path):

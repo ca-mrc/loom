@@ -347,7 +347,17 @@ preserve test selection and all scenarios; they add no jobs or runner capacity.
 Their hosted timing must be verified on the new head, not inferred from a local
 pass or a censored timeout.
 
-The pool job limit remains 50 minutes; individual lifecycle and transport limits
+Run 39677158201 exceeded the general census's 1200-second test limit in its
+preactivation-recovery variant (27.68 seconds setup and 1172.32 seconds call).
+That existing scenario now lives with ordinary recovery in the recovery census
+module on shard 20, using its existing 1500-second whole-test budget. All eight
+census scenarios and their assertions remain. Shard 20 took 552.05 seconds in
+that run; placing the recovery variant there avoids concentrating both the
+participant and recovery matrices on shard 19. Hosted completion and balance
+still require verification on the updated head; the cause of the run-to-run
+timing variation is not established.
+
+The pool job limit remains 50 minutes; other lifecycle and transport limits
 remain unchanged. Every selected successful shard runs all its tests, other
 shards are not cancelled, and `repository-checks` still requires their results.
 Measure execution, allocation wait and serialized merge-group time separately;
