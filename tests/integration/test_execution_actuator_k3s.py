@@ -280,6 +280,39 @@ def _executable_lease(
     )
 
 
+# Images the pinned K3s pulls for its sandbox and packaged addons. Inside the
+# disposable node they would come straight from Docker Hub, bypassing the
+# runner's registry mirror and image cache, once per K3s start.
+K3S_SYSTEM_IMAGES = (
+    "rancher/mirrored-pause:3.6",
+    "rancher/mirrored-coredns-coredns:1.14.3",
+    "rancher/local-path-provisioner:v0.0.36",
+    "rancher/mirrored-metrics-server:v0.8.1",
+)
+
+
+def _k3s_system_image_archive() -> Path:
+    """Host archive of K3S_SYSTEM_IMAGES for K3s to import at startup."""
+    for image in K3S_SYSTEM_IMAGES:
+        cached = subprocess.run(["docker", "image", "inspect", image], check=False,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+        if cached.returncode != 0:
+            # The host daemon applies the runner's mirror and verifies layer digests.
+            subprocess.run(["docker", "pull", "--quiet", image], check=True, timeout=300,
+                           stdout=subprocess.DEVNULL)
+    ids = _docker("image", "inspect", "--format", "{{.Id}}", *K3S_SYSTEM_IMAGES).split()
+    key = hashlib.sha256("\n".join([*K3S_SYSTEM_IMAGES, *ids]).encode()).hexdigest()[:16]
+    directory = Path(tempfile.gettempdir()) / f"loom-k3s-system-images-{key}"
+    archive = directory / "system-images.tar"
+    if not archive.exists():
+        directory.mkdir(exist_ok=True)
+        partial = directory / f".system-images.{os.getpid()}.partial"
+        subprocess.run(["docker", "save", "--output", str(partial), *K3S_SYSTEM_IMAGES], check=True, timeout=300)
+        # Concurrent test processes share the archive; never expose a partial one.
+        partial.replace(archive)
+    return archive
+
+
 def _start_k3s(*, node_name: str | None = None, ephemeral_storage_floor: str | None = None) -> object:
     from testcontainers.core.container import DockerContainer
 
@@ -316,6 +349,9 @@ def _start_k3s(*, node_name: str | None = None, ephemeral_storage_floor: str | N
                 ]),
             ]
         )
+        # Mount the file, not its directory: K3s keeps import state beside it.
+        .with_volume_mapping(str(_k3s_system_image_archive()),
+                             "/var/lib/rancher/k3s/agent/images/system-images.tar", "ro")
         .with_kwargs(privileged=True)
     )
     container.start()
