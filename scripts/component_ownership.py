@@ -1495,10 +1495,20 @@ def _direct_test_imports(file: Path, mtime_ns: int, size: int) -> tuple[str, ...
     sharding re-selects the same lane once per shard in one process.
     """
     found: list[str] = []
-    for node in ast.walk(ast.parse(file.read_text(encoding="utf-8"))):
-        names = ([alias.name for alias in node.names] if isinstance(node, ast.Import)
-                 else [node.module, *(f"{node.module}.{alias.name}" for alias in node.names)]
-                 if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module else [])
+    # Imports are statements, never expressions. Still parse the whole
+    # source so malformed dependencies fail closed, but do not recursively
+    # visit large literal fixtures, calls or assertion expressions to find
+    # imports. Nested functions, handlers and match cases remain traversed.
+    nodes: list[ast.AST] = [ast.parse(file.read_text(encoding="utf-8"))]
+    while nodes:
+        node = nodes.pop()
+        if isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            names = [node.module, *(f"{node.module}.{alias.name}" for alias in node.names)]
+        else:
+            nodes.extend(child for child in ast.iter_child_nodes(node) if not isinstance(child, ast.expr))
+            continue
         found.extend(name.replace(".", "/") + ".py" for name in names if name.startswith("tests."))
     return tuple(found)
 
