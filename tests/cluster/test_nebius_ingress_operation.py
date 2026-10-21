@@ -72,9 +72,10 @@ def _prepare_fixture_image(image, directory):
         def copy(source):
             # Index pins need both the selected platform's blobs and the original
             # index. Preserve the latter without downloading other architectures.
+            # Public fixtures must not discover the runner's registry credentials.
             for mode in ("system", "index-only"):
                 try:
-                    subprocess.run(["skopeo", "copy", "--preserve-digests", "--override-os", "linux",
+                    subprocess.run(["skopeo", "copy", "--src-no-creds", "--preserve-digests", "--override-os", "linux",
                                     "--override-arch", "amd64", "--multi-arch", mode,
                                     "docker://" + source, f"oci:{layout}:{image}"],
                                    check=True, capture_output=True, text=True, timeout=180)
