@@ -92,6 +92,7 @@ def wait_for_feedback(
     # matching source run. No custom status/check publisher is involved.
     query = urlencode({"event": event, "head_sha": head})
     deadline = clock() + timeout_seconds
+    poll_interval = 15.0
     while clock() < deadline:
         candidates = pages(f"{root}/workflows/ci.yml/runs?{query}", "workflow_runs", fetch)
         matching = [run for run in candidates if (
@@ -111,7 +112,8 @@ def wait_for_feedback(
                 return int(run["id"])
             if run["status"] == "completed":
                 raise ValueError("native CI ended without successful fast feedback")
-        sleep(min(30, max(0, deadline - clock())))
+        sleep(min(poll_interval, max(0, deadline - clock())))
+        poll_interval = min(120, poll_interval * 2)
     raise TimeoutError("matching native CI fast feedback did not finish within the wait budget")
 
 

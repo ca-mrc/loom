@@ -108,7 +108,9 @@ releasing image builds, cluster shards or Compose smoke. They read only GitHub's
 native CI run/job results, matching the complete shared run identity: event,
 head, base, PR, update/action and validation-scope labels. A green different-head,
 different-base or narrower-scope run cannot release heavy work. Missing results
-wait at most 90 minutes; failed/cancelled feedback and API errors fail closed.
+wait at most 90 minutes, with polling backing off from 15 to 120 seconds to
+bound API traffic across concurrent PRs; failed/cancelled feedback and API errors
+fail closed.
 Manual source-workflow dispatches remain independent diagnostics because they
 have no companion CI event.
 

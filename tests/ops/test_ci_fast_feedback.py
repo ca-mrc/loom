@@ -137,7 +137,7 @@ def test_waits_for_queued_stage_and_does_not_wait_for_heavy_jobs():
 
     api.advance = complete
     assert api.wait() == 7
-    assert api.now == 30 and api.run["status"] == "in_progress"
+    assert api.now == 15 and api.run["status"] == "in_progress"
 
 
 def test_cancelled_workflow_without_stage_and_duplicate_stage_fail_closed():
@@ -191,3 +191,20 @@ def test_success_from_an_earlier_attempt_cannot_release_a_rerun():
 def test_docs_only_does_not_allocate_a_feedback_runner():
     workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
     assert "docs_only != 'true'" in workflow["jobs"]["fast-feedback"]["if"]
+
+
+def test_wait_backs_off_without_extending_its_deadline():
+    api = API()
+    api.jobs[0].update(status="queued", conclusion=None)
+    intervals = []
+    advance = api.advance
+
+    def record(seconds):
+        intervals.append(seconds)
+        advance(seconds)
+
+    api.advance = record
+    with pytest.raises(TimeoutError):
+        api.wait(seconds=300)
+    assert intervals == [15, 30, 60, 120, 75]
+    assert api.now == 300
