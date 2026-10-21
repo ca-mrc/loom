@@ -121,6 +121,10 @@ func TestPreparedImageDoesNotExemptTrustedOrOtherSidecarImages(t *testing.T) {
 func fixturePlanPayload(t *testing.T) map[string]any {
 	t.Helper()
 	p := preparedTaskPlan()
+	p.VerifierExecution = "in_attempt"
+	verifier := p.Main
+	verifier.Role = "verifier"
+	p.Verifier = &verifier
 	raw, err := json.Marshal(p)
 	if err != nil {
 		t.Fatal(err)
