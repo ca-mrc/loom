@@ -287,6 +287,8 @@ K3S_SYSTEM_IMAGES = (
     "rancher/mirrored-pause:3.6",
     "rancher/mirrored-coredns-coredns:1.14.3",
     "rancher/local-path-provisioner:v0.0.36",
+    # The provisioner launches this helper for volume setup and teardown.
+    "rancher/mirrored-library-busybox:1.37.0",
     "rancher/mirrored-metrics-server:v0.8.1",
 )
 

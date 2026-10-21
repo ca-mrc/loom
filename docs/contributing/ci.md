@@ -102,6 +102,13 @@ It accepts GitHub-hosted Linux runners or disposable self-hosted Linux guests
 with the root-owned ephemeral-runner marker. It refuses unmarked hosts,
 non-Linux runners, and remote-Docker execution.
 
+The shared disposable K3s fixture preloads its pinned system images through
+the host Docker daemon: pause, CoreDNS, local-path provisioner and its busybox
+volume helper, and metrics-server. It saves a reusable archive and mounts that
+file read-only in K3s's startup import directory. Volume setup and teardown use
+the same preloaded helper image; provisioner readiness alone does not exercise
+that dependency. Test-specific images retain their existing import/pull paths.
+
 The separate image BuildKit containers use `config/ci-buildkit.toml` by default;
 an existing readable `/etc/buildkit/loom-ci.toml` retains precedence and is not
 modified. Both pull paths retain every original image reference and digest.
