@@ -19,9 +19,9 @@ import boto3
 import httpx
 import pytest
 from botocore.config import Config
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import create_engine, delete, event, insert, select, update
+from sqlalchemy import create_engine, delete, event, insert, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
@@ -47,15 +47,21 @@ from loom.taskset.materialize import MaterializeOutput, TaskRowDraft
 from loom.taskset.storage_bytes import team_taskset_storage_bytes
 from loom.taskset.transform_sandbox import TransformSandboxConfig
 from loom_control_plane.routes.trials import _ensure_trial_task_image_links
-from loom_service import taskset_gc, taskset_materializer
+from loom_service import taskset_gc, taskset_intake, taskset_materializer
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 from loom_service.submission_compat import validate_submission_agent_task_compatibility
+from loom_service.task_filter import resolve_task_filter_with_diagnostics
 from loom_service.taskset_gc import (
     purge_abandoned_materialization_generations,
     purge_expired_task_sets,
 )
-from loom_service.taskset_intake import delete_task_set, get_latest_job, rebuild_task_set
+from loom_service.taskset_intake import (
+    delete_task_set,
+    get_latest_job,
+    rebuild_task_set,
+    submit_task_set,
+)
 from loom_service.taskset_materializer import run_once
 from tests.integration.minio_test_images import MINIO_TEST_IMAGE
 from tests.support.minio import ensure_test_bucket
@@ -380,6 +386,7 @@ async def _submit_inline_task_set(
     app: FastAPI,
     *,
     token: str,
+    manifest: str = _MANIFEST_INLINE,
 ) -> str:
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -389,13 +396,341 @@ async def _submit_inline_task_set(
             files={
                 "manifest": (
                     "manifest.yaml",
-                    _MANIFEST_INLINE.encode(),
+                    manifest.encode(),
                     "application/x-yaml",
                 ),
             },
         )
     assert response.status_code == 202, response.text
     return response.json()["task_set_id"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["upload", "commit_rollback", "commit_ack_lost"])
+async def test_intake_failure_retains_discoverable_inputs_until_gc(
+    materialization_setup,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    app, _tokens, teams = materialization_setup
+    task_set_id = f"ts/{teams['team_a']}/bundle-upload-tasks"
+    prefix = f"tasksets/user/{teams['team_a']}/bundle-upload-tasks/"
+    manifest = _MANIFEST_BUNDLE_UPLOAD.replace(
+        "  display_name: Bundle Upload Tasks",
+        "  display_name: Bundle Upload Tasks\n  hold: true\n  expires_at: '2099-01-01T00:00:00Z'",
+    )
+
+    async def submit(session):
+        return await submit_task_set(
+            session,
+            team_id=teams["team_a"],
+            minio_client=app.state.minio_client,
+            artifacts_bucket=app.state.settings.artifacts_bucket,
+            manifest_upload=UploadFile(io.BytesIO(manifest.encode()), filename="manifest.yaml"),
+            verifier_upload=None,
+            transform_upload=None,
+            bundle_upload=UploadFile(io.BytesIO(_bundle_tar_bytes()), filename="bundle.tar.gz"),
+        )
+
+    async with app.state.session_factory() as session:
+        commit = session.commit
+        put_object = app.state.minio_client.put_object
+
+        async def fail_commit():
+            if _object_keys(app, prefix=prefix):
+                if failure == "commit_ack_lost":
+                    await commit()
+                raise RuntimeError("injected commit failure")
+            await commit()
+
+        def fail_upload(**kwargs):
+            result = put_object(**kwargs)
+            if kwargs["Key"].endswith("bundle.tar.gz"):
+                raise RuntimeError("injected upload failure after durable PUT")
+            return result
+
+        with monkeypatch.context() as failures:
+            if failure == "upload":
+                failures.setattr(app.state.minio_client, "put_object", fail_upload)
+            else:
+                failures.setattr(session, "commit", fail_commit)
+            with pytest.raises(RuntimeError, match="injected"):
+                await submit(session)
+
+    assert _object_keys(app, prefix=prefix)
+    charged_bytes = team_taskset_storage_bytes(
+        app.state.minio_client,
+        bucket=app.state.settings.artifacts_bucket,
+        team_id=teams["team_a"],
+    )
+    assert charged_bytes > 0
+    async with app.state.session_factory() as session:
+        task_set = await session.get(TaskSet, task_set_id)
+        job = await get_latest_job(session, task_set_id)
+        assert task_set is not None, "uploaded inputs must retain a durable GC identity"
+        assert job is not None
+        if failure == "commit_ack_lost":
+            # A reported commit error does not prove rollback. Keep published
+            # inputs and the queued worker usable, including requested policy.
+            assert task_set.status == "materializing"
+            assert task_set.hold is True
+            assert task_set.expires_at == datetime(2099, 1, 1, tzinfo=UTC)
+            assert job.state == "queued"
+        else:
+            assert (task_set.status, task_set.status_reason) == ("failed", "intake_incomplete")
+            assert task_set.hold is False
+            assert datetime.now(UTC) < task_set.expires_at < datetime.now(UTC) + timedelta(hours=2)
+            assert job.state == "failed"
+            assert job.failure_reason == "intake_incomplete"
+            assert await taskset_materializer._claim_jobs(
+                session, batch_size=1, claimed_by="incomplete-intake-worker",
+            ) == []
+
+    if failure == "commit_ack_lost":
+        await _run_materializer_once(app)
+        async with app.state.session_factory() as session:
+            assert (await session.get(TaskSet, task_set_id)).status == "ready"
+        return
+
+    async with app.state.session_factory() as session:
+        with pytest.raises(HTTPException) as rejected:
+            await rebuild_task_set(session, team_id=teams["team_a"], task_set_id=task_set_id)
+        assert rejected.value.status_code == 409
+        assert rejected.value.detail == "task_set_intake_incomplete"
+    async with app.state.session_factory() as session:
+        with pytest.raises(HTTPException) as duplicate:
+            await submit(session)
+        assert duplicate.value.status_code == 409
+    async with app.state.session_factory() as session:
+        await session.execute(update(TaskSet).where(TaskSet.id == task_set_id).values(
+            expires_at=datetime.now(UTC) - timedelta(seconds=1),
+        ))
+        await session.commit()
+        assert await taskset_gc.retire_expired_task_sets(session) == 1
+
+    def fail_delete(**_kwargs):
+        raise RuntimeError("injected GC storage failure")
+
+    with monkeypatch.context() as cleanup_failure:
+        cleanup_failure.setattr(app.state.minio_client, "delete_objects", fail_delete)
+        async with app.state.session_factory() as session:
+            assert await purge_expired_task_sets(
+                session, minio_client=app.state.minio_client,
+                artifacts_bucket=app.state.settings.artifacts_bucket, retention_days=0,
+            ) == 0
+            assert await session.get(TaskSet, task_set_id) is not None
+    assert team_taskset_storage_bytes(
+        app.state.minio_client, bucket=app.state.settings.artifacts_bucket,
+        team_id=teams["team_a"],
+    ) == charged_bytes
+    async with app.state.session_factory() as session:
+        assert await purge_expired_task_sets(
+            session, minio_client=app.state.minio_client,
+            artifacts_bucket=app.state.settings.artifacts_bucket, retention_days=0,
+        ) == 1
+        assert await session.get(TaskSet, task_set_id) is None
+    assert team_taskset_storage_bytes(
+        app.state.minio_client, bucket=app.state.settings.artifacts_bucket,
+        team_id=teams["team_a"],
+    ) == 0
+    # Only completed GC releases the slug. The next intake cannot be damaged
+    # by a compensating delete from the failed request.
+    async with app.state.session_factory() as session:
+        assert (await submit(session)).status == "materializing"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["quota", "quota_cancel", "flush", "reservation", "reservation_ack_lost"])
+async def test_intake_preupload_failure_closes_spool_without_writing_inputs(
+    materialization_setup,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    app, _tokens, teams = materialization_setup
+    prepared_uploads = []
+    prepare = taskset_intake._prepare_upload_with_size_cap
+
+    async def capture_spool(*args, **kwargs):
+        upload = await prepare(*args, **kwargs)
+        prepared_uploads.append(upload)
+        return upload
+
+    monkeypatch.setattr(taskset_intake, "_prepare_upload_with_size_cap", capture_spool)
+    if failure == "quota":
+        async with app.state.session_factory() as session:
+            (await session.get(TeamQuota, teams["team_a"])).taskset_max_storage_bytes = 1
+            await session.commit()
+    if failure == "quota_cancel":
+        async def cancel_quota(*_args, **_kwargs):
+            raise asyncio.CancelledError()
+
+        monkeypatch.setattr(taskset_intake, "check_taskset_storage_quota", cancel_quota)
+
+    async with app.state.session_factory() as session:
+        commit = session.commit
+
+        async def fail_reservation():
+            if failure == "reservation_ack_lost":
+                await commit()
+            raise RuntimeError("injected reservation failure")
+
+        if failure in {"reservation", "reservation_ack_lost"}:
+            monkeypatch.setattr(session, "commit", fail_reservation)
+        elif failure == "flush":
+            monkeypatch.setattr(session, "flush", fail_reservation)
+        error = (
+            asyncio.CancelledError if failure == "quota_cancel"
+            else HTTPException if failure == "quota" else RuntimeError
+        )
+        with pytest.raises(error):
+            await submit_task_set(
+                session, team_id=teams["team_a"], minio_client=app.state.minio_client,
+                artifacts_bucket=app.state.settings.artifacts_bucket,
+                manifest_upload=UploadFile(io.BytesIO(_MANIFEST_BUNDLE_UPLOAD.encode()), filename="manifest.yaml"),
+                verifier_upload=None, transform_upload=None,
+                bundle_upload=UploadFile(io.BytesIO(_bundle_tar_bytes()), filename="bundle.tar.gz"),
+            )
+    assert len(prepared_uploads) == 1
+    assert prepared_uploads[0].file.closed
+    assert _object_keys(app, prefix=f"tasksets/user/{teams['team_a']}/") == set()
+    async with app.state.session_factory() as session:
+        task_set = await session.get(TaskSet, f"ts/{teams['team_a']}/bundle-upload-tasks")
+        if failure == "reservation_ack_lost":
+            assert (task_set.status, task_set.status_reason) == ("failed", "intake_incomplete")
+        else:
+            assert task_set is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retirement", ["delete", "expiry"])
+async def test_intake_does_not_upload_after_reservation_is_retired(
+    materialization_setup,
+    monkeypatch: pytest.MonkeyPatch,
+    retirement: str,
+) -> None:
+    app, _tokens, teams = materialization_setup
+    task_set_id = f"ts/{teams['team_a']}/inline-tasks"
+    async with app.state.session_factory() as session:
+        commit = session.commit
+        commits = 0
+
+        async def retire_after_reservation():
+            nonlocal commits
+            await commit()
+            commits += 1
+            if commits != 1:
+                return
+            async with app.state.session_factory() as lifecycle:
+                if retirement == "delete":
+                    await delete_task_set(lifecycle, team_id=teams["team_a"], task_set_id=task_set_id)
+                else:
+                    await lifecycle.execute(update(TaskSet).where(TaskSet.id == task_set_id).values(
+                        expires_at=datetime.now(UTC) - timedelta(seconds=1),
+                    ))
+                    await lifecycle.commit()
+                    assert await taskset_gc.retire_expired_task_sets(lifecycle) == 1
+
+        monkeypatch.setattr(session, "commit", retire_after_reservation)
+        with pytest.raises(HTTPException) as rejected:
+            await submit_task_set(
+                session, team_id=teams["team_a"], minio_client=app.state.minio_client,
+                artifacts_bucket=app.state.settings.artifacts_bucket,
+                manifest_upload=UploadFile(io.BytesIO(_MANIFEST_INLINE.encode()), filename="manifest.yaml"),
+                verifier_upload=None, transform_upload=None,
+            )
+        assert rejected.value.status_code == 409
+        assert rejected.value.detail == "task_set_intake_retired"
+    assert _object_keys(app, prefix=f"tasksets/user/{teams['team_a']}/") == set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_intake", [False, True], ids=["commit", "cancel"])
+async def test_intake_reservation_fences_worker_retry_expiry_and_concurrent_delete(
+    materialization_setup,
+    monkeypatch: pytest.MonkeyPatch,
+    cancel_intake: bool,
+) -> None:
+    app, _tokens, teams = materialization_setup
+    task_set_id = f"ts/{teams['team_a']}/inline-tasks"
+    before_publication = asyncio.Event()
+    resume = asyncio.Event()
+    intake_pid = None
+
+    async def submit(session, callback=None):
+        return await submit_task_set(
+            session, team_id=teams["team_a"], minio_client=app.state.minio_client,
+            artifacts_bucket=app.state.settings.artifacts_bucket,
+            manifest_upload=UploadFile(io.BytesIO(_MANIFEST_INLINE.encode()), filename="manifest.yaml"),
+            verifier_upload=None, transform_upload=None, before_commit=callback,
+        )
+
+    async def intake():
+        async with app.state.session_factory() as session:
+            async def pause_publication(_result):
+                nonlocal intake_pid
+                intake_pid = await session.scalar(text("SELECT pg_backend_pid()"))
+                before_publication.set()
+                await resume.wait()
+
+            return await submit(session, pause_publication)
+
+    first = asyncio.create_task(intake())
+    deletion = None
+    try:
+        await asyncio.wait_for(before_publication.wait(), timeout=10)
+        async with app.state.session_factory() as session:
+            pending = await session.get(TaskSet, task_set_id)
+            assert (pending.status, pending.status_reason) == ("failed", "intake_incomplete")
+            assert await taskset_materializer._claim_jobs(
+                session, batch_size=1, claimed_by="concurrent-intake-worker",
+            ) == []
+        with patch.object(app.state.minio_client, "put_object", wraps=app.state.minio_client.put_object) as put:
+            async with app.state.session_factory() as session:
+                with pytest.raises(HTTPException) as duplicate:
+                    await submit(session)
+                assert duplicate.value.status_code == 409
+            put.assert_not_called()
+
+        class FutureClock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime.now(tz) + timedelta(hours=2)
+
+        with monkeypatch.context() as clock:
+            clock.setattr(taskset_gc, "datetime", FutureClock)
+            async with app.state.session_factory() as session:
+                assert await taskset_gc.retire_expired_task_sets(session) == 0
+
+        async with app.state.session_factory() as deleter, app.state.session_factory() as observer:
+            deleter_pid = await deleter.scalar(text("SELECT pg_backend_pid()"))
+            deletion = asyncio.create_task(delete_task_set(
+                deleter, team_id=teams["team_a"], task_set_id=task_set_id,
+            ))
+            async with asyncio.timeout(10):
+                while not await observer.scalar(text(
+                    "SELECT :intake_pid = ANY(pg_blocking_pids(:deleter_pid))"
+                ), {"intake_pid": intake_pid, "deleter_pid": deleter_pid}):
+                    await asyncio.sleep(0.01)
+            if cancel_intake:
+                first.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await first
+            else:
+                resume.set()
+                assert (await first).status == "materializing"
+            await asyncio.wait_for(deletion, timeout=10)
+    finally:
+        resume.set()
+        tasks = [first] + ([deletion] if deletion is not None else [])
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    async with app.state.session_factory() as session:
+        assert (await session.get(TaskSet, task_set_id)).status == "deleted"
+        job = await get_latest_job(session, task_set_id)
+        assert job.state == ("failed" if cancel_intake else "cancelled")
 
 
 async def test_public_rebuild_preserves_trial_and_retained_bundle(materialization_setup) -> None:
@@ -543,6 +878,43 @@ async def test_deployment_fence_canary_preparation_persists_a_candidate_bound_re
 
     assert authorization is not None
     assert authorization.image_tag == "staging-rerun-aaaaaaa"
+
+
+@pytest.mark.asyncio
+async def test_failed_canary_authorization_leaves_only_expiring_intake_reservation(
+    materialization_setup,
+) -> None:
+    app, _tokens, _teams = materialization_setup
+    engine = app.state.session_factory.kw["bind"]
+
+    def reject_authorization(_connection, _cursor, statement, _parameters, _context, _executemany):
+        if statement.lower().startswith("insert into task_set_fence_canary_authorizations"):
+            raise RuntimeError("injected canary authorization failure")
+
+    event.listen(engine.sync_engine, "before_cursor_execute", reject_authorization)
+    try:
+        with pytest.raises(RuntimeError, match="injected canary authorization"):
+            await _prepare_deployment_fence_canary(app)
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", reject_authorization)
+    async with app.state.session_factory() as session:
+        task_set = (await session.scalars(select(TaskSet).where(
+            TaskSet.owning_team_id == _SYSTEM_CANARY_TEAM_ID,
+        ))).one()
+        assert (task_set.status, task_set.status_reason) == ("failed", "intake_incomplete")
+        assert task_set.hold is False
+        assert task_set.expires_at < datetime.now(UTC) + timedelta(hours=2)
+        assert await session.get(TaskSetFenceCanaryAuthorization, task_set.id) is None
+        assert await taskset_materializer._claim_jobs(
+            session, batch_size=1, claimed_by="unauthorized-canary-worker",
+        ) == []
+        task_set.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        await session.commit()
+        assert await taskset_gc.retire_expired_task_sets(session) == 1
+        assert await purge_expired_task_sets(
+            session, minio_client=app.state.minio_client,
+            artifacts_bucket=app.state.settings.artifacts_bucket, retention_days=0,
+        ) == 1
 
 
 @pytest.mark.asyncio
@@ -1234,13 +1606,14 @@ async def test_delete_locks_active_job_before_task_set_and_revokes_lease(
         for index, statement in enumerate(statements)
         if statement.startswith("select") and "task_set_materialization_jobs" in statement
     )
-    task_set_update_index = next(
+    task_set_lock_index = next(
         index
         for index, statement in enumerate(statements)
-        if statement.startswith("update task_sets")
+        if statement.startswith("select") and "from task_sets" in statement
+        and "for update" in statement
     )
     assert "for update" in statements[active_job_select_index]
-    assert active_job_select_index < task_set_update_index
+    assert active_job_select_index < task_set_lock_index
 
     async with app.state.session_factory() as session:
         job_after_delete = await session.get(TaskSetMaterializationJob, job_id)
@@ -1255,6 +1628,76 @@ async def test_delete_locks_active_job_before_task_set_and_revokes_lease(
     assert task_set_after_delete is not None
     assert task_set_after_delete.status == "deleted"
     assert task_set_after_delete.soft_deleted_at is not None
+
+
+@pytest.mark.asyncio
+async def test_delete_and_publication_do_not_deadlock(
+    materialization_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, tokens, teams = materialization_setup
+    task_set_id = await _submit_inline_task_set(app, token=tokens["team_a"])
+    async with app.state.session_factory() as session:
+        lease = (await taskset_materializer._claim_jobs(
+            session, batch_size=1, claimed_by="publication-lock-owner",
+        ))[0]
+        await taskset_materializer._start_job(session, lease=lease)
+
+    job_locked = asyncio.Event()
+    resume_publication = asyncio.Event()
+    async with (
+        app.state.session_factory() as publisher,
+        app.state.session_factory() as deleter,
+        app.state.session_factory() as observer,
+    ):
+        publisher_pid = await publisher.scalar(text("SELECT pg_backend_pid()"))
+        deleter_pid = await deleter.scalar(text("SELECT pg_backend_pid()"))
+        execute = publisher.execute
+
+        async def pause_before_task_set_lock(statement, *args, **kwargs):
+            sql = str(statement).lower()
+            if "from task_sets" in sql and "for update" in sql:
+                job_locked.set()
+                await resume_publication.wait()
+            return await execute(statement, *args, **kwargs)
+
+        monkeypatch.setattr(publisher, "execute", pause_before_task_set_lock)
+        publication = asyncio.create_task(taskset_materializer.publish_if_current(
+            publisher,
+            lease=lease,
+            task_set_id=task_set_id,
+            output=MaterializeOutput(status="failed", status_reason="empty_source"),
+            claim_ttl_sec=60,
+        ))
+        deletion = None
+        try:
+            await asyncio.wait_for(job_locked.wait(), timeout=10)
+            deletion = asyncio.create_task(delete_task_set(
+                deleter, team_id=teams["team_a"], task_set_id=task_set_id,
+            ))
+            # Confirm the real PostgreSQL wait before letting publication ask
+            # for the TaskSet lock. An inverted deleter already holds that row.
+            async with asyncio.timeout(10):
+                while not await observer.scalar(text(
+                    "SELECT :publisher_pid = ANY(pg_blocking_pids(:deleter_pid))"
+                ), {"publisher_pid": publisher_pid, "deleter_pid": deleter_pid}):
+                    await asyncio.sleep(0.01)
+            resume_publication.set()
+            outcomes = await asyncio.wait_for(
+                asyncio.gather(publication, deletion, return_exceptions=True), timeout=10,
+            )
+            assert outcomes == [None, None]
+        finally:
+            resume_publication.set()
+            tasks = [publication] + ([deletion] if deletion is not None else [])
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async with app.state.session_factory() as session:
+        task_set = await session.get(TaskSet, task_set_id)
+        assert task_set.status == "deleted"
 
 
 @pytest.mark.asyncio
@@ -3040,11 +3483,16 @@ async def test_empty_terminal_failure_keeps_prior_published_generation(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("manifest", [_MANIFEST_INLINE, _MANIFEST_PARTIAL], ids=["ready", "partial"])
+@pytest.mark.parametrize("failure_mode", ["terminal", "retry_exhausted", "worker_exception"])
 async def test_empty_failed_rebuild_keeps_published_task_set_state(
     materialization_setup,
+    monkeypatch: pytest.MonkeyPatch,
+    manifest: str,
+    failure_mode: str,
 ) -> None:
     app, tokens, teams = materialization_setup
-    task_set_id = await _submit_inline_task_set(app, token=tokens["team_a"])
+    task_set_id = await _submit_inline_task_set(app, token=tokens["team_a"], manifest=manifest)
     await _run_materializer_once(app)
 
     async with app.state.session_factory() as session:
@@ -3096,29 +3544,58 @@ async def test_empty_failed_rebuild_keeps_published_task_set_state(
     ) == published_task_set_state
     assert rebuilt_job.state == "queued"
 
-    async with app.state.session_factory() as session:
-        claimed = await taskset_materializer._claim_jobs(
-            session,
-            batch_size=1,
-            claimed_by="empty-rebuild-owner",
-        )
-    assert len(claimed) == 1
-    lease = claimed[0]
-    assert lease.id == rebuild.job_id
+    failure_reason = {
+        "terminal": "transform_unavailable_in_internal_trusted",
+        "retry_exhausted": "source_unreachable",
+        "worker_exception": "internal_error",
+    }[failure_mode]
+    if failure_mode == "worker_exception":
+        def crash_materialization(**_kwargs):
+            raise RuntimeError("injected unexpected materialization failure")
 
-    async with app.state.session_factory() as session:
-        await taskset_materializer._start_job(session, lease=lease)
-        await taskset_materializer.publish_if_current(
-            session,
-            lease=lease,
-            task_set_id=task_set_id,
-            output=MaterializeOutput(
-                status="failed",
-                status_reason="transform_unavailable_in_internal_trusted",
-                job_failure_reason="transform_unavailable_in_internal_trusted",
-            ),
-            claim_ttl_sec=60,
-        )
+        monkeypatch.setattr(taskset_materializer, "materialize_task_set", crash_materialization)
+        await _run_materializer_once(app)
+    else:
+        attempts = rebuilt_job.max_attempts if failure_mode == "retry_exhausted" else 1
+        for attempt in range(attempts):
+            async with app.state.session_factory() as session:
+                claimed = await taskset_materializer._claim_jobs(
+                    session, batch_size=1, claimed_by="empty-rebuild-owner",
+                )
+                assert len(claimed) == 1
+                lease = claimed[0]
+                assert lease.id == rebuild.job_id
+                await taskset_materializer._start_job(session, lease=lease)
+                await taskset_materializer.publish_if_current(
+                    session,
+                    lease=lease,
+                    task_set_id=task_set_id,
+                    output=MaterializeOutput(
+                        status="failed",
+                        status_reason=failure_reason,
+                        job_failure_reason=failure_reason,
+                        job_failure_message="injected source failure",
+                        retry_source=failure_mode == "retry_exhausted",
+                    ),
+                    claim_ttl_sec=60,
+                )
+            async with app.state.session_factory() as session:
+                current = await session.get(TaskSet, task_set_id)
+                assert (
+                    current.status, current.status_reason,
+                    current.task_count, current.evaluation_ready,
+                ) == published_task_set_state
+                # Normal task-filter admission must continue to accept the
+                # retained publication while retries are pending as well.
+                await resolve_task_filter_with_diagnostics(
+                    session, {"task_set_id": task_set_id}, team_id=teams["team_a"],
+                )
+                if attempt + 1 < attempts:
+                    retry_job = await session.get(TaskSetMaterializationJob, rebuild.job_id)
+                    assert retry_job.state == "queued"
+                    assert retry_job.failure_reason == failure_reason
+                    retry_job.next_attempt_at = datetime.now(UTC) - timedelta(seconds=1)
+                    await session.commit()
 
     async with app.state.session_factory() as session:
         rows_after_failure = tuple(
@@ -3151,7 +3628,7 @@ async def test_empty_failed_rebuild_keeps_published_task_set_state(
     ) == published_task_set_state
     assert latest_job_after_failure.id == rebuild.job_id
     assert latest_job_after_failure.state == "failed"
-    assert latest_job_after_failure.failure_reason == "transform_unavailable_in_internal_trusted"
+    assert latest_job_after_failure.failure_reason == failure_reason
     assert published_job_after_failure.published_materialization_generation == published_generation
 
 

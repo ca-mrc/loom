@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
+import { Link, MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import TaskSetSubmit from "../../pages/TaskSetSubmit";
@@ -38,6 +38,7 @@ function renderPage(): void {
 
         initialEntries={["/task-sets/new"]}
       >
+        <Link to="/task-sets">All task sets</Link>
         <Routes>
           <Route path="/task-sets/new" element={<TaskSetSubmit />} />
           <Route path="/task-sets/detail" element={<DetailLocation />} />
@@ -127,6 +128,27 @@ describe("TaskSetSubmit", () => {
     expect((body as FormData).get("verifier")).toBeInstanceOf(File);
     expect((body as FormData).get("transform")).toBeInstanceOf(File);
     expect((body as FormData).has("bundle")).toBe(false);
+  });
+
+  it.each(["cancel", "navigate"])("does not redirect when an upload finishes after %s", async (leave) => {
+    const user = userEvent.setup();
+    let finishUpload!: (response: Response) => void;
+    vi.spyOn(globalThis, "fetch").mockReturnValue(new Promise((resolve) => { finishUpload = resolve; }));
+    renderPage();
+    await user.upload(screen.getByLabelText("Manifest (required)"),
+      new File([VALID_MANIFEST], "manifest.yaml", { type: "text/yaml" }));
+    await user.click(screen.getByRole("button", { name: "Review submission" }));
+    await user.click(await screen.findByRole("button", { name: "Confirm upload" }));
+    expect(screen.getByRole("button", { name: "Uploading..." })).toBeDisabled();
+    await user.click(leave === "cancel"
+      ? screen.getByRole("button", { name: "Cancel" })
+      : screen.getByRole("link", { name: "All task sets" }));
+    expect(screen.getByText("Task set list")).toBeInTheDocument();
+
+    await act(async () => { finishUpload(jsonResponse({ task_set_id: "uploaded/set", status: "ready" }, 201)); });
+
+    expect(screen.getByText("Task set list")).toBeInTheDocument();
+    expect(screen.queryByText("Task set detail")).not.toBeInTheDocument();
   });
 
   it("uploads an evaluation task bundle without separate scripts", async () => {

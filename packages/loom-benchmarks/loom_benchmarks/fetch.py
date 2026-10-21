@@ -78,8 +78,11 @@ def fetch_upstream(
             # SHA pin: init → fetch the exact object → checkout.
             repo_dir.mkdir(parents=True, exist_ok=True)
             subprocess.run(["git", "init", "-q"], cwd=repo_dir, check=True)
+            # A failed fetch/checkout/LFS pull leaves this repo in place.
+            # Configure origin idempotently so the next attempt can resume
+            # without deleting cached objects or another caller's work.
             subprocess.run(
-                ["git", "remote", "add", "origin", src.locator],
+                ["git", "config", "remote.origin.url", src.locator],
                 cwd=repo_dir, check=True,
             )
             subprocess.run(

@@ -10,9 +10,9 @@
       "sha256": "89089789197ccdb87f173a03145ed1598d00795220c93e96cf712b1cbf5e5f2b"
     },
     "litellm": {
-      "version": "1.105.1",
-      "wheel": "litellm-1.105.1-py3-none-any.whl",
-      "sha256": "f3d743c2d274c6537f7341213607c927c486676012a9d94412a8a8ccbe2f51f1"
+      "version": "1.106.2",
+      "wheel": "litellm-1.106.2-py3-none-any.whl",
+      "sha256": "cb1a2a1e55a4a8350ae2167525dc0d06f59b078cd685fb3e0f5419f02da5420e"
     }
   },
   "regenerate": "scripts/ops/update_worker_image_lock.sh"

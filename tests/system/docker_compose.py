@@ -57,6 +57,27 @@ _RUNTIME_PROFILE_ARGS = (
     "--profile",
     "task-image-builder",
 )
+_CONTROL_PLANE_LIVENESS_PROBE = """\
+import json, time, urllib.request
+started = time.monotonic()
+try:
+    with urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2) as response:
+        outcome = str(response.status)
+except Exception as error:
+    outcome = type(error).__name__
+print(json.dumps({'outcome': outcome, 'elapsed_seconds': round(time.monotonic() - started, 3)}))
+"""
+_POSTGRES_ACTIVITY_PROBE = """\
+SET default_transaction_read_only = on;
+SET statement_timeout = '2s';
+SELECT pid, state, wait_event_type, wait_event,
+       round(extract(epoch FROM clock_timestamp() - query_start), 3) AS query_age_seconds,
+       round(extract(epoch FROM clock_timestamp() - xact_start), 3) AS transaction_age_seconds,
+       pg_blocking_pids(pid) AS blockers
+FROM pg_stat_activity
+WHERE datname = current_database() AND pid <> pg_backend_pid()
+ORDER BY pid LIMIT 64;
+"""
 
 
 def _compose(
@@ -78,15 +99,30 @@ def _compose(
         env.setdefault(f"LOOM_SYSTEM_{service}_PORT", "0")
     if env_extra:
         env.update(env_extra)
-    return subprocess.run(
-        cmd,
-        check=check,
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=timeout_sec,
-    )
+    try:
+        return subprocess.run(
+            cmd,
+            check=check,
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=timeout_sec,
+        )
+    except subprocess.CalledProcessError as exc:
+        # Pytest truncates exception-local stdout/stderr, hiding build failures
+        # before services exist. Redact before truncating so a cut token prefix
+        # cannot leave its secret suffix in the diagnostic tail.
+        output = _redact_diagnostics(f"{exc.stdout or ''}\n{exc.stderr or ''}")
+        try:
+            print(
+                f"Compose command failed (exit {exc.returncode}); output tail:\n"
+                f"{output[-32_768:]}",
+                file=sys.stderr,
+            )
+        except OSError:
+            pass  # A failed diagnostic must not replace the original failure.
+        raise
 
 
 def _published_port(service: str, container_port: str) -> int:
@@ -596,10 +632,17 @@ def preserve_compose_diagnostics() -> None:
 
     sections: list[str] = []
     for heading, args in (
+        # These run only inside this disposable Compose project. Capture the
+        # volatile waits before slower logs; never include query text or bodies.
+        ("Control Plane liveness", (*_RUNTIME_PROFILE_ARGS, "exec", "-T", "control-plane",
+            "python", "-c", _CONTROL_PLANE_LIVENESS_PROBE)),
+        ("PostgreSQL waits (no query text)", (*_RUNTIME_PROFILE_ARGS, "exec", "-T", "postgres",
+            "psql", "-X", "-U", "loom", "-d", "loom", "-v", "ON_ERROR_STOP=1", "-c", _POSTGRES_ACTIVITY_PROBE)),
+        ("compose stats --no-stream", (*_RUNTIME_PROFILE_ARGS, "stats", "--no-stream", "--format", "json")),
         ("compose ps -a", (*_RUNTIME_PROFILE_ARGS, "ps", "-a")),
         (
             "compose logs --tail=300",
-            (*_RUNTIME_PROFILE_ARGS, "logs", "--no-color", "--tail=300"),
+            (*_RUNTIME_PROFILE_ARGS, "logs", "--no-color", "--timestamps", "--tail=300"),
         ),
     ):
         try:

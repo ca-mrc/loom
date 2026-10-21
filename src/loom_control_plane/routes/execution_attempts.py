@@ -26,6 +26,7 @@ from loom.db.schema import (
     PipelineEvent,
     PipelineLivePreviewFrame,
     PipelineLivePreviewGeneration,
+    PipelineProviderDispatch,
     PipelineRun,
     PipelineStageRun,
     Worker,
@@ -1116,6 +1117,7 @@ async def report_attempt_cancelled(
 ) -> dict[str, Any]:
     if payload.teardown_observed is not True:
         raise HTTPException(status_code=409, detail="cleanup_not_observed")
+    journal_payload = payload.model_dump(mode="json")
     ctx = await _worker_auth(request, authorization, scope="worker:report")
     async with request.app.state.session_factory() as session:
         attempt, replay = await _begin_mutation(
@@ -1127,7 +1129,7 @@ async def report_attempt_cancelled(
             lease_token=lease_token,
             request_id=request_id,
             route="cancel-ack",
-            payload=payload,
+            payload=journal_payload,
         )
         if replay is not None:
             return replay
@@ -1162,6 +1164,9 @@ async def report_attempt_cancelled(
                 .where(
                     PipelineBudgetReservation.execution_attempt_id == attempt.id,
                     PipelineBudgetReservation.state == "active",
+                    ~select(PipelineProviderDispatch.id).where(
+                        PipelineProviderDispatch.reservation_id == PipelineBudgetReservation.id
+                    ).exists(),
                 )
             )
         ).scalar_one()
@@ -1175,6 +1180,9 @@ async def report_attempt_cancelled(
                         .where(
                             PipelineBudgetReservation.execution_attempt_id == attempt.id,
                             PipelineBudgetReservation.state == "active",
+                            ~select(PipelineProviderDispatch.id).where(
+                                PipelineProviderDispatch.reservation_id == PipelineBudgetReservation.id
+                            ).exists(),
                         )
                         .with_for_update()
                     )
@@ -1222,7 +1230,7 @@ async def report_attempt_cancelled(
             attempt_id=attempt_id,
             route="cancel-ack",
             request_id=request_id,
-            payload=payload,
+            payload=journal_payload,
             response=response,
         )
         cancellation_latency = max(
@@ -1350,6 +1358,7 @@ async def report_worker_lost_cleanup(
     request_id: RequestIdHeader,
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
+    journal_payload = payload.model_dump(mode="json")
     ctx = await _worker_auth(request, authorization, scope="worker:reap")
     async with request.app.state.session_factory() as session:
         try:
@@ -1367,7 +1376,7 @@ async def report_worker_lost_cleanup(
                 attempt_id=attempt_id,
                 route="worker-lost-cleanup-ack",
                 request_id=request_id,
-                payload=payload,
+                payload=journal_payload,
             )
         except AttemptFenceError as exc:
             _raise_fence(exc)
@@ -1422,6 +1431,9 @@ async def report_worker_lost_cleanup(
                 .where(
                     PipelineBudgetReservation.execution_attempt_id == attempt.id,
                     PipelineBudgetReservation.state == "active",
+                    ~select(PipelineProviderDispatch.id).where(
+                        PipelineProviderDispatch.reservation_id == PipelineBudgetReservation.id
+                    ).exists(),
                 )
             )
         ).scalar_one()
@@ -1441,6 +1453,9 @@ async def report_worker_lost_cleanup(
                         .where(
                             PipelineBudgetReservation.execution_attempt_id == attempt.id,
                             PipelineBudgetReservation.state == "active",
+                            ~select(PipelineProviderDispatch.id).where(
+                                PipelineProviderDispatch.reservation_id == PipelineBudgetReservation.id
+                            ).exists(),
                         )
                         .with_for_update()
                     )
@@ -1486,7 +1501,7 @@ async def report_worker_lost_cleanup(
             attempt_id=attempt_id,
             route="worker-lost-cleanup-ack",
             request_id=request_id,
-            payload=payload,
+            payload=journal_payload,
             response=response,
         )
         await session.commit()

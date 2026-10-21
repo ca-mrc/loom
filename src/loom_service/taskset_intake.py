@@ -1,7 +1,7 @@
-"""TaskSet intake: manifest validation, blob upload, transactional enqueue.
+"""Reserve a recoverable TaskSet before uploading inputs, then enqueue atomically.
 
-Sub-plan 3 implements the ``task_set_materialization_jobs`` consumer.
-Jobs remain ``queued`` after successful POST until that worker ships.
+Incomplete intake owns a failed, expiring TaskSet/job pair. Only the final
+commit makes its uploaded inputs available to the materialization worker.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ import re
 import tempfile
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -41,6 +41,8 @@ from loom.taskset.storage_bytes import team_taskset_storage_bytes
 _ACTIVE_JOB_STATES = frozenset({"queued", "claimed", "running"})
 _PATH_TRAVERSAL = re.compile(r"(^|[/\\])\.\.([/\\]|$)|(^|[/\\])\.\.?$")
 _MANIFEST_SCHEMA_VERSION = 1
+_INTAKE_INCOMPLETE = "intake_incomplete"
+_INTAKE_RESERVATION_TTL = timedelta(hours=1)
 
 
 @dataclass(frozen=True)
@@ -169,7 +171,7 @@ async def _prepare_upload_with_size_cap(
             raise HTTPException(status_code=400, detail="empty upload part")
         tmp.seek(0)
         return _PreparedUpload(file=tmp, size_bytes=total)
-    except Exception:
+    except BaseException:
         tmp.close()
         raise
 
@@ -325,7 +327,7 @@ async def submit_task_set(
             default_max_storage_bytes=taskset_quota_max_storage_bytes,
             incoming_bytes=incoming_bytes,
         )
-    except Exception:
+    except BaseException:
         if bundle_file is not None:
             bundle_file.file.close()
         raise
@@ -346,7 +348,9 @@ async def submit_task_set(
     job = TaskSetMaterializationJob(
         task_set_id=task_set_id,
         owning_team_id=team_id,
-        state="queued",
+        state="failed",
+        failure_reason=_INTAKE_INCOMPLETE,
+        failure_message="Input upload has not committed; it may still be in progress.",
     )
     task_set = TaskSet(
         id=task_set_id,
@@ -354,9 +358,12 @@ async def submit_task_set(
         slug=slug,
         display_name=manifest_model.metadata.display_name,
         purpose=manifest_model.metadata.purpose,
-        expires_at=manifest_model.metadata.expires_at,
-        hold=manifest_model.metadata.hold,
-        status="materializing",
+        # An abandoned request must retire without operator intervention, even
+        # when the requested final publication is held or has no expiry.
+        expires_at=datetime.now(UTC) + _INTAKE_RESERVATION_TTL,
+        hold=False,
+        status="failed",
+        status_reason=_INTAKE_INCOMPLETE,
         intents=normalized.effective_intents,
         evaluation_ready=False,
         manifest_blob_uri=manifest_blob_uri,
@@ -372,16 +379,7 @@ async def submit_task_set(
     session.add(task_set)
     session.add(manifest_row)
     session.add(job)
-    try:
-        await session.flush()
-    except IntegrityError as exc:
-        await session.rollback()
-        raise HTTPException(
-            status_code=409,
-            detail="task_set slug already exists for this team",
-        ) from exc
-
-    try:
+    def upload_inputs() -> None:
         _upload_object(
             minio_client,
             bucket=artifacts_bucket,
@@ -413,6 +411,47 @@ async def submit_task_set(
                 upload=bundle_file,
                 content_type="application/gzip",
             )
+
+    try:
+        try:
+            await session.flush()
+            job_id = job.id
+            await session.commit()
+        except IntegrityError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="task_set slug already exists for this team",
+            ) from exc
+
+        # The durable reservation is the GC identity even if upload or final
+        # commit fails. Lock in publication order before writing any objects.
+        # Refresh after the commit gap: deletion/expiry may already have won.
+        reserved_job = (await session.execute(
+            select(TaskSetMaterializationJob)
+            .where(TaskSetMaterializationJob.id == job_id)
+            .with_for_update()
+            .execution_options(populate_existing=True),
+        )).scalar_one_or_none()
+        reserved_task_set = (await session.execute(
+            visible_task_sets(team_id=team_id)
+            .where(TaskSet.id == task_set_id)
+            .with_for_update()
+            .execution_options(populate_existing=True),
+        )).scalar_one_or_none()
+        if reserved_job is None or reserved_task_set is None:
+            raise HTTPException(status_code=409, detail="task_set_intake_retired")
+        job = reserved_job
+        task_set = reserved_task_set
+        upload_inputs()
+        task_set.status = "materializing"
+        task_set.status_reason = None
+        task_set.expires_at = manifest_model.metadata.expires_at
+        task_set.hold = manifest_model.metadata.hold
+        task_set.updated_at = datetime.now(UTC)
+        job.state = "queued"
+        job.failure_reason = None
+        job.failure_message = None
+        job.updated_at = datetime.now(UTC)
         result = TaskSetIntakeResult(
             task_set_id=task_set_id,
             status="materializing",
@@ -428,7 +467,9 @@ async def submit_task_set(
         if before_commit is not None:
             await before_commit(result)
         await session.commit()
-    except Exception:
+    except BaseException:
+        # A lost commit acknowledgement may have published successfully. Never
+        # compensate by deleting objects: either committed state is GC-visible.
         await session.rollback()
         raise
     finally:
@@ -487,6 +528,8 @@ async def rebuild_task_set(
     )
     if task_set.status == "deleted":
         raise HTTPException(status_code=404, detail="task_set not found")
+    if task_set.status_reason == _INTAKE_INCOMPLETE:
+        raise HTTPException(status_code=409, detail="task_set_intake_incomplete")
 
     active = (
         await session.execute(
@@ -565,26 +608,32 @@ async def delete_task_set(
     team_id: UUID | None,
     task_set_id: str,
 ) -> None:
-    task_set = await get_visible_task_set(
-        session,
-        team_id=team_id,
-        task_set_id=task_set_id,
-        for_update=True,
-    )
-    active_jobs = (
-        (
-            await session.execute(
-                select(TaskSetMaterializationJob)
-                .where(
-                    TaskSetMaterializationJob.task_set_id == task_set_id,
-                    TaskSetMaterializationJob.state.in_(_ACTIVE_JOB_STATES),
-                )
-                .with_for_update(),
-            )
+    while True:
+        # Match publication/failure: never wait for a job while holding its
+        # TaskSet. Scope even these preliminary locks to the caller's team.
+        active_jobs_query = select(TaskSetMaterializationJob).where(
+            TaskSetMaterializationJob.task_set_id == task_set_id,
+            TaskSetMaterializationJob.owning_team_id == team_id,
+            TaskSetMaterializationJob.state.in_(_ACTIVE_JOB_STATES),
         )
-        .scalars()
-        .all()
-    )
+        active_jobs = (await session.scalars(
+            active_jobs_query.order_by(TaskSetMaterializationJob.id).with_for_update(),
+        )).all()
+        task_set = await get_visible_task_set(
+            session,
+            team_id=team_id,
+            task_set_id=task_set_id,
+            for_update=True,
+        )
+        # Rebuild serializes on the TaskSet, but can enqueue between our job
+        # scan and TaskSet lock. Release both before locking that new job;
+        # its publisher may already be waiting for the TaskSet we now hold.
+        current_job_ids = set((await session.scalars(
+            active_jobs_query.with_only_columns(TaskSetMaterializationJob.id),
+        )).all())
+        if current_job_ids <= {job.id for job in active_jobs}:
+            break
+        await session.rollback()
     now = datetime.now(UTC)
     task_set.status = "deleted"
     task_set.soft_deleted_at = now
