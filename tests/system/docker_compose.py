@@ -639,6 +639,10 @@ def _redact_diagnostics(text: str) -> str:
 def preserve_compose_diagnostics() -> None:
     """Capture Compose state while containers still exist, with redaction."""
 
+    destination = os.environ.get(DIAGNOSTICS_ENV)
+    destination_path = Path(destination) if destination else None
+    if destination_path is not None and destination_path.exists() and destination_path.stat().st_size > 0:
+        return
     sections: list[str] = []
     for heading, args in (
         # These run only inside this disposable Compose project. Capture the
@@ -692,11 +696,7 @@ def preserve_compose_diagnostics() -> None:
         raw_content = "capture exceeded its bounded timeout"
     sections.append(f"===== docker ps for project {project_name} =====\n{raw_content}")
     payload = _redact_diagnostics("\n\n".join(sections)) + "\n"
-    destination = os.environ.get(DIAGNOSTICS_ENV)
-    if destination:
-        destination_path = Path(destination)
-        if destination_path.exists() and destination_path.stat().st_size > 0:
-            return
+    if destination_path is not None:
         destination_path.write_text(payload, encoding="utf-8")
     else:
         print(payload, file=sys.stderr, end="")

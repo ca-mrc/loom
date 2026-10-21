@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tomllib
@@ -790,30 +791,108 @@ def test_preserve_diagnostics_keeps_first_failure_evidence(
     diagnostics = tmp_path / "system-smoke.log"
     diagnostics.write_text("first failure evidence\n", encoding="utf-8")
     monkeypatch.setenv(docker_compose.DIAGNOSTICS_ENV, str(diagnostics))
-    monkeypatch.setattr(
-        docker_compose,
-        "_compose",
-        lambda *args, **kwargs: subprocess.CompletedProcess(
-            args,
-            0,
-            stdout="later mocked output\n",
-            stderr="",
-        ),
-    )
-    monkeypatch.setattr(
-        docker_compose.subprocess,
-        "run",
-        lambda *args, **kwargs: subprocess.CompletedProcess(
-            args[0],
-            0,
-            stdout="later docker output\n",
-            stderr="",
-        ),
-    )
+
+    def unexpected_capture(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("existing first-failure evidence must avoid another capture")
+
+    monkeypatch.setattr(docker_compose, "_compose", unexpected_capture)
+    monkeypatch.setattr(docker_compose.subprocess, "run", unexpected_capture)
 
     docker_compose.preserve_compose_diagnostics()
 
     assert diagnostics.read_text(encoding="utf-8") == "first failure evidence\n"
+
+
+@pytest.mark.parametrize("phase,probe_fails", [("call", False), ("setup", False), ("call", True)])
+def test_stack_failure_captures_before_next_test_without_masking_failure(
+    tmp_path: Path, phase: str, probe_fails: bool,
+) -> None:
+    """Exercise the real report hook, with only Docker and the stack doubled."""
+    (tmp_path / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+    (tmp_path / "conftest.py").write_text('''
+import os
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from tests.system import docker_compose
+
+root = Path(__file__).parent
+os.environ[docker_compose.DIAGNOSTICS_ENV] = str(root / "diagnostics.log")
+
+def capture(*args, **kwargs):
+    if os.environ["LOOM_DIAGNOSTIC_PROBE_FAILS"] == "1":
+        raise OSError("Bearer hidden-probe-token")
+    return subprocess.CompletedProcess(args, 0, stdout=(root / "state").read_text(), stderr="")
+
+docker_compose._compose = capture
+docker_compose.subprocess.run = capture
+
+@pytest.fixture(scope="session")
+def compose_stack():
+    (root / "state").write_text("failure-time state")
+    yield {}
+    (root / "torn-down").touch()
+
+@pytest.fixture
+def failing_setup(compose_stack):
+    pytest.fail("original stack failure")
+''', encoding="utf-8")
+    failing_test = (
+        'def test_02_first_failure(failing_setup):\n    pass\n'
+        if phase == "setup" else
+        'def test_02_first_failure(compose_stack):\n    pytest.fail("original stack failure")\n'
+    )
+    (tmp_path / "test_capture.py").write_text('''
+import os
+from pathlib import Path
+
+import pytest
+
+root = Path(__file__).parent
+
+def test_00_harness_failure():
+    pytest.fail("synthetic failure without the stack")
+
+def test_01_no_capture_for_harness_or_success(compose_stack):
+    assert not (root / "diagnostics.log").exists()
+
+''' + failing_test + '''
+def test_03_next_test_already_has_failure_snapshot(compose_stack):
+    assert not (root / "torn-down").exists()
+    if os.environ["LOOM_DIAGNOSTIC_PROBE_FAILS"] == "1":
+        assert not (root / "diagnostics.log").exists()
+    else:
+        assert "failure-time state" in (root / "diagnostics.log").read_text()
+    (root / "state").write_text("later state must not replace first failure")
+
+def test_04_later_failure(compose_stack):
+    pytest.fail("later failure")
+
+def test_05_original_snapshot_remains(compose_stack):
+    if os.environ["LOOM_DIAGNOSTIC_PROBE_FAILS"] != "1":
+        snapshot = (root / "diagnostics.log").read_text()
+        assert "failure-time state" in snapshot and "later state" not in snapshot
+''', encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "tests.system.conftest",
+         "-c", str(tmp_path / "pytest.ini"), "--confcutdir", str(tmp_path),
+         "--tb=short", "-q", str(tmp_path / "test_capture.py")],
+        cwd=docker_compose.REPO_ROOT,
+        env={**os.environ, "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+             "LOOM_DIAGNOSTIC_PROBE_FAILS": "1" if probe_fails else "0"},
+        capture_output=True, text=True, timeout=20,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 1, output
+    expected = "2 failed, 3 passed, 1 error" if phase == "setup" else "3 failed, 3 passed"
+    assert expected in output, output
+    assert "original stack failure" in output
+    assert (tmp_path / "torn-down").exists()
+    assert "hidden-probe-token" not in output
+    if probe_fails:
+        assert "[REDACTED:bearer]" in output
 
 
 def test_diagnostics_failure_does_not_mask_teardown(monkeypatch: Any) -> None:
