@@ -24,14 +24,22 @@ export default function TaskSetSubmit(): JSX.Element {
 
   const submit = useMutation({
     mutationFn: (formData: FormData) => api.submitTaskSet(formData),
-    onSuccess: (res: TaskSetSubmitResponse) => {
-      navigate(taskSetHref(res.task_set_id));
-    },
-    onError: (err: unknown) => {
-      const apiErr = err as ApiError | undefined;
-      setError(apiErr?.detail ?? "Submission failed. Please try again.");
-    },
   });
+
+  const confirmUpload = (): void => {
+    if (!review) return;
+    // These callbacks belong to the mounted page. Leaving it does not undo
+    // server-side intake, but a late response must not redirect the browser.
+    submit.mutate(review, {
+      onSuccess: (res: TaskSetSubmitResponse) => {
+        navigate(taskSetHref(res.task_set_id));
+      },
+      onError: (err: unknown) => {
+        const apiErr = err as ApiError | undefined;
+        setError(apiErr?.detail ?? "Submission failed. Please try again.");
+      },
+    });
+  };
 
   const handleSubmit = async (e: React.FormEvent): Promise<void> => {
     e.preventDefault();
@@ -162,7 +170,7 @@ export default function TaskSetSubmit(): JSX.Element {
               </div>
             ) : null}
 
-            {review ? <section className="rounded border p-3" aria-label="Submission review"><h2 className="font-medium">Review manifest before upload</h2>{manifestSummary ? <dl className="my-3 grid gap-2 text-sm sm:grid-cols-2"><div><dt className="text-slate-500">Task set</dt><dd>{manifestSummary.name} ({manifestSummary.slug})</dd></div><div><dt className="text-slate-500">Source</dt><dd>{manifestSummary.sourceType}</dd></div><div><dt className="text-slate-500">Declared purpose</dt><dd>{manifestSummary.intents.map((intent) => intent === "evaluation" ? "Evaluation" : "Trajectory generation").join(", ")}</dd></div><div><dt className="text-slate-500">Verifier</dt><dd>{manifestSummary.verifier}</dd></div><div><dt className="text-slate-500">Task template</dt><dd className="break-words">{manifestSummary.taskName ?? "From source tasks"}</dd></div><div><dt className="text-slate-500">Task limit</dt><dd>{manifestSummary.maxInstances === null ? "Server default" : `At most ${manifestSummary.maxInstances} configured instances`}; actual task count is determined during import.</dd></div></dl> : null}<p className="my-2 text-xs text-slate-500">Declared purpose and verifier are not a claim of evaluation readiness. Server validation remains authoritative.</p><ul>{Array.from(review.entries()).map(([name, value]) => <li key={name}>{name}: {value instanceof File ? `${value.name} (${value.size.toLocaleString()} bytes)` : value}</li>)}</ul><Button onClick={() => submit.mutate(review)} disabled={submit.isPending || reviewing}>Confirm upload</Button></section> : null}
+            {review ? <section className="rounded border p-3" aria-label="Submission review"><h2 className="font-medium">Review manifest before upload</h2>{manifestSummary ? <dl className="my-3 grid gap-2 text-sm sm:grid-cols-2"><div><dt className="text-slate-500">Task set</dt><dd>{manifestSummary.name} ({manifestSummary.slug})</dd></div><div><dt className="text-slate-500">Source</dt><dd>{manifestSummary.sourceType}</dd></div><div><dt className="text-slate-500">Declared purpose</dt><dd>{manifestSummary.intents.map((intent) => intent === "evaluation" ? "Evaluation" : "Trajectory generation").join(", ")}</dd></div><div><dt className="text-slate-500">Verifier</dt><dd>{manifestSummary.verifier}</dd></div><div><dt className="text-slate-500">Task template</dt><dd className="break-words">{manifestSummary.taskName ?? "From source tasks"}</dd></div><div><dt className="text-slate-500">Task limit</dt><dd>{manifestSummary.maxInstances === null ? "Server default" : `At most ${manifestSummary.maxInstances} configured instances`}; actual task count is determined during import.</dd></div></dl> : null}<p className="my-2 text-xs text-slate-500">Declared purpose and verifier are not a claim of evaluation readiness. Server validation remains authoritative.</p><ul>{Array.from(review.entries()).map(([name, value]) => <li key={name}>{name}: {value instanceof File ? `${value.name} (${value.size.toLocaleString()} bytes)` : value}</li>)}</ul><Button onClick={confirmUpload} disabled={submit.isPending || reviewing}>Confirm upload</Button></section> : null}
             <div className="flex items-center gap-3">
               <Button
                 type="submit"

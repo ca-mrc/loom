@@ -40,10 +40,11 @@ function TrialColumn({ trialId }: { trialId: string }): JSX.Element {
   });
 
   const traj = useInfiniteQuery({
-    queryKey: queryKeys["trajectory"](trialId, "compare-pages"),
-    initialPageParam: undefined as number | undefined,
-    queryFn: ({ pageParam }) => api.getTrajectoryPage(trialId, pageParam, 200),
-    getNextPageParam: (page) => page.next_cursor ?? undefined,
+    queryKey: queryKeys["trajectory"](trialId, "compare-sequence-pages"),
+    initialPageParam: -1,
+    queryFn: ({ pageParam, signal }) => api.getTrialEvents(trialId, pageParam, 200, signal),
+    getNextPageParam: (page, _pages, afterSeq) =>
+      page.next_after_seq !== null && page.next_after_seq > afterSeq ? page.next_after_seq : undefined,
     enabled: !!trialId,
   });
 
@@ -101,7 +102,9 @@ function TrialColumn({ trialId }: { trialId: string }): JSX.Element {
           </p>
           {traj.isPending ? <LoadingState /> : null}
           {traj.isError ? <ErrorState error={traj.error} /> : null}
-          {traj.data ? <EventTimeline events={traj.data.pages.flatMap((page) => page.events)} /> : null}
+          {traj.data ? <EventTimeline events={Array.from(new Map(
+            traj.data.pages.flatMap((page) => page.events).map((event) => [event.seq, event]),
+          ).values())} /> : null}
           {traj.hasNextPage ? <Button onClick={() => void traj.fetchNextPage()} disabled={traj.isFetchingNextPage}>Load more events</Button> : null}
           <Link to={`/trials/${trialId}`} state={location.state} className="mt-3 block text-sm text-accent">Open full Trial details →</Link>
         </div>
