@@ -1,10 +1,4 @@
-"""--tb2-report flag invokes to_tb2_report and writes JSON to disk.
-
-Plan 25 Task 12. The flag is wired in __main__.py's argparse + a
-_maybe_write_tb2_report hook in run_cmd._run_async. Tests adapted
-from the plan's hypothetical run_cmd.parse_args / main entry points
-to Plan 23's actual __main__.main argparse-subparser surface.
-"""
+"""--tb2-report publishes completed results through the public CLI entry point."""
 
 from __future__ import annotations
 
@@ -33,8 +27,14 @@ def test_tb2_report_omitted_defaults_to_none() -> None:
     assert parsed.tb2_report is None
 
 
+@pytest.mark.parametrize("models,parallel", [
+    ([], False),
+    (["openai/model-a", "openai/model-b"], False),
+    (["openai/model-a", "openai/model-b"], True),
+])
 def test_tb2_report_written_after_trials_complete(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str], models: list[str], parallel: bool,
 ) -> None:
     """End-to-end: stub the registry + LocalRunner so `loom run` returns
     a TrialResult per stub task, then verify the JSON file is written
@@ -53,6 +53,9 @@ def test_tb2_report_written_after_trials_complete(
         "--backend", "fake",
         "--output-dir", str(tmp_path / "runs"),
         "--tb2-report", str(out_path),
+        "--json",
+        *[arg for model in models for arg in ("--model", model)],
+        *(["--parallel-models"] if parallel else []),
     ])
     assert rc in {0, 1}
     assert out_path.exists()
@@ -62,3 +65,8 @@ def test_tb2_report_written_after_trials_complete(
     assert "results" in parsed
     assert "pass_at_k" in parsed
     assert isinstance(parsed["results"], list)
+    completed = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.strip()]
+    assert len(completed) == 2 * max(1, len(models))
+    assert {item["uuid"] for item in parsed["results"]} == {
+        item["trial_id"] for item in completed
+    }

@@ -57,7 +57,7 @@ def platform_inputs():
 
 
 @pytest.fixture
-def private_cutover(completed_upgrade, cutover_inputs, database_guard):
+def private_cutover(completed_upgrade, cutover_inputs, database_guard, request):
     from scripts.ops.nebius_pool_cutover_entry import load_pool_cutover_inputs
     from tests.ops.test_nebius_pool_dormant import dormant_consumer
     metadata, inputs, root = cutover_fixture.private_cutover.__wrapped__(completed_upgrade, cutover_inputs, database_guard)
@@ -70,6 +70,14 @@ def private_cutover(completed_upgrade, cutover_inputs, database_guard):
     container, = pod['containers']
     container['volumeMounts'] = [row for row in container['volumeMounts']
         if row['name'] != 'recovery-platform-config']
+    annotations = getattr(request, 'param', None)
+    if annotations is not None:
+        # Freeze historical operator metadata before any pool phase or receipt
+        # exists; never rewrite sealed history to make the successor pass.
+        assert not Path(metadata['state_dir']).exists()
+        assert not Path(metadata['anchor_dir']).exists()
+        service, = (row for row in inputs['services'] if row['metadata']['namespace'] == namespace)
+        service['spec']['template']['metadata'].setdefault('annotations', {}).update(annotations)
     cutover_fixture.save_private(metadata, inputs)
     retirement = load_pool_cutover_inputs(metadata).request.fencing.retirement
     registration = retirement.migration.registration
@@ -471,11 +479,18 @@ async def test_ordinary_proof_requires_completed_exact_scoped_publication(ordina
 
 
 @pytest.mark.timeout(420)
-@pytest.mark.parametrize('ordinary_rollout', [None, 'NETWORK_SSD_NON_REPLICATED',
-    {'task_image_builder': {'max_concurrent': None}},
-    {'execution_disk_type': 'NETWORK_SSD_NON_REPLICATED', 'task_image_builder': {'max_concurrent': None}}],
-    ids=['ssd', 'nrd', 'resource-only-builder', 'nrd-resource-only-builder'], indirect=True)
-def test_completed_ordinary_successor_preflight_is_read_only_and_rejects_drift(private_cutover, ordinary_rollout, connected_refresh, monkeypatch):
+@pytest.mark.parametrize(('ordinary_rollout', 'private_cutover', 'target_revision'), [(None, None, '0177'),
+    ('NETWORK_SSD_NON_REPLICATED', None, '0177'),
+    ({'task_image_builder': {'max_concurrent': None}}, None, '0177'),
+    ({'execution_disk_type': 'NETWORK_SSD_NON_REPLICATED', 'task_image_builder': {'max_concurrent': None}}, None, '0177'),
+    (None, {'kubectl.kubernetes.io/restartedAt': '2026-10-01T08:30:00Z'}, '0177'),
+    (None, {'kubectl.kubernetes.io/restartedAt': '2026-10-01T08:30:00Z', 'test-historical-unrelated': 'retained'}, '0177'),
+    (None, {'kubectl.kubernetes.io/restartedAt': '2026-10-01T08:30:00Z'}, '0178')],
+    ids=['ssd', 'nrd', 'resource-only-builder', 'nrd-resource-only-builder', 'retained-service-restart',
+        'reject-historical-unrelated', 'retained-service-restart-schema178'],
+    indirect=['ordinary_rollout', 'private_cutover'])
+def test_completed_ordinary_successor_preflight_is_read_only_and_rejects_drift(
+        private_cutover, ordinary_rollout, connected_refresh, monkeypatch, target_revision):
     import asyncio
     from contextlib import contextmanager
 
@@ -493,7 +508,7 @@ def test_completed_ordinary_successor_preflight_is_read_only_and_rejects_drift(p
         completion_sha256=result['completion_sha256']), original=root)
     successor = asyncio.run(ordinary_rollout[0]())
     metadata, payload, _ = private_refresh(root, pool)
-    payload.update(manager_revision='0174', target_manager_revision='0177')
+    payload.update(manager_revision='0174', target_manager_revision=target_revision)
     payload['platform_rollout'] = successor.reference.model_dump(mode='json')
     payload['deployment']['installation']['foundation']['platform_config_json'] = json.dumps(successor.config)
     save_private(metadata, payload)
@@ -521,13 +536,25 @@ def test_completed_ordinary_successor_preflight_is_read_only_and_rejects_drift(p
         save_private(metadata, payload)
     bound = PoolManagerRefresh(root, pool, request, state, successor=successor)
     original_history = {path: path.read_bytes() for path in pool.history}
+    selected_resources = copy.deepcopy(successor.resources)
     with pool_refresh_http(bound)() as (verifier, external):
+        service_key = 'Deployment:' + successor.config['namespace'] + ':loom-service'
+        original_service, = (row for row in pool.context.request.services if _key(row) == service_key)
+        restart = 'kubectl.kubernetes.io/restartedAt'
+        frozen = original_service['spec']['template']['metadata'].get('annotations', {}).get(restart)
+        retained_service = copy.deepcopy(original_service)
+        if frozen is not None:
+            assert pool.completion.workloads[service_key]['spec']['template']['metadata']['annotations'][restart] == frozen
+            assert restart not in successor.resources[service_key]['spec']['template']['metadata'].get('annotations', {})
+            # Model the independent current GET, not a live object synthesized
+            # from the implementation's projected workload options.
+            external.objects[service_key]['spec']['template']['metadata'].setdefault('annotations', {})[restart] = frozen
+        unrelated = 'test-historical-unrelated'
+        historical_unknown = original_service['spec']['template']['metadata'].get('annotations', {}).get(unrelated)
+        if historical_unknown is not None:
+            assert unrelated not in successor.resources[service_key]['spec']['template']['metadata'].get('annotations', {})
+            external.objects[service_key]['spec']['template']['metadata'].setdefault('annotations', {})[unrelated] = historical_unknown
         before = copy.deepcopy(external.objects)
-        verifier.qualify()
-        external.failure = 'manager_schema'
-        with pytest.raises(ValueError):
-            verifier.qualify()
-        external.failure = None
         dormant = pool.context.request.fencing.retirement.dormant_consumers[0]
         for original in (dormant.actuator, dormant.collector):
             assert _key(original) not in successor.resources
@@ -553,9 +580,51 @@ def test_completed_ordinary_successor_preflight_is_read_only_and_rejects_drift(p
             assert expected == external.objects[_key(original)]
             telemetry_checks.append(_key(original))
         guards.qualify_runtime_database, guards.qualify_runtime_telemetry = database_probe, telemetry_probe
+        if historical_unknown is not None:
+            # The exception must retain only the known frozen restart stamp,
+            # not copy every historical annotation into current source output.
+            with pytest.raises(cutover_entry.EntryError, match='pool cutover runtime databases unqualified'):
+                cutover_entry.qualify_pool_runtime_databases(pool.context, guards, refresh=bound)
+            assert external.objects == before
+            assert original_service == retained_service and successor.resources == selected_resources
+            assert {path: path.read_bytes() for path in original_history} == original_history
+            assert not state.exists() and not Path(metadata['anchor_dir']).exists()
+            return
         cutover_entry.qualify_pool_runtime_databases(pool.context, guards, refresh=bound)
         assert len(runtime_checks) == len(guards.request.guards) * 3
         assert len(telemetry_checks) == len(guards.request.guards)
+        actual_service = external.objects[service_key]
+        damages = ('changed', 'removed', 'unknown') if frozen is not None else ('new', 'unknown')
+        strict = replace(bound, successor=None)
+        assert strict.matches_workload(original_service, original_service, original_service)
+        for damage in damages:
+            saved = copy.deepcopy(actual_service)
+            strict_actual = copy.deepcopy(original_service)
+            for document in (actual_service, strict_actual):
+                annotations = document['spec']['template']['metadata'].setdefault('annotations', {})
+                if damage == 'removed':
+                    annotations.pop(restart)
+                elif damage == 'unknown':
+                    annotations[unrelated] = 'live-drift'
+                else:
+                    annotations[restart] = '2026-10-02T08:30:00Z'
+            # These are current GET changes only; the original and completion
+            # remain sealed. Both real entry and the no-successor matcher deny.
+            assert not strict.matches_workload(strict_actual, original_service, original_service), damage
+            with pytest.raises(cutover_entry.EntryError, match='pool cutover runtime databases unqualified'):
+                cutover_entry.qualify_pool_runtime_databases(pool.context, guards, refresh=bound)
+            actual_service.clear()
+            actual_service.update(saved)
+        cutover_entry.qualify_pool_runtime_databases(pool.context, guards, refresh=bound)
+        assert external.objects == before
+        assert original_service == retained_service and successor.resources == selected_resources
+        assert {path: path.read_bytes() for path in original_history} == original_history
+        assert not state.exists() and not Path(metadata['anchor_dir']).exists()
+        verifier.qualify()
+        external.failure = 'manager_schema'
+        with pytest.raises(ValueError):
+            verifier.qualify()
+        external.failure = None
         old_api, live = connected_refresh
         live.request, live.directory, live.anchor, live.operation = request, state, Path(metadata['anchor_dir']), metadata
         live.manager.clear()
@@ -599,6 +668,7 @@ def test_completed_ordinary_successor_preflight_is_read_only_and_rejects_drift(p
         assert len(connections) == 1
         assert all(call.method == 'GET' for call in live.calls)
         assert external.objects == before
+        assert original_service == retained_service and successor.resources == selected_resources
         assert {path: path.read_bytes() for path in original_history} == original_history
         assert not state.exists()
         assert all(call.method == 'GET' or call.url.path == '/apis/authorization.k8s.io/v1/selfsubjectrulesreviews'

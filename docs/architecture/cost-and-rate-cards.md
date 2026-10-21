@@ -20,12 +20,16 @@ that fact in `provider_extras` and the read APIs expose
 `usage_estimate_confidence` so callers can distinguish a complete estimate
 from a lower-confidence token/cost projection.
 If the Gateway attempted an upstream provider request and the upstream
-returned an error or the provider transport failed, it records a
+returned an error, the provider transport failed, or an ordinary Chat/Responses
+HTTP-success body failed JSON decoding or required-shape validation, it records a
 zero-token `llm_calls` audit row with `rate_card_hash=failed-upstream`
 and `provider_extras._loom_call_status=failed`. Trial/batch debug
 evidence surfaces these rows through call-status and failure-category
 counts; usage/cost projections should treat them as audit evidence,
 not billable provider usage.
+Native Responses SSE streams without a usage-bearing event preserve the same
+missing-usage metadata as JSON responses. Explicit pricing configurations leave
+their monetary estimate unknown instead of pricing fabricated zero-token usage.
 
 ```
 provider response

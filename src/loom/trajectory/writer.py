@@ -138,13 +138,11 @@ class TrajectoryWriter:
 
     async def write_raw_dict(self, data: dict[str, object]) -> None:
         """Append a pre-shaped dict as one JSONL line WITHOUT pydantic
-        validation. Used by `SubprocessAgent` (Plan 11) to forward
+        validation. Used by `SubprocessAgent` to forward
         adapter-emitted events whose shape is the adapter's contract,
-        not Loom's `TrajectoryEvent` discriminated union — adapters in
-        Plan 12 are responsible for emitting valid shapes.
-
-        Loom v1.5 will reintroduce validation here once the adapter
-        catalog stabilizes. For v1 we accept the trust boundary."""
+        not Loom's `TrajectoryEvent` discriminated union. Adapters are
+        responsible for emitting valid shapes; typed callers use append().
+        """
         if self._closed:
             raise RuntimeError("append after close")
         import json

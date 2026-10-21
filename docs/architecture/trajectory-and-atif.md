@@ -107,19 +107,25 @@ local file is preserved.
 
 ## Reader (`src/loom/trajectory/reader.py`)
 
-Streaming line-decoded reader. Used by:
-
-- Service `/api/v1/trials/{id}/trajectory` (with cursor pagination)
-- ATIF projector
-- The SPA Trajectory viewer (load-more-on-scroll)
+`TrajectoryReader` reads typed events from a local JSONL file. It can iterate
+all events, filter by kind, retain a bounded tail, or build an excerpt.
 
 ```python
-async for event in reader.stream(bucket="trajectories", key="..."):
+from pathlib import Path
+from loom.trajectory.reader import TrajectoryReader
+
+for event in TrajectoryReader(Path("events.jsonl")).iter_all():
     ...
 ```
 
-Reads via `httpx.AsyncClient.stream("GET", presigned_url)` —
-no full-file buffering.
+Service reads are implemented separately in `loom_service.routes.trajectory`.
+The legacy `/api/v1/trials/{id}/trajectory` endpoint uses a line cursor over the
+stored object. `/api/v1/trials/{id}/events?after_seq=N` and the SSE stream read
+PostgreSQL `trial_events` first, with a stored-object fallback for legacy trials.
+The browser's polling fallback and comparison view use the sequence endpoint,
+so retained database events remain available before an object is completed or
+when that copy is absent. Sequence pagination resumes after the last returned
+event; an empty page is the current tail, and active trials keep polling there.
 
 ## ATIF v1.7 projection (`src/loom/trajectory/atif.py`)
 
@@ -196,7 +202,10 @@ path:
 and authenticated service download URLs for ATIF, trajectory, and artifacts.
 `loom_service` proxies object-backed downloads from the internal MinIO/S3
 endpoint to the caller, so browser and laptop clients do not need direct
-object-store network access. For Postgres-backed trials whose legacy object
+object-store network access. The response owns its acquired object body even
+when sending headers fails. Cancellation and disconnect drain an active read
+before closing the body; normal completion and interrupted delivery also close it.
+For Postgres-backed trials whose legacy object
 copy is absent, `GET /api/v1/trials/{id}/trajectory/download` reconstructs an
 analysis-ready JSONL body from `trial_events`, gateway `llm_calls`, and the
 terminal `trials.state/result` row. The service renumbers the reconstructed

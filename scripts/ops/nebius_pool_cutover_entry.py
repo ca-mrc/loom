@@ -533,7 +533,8 @@ def qualify_pool_provider(context: PoolCutoverContext, base: HTTPSManagementPrer
         namespace, name = original["metadata"]["namespace"], original["metadata"]["name"]
         path = "/api/v1/namespaces/" + namespace + "/configmaps/" + name
         current = base._request("GET", path)
-        if current is None or not _matches(current, expected, _uid(original)):
+        if current is None or not (refresh.matches_provider(current, expected, original) if refresh is not None
+                else _matches(current, expected, _uid(original))):
             raise ValueError
         raw, spec = expected["data"], context.inputs.installation
         foundation = context.original.deployment.installation.foundation.platform_config
@@ -589,7 +590,8 @@ def qualify_pool_provider(context: PoolCutoverContext, base: HTTPSManagementPrer
                 raise ValueError
         current = base._request("GET", path)
         if (_collector_cloud_credential(context, base) != before
-                or current is None or not _matches(current, expected, _uid(original))
+                or current is None or not (refresh.matches_provider(current, expected, original) if refresh is not None
+                    else _matches(current, expected, _uid(original)))
                 or (refresh is not None and refresh.provider_options() != (expected, quota_identities))):
             raise ValueError
     except Exception:

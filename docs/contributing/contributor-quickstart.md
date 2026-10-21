@@ -438,12 +438,19 @@ and follow the normal `dev` auto-merge policy.
 
 Every non-draft `dev` PR uses GitHub's native squash auto-merge. A developer or
 maintainer enables it without considering author or reviewer identity. GitHub
-keeps each candidate queued until `repository-checks`, `images-gate`,
+waits until `repository-checks`, `images-gate`,
 `cluster-smoke-gate`, and `staging-smoke-gate` are visible and successful on
 the current head SHA. Those four strict, GitHub-Actions-app-bound checks are
 the only merge authority: `dev` requires no human approval, no CODEOWNER
 approval, and no conversation resolution. Maintainers should not manually
 merge an eligible `dev` PR just because CI is green.
+
+Check the live queue state and integration coordination in
+[#2416](https://github.com/ca-mrc/loom/issues/2416). When the queue is enabled,
+the same four checks also qualify its generated merge group. While it is
+disabled, strict latest-base protection requires the branch writer to update
+an outdated head and earn checks again; follow the coordinated order to avoid
+repeated base updates and competing CI runs.
 
 For `main`, enable native squash auto-merge only for a same-repository `dev`
 production candidate. The active `main protected promotion` ruleset requires

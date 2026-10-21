@@ -328,16 +328,18 @@ def test_activation_cannot_bypass_incomplete_or_changed_barriers(install, damage
     assert api.switch.calls == ['retire', 'activate']
 
 
-@pytest.mark.parametrize('pending,expected', [
-    ('manager-probe', ('0174',)), ('migration', ('0174', '0177')),
-    ('post-migration-probe', ('0174', '0177')), (None, ('0177',)),
-])
-def test_manager_schema_observation_follows_own_migration(install, tmp_path, pending, expected):
+@pytest.mark.parametrize('target_revision', ['0177', '0178'])
+@pytest.mark.parametrize('pending', ['manager-probe', 'migration', 'post-migration-probe', None])
+def test_manager_schema_observation_follows_own_migration(install, tmp_path, pending, target_revision):
     from scripts.ops.nebius_management_refresh_install import refresh_manager_revision_options
 
+    expected = {
+        'manager-probe': ('0174',), 'migration': ('0174', target_revision),
+        'post-migration-probe': ('0174', target_revision), None: (target_revision,),
+    }[pending]
     original, _, _, _ = install
     (tmp_path / 'schema').mkdir(mode=0o700)
-    case = install_case(replace(original.resources, manager_revision='0174', target_manager_revision='0177'),
+    case = install_case(replace(original.resources, manager_revision='0174', target_manager_revision=target_revision),
         tmp_path / 'schema', history=original.history, installation_anchor=original.installation_anchor)
     request, api, state, anchor = case
     assert refresh_manager_revision_options(request, state=state, anchor=anchor) == ('0174',)

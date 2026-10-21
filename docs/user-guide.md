@@ -1053,8 +1053,10 @@ Loom:
 4. Reads the canonical model id vLLM advertises (so HF ids that get
    shortened by vLLM still resolve correctly).
 5. Runs the trial against `local/_auto_vllm/<served-name>`.
-6. Tears down that model's vLLM after its trials, unless `--keep-alive` is set.
-   Process exit and SIGTERM also stop any remaining registered servers.
+6. Tears down that model's vLLM after its trials. For a single model,
+   `--keep-alive` retains a healthy server after normal completion and prints
+   its PID, endpoint, log path and stop command. Setup failures, cancellation
+   and multiple-model runs still stop their servers.
 
 This path is local `loom run` behavior only. It is not available as hosted
 platform inference; service-mode users should run their own vLLM or
@@ -1070,7 +1072,7 @@ vLLM tuning (passed through to `vllm serve`):
 | `--gpu-memory-utilization F` | 0.90 | 0.0–1.0 |
 | `--max-model-len N` | model's max | Cap context window |
 | `--enforce-eager` | off | Disable CUDA graphs (debug only) |
-| `--keep-alive` | off | Skip per-model teardown, including in multi-model runs; process-exit cleanup still stops the servers. Use `loom serve` for reuse across CLI invocations. |
+| `--keep-alive` | off | Retain a healthy single-model server after normal completion, with output in `<output-dir>/vllm.log`. Stop it using the printed `kill <PID>` command. Multi-model runs still stop each server. |
 
 #### Path C: persisted — same server, many runs
 

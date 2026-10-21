@@ -77,7 +77,7 @@ async def _reconcile_provider_dispatches(
                 )
             if settled:
                 logger.warning(
-                    "provider_dispatch_recovered_uncertain count=%d",
+                    "provider_dispatch_recovered count=%d",
                     settled,
                 )
         except asyncio.CancelledError:
