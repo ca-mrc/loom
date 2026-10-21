@@ -137,6 +137,10 @@ def test_deferred_verifier_does_not_install_the_agent_harness(agent: str) -> Non
     assert verifier.handoff_input == handoff
     assert verifier.effective_network_policy == plan.effective_network_policy
     assert verifier.task_egress == plan.task_egress
+    # A gateway-only verifier runs no egress proxy, so it cannot require its
+    # log; the agent pod still records install egress.
+    assert TASK_EGRESS_OUTPUT not in verifier.output_declarations
+    assert TASK_EGRESS_OUTPUT in plan.output_declarations
     # Compiling the verifier must leave the agent's install contract intact.
     assert plan.setup and plan.setup_egress is not None
 

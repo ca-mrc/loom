@@ -472,11 +472,14 @@ def compile_deferred_verifier_plan(
             "argv": verifier_argv(task_sandbox.readiness_probe.argv),
         }),
     })
+    # Without setup egress the runtime starts its proxy, and writes the egress
+    # log, only for task egress. A gateway-only task's verifier has neither.
     outputs = [
         item if item == TASK_EGRESS_OUTPUT
         else item.model_copy(update={"required": item.relative_path == "verifier/output.json"})
         for item in agent_plan.output_declarations
-        if item.relative_path in _VERIFIER_OWNED_OUTPUTS or item == TASK_EGRESS_OUTPUT
+        if item.relative_path in _VERIFIER_OWNED_OUTPUTS
+        or (item == TASK_EGRESS_OUTPUT and agent_plan.task_egress is not None)
     ]
     requests = agent_plan.resource_requests
     if requests is not None:
