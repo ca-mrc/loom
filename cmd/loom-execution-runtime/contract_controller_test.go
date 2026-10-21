@@ -11,6 +11,8 @@ import (
 func isolatedControllerPlan() plan {
 	p := testPlan("/workspace", phase{Role: "agent", Argv: []string{"/bin/true"}, WorkingDirectory: "/app", TimeoutSeconds: 60})
 	p.AgentImageRef = &p.TaskImageRef
+	p.VerifierExecution = "in_attempt"
+	p.Verifier = &phase{Role: "verifier", Argv: []string{"/bin/true"}, WorkingDirectory: "/app", TimeoutSeconds: 60}
 	p.TaskResources = resources{CPUMillis: 8000, MemoryMiB: 16384, EphemeralStorageMiB: 10240}
 	p.ControllerResources = &resources{CPUMillis: 1000, MemoryMiB: 2048, EphemeralStorageMiB: 10240}
 	ready := probe{Kind: "exec", Argv: []string{"/bin/true"}, TimeoutSeconds: 2, PeriodSeconds: 2, FailureThreshold: 30}

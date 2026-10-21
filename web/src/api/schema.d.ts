@@ -2738,8 +2738,8 @@ export interface paths {
          * List Events By Seq
          * @description Return events with `seq > after_seq`, capped at `limit`.
          *
-         *     Slice 3c reads from the Postgres `trial_events` table. MinIO is
-         *     the fallback for legacy trials (worker shipped before Slice 3b).
+         *     Reads from the Postgres `trial_events` table, with MinIO fallback for
+         *     retained object-backed events.
          *
          *     Use `after_seq=-1` (the default) to start from the beginning;
          *     `after_seq=N` to resume after event seq `N`. `next_after_seq` in

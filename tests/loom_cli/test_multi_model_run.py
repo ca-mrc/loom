@@ -58,10 +58,10 @@ def test_sequential_one_model_fails_other_still_runs(
     import loom_cli.run_cmd as rc
     real = rc._run_one_model
 
-    async def _fail_for_anthropic(args, *, model, output_dir):
+    async def _fail_for_anthropic(args, *, model, output_dir, completed=None):
         if model is not None and model.provider == "anthropic":
             raise RuntimeError("simulated failure for model A")
-        return await real(args, model=model, output_dir=output_dir)
+        return await real(args, model=model, output_dir=output_dir, completed=completed)
 
     monkeypatch.setattr(rc, "_run_one_model", _fail_for_anthropic)
 
@@ -150,14 +150,14 @@ def test_local_server_with_multiple_models_each_uses_its_own_spec(
     import loom_cli.run_cmd as rc
     real = rc._run_one_model
 
-    async def _capture(args, *, model, output_dir):
+    async def _capture(args, *, model, output_dir, completed=None):
         # Capture the pre-rewrite model string so we can assert
         # that each iteration received a distinct spec.
         if model is not None:
             seen_models.append(f"{model.provider}/{model.name}")
         else:
             seen_models.append("<none>")
-        return await real(args, model=model, output_dir=output_dir)
+        return await real(args, model=model, output_dir=output_dir, completed=completed)
 
     monkeypatch.setattr(rc, "_run_one_model", _capture)
 
@@ -177,13 +177,15 @@ def test_local_server_with_multiple_models_each_uses_its_own_spec(
     assert (out / "model-a").is_dir()
     assert (out / "model-b").is_dir()
     # Two distinct models hit _run_one_model (not model-A twice)
-    # The values are pre-rewrite specs from _parse_model.
-    assert seen_models == ["meta-llama/Model-A", "meta-llama/Model-B"]
+    assert seen_models == ["local/_inline/meta-llama/Model-A", "local/_inline/meta-llama/Model-B"]
 
 
+@pytest.mark.parametrize("parallel", [False, True])
+@pytest.mark.parametrize("keep_alive", [False, True])
 def test_parallel_managed_vllms_dont_kill_each_other(
     tmp_xdg_home: Path, tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    parallel: bool, keep_alive: bool,
 ) -> None:
     """With `--parallel-models --model hf:A --model hf:B`, the
     teardown of model A must not also kill model B's vLLM."""
@@ -199,13 +201,19 @@ def test_parallel_managed_vllms_dont_kill_each_other(
 
     # Mock launch_vllm to return distinct VLLMServerInfos
     launches: list[str] = []
+    retained_flags: list[bool] = []
+    owned = []
 
     def _fake_launch(spec):
+        if not parallel:
+            assert all(proc not in vr._LIVE_PROCESSES for proc in owned)
         launches.append(spec.model)
+        retained_flags.append(spec.keep_alive)
         proc = MagicMock()
         proc.pid = 10000 + len(launches)
         proc.poll.return_value = None
         vr._LIVE_PROCESSES.append(proc)
+        owned.append(proc)
         return vr.VLLMServerInfo(
             base_url=f"http://localhost:{8234 + len(launches)}/v1",
             served_model_name=spec.model,
@@ -219,6 +227,7 @@ def test_parallel_managed_vllms_dont_kill_each_other(
 
     def _capture_stop_one(proc):
         stop_one_calls.append(proc.pid)
+        vr._LIVE_PROCESSES.remove(proc)
 
     monkeypatch.setattr(rc, "stop_one", _capture_stop_one)
 
@@ -235,12 +244,14 @@ def test_parallel_managed_vllms_dont_kill_each_other(
         "--backend", "fake",
         "--model", "hf:meta-llama/A",
         "--model", "hf:meta-llama/B",
-        "--parallel-models",
+        *(["--parallel-models"] if parallel else []),
+        *(["--keep-alive"] if keep_alive else []),
         "--output-dir", str(tmp_path / "out"),
     ])
 
     # Both vLLMs launched
     assert len(launches) == 2
+    assert retained_flags == [False, False]
     # Each was torn down by stop_one (per-process), not stop_all
     assert len(stop_one_calls) == 2
     assert stop_all_called == [], \

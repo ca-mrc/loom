@@ -29,6 +29,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from uuid import uuid4
 
 import httpx
 from sqlalchemy import create_engine, select
@@ -45,6 +46,7 @@ CONTROL_PLANE_URL = "http://localhost:58080"
 GATEWAY_URL = "http://localhost:59100"
 MINIO_URL = "http://localhost:59000"
 DIAGNOSTICS_ENV = "LOOM_SYSTEM_SMOKE_DIAGNOSTICS"
+_DEFAULT_PROJECT_NAME = f"loom-system-{uuid4().hex[:12]}"
 _CANARY_MAX_TIMEOUT_SEC = 30.0
 _CANARY_POLL_INTERVAL_SEC = 0.25
 _COMPOSE_INSPECT_TIMEOUT_SEC = 5.0
@@ -57,6 +59,31 @@ _RUNTIME_PROFILE_ARGS = (
     "--profile",
     "task-image-builder",
 )
+_CONTROL_PLANE_LIVENESS_PROBE = """\
+import json, time, urllib.request
+started = time.monotonic()
+try:
+    with urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2) as response:
+        outcome = str(response.status)
+except Exception as error:
+    outcome = type(error).__name__
+print(json.dumps({'outcome': outcome, 'elapsed_seconds': round(time.monotonic() - started, 3)}))
+"""
+_POSTGRES_ACTIVITY_PROBE = """\
+SET default_transaction_read_only = on;
+SET statement_timeout = '2s';
+SELECT pid, state, wait_event_type, wait_event,
+       round(extract(epoch FROM clock_timestamp() - query_start), 3) AS query_age_seconds,
+       round(extract(epoch FROM clock_timestamp() - xact_start), 3) AS transaction_age_seconds,
+       pg_blocking_pids(pid) AS blockers
+FROM pg_stat_activity
+WHERE datname = current_database() AND pid <> pg_backend_pid()
+ORDER BY pid LIMIT 64;
+"""
+
+
+def _compose_project_name() -> str:
+    return os.environ.get("COMPOSE_PROJECT_NAME") or _DEFAULT_PROJECT_NAME
 
 
 def _compose(
@@ -67,6 +94,7 @@ def _compose(
 ) -> subprocess.CompletedProcess[str]:
     cmd = ["docker", "compose", "-f", str(COMPOSE_FILE), *args]
     env = os.environ.copy()
+    env["COMPOSE_PROJECT_NAME"] = _compose_project_name()
     # Stub LOOM_WORKER_TOKEN so compose can parse the file even when the
     # worker service is not in the active profile. The :? required-form
     # in compose only triggers when the service is selected.
@@ -78,15 +106,30 @@ def _compose(
         env.setdefault(f"LOOM_SYSTEM_{service}_PORT", "0")
     if env_extra:
         env.update(env_extra)
-    return subprocess.run(
-        cmd,
-        check=check,
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=timeout_sec,
-    )
+    try:
+        return subprocess.run(
+            cmd,
+            check=check,
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=timeout_sec,
+        )
+    except subprocess.CalledProcessError as exc:
+        # Pytest truncates exception-local stdout/stderr, hiding build failures
+        # before services exist. Redact before truncating so a cut token prefix
+        # cannot leave its secret suffix in the diagnostic tail.
+        output = _redact_diagnostics(f"{exc.stdout or ''}\n{exc.stderr or ''}")
+        try:
+            print(
+                f"Compose command failed (exit {exc.returncode}); output tail:\n"
+                f"{output[-32_768:]}",
+                file=sys.stderr,
+            )
+        except OSError:
+            pass  # A failed diagnostic must not replace the original failure.
+        raise
 
 
 def _published_port(service: str, container_port: str) -> int:
@@ -346,6 +389,8 @@ def stack_down() -> None:
             "down",
             "-v",
             "--remove-orphans",
+            "--rmi",
+            "local",
             check=False,
             timeout_sec=_COMPOSE_TEARDOWN_TIMEOUT_SEC,
         )
@@ -594,12 +639,23 @@ def _redact_diagnostics(text: str) -> str:
 def preserve_compose_diagnostics() -> None:
     """Capture Compose state while containers still exist, with redaction."""
 
+    destination = os.environ.get(DIAGNOSTICS_ENV)
+    destination_path = Path(destination) if destination else None
+    if destination_path is not None and destination_path.exists() and destination_path.stat().st_size > 0:
+        return
     sections: list[str] = []
     for heading, args in (
+        # These run only inside this disposable Compose project. Capture the
+        # volatile waits before slower logs; never include query text or bodies.
+        ("Control Plane liveness", (*_RUNTIME_PROFILE_ARGS, "exec", "-T", "control-plane",
+            "python", "-c", _CONTROL_PLANE_LIVENESS_PROBE)),
+        ("PostgreSQL waits (no query text)", (*_RUNTIME_PROFILE_ARGS, "exec", "-T", "postgres",
+            "psql", "-X", "-U", "loom", "-d", "loom", "-v", "ON_ERROR_STOP=1", "-c", _POSTGRES_ACTIVITY_PROBE)),
+        ("compose stats --no-stream", (*_RUNTIME_PROFILE_ARGS, "stats", "--no-stream", "--format", "json")),
         ("compose ps -a", (*_RUNTIME_PROFILE_ARGS, "ps", "-a")),
         (
             "compose logs --tail=300",
-            (*_RUNTIME_PROFILE_ARGS, "logs", "--no-color", "--tail=300"),
+            (*_RUNTIME_PROFILE_ARGS, "logs", "--no-color", "--timestamps", "--tail=300"),
         ),
     ):
         try:
@@ -614,7 +670,7 @@ def preserve_compose_diagnostics() -> None:
         except subprocess.TimeoutExpired:
             content = "capture exceeded its bounded timeout"
         sections.append(f"===== {heading} =====\n{content}".rstrip())
-    project_name = os.environ.get("COMPOSE_PROJECT_NAME", COMPOSE_FILE.parent.name)
+    project_name = _compose_project_name()
     try:
         raw_ps = subprocess.run(
             [
@@ -640,11 +696,7 @@ def preserve_compose_diagnostics() -> None:
         raw_content = "capture exceeded its bounded timeout"
     sections.append(f"===== docker ps for project {project_name} =====\n{raw_content}")
     payload = _redact_diagnostics("\n\n".join(sections)) + "\n"
-    destination = os.environ.get(DIAGNOSTICS_ENV)
-    if destination:
-        destination_path = Path(destination)
-        if destination_path.exists() and destination_path.stat().st_size > 0:
-            return
+    if destination_path is not None:
         destination_path.write_text(payload, encoding="utf-8")
     else:
         print(payload, file=sys.stderr, end="")

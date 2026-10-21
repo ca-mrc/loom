@@ -222,6 +222,9 @@ The upstream cache defaults to `$XDG_CACHE_HOME/loom/benchmarks` (or
 `~/.cache/loom/benchmarks`). `LOOM_BENCHMARK_CACHE` and `--cache-dir` override it;
 `--refresh` replaces the selected upstream cache. A permission failure reports
 the cache directory and asks the operator to choose a writable cache.
+Adapter fetching and conversion run outside the CLI event loop, including
+cold-cache Harbor downloads and refreshes. Cancellation waits for that worker
+to finish before removing its temporary task bundles.
 
 Migration: replace `publish SLUG --target=...` followed by `register` with
 `publish --benchmark SLUG` against the intended database and object store.
@@ -458,16 +461,24 @@ single fetcher. Dispatches on `src.kind`:
   historical `trust_remote_code` marker preserves source identity but does
   not execute remote Python; unreviewed script revisions/configurations
   are rejected. See [loader compatibility](../../packages/loom-benchmarks/README.md#hugging-face-loader-compatibility).
-- **git** — `git init && git remote add origin <locator> && git
+- **git** — `git init && git config remote.origin.url <locator> && git
   fetch --depth=1 origin <revision>` when `revision` is a SHA;
-  otherwise `git clone --depth=1 --branch <revision>`.
+  checkout uses the fetched commit. Configuring the remote is idempotent so a
+  failed fetch, checkout, or LFS pull can retry the pinned source in place.
+  Branches and tags use `git clone --depth=1 --branch <revision>`.
 - **https-tarball** — `httpx` download + `tarfile.extract`. Path
   traversal guarded.
+- **harbor-package** — resolves the pinned Harbor Hub dataset and records its
+  metadata version and task package digests in `harbor-materialization.json`.
 
 Caches content-addressed under
 `<cache_root>/<kind>/<sha256_of_(locator,revision,subset)>/`. A
-sentinel `.fetch_complete` marks the cache as usable; partial fetches
-get cleaned up via `rmtree` on the next call.
+sentinel `.fetch_complete` marks the cache as usable. Failed fetches do not
+write the sentinel; pinned Git retries reuse the incomplete repository.
+`refresh=True` explicitly removes the selected source cache before fetching.
+Adapters that reload Hugging Face datasets for row selection must pass the
+same revision used by the initial fetch; a cache directory alone does not pin
+the selected rows.
 
 ## Adding a new adapter
 

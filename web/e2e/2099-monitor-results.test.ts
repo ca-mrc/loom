@@ -100,9 +100,10 @@ test("Compare searches, warns on task mismatch, continues past 200 events and re
     json("first trial", "/api/v1/trials/first", { ...trial("first", "task-one"), batch_id: null, aggregate_reward: 0 }),
     json("second trial", "/api/v1/trials/second", { ...trial("second", "task-two"), batch_id: null, aggregate_reward: 1 }),
     json("search second trial", "/api/v1/trials?q=second&limit=20", { items: [trial("second", "task-two")], next_cursor: null }),
-    json("first 200 events", "/api/v1/trials/first/trajectory?limit=200", { events: Array.from({ length: 200 }, (_, seq) => ({ seq, kind: "trial_start" })), next_cursor: 200 }),
-    json("event 201", "/api/v1/trials/first/trajectory?cursor=200&limit=200", { events: [{ seq: 200, kind: "trial_end", final_state: "succeeded" }], next_cursor: null }),
-    json("second empty trajectory", "/api/v1/trials/second/trajectory?limit=200", { events: [], next_cursor: null }),
+    json("first 200 events", "/api/v1/trials/first/events?after_seq=-1&limit=200", { events: Array.from({ length: 200 }, (_, seq) => ({ seq, kind: "trial_start" })), next_after_seq: 199 }),
+    json("event 201", "/api/v1/trials/first/events?after_seq=199&limit=200", { events: [{ seq: 200, kind: "trial_end", final_state: "succeeded" }], next_after_seq: 200 }),
+    json("first empty tail", "/api/v1/trials/first/events?after_seq=200&limit=200", { events: [], next_after_seq: null }),
+    json("second empty trajectory", "/api/v1/trials/second/events?after_seq=-1&limit=200", { events: [], next_after_seq: null }),
   ] });
   await page.goto(`${browserHarness.baseURL}/trials/compare?a=first`);
   await expect(page).toHaveTitle("Compare trials · Loom");
@@ -113,6 +114,7 @@ test("Compare searches, warns on task mismatch, continues past 200 events and re
   await expect(page.getByRole("link", { name: "Open full Trial details →" })).toHaveCount(2);
   await page.getByRole("button", { name: "Load more events" }).click();
   await expect(page.getByText("Trial ended — succeeded", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Load more events" }).click();
   await expect(page.getByRole("button", { name: "Load more events" })).toHaveCount(0);
   await page.getByRole("button", { name: "Replace second Trial" }).click();
   await expect(page.getByLabel("Search comparison trial")).toBeVisible();

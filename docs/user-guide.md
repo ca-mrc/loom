@@ -588,7 +588,10 @@ with `--purpose trajectory_generation`; the CLI stores it as
 is no `--skip-verifier` flag; use `"verification": "skipped"` or
 `--verifier-env-mode skipped`. Delivery export and canonical archive already
 accept a succeeded trial without a numeric reward when that boolean is true.
-Hosted Nebius still rejects skip at admission (`verifier_mode_required`).
+Hosted trajectory generation admits the same boolean and runs the agent sandbox
+without a verifier phase. Missing verifier artifacts are valid for that trial.
+Evaluation still rejects skip, and a graded trial still requires its verifier
+artifacts.
 
 ```bash
 loom eval batch create --purpose evaluation \
@@ -1050,8 +1053,10 @@ Loom:
 4. Reads the canonical model id vLLM advertises (so HF ids that get
    shortened by vLLM still resolve correctly).
 5. Runs the trial against `local/_auto_vllm/<served-name>`.
-6. Tears down that model's vLLM after its trials, unless `--keep-alive` is set.
-   Process exit and SIGTERM also stop any remaining registered servers.
+6. Tears down that model's vLLM after its trials. For a single model,
+   `--keep-alive` retains a healthy server after normal completion and prints
+   its PID, endpoint, log path and stop command. Setup failures, cancellation
+   and multiple-model runs still stop their servers.
 
 This path is local `loom run` behavior only. It is not available as hosted
 platform inference; service-mode users should run their own vLLM or
@@ -1067,7 +1072,7 @@ vLLM tuning (passed through to `vllm serve`):
 | `--gpu-memory-utilization F` | 0.90 | 0.0–1.0 |
 | `--max-model-len N` | model's max | Cap context window |
 | `--enforce-eager` | off | Disable CUDA graphs (debug only) |
-| `--keep-alive` | off | Skip per-model teardown, including in multi-model runs; process-exit cleanup still stops the servers. Use `loom serve` for reuse across CLI invocations. |
+| `--keep-alive` | off | Retain a healthy single-model server after normal completion, with output in `<output-dir>/vllm.log`. Stop it using the printed `kill <PID>` command. Multi-model runs still stop each server. |
 
 #### Path C: persisted — same server, many runs
 
@@ -2020,11 +2025,12 @@ behavior. Use hosted commands to submit new hosted trials.
   Not supported with `--combinations-json`. Those combination shapes stay
   independent of this one-session Terminus-2 router.
 
-  Nebius hosted execution currently admits only Path A
-  (`student_teacher_student`), and only after the selected runtime profile
-  advertises `terminus2_multi_model_policies`. Paths B and C stay local-worker
-  policies until a later slice. Ordinary single-model Terminus-2 trials are
-  unchanged.
+  Nebius hosted execution admits Path A, Path B, and Path C when the
+  selected runtime profile lists that policy in
+  `terminus2_multi_model_policies`. A profile that omits a policy still
+  rejects it. Ordinary single-model Terminus-2 trials are unchanged.
+  Path B and Path C freeze `mix_seed` onto the trial before the pod starts,
+  so the hosted draw matches the stored plan.
 
   If a worker dies after the agent has already written episode checkpoints,
   Loom **does not** restart Harbor from episode 1 on the same trial

@@ -1,4 +1,4 @@
-"""Canonical export must leave the API responsive while storage is blocked."""
+"""Download responses retain storage ownership through completion and failure."""
 from __future__ import annotations
 
 import asyncio
@@ -21,6 +21,7 @@ from loom.db.schema import Trial
 from loom_service.delivery_export import ArchiveBuildResult
 from loom_service.dependencies import authed_session
 from loom_service.routes import trials
+from loom_service.routes.object_downloads import stream_object_response
 from loom_service.trial_bundles import CanonicalTrialBundle, CanonicalTrialBundleFile, ObjectRef
 
 
@@ -156,15 +157,25 @@ async def test_cancelled_build_drains_worker_and_closes_result(
     assert closed, 'cancelled build leaked its completed spool'
 
 
+async def _response_for_body(monkeypatch, body, response_kind):
+    if response_kind == 'object':
+        return stream_object_response(
+            client=SimpleNamespace(get_object=lambda **_kwargs: {'Body': body, 'ContentLength': 7}),
+            bucket='artifacts', key='owned', filename='archive', artifact_kind='artifact',
+        )
+    archive = ArchiveBuildResult(body=body, size_bytes=7, sha256='0' * 64)
+    monkeypatch.setattr(trials, 'build_canonical_trial_bundle_archive', lambda **_kwargs: archive)
+    return await trials.download_trial_bundle(*_route_arguments(monkeypatch))
+
+
+@pytest.mark.parametrize('response_kind', ['bundle', 'object'])
 @pytest.mark.parametrize('failure', [asyncio.CancelledError, RuntimeError])
 @pytest.mark.parametrize('failure_at', ['http.response.start', 'http.response.body'])
 async def test_response_send_failure_closes_archive(
-    monkeypatch: pytest.MonkeyPatch, failure: type[BaseException], failure_at: str,
+    monkeypatch: pytest.MonkeyPatch, failure: type[BaseException], failure_at: str, response_kind: str,
 ) -> None:
     body = io.BytesIO(b'archive')
-    archive = ArchiveBuildResult(body=body, size_bytes=7, sha256='0' * 64)
-    monkeypatch.setattr(trials, 'build_canonical_trial_bundle_archive', lambda **_kwargs: archive)
-    response = await trials.download_trial_bundle(*_route_arguments(monkeypatch))
+    response = await _response_for_body(monkeypatch, body, response_kind)
 
     async def receive() -> Any:
         return {'type': 'http.disconnect'}
@@ -181,7 +192,10 @@ async def test_response_send_failure_closes_archive(
         body.close()
 
 
-async def test_response_cancellation_drains_active_spool_read(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize('response_kind', ['bundle', 'object'])
+async def test_response_cancellation_drains_active_spool_read(
+    monkeypatch: pytest.MonkeyPatch, response_kind: str,
+) -> None:
     entered, release, finished = threading.Event(), threading.Event(), threading.Event()
 
     class SlowSpool(io.BytesIO):
@@ -201,9 +215,7 @@ async def test_response_cancellation_drains_active_spool_read(monkeypatch: pytes
             super().close()
 
     body = SlowSpool(b'archive')
-    archive = ArchiveBuildResult(body=body, size_bytes=7, sha256='0' * 64)
-    monkeypatch.setattr(trials, 'build_canonical_trial_bundle_archive', lambda **_kwargs: archive)
-    response = await trials.download_trial_bundle(*_route_arguments(monkeypatch))
+    response = await _response_for_body(monkeypatch, body, response_kind)
 
     async def receive() -> Any:
         return {'type': 'http.disconnect'}
@@ -231,14 +243,13 @@ async def test_response_cancellation_drains_active_spool_read(monkeypatch: pytes
     assert body.closed
 
 
+@pytest.mark.parametrize('response_kind', ['bundle', 'object'])
 @pytest.mark.parametrize('disconnect', [False, True])
 async def test_response_completion_and_disconnect_close_spool(
-    monkeypatch: pytest.MonkeyPatch, disconnect: bool,
+    monkeypatch: pytest.MonkeyPatch, disconnect: bool, response_kind: str,
 ) -> None:
     body = io.BytesIO(b'archive')
-    archive = ArchiveBuildResult(body=body, size_bytes=7, sha256='0' * 64)
-    monkeypatch.setattr(trials, 'build_canonical_trial_bundle_archive', lambda **_kwargs: archive)
-    response = await trials.download_trial_bundle(*_route_arguments(monkeypatch))
+    response = await _response_for_body(monkeypatch, body, response_kind)
     first_chunk = asyncio.Event()
     chunks = []
 

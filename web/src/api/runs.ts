@@ -15,8 +15,11 @@ export type DebugEvidence =
 export type DiagnosisReport =
   paths["/api/v1/trials/{trial_id}/diagnosis"]["get"]["responses"][200]["content"]["application/json"];
 
-export type TrajectoryPage =
-  paths["/api/v1/trials/{trial_id}/trajectory"]["get"]["responses"][200]["content"]["application/json"];
+export interface TrialEventsPage {
+  events: Array<components["schemas"]["TrajectoryEvent"] & { seq: number }>;
+  /** Last returned event sequence; null means an empty tail, not cursor zero. */
+  next_after_seq: number | null;
+}
 
 export type BatchList = paths["/api/v1/batches"]["get"]["responses"][200]["content"]["application/json"];
 
@@ -109,8 +112,8 @@ export const runsApi = {
       method: "POST",
       body: JSON.stringify(body),
     }),
-  getTrajectoryPage: (id: string, cursor?: number, limit = 200, signal?: AbortSignal) =>
-    apiFetch<TrajectoryPage>(`/api/v1/trials/${id}/trajectory${qs({ cursor, limit })}`, { signal }),
+  getTrialEvents: (id: string, afterSeq = -1, limit = 200, signal?: AbortSignal) =>
+    apiFetch<TrialEventsPage>(`/api/v1/trials/${id}/events${qs({ after_seq: afterSeq, limit })}`, { signal }),
   downloadATIF: (id: string) => apiDownload(`/api/v1/trials/${id}/atif`, `${id}-atif.json`),
   downloadTrajectory: (id: string) =>
     apiDownload(`/api/v1/trials/${id}/trajectory/download`, `${id}-events.jsonl`),

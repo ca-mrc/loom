@@ -256,7 +256,7 @@ jobs:
         run: |
           timeout 60s docker compose -f deploy/docker-compose.test.yml \
             --profile worker --profile task-image-builder \
-            down -v --remove-orphans
+            down -v --remove-orphans --rmi local
 
   staging-smoke-gate:
     name: >-

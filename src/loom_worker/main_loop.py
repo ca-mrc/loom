@@ -5,14 +5,9 @@ Dockerfile-backed claims carry the immutable task snapshot and registry
 digests selected by the scheduler. Prebuilt-image tasks retain the historic
 second round-trip to `GET /tasks/{task_id}/bundle`.
 
-Remaining v1 limitation: the worker uses a tempfile mkdtemp() for the
-task directory. The solution/ + tests/ + environment/ subtrees that live
-under a real fixture directory must be fetched out-of-band — production
-deploys mount a shared volume or run a git clone against
-`bundle["source"]`. v1 documents this as an ops requirement and leaves
-the dir empty; agents that depend on disk content (OracleAgent,
-PytestVerifier with local tests) will error out until the ops
-integration ships.
+Task materializers populate a temporary directory from supported claimed
+sources before the runner starts; absent or unsupported sources leave it empty.
+Runtime-bundle claims use the verified delivery path.
 """
 
 from __future__ import annotations
@@ -495,17 +490,27 @@ async def run_worker(
         )
         hb.start()
 
+        vllm_registry: WorkerVLLMRegistry | None = None
         try:
             pool = RunnerPool(
                 max_concurrent=settings.max_concurrent,
                 unhealthy_callback=hard_exit_unhealthy_worker,
             )
             object_store = _build_worker_object_store(settings)
-            await _ensure_runtime_buckets(
-                object_store,
-                trajectories_bucket=settings.trajectories_bucket,
-                artifacts_bucket=settings.artifacts_bucket,
-            )
+            try:
+                await _ensure_runtime_buckets(
+                    object_store,
+                    trajectories_bucket=settings.trajectories_bucket,
+                    artifacts_bucket=settings.artifacts_bucket,
+                )
+            except BaseException:
+                # No runner can own this client yet. Preserve the startup error
+                # even if closing its partially initialized transport also fails.
+                try:
+                    object_store.close()
+                except Exception:
+                    logger.warning("worker_object_store_startup_cleanup_failed")
+                raise
             idle_exit = _IdleExitTracker(
                 after_seconds=settings.idle_exit_after_seconds,
             )
@@ -608,7 +613,8 @@ async def run_worker(
             # PR-E: tear down any worker-spawned vLLMs on graceful
             # drain. Hard-kill via signal handlers in vllm_runner
             # covers crash paths.
-            await vllm_registry.shutdown()
+            if vllm_registry is not None:
+                await vllm_registry.shutdown()
 
 
 async def _register_worker_with_retry(
@@ -756,7 +762,7 @@ def _run_orphan_sandbox_cleanup(
 
 
 def _run_trial_cache_eviction(settings: WorkerSettings) -> None:
-    """Best-effort prune of all Loom-managed images.
+    """Best-effort cleanup within this worker's Docker ownership scope.
 
     Docker errors are logged and swallowed by the shared eviction helper;
     opportunistic cleanup must not fail worker boot or claim processing.
@@ -1185,11 +1191,9 @@ async def _spawn_trial(
                 task_config.task.id.startswith("terminal-bench-2@tb2.1-r6/"),
             )
 
-            # Plan 13 Task 3: materialize the fixture content from
-            # bundle["source"] when it's an s3:// URL (benchmark-imported
-            # tasks). Hand-authored tasks with source=None or git+... still
-            # get an empty tempdir; the operator runbook documents the
-            # volume-mount / git-clone alternatives.
+            # Resolve S3, Hugging Face and configured fixture sources through
+            # the materializer registry. Absent and unsupported sources leave
+            # an empty task directory.
             task_dir = await _materialize_task_dir(
                 bundle=bundle,
                 object_store=object_store,
@@ -1491,12 +1495,9 @@ async def _spawn_trial(
             # project each into an LLMCallEvent. No-op for trials that
             # don't route through the Gateway (oracle, in-box runtimes).
             llm_calls_fetcher=cp_client.get_trial_llm_calls,
-            # #5 Slice 3b: mirror typed trajectory events to the CP
-            # `trial_events` table alongside the existing MinIO writer.
-            # Slice 3c will flip the SSE reader from MinIO-poll to
-            # Postgres-LISTEN, at which point sink failures start
-            # mattering more; for now MinIO remains authoritative
-            # and the sink swallows its own errors.
+            # Mirror typed events to CP's trial_events for Postgres replay
+            # and live SSE notification. Sink failures are best-effort;
+            # the object-store trajectory remains the durable fallback.
             cp_event_sink=trial_cp_event_sink,
             model_switch_plan=payload.get("model_switch_plan"),
             # PR-E: worker-spawned vLLM registry. Shared across trials

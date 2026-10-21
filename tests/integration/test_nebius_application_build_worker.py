@@ -6,6 +6,7 @@ import hashlib
 import json
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from time import monotonic
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
@@ -56,10 +57,22 @@ async def setup_worker(environment_registry, build_inputs, tmp_path, *, lose_rep
     class LostReply(httpx.AsyncBaseTransport):
         lost = False
         async def handle_async_request(self, request):
-            response = await httpx.ASGITransport(app=app).handle_async_request(request)
+            operation = request.url.path.rsplit("/", 1)[-1]
+            started = monotonic()
+            outcome = "pending"
+            try:
+                response = await httpx.ASGITransport(app=app).handle_async_request(request)
+                outcome = str(response.status_code)
+            except BaseException as error:
+                outcome = type(error).__name__
+                raise
+            finally:
+                # Captured on failure only; omit credentials, identities and bodies.
+                print(f"build pool operation={operation} elapsed={monotonic() - started:.3f}s outcome={outcome}")
             if lose_reply and request.url.path.endswith("/" + lose_reply) and not self.lost:
                 self.lost = True
                 await response.aclose()
+                print(f"build pool operation={operation} injected_lost_reply=true")
                 raise httpx.ReadTimeout("response lost after commit")
             return response
 

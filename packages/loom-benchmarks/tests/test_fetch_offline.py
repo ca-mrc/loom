@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import subprocess
 import tarfile
 from io import BytesIO
 from pathlib import Path
@@ -148,13 +149,74 @@ def test_git_fetch_uses_init_fetch_checkout_for_sha(
         revision="d0d4f3c2c8a5a2e6e3e2f6b3f7e2c5c9c8b9d4e7",
     )
     fetch_upstream(src, cache_root=tmp_path)
-    # 4 calls: init, remote add, fetch, checkout — NOT a single `clone`.
+    # 4 calls: init, remote config, fetch, checkout — NOT a single `clone`.
     cmds = [c[0:2] for c in calls]
     assert ["git", "init"] in cmds
-    assert ["git", "remote"] in cmds
+    assert ["git", "config", "remote.origin.url", src.locator] in calls
     assert ["git", "fetch"] in cmds
     assert ["git", "checkout"] in cmds
     assert not any(c[:2] == ["git", "clone"] for c in calls)
+
+
+def test_pinned_git_fetch_recovers_after_failed_fetch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    upstream = tmp_path / "upstream"
+    upstream.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=upstream, check=True)
+    rows = upstream / "data.jsonl"
+    rows.write_text('{"id":"pinned"}\n')
+    subprocess.run(["git", "add", "data.jsonl"], cwd=upstream, check=True)
+    commit_cmd = [
+        "git", "-c", "user.name=Fetch Test", "-c", "user.email=fetch@example.test",
+        "-c", "commit.gpgsign=false", "commit", "-qm",
+    ]
+    subprocess.run([*commit_cmd, "pinned"], cwd=upstream, check=True)
+    revision = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=upstream, check=True,
+        capture_output=True, text=True,
+    ).stdout.strip()
+    rows.write_text('{"id":"newer-head"}\n')
+    subprocess.run(["git", "add", "data.jsonl"], cwd=upstream, check=True)
+    subprocess.run([*commit_cmd, "newer"], cwd=upstream, check=True)
+
+    src = UpstreamSource(kind="git", locator=str(upstream), revision=revision)
+    cache_root = tmp_path / "cache"
+    target = cache_root / "git" / cache_key(src)
+    real_run = subprocess.run
+    failed_once = False
+
+    def fail_first_fetch(
+        cmd: list[str], *, cwd: Path, check: bool,
+    ) -> subprocess.CompletedProcess[bytes]:
+        nonlocal failed_once
+        if cmd[:2] == ["git", "fetch"] and not failed_once:
+            failed_once = True
+            raise subprocess.CalledProcessError(128, cmd, stderr="fetch interrupted")
+        return real_run(cmd, cwd=cwd, check=check)
+
+    monkeypatch.setattr("loom_benchmarks.fetch.subprocess.run", fail_first_fetch)
+    with pytest.raises(subprocess.CalledProcessError, match="128"):
+        fetch_upstream(src, cache_root=cache_root)
+    assert (target / "repo" / ".git").is_dir()
+    assert not (target / ".fetch_complete").exists()
+    retained = target / "repo" / "retained-local-file"
+    retained.write_text("preserve existing cache data")
+
+    result = fetch_upstream(src, cache_root=cache_root)
+    assert (result / "repo" / "data.jsonl").read_text() == '{"id":"pinned"}\n'
+    assert real_run(
+        ["git", "rev-parse", "HEAD"], cwd=result / "repo", check=True,
+        capture_output=True, text=True,
+    ).stdout.strip() == revision
+    assert retained.read_text() == "preserve existing cache data"
+    assert (result / ".fetch_complete").read_text() == "ok"
+
+    def reject_refetch(*args: object, **kwargs: object) -> None:
+        pytest.fail("a completed source must be reused without invoking Git")
+
+    monkeypatch.setattr("loom_benchmarks.fetch.subprocess.run", reject_refetch)
+    assert fetch_upstream(src, cache_root=cache_root) == result
 
 
 def test_git_fetch_uses_clone_for_branch(

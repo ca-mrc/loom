@@ -796,8 +796,9 @@ def test_evict_stale_managed_images_covers_all_managed_kinds(
     )
 
 
+@pytest.mark.parametrize("sandbox_identity", ["", "session-a"])
 def test_cleanup_removes_only_stopped_labelled_containers_without_volumes(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, sandbox_identity: str,
 ) -> None:
     def image(labels: dict[str, str]) -> SimpleNamespace:
         return SimpleNamespace(labels=labels, attrs={"Config": {"Labels": labels}})
@@ -821,13 +822,13 @@ def test_cleanup_removes_only_stopped_labelled_containers_without_volumes(
     container_owned = container(
         "container-owned",
         status="exited",
-        labels={"loom.task-image": "true"},
+        labels={"loom.task-image": "true", "loom.sandbox": sandbox_identity},
         image_labels={},
     )
     image_owned = container(
         "image-owned",
         status="dead",
-        labels={},
+        labels={"loom.sandbox": sandbox_identity},
         image_labels={"loom.task-sidecar": "true"},
     )
     unlabelled = container(
@@ -842,12 +843,26 @@ def test_cleanup_removes_only_stopped_labelled_containers_without_volumes(
         labels={"loom.trial-cache": "true"},
         image_labels={"loom.task-image": "true"},
     )
+    foreign = container(
+        "foreign",
+        status="exited",
+        labels={"loom.sandbox": "session-b"},
+        image_labels={"loom.task-image": "true"},
+    )
+    legacy = container(
+        "legacy",
+        status="exited",
+        labels={},
+        image_labels={"loom.task-image": "true"},
+    )
     client = MagicMock()
     client.containers.list.return_value = [
         container_owned,
         image_owned,
         unlabelled,
         running,
+        foreign,
+        legacy,
     ]
     client.info.return_value = {"DockerRootDir": "/var/lib/docker"}
     monkeypatch.setattr(
@@ -856,17 +871,45 @@ def test_cleanup_removes_only_stopped_labelled_containers_without_volumes(
         lambda _path: SimpleNamespace(free=25 * 1024**3),
     )
 
-    result = trial_cache.evict_stale_managed_images(
-        client,
-        _StubSettings(trial_cache_min_free_gb=20),  # type: ignore[arg-type]
-    )
+    settings = _StubSettings(trial_cache_min_free_gb=20)
+    settings.sandbox_identity = sandbox_identity
+    result = trial_cache.evict_stale_managed_images(client, settings)  # type: ignore[arg-type]
 
     container_owned.remove.assert_called_once_with(v=False, force=False)
     image_owned.remove.assert_called_once_with(v=False, force=False)
     unlabelled.remove.assert_not_called()
     running.remove.assert_not_called()
+    foreign.remove.assert_not_called()
+    if sandbox_identity:
+        legacy.remove.assert_not_called()
+    else:
+        legacy.remove.assert_called_once_with(v=False, force=False)
     assert not client.volumes.mock_calls
     assert result.probe_available is True
+    assert result.error_count == 0
+
+
+@pytest.mark.parametrize("free_gb", [1, 25])
+def test_shared_daemon_cleanup_preserves_images_and_reports_actual_storage(
+    monkeypatch: pytest.MonkeyPatch, free_gb: int,
+) -> None:
+    client = MagicMock()
+    client.containers.list.return_value = []
+    client.info.return_value = {"DockerRootDir": "/var/lib/docker"}
+    client.images.list.return_value = [SimpleNamespace(id="shared-image", attrs={})]
+    monkeypatch.setattr(
+        trial_cache.shutil, "disk_usage", lambda _path: SimpleNamespace(free=free_gb * 1024**3),
+    )
+    settings = _StubSettings(trial_cache_min_free_gb=20)
+    settings.sandbox_identity = "session-a"
+
+    result = trial_cache.evict_stale_managed_images(client, settings)  # type: ignore[arg-type]
+
+    client.images.prune.assert_not_called()
+    client.images.remove.assert_not_called()
+    assert result.probe_available is True
+    assert result.free_bytes == free_gb * 1024**3
+    assert result.required_free_bytes == 20 * 1024**3
     assert result.error_count == 0
 
 

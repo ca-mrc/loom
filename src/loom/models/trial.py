@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+import secrets
 from enum import StrEnum
 from typing import Any, Literal
 
@@ -20,6 +21,11 @@ MixPolicy = Literal[
     "beta_mixture",
     "student_to_teacher_turns",
 ]
+HOSTED_TERMINUS2_MULTI_MODEL_POLICIES: frozenset[MixPolicy] = frozenset({
+    "beta_mixture",
+    "student_teacher_student",
+    "student_to_teacher_turns",
+})
 
 
 class MultiModelSwitchSpec(BaseModel):
@@ -148,6 +154,8 @@ def materialize_multi_model_switch_episode(
         data.pop("episode_ceiling", None)
         data.pop("step_start", None)
         data.pop("step_end", None)
+        if not data.get("mix_seed"):
+            data["mix_seed"] = secrets.token_hex(16)
         return data
     if data["policy"] == "student_to_teacher_turns":
         data.pop("switch_episode", None)
@@ -155,6 +163,8 @@ def materialize_multi_model_switch_episode(
         data.pop("teacher_episodes", None)
         data.pop("episode_ceiling", None)
         data.pop("beta", None)
+        if not data.get("mix_seed"):
+            data["mix_seed"] = secrets.token_hex(16)
         return data
     data.pop("step_start", None)
     data.pop("step_end", None)

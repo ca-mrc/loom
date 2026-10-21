@@ -42,15 +42,16 @@ memory to one model. Output is grouped as
 
 `--parallel-models` allows model runs to overlap. The user must provide enough
 GPU memory and device placement for all models. Per-model teardown stops only
-that model's server. `--keep-alive` skips this teardown in single- and
-multiple-model runs, so sequential runs can retain earlier models in memory.
-Process-exit cleanup still stops all registered servers; use `loom serve` for
-reuse across CLI invocations.
+that model's server. Multiple-model runs always stop their managed servers,
+including when `--keep-alive` is supplied. For a single model, that flag retains
+a healthy server after normal completion. Loom prints its PID, endpoint, log
+path and stop command; output goes to `<output-dir>/vllm.log`. Setup failures
+and cancellation still stop the server. `loom serve` provides a foreground
+alternative for reuse across CLI invocations.
 
 With `--local-server URL`, repeated model values are sent as upstream model
-IDs to that same already-running server. The current parser requires a slash
-in each inline model ID; registered `local/<server>/<model_id>` selections also
-allow slashless upstream IDs. Managed `hf:` or path specs cannot be combined
+IDs to that same already-running server. Both bare IDs such as `llama3.1` and
+IDs containing slashes are preserved. Managed `hf:` or path specs cannot be combined
 with `--local-server`.
 
 The local launcher exists only in CLI mode. Service-mode local endpoints are

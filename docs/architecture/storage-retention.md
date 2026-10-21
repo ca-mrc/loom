@@ -45,7 +45,7 @@ Current strategies are:
 | Strategy | S3-compatible effect |
 | --- | --- |
 | `expire_after_days` | Emits one enabled expiration rule for the bucket |
-| `keep_forever` | Emits no rule and leaves existing objects unexpired |
+| `keep_forever` | Emits no new expiration rule; existing external lifecycle policies still apply |
 | `cleanup_incomplete_uploads_after_hours` | Parses but is not emitted by the S3-compatible renderer |
 
 The multipart-cleanup strategy is omitted because MinIO drops that action on

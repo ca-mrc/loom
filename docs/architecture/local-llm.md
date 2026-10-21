@@ -39,13 +39,10 @@ managed launcher.
 | `hf:meta-llama/Llama-3.1-8B` | `hf` | Managed vLLM launch; requires `org/name` |
 | `/data/checkpoints/my-tune/` | `file` | Managed vLLM launch from local weights |
 
-[`run_cmd.py`](../../src/loom_cli/run_cmd.py) parses every model before
-`_run_one_model` configures its provider. With `--local-server`, that function
-reassembles the parsed `provider/name` as the upstream model ID and registers
-`_inline`. Consequently, slashless IDs are currently rejected before inline
-rewriting. To use one, register the endpoint and select
-`local/<server>/<model_id>`. Managed `hf:` and path specs cannot be combined
-with `--local-server`.
+With `--local-server`, [`run_cmd.py`](../../src/loom_cli/run_cmd.py) preserves
+each complete model value as the upstream model ID and registers `_inline`.
+Both bare IDs such as `llama3.1` and IDs containing slashes are accepted.
+Managed `hf:` and path specs cannot be combined with `--local-server`.
 
 For managed specs, `_run_one_model` calls `launch_vllm`, registers `_auto_vllm`,
 and uses the model ID returned by `/v1/models`. These transient entries stay
@@ -67,9 +64,12 @@ tensor-parallel, context-length and eager-execution settings.
 3. Poll `/v1/models` for up to 300 seconds, failing when the process exits.
 4. Read the first advertised model ID and return its base URL and process ID.
 
-The subprocess inherits stdout and stderr. Health-check or model-query failures
-stop the process and remove it from the registry. Shutdown attempts TERM,
-waits up to 30 seconds, then uses KILL if needed.
+The subprocess normally inherits stdout and stderr. A single-model
+`--keep-alive` launch starts in a separate session with stdin disconnected and
+output appended to `<output-dir>/vllm.log`. It remains owned by the CLI until
+normal completion. Startup failures and interruptions stop the process and
+remove it from the registry. Shutdown attempts TERM, waits up to 30 seconds,
+then uses KILL if needed.
 
 vLLM binds to `127.0.0.1` by default. `--vllm-host 0.0.0.0` explicitly exposes
 it on the LAN.
@@ -78,16 +78,20 @@ it on the LAN.
 
 | Trigger | Behavior |
 | --- | --- |
-| Model run finishes or its trial gathering fails | `_run_one_model` calls `stop_one` in `finally`, unless `--keep-alive` was supplied |
+| Model run finishes | Stop its server; a single-model `--keep-alive` run may retain a healthy server after normal completion |
+| Setup or trial execution raises without a result | Stop that model's server, including with `--keep-alive` |
 | Ctrl-C | Python's `KeyboardInterrupt` follows the normal asynchronous cleanup path |
 | CLI process exits | `atexit` calls `stop_all` for remaining registered processes |
-| SIGTERM | The signal handler calls `stop_all`, then restores and raises the default signal behavior |
-| Startup health or model query fails | `launch_vllm` stops and unregisters that process |
+| SIGTERM or terminal hangup (SIGHUP) | The signal handler stops CLI-owned servers, then restores and raises the default signal behavior; already retained servers survive |
+| Startup settling, health probe or model query fails or is interrupted | `launch_vllm` stops and unregisters that process |
 
 Per-model cleanup stops only its own process so parallel model runs keep their
-servers. `--keep-alive` skips that cleanup in both single- and multiple-model
-runs; process-exit cleanup still applies. Use foreground `loom serve` when a
-server should outlive individual `loom run` commands.
+servers. Multiple-model runs always stop their managed servers. For a
+single-model `--keep-alive` run, normal completion transfers the healthy server
+out of CLI exit cleanup, even if completed trials report unsuccessful results.
+Loom prints its PID, endpoint, log path and `kill <PID>` command. The user then
+owns its lifetime. Foreground `loom serve` is another way to reuse a server
+across individual `loom run` commands.
 
 For installed subprocess agents, provider requests originate inside the task
 sandbox. A registered `127.0.0.1` URL therefore targets that sandbox, not the
@@ -101,8 +105,8 @@ a Responses endpoint; other chat adapters use Chat Completions. See the
 `--concurrency N` bounds simultaneous trials for each model. All trials for one
 managed model share its vLLM process. Repeated `--model` selections run
 sequentially by default; `--parallel-models` allows overlapping model runs.
-Without `--keep-alive`, sequential execution stops each managed server before
-starting the next. Parallel runs require enough GPU capacity for all selected
+Sequential execution stops each managed server before starting the next,
+including with `--keep-alive`. Parallel runs require enough GPU capacity for all selected
 models; Loom does not partition GPU memory automatically.
 
 See [multiple local model servers](multi-server-local-llm.md) for output

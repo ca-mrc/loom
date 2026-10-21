@@ -127,37 +127,48 @@ class _Topology:
     shared: bool
     retained_services: bool
     shared_guest: bool = False
+    skipped: bool = False
 
     @property
     def colocated_verifier(self) -> bool:
         # Guest launch keeps both sandboxes in this pod. Retained services
         # cannot survive the agent pod, so their verifier also grades beside
         # them. Separate grading otherwise defers the verifier until the agent
-        # pod is gone (#2212).
+        # pod is gone (#2212). Skip launches neither verifier.
+        if self.skipped:
+            return False
         return self.shared or self.guest_execution is not None or self.retained_services
 
     @property
     def in_place_verifier(self) -> bool:
+        if self.skipped:
+            return False
         return self.shared and (self.guest_execution is None or self.shared_guest)
 
     @property
     def sandbox_roles(self) -> tuple[str, ...]:
+        if self.skipped:
+            return (TASK_SANDBOX,)
         fresh_verifier = (self.guest_execution is not None and not self.in_place_verifier) or (self.colocated_verifier and not self.shared)
         return (TASK_SANDBOX, VERIFIER_SANDBOX) if fresh_verifier else (TASK_SANDBOX,)
 
     @property
     def verifier_output_required(self) -> bool:
+        if self.skipped:
+            return False
         return self.shared or (self.colocated_verifier and self.guest_execution is None)
 
 
 def _topology(task: TaskConfig, trial: TrialConfig, *, shared_guest: bool = False) -> _Topology:
     capabilities = effective_guest_capabilities(task, trial)
+    skipped = trial.skip_verifier
     return _Topology(
         guest_execution=(GuestExecutionV1(capabilities=tuple(sorted(capabilities)))
                          if capabilities is not None else None),
-        shared=resolve_verifier_env_mode(task, trial) == "shared",
+        shared=False if skipped else resolve_verifier_env_mode(task, trial) == "shared",
         retained_services=task.environment.service_lifecycle is not None,
         shared_guest=shared_guest,
+        skipped=skipped,
     )
 
 
@@ -177,6 +188,8 @@ def _sandbox_sidecars(
     env = task.environment
     assert env.docker_image
     agent_timeout, verifier_timeout = _timeouts(task, request.trial)
+    if topology.skipped:
+        verifier_timeout = 0
     setup_timeout = request.spec.setup.timeout_seconds if request.spec.setup is not None else 0
     exec_limit = str(math.ceil(max(_MIN_SANDBOX_EXEC_LIMIT_SECONDS, agent_timeout, verifier_timeout, setup_timeout)))
     sidecars = list(fixture_sidecars(task))
@@ -230,14 +243,22 @@ def _output_declarations(request: TaskSandboxPlanRequest, topology: _Topology) -
         ("agent/trajectory.jsonl", "trajectory/events.jsonl", "trajectory", True),
         ("agent/usage.json", "accounting/usage.json", "usage", True),
         ("agent/exception.json", "diagnostics/agent-exception.json", "agent_native", False),
-        ("verifier/exception.json", "diagnostics/verifier-exception.json", "verifier", False),
+        *(
+            () if topology.skipped else (
+                ("verifier/exception.json", "diagnostics/verifier-exception.json", "verifier", False),
+            )
+        ),
         *((("setup/exception.json", "diagnostics/setup-exception.json", "agent_native", False),)
           if request.spec.setup is not None else ()),
         *((("harness-cache/outcome.json", "diagnostics/harness-cache.json", "agent_native", False),)
           if request.spec.setup is not None and request.spec.setup.cacheable else ()),
         *native,
         ("workspace.tar", "artifacts/workspace.tar", "task_artifact", True),
-        ("verifier/output.json", "verifier/output.json", "verifier", topology.verifier_output_required),
+        *(
+            () if topology.skipped else (
+                ("verifier/output.json", "verifier/output.json", "verifier", topology.verifier_output_required),
+            )
+        ),
         ("verifier/ctrf.json", "artifacts/verifier/ctrf.json", "task_artifact", False),
     ):
         outputs.append(RuntimeOutputDeclarationV1(
@@ -384,7 +405,11 @@ def compile_task_sandbox_plan(request: TaskSandboxPlanRequest) -> ExecutionRunti
         setup_egress=_setup_egress(spec),
         setup_cache=_setup_cache(spec),
         main=phase("agent", spec.controller_phase, agent_timeout),
-        verifier_execution="in_attempt" if topology.colocated_verifier else "separate_execution",
+        verifier_execution=(
+            "skipped" if topology.skipped
+            else "in_attempt" if topology.colocated_verifier
+            else "separate_execution"
+        ),
         verifier_after_agent_timeout=topology.in_place_verifier,
         in_place_verifier=topology.in_place_verifier,
         verifier=(phase("verifier", VERIFY_SANDBOX_PHASE, verifier_timeout)
@@ -447,11 +472,14 @@ def compile_deferred_verifier_plan(
             "argv": verifier_argv(task_sandbox.readiness_probe.argv),
         }),
     })
+    # Without setup egress the runtime starts its proxy, and writes the egress
+    # log, only for task egress. A gateway-only task's verifier has neither.
     outputs = [
         item if item == TASK_EGRESS_OUTPUT
         else item.model_copy(update={"required": item.relative_path == "verifier/output.json"})
         for item in agent_plan.output_declarations
-        if item.relative_path in _VERIFIER_OWNED_OUTPUTS or item == TASK_EGRESS_OUTPUT
+        if item.relative_path in _VERIFIER_OWNED_OUTPUTS
+        or (item == TASK_EGRESS_OUTPUT and agent_plan.task_egress is not None)
     ]
     requests = agent_plan.resource_requests
     if requests is not None:

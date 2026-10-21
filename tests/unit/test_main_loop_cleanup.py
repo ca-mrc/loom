@@ -11,7 +11,8 @@ from __future__ import annotations
 import asyncio
 import tempfile
 from pathlib import Path, PurePosixPath
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 from uuid import uuid4
 
 import httpx
@@ -22,6 +23,40 @@ from loom.models.trial import BackoffSpec, RetryPolicy, RetryReason
 from loom.verifier.script_verifier import ScriptVerifier
 from loom_worker import main_loop as ml
 from loom_worker.runner_pool import RunnerPool
+
+
+@pytest.mark.parametrize("stage", ["store", "buckets"])
+async def test_worker_storage_startup_preserves_failure_and_closes_acquired_resources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str,
+) -> None:
+    settings = SimpleNamespace(
+        trajectory_cache_dir=tmp_path, control_plane_url="http://cp.test",
+        gateway_url="http://gateway.test", token=SimpleNamespace(get_secret_value=lambda: "test"),
+        heartbeat_interval_sec=5, max_concurrent=1,
+        trajectories_bucket="test-trajectories", artifacts_bucket="test-artifacts",
+    )
+    for name in ("install_signal_handlers", "_configure_blocking_io_executor",
+                 "_log_docker_registry_auth_summary", "_run_orphan_cleanup", "_run_trial_cache_eviction"):
+        monkeypatch.setattr(ml, name, Mock())
+    monkeypatch.setattr(ml, "_register_worker_with_retry", AsyncMock(return_value={"worker_id": str(uuid4())}))
+    monkeypatch.setattr(ml, "ResourceUsageOutbox", Mock(return_value=SimpleNamespace(replay=AsyncMock())))
+    heartbeat = Mock()
+    monkeypatch.setattr(ml, "HeartbeatThread", Mock(return_value=heartbeat))
+    store = Mock()
+    error = RuntimeError("storage startup unavailable")
+    monkeypatch.setattr(ml, "_build_worker_object_store", Mock(
+        return_value=store, side_effect=error if stage == "store" else None,
+    ))
+    monkeypatch.setattr(ml, "_ensure_runtime_buckets", AsyncMock(side_effect=error))
+    registry = Mock()
+    monkeypatch.setattr(ml, "WorkerVLLMRegistry", registry)
+    with pytest.raises(RuntimeError, match="storage startup unavailable") as raised:
+        await ml.run_worker(settings)  # type: ignore[arg-type]
+    assert raised.value is error
+    heartbeat.stop.assert_called_once()
+    heartbeat.join.assert_called_once()
+    registry.assert_not_called()
+    assert store.close.call_count == (1 if stage == "buckets" else 0)
 
 
 def test_runtime_identity_labels_allow_legacy_settings() -> None:

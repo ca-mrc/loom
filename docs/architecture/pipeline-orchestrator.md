@@ -48,6 +48,22 @@ same transaction creates cancellation-outbox rows for live Attempts; cleanup
 acknowledgements are durable and replay-safe. No retry may be scheduled after a
 terminal cause is present.
 
+Worker cancellation and worker-loss acknowledgements release generic provider,
+GPU, and artifact reservations, but leave reservations linked to a durable
+`PipelineProviderDispatch` with the Gateway accounting owner. A worker cleanup
+proof cannot determine whether an upstream provider charged a request. Cleanup
+acknowledgements may therefore finish before provider accounting converges; the
+run's terminal projection still waits for active reservations to close.
+
+The Gateway settles a received provider result or recovers an abandoned dispatch
+in its bounded sweep. An old `reserved` row releases the request allowance and
+cost reserve as `not_dispatched`, without an `LLMCall`. An old `dispatched` row
+settles the reserved cost as `uncertain` with one correlated `LLMCall`. Both
+transitions update the Attempt budget and run ledger atomically. Cleanup replay
+uses the acknowledgement's JSON payload, including its timestamp, to retain the
+same durable request identity after the Attempt becomes terminal. See the
+[Gateway accounting boundary](llm-gateway.md#retained-pipeline-dispatch-accounting).
+
 ## Retired hosted execution
 
 Hosted Loom execution is Nebius only. Shared-cluster acceptance, Stage1 worker

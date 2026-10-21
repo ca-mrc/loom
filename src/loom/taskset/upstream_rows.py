@@ -17,8 +17,9 @@ class UpstreamFetchError(Exception):
 
 
 def _parse_jsonl_text(text: str) -> Iterator[dict[str, Any]]:
-    normalized = text.replace("\\n", "\n") if "\\n" in text and "\n" not in text else text
-    for line_no, line in enumerate(normalized.splitlines(), start=1):
+    # JSONL records use physical newlines; JSON escapes and Unicode string
+    # separators belong to the value and must reach the JSON parser intact.
+    for line_no, line in enumerate(text.split("\n"), start=1):
         stripped = line.strip()
         if not stripped:
             continue

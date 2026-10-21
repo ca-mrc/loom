@@ -251,13 +251,24 @@ uv run --no-sync pytest tests/integration                # full directory
 uv run --no-sync pytest tests/integration -m "not docker" # exclude docker-marked tests
 uv run --no-sync pytest tests/integration -m docker       # Docker driver and runtime tests
 
-# System tier — full docker-compose stack
-uv run --no-sync pytest tests/system -v
+# System tier — full docker-compose stack, including image/fixture setup
+uv run --no-sync pytest tests/system --timeout=1200 -v
 
 # Live Modal — requires provider credentials
 LOOM_RUN_MODAL_INTEGRATION=1 \
   uv run --no-sync pytest tests/integration/test_modal_driver_live.py -v
 ```
+
+The system-test harness chooses a unique Compose project for each pytest
+process, or honors an explicitly set `COMPOSE_PROJECT_NAME`. Worker and builder
+use that project as their sandbox identity. Compose generates project-scoped
+service image names and removes those tags during teardown. Restart cleanup
+preserves other projects' running/stopped trial containers and shared
+task-image caches. Shared image garbage collection is
+the Docker daemon owner's responsibility; insufficient disk space still fails
+builder admission. To inspect or recover a manually interrupted run, set a
+unique `COMPOSE_PROJECT_NAME` before invoking pytest and use that same value
+with `docker compose -f deploy/docker-compose.test.yml`.
 
 The `not docker` subset can still require Docker for PostgreSQL and MinIO
 fixtures. These directory/marker commands include retained compatibility tests;
@@ -438,12 +449,19 @@ and follow the normal `dev` auto-merge policy.
 
 Every non-draft `dev` PR uses GitHub's native squash auto-merge. A developer or
 maintainer enables it without considering author or reviewer identity. GitHub
-keeps each candidate queued until `repository-checks`, `images-gate`,
+waits until `repository-checks`, `images-gate`,
 `cluster-smoke-gate`, and `staging-smoke-gate` are visible and successful on
 the current head SHA. Those four strict, GitHub-Actions-app-bound checks are
 the only merge authority: `dev` requires no human approval, no CODEOWNER
 approval, and no conversation resolution. Maintainers should not manually
 merge an eligible `dev` PR just because CI is green.
+
+Check the live queue state and integration coordination in
+[#2416](https://github.com/ca-mrc/loom/issues/2416). When the queue is enabled,
+the same four checks also qualify its generated merge group. While it is
+disabled, strict latest-base protection requires the branch writer to update
+an outdated head and earn checks again; follow the coordinated order to avoid
+repeated base updates and competing CI runs.
 
 For `main`, enable native squash auto-merge only for a same-repository `dev`
 production candidate. The active `main protected promotion` ruleset requires

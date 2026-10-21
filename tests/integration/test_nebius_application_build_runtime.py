@@ -8,6 +8,7 @@ import io
 import json
 from contextlib import AsyncExitStack
 from pathlib import Path
+from time import monotonic
 from uuid import UUID, uuid4
 
 import boto3
@@ -310,7 +311,18 @@ async def test_configured_two_owner_upload_build_and_cancel_reaches_real_closed_
     async def internal_http(transport, request):
         # Replace only network I/O; keep PoolClient framing/auth and real routes.
         assert request.url.host == "management.example.com"
-        response = await httpx.ASGITransport(app=app).handle_async_request(request)
+        operation = request.url.path.rsplit("/", 1)[-1]
+        started = monotonic()
+        outcome = "pending"
+        try:
+            response = await httpx.ASGITransport(app=app).handle_async_request(request)
+            outcome = str(response.status_code)
+        except BaseException as error:
+            outcome = type(error).__name__
+            raise
+        finally:
+            # Captured on failure only; omit credentials, identities and bodies.
+            print(f"build pool operation={operation} elapsed={monotonic() - started:.3f}s outcome={outcome}")
         if request.url.path.endswith("/prepare"):
             prepared.add(UUID(json.loads(request.content)["key"]["local_work_id"]))
         return response
@@ -355,11 +367,17 @@ async def test_configured_two_owner_upload_build_and_cancel_reaches_real_closed_
         for (client, _), identity in zip(owners, builds, strict=True):
             reply = await client.post(f"/api/v1/application-builds/{identity}/cancel", json={"attempt": 1})
             assert reply.status_code == 202, reply.text
+        previous_phases = None
+        polling_started = monotonic()
         async with asyncio.timeout(10):
             while True:
                 results = await asyncio.gather(*(client.get(f"/api/v1/application-builds/{identity}")
                     for (client, _), identity in zip(owners, builds, strict=True)))
-                if all(result.json()["phase"] == "cancelled" for result in results):
+                phases = tuple(result.json()["phase"] for result in results)
+                if phases != previous_phases:
+                    print(f"build cancellation elapsed={monotonic() - polling_started:.3f}s phases={phases}")
+                    previous_phases = phases
+                if all(phase == "cancelled" for phase in phases):
                     break
                 await asyncio.sleep(0.02)
         async with sessions() as session:

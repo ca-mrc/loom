@@ -249,7 +249,9 @@ def test_prepare_readiness_round_trips_through_renderer(
         else:
             assert name not in profile
     if enabled:
-        assert profile["terminus2_multi_model_policies"] == ["student_teacher_student"]
+        assert profile["terminus2_multi_model_policies"] == [
+            "beta_mixture", "student_teacher_student", "student_to_teacher_turns",
+        ]
     else:
         assert "terminus2_multi_model_policies" not in profile
     config, candidate, _ = request.getfixturevalue("platform_inputs")

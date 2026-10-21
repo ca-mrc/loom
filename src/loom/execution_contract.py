@@ -78,6 +78,7 @@ class ImageMaterialization(StrEnum):
 class VerifierTopology(StrEnum):
     IN_ATTEMPT = "in_attempt"
     SEPARATE_EXECUTION = "separate_execution"
+    SKIPPED = "skipped"
 
 
 class ExecutionAdapterKind(StrEnum):
@@ -604,26 +605,29 @@ def workload_requirements_from_task(
     # uses. Task-only callers keep their historical projection (declared agent
     # and env_mode) so stored comparisons that do not know the trial stay stable;
     # the declared harness's spec says whether it has that projection.
-    if trial is None:
-        declared_harness = hosted_harness(task.agent.name)
-        separate = (
-            declared_harness is not None
-            and declared_harness.task_declared_separate_verifier
-            and task.verifier.env_mode == "separate"
-            and not _task_declares_guest_execution(task)
-        )
+    if trial is not None and trial.skip_verifier:
+        verifier_topology = VerifierTopology.SKIPPED
     else:
-        # Retained services cannot outlive the agent pod, so the compiler
-        # grades them in it with a separate verifier sandbox.
-        separate = (
-            is_workspace_harness(trial.agent_name)
-            and resolve_verifier_env_mode(task, trial) == "separate"
-            and not needs_guest_kernel
-            and task.environment.service_lifecycle is None
+        if trial is None:
+            declared_harness = hosted_harness(task.agent.name)
+            separate = (
+                declared_harness is not None
+                and declared_harness.task_declared_separate_verifier
+                and task.verifier.env_mode == "separate"
+                and not _task_declares_guest_execution(task)
+            )
+        else:
+            # Retained services cannot outlive the agent pod, so the compiler
+            # grades them in it with a separate verifier sandbox.
+            separate = (
+                is_workspace_harness(trial.agent_name)
+                and resolve_verifier_env_mode(task, trial) == "separate"
+                and not needs_guest_kernel
+                and task.environment.service_lifecycle is None
+            )
+        verifier_topology = (
+            VerifierTopology.SEPARATE_EXECUTION if separate else VerifierTopology.IN_ATTEMPT
         )
-    verifier_topology = (
-        VerifierTopology.SEPARATE_EXECUTION if separate else VerifierTopology.IN_ATTEMPT
-    )
     return WorkloadRequirementsV1(
         operating_system=env.os,
         cpu_architecture=env.cpu_arch,

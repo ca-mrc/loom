@@ -1,6 +1,6 @@
 """CP-side event observer that batches typed trajectory events and
 POSTs them through to the `trial_events` table via the worker's
-`HttpControlPlaneClient.append_events` method (#5 Slice 3b).
+`HttpControlPlaneClient.append_events` method.
 
 Owned by the worker for the lifetime of one trial. The worker
 constructs it once per trial, wires it as `TrialContext.event_observer`,
@@ -8,11 +8,9 @@ and `TrajectoryWriter` calls `observe(event)` from `append`
 alongside the existing local-JSONL + MinIO multipart writes. On
 trial close, `flush_and_close()` drains the buffer.
 
-MinIO remains the authoritative copy until #5 Slice 3c flips the
-SSE reader from MinIO-poll to Postgres-LISTEN. So in this slice
-the sink is best-effort — any POST failure is logged and the
-batch is dropped, never fails the writer. Slice 3c may tighten
-the error path; that's a separate decision.
+Postgres supplies event replay and live SSE notifications. The sink remains
+best-effort: failed POSTs are logged and dropped without failing the writer.
+The object-store trajectory retains the durable event copy.
 """
 
 from __future__ import annotations
@@ -38,7 +36,7 @@ EventObserver = Callable[[TrajectoryEvent], Awaitable[None]]
 
 # Default flush triggers. Smaller than MinIO's 5 MiB / 1000-event
 # multipart cadence because the CP event table is what powers the
-# eventual SSE-push path — low latency matters more than throughput.
+# live SSE path — low latency matters more than throughput.
 _DEFAULT_FLUSH_EVENT_COUNT = 50
 _DEFAULT_FLUSH_INTERVAL_SEC = 2.0
 # Cap per HTTP batch so we stay under the CP route's 500-event limit
@@ -61,7 +59,7 @@ class CpEventSink:
     Flush triggers: event count >= `flush_event_count`, OR seconds
     since last flush >= `flush_interval_sec`, OR explicit
     `flush_and_close()`. Flush failures are logged and the batch is
-    dropped — MinIO remains the source of truth in this slice.
+    dropped; the object-store trajectory retains the durable copy.
     """
 
     def __init__(
@@ -101,7 +99,7 @@ class CpEventSink:
 
         Best-effort: never raises. CP outages, network errors, and
         worker-lost-claim are logged + swallowed; MinIO remains the
-        canonical trajectory copy in this slice."""
+        durable trajectory copy."""
         if self._closed:
             return
         if self._lost_claim:

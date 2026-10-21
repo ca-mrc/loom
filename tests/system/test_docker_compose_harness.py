@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tomllib
@@ -13,6 +14,61 @@ import yaml
 
 from tests.integration.minio_test_images import MINIO_TEST_IMAGE
 from tests.system import docker_compose
+
+
+@pytest.mark.parametrize("configured", [None, "explicit-system-session"])
+def test_compose_keeps_one_isolated_project_for_start_restart_and_cleanup(
+    monkeypatch: Any, configured: str | None,
+) -> None:
+    projects: list[str] = []
+
+    def run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        projects.append(kwargs["env"]["COMPOSE_PROJECT_NAME"])
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.delenv("COMPOSE_PROJECT_NAME", raising=False)
+    if configured:
+        monkeypatch.setenv("COMPOSE_PROJECT_NAME", configured)
+    monkeypatch.setattr(docker_compose.subprocess, "run", run)
+    docker_compose._compose("up", "-d")
+    docker_compose.start_service("worker", "test-token")
+    docker_compose.stack_down()
+
+    assert len(set(projects)) == 1
+    assert projects[0] == configured if configured else projects[0].startswith("loom-system-")
+
+
+def test_compose_failure_reports_bounded_redacted_output_without_replacing_error(
+    monkeypatch: Any, capsys: Any,
+) -> None:
+    secret = "s" * 40_000
+    failure = subprocess.CalledProcessError(
+        1,
+        ["docker", "compose", "up", "--build"],
+        output=(
+            "discarded build preamble\n" + "build progress\n" * 4_000
+            + f"Bearer {secret}\npackage build failed: concrete root cause\n"
+        ),
+        stderr="Dockerfile.control-plane:20\nloom_w_worker-secret\n",
+    )
+
+    def fail(*args: Any, **kwargs: Any) -> None:
+        raise failure
+
+    monkeypatch.setattr(docker_compose.subprocess, "run", fail)
+    with pytest.raises(subprocess.CalledProcessError) as caught:
+        docker_compose._compose("up", "--build")
+
+    assert caught.value is failure
+    output = capsys.readouterr().err
+    assert "package build failed: concrete root cause" in output
+    assert "Dockerfile.control-plane:20" in output
+    assert "discarded build preamble" not in output
+    assert secret[:64] not in output
+    assert "loom_w_worker-secret" not in output
+    assert "[REDACTED:bearer]" in output
+    assert "[REDACTED:loom-token]" in output
+    assert len(output) <= 33_000
 
 
 @pytest.mark.parametrize("requested_port", [None, "61234"])
@@ -108,6 +164,13 @@ def test_compose_mounts_runtime_fixtures_and_uses_fast_test_cancellation() -> No
     services = compose["services"]
     worker = compose["services"]["worker"]
     builder = services["task-image-builder"]
+
+    for service in (worker, builder):
+        assert service["environment"]["LOOM_WORKER_SANDBOX_IDENTITY"] == "${COMPOSE_PROJECT_NAME}"
+    for name in ("control-plane", "llm-gateway", "worker", "task-image-builder"):
+        # Compose owns the generated project/service image name and can
+        # remove it with --rmi local without removing pulled shared images.
+        assert "image" not in services[name]
 
     assert worker["environment"]["LOOM_WORKER_FIXTURES_ROOT"] == ("/app/tests/fixtures/tasks")
     assert worker["environment"]["LOOM_WORKER_TRIAL_CANCEL_POLL_INTERVAL_SEC"] == "0.1"
@@ -409,6 +472,8 @@ def test_stack_up_cleans_partial_compose_state_on_setup_failure(
         "down",
         "-v",
         "--remove-orphans",
+        "--rmi",
+        "local",
     )
     assert compose_calls[-3:-1] == [
         (
@@ -426,6 +491,7 @@ def test_stack_up_cleans_partial_compose_state_on_setup_failure(
             "task-image-builder",
             "logs",
             "--no-color",
+            "--timestamps",
             "--tail=300",
         ),
     ]
@@ -621,9 +687,11 @@ def test_worker_claim_canary_retries_transient_initial_connect_error(
     assert attempts == 2
 
 
+@pytest.mark.parametrize("probe_times_out", [False, True])
 def test_failed_teardown_redacts_diagnostics_before_down(
     monkeypatch: Any,
     tmp_path: Path,
+    probe_times_out: bool,
 ) -> None:
     monkeypatch.setenv("COMPOSE_PROJECT_NAME", "deploy")
     calls: list[tuple[str, ...]] = []
@@ -639,6 +707,8 @@ def test_failed_teardown_redacts_diagnostics_before_down(
     def fake_compose(*args: str, **kwargs: Any) -> subprocess.CompletedProcess[str]:
         calls.append(args)
         timeouts.append(kwargs["timeout_sec"])
+        if probe_times_out and "exec" in args:
+            raise subprocess.TimeoutExpired(args, kwargs["timeout_sec"])
         return subprocess.CompletedProcess(
             args,
             0,
@@ -661,7 +731,12 @@ def test_failed_teardown_redacts_diagnostics_before_down(
 
     docker_compose.stack_down_with_diagnostics(failed=True)
 
-    assert calls == [
+    assert [args[4:8] for args in calls[:3]] == [
+        ("exec", "-T", "control-plane", "python"),
+        ("exec", "-T", "postgres", "psql"),
+        ("stats", "--no-stream", "--format", "json"),
+    ]
+    assert calls[3:] == [
         (
             "--profile",
             "worker",
@@ -677,6 +752,7 @@ def test_failed_teardown_redacts_diagnostics_before_down(
             "task-image-builder",
             "logs",
             "--no-color",
+            "--timestamps",
             "--tail=300",
         ),
         (
@@ -687,14 +763,17 @@ def test_failed_teardown_redacts_diagnostics_before_down(
             "down",
             "-v",
             "--remove-orphans",
+            "--rmi",
+            "local",
         ),
     ]
-    assert timeouts == [
-        docker_compose._COMPOSE_DIAGNOSTICS_TIMEOUT_SEC,
-        docker_compose._COMPOSE_DIAGNOSTICS_TIMEOUT_SEC,
-        docker_compose._COMPOSE_TEARDOWN_TIMEOUT_SEC,
-    ]
+    assert timeouts == [docker_compose._COMPOSE_DIAGNOSTICS_TIMEOUT_SEC] * 5 + [
+        docker_compose._COMPOSE_TEARDOWN_TIMEOUT_SEC]
     payload = diagnostics.read_text(encoding="utf-8")
+    assert "===== Control Plane liveness =====" in payload
+    assert "===== PostgreSQL waits (no query text) =====" in payload
+    assert "===== compose stats --no-stream =====" in payload
+    assert ("capture exceeded its bounded timeout" in payload) == probe_times_out
     assert "===== compose ps -a =====" in payload
     assert "===== compose logs --tail=300 =====" in payload
     assert "===== docker ps for project deploy =====" in payload
@@ -712,30 +791,108 @@ def test_preserve_diagnostics_keeps_first_failure_evidence(
     diagnostics = tmp_path / "system-smoke.log"
     diagnostics.write_text("first failure evidence\n", encoding="utf-8")
     monkeypatch.setenv(docker_compose.DIAGNOSTICS_ENV, str(diagnostics))
-    monkeypatch.setattr(
-        docker_compose,
-        "_compose",
-        lambda *args, **kwargs: subprocess.CompletedProcess(
-            args,
-            0,
-            stdout="later mocked output\n",
-            stderr="",
-        ),
-    )
-    monkeypatch.setattr(
-        docker_compose.subprocess,
-        "run",
-        lambda *args, **kwargs: subprocess.CompletedProcess(
-            args[0],
-            0,
-            stdout="later docker output\n",
-            stderr="",
-        ),
-    )
+
+    def unexpected_capture(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("existing first-failure evidence must avoid another capture")
+
+    monkeypatch.setattr(docker_compose, "_compose", unexpected_capture)
+    monkeypatch.setattr(docker_compose.subprocess, "run", unexpected_capture)
 
     docker_compose.preserve_compose_diagnostics()
 
     assert diagnostics.read_text(encoding="utf-8") == "first failure evidence\n"
+
+
+@pytest.mark.parametrize("phase,probe_fails", [("call", False), ("setup", False), ("call", True)])
+def test_stack_failure_captures_before_next_test_without_masking_failure(
+    tmp_path: Path, phase: str, probe_fails: bool,
+) -> None:
+    """Exercise the real report hook, with only Docker and the stack doubled."""
+    (tmp_path / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+    (tmp_path / "conftest.py").write_text('''
+import os
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from tests.system import docker_compose
+
+root = Path(__file__).parent
+os.environ[docker_compose.DIAGNOSTICS_ENV] = str(root / "diagnostics.log")
+
+def capture(*args, **kwargs):
+    if os.environ["LOOM_DIAGNOSTIC_PROBE_FAILS"] == "1":
+        raise OSError("Bearer hidden-probe-token")
+    return subprocess.CompletedProcess(args, 0, stdout=(root / "state").read_text(), stderr="")
+
+docker_compose._compose = capture
+docker_compose.subprocess.run = capture
+
+@pytest.fixture(scope="session")
+def compose_stack():
+    (root / "state").write_text("failure-time state")
+    yield {}
+    (root / "torn-down").touch()
+
+@pytest.fixture
+def failing_setup(compose_stack):
+    pytest.fail("original stack failure")
+''', encoding="utf-8")
+    failing_test = (
+        'def test_02_first_failure(failing_setup):\n    pass\n'
+        if phase == "setup" else
+        'def test_02_first_failure(compose_stack):\n    pytest.fail("original stack failure")\n'
+    )
+    (tmp_path / "test_capture.py").write_text('''
+import os
+from pathlib import Path
+
+import pytest
+
+root = Path(__file__).parent
+
+def test_00_harness_failure():
+    pytest.fail("synthetic failure without the stack")
+
+def test_01_no_capture_for_harness_or_success(compose_stack):
+    assert not (root / "diagnostics.log").exists()
+
+''' + failing_test + '''
+def test_03_next_test_already_has_failure_snapshot(compose_stack):
+    assert not (root / "torn-down").exists()
+    if os.environ["LOOM_DIAGNOSTIC_PROBE_FAILS"] == "1":
+        assert not (root / "diagnostics.log").exists()
+    else:
+        assert "failure-time state" in (root / "diagnostics.log").read_text()
+    (root / "state").write_text("later state must not replace first failure")
+
+def test_04_later_failure(compose_stack):
+    pytest.fail("later failure")
+
+def test_05_original_snapshot_remains(compose_stack):
+    if os.environ["LOOM_DIAGNOSTIC_PROBE_FAILS"] != "1":
+        snapshot = (root / "diagnostics.log").read_text()
+        assert "failure-time state" in snapshot and "later state" not in snapshot
+''', encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "tests.system.conftest",
+         "-c", str(tmp_path / "pytest.ini"), "--confcutdir", str(tmp_path),
+         "--tb=short", "-q", str(tmp_path / "test_capture.py")],
+        cwd=docker_compose.REPO_ROOT,
+        env={**os.environ, "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+             "LOOM_DIAGNOSTIC_PROBE_FAILS": "1" if probe_fails else "0"},
+        capture_output=True, text=True, timeout=20,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 1, output
+    expected = "2 failed, 3 passed, 1 error" if phase == "setup" else "3 failed, 3 passed"
+    assert expected in output, output
+    assert "original stack failure" in output
+    assert (tmp_path / "torn-down").exists()
+    assert "hidden-probe-token" not in output
+    if probe_fails:
+        assert "[REDACTED:bearer]" in output
 
 
 def test_diagnostics_failure_does_not_mask_teardown(monkeypatch: Any) -> None:
@@ -763,6 +920,8 @@ def test_diagnostics_failure_does_not_mask_teardown(monkeypatch: Any) -> None:
             "down",
             "-v",
             "--remove-orphans",
+            "--rmi",
+            "local",
         ),
     ]
 

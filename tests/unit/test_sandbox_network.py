@@ -3,6 +3,7 @@ allocator (#78 Phase A)."""
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
 from typing import Any
 from uuid import UUID
@@ -167,6 +168,66 @@ async def test_create_non_recoverable_error_propagates() -> None:
         )
     # Allocator released the index even though create failed.
     assert a.in_use_count == 0
+
+
+@pytest.mark.parametrize("created", [True, False])
+@pytest.mark.parametrize("future_runner", [False, True])
+async def test_cancelled_create_drains_before_releasing_its_subnet(
+    created: bool, future_runner: bool,
+) -> None:
+    allocator = SandboxNetworkAllocator()
+    entered, finish = asyncio.Event(), asyncio.Event()
+    removing, removed = asyncio.Event(), asyncio.Event()
+    calls: list[list[str]] = []
+    commands: list[asyncio.Task[str]] = []
+
+    async def docker(argv: Sequence[str]) -> str:
+        calls.append(list(argv))
+        if argv[:2] == ["network", "create"]:
+            entered.set()
+            await finish.wait()
+            if not created:
+                raise SandboxNetworkError("network name already exists")
+            return "exact-created-id\n"
+        assert argv == ["network", "rm", "exact-created-id"]
+        assert allocator.in_use_count == 1
+        removing.set()
+        await removed.wait()
+        return "exact-created-id"
+
+    def run_command(argv: Sequence[str]):
+        operation = docker(argv)
+        if future_runner:
+            command = asyncio.create_task(operation)
+            commands.append(command)
+            return command
+        return operation
+
+    task = asyncio.create_task(create_sandbox_bridge(
+        trial_id=_TRIAL, allocator=allocator, docker_runner=run_command,
+    ))
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert allocator.in_use_count == 1
+        finish.set()
+        if created:
+            await asyncio.wait_for(removing.wait(), 1)
+            task.cancel()  # A repeated cancellation must not abandon removal.
+            await asyncio.sleep(0)
+            assert not task.done()
+            removed.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert allocator.in_use_count == 0
+        assert len(calls) == (2 if created else 1)
+    finally:
+        finish.set()
+        removed.set()
+        await asyncio.gather(task, return_exceptions=True)
+        await asyncio.gather(*commands, return_exceptions=True)
+        allocator.release(1)  # Only this test's fake slot can remain on RED.
 
 
 async def test_create_gives_up_after_max_retries() -> None:
