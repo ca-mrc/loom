@@ -852,9 +852,12 @@ registration, a new input directory alone is insufficient. Before handoff:
    creates private immutable inputs only; it does not contact Kubernetes or SQL.
    For a subsequent refresh, explicitly select the previous completed
    `PreactivationReference` as `predecessor`. If a storage correction was required,
-   also select its completed `storage` reference as described above.
+   also select its completed `storage` reference as described above. If a schema
+   upgrade was required, select its completed `schema_successor` reference; that
+   successor must retain the same storage ancestry.
 2. In the new handoff preparation, use private input schema
-   `loom.nebius-shared-pool-inputs.v2` (v4 when selecting storage) and its `preactivation` reference
+   `loom.nebius-shared-pool-inputs.v2` (v3 with a schema successor, v4 when selecting
+   storage) and its `preactivation` reference
    (`operation_id`, `inputs_sha256`). Keep `runtime` and the shared operation's
    registered `operation_id` unchanged. The staging envelope must be exactly the
    one retained by preactivation. Build and install the exact integrated-source,
@@ -888,14 +891,17 @@ registration, a new input directory alone is insufficient. Before handoff:
    successor while still CLOSED; never weaken catalog equality or roll staging
    backward to make an earlier preparation pass.
 
-Schema compatibility is separate from release/catalog identity. The new active
-management database must still be exactly `0176`. Participant readiness,
-guard/role handoff and recovery accept the audited `0175`, `0176` and `0177` layouts;
-readiness reports the actual revision. The `0177` publication journal remains
-inaccessible to the actuator. An unknown revision, missing journal or excessive
-role grants blocks qualification. No handoff command migrates a database or
-changes its version marker. Protected read-only lease census also supports
-`0177`; a successful census is not handoff authority.
+Schema compatibility is separate from release/catalog identity. Without an
+explicit completed development schema successor, the new active management
+database must still be exactly `0176`. Selecting that successor instead requires
+its exact upgraded manager revision from the protected publication. Participant
+readiness, guard/role handoff and recovery accept the audited `0175`, `0176`,
+`0177` and `0178` layouts; readiness reports the actual revision. The `0177`
+publication journal and `0178` catalog/lifecycle tables remain inaccessible to
+the actuator. An unknown revision, missing required journal or excessive role
+grants blocks qualification. No handoff command migrates a database or changes
+its version marker. Protected read-only lease census supports these participant
+layouts; a successful census is not handoff authority.
 
 The retained dev participant may remain on its qualified `0175` runtime: `0176`
 adds Harbor sessions without changing the shared-pool journals or guard layout.

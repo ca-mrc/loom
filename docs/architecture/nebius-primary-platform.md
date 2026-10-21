@@ -68,7 +68,10 @@ this completed storage predecessor explicitly; handoff, recovery and ordinary
 releases follow that same ancestry. A storage-only handoff is also supported.
 Neither correction opens admission or grants ordinary releases permission to
 change physical capacity. Used or active pools require a separate transition.
-Management catalog/startup SQL remains pinned to the retained `0176` database.
+Without an explicit completed schema successor, management catalog/startup SQL
+remains pinned to the retained `0176` database. A selected schema successor pins
+the exact upgraded manager revision from its protected publication; neither
+handoff nor a historical-manager observation authorizes a schema upgrade.
 Participant handoff and recovery separately support the audited `0175`, `0176`,
 `0177` and `0178` layouts. Publication retention in `0177` and management catalog/lifecycle
 history in `0178` do not change pool guards or outboxes. The actuator receives no
