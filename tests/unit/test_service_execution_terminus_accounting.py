@@ -326,18 +326,36 @@ def test_terminus_model_identity_still_rejects_other_provider_model_or_source(id
         reconcile_terminus_ledger(native, rows, trial, trial_id)
 
 
-def test_terminus_sts_accepts_teacher_ledger_identity() -> None:
+@pytest.mark.parametrize("multi_model", [
+    {
+        "enabled": True,
+        "policy": "student_teacher_student",
+        "secondary_model": {"provider": "openai", "name": "teacher", "source": "api"},
+        "switch_episode": 2,
+        "return_switch_episode": 3,
+        "teacher_episodes": 1,
+    },
+    {
+        "enabled": True,
+        "policy": "beta_mixture",
+        "secondary_model": {"provider": "openai", "name": "teacher", "source": "api"},
+        "beta": 0.6,
+        "mix_seed": "seed",
+    },
+    {
+        "enabled": True,
+        "policy": "student_to_teacher_turns",
+        "secondary_model": {"provider": "openai", "name": "teacher", "source": "api"},
+        "step_start": 2,
+        "step_end": 9,
+        "mix_seed": "seed",
+    },
+])
+def test_terminus_mix_accepts_teacher_ledger_identity(multi_model: dict) -> None:
     trial, trial_id, native, rows = _case()
     trial = TrialConfig.model_validate({
         **trial.model_dump(mode="json"),
-        "multi_model": {
-            "enabled": True,
-            "policy": "student_teacher_student",
-            "secondary_model": {"provider": "openai", "name": "teacher", "source": "api"},
-            "switch_episode": 2,
-            "return_switch_episode": 3,
-            "teacher_episodes": 1,
-        },
+        "multi_model": multi_model,
     })
     teacher_row = {
         **rows[1],

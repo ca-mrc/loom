@@ -136,7 +136,11 @@ def test_automatic_admission_keeps_multi_model_scoped_to_terminus_sts() -> None:
         reasons = automatic_service_execution_rejections(
             _task(), _multi_model_trial(policy), source_provenance=_provenance(),
         )
-        assert "terminus2_multi_model_policy_unsupported" in reasons
+        assert "terminus2_multi_model_policy_unsupported" not in reasons
+        profile_reasons = execution_selection_rejections(
+            _task(), _multi_model_trial(policy), _profile(), source_provenance=_provenance(),
+        )
+        assert "terminus2_multi_model_runtime_unavailable" in profile_reasons
 
     wrong_agent = sts.model_copy(update={"agent_name": "direct-completion"})
     reasons = automatic_service_execution_rejections(

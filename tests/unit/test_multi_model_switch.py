@@ -142,6 +142,22 @@ def test_schedule_spec_rejects_beta() -> None:
         )
 
 
+def test_materialize_beta_freezes_a_mix_seed_once() -> None:
+    raw = {
+        "enabled": True,
+        "policy": "student_to_teacher_turns",
+        "secondary_model": _SECONDARY.model_dump(mode="json"),
+        "step_start": 2,
+        "step_end": 9,
+    }
+    first = materialize_multi_model_switch_episode(raw)
+    assert first is not None
+    assert isinstance(first["mix_seed"], str) and first["mix_seed"]
+    second = materialize_multi_model_switch_episode(first)
+    assert second is not None
+    assert second["mix_seed"] == first["mix_seed"]
+
+
 def test_materialize_beta_does_not_sample_k1() -> None:
     raw = {
         "enabled": True,

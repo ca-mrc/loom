@@ -167,10 +167,9 @@ async def authorize_trial_execution_dispatch(
 def admitted_service_execution_models(config: object) -> tuple[tuple[str, str], ...]:
     """Provider/name pairs a native Trial may name on a model route.
 
-    Ordinary hosted trials admit only ``agent_model``. Terminus-2
-    ``student_teacher_student`` also admits the materialized teacher so the
-    same-session role router can reach both delegates. Other policies stay
-    rejected at admission and are not opened here.
+    Ordinary hosted trials admit only ``agent_model``. An enabled Terminus-2
+    student/teacher policy also admits the materialized teacher so the
+    same-session role router can reach both delegates.
     """
 
     if not isinstance(config, dict):
@@ -184,7 +183,11 @@ def admitted_service_execution_models(config: object) -> tuple[tuple[str, str], 
     if (
         isinstance(multi, dict)
         and multi.get("enabled")
-        and multi.get("policy") == "student_teacher_student"
+        and multi.get("policy") in {
+            "beta_mixture",
+            "student_teacher_student",
+            "student_to_teacher_turns",
+        }
         and isinstance(secondary, dict)
         and secondary.get("provider")
         and secondary.get("name")
@@ -200,9 +203,10 @@ async def authorize_trial_model(
 ) -> None:
     """A native service-execution call may name only its Trial's admitted models.
 
-    Single-model trials keep the historical one-name rule. Terminus-2 STS
-    also admits the teacher snapshot so role-routed calls are not 403'd
-    before correlation. Materialization still fails any other identity.
+    Single-model trials keep the historical one-name rule. An enabled
+    Terminus-2 student/teacher policy also admits the teacher snapshot so
+    role-routed calls are not 403'd before correlation. Materialization
+    still fails any other identity.
     `provider` is the provider the route's ledger dialect records; `model`
     is the model name it records.
     """

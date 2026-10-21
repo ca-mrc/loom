@@ -9,7 +9,7 @@ from uuid import UUID
 from pydantic import TypeAdapter
 
 from loom.models.trajectory import LLMCallEvent, TrajectoryEvent
-from loom.models.trial import TrialConfig
+from loom.models.trial import HOSTED_TERMINUS2_MULTI_MODEL_POLICIES, TrialConfig
 from loom.models.types import ModelSpec
 from loom.trajectory.llm_call_events import llm_call_diagnostic_counts, llm_call_row_to_event
 
@@ -35,7 +35,7 @@ def _admitted_model_identities(trial: TrialConfig) -> tuple[ModelSpec, ...]:
     if (
         multi is not None
         and multi.enabled
-        and multi.policy == "student_teacher_student"
+        and multi.policy in HOSTED_TERMINUS2_MULTI_MODEL_POLICIES
         and multi.secondary_model is not None
     ):
         models.append(multi.secondary_model)
