@@ -251,8 +251,8 @@ uv run --no-sync pytest tests/integration                # full directory
 uv run --no-sync pytest tests/integration -m "not docker" # exclude docker-marked tests
 uv run --no-sync pytest tests/integration -m docker       # Docker driver and runtime tests
 
-# System tier — full docker-compose stack
-uv run --no-sync pytest tests/system -v
+# System tier — full docker-compose stack, including image/fixture setup
+uv run --no-sync pytest tests/system --timeout=1200 -v
 
 # Live Modal — requires provider credentials
 LOOM_RUN_MODAL_INTEGRATION=1 \
@@ -262,8 +262,9 @@ LOOM_RUN_MODAL_INTEGRATION=1 \
 The system-test harness chooses a unique Compose project for each pytest
 process, or honors an explicitly set `COMPOSE_PROJECT_NAME`. Worker and builder
 use that project as their sandbox identity. Compose generates project-scoped
-service image names and removes those tags during teardown. Restart cleanup preserves other projects' running/stopped trial
-containers and shared task-image caches. Shared image garbage collection is
+service image names and removes those tags during teardown. Restart cleanup
+preserves other projects' running/stopped trial containers and shared
+task-image caches. Shared image garbage collection is
 the Docker daemon owner's responsibility; insufficient disk space still fails
 builder admission. To inspect or recover a manually interrupted run, set a
 unique `COMPOSE_PROJECT_NAME` before invoking pytest and use that same value
