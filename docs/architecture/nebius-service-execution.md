@@ -1294,6 +1294,10 @@ runtime places them under `.loom/` outside the task-bundle digest.
 In global-pool mode, the scheduler proposes the child only after the exact
 parent's manager release is retained. The manager independently requires that
 parent's committed output and release before granting fresh physical capacity.
+Before retaining or admitting a separate-mode parent, both selection and the
+manager require verifier support on that parent's registered target. A trial-only
+target remains eligible for work that does not require a separate verifier;
+an incompatible selection leaves the trial queued without consuming an attempt.
 The child uses the existing grant, local image/cost/admission, activation,
 stop/drain and qualified release path. It does not consume an agent attempt or
 enter the local capacity writer. Node-share sizing and its original observation

@@ -331,6 +331,8 @@ class PoolExecutionOutbox:
             if target_id not in {target.id for target in compiled.targets}:
                 raise PoolHandoffError
             runtime = compiled.runtime_plan
+            if runtime.verifier_execution == "separate_execution":
+                self.participant.target(target_id, "verifier")
             evidence = None
             if compiled.allocate_resources:
                 if node_allocation is None:
