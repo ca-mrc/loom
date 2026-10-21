@@ -419,8 +419,10 @@ This is a scoped test-budget adjustment, not a repair of the unexplained hosted
 timing variation. Completion on the updated head still needs hosted verification.
 
 The pool job limit remains 50 minutes; other lifecycle and transport limits
-remain unchanged. Every selected successful shard runs all its tests, other
-shards are not cancelled, and `repository-checks` still requires their results.
+remain unchanged. Every selected successful shard runs all its tests. PR and
+merge-group matrices cancel remaining siblings after a failure; manual,
+scheduled and push diagnostics retain all selected shards. `repository-checks`
+still rejects selected failed, cancelled or skipped work.
 Measure execution, allocation wait and serialized merge-group time separately;
 local reductions are not a measured PR-to-deployment hosted speedup. Candidate
 publication continues reusing only successful native coverage on its exact candidate tree,
