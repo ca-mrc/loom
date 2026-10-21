@@ -945,7 +945,7 @@ description = "Optional local Docker cgroup path or systemd slice for trial, ver
 used_by     = ["worker"]
 python_type = "str"
 default     = ""
-description = "Optional local sandbox/environment identity for container labels and cleanup scoping."
+description = "Local sandbox/environment identity for container labels and cleanup scoping. Set on shared Docker daemons: only matching containers are cleaned, and shared image caches are retained. Empty preserves legacy unlabelled-container and managed-image eviction for dedicated daemons."
 
 [service_config.candidate_sha]
 used_by     = ["worker"]

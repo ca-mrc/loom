@@ -29,6 +29,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from uuid import uuid4
 
 import httpx
 from sqlalchemy import create_engine, select
@@ -45,6 +46,7 @@ CONTROL_PLANE_URL = "http://localhost:58080"
 GATEWAY_URL = "http://localhost:59100"
 MINIO_URL = "http://localhost:59000"
 DIAGNOSTICS_ENV = "LOOM_SYSTEM_SMOKE_DIAGNOSTICS"
+_DEFAULT_PROJECT_NAME = f"loom-system-{uuid4().hex[:12]}"
 _CANARY_MAX_TIMEOUT_SEC = 30.0
 _CANARY_POLL_INTERVAL_SEC = 0.25
 _COMPOSE_INSPECT_TIMEOUT_SEC = 5.0
@@ -80,6 +82,10 @@ ORDER BY pid LIMIT 64;
 """
 
 
+def _compose_project_name() -> str:
+    return os.environ.get("COMPOSE_PROJECT_NAME") or _DEFAULT_PROJECT_NAME
+
+
 def _compose(
     *args: str,
     check: bool = True,
@@ -88,6 +94,7 @@ def _compose(
 ) -> subprocess.CompletedProcess[str]:
     cmd = ["docker", "compose", "-f", str(COMPOSE_FILE), *args]
     env = os.environ.copy()
+    env["COMPOSE_PROJECT_NAME"] = _compose_project_name()
     # Stub LOOM_WORKER_TOKEN so compose can parse the file even when the
     # worker service is not in the active profile. The :? required-form
     # in compose only triggers when the service is selected.
@@ -657,7 +664,7 @@ def preserve_compose_diagnostics() -> None:
         except subprocess.TimeoutExpired:
             content = "capture exceeded its bounded timeout"
         sections.append(f"===== {heading} =====\n{content}".rstrip())
-    project_name = os.environ.get("COMPOSE_PROJECT_NAME", COMPOSE_FILE.parent.name)
+    project_name = _compose_project_name()
     try:
         raw_ps = subprocess.run(
             [

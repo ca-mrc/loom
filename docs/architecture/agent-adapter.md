@@ -338,6 +338,14 @@ capacity backstop (`trial_cache_min_free_gb`, default 20 GB) that
 evicts oldest-by-creation entries until disk frees up. Eviction is
 local only — registry retention is the registry operator's concern.
 
+On a shared Docker daemon, configure `LOOM_WORKER_SANDBOX_IDENTITY` for each
+independent environment. Container cleanup then requires that exact identity.
+Task, sidecar and adapter images are shared by content, so sandbox-scoped
+workers do not prune or evict them. Disk-space admission still uses measured
+free space and can reject builds when the daemon is full; the daemon owner
+manages shared image retention. Leaving the identity empty retains legacy
+unlabelled-container and managed-image cleanup and requires a dedicated daemon.
+
 
 
 Every displayed service-mode agent entry includes runtime metadata:
