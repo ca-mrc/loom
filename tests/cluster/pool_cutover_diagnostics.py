@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
@@ -52,6 +53,56 @@ def _revision(value: Any) -> str | None:
 
 def _choice(value: Any, choices: frozenset[str]) -> str | None:
     return value if type(value) is str and value in choices else None
+
+
+def add_bootstrap_rbac_diagnostics(cluster: Any, roles: Any, bindings: Any, error: BaseException) -> None:
+    """Failure-only bootstrap evidence; two bounded reads, no object contents."""
+    report: dict[str, Any] = {}
+    try:
+        report.update(roles_resource_version=_revision(roles.metadata.resource_version),
+            bindings_resource_version=_revision(bindings.metadata.resource_version))
+        report['targets'] = {name: {'role_present': any(row.metadata.name == name for row in roles.items),
+            'binding_present': any(row.metadata.name == name for row in bindings.items),
+            'binding_role_ref_present': any(row.metadata.name == name and row.role_ref.name == name
+                and row.role_ref.kind == 'ClusterRole' and row.role_ref.api_group == 'rbac.authorization.k8s.io'
+                for row in bindings.items)} for name in ('clustercidrs-node', 'system:k3s-controller')}
+        ident = cluster.get_wrapped_container().id
+        for label, arguments in (
+            ('addon', ['get', 'addons.k3s.cattle.io', 'rolebindings']),
+            ('events', ['get', 'events', '--field-selector=involvedObject.name=rolebindings']),
+        ):
+            try:
+                result = subprocess.run(['docker', 'exec', ident, 'kubectl', '--request-timeout=2s',
+                    '-n', 'kube-system', *arguments, '-o', 'json'], capture_output=True, text=True, timeout=3)
+                if result.returncode:
+                    report[label] = {'returncode': result.returncode}
+                    continue
+                document = _mapping(json.loads(result.stdout))
+                if label == 'addon':
+                    metadata, status = _mapping(document.get('metadata')), _mapping(document.get('status'))
+                    report[label] = {key: value if type(value) is int and 0 <= value < 2**63 else None
+                        for key, value in (('generation', metadata.get('generation')),
+                            ('observed_generation', status.get('observedGeneration')))}
+                    report[label]['conditions'] = [{'type': _choice(_mapping(row).get('type'),
+                        frozenset({'Ready', 'Applied', 'Processed', 'Deployed'})),
+                        'status': _choice(_mapping(row).get('status'), frozenset({'True', 'False', 'Unknown'}))}
+                        for row in (status.get('conditions') if type(status.get('conditions')) is list else [])[:8]]
+                else:
+                    rows = document.get('items') if type(document.get('items')) is list else []
+                    report[label] = [{'reason': row['reason'], 'count': row.get('count')
+                        if type(row.get('count')) is int and 0 <= row['count'] < 2**63 else None}
+                        for item in rows[:64] if (row := _mapping(item)).get('reason')
+                        in {'ApplyingManifest', 'AppliedManifest', 'ApplyManifestFailed'}
+                        and _mapping(row.get('involvedObject')).get('name') == 'rolebindings'
+                        and _mapping(row.get('involvedObject')).get('kind') in {'Addon', 'AddOn'}]
+            except Exception as diagnostic_error:
+                report[label] = {'error': type(diagnostic_error).__name__}
+    except Exception as diagnostic_error:
+        report['error'] = type(diagnostic_error).__name__
+    try:
+        error.add_note('disposable bootstrap RBAC: ' + json.dumps(report, sort_keys=True))
+    except Exception:
+        pass
 
 
 def _workload(document: Any, identities: dict[str, Any]) -> dict[str, Any]:

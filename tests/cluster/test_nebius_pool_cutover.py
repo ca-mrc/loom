@@ -12,7 +12,10 @@ from uuid import UUID
 
 import pytest
 
-from tests.cluster.pool_cutover_diagnostics import observe_cutover_stage
+from tests.cluster.pool_cutover_diagnostics import (
+    add_bootstrap_rbac_diagnostics,
+    observe_cutover_stage,
+)
 from tests.integration.test_execution_actuator_k3s import _load_client, _start_k3s
 from tests.ops.test_nebius_pool_cutover import collector_inputs as collector_inputs
 from tests.ops.test_nebius_pool_cutover import cutover_inputs as cutover_inputs
@@ -85,7 +88,13 @@ async def test_real_connected_cutover_stages_closed_workloads_and_replays_withou
             missing = ({row.role_ref.name for row in bootstrap_bindings.items} | late_bootstrap_roles) - available
             if not missing:
                 break
-            assert time.monotonic() < bootstrap_deadline, f"disposable bootstrap role references unresolved: {sorted(missing)}"
+            try:
+                assert time.monotonic() < bootstrap_deadline, f"disposable bootstrap role references unresolved: {sorted(missing)}"
+            except AssertionError as error:
+                await asyncio.to_thread(
+                    add_bootstrap_rbac_diagnostics, container, bootstrap_roles, bootstrap_bindings, error
+                )
+                raise
             await asyncio.sleep(0.1)
         platform_authority = PoolPlatformAuthority(schema_version="loom.pool-platform-authority.v1",
             kube_system_uid=kube_system.metadata.uid, resources=tuple(platform_resources))
