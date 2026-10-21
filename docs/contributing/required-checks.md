@@ -16,10 +16,17 @@ GitHub App or CODEOWNER approval is required for `dev` integration.
 
 The `dev protected admission` ruleset requires these four checks from the
 GitHub Actions app and sets strict required-status-check evaluation to `true`.
-GitHub's native merge queue uses squash integration. PR-head checks establish
-queue eligibility; the same four workflows validate the generated merge-group
-SHA against the current base before integration. Advancing `dev` alone is handled
-by the queue. Conflicts or amendments require a branch update and new checks.
+When GitHub's native merge queue is enabled, PR-head checks establish queue
+eligibility; the same four workflows validate the generated merge-group SHA
+against the current base before squash integration. In that mode, advancing
+`dev` alone is handled by the queue. Conflicts or amendments require a branch
+update and new checks.
+
+While the queue is disabled, native squash auto-merge retains the same four
+checks and strict latest-base protection. The branch writer updates an outdated
+head and earns checks again. Follow the integration order and live queue
+coordination in [#2416](https://github.com/ca-mrc/loom/issues/2416) to avoid
+unnecessary competing base updates and validation runs.
 
 ## Check ownership
 
@@ -33,9 +40,9 @@ pull-request admission. A publication failure makes the merged commit
 unreleasable until repaired; it does not rewrite the pull request's admission
 result.
 
-Eligible pull requests use GitHub-native auto-merge/queue admission. A developer
-or maintainer enables it after the current head is ready; GitHub performs squash
-integration after the required merge-group checks. No workflow has
+Eligible pull requests use GitHub-native auto-merge. A developer or maintainer
+enables it after the current head is ready; GitHub performs squash integration
+after the required checks, including merge-group checks when the queue is enabled. No workflow has
 `contents: write` merely to enable auto-merge, and manual dispatch checks do not
 substitute for either PR or merge-group validation.
 

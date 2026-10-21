@@ -221,12 +221,21 @@ async def _dispatch_via_chat_translator(
                 f"{chat_response.status_code}: {excerpt}"
             ),
         )
-    chat_body = decode_chat_completion_body(chat_response)
-    body_or_stream = chat_completion_to_responses(
-        chat_body,
-        model_name=model_name,
-        stream=bool(payload.get("stream")),
-    )
+    try:
+        chat_body = decode_chat_completion_body(chat_response)
+        body_or_stream = chat_completion_to_responses(
+            chat_body,
+            model_name=model_name,
+            stream=bool(payload.get("stream")),
+        )
+    except HTTPException:
+        await _record_failed_responses_call(
+            request=request, team_id=team_id, trial_id=trial_id, step_id=step_id,
+            model_name=model_name, provider=row.provider_type, request_payload=payload,
+            failure_category="upstream_invalid_response",
+            failure_status_code=chat_response.status_code, attempt=attempt,
+        )
+        raise
     usage = _extract_responses_usage(body_or_stream)
     cost_estimate = await compute_facade_cost_estimate(
         row,
@@ -437,7 +446,16 @@ async def responses(
                 detail=(f"upstream returned {upstream_response.status_code}: {excerpt}"),
             )
 
-        body_or_stream = _decode_response_body(upstream_response)
+        try:
+            body_or_stream = _decode_response_body(upstream_response)
+        except HTTPException:
+            await _record_failed_responses_call(
+                request=request, team_id=team_id, trial_id=trial_id, step_id=step_id,
+                model_name=model_name, provider=row.provider_type, request_payload=payload,
+                failure_category="upstream_invalid_response",
+                failure_status_code=upstream_response.status_code, attempt=attempt,
+            )
+            raise
         usage = _extract_responses_usage(body_or_stream)
         cost_estimate = await compute_facade_cost_estimate(
             row,
@@ -515,13 +533,22 @@ async def responses(
             f"{upstream_response.text[:500]}",
         )
 
-    body_or_stream = _decode_response_body(upstream_response)
-    usage = _extract_responses_usage(body_or_stream)
-    if usage.input_tokens == 0 and usage.output_tokens == 0:
-        raise HTTPException(
-            status_code=502,
-            detail="openai responses 200 missing usage block; cost cannot be attributed",
+    try:
+        body_or_stream = _decode_response_body(upstream_response)
+        usage = _extract_responses_usage(body_or_stream)
+        if usage.input_tokens == 0 and usage.output_tokens == 0:
+            raise HTTPException(
+                status_code=502,
+                detail="openai responses 200 missing usage block; cost cannot be attributed",
+            )
+    except HTTPException:
+        await _record_failed_responses_call(
+            request=request, team_id=team_id, trial_id=trial_id, step_id=step_id,
+            model_name=model_name, provider="openai", request_payload=payload,
+            failure_category="upstream_invalid_response",
+            failure_status_code=upstream_response.status_code, attempt=attempt,
         )
+        raise
     table = await request.app.state.rate_card_cache.get()
     entry = lookup_entry(table, ModelSpec(provider="openai", name=model_name))
     cost = compute_cost_usd(
@@ -996,9 +1023,7 @@ def _extract_responses_usage(body_or_stream: dict[str, Any] | str) -> TokenUsage
             usage_body = response_obj
         elif isinstance(event.get("usage"), dict):
             usage_body = event
-    if usage_body is None:
-        return TokenUsage(input_tokens=0, output_tokens=0)
-    return DIALECTS["openai_responses"].extract_tokens(usage_body)
+    return DIALECTS["openai_responses"].extract_tokens(usage_body or {})
 
 
 async def _record_responses_call(

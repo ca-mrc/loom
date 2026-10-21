@@ -18,11 +18,13 @@
 - [ ] This PR targets `dev` for normal development.
 - [ ] For this normal `dev` PR, a developer or maintainer enables
       GitHub's native squash auto-merge for every non-draft PR, regardless of
-      author or reviewer. GitHub keeps the candidate queued until
+      author or reviewer. GitHub waits until
       `repository-checks`, `images-gate`, `cluster-smoke-gate`, and
-      `staging-smoke-gate` succeed on the current head SHA. The native `dev`
-      merge queue then requires those same contexts on its generated merge-group
-      SHA against the latest base before performing the squash merge. These four
+      `staging-smoke-gate` succeed on the current head SHA. When enabled, the
+      native `dev` merge queue also requires those contexts on its generated
+      merge-group SHA. While the queue is disabled, native auto-merge retains
+      strict latest-base protection; follow the integration coordination in
+      [#2416](https://github.com/ca-mrc/loom/issues/2416). These four
       strict, app-bound checks are the only merge authority: `dev` requires no human
       approval, no CODEOWNER approval, and no conversation resolution.
 - [ ] This PR targets `main` only for a production release promotion from `dev`;

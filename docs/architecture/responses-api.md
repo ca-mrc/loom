@@ -37,6 +37,11 @@ API keys and upstream response excerpts are redacted before errors are exposed.
 Failed probes do not create LLM-call rows; the translated or native model call
 does.
 
+For ordinary calls, a non-JSON or non-object HTTP-success body, or a Chat
+fallback body that lacks the required choice, returns `502` and records a failed
+call with `upstream_invalid_response`. The record retains the upstream HTTP
+status and attempt number with missing usage; it does not establish zero spend.
+
 ## Streaming and fidelity
 
 Native Responses bodies and streams are passed through. The Chat compatibility
@@ -49,3 +54,8 @@ For direct OpenAI calls, a successful response without token usage is rejected
 with `502` because cost cannot be attributed. Provider-connection calls attach
 the connection's current cost-status metadata when exact pricing is
 unavailable.
+
+Native SSE streams without a usage-bearing event carry the same missing-usage
+metadata as JSON responses without a usage block. Explicit pricing configurations
+therefore report unknown cost; a provider-reported zero-token usage block remains
+distinguishable from missing usage.

@@ -304,8 +304,8 @@ The service routes are implemented in
 [`src/loom_service/routes/tasksets.py`](../../src/loom_service/routes/tasksets.py).
 Manifest validation and row conversion live under `src/loom/models/taskset.py`
 and `src/loom/taskset/`; intake and worker orchestration live in
-`src/loom_service/taskset_intake.py` and `src/loom_service/taskset_materializer.py`. The
-the persistence model is in [`src/loom/db/schema.py`](../../src/loom/db/schema.py).
+`src/loom_service/taskset_intake.py` and `src/loom_service/taskset_materializer.py`.
+The persistence model is in [`src/loom/db/schema.py`](../../src/loom/db/schema.py).
 
 ## Web discovery and import review
 

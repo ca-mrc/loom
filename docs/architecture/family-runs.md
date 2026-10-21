@@ -1,8 +1,10 @@
 # Family runs
 
-Family-run mode serializes related tasks and carries shared state between them.
-It is opt-in per catalog entry or batch; ordinary batches continue to fan out
-independent trials.
+The retained family-run implementation serializes related tasks and carries shared
+state between them. Its configuration is opt-in per catalog entry or batch.
+The current Nebius-native service scheduler selects only tasks without a
+`family_key`, so this page describes the retained contract, not supported hosted
+family execution. Ordinary batches continue to fan out independent trials.
 
 ## Configuration
 
@@ -20,12 +22,12 @@ requires all six plugin roles:
 The resolved immutable specification is stored on `batches.family_run_spec`.
 `mount_path` defaults to `/root/.skills`.
 
-## Execution
+## Retained execution contract
 
 1. The submit path groups tasks with the configured key extractor and writes a
    deterministic task sequence for each family.
-2. The scheduler claims only the task at a family's `current_index`. Separate
-   families remain independently claimable.
+2. The retained family scheduler claims only the task at a family's
+   `current_index`. Separate families remain independently claimable on that path.
 3. Before a trial starts, the Worker downloads the family's state through the
    configured backend and bind-mounts it read/write at `mount_path`.
 4. Trial finalization applies the advance predicate. A family either advances,
@@ -64,10 +66,15 @@ follow normal provider accounting.
 
 ## Deployment boundary
 
-The foundation, scheduler gate, Worker mount path, database state, and plugins
-are part of the main Loom services. State evolution requires the separate
-`loom-family-orchestrator` process; if it is not running, families that enter
-`adapting` remain there and later tasks in that family are not claimable.
+The database state, plugins, family scheduler gate, and Worker mount path remain
+in the repository. They do not establish family support in the current
+[native service execution](nebius-service-execution.md) path. Starting the separate
+`loom-family-orchestrator` process does not make family tasks eligible for that
+scheduler.
+
+On the retained path, state evolution requires `loom-family-orchestrator`; if it
+is not running, families that enter `adapting` remain there and later tasks in
+that family are not claimable.
 
 Relevant settings are defined by
 `src/loom_family_orchestrator/settings.py`. Health is observable through the

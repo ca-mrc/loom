@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -9,7 +10,8 @@ from decimal import ROUND_CEILING, Decimal
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from sqlalchemy import select, text
+from sqlalchemy import and_, func, or_, select, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.auth import AuthContext
@@ -28,6 +30,15 @@ from loom.db.schema import (
 from loom.request_params import coerce_request_params, normalize_request_params
 from loom_llm_gateway.dialect import TokenUsage
 from loom_llm_gateway.execution_attempt_dispatch import authorize_execution_attempt_dispatch
+
+logger = logging.getLogger(__name__)
+_ACCOUNTING_LOCK_ATTEMPTS = 3
+
+_RECOVERABLE_ACCOUNTING_ERRORS = frozenset({
+    "provider_dispatch_accounting_unavailable",
+    "provider_dispatch_accounting_drift",
+    "provider_dispatch_accounting_violation_conflict",
+})
 
 DispatchOutcome = Literal["not_dispatched", "succeeded", "failed", "uncertain"]
 _DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
@@ -259,7 +270,9 @@ async def mark_provider_dispatch_sent(
     _require_attempt_context(ctx)
     async with session.begin():
         await authorize_execution_attempt_dispatch(session, ctx, lock=True)
-        dispatch = await session.get(PipelineProviderDispatch, dispatch_id, with_for_update=True)
+        dispatch = await session.get(
+            PipelineProviderDispatch, dispatch_id, with_for_update=True, populate_existing=True
+        )
         if dispatch is None or dispatch.execution_attempt_id != ctx.execution_attempt_id:
             raise ProviderDispatchError("provider_dispatch_not_found", status_code=404)
         if dispatch.state != "reserved":
@@ -282,7 +295,9 @@ async def release_provider_dispatch_unsent(
 
     _require_attempt_context(ctx)
     async with session.begin():
-        dispatch = await session.get(PipelineProviderDispatch, dispatch_id, with_for_update=True)
+        dispatch = await session.get(
+            PipelineProviderDispatch, dispatch_id, with_for_update=True, populate_existing=True
+        )
         if dispatch is None or dispatch.execution_attempt_id != ctx.execution_attempt_id:
             raise ProviderDispatchError("provider_dispatch_not_found", status_code=404)
         if dispatch.state == "settled":
@@ -291,23 +306,34 @@ async def release_provider_dispatch_unsent(
             return _settlement(dispatch)
         if dispatch.state != "reserved":
             raise ProviderDispatchError("provider_dispatch_release_after_send")
-        reservation, budget, ledger = await _lock_accounting(session, dispatch)
-        budget.requests_reserved -= 1
-        budget.cost_reserved_microusd -= dispatch.reserved_cost_microusd
-        budget.version += 1
-        ledger.provider_reserved_microusd -= dispatch.reserved_cost_microusd
-        ledger.version += 1
-        ledger.updated_at = _database_now()
-        reservation.state = "released"
-        reservation.settled_at = _database_now()
-        dispatch.state = "settled"
-        dispatch.outcome = "not_dispatched"
-        dispatch.actual_cost_microusd = 0
-        dispatch.outcome_at = _database_now()
-        dispatch.settled_at = dispatch.outcome_at
-        dispatch.version += 1
-        settlement = _settlement(dispatch)
+        settlement = await _release_locked_unsent_dispatch(session, dispatch)
     return settlement
+
+
+async def _release_locked_unsent_dispatch(
+    session: AsyncSession,
+    dispatch: PipelineProviderDispatch,
+    *,
+    ledger_nowait: bool = False,
+) -> ProviderDispatchSettlement:
+    reservation, budget, ledger = await _lock_accounting(
+        session, dispatch, ledger_nowait=ledger_nowait
+    )
+    budget.requests_reserved -= 1
+    budget.cost_reserved_microusd -= dispatch.reserved_cost_microusd
+    budget.version += 1
+    ledger.provider_reserved_microusd -= dispatch.reserved_cost_microusd
+    ledger.version += 1
+    ledger.updated_at = _database_now()
+    reservation.state = "released"
+    reservation.settled_at = _database_now()
+    dispatch.state = "settled"
+    dispatch.outcome = "not_dispatched"
+    dispatch.actual_cost_microusd = 0
+    dispatch.outcome_at = _database_now()
+    dispatch.settled_at = dispatch.outcome_at
+    dispatch.version += 1
+    return _settlement(dispatch)
 
 
 async def settle_provider_dispatch(
@@ -330,37 +356,78 @@ async def settle_provider_dispatch(
         raise ProviderDispatchError("provider_dispatch_cost_invalid", status_code=502)
     if (outcome == "succeeded") != (response_digest is not None):
         raise ProviderDispatchError("provider_dispatch_response_digest_invalid", status_code=502)
+    for lock_attempt in range(_ACCOUNTING_LOCK_ATTEMPTS):
+        try:
+            async with session.begin():
+                # Accounting remains valid after cancellation; lock without re-authorizing send.
+                await session.get(ExecutionAttempt, ctx.execution_attempt_id, with_for_update=True)
+                dispatch = await session.get(
+                    PipelineProviderDispatch, dispatch_id, with_for_update=True, populate_existing=True
+                )
+                if dispatch is None or dispatch.execution_attempt_id != ctx.execution_attempt_id:
+                    raise ProviderDispatchError("provider_dispatch_not_found", status_code=404)
+                if dispatch.state == "settled":
+                    if (
+                        dispatch.outcome != outcome
+                        or dispatch.actual_cost_microusd != actual_cost_microusd
+                        or dispatch.response_digest != response_digest
+                    ):
+                        raise ProviderDispatchError("provider_dispatch_settlement_replay_drift")
+                    return _settlement(dispatch)
+                if dispatch.state != "dispatched":
+                    raise ProviderDispatchError("provider_dispatch_not_sent")
+                assert ctx.team_id is not None
+                assert ctx.execution_attempt_id is not None
+                assert ctx.step_id is not None
+                settlement = await _settle_locked_dispatch(
+                    session,
+                    dispatch=dispatch,
+                    team_id=ctx.team_id,
+                    step_id=ctx.step_id,
+                    outcome=outcome,
+                    usage=usage,
+                    actual_cost_microusd=actual_cost_microusd,
+                    rate_card_hash=rate_card_hash,
+                    request_params=request_params,
+                    response_digest=response_digest,
+                    failure_category=failure_category,
+                    ledger_nowait=True,
+                )
+            return settlement
+
+        except DBAPIError as exc:
+            if getattr(exc.orig, "sqlstate", None) != "55P03":
+                raise
+            if lock_attempt == _ACCOUNTING_LOCK_ATTEMPTS - 1:
+                raise ProviderDispatchError("provider_dispatch_accounting_busy", status_code=503) from exc
+            # The failed transaction has released its Attempt/dispatch/accounting
+            # locks. Wait on the ledger alone so cancellation can finish its
+            # ledger-before-Attempt order, then retry the complete settlement.
+            try:
+                await _wait_for_accounting_ledger(session, ctx.execution_attempt_id)
+            except DBAPIError as wait_exc:
+                if getattr(wait_exc.orig, "sqlstate", None) != "55P03":
+                    raise
+                raise ProviderDispatchError(
+                    "provider_dispatch_accounting_busy", status_code=503
+                ) from wait_exc
+    raise AssertionError("unreachable accounting retry exhaustion")
+
+
+async def _wait_for_accounting_ledger(session: AsyncSession, attempt_id: UUID | None) -> None:
     async with session.begin():
-        dispatch = await session.get(PipelineProviderDispatch, dispatch_id, with_for_update=True)
-        if dispatch is None or dispatch.execution_attempt_id != ctx.execution_attempt_id:
-            raise ProviderDispatchError("provider_dispatch_not_found", status_code=404)
-        if dispatch.state == "settled":
-            if (
-                dispatch.outcome != outcome
-                or dispatch.actual_cost_microusd != actual_cost_microusd
-                or dispatch.response_digest != response_digest
-            ):
-                raise ProviderDispatchError("provider_dispatch_settlement_replay_drift")
-            return _settlement(dispatch)
-        if dispatch.state != "dispatched":
-            raise ProviderDispatchError("provider_dispatch_not_sent")
-        assert ctx.team_id is not None
-        assert ctx.execution_attempt_id is not None
-        assert ctx.step_id is not None
-        settlement = await _settle_locked_dispatch(
-            session,
-            dispatch=dispatch,
-            team_id=ctx.team_id,
-            step_id=ctx.step_id,
-            outcome=outcome,
-            usage=usage,
-            actual_cost_microusd=actual_cost_microusd,
-            rate_card_hash=rate_card_hash,
-            request_params=request_params,
-            response_digest=response_digest,
-            failure_category=failure_category,
+        # At most two one-second waits across the three settlement attempts.
+        await session.execute(text("SET LOCAL lock_timeout = '1s'"))
+        await session.execute(
+            select(PipelineBudgetLedger.pipeline_run_id)
+            .join(
+                PipelineStageRun,
+                PipelineStageRun.pipeline_run_id == PipelineBudgetLedger.pipeline_run_id,
+            )
+            .join(ExecutionAttempt, ExecutionAttempt.stage_run_id == PipelineStageRun.id)
+            .where(ExecutionAttempt.id == attempt_id)
+            .with_for_update(of=PipelineBudgetLedger, read=True)
         )
-    return settlement
 
 
 async def settle_stale_provider_dispatches(
@@ -369,10 +436,11 @@ async def settle_stale_provider_dispatches(
     stale_before: datetime,
     limit: int = 100,
 ) -> int:
-    """Conservatively close sends whose Gateway died before settlement."""
+    """Release abandoned unsent reserves and conservatively settle old sends."""
 
     if not 1 <= limit <= 1000:
         raise ValueError("limit must be between 1 and 1000")
+    recovered = 0
     async with session.begin():
         # Recovery must never become a Gateway shutdown or readiness blocker
         # behind a live request's accounting locks. A timed-out sweep rolls
@@ -389,35 +457,77 @@ async def settle_stale_provider_dispatches(
                 .join(PipelineStageRun, PipelineStageRun.id == ExecutionAttempt.stage_run_id)
                 .join(PipelineRun, PipelineRun.id == PipelineStageRun.pipeline_run_id)
                 .where(
-                    PipelineProviderDispatch.state == "dispatched",
-                    PipelineProviderDispatch.dispatched_at <= stale_before,
+                    or_(
+                        and_(
+                            PipelineProviderDispatch.state == "reserved",
+                            PipelineProviderDispatch.created_at <= stale_before,
+                        ),
+                        and_(
+                            PipelineProviderDispatch.state == "dispatched",
+                            PipelineProviderDispatch.dispatched_at <= stale_before,
+                        ),
+                    ),
                 )
                 .order_by(
-                    PipelineProviderDispatch.dispatched_at,
+                    func.coalesce(
+                        PipelineProviderDispatch.dispatched_at,
+                        PipelineProviderDispatch.created_at,
+                    ),
                     PipelineProviderDispatch.id,
                 )
                 .limit(limit)
                 .with_for_update(
-                    of=PipelineProviderDispatch,
+                    # Cleanup and senders own the Attempt before accounting.
+                    # Include it here so a later LlmCall FK insert cannot cycle
+                    # with cleanup waiting for our run-ledger lock.
+                    of=(ExecutionAttempt, PipelineProviderDispatch),
                     skip_locked=True,
                 )
+                .execution_options(populate_existing=True)
             )
         ).all()
         for dispatch, stage, run in rows:
-            await _settle_locked_dispatch(
-                session,
-                dispatch=dispatch,
-                team_id=run.team_id,
-                step_id=stage.node_key,
-                outcome="uncertain",
-                usage=TokenUsage(input_tokens=0, output_tokens=0),
-                actual_cost_microusd=dispatch.reserved_cost_microusd,
-                rate_card_hash="pipeline:stale-dispatch-recovery",
-                request_params={},
-                response_digest=None,
-                failure_category="gateway_crash_after_send",
-            )
-    return len(rows)
+            dispatch_id = dispatch.id
+            try:
+                async with session.begin_nested():
+                    if dispatch.state == "reserved":
+                        await _release_locked_unsent_dispatch(
+                            session, dispatch, ledger_nowait=True
+                        )
+                    else:
+                        await _settle_locked_dispatch(
+                            session,
+                            dispatch=dispatch,
+                            team_id=run.team_id,
+                            step_id=stage.node_key,
+                            outcome="uncertain",
+                            usage=TokenUsage(input_tokens=0, output_tokens=0),
+                            actual_cost_microusd=dispatch.reserved_cost_microusd,
+                            rate_card_hash="pipeline:stale-dispatch-recovery",
+                            request_params={},
+                            response_digest=None,
+                            failure_category="gateway_crash_after_send",
+                            ledger_nowait=True,
+                        )
+            except ProviderDispatchError as exc:
+                if exc.reason not in _RECOVERABLE_ACCOUNTING_ERRORS:
+                    raise
+                logger.warning(
+                    "provider_dispatch_recovery_skipped dispatch_id=%s reason=%s",
+                    dispatch_id, exc.reason,
+                )
+            except DBAPIError as exc:
+                if getattr(exc.orig, "sqlstate", None) != "55P03":
+                    raise
+                # Cancellation may acquire the ledger after our candidate lock.
+                # Roll back this savepoint rather than wait while holding its Attempt.
+                logger.warning(
+                    "provider_dispatch_recovery_skipped dispatch_id=%s reason=%s",
+                    dispatch_id, "provider_dispatch_accounting_busy",
+                )
+            else:
+                recovered += 1
+    return recovered
 
 
 async def _settle_locked_dispatch(
@@ -433,8 +543,11 @@ async def _settle_locked_dispatch(
     request_params: dict[str, Any],
     response_digest: str | None,
     failure_category: str | None,
+    ledger_nowait: bool = False,
 ) -> ProviderDispatchSettlement:
-    reservation, budget, ledger = await _lock_accounting(session, dispatch)
+    reservation, budget, ledger = await _lock_accounting(
+        session, dispatch, ledger_nowait=ledger_nowait
+    )
     overage = (
         actual_cost_microusd > dispatch.reserved_cost_microusd
         or budget.cost_settled_microusd + actual_cost_microusd > budget.cost_limit_microusd
@@ -564,23 +677,28 @@ def _validate_replay(
 async def _lock_accounting(
     session: AsyncSession,
     dispatch: PipelineProviderDispatch,
+    *,
+    ledger_nowait: bool = False,
 ) -> tuple[PipelineBudgetReservation, ExecutionAttemptProviderBudget, PipelineBudgetLedger]:
     reservation = await session.get(
         PipelineBudgetReservation,
         dispatch.reservation_id,
         with_for_update=True,
+        populate_existing=True,
     )
     budget = await session.get(
         ExecutionAttemptProviderBudget,
         dispatch.execution_attempt_id,
         with_for_update=True,
+        populate_existing=True,
     )
     if reservation is None or budget is None:
         raise ProviderDispatchError("provider_dispatch_accounting_unavailable")
     ledger = await session.get(
         PipelineBudgetLedger,
         reservation.pipeline_run_id,
-        with_for_update=True,
+        with_for_update={"nowait": ledger_nowait},
+        populate_existing=True,
     )
     if (
         ledger is None
@@ -589,6 +707,9 @@ async def _lock_accounting(
         or reservation.state != "active"
         or reservation.reserved_amount != dispatch.reserved_cost_microusd
         or reservation.request_digest != dispatch.request_digest
+        or budget.requests_reserved < 1
+        or budget.cost_reserved_microusd < dispatch.reserved_cost_microusd
+        or ledger.provider_reserved_microusd < dispatch.reserved_cost_microusd
     ):
         raise ProviderDispatchError("provider_dispatch_accounting_drift")
     return reservation, budget, ledger
