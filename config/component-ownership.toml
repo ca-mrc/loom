@@ -252,6 +252,15 @@ strategy = "stable-hash"
 # PR2304 run36949210207 reached 61% of 77 tests before the serial 35m limit.
 # Keep whole files and their fixture ordering together on independent runners.
 salt = "cluster-smoke-v1-4"
+# Eight PR runs on Oct 19-20 measured 8.7 / 15.0 / 13.6 / 7.7 median pytest
+# minutes on shards 1-4, so the lane waited 15-18m for its slowest runner.
+# Moving four whole files projects 11.1 / 11.7 / 10.7 / 11.5.
+pins = [
+  { path = "tests/cluster/test_nebius_k3s_addon_readiness.py", shard_index = 0 },
+  { path = "tests/cluster/test_nebius_pool_cutover.py", shard_index = 0 },
+  { path = "tests/cluster/test_nebius_application_kubernetes.py", shard_index = 3 },
+  { path = "tests/integration/test_execution_maintenance_k3s.py", shard_index = 3 },
+]
 
 [[execution_policies]]
 id = "virtual-app-v1"
