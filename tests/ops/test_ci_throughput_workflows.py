@@ -1282,7 +1282,8 @@ def test_staging_gate_consumes_manifest_owned_system_smoke_lane() -> None:
     )
     assert 'pytest -m "${CI_PYTEST_MARKERS:-not legacy_pool}" --timeout=1200 "${test_paths[@]}"' in scripts
     assert (
-        "--profile worker --profile task-image-builder down -v --remove-orphans" in cleanup_script
+        "--profile worker --profile task-image-builder down -v --remove-orphans --rmi local"
+        in cleanup_script
     )
     assert pytest_step["env"]["LOOM_SYSTEM_SMOKE_DIAGNOSTICS"] == (
         "${{ runner.temp }}/system-smoke-compose.log"

@@ -21,7 +21,7 @@ Graph entry has no workflow YAML in this repository and is maintained separately
 | Required CI | `staging-smoke.yml` | Credential-free Compose system checks on PRs, merge groups, and manual dispatch. |
 | Contributor compatibility | `macos-locked-environment.yml` | macOS ARM64 locked workspace installation, daily at 09:17 UTC or manually. |
 | CI operations | `ci-retry.yml` | Manual bounded, classified retry by default; an explicit read-only capacity branch supplies disposable single-job hosted workers. |
-| CI operations | `ci-dependency-cache.yml` | Writes the full uv wheel cache on relevant `dev` pushes, daily at 07:41 UTC, or manually; PR and merge-group jobs only read it. |
+| CI operations | `ci-dependency-cache.yml` | Writes the full uv wheel cache and the source-built MinIO fixture archives on relevant `dev` pushes, daily at 07:41 UTC, or manually; PR and merge-group jobs only read them. |
 | Dependency maintenance | `harbor-upstream.yml` | Discovers Harbor drift daily at 09:41 UTC or manually. Draft candidate creation requires repository activation and is skipped by manual `check_only=true`; see [Harbor upgrades](terminus2-upgrades.md). |
 | Production promotion | `release-promotion-gate.yml` | Manual validation of release evidence for an exact candidate SHA and image. |
 | Production promotion | `main-promotion-gate.yml` | Manual verification that the open `dev` to `main` PR, current candidate SHA, and successful release evidence agree. |
@@ -338,11 +338,17 @@ all selected shards. Required platform tests are retained.
 MinIO preparation follows selected fixture imports and parent conftests. Fast
 integration normally needs only the testcontainers release; TLS storage tests
 also need the newer release. Source-built fallback images retain their pinned
-commit, compiler and recipe and are cached as Docker archives. PR and merge-group
-runs only restore caches; trusted pushes, dispatches and scheduled runs may save
-them. Recipe or release changes get a new cache key, and invalid archives fall
-back to normal pinned-image preparation. The lazy per-fixture resolver remains
-available for local tests.
+commit, compiler and recipe and are cached as Docker archives. `quay.io/minio/minio`
+no longer serves anonymous pulls, so without the cache every job builds from
+source (about 2 minutes, failing when the Go module proxy resets). CI jobs only
+restore the archives, from `/home/runner/.cache/loom-minio-fixtures`: the cache
+version hashes the path, and `RUNNER_TEMP` differs per hosted worker. The only
+writer is `ci-dependency-cache.yml`, which builds every fixture under one key per
+recipe set when `tests/support/minio_images.py` changes on dev, and daily. Each job
+still prepares only the images it selected. Recipe or release changes get a new
+key, and invalid archives fall back to normal pinned-image preparation. The lazy
+per-fixture resolver remains available for local tests.
+
 System smoke uses a Compose project per run/attempt and Docker-assigned loopback
 ports; it discovers actual service endpoints once and passes the registry endpoint
 to the image builder without changing the original port mappings.
