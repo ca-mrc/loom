@@ -4913,9 +4913,12 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
                             machine, = (row for row in retained.release.refresh.before.machines if row.role == 'gateway')
                             wanted = expected_pool_runtime_settings('gateway', gateway, token_sha256=machine.token_sha256)
                         else:
-                            profiles = (retained.release.refresh.after if 'manager' in pool_state.effects else retained.release.refresh.before).profiles
+                            volume, = (row for row in pool_state.manager['spec']['template']['spec']['volumes']
+                                if row['name'] == 'pool-profiles')
+                            catalog = pool_state.api.resources['ConfigMap:' + target.namespace
+                                + ':' + volume['configMap']['name']]
                             wanted = expected_pool_runtime_settings('manager', pool_state.manager,
-                                catalog_sha256=hashlib.sha256(profiles.model_dump_json().encode()).hexdigest())
+                                catalog_sha256=hashlib.sha256(catalog['data']['profiles.json'].encode()).hexdigest())
                         payload = json.dumps(wanted, sort_keys=True, separators=(',', ':')).encode()
                     manager_checks.append(component)
                     assert challenge == hmac.new(bytes.fromhex(nonce), payload, hashlib.sha256).hexdigest()
