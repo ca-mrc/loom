@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import copy
 import json
+import subprocess
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -144,3 +146,81 @@ def test_unrelated_exception_never_exposes_type_name_message_or_locals(capsys):
     report = read_report(capsys)
     assert report == {"invocation": 7, "locations": [], "snapshot_resource_version": None,
         "journal": {"record": "unavailable"}, "workload": None, "ancestry": []}
+
+
+def test_bootstrap_diagnostics_project_actual_models_and_hide_private_reader_fields(monkeypatch):
+    from kubernetes import client
+
+    roles = client.V1ClusterRoleList(metadata=client.V1ListMeta(resource_version='31'), items=[
+        client.V1ClusterRole(metadata=client.V1ObjectMeta(name='clustercidrs-node', annotations={'token': PRIVATE}),
+            rules=[client.V1PolicyRule(verbs=['get'], resources=[PRIVATE])])])
+    bindings = client.V1ClusterRoleBindingList(metadata=client.V1ListMeta(resource_version='31'), items=[
+        client.V1ClusterRoleBinding(metadata=client.V1ObjectMeta(name='clustercidrs-node'),
+            role_ref=client.V1RoleRef(api_group='rbac.authorization.k8s.io', kind='ClusterRole', name='clustercidrs-node'),
+            subjects=[client.RbacV1Subject(kind='User', name=PRIVATE)]),
+        client.V1ClusterRoleBinding(metadata=client.V1ObjectMeta(name='system:k3s-controller'),
+            role_ref=client.V1RoleRef(api_group=PRIVATE, kind='ClusterRole', name=PRIVATE))])
+    addon = {'metadata': {'generation': 3, 'annotations': {'token': PRIVATE}}, 'spec': {'source': PRIVATE},
+        'status': {'observedGeneration': 2, 'private': PRIVATE, 'conditions': [
+            {'type': 'Ready', 'status': 'False', 'message': PRIVATE}, {'type': PRIVATE, 'status': PRIVATE}]}}
+    events = {'items': [{'involvedObject': {'kind': 'Addon', 'name': 'rolebindings'},
+        'reason': reason, 'count': index, 'message': PRIVATE, 'source': {'host': PRIVATE}}
+        for index, reason in enumerate(('ApplyingManifest', 'AppliedManifest', 'ApplyManifestFailed', PRIVATE))]}
+    calls = []
+
+    def read(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0, json.dumps(addon if len(calls) == 1 else events), PRIVATE)
+
+    monkeypatch.setattr(diagnostics.subprocess, 'run', read)
+    error = AssertionError('bootstrap unresolved')
+    diagnostics.add_bootstrap_rbac_diagnostics(SimpleNamespace(get_wrapped_container=lambda: SimpleNamespace(id='fixture')),
+        roles, bindings, error)
+    note, = error.__notes__
+    assert PRIVATE not in note
+    report = json.loads(note.removeprefix('disposable bootstrap RBAC: '))
+    assert report == {'roles_resource_version': '31', 'bindings_resource_version': '31',
+        'targets': {'clustercidrs-node': {'role_present': True, 'binding_present': True,
+            'binding_role_ref_present': True}, 'system:k3s-controller': {'role_present': False,
+            'binding_present': True, 'binding_role_ref_present': False}},
+        'addon': {'generation': 3, 'observed_generation': 2,
+            'conditions': [{'type': 'Ready', 'status': 'False'}, {'type': None, 'status': None}]},
+        'events': [{'reason': 'ApplyingManifest', 'count': 0}, {'reason': 'AppliedManifest', 'count': 1},
+            {'reason': 'ApplyManifestFailed', 'count': 2}]}
+    assert len(calls) == 2
+    for command, kwargs in calls:
+        assert command[:8] == ['docker', 'exec', 'fixture', 'kubectl', '--request-timeout=2s', '-n', 'kube-system', 'get']
+        assert kwargs == {'capture_output': True, 'text': True, 'timeout': 3}
+
+
+@pytest.mark.parametrize('failure', ['exception', 'returncode'])
+def test_bootstrap_reader_failures_keep_original_error_and_bounded_single_reads(monkeypatch, failure):
+    calls = []
+
+    def broken(command, **kwargs):
+        calls.append((command, kwargs))
+        if failure == 'returncode':
+            return subprocess.CompletedProcess(command, 7, PRIVATE, PRIVATE)
+        if len(calls) == 1:
+            raise subprocess.TimeoutExpired(PRIVATE, 3, output=PRIVATE, stderr=PRIVATE)
+        raise RuntimeError(PRIVATE)
+
+    monkeypatch.setattr(diagnostics.subprocess, 'run', broken)
+    cluster = SimpleNamespace(get_wrapped_container=lambda: SimpleNamespace(id='fixture'))
+    rows = SimpleNamespace(metadata=SimpleNamespace(resource_version=PRIVATE), items=[])
+    original = AssertionError('bootstrap unresolved')
+    with pytest.raises(AssertionError) as caught:
+        try:
+            raise original
+        except AssertionError as error:
+            diagnostics.add_bootstrap_rbac_diagnostics(cluster, rows, rows, error)
+            raise
+    assert caught.value is original and original.__context__ is None
+    note, = original.__notes__
+    assert PRIVATE not in note
+    report = json.loads(note.removeprefix('disposable bootstrap RBAC: '))
+    assert report['roles_resource_version'] is report['bindings_resource_version'] is None
+    assert report['addon'] == ({'error': 'TimeoutExpired'} if failure == 'exception' else {'returncode': 7})
+    assert report['events'] == ({'error': 'RuntimeError'} if failure == 'exception' else {'returncode': 7})
+    assert len(calls) == 2
+    assert all('--request-timeout=2s' in command and kwargs['timeout'] == 3 for command, kwargs in calls)
