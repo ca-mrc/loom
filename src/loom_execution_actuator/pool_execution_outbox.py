@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from loom.db.nebius_pool_outbox_schema import NebiusPoolExecutionOutbox
 from loom.db.schema import Batch, ServiceExecutionLease, ServiceExecutionTarget, Task, Trial
-from loom.execution_contract import ExecutionRoutingReason
+from loom.execution_contract import ExecutionRoutingReason, WorkloadRequirementsV1
 from loom.execution_image_admission import ImageAdmissionKeyring
 from loom.execution_resource_allocation import allocate_node_resources
 from loom.nebius_pool_allocation import PoolNodeAllocationRequestV1, PoolNodeAllocationV1
@@ -34,18 +34,27 @@ from loom.nebius_rollout_guard import admission_open
 from loom.pipeline.keys import canonical_digest
 from loom.task_bundle_source_journal import require_task_bundle_transaction
 from loom_control_plane.execution_capacity import ExecutionProvisioningBlockedError
-from loom_control_plane.pool_execution_handoff import execution_selection_snapshot
+from loom_control_plane.pool_execution_handoff import (
+    execution_selection_snapshot,
+    verifier_selection_snapshot,
+)
 from loom_control_plane.service_execution import (
     ServiceExecutionConflict,
     _execution_identity,
     enqueue_execution_transition,
     record_kubernetes_observation,
     reserve_trial_execution,
+    verifier_retries,
 )
 from loom_control_plane.service_execution_scheduler import (
     _SERVICE_TRIAL_BY_ID,
+    VERIFIER_HANDOFF_TIMEOUT,
     ServiceExecutionConfigurationError,
     _compile_service_candidate,
+    _fail_verifier_handoff,
+    _handoff_pending_since,
+    compile_verifier_candidate,
+    verifier_candidates,
 )
 from loom_execution_actuator.contracts import KubernetesJobObservation, NormalizedJobState
 from loom_execution_actuator.pool_outbox import PoolHandoffError
@@ -89,7 +98,7 @@ class PoolExecutionOutbox:
         request = PoolExecutionPrepareV1.model_validate(row.request_json)
         if (request.key.participant_id != self.participant.participant_id
                 or request.pool_id != self.participant.pool_id or request.key.local_work_id != row.lease_id
-                or request.key.workload_kind != "trial" or request.key.generation != 1
+                or request.key.workload_kind not in {"trial", "verifier"} or request.key.generation != 1
                 or row.request_sha256 != canonical_digest(row.request_json).removeprefix("sha256:")
                 or request.origin.data_environment_id != self.participant.environment_id
                 or row.selection_json["target"]["environment"] != self.environment
@@ -147,8 +156,34 @@ class PoolExecutionOutbox:
     def _current_binding(self, request: PoolExecutionPrepareV1) -> bool:
         return (request.admission_epoch == self.participant.admission_epoch
                 and request.participant_revision == self.participant.binding_revision
-                and any(target.target_id == request.target_id and "trial" in target.workload_kinds
+                and any(target.target_id == request.target_id and request.key.workload_kind in target.workload_kinds
                         for target in self.participant.targets))
+
+    async def _selected_snapshot(self, session: AsyncSession, row: NebiusPoolExecutionOutbox,
+                                 request: PoolExecutionPrepareV1, now: datetime) -> dict[str, Any] | None:
+        if request.key.workload_kind == "trial":
+            candidate = (await session.execute(_SERVICE_TRIAL_BY_ID,
+                {"trial_id": row.trial_id, "pool_id": self.logical_pool_id, "now": now})).mappings().one_or_none()
+            trial = await session.get(Trial, row.trial_id, populate_existing=True)
+            target = await session.get(ServiceExecutionTarget, request.target_id, with_for_update=True)
+            if candidate is None or trial is None or target is None:
+                return None
+            return execution_selection_snapshot(trial, candidate, target, request.execution.runtime)
+        verifier_candidate = (await session.execute(verifier_candidates(self.logical_pool_id).where(
+            ServiceExecutionLease.id == request.execution.parent_lease_id,
+        ).with_for_update(of=Trial))).one_or_none()
+        if verifier_candidate is None:
+            return None
+        parent, trial = verifier_candidate
+        target = await session.get(ServiceExecutionTarget, request.target_id, with_for_update=True)
+        waiting_since = _handoff_pending_since(trial) or parent.deleted_at
+        if waiting_since is not None and now - waiting_since >= VERIFIER_HANDOFF_TIMEOUT:
+            _fail_verifier_handoff(trial, reason="global_verifier_capacity_unavailable", now=now)
+            return None
+        if target is None or parent.target_id != target.id:
+            return None
+        return await verifier_selection_snapshot(session, trial=trial, parent=parent,
+            target=target, runtime=request.execution.runtime)
 
     async def refresh_selection(self, key: PoolRequestKeyV1) -> PoolExecutionHandoff:
         async with self.sessions.begin() as session:
@@ -156,16 +191,80 @@ class PoolExecutionOutbox:
             request = self._view(row).request
             if row.phase == "selected":
                 now = await _clock(session)
-                candidate = (await session.execute(_SERVICE_TRIAL_BY_ID,
-                    {"trial_id": row.trial_id, "pool_id": self.logical_pool_id, "now": now})).mappings().one_or_none()
-                trial = await session.get(Trial, row.trial_id, populate_existing=True)
-                target = await session.get(ServiceExecutionTarget, request.target_id, with_for_update=True)
-                if (candidate is None or trial is None or target is None or not self._current_binding(request)
+                snapshot = await self._selected_snapshot(session, row, request, now)
+                if (snapshot is None or not self._current_binding(request)
                         or request.deadline_at <= now or not await admission_open(session)
-                        or execution_selection_snapshot(trial, candidate, target, request.execution.runtime) != row.selection_json):
+                        or snapshot != row.selection_json):
                     row.phase = "cancel_pending"
                     await session.flush()
             return self._view(row)
+
+    async def propose_next_verifier(self) -> PoolExecutionHandoff | None:
+        """Re-admit a cleaned global parent's exact pending workspace, without a local claim."""
+        async with self.sessions.begin() as session:
+            await require_task_bundle_transaction(session)
+            if not await admission_open(session):
+                return None
+            now = await _clock(session)
+            candidates = (await session.execute(verifier_candidates(self.logical_pool_id).where(
+                ~select(NebiusPoolExecutionOutbox.lease_id).where(
+                    NebiusPoolExecutionOutbox.trial_id == Trial.id,
+                    NebiusPoolExecutionOutbox.phase.not_in(("cancelled", "released")),
+                ).exists(),
+            ).limit(32))).all()
+            for parent, trial in candidates:
+                try:
+                    async with session.begin_nested():
+                        target_id = parent.target_id
+                        if target_id is None:
+                            raise ValueError("verifier_parent_target_unavailable")
+                        self.participant.target(target_id, "verifier")
+                        previous = await session.get(NebiusPoolExecutionOutbox, parent.id)
+                        if (previous is None or previous.phase != "released"
+                                or previous.participant_id != self.participant.participant_id
+                                or previous.pool_id != self.participant.pool_id):
+                            raise ValueError("verifier_parent_global_release_unavailable")
+                        waiting_since = _handoff_pending_since(trial) or parent.deleted_at
+                        if waiting_since is not None and now - waiting_since >= VERIFIER_HANDOFF_TIMEOUT:
+                            _fail_verifier_handoff(trial, reason="global_verifier_capacity_unavailable", now=now)
+                            continue
+                        target = await session.get(ServiceExecutionTarget, target_id, with_for_update=True)
+                        if target is None or target.spec_json["namespace_name"] != self.participant.execution_namespace.name:
+                            raise ValueError("verifier_parent_target_scope_changed")
+                        plan, deadline = await compile_verifier_candidate(session, parent=parent, trial=trial,
+                            maximum_deadline_seconds=self.maximum_deadline_seconds, current_time=now)
+                        snapshot = await verifier_selection_snapshot(session, trial=trial, parent=parent,
+                            target=target, runtime=plan)
+                        origin = PoolWorkOriginV1.model_validate(trial.pool_origin)
+                        pool_request_priority(self.participant, origin, workload_kind="verifier")
+                        lease_id = uuid4()
+                        _, _, _, unit = _execution_identity(trial_id=trial.id, attempt=parent.attempt,
+                            generation=1, execution_role="verifier", namespace_name=self.participant.execution_namespace.name,
+                            target_id=target_id, verifier_retry=verifier_retries(trial))
+                        parent_request = self._view(previous).request
+                        request = PoolExecutionPrepareV1(pool_id=self.participant.pool_id,
+                            admission_epoch=self.participant.admission_epoch, participant_revision=self.participant.binding_revision,
+                            key=PoolRequestKeyV1(participant_id=self.participant.participant_id, workload_kind="verifier",
+                                local_work_id=lease_id, generation=1), target_id=target_id, deadline_at=deadline,
+                            origin=origin, execution=PoolExecutionWorkloadV1(lease_generation=1, execution_unit_key=unit,
+                                parent_lease_id=parent.id,
+                                requirements=WorkloadRequirementsV1.model_validate(parent.workload_requirements_json),
+                                runtime=plan, node_allocation=parent_request.execution.node_allocation))
+                        payload = request.model_dump(mode="json")
+                        row = NebiusPoolExecutionOutbox(lease_id=lease_id, trial_id=trial.id, pool_id=request.pool_id,
+                            participant_id=request.key.participant_id, request_json=payload,
+                            request_sha256=canonical_digest(payload).removeprefix("sha256:"),
+                            selection_json=snapshot, phase="selected")
+                        session.add(row)
+                        await session.flush()
+                        return self._view(row)
+                except ServiceExecutionConflict:
+                    # Image admission, rollout and target health can recover.
+                    # The handoff deadline above bounds these waits, as locally.
+                    continue
+                except ValueError as error:
+                    _fail_verifier_handoff(trial, reason=str(error), now=now)
+            return None
 
     def _receipt(self, row: NebiusPoolExecutionOutbox, receipt: PoolReceiptV1) -> PoolReceiptV1:
         receipt = PoolReceiptV1.model_validate_json(receipt.model_dump_json())
@@ -268,7 +367,8 @@ class PoolExecutionOutbox:
         if row.attached_lease_id is None or not self._current_binding(request):
             return False
         trial = await session.get(Trial, row.trial_id, with_for_update=True, populate_existing=True)
-        if trial is None or trial.state != "claimed" or trial.cancellation_requested_at is not None:
+        states = {"claimed"} if request.key.workload_kind == "trial" else {"claimed", "running"}
+        if trial is None or trial.state not in states or trial.cancellation_requested_at is not None:
             return False
         task = await session.get(Task, trial.task_id, with_for_update=True)
         batch = await session.get(Batch, trial.batch_id, with_for_update=True) if trial.batch_id is not None else None
@@ -294,6 +394,13 @@ class PoolExecutionOutbox:
             "legacy_separate_verifier_checksum": task.legacy_separate_verifier_checksum,
             "batch_runtime_profile": batch.service_execution_runtime_profile,
         }, target, request.execution.runtime)
+        if request.key.workload_kind == "verifier":
+            parent = await session.get(ServiceExecutionLease, request.execution.parent_lease_id, with_for_update=True)
+            if (parent is None or lease.parent_lease_id != parent.id or lease.execution_role != "verifier"
+                    or lease.verifier_retry != verifier_retries(trial)):
+                return False
+            snapshot = await verifier_selection_snapshot(session, trial=trial, parent=parent,
+                target=target, runtime=request.execution.runtime)
         # These are the only selection fields deliberately advanced by claim.
         # Verify the current route against the lease above, then compare all
         # other source/configuration/identity fields to the retained proposal.
@@ -455,7 +562,8 @@ class PoolExecutionOutbox:
         now = await _clock(session)
         if lease.desired_state == "create":
             await enqueue_execution_transition(session, lease_id=lease.id, expected_generation=lease.generation,
-                desired_state=("retry" if trial.state == "claimed" and trial.cancellation_requested_at is None else "cancel"), now=now)
+                desired_state=("retry" if trial.state in {"claimed", "running"}
+                    and trial.cancellation_requested_at is None else "cancel"), now=now)
         if lease.desired_state not in {"cancel", "retry", "timeout", "delete_pending"} or lease.revoked_at is None:
             raise PoolHandoffError
         # This path has the manager's exact cancelled_unstarted evidence, not
@@ -544,10 +652,8 @@ class PoolExecutionOutbox:
             else:
                 try:
                     async with session.begin_nested():
-                        self.participant.target(request.target_id, "trial")
-                        candidate = (await session.execute(_SERVICE_TRIAL_BY_ID,
-                            {"trial_id": row.trial_id, "pool_id": self.logical_pool_id, "now": now})).mappings().one_or_none()
-                        if candidate is None:
+                        self.participant.target(request.target_id, request.key.workload_kind)
+                        if await self._selected_snapshot(session, row, request, now) != row.selection_json:
                             raise PoolHandoffError
                         target = await session.get(ServiceExecutionTarget, request.target_id, with_for_update=True)
                         if target is None or target.spec_json["namespace_name"] != self.participant.execution_namespace.name:
@@ -557,7 +663,9 @@ class PoolExecutionOutbox:
                             requirements=request.execution.requirements, runtime_contract=request.execution.runtime,
                             image_admission_keyring=self.image_admission_keyring,
                             routing_reason=ExecutionRoutingReason.PREEXISTING_ASSIGNMENT,
-                            deadline_at=request.deadline_at, now=now, pool_handoff_id=row.lease_id)
+                            deadline_at=request.deadline_at, now=now, pool_handoff_id=row.lease_id,
+                            parent_lease_id=request.execution.parent_lease_id,
+                            verifier_retry=int(row.selection_json.get("verifier", {}).get("handoff", {}).get("retries", 0)))
                         row.attached_lease_id, row.phase = lease.id, "attached"
                         await session.flush()
                 except (ServiceExecutionConflict, ExecutionProvisioningBlockedError, PoolHandoffError):

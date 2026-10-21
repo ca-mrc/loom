@@ -11,7 +11,7 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.nebius_pool_outbox_schema import NebiusPoolExecutionOutbox
-from loom.db.schema import ServiceExecutionTarget, Trial
+from loom.db.schema import Batch, ServiceExecutionLease, ServiceExecutionTarget, Task, Trial
 from loom.execution_contract import WorkloadRequirementsV1
 from loom.execution_runtime_contract import ExecutionRuntimePlanV1
 from loom.nebius_pool_contract import PoolReceiptV1
@@ -35,9 +35,36 @@ def execution_selection_snapshot(trial: Trial, candidate: Any, target: ServiceEx
     }
 
 
+async def verifier_selection_snapshot(session: AsyncSession, *, trial: Trial,
+    parent: ServiceExecutionLease, target: ServiceExecutionTarget, runtime: ExecutionRuntimePlanV1,
+) -> dict[str, Any]:
+    """Bind the committed parent and retry before any remote physical grant."""
+    task = await session.get(Task, trial.task_id, with_for_update=True)
+    batch = await session.get(Batch, trial.batch_id, with_for_update=True) if trial.batch_id else None
+    if task is None or batch is None:
+        raise ValueError("verifier source unavailable")
+    snapshot = execution_selection_snapshot(trial, {
+        "task_checksum": task.checksum, "task_config": task.config,
+        "task_source_provenance": task.source_provenance,
+        "legacy_separate_verifier_checksum": task.legacy_separate_verifier_checksum,
+        "batch_runtime_profile": batch.service_execution_runtime_profile,
+    }, target, runtime)
+    snapshot["verifier"] = {
+        "handoff": (trial.result or {}).get("verifier_execution"),
+        "parent_lease_id": str(parent.id), "attempt": parent.attempt,
+        "runtime_contract_sha256": parent.runtime_contract_sha256,
+        "resource_generation": parent.resource_generation,
+        "upload_session_id": str(parent.output_upload_session_id),
+        "manifest_sha256": parent.output_manifest_sha256,
+        "marker_sha256": parent.output_marker_sha256,
+    }
+    return snapshot
+
+
 async def qualify_execution_handoff(session: AsyncSession, *, handoff_id: UUID, request_id: UUID,
     trial: Trial, target: ServiceExecutionTarget, requirements: WorkloadRequirementsV1,
     runtime: ExecutionRuntimePlanV1, deadline_at: datetime, now: datetime,
+    parent: ServiceExecutionLease | None = None, verifier_retry: int = 0,
 ) -> tuple[UUID, str]:
     from loom_control_plane.service_execution import ServiceExecutionConflict, _execution_identity
     from loom_control_plane.service_execution_scheduler import _SERVICE_TRIAL_BY_ID
@@ -47,16 +74,23 @@ async def qualify_execution_handoff(session: AsyncSession, *, handoff_id: UUID, 
         raise ServiceExecutionConflict("global execution handoff unavailable")
     request = PoolExecutionPrepareV1.model_validate(row.request_json)
     receipt = PoolReceiptV1.model_validate(row.receipt_json)
-    _, _, _, unit = _execution_identity(trial_id=trial.id, attempt=trial.attempt_count + 1,
-        generation=1, execution_role="attempt", namespace_name=str(target.spec_json["namespace_name"]),
-        target_id=target.id)
-    candidate = (await session.execute(_SERVICE_TRIAL_BY_ID,
-        {"trial_id": trial.id, "pool_id": target.logical_pool_id, "now": now})).mappings().one_or_none()
-    if (candidate is None or row.trial_id != trial.id or row.lease_id != request_id
+    _, _, _, unit = _execution_identity(trial_id=trial.id,
+        attempt=trial.attempt_count + 1 if parent is None else parent.attempt,
+        generation=1, execution_role=runtime.execution_role,
+        namespace_name=str(target.spec_json["namespace_name"]), target_id=target.id, verifier_retry=verifier_retry)
+    if parent is None:
+        candidate = (await session.execute(_SERVICE_TRIAL_BY_ID,
+            {"trial_id": trial.id, "pool_id": target.logical_pool_id, "now": now})).mappings().one_or_none()
+        snapshot = execution_selection_snapshot(trial, candidate, target, runtime) if candidate is not None else None
+    else:
+        snapshot = await verifier_selection_snapshot(session, trial=trial, parent=parent, target=target, runtime=runtime)
+    if (snapshot is None or row.trial_id != trial.id or row.lease_id != request_id
             or request.key.local_work_id != row.lease_id or request.key.generation != 1
-            or request.execution.lease_generation != 1 or request.key.workload_kind != "trial"
+            or request.execution.lease_generation != 1
+            or request.key.workload_kind != ("trial" if parent is None else "verifier")
             or request.execution.execution_unit_key != unit
-            or request.execution.parent_lease_id is not None or runtime.execution_role != "attempt"
+            or request.execution.parent_lease_id != (parent.id if parent is not None else None)
+            or runtime.execution_role != ("attempt" if parent is None else "verifier")
             or request.target_id != target.id or request.deadline_at != deadline_at
             or request.execution.requirements != requirements or request.execution.runtime != runtime
             or request.origin.model_dump(mode="json") != trial.pool_origin
@@ -64,6 +98,6 @@ async def qualify_execution_handoff(session: AsyncSession, *, handoff_id: UUID, 
             or receipt.phase != "reserved" or receipt.reservation_id != row.reservation_id
             or receipt.request_key != request.key or receipt.pool_id != request.pool_id
             or receipt.admission_epoch != request.admission_epoch or receipt.request_sha256 != row.request_sha256
-            or execution_selection_snapshot(trial, candidate, target, runtime) != row.selection_json):
+            or snapshot != row.selection_json):
         raise ServiceExecutionConflict("global execution handoff changed selected work")
     return row.lease_id, "loom-pool-" + receipt.reservation_id.hex

@@ -63,12 +63,22 @@ class PoolExecutionPrepareV1(BaseModel):
         role = {"trial": "attempt", "verifier": "verifier"}.get(self.key.workload_kind)
         if role is None or role != self.execution.runtime.execution_role or self.origin.kind == "personal_build":
             raise ValueError("pool_execution_kind_mismatch")
+        if (role == "verifier") != (self.execution.parent_lease_id is not None):
+            raise ValueError("pool_execution_parent_mismatch")
         allocation = self.execution.node_allocation
+        # A child retains the exact parent's sizing, including its original
+        # trial-scoped observation. Management must qualify that released
+        # parent before granting fresh physical capacity; this is not a new
+        # observation and its validity window is never extended.
+        inherited = self.key.workload_kind == "verifier"
+        allocation_kind = "trial" if inherited else self.key.workload_kind
         if allocation is not None and (
-            allocation.scope.pool_id, allocation.scope.participant_id, allocation.scope.admission_epoch,
-            allocation.scope.participant_revision, allocation.scope.target_id, allocation.scope.workload_kind,
-        ) != (self.pool_id, self.key.participant_id, self.admission_epoch,
-              self.participant_revision, self.target_id, self.key.workload_kind):
+            (allocation.scope.pool_id, allocation.scope.participant_id,
+             allocation.scope.target_id, allocation.scope.workload_kind)
+            != (self.pool_id, self.key.participant_id, self.target_id, allocation_kind)
+            or (not inherited and (allocation.scope.admission_epoch, allocation.scope.participant_revision)
+                != (self.admission_epoch, self.participant_revision))
+        ):
             raise ValueError("pool_node_allocation_scope_mismatch")
         object.__setattr__(self, "deadline_at", self.deadline_at.astimezone(UTC))
         return self

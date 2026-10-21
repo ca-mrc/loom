@@ -798,7 +798,8 @@ async def reserve_trial_execution(
 
         global_identity = await qualify_execution_handoff(session, handoff_id=pool_handoff_id,
             request_id=request_id, trial=trial, target=target, requirements=requirements,
-            runtime=runtime_contract, deadline_at=deadline_at, now=current_time)
+            runtime=runtime_contract, deadline_at=deadline_at, now=current_time,
+            parent=parent_lease, verifier_retry=verifier_retry)
 
     allow_target_reselection = False
     if (
@@ -1066,6 +1067,11 @@ async def enqueue_execution_transition(
             raise ServiceExecutionFenceError("retry lost the trial attempt fence")
         if retry_trial.state in _TERMINAL_TRIAL_STATES:
             raise ServiceExecutionConflict("retry cannot reopen a terminal trial")
+        if lease.execution_role == "verifier" and (
+            lease.output_commit_state == "committed"
+            or retry_trial.cancellation_requested_at is not None
+        ):
+            raise ServiceExecutionConflict("retry cannot reopen committed or cancelled verification")
 
     # Generation and desired state are one atomic intent.  Set desired state
     # before any query can autoflush a generation change.
@@ -1078,11 +1084,21 @@ async def enqueue_execution_transition(
         lease.cleanup_requested_at = revoked_at
         lease.cleanup_deadline_at = revoked_at + _RESOURCE_RELEASE_DEADLINE
         if retry_trial is not None:
-            retry_trial.state = "queued"
-            retry_trial.worker_id = None
-            retry_trial.claimed_at = None
-            retry_trial.pre_start_heartbeat_at = None
-            retry_trial.started_at = None
+            if lease.execution_role == "verifier":
+                # Revoking a child must not rerun its already committed agent.
+                # The pending handoff remains fenced by this child's cleanup;
+                # the next child receives a fresh reservation after deletion.
+                reason = lease.error_code or "execution_lease_revoked"
+                if not _retry_verifier(retry_trial, lease, reason=reason, now=revoked_at):
+                    retry_trial.state = "failed"
+                    retry_trial.finished_at = revoked_at
+                    mark_verifier_unavailable(retry_trial, lease, reason=reason)
+            else:
+                retry_trial.state = "queued"
+                retry_trial.worker_id = None
+                retry_trial.claimed_at = None
+                retry_trial.pre_start_heartbeat_at = None
+                retry_trial.started_at = None
     sequence = (
         await session.execute(
             select(func.coalesce(func.max(ServiceExecutionCommand.sequence), 0)).where(

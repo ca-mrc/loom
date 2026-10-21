@@ -178,7 +178,7 @@ def global_role_database(platform_database):  # noqa: F811 -- imported shared fi
 
 @pytest.mark.parametrize("kind,schema_revision,upgrade_from", [
     (kind, revision, None)
-    for revision in ('0175', '0176', '0177', '0178')
+    for revision in ('0175', '0176', '0177', '0178', '0179')
     for kind in ('execution', 'build', 'registered-build')
 ] + [pytest.param('execution', '0178', '0175', id='upgrade-0175-to-0178')])
 async def test_global_handoff_runs_as_restricted_actuator_after_guarded_role_stage(
@@ -258,7 +258,7 @@ async def test_global_handoff_runs_as_restricted_actuator_after_guarded_role_sta
                     if not cursor.nextset():
                         break
             assert reports == [({"status": "staged"},)]
-            if schema_revision in {"0177", "0178"}:
+            if schema_revision in {"0177", "0178", "0179"}:
                 assert db.execute("SELECT has_table_privilege('loom_actuator','task_source_publications','SELECT,INSERT,UPDATE,DELETE')").fetchone() == (False,)
                 db.execute("GRANT SELECT ON task_source_publications TO loom_actuator")
                 for action in ("observe", "stage", "inspect"):
@@ -266,7 +266,7 @@ async def test_global_handoff_runs_as_restricted_actuator_after_guarded_role_sta
                         db.execute(migration.pool_runtime_role_sql(owner=owner, candidate=candidate, action=action), prepare=False)
                     db.rollback()
                 db.execute("REVOKE SELECT ON task_source_publications FROM loom_actuator")
-            if schema_revision == "0178" and kind == "execution":
+            if schema_revision in {"0178", "0179"} and kind == "execution":
                 for table in ('nebius_pool_participant_catalogs', 'nebius_pool_profile_documents',
                               'nebius_pool_lifecycle_operations', 'nebius_pool_participant_lifecycle'):
                     assert db.execute("SELECT has_table_privilege('loom_actuator',%s,'SELECT,INSERT,UPDATE,DELETE')",

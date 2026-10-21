@@ -48,6 +48,9 @@ class PoolExecutionSelector:
             raise ValueError("global execution selection requires a registered trial target")
 
     async def select_next(self) -> PoolExecutionHandoff | None:
+        verifier = await self.outbox.propose_next_verifier()
+        if verifier is not None:
+            return verifier
         allocations = {}
         if self.allocation_reader is not None:
             participant = self.outbox.participant
