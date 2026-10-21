@@ -1124,7 +1124,9 @@ async def test_runtime_executes_task_native_sidecar_and_verifier_without_docker_
                 _runtime_binary_digest, runtime_tag, root, platform
             )
             container = await asyncio.to_thread(_start_k3s)
-            client_module, core, batch = await asyncio.to_thread(_load_client, container)
+            client_module, core, batch = await asyncio.to_thread(
+                _load_client, container, required_addons=("dns",) if not prepared_fixture else ()
+            )
             runtime_image_ref = await asyncio.to_thread(
                 _import_image,
                 container,
