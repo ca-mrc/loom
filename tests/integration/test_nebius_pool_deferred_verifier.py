@@ -342,6 +342,57 @@ async def test_global_verifier_proposal_and_grant_preserve_parent_attempt(
         assert len(case.api.writes) == len(case.api.deletes) == 2
 
 
+@pytest.mark.parametrize("verifier_operation", ["propose", "refresh"])
+async def test_verifier_and_ordinary_proposals_share_source_before_target_lock_order(
+    sessions, tmp_path, separate_setup, monkeypatch, verifier_operation,
+):
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from loom_control_plane.service_execution_scheduler import _SERVICE_TRIAL_BY_ID
+    from tests.integration.test_nebius_pool_execution_controller import another_trial
+
+    async with connected(sessions, tmp_path) as case:
+        await finish_parent(sessions, case)
+        selected = (await case.outbox.propose_next_verifier()) if verifier_operation == "refresh" else None
+        ordinary_id = await another_trial(sessions, case.trial_id)
+        source_held, verifier_needs_source = asyncio.Event(), asyncio.Event()
+        original_execute, original_get = AsyncSession.execute, AsyncSession.get
+
+        async def execute(session, statement, *args, **kwargs):
+            result = await original_execute(session, statement, *args, **kwargs)
+            if statement is _SERVICE_TRIAL_BY_ID and asyncio.current_task().get_name() == "ordinary-proposal":
+                source_held.set()
+                await verifier_needs_source.wait()
+            return result
+
+        async def get(session, entity, *args, **kwargs):
+            if entity is Task and asyncio.current_task().get_name() == "verifier-proposal":
+                verifier_needs_source.set()
+            return await original_get(session, entity, *args, **kwargs)
+
+        monkeypatch.setattr(AsyncSession, "execute", execute)
+        monkeypatch.setattr(AsyncSession, "get", get)
+        ordinary = asyncio.create_task(case.outbox.propose(
+            trial_id=ordinary_id, target_id=case.proposal.request.target_id,
+        ), name="ordinary-proposal")
+        verifier = None
+        try:
+            await asyncio.wait_for(source_held.wait(), timeout=5)
+            operation = (case.outbox.refresh_selection(selected.request.key) if selected is not None
+                else case.outbox.propose_next_verifier())
+            verifier = asyncio.create_task(operation, name="verifier-proposal")
+            # If the verifier holds the target while waiting for the shared
+            # source, the real ordinary proposal now closes a PostgreSQL deadlock.
+            results = await asyncio.wait_for(asyncio.gather(ordinary, verifier), timeout=10)
+            assert {row.request.key.workload_kind for row in results} == {"trial", "verifier"}
+            assert all(row.phase == "selected" for row in results)
+        finally:
+            tasks = [ordinary, *([] if verifier is None else [verifier])]
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+
 @pytest.mark.parametrize("damage", ["full", "cancel", "config"])
 async def test_pending_global_verifier_does_not_claim_or_hide_other_trials(
     sessions,
