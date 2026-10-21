@@ -31,9 +31,12 @@ from scripts.ops.nebius_development_runtime_operation import (
 )
 from scripts.ops.nebius_development_runtime_render import DevelopmentRuntimePublication
 from scripts.ops.nebius_development_runtime_retained import (
+    CompletedDevelopmentRuntime,
+    load_completed_runtime,
+)
+from scripts.ops.nebius_development_runtime_retained import (
     RetainedRuntimeReference as RetainedRuntimeReference,
 )
-from scripts.ops.nebius_development_runtime_retained import load_completed_runtime
 from scripts.ops.nebius_development_runtime_setup import prepare_database_runtime
 from scripts.ops.nebius_development_schema_upgrade import (
     DevelopmentSchemaReference,
@@ -169,6 +172,16 @@ def _private(path: Path) -> bytes:
 
 def _retained_runtime(reference: RetainedRuntimeReference, files: dict[Path, bytes]) -> DevelopmentRuntimeInstallRequest:
     """Rebuild completed runtime evidence without retired operator file access."""
+    return _retained_completed_runtime(reference, files).request
+
+
+def _retained_completed_runtime(reference: RetainedRuntimeReference, files: dict[Path, bytes]) -> CompletedDevelopmentRuntime:
+    """Load once for a private composing scope; never accept a cached projection.
+
+    The caller retains these exact byte pins and must recheck them before using
+    the result after further projection or observation. Every invocation loads
+    the source and completed runtime afresh.
+    """
     def read(path: Path) -> bytes:
         raw = _private(path)
         if path in files:
@@ -218,7 +231,9 @@ def _retained_runtime(reference: RetainedRuntimeReference, files: dict[Path, byt
     if files.keys() & completed.files.keys():
         raise ValueError
     files.update(completed.files)
-    return request
+    if any(_private(path) != raw for path, raw in files.items()):
+        raise ValueError
+    return completed
 
 
 def load_inputs(operation: dict[str, Any]) -> SharedPoolEntryContext:
@@ -344,7 +359,7 @@ def load_storage_inputs(operation: dict[str, Any]) -> StorageEntryContext:
     try:
         roots = _load_input_roots(operation, source_record=SOURCE_RECORD, include_operator=True)
         inputs, files = roots.inputs, roots.files
-        if inputs.storage is None or inputs.preactivation is not None:
+        if inputs.storage is None or inputs.preactivation is not None or inputs.schema_successor is not None:
             raise ValueError('storage correction requires its own explicit selection')
         retained = load_closed_storage(runtime=inputs.runtime, reference=inputs.storage)
         if retained.runtime != roots.runtime:

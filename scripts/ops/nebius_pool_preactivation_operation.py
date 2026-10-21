@@ -21,11 +21,9 @@ from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_development_runtime_install import DevelopmentRuntimeInstallRequest
 from scripts.ops.nebius_development_runtime_retained import (
     RetainedRuntimeReference,
-    load_completed_runtime,
 )
 from scripts.ops.nebius_development_runtime_selection import (
     DevelopmentRuntimeSelection,
-    select_development_runtime,
 )
 from scripts.ops.nebius_development_runtime_transition import DevelopmentRuntimeWorkloadAPI
 from scripts.ops.nebius_development_schema_upgrade import (
@@ -154,27 +152,37 @@ def _anchor(reference: PreactivationReference, state: Path) -> dict[str, Any]:
 def _basis(*, runtime: RetainedRuntimeReference, predecessor: PreactivationReference | None,
         storage: StorageReference | None, repo_root: Path, seen: frozenset[UUID],
         schema_successor: DevelopmentSchemaReference | None) -> tuple[DevelopmentRuntimeInstallRequest,
-            PoolRegistrationRequest, dict[str, Any], dict[str, Any], dict[Path, bytes]]:
-    from scripts.ops.nebius_shared_pool_entry import _retained_runtime
+            PoolRegistrationRequest, dict[str, Any], dict[str, Any], dict[Path, bytes], StorageReference | None]:
+    from scripts.ops.nebius_shared_pool_entry import _retained_completed_runtime
 
     files: dict[Path, bytes] = {}
-    request = _retained_runtime(runtime, files)
+    original = _retained_completed_runtime(runtime, files)
+    request = original.request
     registration = request.database.manager.retained.request.registration
     if predecessor is not None:
         prior = _load(runtime=runtime, reference=predecessor, repo_root=repo_root, seen=seen)
+        if schema_successor is not None and storage is None:
+            storage = prior.inputs.storage
         if prior.inputs.storage != storage:
             raise ValueError('catalog physical ancestry changed')
         completed = _completed(prior)
         if prior.inputs.schema_successor != schema_successor:
             raise ValueError
         files = dict(completed.files)
-        return request, prior.registration, completed.resources.manager, completed.resources.catalog, files
-    original = load_completed_runtime(request)
+        return request, prior.registration, completed.resources.manager, completed.resources.catalog, files, storage
     successor = (None if schema_successor is None else
         load_completed_development_schema_successor(runtime=request, reference=schema_successor))
-    selected = select_development_runtime(original, successor)
+    if successor is not None and successor.runtime != original:
+        raise ValueError('catalog schema runtime differs')
+    # Both objects were loaded and qualified in this invocation. The caller
+    # rechecks their merged byte pins after deriving the catalog projection.
+    selected = DevelopmentRuntimeSelection(original, successor)
     registration = selected.registration
     if successor is not None:
+        reference = None if successor.storage is None else successor.storage.retained.reference
+        if storage is not None and storage != reference:
+            raise ValueError('catalog schema storage ancestry differs')
+        storage = reference
         for path, raw in successor.files.items():
             if path in files and files[path] != raw:
                 raise ValueError
@@ -188,12 +196,16 @@ def _basis(*, runtime: RetainedRuntimeReference, predecessor: PreactivationRefer
         physical = load_completed_storage(runtime=runtime, reference=storage)
         if physical.retained.runtime != request:
             raise ValueError('catalog storage runtime differs')
-        registration = physical.retained.registration
+        if successor is not None:
+            if successor.storage != physical:
+                raise ValueError('catalog schema storage ancestry differs')
+        else:
+            registration = physical.retained.registration
         for path, raw in physical.files.items():
             if path in files and files[path] != raw:
                 raise ValueError
             files[path] = raw
-    return request, registration, copy.deepcopy(manager), copy.deepcopy(catalog), files
+    return request, registration, copy.deepcopy(manager), copy.deepcopy(catalog), files, storage
 
 
 def _inputs(*, runtime: RetainedRuntimeReference, predecessor: PreactivationReference | None,
@@ -208,7 +220,7 @@ def _inputs(*, runtime: RetainedRuntimeReference, predecessor: PreactivationRefe
     if (source.publication.source_sha != source.candidate.get('candidate_sha')
             or source.publication.run_id != source.candidate.get('run_id')):
         raise ValueError
-    request, registration, manager, catalog, files = _basis(runtime=runtime, predecessor=predecessor,
+    request, registration, manager, catalog, files, storage = _basis(runtime=runtime, predecessor=predecessor,
         repo_root=repo_root, seen=seen, schema_successor=schema_successor, storage=storage)
     if operation_id == request.database.manager.retained.request.registration.spec.operation_id:
         raise ValueError

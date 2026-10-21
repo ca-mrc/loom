@@ -809,7 +809,7 @@ installation, change the worker group, or weaken quota matching:
    name may advance. For example, `NETWORK_SSD_NON_REPLICATED` requires
    `compute.disk.size.network-ssd-non-replicated`; it does not buy or resize disks.
 2. Create a new immutable handoff preparation using private input schema
-   `loom.nebius-shared-pool-inputs.v3` and its `storage` reference
+   `loom.nebius-shared-pool-inputs.v4` and its `storage` reference
    (`operation_id`, `inputs_sha256`). Do not select `preactivation` for this
    pending correction. Keep the original runtime and registered operation
    identity, and deliver the exact-source, digest-bound shared tooling grant.
@@ -829,10 +829,18 @@ installation, change the worker group, or weaken quota matching:
    with the real disks. A used/active pool is outside this operation's authority.
 5. Carry the completed `storage` reference into handoff, or pass it explicitly to
    `retain_preactivation_catalog` if a catalog refresh is also needed. Every later
-   catalog predecessor must retain the same storage ancestry. Use v3 private
+   catalog predecessor must retain the same storage ancestry. Use v4 private
    inputs with both references for that catalog/handoff path. A catalog's pinned
    storage reference is authoritative; an unrelated selected head is rejected.
    Ordinary releases preserve this physical binding and cannot change it.
+
+If development also requires a schema upgrade, complete the storage correction
+first. Pin its completed `storage` reference in the schema upgrade's private
+inputs. The upgrade consumes the corrected registry and collector, then later
+catalog and handoff operations follow that single storage → schema → catalog
+chain. Independently selected, conflicting successors are rejected. Shared-pool
+input v3 retains its schema-only meaning; v4 selects storage explicitly, with
+the matching schema successor when applicable.
 
 If the captured staging release also differs from the catalog frozen at dev
 registration, a new input directory alone is insufficient. Before handoff:
@@ -846,7 +854,7 @@ registration, a new input directory alone is insufficient. Before handoff:
    `PreactivationReference` as `predecessor`. If a storage correction was required,
    also select its completed `storage` reference as described above.
 2. In the new handoff preparation, use private input schema
-   `loom.nebius-shared-pool-inputs.v2` (v3 when selecting storage) and its `preactivation` reference
+   `loom.nebius-shared-pool-inputs.v2` (v4 when selecting storage) and its `preactivation` reference
    (`operation_id`, `inputs_sha256`). Keep `runtime` and the shared operation's
    registered `operation_id` unchanged. The staging envelope must be exactly the
    one retained by preactivation. Build and install the exact integrated-source,

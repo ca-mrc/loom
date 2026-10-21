@@ -171,6 +171,8 @@ class HTTPSDevelopmentRuntimeProbes(HTTPSDevelopmentRuntimeObserver):
             from scripts.ops.nebius_development_runtime_selection import DevelopmentRuntimeSelection
 
             return DevelopmentRuntimeSelection(self.schema_successor.runtime, self.schema_successor).registration
+        if self.storage is not None:
+            return self.storage.retained.registration
         return self.request.database.manager.retained.request.registration
 
     @property
@@ -185,8 +187,6 @@ class HTTPSDevelopmentRuntimeProbes(HTTPSDevelopmentRuntimeObserver):
         """One fixed READ ONLY query, bracketed by retained database qualification."""
         try:
             spec = self.effective_registration.spec
-            if self.preactivation is None and self.storage is not None:
-                spec = self.storage.retained.registration.spec
             before = self._database(self.manager.binding.namespace)
             report = self._exec(before, 'loom-postgres', ['psql', '-X', '-qAt', '-v', 'ON_ERROR_STOP=1',
                 '-U', 'postgres', '-d', 'loom', '-c', pool_startup_closed_sql(spec, manager_revision=self.manager_revision)])

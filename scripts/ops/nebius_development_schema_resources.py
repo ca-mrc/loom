@@ -10,7 +10,7 @@ import copy
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from scripts.ops.nebius_development_build_policy import build_policy_documents
 from scripts.ops.nebius_development_runtime_retained import CompletedDevelopmentRuntime
@@ -27,6 +27,9 @@ from loom.service_execution_materialization import ServiceExecutionRuntimeProfil
 from loom_service.environment_management.deployment import render_management
 from loom_service.pool_management.installation_render import render_gateway
 
+if TYPE_CHECKING:
+    from scripts.ops.nebius_pool_storage_operation import CompletedClosedStorage
+
 MARKER = 'loom.nebius/development-schema-operation'
 _ROOT = Path(__file__).resolve().parents[2]
 
@@ -42,7 +45,8 @@ class DevelopmentSchemaResources:
     input_digest: str
 
 
-def schema_original_resources(runtime: CompletedDevelopmentRuntime) -> dict[str, dict[str, Any]]:
+def schema_original_resources(runtime: CompletedDevelopmentRuntime, *,
+        storage: CompletedClosedStorage | None = None) -> dict[str, dict[str, Any]]:
     """Original foundation and manager resources, with completed runtime overlays."""
     result: dict[str, dict[str, Any]] = {}
     foundation = runtime.request.database.foundation
@@ -61,6 +65,15 @@ def schema_original_resources(runtime: CompletedDevelopmentRuntime) -> dict[str,
                 row['metadata']['uid'] = item['uid']
                 result[_key(row)] = row
     result.update(copy.deepcopy(runtime.resources))
+    if storage is not None:
+        if (storage.retained.runtime != runtime.request
+                or storage.retained.inputs.refresh.before != runtime.request.database.manager.retained.request.registration.spec):
+            raise ValueError('development_schema_storage_predecessor_changed')
+        for row in (storage.resources.configuration, storage.resources.collector):
+            key = _key(row)
+            if key in result and (row['kind'] != 'CronJob' or _uid(row) != _uid(result[key])):
+                raise ValueError('development_schema_storage_resource_collision')
+            result[key] = copy.deepcopy(row)
     for key, row in result.items():
         if key != _key(row):
             raise ValueError('development_schema_original_resource_invalid')
@@ -69,13 +82,13 @@ def schema_original_resources(runtime: CompletedDevelopmentRuntime) -> dict[str,
 
 
 def schema_runtime_resources(*, runtime: CompletedDevelopmentRuntime,
-        projection: DevelopmentSchemaProjection) -> DevelopmentSchemaResources:
+        projection: DevelopmentSchemaProjection, storage: CompletedClosedStorage | None = None) -> DevelopmentSchemaResources:
     """Retain exact process settings except the validated publication/catalog delta."""
     expected = project_development_schema_successor(runtime=runtime, operation_id=projection.after_pool.operation_id,
-        data_publication=projection.data_publication, manager_publication=projection.manager_publication)
+        data_publication=projection.data_publication, manager_publication=projection.manager_publication, storage=storage)
     if expected != projection:
         raise ValueError('development_schema_projection_changed')
-    source = schema_original_resources(runtime)
+    source = schema_original_resources(runtime, storage=storage)
     database = runtime.request.database
     manager_namespace = projection.after_manager.namespace
     participant = projection.participant

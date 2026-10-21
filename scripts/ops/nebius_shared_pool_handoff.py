@@ -108,7 +108,7 @@ class SharedPoolHandoffPlan:
     def effective_runtime_resources(self) -> dict[str, dict[str, Any]]:
         """Current catalog/manager overlay; original installation stays intact."""
         resources = copy.deepcopy(self.development.selection.resources)
-        if self.storage is not None:
+        if self.storage is not None and self.development.schema_successor is None:
             for row in (self.storage.resources.configuration, self.storage.resources.collector):
                 resources[_key(row)] = copy.deepcopy(row)
         if self.preactivation is not None:
@@ -251,8 +251,9 @@ def prepare_shared_pool_handoff(*, runtime: DevelopmentRuntimeInstallRequest,
         completed = development.runtime
         database = completed.request.database
         registration = development.selection.registration
-        storage = resolve_runtime_storage(runtime=runtime, preactivation=preactivation, storage=storage)
-        if storage is not None:
+        storage = resolve_runtime_storage(runtime=runtime, preactivation=preactivation,
+            schema_successor=schema_successor, storage=storage)
+        if storage is not None and schema_successor is None:
             registration = storage.retained.registration
         if preactivation is not None:
             from scripts.ops.nebius_pool_preactivation_operation import load_completed_preactivation

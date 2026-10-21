@@ -87,10 +87,11 @@ class HTTPSDevelopmentRuntimeObserver(ManagementKubernetesTransport):
                     raise ValueError('development runtime catalog evidence differs')
                 self.private_files[path] = raw
         self._preactivation_origin = copy.deepcopy(self.preactivation)
-        if preactivation is not None or storage is not None:
+        if preactivation is not None or schema_successor is not None or storage is not None:
             from scripts.ops.nebius_pool_storage_operation import resolve_runtime_storage
 
-            storage = resolve_runtime_storage(runtime=self.request, preactivation=preactivation, storage=storage)
+            storage = resolve_runtime_storage(runtime=self.request, preactivation=preactivation,
+                schema_successor=schema_successor, storage=storage)
         self.storage = copy.deepcopy(storage)
         if storage is not None:
             for path, raw in storage.files.items():
@@ -168,15 +169,12 @@ class HTTPSDevelopmentRuntimeObserver(ManagementKubernetesTransport):
             record, choices, _ = view
             if _expected_record is not None and record != _expected_record:
                 raise ValueError
-            if self.schema_successor is not None:
-                if _prechild_phase is not None or any(item['status'] != 'complete' for item in record['phases'].values()):
-                    raise ValueError
-                choices = {**choices, **{key: (row,) for key, row in self.schema_successor.resources.items()}}
             storage_view = None
             if _storage_correction is not None:
                 from scripts.ops.nebius_pool_storage_operation import storage_runtime_view
 
-                if (self.storage is not None or self.preactivation is not None or _preactivation_catalog is not None
+                if (self.storage is not None or self.schema_successor is not None
+                        or self.preactivation is not None or _preactivation_catalog is not None
                         or _shared_handoff is not None or _prechild_phase is not None
                         or _storage_correction.runtime != self.request
                         or any(item['status'] != 'complete' for item in record['phases'].values())):
@@ -190,6 +188,10 @@ class HTTPSDevelopmentRuntimeObserver(ManagementKubernetesTransport):
                 choices = dict(choices)
                 for row in (self.storage.resources.configuration, self.storage.resources.collector):
                     choices[_key(row)] = (row,)
+            if self.schema_successor is not None:
+                if _prechild_phase is not None or any(item['status'] != 'complete' for item in record['phases'].values()):
+                    raise ValueError
+                choices = {**choices, **{key: (row,) for key, row in self.schema_successor.resources.items()}}
             preactivation_view = None
             if _preactivation_catalog is not None:
                 from scripts.ops.nebius_pool_preactivation_live import preactivation_runtime_view

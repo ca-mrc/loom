@@ -151,6 +151,10 @@ as the operation's private input file. It contains:
   `publication`, `candidate` and `profile` objects, using the same publication
   shape as development runtime installation.
 - `connection`: the explicit cluster endpoint, CA and operator credential files.
+- Optional `storage`: the exact completed closed-storage correction's
+  `operation_id` and `inputs_sha256`. When native disk accounting needs correction,
+  complete that operation first; the schema upgrade must retain its corrected
+  registry and collector rather than restore the original accounting.
 
 The configured lifecycle scope must match the original development participant,
 environment, incarnation, installation and pool. Use the existing protected
@@ -175,7 +179,8 @@ Staging resources and original installation receipts remain unchanged.
 
 Retain the original runtime plus the completed `schema_successor` reference
 (`operation_id`, `inputs_path`, `inputs_sha256`) in subsequent shared-pool private
-inputs version 3. If a staging catalog must also advance before handoff, use
+inputs version 3 (version 4 with the matching `storage` reference when storage
+was corrected). If a staging catalog must also advance before handoff, use
 preactivation inputs version 2 rooted in that same successor. Activation and
 handoff reconstruct the upgraded selections from the completed journals; changing
 the old installation's advertised schema or rewriting its receipts is invalid.

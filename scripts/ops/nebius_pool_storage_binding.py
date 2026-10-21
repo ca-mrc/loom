@@ -14,9 +14,13 @@ from typing import Any, Literal, cast
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_development_collector_runtime import prepare_collector_runtime
 from scripts.ops.nebius_development_runtime_install import DevelopmentRuntimeInstallRequest
-from scripts.ops.nebius_development_runtime_retained import load_completed_runtime
+from scripts.ops.nebius_development_runtime_retained import (
+    CompletedDevelopmentRuntime,
+    load_completed_runtime,
+)
 from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
 from scripts.ops.nebius_management_stage import _MARKER
 from scripts.ops.nebius_pool_activation_database import _header
@@ -85,8 +89,27 @@ def prepare_storage_collector(*, runtime: DevelopmentRuntimeInstallRequest,
     documents alone are neither current readiness nor permission to write them.
     """
     try:
+        return _storage_collector_from_completed(completed=load_completed_runtime(runtime), refresh=refresh)
+    except Exception:
+        raise ValueError('storage collector history unqualified') from None
+
+
+def _storage_collector_from_completed(*, completed: CompletedDevelopmentRuntime,
+        refresh: ClosedPoolStorageRefresh) -> StorageCollectorPlan:
+    """Private same-load projection; keep origin and every immutable pin fresh."""
+    try:
+        origin = copy.deepcopy(completed)
+
+        def unchanged() -> None:
+            if completed != origin:
+                raise ValueError
+            if any(not path.is_absolute() or path != path.resolve()
+                    or private_state._private_read(path, limit=4 * 1024**2) != raw
+                    for path, raw in origin.files.items()):
+                raise ValueError
+
+        unchanged()
         refresh = ClosedPoolStorageRefresh.model_validate(refresh.model_dump())
-        completed = load_completed_runtime(runtime)
         if refresh.before != completed.request.database.manager.retained.request.registration.spec:
             raise ValueError
         rendered = prepare_collector_runtime(completed.request.database)
@@ -116,6 +139,7 @@ def prepare_storage_collector(*, runtime: DevelopmentRuntimeInstallRequest,
         next_container['envFrom'] = [{'configMapRef': {'name': configuration['metadata']['name']}}]
         resumed = copy.deepcopy(reconfigured)
         resumed['spec']['suspend'] = original['spec']['suspend']
+        unchanged()
         return StorageCollectorPlan(previous, configuration, original, paused, reconfigured, resumed)
     except Exception:
         raise ValueError('storage collector history unqualified') from None

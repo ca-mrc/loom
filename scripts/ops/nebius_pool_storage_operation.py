@@ -21,8 +21,8 @@ from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_closed_registry import ClosedRegistryAPI, RegistryNotDispatchedError
 from scripts.ops.nebius_development_runtime_install import DevelopmentRuntimeInstallRequest
 from scripts.ops.nebius_development_runtime_retained import (
+    CompletedDevelopmentRuntime,
     RetainedRuntimeReference,
-    load_completed_runtime,
 )
 from scripts.ops.nebius_development_runtime_transition import (
     DevelopmentRuntimeWorkloadAPI,
@@ -47,7 +47,7 @@ from scripts.ops.nebius_pool_registration import PoolRegistrationRequest
 from scripts.ops.nebius_pool_storage_binding import (
     ClosedPoolStorageRefresh,
     StorageCollectorPlan,
-    prepare_storage_collector,
+    _storage_collector_from_completed,
 )
 from scripts.ops.nebius_pool_storage_binding import StorageReference as StorageReference
 from scripts.ops.nebius_pool_storage_registry import (
@@ -65,6 +65,7 @@ _TRANSITIONS = {'pause': 'stop', 'reconfigure': 'control', 'resume': 'start'}
 
 
 if TYPE_CHECKING:
+    from scripts.ops.nebius_development_schema_upgrade import CompletedDevelopmentSchemaSuccessor
     from scripts.ops.nebius_pool_preactivation_operation import CompletedPreactivationCatalog
 
 
@@ -115,23 +116,28 @@ def _paths(runtime: DevelopmentRuntimeInstallRequest, operation_id: UUID) -> tup
 
 def _inputs(runtime: RetainedRuntimeReference, operation_id: UUID, target_disk_type: str
         ) -> tuple[StorageInputs, DevelopmentRuntimeInstallRequest, StorageCollectorPlan, dict[Path, bytes]]:
-    from scripts.ops.nebius_shared_pool_entry import _retained_runtime
+    from scripts.ops.nebius_shared_pool_entry import _retained_completed_runtime
 
     files: dict[Path, bytes] = {}
     runtime = RetainedRuntimeReference.model_validate(runtime.model_dump())
-    request = _retained_runtime(runtime, files)
-    completed = load_completed_runtime(request)
-    for path, raw in completed.files.items():
-        if path in files and files[path] != raw:
-            raise ValueError
-        files[path] = raw
+    completed = _retained_completed_runtime(runtime, files)
+    return _inputs_from_completed(runtime, operation_id, target_disk_type, completed, files)
+
+
+def _inputs_from_completed(runtime: RetainedRuntimeReference, operation_id: UUID, target_disk_type: str,
+        completed: CompletedDevelopmentRuntime, files: dict[Path, bytes]
+        ) -> tuple[StorageInputs, DevelopmentRuntimeInstallRequest, StorageCollectorPlan, dict[Path, bytes]]:
+    """Compose only this loader's qualified runtime; preserve its source pins."""
+    files = dict(files)
+    _unchanged(files)
+    request = completed.request
     before = request.database.manager.retained.request.registration.spec
     after = before.model_dump(mode='json')
     after['policy_revision'] += 1
     after['quota_identities']['storage'][3] = EXECUTION_DISK_STORAGE_QUOTAS[target_disk_type]
     refresh = ClosedPoolStorageRefresh.model_validate({'schema_version': 'loom.closed-pool-storage-refresh.v1',
         'operation_id': operation_id, 'target_disk_type': target_disk_type, 'before': before, 'after': after})
-    plan = prepare_storage_collector(runtime=request, refresh=refresh)
+    plan = _storage_collector_from_completed(completed=completed, refresh=refresh)
     inputs = StorageInputs(runtime=runtime, refresh=refresh,
         history={path: hashlib.sha256(raw).hexdigest() for path, raw in files.items()})
     _unchanged(files)
@@ -144,11 +150,13 @@ def _anchor(reference: StorageReference, state: Path) -> dict[str, Any]:
 
 def load_closed_storage(*, runtime: RetainedRuntimeReference, reference: StorageReference) -> RetainedClosedStorage:
     try:
-        from scripts.ops.nebius_shared_pool_entry import _retained_runtime
+        from scripts.ops.nebius_shared_pool_entry import _retained_completed_runtime
 
+        runtime = RetainedRuntimeReference.model_validate(runtime.model_dump())
         reference = StorageReference.model_validate(reference.model_dump())
-        original = _retained_runtime(runtime, {})
-        state, anchor, _ = _paths(original, reference.operation_id)
+        files: dict[Path, bytes] = {}
+        completed = _retained_completed_runtime(runtime, files)
+        state, anchor, _ = _paths(completed.request, reference.operation_id)
         marker = anchor / (str(reference.operation_id) + '-pool-storage-refresh.json')
         marker_raw, raw = _read(marker), _read(state / 'inputs.json')
         if _json(marker_raw) != _anchor(reference, state) or hashlib.sha256(raw).hexdigest() != reference.inputs_sha256:
@@ -156,7 +164,8 @@ def load_closed_storage(*, runtime: RetainedRuntimeReference, reference: Storage
         supplied = StorageInputs.model_validate(_json(raw))
         if supplied.runtime != runtime or supplied.refresh.operation_id != reference.operation_id:
             raise ValueError
-        expected, request, plan, files = _inputs(runtime, reference.operation_id, supplied.refresh.target_disk_type)
+        expected, request, plan, files = _inputs_from_completed(
+            runtime, reference.operation_id, supplied.refresh.target_disk_type, completed, files)
         if supplied != expected or any(path in files for path in (marker, state / 'inputs.json')):
             raise ValueError
         files.update({marker: marker_raw, state / 'inputs.json': raw})
@@ -285,23 +294,34 @@ def load_completed_storage(*, runtime: RetainedRuntimeReference, reference: Stor
 
 def resolve_runtime_storage(*, runtime: DevelopmentRuntimeInstallRequest,
         preactivation: CompletedPreactivationCatalog | None = None,
+        schema_successor: CompletedDevelopmentSchemaSuccessor | None = None,
         storage: CompletedClosedStorage | None = None) -> CompletedClosedStorage | None:
     """Resolve one explicit chain, never independently select two latest heads.
 
     A catalog pins its physical predecessor. A storage-only handoff selects its
     completed predecessor directly. Historical absent selections remain absent.
     """
+    if schema_successor is not None:
+        if schema_successor.runtime.request != runtime or (storage is not None and storage != schema_successor.storage):
+            raise ValueError('schema storage ancestry differs')
+        storage = schema_successor.storage
     if preactivation is not None:
         reference = preactivation.retained.inputs.storage
+        if schema_successor is not None and reference != (None if storage is None else storage.retained.reference):
+            raise ValueError('catalog schema storage ancestry differs')
         selected = None if reference is None else load_completed_storage(
             runtime=preactivation.retained.inputs.runtime, reference=reference)
         if storage is not None and storage != selected:
             raise ValueError('catalog storage ancestry differs')
         storage = selected
-    if storage is not None:
+    elif storage is not None:
         selected = load_completed_storage(runtime=storage.retained.inputs.runtime, reference=storage.retained.reference)
-        if selected != storage or storage.retained.runtime != runtime:
+        if selected != storage:
             raise ValueError('runtime storage ancestry differs')
+    if storage is not None:
+        if storage.retained.runtime != runtime:
+            raise ValueError('runtime storage ancestry differs')
+        _unchanged(storage.files)
     return storage
 
 
