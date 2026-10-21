@@ -380,18 +380,32 @@ jobs:
       - name: Verify controlled CI upgrade policy
         run: uv run --no-sync python scripts/check_ci_upgrade_policy.py
 
+  # Native dependencies reserve runner slots for quick checks first. Unselected
+  # prerequisites may skip; a selected skip/failure/cancellation blocks fan-out.
   tests-root:
     name: tests-root (${{ matrix.shard }})
     runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-24.04' }}
-    needs: [workflow-plan]
+    needs: [workflow-plan, lint-and-static, locked-environments, tests-packages, go-checks, nebius-iac]
     # Shards project ~7 minutes of pytest without coverage; leave room for
     # coverage, setup, wheel verification and cleanup.
     timeout-minutes: 50
     if: >-
+      !cancelled() &&
+      needs.workflow-plan.result == 'success' &&
+      ((needs.workflow-plan.outputs.lint_and_static == 'true' && needs.lint-and-static.result == 'success') ||
+       (needs.workflow-plan.outputs.lint_and_static == 'false' && needs.lint-and-static.result == 'skipped')) &&
+      ((needs.workflow-plan.outputs.locked_environments == 'true' && needs.locked-environments.result == 'success') ||
+       (needs.workflow-plan.outputs.locked_environments == 'false' && needs.locked-environments.result == 'skipped')) &&
+      ((needs.workflow-plan.outputs.tests_packages == 'true' && needs.tests-packages.result == 'success') ||
+       (needs.workflow-plan.outputs.tests_packages == 'false' && needs.tests-packages.result == 'skipped')) &&
+      ((needs.workflow-plan.outputs.go_checks == 'true' && needs.go-checks.result == 'success') ||
+       (needs.workflow-plan.outputs.go_checks == 'false' && needs.go-checks.result == 'skipped')) &&
+      ((needs.workflow-plan.outputs.nebius_iac == 'true' && needs.nebius-iac.result == 'success') ||
+       (needs.workflow-plan.outputs.nebius_iac == 'false' && needs.nebius-iac.result == 'skipped')) &&
       needs.workflow-plan.outputs.tests_root == 'true' &&
       needs.workflow-plan.outputs.gate_mode == 'full'
     strategy:
-      fail-fast: false
+      fail-fast: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
       matrix:
         include: ${{ fromJSON(needs.workflow-plan.outputs.tests_root_matrix) }}
     env:
@@ -558,10 +572,27 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
 
+  fast-feedback:
+    name: fast-feedback
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-latest' }}
+    needs: [workflow-plan, lint-and-static, locked-environments, tests-packages, go-checks, nebius-iac, tests-root, integration, web-checks]
+    if: always() && needs.workflow-plan.outputs.gate_mode == 'full' && needs.workflow-plan.outputs.docs_only != 'true'
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+      - name: Enforce selected quick checks and affected tests
+        env:
+          FEEDBACK_NEEDS: ${{ toJSON(needs) }}
+        run: python3 scripts/ci_fast_feedback.py enforce
+
+  # Heavy execution starts only after the selected quick and affected-test jobs.
+  # Reuse the existing manifests; no tests are duplicated or moved out of admission.
   nebius-pool:
     name: nebius-pool (${{ matrix.shard }})
     runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-24.04' }}
-    needs: [workflow-plan]
+    needs: [workflow-plan, fast-feedback]
     # Pool operator lifecycle modules; the slowest shard needs ~40 minutes
     # for pytest alone. Selected only when operator inputs change.
     timeout-minutes: 50
@@ -569,7 +600,7 @@ jobs:
       needs.workflow-plan.outputs.nebius_pool == 'true' &&
       needs.workflow-plan.outputs.gate_mode == 'full'
     strategy:
-      fail-fast: false
+      fail-fast: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
       matrix:
         include: ${{ fromJSON(needs.workflow-plan.outputs.nebius_pool_matrix) }}
     env:
@@ -702,7 +733,7 @@ jobs:
   runtime-payload:
     name: runtime-payload
     runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-24.04' }}
-    needs: [workflow-plan]
+    needs: [workflow-plan, fast-feedback]
     timeout-minutes: 10
     if: >-
       needs.workflow-plan.outputs.runtime_payload == 'true' &&
@@ -938,9 +969,7 @@ jobs:
           mapfile -t packages < "$RUNNER_TEMP/go-packages.txt"
           go test -race "${packages[@]}"
 
-  # Required frontend gate. It builds and serves the production bundle under
-  # a route prefix, then exercises logged-out, user, and admin paths at
-  # four viewports with strict browser failure ledgers and axe.
+  # Frontend contract, static and unit feedback precedes production/browser work.
   web-checks:
     name: web-checks
     runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-24.04' }}
@@ -1025,6 +1054,29 @@ jobs:
             npm run test:coverage
           fi
 
+  # Production/browser work remains required, after shared fast feedback.
+  web-runtime:
+    name: web-runtime
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-24.04' }}
+    needs: [workflow-plan, fast-feedback]
+    timeout-minutes: 20
+    if: >-
+      needs.workflow-plan.outputs.web_runtime == 'true' &&
+      needs.workflow-plan.outputs.gate_mode == 'full'
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install frozen frontend dependencies
+        working-directory: web
+        run: npm ci
+
       - name: Production build
         if: needs.workflow-plan.outputs.web_runtime == 'true'
         working-directory: web
@@ -1058,21 +1110,29 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  # Fast integration tier — testcontainers Postgres + MinIO only.
-  # Excludes the `@pytest.mark.docker` tests (real DockerDriver,
-  # network-policy, trial-e2e, subprocess-agent, gateway-with-litellm).
-  # The planner selects each tier from paths or opt-in labels. The growing
-  # integration shards need bounded headroom for tests, coverage and cleanup.
+  # Fast integration tier uses the existing affected manifests.
   integration:
     name: integration (${{ matrix.shard }})
     runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-latest' }}
-    needs: [workflow-plan]
+    needs: [workflow-plan, lint-and-static, locked-environments, tests-packages, go-checks, nebius-iac]
     timeout-minutes: 75
     if: >-
+      !cancelled() &&
+      needs.workflow-plan.result == 'success' &&
+      ((needs.workflow-plan.outputs.lint_and_static == 'true' && needs.lint-and-static.result == 'success') ||
+       (needs.workflow-plan.outputs.lint_and_static == 'false' && needs.lint-and-static.result == 'skipped')) &&
+      ((needs.workflow-plan.outputs.locked_environments == 'true' && needs.locked-environments.result == 'success') ||
+       (needs.workflow-plan.outputs.locked_environments == 'false' && needs.locked-environments.result == 'skipped')) &&
+      ((needs.workflow-plan.outputs.tests_packages == 'true' && needs.tests-packages.result == 'success') ||
+       (needs.workflow-plan.outputs.tests_packages == 'false' && needs.tests-packages.result == 'skipped')) &&
+      ((needs.workflow-plan.outputs.go_checks == 'true' && needs.go-checks.result == 'success') ||
+       (needs.workflow-plan.outputs.go_checks == 'false' && needs.go-checks.result == 'skipped')) &&
+      ((needs.workflow-plan.outputs.nebius_iac == 'true' && needs.nebius-iac.result == 'success') ||
+       (needs.workflow-plan.outputs.nebius_iac == 'false' && needs.nebius-iac.result == 'skipped')) &&
       needs.workflow-plan.outputs.gate_mode == 'full' &&
       needs.workflow-plan.outputs.integration == 'true'
     strategy:
-      fail-fast: false
+      fail-fast: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
       matrix:
         include: ${{ fromJSON(needs.workflow-plan.outputs.integration_matrix) }}
     env:
@@ -1185,13 +1245,13 @@ jobs:
   integration-docker:
     name: integration-docker (${{ matrix.shard }})
     runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-24.04' }}
-    needs: [workflow-plan]
+    needs: [workflow-plan, fast-feedback]
     timeout-minutes: 40
     if: >-
       needs.workflow-plan.outputs.gate_mode == 'full' &&
       needs.workflow-plan.outputs.integration_docker == 'true'
     strategy:
-      fail-fast: false
+      fail-fast: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
       matrix:
         include: ${{ fromJSON(needs.workflow-plan.outputs.integration_docker_matrix) }}
     env:
@@ -1283,7 +1343,7 @@ jobs:
           mapfile -t test_paths < "${{ steps.manifest.outputs.paths_file }}"
           [[ ${#test_paths[@]} -gt 0 ]]
           uv run --no-sync pytest -m "${CI_PYTEST_MARKERS:-not legacy_pool}" "${test_paths[@]}" \
-            --durations=15
+            --maxfail=1 --durations=15
 
   # Optional combined coverage summary for PRs and manual diagnostics.
   # The default fast-tier
@@ -1395,6 +1455,7 @@ jobs:
       needs.workflow-plan.outputs.gate_mode != 'filtered'
     needs:
       - workflow-plan
+      - fast-feedback
       - locked-environments
       - lint-and-static
       - runtime-payload
@@ -1408,10 +1469,12 @@ jobs:
       - integration-docker
       - coverage-summary
       - web-checks
+      - web-runtime
     steps:
       - name: Enforce selected validation results
         env:
           PLAN_RESULT: ${{ needs.workflow-plan.result }}
+          FEEDBACK_RESULT: ${{ needs.fast-feedback.result }}
           GATE_MODE: ${{ needs.workflow-plan.outputs.gate_mode }}
           LINT_RESULT: ${{ needs.lint-and-static.result }}
           LINT_SELECTED: ${{ needs.workflow-plan.outputs.lint_and_static }}
@@ -1439,6 +1502,8 @@ jobs:
           COVERAGE_RESULT: ${{ needs.coverage-summary.result }}
           WEB_SELECTED: ${{ needs.workflow-plan.outputs.web_checks }}
           WEB_RESULT: ${{ needs.web-checks.result }}
+          WEB_RUNTIME_SELECTED: ${{ needs.workflow-plan.outputs.web_runtime }}
+          WEB_RUNTIME_RESULT: ${{ needs.web-runtime.result }}
         run: |
           set -euo pipefail
           case "$GATE_MODE" in
@@ -1480,7 +1545,11 @@ jobs:
           require_boolean integration_docker "$DOCKER_SELECTED"
           require_boolean coverage_summary "$COVERAGE_SELECTED"
           require_boolean web_checks "$WEB_SELECTED"
+          require_boolean web_runtime "$WEB_RUNTIME_SELECTED"
           require_success workflow-plan "$PLAN_RESULT"
+          if [[ "$DOCS_ONLY" != "true" ]]; then
+            require_success fast-feedback "$FEEDBACK_RESULT"
+          fi
           require_boolean locked_environments "$LOCKED_SELECTED"
           require_boolean tests_root "$ROOT_SELECTED"
           require_boolean nebius_pool "$POOL_SELECTED"
@@ -1497,6 +1566,7 @@ jobs:
           require_selected "$GO_SELECTED" go-checks "$GO_RESULT"
           require_selected "$COVERAGE_SELECTED" fast-coverage "$FAST_COVERAGE_RESULT"
           require_selected "$WEB_SELECTED" web-checks "$WEB_RESULT"
+          require_selected "$WEB_RUNTIME_SELECTED" web-runtime "$WEB_RUNTIME_RESULT"
           require_selected "$INTEGRATION_SELECTED" integration "$INTEGRATION_RESULT"
           require_selected "$DOCKER_SELECTED" integration-docker "$DOCKER_RESULT"
           require_selected "$COVERAGE_SELECTED" coverage-summary "$COVERAGE_RESULT"

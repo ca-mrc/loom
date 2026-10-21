@@ -140,7 +140,7 @@ def test_manifest_is_selected_before_dependency_or_registry_installation():
     assert contract["strategy"]["matrix"]["include"] == "${{ fromJSON(needs.plan.outputs.cluster_smoke_matrix) }}"
     assert contract["env"]["TEST_CHANGED_PATHS"] == "${{ needs.plan.outputs.test_changes }}"
     assert selector["env"]["SHARD_COUNT"] == "${{ matrix.shard_count }}"
-    assert contract["strategy"]["fail-fast"] is False
+    assert "pull_request" in contract["strategy"]["fail-fast"] and "merge_group" in contract["strategy"]["fail-fast"]
     assert not contract.get("continue-on-error", False)
     assert all("validate_environment_isolation.py" not in step.get("run", "")
                and "loom cluster render" not in step.get("run", "") for step in steps)

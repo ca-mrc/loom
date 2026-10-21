@@ -90,6 +90,43 @@ Kubernetes checks include the Nebius platform and execution contracts. Candidate
 publication uses the protected `nebius-integration` Environment from `dev`;
 PR checks do not receive its credentials. CI does not deploy the live platform.
 
+## Early feedback and heavy-job ordering
+
+Inside `CI`, selected lint/type/codegen, locked-environment, package, Go and
+Terraform checks run first. Selected root tests and the non-Docker integration
+tier follow those checks. Frontend API/type/lint/unit checks also contribute to
+`fast-feedback`, an internal aggregation job, not a required merge context.
+It rejects every selected failure, cancellation or unexpected skip. Unselected
+lanes may skip. Existing changed-path selection, test manifests and coverage
+requests remain in force; full-regression requests still use full manifests.
+
+Pool, Docker integration, runtime payload and frontend production/browser work
+start only after `fast-feedback` succeeds. Frontend runtime work has its own
+job and is still enforced by `repository-checks`; no test is omitted or repeated.
+The three other source workflows wait in their existing planning jobs before
+releasing image builds, cluster shards or Compose smoke. They read only GitHub's
+native CI run/job results, matching the complete shared run identity: event,
+head, base, PR, update/action and validation-scope labels. A green different-head,
+different-base or narrower-scope run cannot release heavy work. Missing results
+wait at most 90 minutes; failed/cancelled feedback and API errors fail closed.
+Manual source-workflow dispatches remain independent diagnostics because they
+have no companion CI event.
+
+The cross-workflow wait uses the existing three planning runners and read-only
+Actions API permission on those jobs. Waiting therefore has a runner cost; it
+does not create extra heavy runners or repeat the feedback tests. A passing run
+also gives up some parallelism and reinstalls frontend dependencies in its later
+runtime job. Compare first-failure latency, passing-run time and runner-minutes
+per successful merge before claiming a throughput gain. No dependency download,
+cache or retry policy is changed by this ordering work.
+
+PR and merge-group root, integration, pool, Docker, image and cluster matrices
+stop sibling shards on failure. Manual/scheduled/push diagnostics retain all
+selected shards. Docker and cluster pytest stop at the first failure and still
+perform fixture teardown. All four original source gates remain direct native
+Actions jobs; selected blocked/skipped work cannot turn a required gate green.
+There is no custom check publisher, fifth required context or ruleset change.
+
 ## Public image pulls in validation
 
 The protected Docker consumers (root tests, runtime payloads, both integration

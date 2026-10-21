@@ -239,6 +239,7 @@ def test_frontend_contract_only_retains_codegen_and_full_ui_for_frontend_inputs(
     workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
     steps = workflow["jobs"]["web-checks"]["steps"]
     assert "if" not in next(row for row in steps if row.get("name") == "Verify generated API types")
+    runtime = workflow["jobs"]["web-runtime"]["steps"]
     for name in (
         "Vitest coverage gate",
         "Production build",
@@ -246,7 +247,7 @@ def test_frontend_contract_only_retains_codegen_and_full_ui_for_frontend_inputs(
         "Prefix-route browser, axe, console, and network gate",
     ):
         assert (
-            next(row for row in steps if row.get("name") == name)["if"]
+            next(row for row in (steps if name == "Vitest coverage gate" else runtime) if row.get("name") == name)["if"]
             == "needs.workflow-plan.outputs.web_runtime == 'true'"
         )
 
