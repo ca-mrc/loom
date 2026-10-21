@@ -313,16 +313,18 @@ runs it, releases the permit. Trials are run via `asyncio.gather`.
 
 Per-trial state isolation: each trial has its own `Driver` instance
 (via `driver_factory()`), its own `TrajectoryWriter`, its own
-working dir under `<output_dir>/<trial_id>/`. They share the
-`UpstreamDirectGatewayClient` (provider SDK clients are themselves
-safe for concurrent use).
+working dir under `<output_dir>/<trial_id>/`, and gateway wrapper. Trials for
+one model share provider SDK clients, which close after all sibling trials
+have finished or completed cancellation cleanup.
 
 ## TB-2 report integration
 
 `--tb2-report PATH` collects every `TrialResult` across all completed
-trials and writes
+trials across every selected model, sequential or parallel, and writes
 `loom_benchmark_terminal_bench_2.report.to_tb2_report(trials)` to the
-given path after `asyncio.gather` resolves. Lazy import — the TB-2
+given path once after all model runs have finished or completed cancellation
+cleanup. Completed results remain available in the report when a later model
+fails. Lazy import — the TB-2
 sibling package is optional unless the flag is actually used. Missing
 package logs a warning, doesn't crash.
 
