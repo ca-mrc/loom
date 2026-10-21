@@ -171,6 +171,50 @@ def test_shared_pool_scope_follows_operator_dependencies_and_preserves_unknown_e
     assert select("scripts/ops/unrelated.py") == tests
 
 
+def test_helper_import_discovery_is_statement_bounded_and_fresh(tmp_path, monkeypatch):
+    # Large literal fixtures are not imports. Traversal work must depend on
+    # statements, while retaining imports inside every nested statement container.
+    source = """PAYLOAD = PAYLOAD_VALUE
+if True:
+    import tests.support.alpha as alpha
+class Nested:
+    async def load(self):
+        try:
+            from tests.support import beta
+        except Exception:
+            import tests.support.gamma
+        finally:
+            match value:
+                case _:
+                    from tests.support.delta import VALUE
+"""
+    target = tmp_path / "tests/sample.py"
+    target.parent.mkdir()
+    (tmp_path / "tests/support").mkdir()
+    for name in ("alpha", "beta", "gamma", "delta", "later"):
+        (tmp_path / f"tests/support/{name}.py").write_text("import tests.sample\n")
+    target.write_text(source.replace("PAYLOAD_VALUE", "[0]"))
+    visited = 0
+    children = ownership.ast.iter_child_nodes
+
+    def count(node):
+        nonlocal visited
+        visited += 1
+        return children(node)
+
+    monkeypatch.setattr(ownership.ast, "iter_child_nodes", count)
+    expected = frozenset({"tests/sample.py", "tests/support/alpha.py", "tests/support/beta.py",
+                          "tests/support/gamma.py", "tests/support/delta.py"})
+    assert ownership._imported_test_modules(("tests/sample.py",), repo_root=tmp_path) == expected
+    small = visited
+    visited = 0
+    target.write_text(source.replace("PAYLOAD_VALUE", "[" + "0," * 5000 + "]")
+                      + "from tests.support import later\n")
+    assert ownership._imported_test_modules(("tests/sample.py",), repo_root=tmp_path) == (
+        expected | {"tests/support/later.py"})
+    assert visited <= 2 * small + 40, "fixture expressions multiplied import-discovery traversal work"
+
+
 def test_staging_workflow_passes_the_same_changed_paths_to_its_owner():
     workflow = yaml.safe_load((ROOT / ".github/workflows/staging-smoke.yml").read_text())
     job = workflow["jobs"]["system-smoke"]

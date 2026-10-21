@@ -160,16 +160,17 @@ def test_shared_pool_scope_tracks_consumers_not_the_entire_operator_lane(changes
     ("tests/ops/nebius_participant_external_fixture.py",),
     ("scripts/ops/nebius_shared_pool_api.py",),
     ("scripts/ops/ci_reliability_metrics.py",),
-    ("src/loom/config.py",),
+    ("uv.lock",),
 ])
 @pytest.mark.parametrize("lane", ["tests-root", "nebius-pool"])
-def test_shard_manifests_execute_exactly_the_planned_selection(changes, lane):
+def test_shard_manifests_execute_exactly_the_planned_selection(changes, lane, tmp_path):
     # Select from the whole lane, then shard: each job must run its part of the
     # planned set, never a set decided by which files share its shard.
+    from dataclasses import replace
     from pathlib import Path
 
     from scripts.component_ownership import (
-        _tracked_paths,
+        TestShardPolicy,
         load_manifest,
         selected_test_paths,
         test_shard_matrix,
@@ -177,9 +178,35 @@ def test_shard_manifests_execute_exactly_the_planned_selection(changes, lane):
 
     root = Path(__file__).resolve().parents[2]
     manifest = load_manifest(root / "config/component-ownership.toml")
-    tracked = _tracked_paths(root)
-    common = dict(tracked_paths=tracked, lane=lane, repo_root=root, changed_paths=changes)
+    prefix = "test_nebius_shared_pool" if lane == "nebius-pool" else "test_ci_selection_fixture"
+    tests = tuple(f"tests/ops/{prefix}_{suffix}.py" for suffix in ("alpha", "beta", "gamma", "delta"))
+    files = {
+        # A string-loaded test helper lives in another shard. Selecting within
+        # each shard loses this edge and conservatively runs unrelated siblings.
+        tests[0]: f'from importlib import import_module\nVALUE = import_module("tests.ops.{prefix}_beta").VALUE\n',
+        tests[1]: "from tests.ops.nebius_participant_external_fixture import VALUE\n",
+        tests[2]: "def test_unrelated(): pass\n",
+        tests[3]: "def test_other(): pass\n",
+        "tests/ops/nebius_participant_external_fixture.py": "from scripts.ops.nebius_shared_pool_api import VALUE\n",
+        "scripts/ops/nebius_shared_pool_api.py": "VALUE = 1\n",
+        "scripts/ops/ci_reliability_metrics.py": "VALUE = 2\n",
+        "uv.lock": "",
+    }
+    for path, source in files.items():
+        target = tmp_path / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(source)
+    # Real ownership policy and real selection, but only the dependency graph
+    # needed to test this contract. Whole-repository shard ownership is audited
+    # separately; repeating its import graph once per real shard adds no case.
+    manifest = replace(manifest, test_sharding=(TestShardPolicy(lane, 3, "round-robin", None, ()),))
+    common = dict(tracked_paths=tuple(files), lane=lane, repo_root=tmp_path, changed_paths=changes)
     planned = selected_test_paths(manifest, **common)
+    full_lane = lane == "tests-root" or changes in (
+        ("uv.lock",), ("tests/ops/nebius_participant_external_fixture.py",))
+    expected = tests if full_lane else (
+        () if changes == ("scripts/ops/ci_reliability_metrics.py",) else tests[:2])
+    assert set(planned) == set(expected)
     policy = manifest.test_shard_policy(lane)
     assert policy is not None
     shards = [selected_test_paths(manifest, **common, shard_index=index, shard_count=policy.shard_count)
