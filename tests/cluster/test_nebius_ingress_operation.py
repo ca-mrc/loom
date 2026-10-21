@@ -12,10 +12,13 @@ import shutil
 import socket
 import ssl
 import subprocess
+import sys
+import tarfile
 import time
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from uuid import uuid4
 
 import pytest
@@ -57,21 +60,74 @@ pytestmark = pytest.mark.skipif(os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1"
                                 reason="requires an explicitly disposable Kubernetes API")
 
 
-def _pull_fixture_image(container, image):
-    # Docker save/import reconstructs the manifest and changes its digest. Pull
-    # original bytes; only a mirror quota error permits the same pinned upstream.
+def _prepare_fixture_image(image, directory):
+    # Host-side OCI transport preserves original bytes without requiring the
+    # nested node's resolver for application images. Classic Docker save can
+    # reconstruct the manifest and change its digest.
     source = image.replace("docker.io/library/", "public.ecr.aws/docker/library/")
+    with TemporaryDirectory(dir=directory) as scratch:
+        layout = Path(scratch) / "layout"
+        layout.mkdir()
+
+        def copy(source):
+            # Index pins need both the selected platform's blobs and the original
+            # index. Preserve the latter without downloading other architectures.
+            for mode in ("system", "index-only"):
+                try:
+                    subprocess.run(["skopeo", "copy", "--preserve-digests", "--override-os", "linux",
+                                    "--override-arch", "amd64", "--multi-arch", mode,
+                                    "docker://" + source, f"oci:{layout}:{image}"],
+                                   check=True, capture_output=True, text=True, timeout=180)
+                except subprocess.CalledProcessError as error:
+                    error.add_note("Host fixture image acquisition failed: " + (error.stderr or "")[-4096:])
+                    raise
+
+        try:
+            copy(source)
+        except subprocess.CalledProcessError as error:
+            # Skopeo reports registry HTTP 429 as the distribution error code.
+            if "toomanyrequests:" not in (error.stderr or "").lower():
+                raise
+            copy(source.replace("public.ecr.aws/docker/library/", "docker.io/library/"))
+        archive = Path(scratch) / "image.oci.tar"
+        with tarfile.open(archive, "w") as saved:
+            for name in ("oci-layout", "index.json", "blobs"):
+                saved.add(layout / name, arcname=name)
+        return archive.rename(directory / (image.split("@sha256:", 1)[1] + ".oci.tar"))
+
+
+@pytest.fixture
+def fixture_images(tmp_path):
+    # Finish host acquisition before starting Kubernetes, and remove every
+    # archive even when setup or the later test fails before importing it.
+    with TemporaryDirectory(dir=tmp_path) as directory:
+        yield {image: _prepare_fixture_image(image, Path(directory))
+               for image in (TRAEFIK, PYTHON, POSTGRES, GUARD_PYTHON)}
+
+
+def _import_fixture_image(container, image, archive):
+    remote = "/tmp/loom-ingress-fixture.oci.tar"
     try:
-        _run(container, "ctr", "images", "pull", "--platform", "linux/amd64", "--skip-metadata", source, timeout=180)
-    except AssertionError as error:
-        if "429 Too Many Requests" not in str(error):
-            raise
-        source = source.replace("public.ecr.aws/docker/library/", "docker.io/library/")
-        _run(container, "ctr", "images", "pull", "--platform", "linux/amd64", "--skip-metadata", source, timeout=180)
-    rows = [line.split() for line in _run(container, "ctr", "images", "ls").splitlines()]
-    assert any(row[0] == source and row[2] == image.split("@", 1)[1] for row in rows if len(row) >= 3)
-    if source != image:
-        _run(container, "ctr", "images", "tag", source, image)
+        subprocess.run(["docker", "cp", str(archive), container.get_wrapped_container().id + ":" + remote],
+                       check=True, timeout=60)
+        _run(container, "ctr", "images", "import", "--platform", "linux/amd64", remote, timeout=180)
+        rows = [line.split() for line in _run(container, "ctr", "images", "ls").splitlines()]
+        assert any(row[0] == image and row[2] == image.split("@", 1)[1] for row in rows if len(row) >= 3), rows
+    finally:
+        original = sys.exception()
+        cleanup_errors = []
+        for cleanup in (lambda: archive.unlink(missing_ok=True),
+                        lambda: _run(container, "rm", "-f", remote, timeout=5)):
+            try:
+                cleanup()
+            except Exception as error:
+                cleanup_errors.append(error)
+        if cleanup_errors:
+            failure = original if original is not None else cleanup_errors.pop(0)
+            for error in cleanup_errors:
+                failure.add_note(f"Fixture archive cleanup failed: {error}")
+            if original is None:
+                raise failure
 
 
 @pytest.fixture(autouse=True)
@@ -264,7 +320,8 @@ CREATE TABLE task_image_materialization_attempts (native_build jsonb);
 
 
 @pytest.mark.timeout(420)
-def test_connected_installation_recovers_then_cuts_over_with_installed_guard(inputs, platform_inputs, tmp_path, monkeypatch):
+def test_connected_installation_recovers_then_cuts_over_with_installed_guard(
+        inputs, platform_inputs, tmp_path, monkeypatch, fixture_images):
     config, binding, _fake, roots, _selected, _root = inputs
     platform, candidate, profile = platform_inputs
     namespace, node_name = platform["namespace"], "computeinstance-ingressfixture"
@@ -288,19 +345,8 @@ def test_connected_installation_recovers_then_cuts_over_with_installed_guard(inp
         _run(container, "kubectl", "wait", "node/" + node_name, "--for=condition=Ready", "--timeout=60s")
         _run(container, "mkdir", "-p", "/tmp/loom-ingress-qualification")
         subprocess.run(["docker", "cp", str(tools) + "/.", ident + ":/tmp/loom-ingress-qualification/"], check=True, timeout=60)
-        # Reproduce the observed mirror quota failure, but fetch and execute the
-        # original pinned image from its real upstream through the fallback.
-        real_run = _run
-        limited_image = TRAEFIK.replace("docker.io/library/", "public.ecr.aws/docker/library/")
-
-        def registry_quota(container, *args, **kwargs):
-            if args[:3] == ("ctr", "images", "pull") and args[-1] == limited_image:
-                raise AssertionError("429 Too Many Requests: Data limit exceeded")
-            return real_run(container, *args, **kwargs)
-
-        monkeypatch.setitem(globals(), "_run", registry_quota)
-        for image in (TRAEFIK, PYTHON, POSTGRES, GUARD_PYTHON):
-            _pull_fixture_image(container, image)
+        for image, archive in fixture_images.items():
+            _import_fixture_image(container, image, archive)
         image = "cr.eu-north1.nebius.cloud/test/loom-shared-ingress@" + TRAEFIK.split("@", 1)[1]
         _run(container, "ctr", "images", "tag", TRAEFIK, image)
         _run(container, "kubectl", "wait", "--for=create", "node/" + node_name, "--timeout=60s")

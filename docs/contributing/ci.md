@@ -106,6 +106,16 @@ The separate image BuildKit containers use `config/ci-buildkit.toml` by default;
 an existing readable `/etc/buildkit/loom-ci.toml` retains precedence and is not
 modified. Both pull paths retain every original image reference and digest.
 
+The connected ingress fixture prepares its pinned application images on the host
+with Skopeo before starting disposable K3s, then imports OCI archives and verifies
+the original references and digests. Multi-architecture pins retain the original
+index plus the AMD64 payload, not a replacement child-manifest identity. Only a
+mirror's `toomanyrequests` response permits the same digest from its upstream;
+other acquisition errors fail setup. Deterministic helper coverage exercises that
+fallback; the connected test does not deliberately force a live upstream pull.
+This removes its nested application-image registry dependency, not native K3s
+addon pulls or other test dependencies. Archives are removed after use or failure.
+
 The pinned `setup-uv` action uses v10.0.1, which handles transient manifest
 transport failures with at most three attempts and stops reading the version
 list after the selected version. This addresses the observed single five-second
@@ -417,6 +427,9 @@ containerd log tail and CRI sandbox/container listings from its disposable node;
 each command has a five-second deadline and a 16-KiB output tail. Diagnostic
 failures preserve the original error. The retirement fixture also records PVC
 status without logging Secrets or Pod specs.
+The database guard fixture collects the same node/runtime/event evidence before
+teardown when PostgreSQL startup or its subsequent assertions fail. This is
+diagnostic coverage, not a timeout extension or a claimed startup-stall repair.
 The repeat-refresh test also requires this native DNS readiness as an existing
 Deployment/ReplicaSet/Pod reconciliation startup witness before its functional
 30-second window; it adds no startup budget or storage prerequisite.
