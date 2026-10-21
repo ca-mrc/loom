@@ -7,11 +7,18 @@ name: ci-dependency-cache
 # that CI jobs restore read-only. It runs on protected dev or on a schedule,
 # never on PR code, and saves once per uv.lock (an existing key is not
 # overwritten). PRs and merge groups read dev's caches.
+#
+# It is also the only writer of the source-built MinIO fixture archives.
+# quay.io/minio/minio no longer serves anonymous pulls, so a cache miss means a
+# multi-minute Go build that fails when the Go module proxy resets. CI saves
+# used to come only from trusted push runs, per selected image set and per
+# RUNNER_TEMP path, so recipe changes left PR jobs cold until a dev run
+# happened to select the same shards.
 
 on:
   push:
     branches: [dev]
-    paths: [uv.lock, .github/workflows/ci-dependency-cache.yml]
+    paths: [uv.lock, tests/support/minio_images.py, .github/workflows/ci-dependency-cache.yml]
   # Backstop for an evicted or never-written key.
   schedule:
     - cron: "41 7 * * *"
@@ -57,3 +64,43 @@ jobs:
         run: |
           uv sync --locked --all-packages --extra dev --extra cluster --extra rollout \
             --group ci-coverage --python 3.11
+
+  minio-fixtures:
+    name: Save source-built MinIO fixtures
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+
+      # Without --test-paths-file every fixture is selected; readers use the
+      # same key for any non-empty selection.
+      - name: Compute fixture cache key
+        id: key
+        run: echo "key=$(python3 -m tests.support.minio_images --cache-key)" >> "$GITHUB_OUTPUT"
+
+      - name: Check for an existing archive set
+        id: existing
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: /home/runner/.cache/loom-minio-fixtures
+          key: ${{ runner.os }}-${{ steps.key.outputs.key }}
+          lookup-only: true
+
+      - name: Build and verify every pinned fixture
+        if: steps.existing.outputs.cache-hit != 'true'
+        run: |
+          python3 -m tests.support.minio_images \
+            --cache-dir /home/runner/.cache/loom-minio-fixtures --save-cache true
+          # An incomplete set would stick under this key, so save only all of it.
+          expected=$(python3 -c 'from tests.support.minio_images import SOURCE_FIXTURES; print(len(SOURCE_FIXTURES))')
+          actual=$(find /home/runner/.cache/loom-minio-fixtures -name '*.tar' | wc -l)
+          [ "$actual" -eq "$expected" ] || { echo "expected $expected fixture archives, found $actual" >&2; exit 1; }
+
+      - name: Save fixture archives
+        if: steps.existing.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: /home/runner/.cache/loom-minio-fixtures
+          key: ${{ runner.os }}-${{ steps.key.outputs.key }}
