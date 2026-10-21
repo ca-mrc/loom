@@ -41,7 +41,6 @@ services:
       - "127.0.0.1:${LOOM_SYSTEM_REGISTRY_PORT:-55000}:5000"
 
   llm-gateway:
-    image: loom-llm-gateway:${COMPOSE_PROJECT_NAME}
     build:
       context: ..
       dockerfile: deploy/Dockerfile.gateway
@@ -62,7 +61,6 @@ services:
       - "127.0.0.1:${LOOM_SYSTEM_GATEWAY_PORT:-59100}:9100"
 
   control-plane:
-    image: loom-control-plane:${COMPOSE_PROJECT_NAME}
     build:
       context: ..
       dockerfile: deploy/Dockerfile.control-plane
@@ -85,7 +83,6 @@ services:
       - "127.0.0.1:${LOOM_SYSTEM_CONTROL_PLANE_PORT:-58080}:8080"
 
   worker:
-    image: loom-worker:${COMPOSE_PROJECT_NAME}
     build:
       context: ..
       dockerfile: deploy/Dockerfile.worker
@@ -129,7 +126,6 @@ services:
       - task_image_builder_storage_probe:/run/loom/docker-storage-probe:ro
 
   task-image-builder:
-    image: loom-worker:${COMPOSE_PROJECT_NAME}
     build:
       context: ..
       dockerfile: deploy/Dockerfile.worker

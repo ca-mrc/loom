@@ -389,6 +389,8 @@ def stack_down() -> None:
             "down",
             "-v",
             "--remove-orphans",
+            "--rmi",
+            "local",
             check=False,
             timeout_sec=_COMPOSE_TEARDOWN_TIMEOUT_SEC,
         )

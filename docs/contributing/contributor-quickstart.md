@@ -261,8 +261,8 @@ LOOM_RUN_MODAL_INTEGRATION=1 \
 
 The system-test harness chooses a unique Compose project for each pytest
 process, or honors an explicitly set `COMPOSE_PROJECT_NAME`. Worker and builder
-use that project as their sandbox identity, and built service tags are scoped
-to it. Restart cleanup preserves other projects' running/stopped trial
+use that project as their sandbox identity. Compose generates project-scoped
+service image names and removes those tags during teardown. Restart cleanup preserves other projects' running/stopped trial
 containers and shared task-image caches. Shared image garbage collection is
 the Docker daemon owner's responsibility; insufficient disk space still fails
 builder admission. To inspect or recover a manually interrupted run, set a

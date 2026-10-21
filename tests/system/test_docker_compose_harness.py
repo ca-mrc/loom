@@ -762,6 +762,8 @@ def test_failed_teardown_redacts_diagnostics_before_down(
             "down",
             "-v",
             "--remove-orphans",
+            "--rmi",
+            "local",
         ),
     ]
     assert timeouts == [docker_compose._COMPOSE_DIAGNOSTICS_TIMEOUT_SEC] * 5 + [
@@ -839,6 +841,8 @@ def test_diagnostics_failure_does_not_mask_teardown(monkeypatch: Any) -> None:
             "down",
             "-v",
             "--remove-orphans",
+            "--rmi",
+            "local",
         ),
     ]
 
