@@ -88,6 +88,9 @@ If native disk accounting needs correction, complete that CLOSED storage
 successor first and pin it in the schema inputs. The upgraded registry and
 collector retain that physical binding; later catalog, handoff and recovery
 follow the same storage → schema ancestry rather than independent selections.
+Each schema-history load qualifies the original runtime once and reuses that
+result only within the call, rechecking all pinned history before returning.
+Later loads reconstruct the runtime afresh; no completed projection is cached.
 
 The schema parent shares the existing handoff mutation lock and rejects prior
 handoff/recovery/preactivation dispatch. It requires idle work and retired personal

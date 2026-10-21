@@ -27,7 +27,6 @@ from scripts.ops.nebius_development_runtime_install import DevelopmentRuntimeIns
 from scripts.ops.nebius_development_runtime_retained import (
     CompletedDevelopmentRuntime,
     RetainedRuntimeReference,
-    load_completed_runtime,
 )
 from scripts.ops.nebius_development_runtime_transition import (
     DevelopmentRuntimeWorkloadAPI,
@@ -144,7 +143,7 @@ def _unchanged(files: dict[Path, bytes]) -> None:
 def load_development_schema_upgrade(reference: DevelopmentSchemaReference, *,
         operator: bool = False) -> RetainedDevelopmentSchema:
     from scripts.ops.nebius_pool_storage_operation import load_completed_storage
-    from scripts.ops.nebius_shared_pool_entry import _retained_runtime
+    from scripts.ops.nebius_shared_pool_entry import _retained_completed_runtime
 
     reference = DevelopmentSchemaReference.model_validate(reference.model_dump())
     raw = _read(reference.inputs_path)
@@ -152,8 +151,10 @@ def load_development_schema_upgrade(reference: DevelopmentSchemaReference, *,
         raise ValueError('development_schema_inputs_changed')
     inputs = DevelopmentSchemaInputs.model_validate_json(raw)
     files = {reference.inputs_path: raw}
-    request = _retained_runtime(inputs.runtime, files)
-    runtime = load_completed_runtime(request)
+    # This private load already qualifies the completed runtime and pins its
+    # history. Reuse it only within this call; _unchanged rechecks every pin.
+    runtime = _retained_completed_runtime(inputs.runtime, files)
+    request = runtime.request
     storage = None if inputs.storage is None else load_completed_storage(runtime=inputs.runtime, reference=inputs.storage)
     if storage is not None:
         if storage.retained.runtime != request:
