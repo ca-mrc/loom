@@ -14,6 +14,39 @@ from tests.integration import test_execution_actuator_k3s as fixture
 from tests.integration.test_execution_actuator_k3s import _wait_for_dns_pods
 
 
+def test_database_startup_failure_keeps_evidence_before_node_cleanup(monkeypatch, tmp_path):
+    from tests.cluster import test_nebius_pool_database_guard as database
+
+    original = AssertionError("database did not become ready")
+    events = []
+    container = SimpleNamespace(
+        get_wrapped_container=lambda: SimpleNamespace(id="disposable-database"),
+        stop=lambda: events.append("stopped"),
+    )
+    monkeypatch.setattr(database, "_docker", lambda *args: "")
+    monkeypatch.setattr(database, "_start_k3s", lambda **kwargs: container)
+
+    def fail_startup(*args, **kwargs):
+        raise original
+
+    def diagnostic(args, **kwargs):
+        if args[:3] == ["docker", "image", "rm"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        assert "stopped" not in events, "startup evidence was read after node teardown"
+        events.append(args)
+        return SimpleNamespace(returncode=0, stdout="database startup evidence", stderr="")
+
+    monkeypatch.setattr(database, "_load_client", fail_startup)
+    monkeypatch.setattr(database.subprocess, "run", diagnostic)
+    request = SimpleNamespace(guards=[SimpleNamespace(namespace="disposable-database")])
+    with pytest.raises(AssertionError) as caught:
+        database.test_actual_database_observer_works_without_control_plane(
+            (request, None, None, None), None, tmp_path, monkeypatch)
+    assert caught.value is original
+    assert "database startup evidence" in "\n".join(getattr(original, "__notes__", ()))
+    assert "stopped" in events
+
+
 def test_addon_failure_diagnostics_distinguish_sandbox_readiness_and_image_pull():
     from kubernetes import client
 
