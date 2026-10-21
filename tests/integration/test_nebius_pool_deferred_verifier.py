@@ -182,6 +182,26 @@ async def finish_parent(sessions, case):
     return await complete_execution(sessions, case, await lease(sessions, case), case.store)
 
 
+async def test_separate_parent_waits_for_target_verifier_support_without_claims(sessions, separate_setup):
+    from tests.integration.test_nebius_pool_execution_outbox import assert_unclaimed
+
+    outbox, trial_id, target = await activation.setup(sessions)
+    registered = outbox.participant
+    outbox.participant = registered.model_copy(update={"targets": (
+        registered.targets[0].model_copy(update={"workload_kinds": ("trial",)}),
+    )})
+    assert await PoolExecutionSelector(outbox=outbox).select_next() is None
+    async with sessions() as session:
+        assert await session.scalar(select(func.count()).select_from(NebiusPoolExecutionOutbox)) == 0
+    await assert_unclaimed(sessions, trial_id)
+
+    outbox.participant = registered
+    proposal = await PoolExecutionSelector(outbox=outbox).select_next()
+    assert proposal.request.target_id == target.target_id
+    assert proposal.request.execution.runtime.verifier_execution == "separate_execution"
+    await assert_unclaimed(sessions, trial_id)
+
+
 @pytest.mark.parametrize("node_share", [False, True])
 async def test_global_verifier_proposal_and_grant_preserve_parent_attempt(
     sessions,
