@@ -103,13 +103,15 @@ def apply_plan_mode(
     raw = out.get("multi_model")
     if not isinstance(raw, dict) or not raw.get("enabled"):
         return apply_multi_model_materialization(out)
-    if resolved == "resample" and raw.get("policy") not in {
-        "beta_mixture",
-        "student_to_teacher_turns",
-    }:
+    if resolved == "resample":
         mm = dict(raw)
-        mm.pop("switch_episode", None)
-        mm.pop("return_switch_episode", None)
+        if raw.get("policy") in {"beta_mixture", "student_to_teacher_turns"}:
+            # A frozen server seed would otherwise survive into clone-config
+            # and rerun-failed. Drop it so materialize draws a new one.
+            mm.pop("mix_seed", None)
+        else:
+            mm.pop("switch_episode", None)
+            mm.pop("return_switch_episode", None)
         out["multi_model"] = mm
     return apply_multi_model_materialization(out)
 

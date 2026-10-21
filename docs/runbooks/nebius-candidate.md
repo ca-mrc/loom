@@ -103,8 +103,10 @@ For the equivalent local preparation path, `nebius_candidate.py create` and
 `--supports-task-web-egress`, `--service-lifecycle-ready`,
 `--supports-task-identity` and `--supports-terminus2-multi-model`. Without them, the corresponding fields remain
 omitted from the canonical profile. `NEBIUS_TERMINUS2_MULTI_MODEL_READY=true`
-writes `terminus2_multi_model_policies: ["student_teacher_student"]` so hosted
-Terminus-2 STS can admit; leave it false until the same candidate's
+writes `terminus2_multi_model_policies` with `student_teacher_student`,
+`beta_mixture`, and `student_to_teacher_turns`, so hosted Terminus-2 can
+admit a fixed K1/K2 block, a constant episode coin, or the rising turn
+probability; leave it false until the same candidate's
 execution-runtime and Harbor controller images are the #2503 bind. Web egress still requires the matching
 [deployment policy](nebius-platform.md); the renderer rejects missing or
 unmatched configuration. Identity readiness requires the explicit

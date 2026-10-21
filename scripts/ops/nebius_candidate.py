@@ -43,6 +43,7 @@ from loom.execution_image_admission import (
     ImageAdmissionStatementV1,
     SignedImageAdmissionV1,
 )
+from loom.models.trial import HOSTED_TERMINUS2_MULTI_MODEL_POLICIES
 from loom.pipeline.keys import canonical_document
 from loom.repository_identity import REPOSITORY_ID, REPOSITORY_NAMES, is_repository_name
 from loom.service_execution_materialization import (
@@ -326,7 +327,7 @@ def create_candidate(
         supports_task_artifact_inputs=True,
         supports_task_identity=supports_task_identity,
         terminus2_multi_model_policies=(
-            frozenset({"student_teacher_student"}) if supports_terminus2_multi_model else frozenset()
+            HOSTED_TERMINUS2_MULTI_MODEL_POLICIES if supports_terminus2_multi_model else frozenset()
         ),
         guest_runtime=guest_runtime,
         supports_emulated_pkcs11=supports_emulated_pkcs11,

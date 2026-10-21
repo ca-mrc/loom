@@ -130,7 +130,56 @@ async def test_hosted_control_fails_closed_without_reclaim_identity() -> None:
 
 
 @pytest.mark.asyncio
-async def test_hosted_terminus_rejects_deferred_multi_model_policies(tmp_path: Path) -> None:
+@pytest.mark.parametrize(("policy", "extra", "expected"), [
+    (
+        "beta_mixture",
+        {"beta": 0.5, "mix_seed": "seed"},
+        {"mix_mode": "beta_mixture", "beta": 0.5, "seed": "seed"},
+    ),
+    (
+        "student_to_teacher_turns",
+        {"step_start": 2, "step_end": 9, "mix_seed": "seed"},
+        {"mix_mode": "student_to_teacher_turns", "k1": 2, "k2": 9, "seed": "seed"},
+    ),
+])
+async def test_hosted_terminus_freezes_beta_and_turn_plans(
+    tmp_path: Path, monkeypatch: Any, policy: str, extra: dict[str, Any], expected: dict[str, Any],
+) -> None:
+    task, trial = _config()
+    trial = TrialConfig.model_validate({
+        **trial.model_dump(mode="json"),
+        "multi_model": {
+            "enabled": True,
+            "policy": policy,
+            "secondary_model": {"provider": "openai", "name": "teacher", "source": "api"},
+            **extra,
+        },
+    })
+    captured: dict[str, Any] = {}
+
+    class Runtime:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+        def begin_attempt(self, deadline: AttemptDeadline) -> None:
+            return None
+
+        async def run(self, **kwargs: Any) -> None:
+            return None
+
+    monkeypatch.setattr("loom.service_execution_terminus2.LoomTerminus2Runtime", Runtime)
+    driver = FakeDriver()
+    await driver.start()
+    await run_terminus2(
+        driver=driver, workspace=tmp_path, task_config=task, trial_config=trial,
+        trial_id=uuid4(), team_id=uuid4(), gateway_url="http://127.0.0.1:9000",
+        instruction="Inspect /app and write the manifest.",
+    )
+    assert captured["model_switch_plan"] == expected
+
+
+@pytest.mark.asyncio
+async def test_hosted_terminus_rejects_an_unseeded_beta_plan(tmp_path: Path) -> None:
     task, trial = _config()
     trial = TrialConfig.model_validate({
         **trial.model_dump(mode="json"),
@@ -139,12 +188,11 @@ async def test_hosted_terminus_rejects_deferred_multi_model_policies(tmp_path: P
             "policy": "beta_mixture",
             "secondary_model": {"provider": "openai", "name": "teacher", "source": "api"},
             "beta": 0.5,
-            "mix_seed": "seed",
         },
     })
     driver = FakeDriver()
     await driver.start()
-    with pytest.raises(AgentError, match="student_teacher_student"):
+    with pytest.raises(AgentError, match="mix seed"):
         await run_terminus2(
             driver=driver, workspace=tmp_path, task_config=task, trial_config=trial,
             trial_id=uuid4(), team_id=uuid4(), gateway_url="http://127.0.0.1:9000",
