@@ -256,15 +256,17 @@ of those harnesses have native execution acceptance. The current admission
 rules live in
 [`automatic_service_execution_rejections`](../../src/loom/service_execution_materialization.py).
 
-Terminus-2 `student_teacher_student` is the only hosted multi-model policy
-([#2396](https://github.com/ca-mrc/loom/issues/2396)). Admission stays inert
-until the selected runtime profile advertises
-`terminus2_multi_model_policies: ["student_teacher_student"]` (publication
-flag `--supports-terminus2-multi-model` /
-`NEBIUS_TERMINUS2_MULTI_MODEL_READY`). Deferred
-policies (`beta_mixture`, `student_to_teacher_turns`), non-Terminus agents,
-extra MCP/skills, and `--combinations-json` stay rejected or independent. The
-frozen K1/K2 schedule travels in `LOOM_TASK_TRIAL_JSON`;
+Hosted Terminus-2 admits `student_teacher_student`, `beta_mixture`, and
+`student_to_teacher_turns` ([#2396](https://github.com/ca-mrc/loom/issues/2396)).
+Admission stays inert until the selected runtime profile lists the requested
+policy. Publication flag `--supports-terminus2-multi-model` /
+`NEBIUS_TERMINUS2_MULTI_MODEL_READY` writes all three into
+`terminus2_multi_model_policies`. `student_teacher_student` is the fixed
+K1/K2 block. `beta_mixture` is a constant per-episode teacher coin.
+`student_to_teacher_turns` is the rising teacher probability: student until
+`step_start`, β = progress^1.65 until `step_end`, then a one-way teacher
+latch. Non-Terminus agents, extra MCP/skills, and `--combinations-json` stay
+rejected or independent. The frozen schedule travels in `LOOM_TASK_TRIAL_JSON`;
 `ExecutionRuntimePlanV1` is unchanged. The workload broker exposes
 lease-bound reclaim and episode-checkpoint routes so the existing role router
 can stamp correlated `loom_*` fields instead of falling back to

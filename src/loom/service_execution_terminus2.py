@@ -305,17 +305,39 @@ async def run_terminus2(
         multi_model = MultiModelSwitchSpec.model_validate(multi_model)
     model_switch_plan: dict[str, Any] | None = None
     if multi_model is not None and multi_model.enabled:
-        if multi_model.policy != "student_teacher_student":
-            raise AgentError(
-                "Nebius Terminus supports only student_teacher_student multi-model sessions",
-            )
-        if multi_model.switch_episode is None or multi_model.return_switch_episode is None:
-            raise AgentError("Nebius Terminus requires materialized multi-model K1/K2")
-        model_switch_plan = {
-            "mix_mode": "student_teacher_student",
-            "k1": multi_model.switch_episode,
-            "k2": multi_model.return_switch_episode,
-        }
+        if multi_model.policy == "beta_mixture":
+            if multi_model.beta is None or not multi_model.mix_seed:
+                raise AgentError(
+                    "Nebius Terminus requires a materialized beta and mix seed",
+                )
+            model_switch_plan = {
+                "mix_mode": "beta_mixture",
+                "beta": multi_model.beta,
+                "seed": multi_model.mix_seed,
+            }
+        elif multi_model.policy == "student_to_teacher_turns":
+            if (
+                multi_model.step_start is None
+                or multi_model.step_end is None
+                or not multi_model.mix_seed
+            ):
+                raise AgentError(
+                    "Nebius Terminus requires a materialized turn window and mix seed",
+                )
+            model_switch_plan = {
+                "mix_mode": "student_to_teacher_turns",
+                "k1": multi_model.step_start,
+                "k2": multi_model.step_end,
+                "seed": multi_model.mix_seed,
+            }
+        else:
+            if multi_model.switch_episode is None or multi_model.return_switch_episode is None:
+                raise AgentError("Nebius Terminus requires materialized multi-model K1/K2")
+            model_switch_plan = {
+                "mix_mode": "student_teacher_student",
+                "k1": multi_model.switch_episode,
+                "k2": multi_model.return_switch_episode,
+            }
     if len(task_config.steps) != 1:
         raise AgentError("Nebius Terminus requires exactly one task step")
     if not instruction.strip() or max_turns < 1 or max_trajectory_bytes < 1:

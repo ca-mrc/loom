@@ -360,9 +360,9 @@ Revocation is the end of the agent phase. The token also expires with the
 lease deadline and is never present in the sandbox.
 
 **The model is bound to the Trial.** A native Trial admits its `agent_model`.
-Terminus-2 `student_teacher_student` also admits the materialized teacher when
-the runtime profile enables that policy; `beta_mixture`,
-`student_to_teacher_turns`, and other agents remain rejected. On every model
+An enabled Terminus-2 student/teacher policy also admits the materialized
+teacher when the runtime profile lists that policy. Other agents remain
+rejected. On every model
 route the broker can reach (OpenAI chat and Responses, Anthropic messages,
 Gemini, each in facade and plain form), the Gateway's `authorize_trial_model`
 compares the requested model, and the provider that route records, with that

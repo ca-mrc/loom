@@ -59,7 +59,7 @@ from loom.models.networking import (
     resolve_effective_network_policy,
 )
 from loom.models.task import TaskConfig, normalize_steps
-from loom.models.trial import TrialConfig
+from loom.models.trial import HOSTED_TERMINUS2_MULTI_MODEL_POLICIES, MixPolicy, TrialConfig
 from loom.mutable_paths import validate_task_workdir
 from loom.pipeline.keys import canonical_digest
 from loom.prebuilt_task_images import resolve_prebuilt_task_image, validate_prebuilt_image_pins
@@ -215,9 +215,7 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
     max_log_bytes_per_stream: int = Field(default=10 * 1024 * 1024, gt=0)
     max_artifact_bytes: int = Field(default=1024 * 1024 * 1024, gt=0)
     service_lifecycle_ready: bool = False
-    terminus2_multi_model_policies: frozenset[
-        Literal["student_teacher_student"]
-    ] = Field(default_factory=frozenset)
+    terminus2_multi_model_policies: frozenset[MixPolicy] = Field(default_factory=frozenset)
 
     @property
     def supported_guest_capabilities(self) -> frozenset[GuestExecutionCapability]:
@@ -244,6 +242,9 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
             payload.pop("default_task_resource_requests", None)
         if not self.service_lifecycle_ready:
             payload.pop("service_lifecycle_ready", None)
+        policies = payload.get("terminus2_multi_model_policies")
+        if policies:
+            payload["terminus2_multi_model_policies"] = sorted(policies)
         if not self.terminus2_multi_model_policies:
             payload.pop("terminus2_multi_model_policies", None)
         if not self.supports_task_identity:
@@ -306,9 +307,7 @@ def build_nebius_runtime_profile(
     supports_task_web_egress: bool = False,
     supports_task_artifact_inputs: bool = False,
     service_lifecycle_ready: bool = False,
-    terminus2_multi_model_policies: frozenset[
-        Literal["student_teacher_student"]
-    ] = frozenset(),
+    terminus2_multi_model_policies: frozenset[MixPolicy] = frozenset(),
     supports_task_identity: bool = False,
     guest_runtime: Literal["qemu-tcg-v1"] | None = None,
     supports_emulated_pkcs11: bool = False,
@@ -635,7 +634,7 @@ def automatic_service_execution_rejections(
         and trial.multi_model.enabled
         and (
             trial.agent_name != "terminus-2"
-            or trial.multi_model.policy != "student_teacher_student"
+            or trial.multi_model.policy not in HOSTED_TERMINUS2_MULTI_MODEL_POLICIES
         )
     ):
         reasons.append("terminus2_multi_model_policy_unsupported")

@@ -142,6 +142,22 @@ def test_schedule_spec_rejects_beta() -> None:
         )
 
 
+def test_materialize_beta_freezes_a_mix_seed_once() -> None:
+    raw = {
+        "enabled": True,
+        "policy": "student_to_teacher_turns",
+        "secondary_model": _SECONDARY.model_dump(mode="json"),
+        "step_start": 2,
+        "step_end": 9,
+    }
+    first = materialize_multi_model_switch_episode(raw)
+    assert first is not None
+    assert isinstance(first["mix_seed"], str) and first["mix_seed"]
+    second = materialize_multi_model_switch_episode(first)
+    assert second is not None
+    assert second["mix_seed"] == first["mix_seed"]
+
+
 def test_materialize_beta_does_not_sample_k1() -> None:
     raw = {
         "enabled": True,
@@ -173,22 +189,37 @@ def test_role_for_beta_teacher_if_draw_lt_beta() -> None:
     )
 
 
-def test_apply_plan_mode_resample_keeps_beta() -> None:
-    cfg = {
+@pytest.mark.parametrize(("policy", "fields"), [
+    ("beta_mixture", {"beta": 0.6}),
+    ("student_to_teacher_turns", {"step_start": 2, "step_end": 9}),
+])
+def test_public_resample_redraws_frozen_mix_seed(policy: str, fields: dict[str, object]) -> None:
+    """clone-config and rerun-failed both store apply_plan_mode(..., mode='resample')."""
+    parent = {
         "agent_name": "terminus-2",
         "agent_model": _PRIMARY.model_dump(mode="json"),
         "multi_model": {
             "enabled": True,
-            "policy": "beta_mixture",
+            "policy": policy,
             "secondary_model": _SECONDARY.model_dump(mode="json"),
-            "beta": 0.6,
-            "mix_seed": "keep-me",
+            "mix_seed": "frozen-server-seed",
+            **fields,
         },
     }
-    resampled = apply_plan_mode(cfg, mode="resample")
-    assert resampled["multi_model"]["beta"] == 0.6
-    assert resampled["multi_model"]["policy"] == "beta_mixture"
-    assert "switch_episode" not in resampled["multi_model"]
+    inherited = apply_plan_mode(parent, mode="inherit")
+    assert inherited["multi_model"]["mix_seed"] == "frozen-server-seed"
+    resampled = apply_plan_mode(parent, mode="resample")
+    hosted_seed = resampled["multi_model"]["mix_seed"]
+    assert hosted_seed != "frozen-server-seed"
+    assert hosted_seed
+    again = apply_plan_mode(resampled, mode="inherit")
+    assert again["multi_model"]["mix_seed"] == hosted_seed
+    if policy == "beta_mixture":
+        assert resampled["multi_model"]["beta"] == 0.6
+        assert "switch_episode" not in resampled["multi_model"]
+    else:
+        assert resampled["multi_model"]["step_start"] == 2
+        assert resampled["multi_model"]["step_end"] == 9
 
 
 def test_turn_schedule_spec_requires_window() -> None:

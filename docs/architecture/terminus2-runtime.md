@@ -720,18 +720,19 @@ Constraints:
 
 ### Nebius hosted slice (#2396)
 
-Hosted Terminus-2 admits only `student_teacher_student`. The same two LiteLLM
-delegates share one Harbor session; `--combinations-json` and combination
-fan-out stay independent. The selected runtime profile must list
-`student_teacher_student` in `terminus2_multi_model_policies` (default empty,
-so merged code stays inert until publication sets
-`NEBIUS_TERMINUS2_MULTI_MODEL_READY=true` on the same candidate that
-publishes the broker and Terminus controller images). Frozen K1/K2 remain inside `LOOM_TASK_TRIAL_JSON`. The trusted
-broker derives trial identity from the active attempt lease, reclaims the
-Terminus execution/run attempt, and accepts bounded episode checkpoints.
-Missing reclaim identity fails closed instead of emitting uncorrelated
-multi-model calls. `beta_mixture` and `student_to_teacher_turns` remain
-rejected on Nebius in this slice.
+Hosted Terminus-2 admits `student_teacher_student`, `beta_mixture`, and
+`student_to_teacher_turns`. The same two LiteLLM delegates share one Harbor
+session; `--combinations-json` and combination fan-out stay independent. The
+selected runtime profile must list the requested policy in
+`terminus2_multi_model_policies` (default empty, so merged code stays inert
+until publication sets `NEBIUS_TERMINUS2_MULTI_MODEL_READY=true` on the same
+candidate that publishes the broker and Terminus controller images). That
+flag publishes all three policies. Frozen K1/K2, or the beta and the mix
+seed, or the turn window and the mix seed, remain inside
+`LOOM_TASK_TRIAL_JSON`. The trusted broker derives trial identity from the
+active attempt lease, reclaims the Terminus execution/run attempt, and
+accepts bounded episode checkpoints. Missing reclaim identity fails closed
+instead of emitting uncorrelated multi-model calls.
 
 ### Worker retry: fail closed (no merged Harbor rerun)
 

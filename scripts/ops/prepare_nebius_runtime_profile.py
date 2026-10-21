@@ -30,6 +30,7 @@ from loom.execution_image_admission import (
     SignedImageAdmissionV1,
     verify_execution_image_admission,
 )
+from loom.models.trial import HOSTED_TERMINUS2_MULTI_MODEL_POLICIES
 from loom.pipeline.keys import canonical_document
 from loom.service_execution_materialization import build_nebius_runtime_profile
 
@@ -314,7 +315,7 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
         service_lifecycle_ready=getattr(args, "service_lifecycle_ready", False),
         supports_task_identity=getattr(args, "supports_task_identity", False),
         terminus2_multi_model_policies=(
-            frozenset({"student_teacher_student"})
+            HOSTED_TERMINUS2_MULTI_MODEL_POLICIES
             if getattr(args, "supports_terminus2_multi_model", False) else frozenset()
         ),
         guest_runtime=getattr(args, "guest_runtime", None),

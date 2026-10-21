@@ -2025,11 +2025,12 @@ behavior. Use hosted commands to submit new hosted trials.
   Not supported with `--combinations-json`. Those combination shapes stay
   independent of this one-session Terminus-2 router.
 
-  Nebius hosted execution currently admits only Path A
-  (`student_teacher_student`), and only after the selected runtime profile
-  advertises `terminus2_multi_model_policies`. Paths B and C stay local-worker
-  policies until a later slice. Ordinary single-model Terminus-2 trials are
-  unchanged.
+  Nebius hosted execution admits Path A, Path B, and Path C when the
+  selected runtime profile lists that policy in
+  `terminus2_multi_model_policies`. A profile that omits a policy still
+  rejects it. Ordinary single-model Terminus-2 trials are unchanged.
+  Path B and Path C freeze `mix_seed` onto the trial before the pod starts,
+  so the hosted draw matches the stored plan.
 
   If a worker dies after the agent has already written episode checkpoints,
   Loom **does not** restart Harbor from episode 1 on the same trial

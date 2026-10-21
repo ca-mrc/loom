@@ -343,7 +343,9 @@ def test_cli_create_plain_candidate_and_check_shape(
         else:
             assert capability not in profile
     if enabled:
-        assert profile["terminus2_multi_model_policies"] == ["student_teacher_student"]
+        assert profile["terminus2_multi_model_policies"] == [
+            "beta_mixture", "student_teacher_student", "student_to_teacher_turns",
+        ]
     else:
         assert "terminus2_multi_model_policies" not in profile
     verify = [
@@ -679,7 +681,9 @@ def test_publication_builds_selected_images_and_reuses_platform_admission(
             else:
                 assert capability not in profile
         if enabled:
-            assert profile["terminus2_multi_model_policies"] == ["student_teacher_student"]
+            assert profile["terminus2_multi_model_policies"] == [
+            "beta_mixture", "student_teacher_student", "student_to_teacher_turns",
+        ]
         else:
             assert "terminus2_multi_model_policies" not in profile
 
