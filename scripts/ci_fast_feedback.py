@@ -101,6 +101,8 @@ def wait_for_feedback(
         )]
         if matching:
             run = max(matching, key=lambda row: row["id"])
+            if run["status"] == "completed" and run.get("conclusion") == "cancelled":
+                raise ValueError("native CI was cancelled")
             jobs = pages(f"{root}/runs/{run['id']}/jobs?filter=latest", "jobs", fetch)
             feedback = [job for job in jobs if job["name"] == "fast-feedback"
                         and job["run_attempt"] == run["run_attempt"]]

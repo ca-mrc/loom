@@ -99,6 +99,9 @@ tier follow those checks. Frontend API/type/lint/unit checks also contribute to
 It rejects every selected failure, cancellation or unexpected skip. Unselected
 lanes may skip. Existing changed-path selection, test manifests and coverage
 requests remain in force; full-regression requests still use full manifests.
+Ordinary documentation-only PRs skip feedback when no dependent work is selected.
+Additive image/cluster/staging labels and manual baseline requests still run
+feedback before their selected dependents, even when only documents changed.
 
 Pool, Docker integration, runtime payload and frontend production/browser work
 start only after `fast-feedback` succeeds. Frontend runtime work has its own
@@ -111,6 +114,9 @@ different-base or narrower-scope run cannot release heavy work. Missing results
 wait at most 90 minutes, with polling backing off from 15 to 120 seconds to
 bound API traffic across concurrent PRs; failed/cancelled feedback and API errors
 fail closed.
+An already cancelled matching CI cannot release work using its earlier green
+feedback. A still-running CI with successful feedback can release heavy work
+without waiting for the remaining heavy jobs to finish.
 Manual source-workflow dispatches remain independent diagnostics because they
 have no companion CI event.
 

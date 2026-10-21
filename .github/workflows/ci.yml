@@ -576,7 +576,16 @@ jobs:
     name: fast-feedback
     runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-latest' }}
     needs: [workflow-plan, lint-and-static, locked-environments, tests-packages, go-checks, nebius-iac, tests-root, integration, web-checks]
-    if: always() && needs.workflow-plan.outputs.gate_mode == 'full' && needs.workflow-plan.outputs.docs_only != 'true'
+    if: >-
+      always() && needs.workflow-plan.outputs.gate_mode == 'full' &&
+      (needs.workflow-plan.outputs.docs_only != 'true' ||
+       needs.workflow-plan.outputs.nebius_pool == 'true' ||
+       needs.workflow-plan.outputs.integration_docker == 'true' ||
+       needs.workflow-plan.outputs.runtime_payload == 'true' ||
+       needs.workflow-plan.outputs.web_runtime == 'true' ||
+       needs.workflow-plan.outputs.images == 'true' ||
+       needs.workflow-plan.outputs.cluster_smoke == 'true' ||
+       needs.workflow-plan.outputs.staging_smoke == 'true')
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5

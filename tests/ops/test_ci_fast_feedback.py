@@ -12,6 +12,8 @@ from pathlib import Path
 import pytest
 import yaml
 from scripts.ci_fast_feedback import FEEDBACK_JOBS, enforce, pages, wait_for_feedback
+from scripts.plan_ci_validations import plan_validations
+from tests.ops.test_ci_images_parallel_builds import _condition
 
 ROOT = Path(__file__).resolve().parents[2]
 HEAD = "a" * 40
@@ -140,6 +142,25 @@ def test_waits_for_queued_stage_and_does_not_wait_for_heavy_jobs():
     assert api.now == 15 and api.run["status"] == "in_progress"
 
 
+@pytest.mark.parametrize("source", ["images", "cluster-smoke", "staging-smoke"])
+@pytest.mark.parametrize("event", ["pull_request", "merge_group"])
+def test_cancelled_parent_cannot_release_heavy_work_with_previously_green_feedback(source, event):
+    api = API()
+    api.source.update(event=event, path=f".github/workflows/{source}.yml")
+    api.run.update(event=event, status="completed", conclusion="cancelled")
+    with pytest.raises(ValueError, match="native CI was cancelled"):
+        api.wait()
+    assert api.now == 0
+
+
+@pytest.mark.parametrize("status", ["in_progress", "completed"])
+def test_successful_feedback_releases_work_without_waiting_for_parent_completion(status):
+    api = API()
+    api.run.update(status=status, conclusion="success" if status == "completed" else None)
+    assert api.wait() == 7
+    assert api.now == 0
+
+
 def test_cancelled_workflow_without_stage_and_duplicate_stage_fail_closed():
     api = API()
     api.run["status"] = "completed"
@@ -188,9 +209,42 @@ def test_success_from_an_earlier_attempt_cannot_release_a_rerun():
         api.wait()
 
 
-def test_docs_only_does_not_allocate_a_feedback_runner():
+@pytest.mark.parametrize(("event", "label", "dependent"), [
+    ("pull_request", None, None),
+    ("merge_group", None, None),
+    ("pull_request", "ci:images", "images"),
+    ("pull_request", "cluster-smoke", "cluster_smoke"),
+    ("pull_request", "staging-smoke", "staging_smoke"),
+    ("pull_request", "ci:integration", "integration"),
+    ("pull_request", "ci:integration-docker", "integration_docker"),
+    ("pull_request", "ci:coverage-summary", "coverage_summary"),
+    ("workflow_dispatch", None, "nebius_pool"),
+    ("schedule", None, "nebius_pool"),
+])
+def test_docs_feedback_follows_actual_selected_work(event, label, dependent):
     workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
-    assert "docs_only != 'true'" in workflow["jobs"]["fast-feedback"]["if"]
+    plan = plan_validations(changed_paths=["docs/user-guide.md"],
+                            labels={label} if label else set(), event_name=event)
+    outputs = plan.github_outputs()
+    if dependent:
+        assert outputs[dependent] == "true"
+    else:
+        assert plan.docs_only
+        assert not plan.selected_heavy_checks()
+    values = {f"needs.workflow-plan.outputs.{key}": value for key, value in outputs.items()}
+    value = {"workflow-plan": {"result": "success", "outputs": outputs},
+             **{job: {"result": "success" if outputs[selector] == "true" else "skipped"}
+                for job, selector in FEEDBACK_JOBS.items()}}
+    values.update({f"needs.{job}.result": result["result"] for job, result in value.items()})
+    assert _condition(workflow["jobs"]["fast-feedback"]["if"], values) is bool(dependent)
+    if dependent:
+        enforce(value)
+        # A selected manual baseline must also reach its actual heavy jobs.
+        if event in {"workflow_dispatch", "schedule"}:
+            values = {f"needs.workflow-plan.outputs.{key}": value for key, value in outputs.items()}
+            values.update({"needs.workflow-plan.result": "success", "needs.fast-feedback.result": "success"})
+            for job in ("nebius-pool", "runtime-payload", "web-runtime"):
+                assert _condition(workflow["jobs"][job]["if"], values)
 
 
 def test_wait_backs_off_without_extending_its_deadline():
