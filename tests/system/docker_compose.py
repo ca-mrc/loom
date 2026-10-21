@@ -29,6 +29,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from uuid import uuid4
 
 import httpx
 from sqlalchemy import create_engine, select
@@ -45,6 +46,7 @@ CONTROL_PLANE_URL = "http://localhost:58080"
 GATEWAY_URL = "http://localhost:59100"
 MINIO_URL = "http://localhost:59000"
 DIAGNOSTICS_ENV = "LOOM_SYSTEM_SMOKE_DIAGNOSTICS"
+_DEFAULT_PROJECT_NAME = f"loom-system-{uuid4().hex[:12]}"
 _CANARY_MAX_TIMEOUT_SEC = 30.0
 _CANARY_POLL_INTERVAL_SEC = 0.25
 _COMPOSE_INSPECT_TIMEOUT_SEC = 5.0
@@ -80,6 +82,10 @@ ORDER BY pid LIMIT 64;
 """
 
 
+def _compose_project_name() -> str:
+    return os.environ.get("COMPOSE_PROJECT_NAME") or _DEFAULT_PROJECT_NAME
+
+
 def _compose(
     *args: str,
     check: bool = True,
@@ -88,6 +94,7 @@ def _compose(
 ) -> subprocess.CompletedProcess[str]:
     cmd = ["docker", "compose", "-f", str(COMPOSE_FILE), *args]
     env = os.environ.copy()
+    env["COMPOSE_PROJECT_NAME"] = _compose_project_name()
     # Stub LOOM_WORKER_TOKEN so compose can parse the file even when the
     # worker service is not in the active profile. The :? required-form
     # in compose only triggers when the service is selected.
@@ -382,6 +389,8 @@ def stack_down() -> None:
             "down",
             "-v",
             "--remove-orphans",
+            "--rmi",
+            "local",
             check=False,
             timeout_sec=_COMPOSE_TEARDOWN_TIMEOUT_SEC,
         )
@@ -630,6 +639,10 @@ def _redact_diagnostics(text: str) -> str:
 def preserve_compose_diagnostics() -> None:
     """Capture Compose state while containers still exist, with redaction."""
 
+    destination = os.environ.get(DIAGNOSTICS_ENV)
+    destination_path = Path(destination) if destination else None
+    if destination_path is not None and destination_path.exists() and destination_path.stat().st_size > 0:
+        return
     sections: list[str] = []
     for heading, args in (
         # These run only inside this disposable Compose project. Capture the
@@ -657,7 +670,7 @@ def preserve_compose_diagnostics() -> None:
         except subprocess.TimeoutExpired:
             content = "capture exceeded its bounded timeout"
         sections.append(f"===== {heading} =====\n{content}".rstrip())
-    project_name = os.environ.get("COMPOSE_PROJECT_NAME", COMPOSE_FILE.parent.name)
+    project_name = _compose_project_name()
     try:
         raw_ps = subprocess.run(
             [
@@ -683,11 +696,7 @@ def preserve_compose_diagnostics() -> None:
         raw_content = "capture exceeded its bounded timeout"
     sections.append(f"===== docker ps for project {project_name} =====\n{raw_content}")
     payload = _redact_diagnostics("\n\n".join(sections)) + "\n"
-    destination = os.environ.get(DIAGNOSTICS_ENV)
-    if destination:
-        destination_path = Path(destination)
-        if destination_path.exists() and destination_path.stat().st_size > 0:
-            return
+    if destination_path is not None:
         destination_path.write_text(payload, encoding="utf-8")
     else:
         print(payload, file=sys.stderr, end="")

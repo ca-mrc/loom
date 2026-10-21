@@ -667,7 +667,7 @@ def _container_status(container: Any) -> str:
     return ""
 
 
-def _remove_stopped_managed_containers(client: Any) -> int:
+def _remove_stopped_managed_containers(client: Any, *, sandbox_identity: str) -> int:
     errors = 0
     try:
         containers = client.containers.list(all=True)
@@ -676,6 +676,10 @@ def _remove_stopped_managed_containers(client: Any) -> int:
         return 1
     for container in containers:
         try:
+            # A managed image can be shared across sandboxes. Only the
+            # container's own identity establishes cleanup ownership.
+            if (_docker_labels(container).get("loom.sandbox") or "") != sandbox_identity:
+                continue
             if _container_status(container) not in _STOPPED_CONTAINER_STATES:
                 continue
             if not _is_loom_managed(container) and not _is_loom_managed(container.image):
@@ -725,8 +729,15 @@ def evict_stale_managed_images(
     client: Any,
     settings: WorkerSettings,
 ) -> ManagedImageCleanupResult:
-    """Clean only Loom-owned Docker resources and return final storage evidence."""
-    error_count = _remove_stopped_managed_containers(client)
+    """Clean owned containers and, on dedicated daemons, managed image caches.
+
+    Sandbox-scoped workers share their daemon's content-addressed images.
+    Image labels identify cache contents, not exclusive sandbox ownership, so
+    those workers leave image eviction to the daemon owner. Free-space probes
+    still run: insufficient space must remain an admission failure.
+    """
+    sandbox_identity = getattr(settings, "sandbox_identity", "")
+    error_count = _remove_stopped_managed_containers(client, sandbox_identity=sandbox_identity)
     ttl_hours = int(
         getattr(
             settings,
@@ -735,7 +746,7 @@ def evict_stale_managed_images(
         )
     )
     required_free_bytes = _required_managed_image_free_bytes(settings)
-    for label in _MANAGED_IMAGE_LABELS:
+    for label in (() if sandbox_identity else _MANAGED_IMAGE_LABELS):
         try:
             client.images.prune(
                 filters={
@@ -782,7 +793,7 @@ def evict_stale_managed_images(
             required_free_bytes=required_free_bytes,
             error_count=error_count,
         )
-    if free_bytes >= required_free_bytes:
+    if sandbox_identity or free_bytes >= required_free_bytes:
         return ManagedImageCleanupResult(
             docker_root=docker_root,
             storage_probe_path=storage_probe_path_text,

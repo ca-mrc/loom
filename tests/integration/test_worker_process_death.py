@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 import logging
 import multiprocessing
 import os
 import signal
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import MagicMock
 from uuid import UUID, uuid4
 
 import docker
 import httpx
 import pytest
+from pydantic import SecretStr
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -29,14 +32,84 @@ from loom_control_plane.app import create_app
 from loom_control_plane.config import ControlPlaneSettings
 from loom_control_plane.retry_exhausted_sweeper import sweep_retry_exhausted
 from loom_control_plane.scheduler.crash_detector import reclaim_expired_workers
+from loom_worker.config import WorkerSettings
 from loom_worker.control_plane_client import HttpControlPlaneClient
 from loom_worker.orphan_containers import cleanup_orphan_sandbox_containers
+from loom_worker.trial_cache import evict_stale_managed_images
 from loom_worker.trial_runner import LocalTrialRunner
 from tests._trial_config_defaults import stub_trial_config
 from tests.integration.test_service_trials_read import trials_setup  # noqa: F401
 
 pytestmark = pytest.mark.docker
 logger = logging.getLogger(__name__)
+
+
+def test_shared_daemon_eviction_preserves_foreign_containers_and_image_references(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity = f"cleanup-{uuid4().hex}"
+    image_tag = f"loom-cleanup-test:{identity}"
+    owner_label = f"loom.cleanup-test={identity}"
+    client = docker.from_env()
+    owned_ids: list[str] = []
+    try:
+        image, _ = client.images.build(
+            fileobj=io.BytesIO(b"FROM alpine:3.20\n"), tag=image_tag,
+            labels={"loom.task-image": "true", "loom.cleanup-test": identity},
+            rm=True, forcerm=True,
+        )
+        containers = {}
+        for name, sandbox in (("owned", identity), ("foreign", "other"), ("legacy", ""), ("running", "other")):
+            labels = {"loom.cleanup-test": identity}
+            if sandbox:
+                labels["loom.sandbox"] = sandbox
+            container = client.containers.create(
+                image_tag, ["sleep", "120"], name=f"{identity}-{name}", labels=labels,
+            )
+            owned_ids.append(container.id)
+            containers[name] = container
+        containers["running"].start()
+
+        # Even a broken implementation may only see this test's controls.
+        # Exercise real Docker removal without granting test code daemon-wide GC.
+        list_containers = client.containers.list
+        monkeypatch.setattr(client.containers, "list", lambda **kwargs: list_containers(
+            all=True, filters={"label": owner_label},
+        ))
+        prune = MagicMock(side_effect=AssertionError("shared images must not be pruned"))
+        remove = MagicMock(side_effect=AssertionError("shared images must not be evicted"))
+        with monkeypatch.context() as image_guard:
+            image_guard.setattr(client.images, "prune", prune)
+            image_guard.setattr(client.images, "remove", remove)
+            result = evict_stale_managed_images(client, WorkerSettings(
+                _env_file=None, token=SecretStr("unused"), minio_access_key=SecretStr("unused"),
+                minio_secret_key=SecretStr("unused"), sandbox_identity=identity,
+                task_image_storage_probe_path=tmp_path, task_image_min_free_gb=1_000_000,
+            ))
+        assert result.probe_available and result.free_bytes < result.required_free_bytes
+        assert result.error_count == 0
+        prune.assert_not_called()
+        remove.assert_not_called()
+        with pytest.raises(docker.errors.NotFound):
+            client.containers.get(containers["owned"].id)
+        for name in ("foreign", "legacy", "running"):
+            containers[name].reload()
+            assert containers[name].image.id == image.id
+        assert containers["running"].status == "running"
+        assert client.images.get(image_tag).id == image.id
+    finally:
+        for container_id in owned_ids:
+            try:
+                container = client.containers.get(container_id)
+                assert container.labels["loom.cleanup-test"] == identity
+                container.remove(force=True)
+            except docker.errors.NotFound:
+                pass
+        try:
+            client.images.remove(image_tag)
+        except docker.errors.ImageNotFound:
+            pass
+        client.close()
 
 
 class _PassVerifier:
