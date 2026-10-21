@@ -18,10 +18,12 @@ def test_fixture_archive_preserves_manifest_index_and_original_name(monkeypatch,
     copies = []
 
     def run(args, **kwargs):
-        assert args[:8] == ["skopeo", "copy", "--preserve-digests", "--override-os", "linux",
+        # Public fixtures must not discover runner credentials. Require this
+        # for both copy modes and for the mirror's same-pin upstream fallback.
+        assert args[:9] == ["skopeo", "copy", "--src-no-creds", "--preserve-digests", "--override-os", "linux",
                             "--override-arch", "amd64", "--multi-arch"]
         assert kwargs == {"check": True, "capture_output": True, "text": True, "timeout": 180}
-        mode, source, destination = args[8:]
+        mode, source, destination = args[9:]
         copies.append((mode, source))
         if mode == limited_mode and source == "docker://" + mirror:
             raise subprocess.CalledProcessError(1, args, stderr="reading manifest: toomanyrequests: Data limit exceeded")
