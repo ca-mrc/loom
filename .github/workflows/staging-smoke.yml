@@ -94,6 +94,10 @@ jobs:
   plan:
     name: staging smoke plan
     runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+      actions: read
+    timeout-minutes: 100
     outputs:
       required: ${{ steps.plan.outputs.staging_smoke || steps.event.outputs.required }}
       gate_mode: ${{ steps.plan.outputs.gate_mode || steps.event.outputs.gate_mode }}
@@ -172,6 +176,14 @@ jobs:
             --pull-request-draft "$PR_DRAFT" \
             --pull-request-base-changed "$PR_BASE_CHANGED" \
             --github-output "$GITHUB_OUTPUT"
+
+      - name: Wait for the same native CI fast feedback
+        if: >-
+          (github.event_name == 'pull_request' || github.event_name == 'merge_group') &&
+          steps.plan.outputs.staging_smoke == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci_fast_feedback.py wait --timeout-seconds 5400
 
   system-smoke:
     name: manifest-owned system smoke
