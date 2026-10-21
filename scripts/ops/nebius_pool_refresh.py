@@ -138,6 +138,24 @@ class PoolManagerRefresh:
         quotas['storage'] = (*storage[:3], name, storage[4])
         return desired, quotas
 
+    def matches_provider(self, actual: dict[str, Any], expected: dict[str, Any], original: dict[str, Any]) -> bool:
+        """Ignore only ordinary kubectl bookkeeping on the retained collector."""
+        successor = self.successor
+        if successor is None:
+            return _matches(actual, expected, _uid(original))
+        selected = successor.resources.get(_key(original))
+        if (original.get('kind') != 'ConfigMap' or selected is None
+                or selected.get('kind') != 'ConfigMap' or _key(selected) != _key(original)
+                or original['metadata']['namespace'] != successor.config['execution_namespace']):
+            return False
+        observed, desired = copy.deepcopy(actual), copy.deepcopy(expected)
+        for document in (observed, desired):
+            annotations = document['metadata'].get('annotations', {})
+            annotations.pop('kubectl.kubernetes.io/last-applied-configuration', None)
+            if not annotations:
+                document['metadata'].pop('annotations', None)
+        return _matches(observed, desired, _uid(original))
+
     def manager_revision_options(self) -> tuple[str, ...]:
         """Read this phase within the live reader's existing scope qualification."""
         return refresh_manager_revision_options(self.request, state=self.state_dir,
@@ -266,6 +284,14 @@ class PoolManagerRefresh:
         if (not _exact_pod(old_volumes, new_volumes, ('volumes',))
                 or not _exact_pod(old.get('imagePullSecrets', []), new.get('imagePullSecrets', []), ('imagePullSecrets',))):
             raise ValueError
+        if desired['kind'] == 'Deployment':
+            # Preserve the already-frozen restart marker; the live template must
+            # still match its exact value, including through ordinary releases.
+            restart = 'kubectl.kubernetes.io/restartedAt'
+            annotations = before_template['metadata'].get('annotations', {})
+            if restart in annotations:
+                after_template['metadata'].setdefault('annotations', {}).setdefault(restart,
+                    copy.deepcopy(annotations[restart]))
         desired['metadata']['uid'] = _uid(original)
         return desired
 
