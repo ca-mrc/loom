@@ -838,6 +838,11 @@ class HTTPSDevelopmentSchemaAPI(HTTPSDevelopmentRuntimeProbes):
     def manager_revision(self) -> str:
         return candidate_service_schema_head(self.retained.projection.manager_publication.bundle.candidate)
 
+    def _manager_catalog(self) -> dict[str, Any]:
+        # Verification runs before a completed schema-successor receipt exists.
+        return self.retained.plan.fixed['ConfigMap:' + self.manager.binding.namespace
+            + ':loom-pool-profiles-' + self.retained.projection.after_pool.operation_id.hex]
+
     def _running(self, key: str, state_dir: Path) -> tuple[PoolSettingsComponent, dict[str, Any], dict[str, Any]]:
         if state_dir != self.retained.runtime.state_dir:
             raise ValueError('development_schema_runtime_history_changed')

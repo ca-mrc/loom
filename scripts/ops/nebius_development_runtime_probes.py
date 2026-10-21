@@ -240,6 +240,15 @@ class HTTPSDevelopmentRuntimeProbes(HTTPSDevelopmentRuntimeObserver):
     def _process_identity(pod: dict[str, Any]) -> tuple[Any, ...]:
         return (_uid(pod), pod['status']['containerStatuses'], pod['status'].get('initContainerStatuses', []))
 
+    def _manager_catalog(self) -> dict[str, Any]:
+        """Select the retained document mounted by the qualified manager."""
+        if self.preactivation is not None:
+            return self.preactivation.resources.catalog
+        resources = (self.schema_successor.resources if self.schema_successor is not None
+            else self.request.database.manager.retained.resources)
+        return resources['ConfigMap:' + self.manager.binding.namespace
+            + ':loom-pool-profiles-' + self.effective_registration.spec.operation_id.hex]
+
     def qualify_runtime_settings(self, *, key: str, state_dir: Path) -> None:
         """Challenge real typed settings/catalog/token readers; never return secrets."""
         try:
@@ -253,13 +262,7 @@ class HTTPSDevelopmentRuntimeProbes(HTTPSDevelopmentRuntimeObserver):
                 # The process reads the retained mounted bytes. Re-serializing
                 # an equivalent catalog after storage/history round-trips can
                 # reorder maps and produce a different byte identity.
-                if self.preactivation is not None:
-                    catalog = self.preactivation.resources.catalog
-                else:
-                    resources = (self.schema_successor.resources if self.schema_successor is not None
-                        else self.request.database.manager.retained.resources)
-                    catalog = resources['ConfigMap:' + self.manager.binding.namespace
-                        + ':loom-pool-profiles-' + spec.operation_id.hex]
+                catalog = self._manager_catalog()
                 catalog_sha256 = hashlib.sha256(catalog['data']['profiles.json'].encode()).hexdigest()
             wanted = expected_pool_runtime_settings(component, workload,
                 token_sha256=machine.token_sha256 if component in {'controller', 'actuator'} else None,
