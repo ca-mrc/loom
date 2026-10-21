@@ -167,7 +167,9 @@ def test_compose_mounts_runtime_fixtures_and_uses_fast_test_cancellation() -> No
     for service in (worker, builder):
         assert service["environment"]["LOOM_WORKER_SANDBOX_IDENTITY"] == "${COMPOSE_PROJECT_NAME}"
     for name in ("control-plane", "llm-gateway", "worker", "task-image-builder"):
-        assert services[name]["image"].endswith(":${COMPOSE_PROJECT_NAME}")
+        # Compose owns the generated project/service image name and can
+        # remove it with --rmi local without removing pulled shared images.
+        assert "image" not in services[name]
 
     assert worker["environment"]["LOOM_WORKER_FIXTURES_ROOT"] == ("/app/tests/fixtures/tasks")
     assert worker["environment"]["LOOM_WORKER_TRIAL_CANCEL_POLL_INTERVAL_SEC"] == "0.1"
@@ -469,6 +471,8 @@ def test_stack_up_cleans_partial_compose_state_on_setup_failure(
         "down",
         "-v",
         "--remove-orphans",
+        "--rmi",
+        "local",
     )
     assert compose_calls[-3:-1] == [
         (
