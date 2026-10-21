@@ -402,7 +402,8 @@ async def prepare_deployment_fence_canary(
     The only caller-controlled values are the rollout-derived candidate and
     image tag. The selected service Pod chooses the fixed deployment-owned Team, random
     TaskSet slug, one-task bundle, checksum, and nonce before inserting the
-    authorization in the same database transaction as normal TaskSet intake.
+    authorization in TaskSet intake's final enqueue/publication transaction.
+    An interrupted upload leaves an expiring, non-claimable intake reservation.
     """
     _validate_authorization_token(
         request.authorization_token,

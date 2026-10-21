@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import copy
 import hashlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -56,6 +57,12 @@ def provider(platform_inputs, tmp_path, monkeypatch, request):
     current = copy.deepcopy(original)
     current['data'] = copy.deepcopy(selected['data'])
     current['metadata']['resourceVersion'] = '8'
+    if mode == 'bookkeeping':
+        # Independent retained/current kubectl apply records, not a copy of the
+        # refresh projection. The selected renderer emits neither annotation.
+        bookkeeping = 'kubectl.kubernetes.io/last-applied-configuration'
+        original['metadata']['annotations'] = {bookkeeping: json.dumps(original, sort_keys=True)}
+        current['metadata']['annotations'] = {bookkeeping: json.dumps(selected, sort_keys=True)}
     data = original['data']
     quotas = {name: (config['quota_parent_id'], config['region'], data[PREFIX + 'QUOTA_SERVICE'],
         data[PREFIX + 'QUOTA_' + name.upper() + '_NAME'], data[PREFIX + 'QUOTA_' + name.upper() + '_UNIT'])
@@ -123,21 +130,99 @@ def provider(platform_inputs, tmp_path, monkeypatch, request):
     return state
 
 
-@pytest.mark.parametrize('provider', [False, 'retained', True],
-    ids=['no-builder', 'retained-builder', 'resource-only-builder'], indirect=True)
+@pytest.mark.parametrize('provider', [False, 'retained', True, 'bookkeeping'],
+    ids=['no-builder', 'retained-builder', 'resource-only-builder', 'collector-bookkeeping'], indirect=True)
 def test_source_bound_nrd_provider_reads_actual_native_group_without_rewriting_history(provider):
     p = provider
-    before = copy.deepcopy((p.context.request.collector_config, p.spec.quota_identities, p.current, p.secret))
+    before = copy.deepcopy((p.context.request.collector_config, p.spec.quota_identities, p.current, p.secret, p.selected))
     with pytest.raises(EntryError):
         entry.qualify_pool_provider(p.context, p.base)
     entry.qualify_pool_provider(p.context, p.base, refresh=p.refresh)
     assert p.calls == ['quotas', 'group'] and p.closed == [True]
     assert p.qualified and all(not path.exists() for path in p.files)
-    assert (p.context.request.collector_config, p.spec.quota_identities, p.current, p.secret) == before
+    assert (p.context.request.collector_config, p.spec.quota_identities, p.current, p.secret, p.selected) == before
     assert p.http_calls and all(method == 'GET' for method, _ in p.http_calls)
     if p.config.get('task_image_builder', {}).get('max_concurrent', 16) is None:
         assert p.context.request.collector_config['data'][BUILD_LIMIT] == '16'
         assert BUILD_LIMIT not in p.current['data']
+    bookkeeping = 'kubectl.kubernetes.io/last-applied-configuration'
+    if bookkeeping not in p.current['metadata'].get('annotations', {}):
+        return
+    original = p.context.request.collector_config
+    assert p.current['data'] == p.selected['data'] == p.refresh.provider_options()[0]['data']
+    assert bookkeeping not in p.selected['metadata'].get('annotations', {})
+
+    def reset():
+        for actual, saved in ((original, before[0]), (p.current, before[2])):
+            actual.clear()
+            actual.update(copy.deepcopy(saved))
+        p.calls.clear()
+        p.closed.clear()
+        p.files.clear()
+        p.late = None
+
+    def snapshot():
+        return copy.deepcopy((original, p.spec.quota_identities, p.current, p.secret, p.selected))
+
+    for change in ('added', 'changed', 'removed'):
+        reset()
+        if change == 'added':
+            original['metadata'].pop('annotations')
+        elif change == 'changed':
+            p.current['metadata']['annotations'][bookkeeping] = json.dumps(p.selected, sort_keys=True, indent=2)
+        else:
+            p.current['metadata'].pop('annotations')
+        recorded = snapshot()
+        entry.qualify_pool_provider(p.context, p.base, refresh=p.refresh)
+        assert p.calls == ['quotas', 'group'] and p.closed == [True], change
+        assert snapshot() == recorded, change
+        assert all(not path.exists() for path in p.files), change
+
+    for damage in ('annotation', 'label', 'uid', 'data', 'late_annotation', 'late_label', 'late_uid'):
+        reset()
+        injected = []
+        def drift(damage=damage, injected=injected):
+            if damage.endswith('annotation'):
+                p.current['metadata'].setdefault('annotations', {})['unrelated'] = 'drift'
+            elif damage.endswith('label'):
+                p.current['metadata'].setdefault('labels', {})['unrelated'] = 'drift'
+            elif damage.endswith('uid'):
+                p.current['metadata']['uid'] = str(uuid4())
+            else:
+                p.current['data'][PREFIX + 'NEBIUS_PROJECT_ID'] = 'foreign'
+            injected.append(snapshot())
+        if damage.startswith('late_'):
+            p.late = drift
+        else:
+            drift()
+        with pytest.raises(EntryError, match='pool cutover provider unqualified'):
+            entry.qualify_pool_provider(p.context, p.base, refresh=p.refresh)
+        assert len(injected) == 1 and snapshot() == injected[0], damage
+        assert p.calls == (['quotas', 'group'] if damage.startswith('late_') else []), damage
+        assert all(not path.exists() for path in p.files), damage
+        assert (original, p.spec.quota_identities, p.secret, p.selected) == (before[0], before[1], before[3], before[4])
+
+    reset()
+    # Remove the source-selected NRD data delta so these failures isolate root
+    # bookkeeping rather than an unrelated configuration or provider mismatch.
+    p.current['data'] = copy.deepcopy(original['data'])
+    recorded = snapshot()
+    selected = p.refresh.successor
+    try:
+        object.__setattr__(p.refresh, 'successor', None)
+        assert p.refresh.matches_provider(original, original, original)
+        assert not p.refresh.matches_provider(p.current, original, original)
+        for refresh in (None, p.refresh):
+            with pytest.raises(EntryError, match='pool cutover provider unqualified'):
+                entry.qualify_pool_provider(p.context, p.base, refresh=refresh)
+            assert p.calls == []  # Reject before any provider/credential use.
+            assert snapshot() == recorded
+    finally:
+        object.__setattr__(p.refresh, 'successor', selected)
+        reset()
+    assert p.refresh.successor is selected
+    assert snapshot() == before
+    assert all(method == 'GET' for method, _ in p.http_calls)
 
 
 @pytest.mark.parametrize('damage', ['uid', 'credential', 'late_config', 'late_credential', 'credential_file',

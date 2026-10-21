@@ -42,7 +42,9 @@ class NebiusEnvironmentCloudProvider:
         if step.kind == "object_bucket":
             if purpose not in {"artifacts", "trajectories", "source", "backup"}:
                 raise ProviderBlockedError("cloud_bucket_purpose_invalid")
-            if step.payload.get("name") != prefix + purpose:
+            v2 = context.config.get('schema_version') == 'loom.nebius-environment-platform.v2'
+            wanted_name = context.config['buckets'][purpose] if v2 else prefix + purpose
+            if step.payload.get("name") != wanted_name:
                 raise ProviderBlockedError("cloud_bucket_name_mismatch")
             kind, name = "bucket", step.payload["name"]
             owner = "canonical" if purpose in {"artifacts", "trajectories"} else purpose
@@ -90,11 +92,13 @@ class NebiusEnvironmentCloudProvider:
         metadata["labels"]["loom-intent"] = digest[:32]
         return kind, expected
 
-    async def apply(self, context: ProvisioningContext, step: ProvisioningStep) -> str:
+    async def apply(self, context: ProvisioningContext, step: ProvisioningStep, *, create: bool = True) -> str:
+        if not create and not context.identities.get(step.key):
+            raise ProviderBlockedError("cloud_import_identity_missing")
         kind, expected = self.intent(context, step)
         actual = await self.api.find(kind, expected)
         if actual is None:
-            if step.key in context.identities:
+            if not create or step.key in context.identities:
                 raise ProviderBlockedError("cloud_recorded_resource_missing")
             actual = await self.api.create(kind, expected, idempotency_key=str(uuid5(context.lease.operation_id, step.key)))
         identity = actual.get("metadata", {}).get("id")

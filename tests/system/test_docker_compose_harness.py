@@ -15,6 +15,39 @@ from tests.integration.minio_test_images import MINIO_TEST_IMAGE
 from tests.system import docker_compose
 
 
+def test_compose_failure_reports_bounded_redacted_output_without_replacing_error(
+    monkeypatch: Any, capsys: Any,
+) -> None:
+    secret = "s" * 40_000
+    failure = subprocess.CalledProcessError(
+        1,
+        ["docker", "compose", "up", "--build"],
+        output=(
+            "discarded build preamble\n" + "build progress\n" * 4_000
+            + f"Bearer {secret}\npackage build failed: concrete root cause\n"
+        ),
+        stderr="Dockerfile.control-plane:20\nloom_w_worker-secret\n",
+    )
+
+    def fail(*args: Any, **kwargs: Any) -> None:
+        raise failure
+
+    monkeypatch.setattr(docker_compose.subprocess, "run", fail)
+    with pytest.raises(subprocess.CalledProcessError) as caught:
+        docker_compose._compose("up", "--build")
+
+    assert caught.value is failure
+    output = capsys.readouterr().err
+    assert "package build failed: concrete root cause" in output
+    assert "Dockerfile.control-plane:20" in output
+    assert "discarded build preamble" not in output
+    assert secret[:64] not in output
+    assert "loom_w_worker-secret" not in output
+    assert "[REDACTED:bearer]" in output
+    assert "[REDACTED:loom-token]" in output
+    assert len(output) <= 33_000
+
+
 @pytest.mark.parametrize("requested_port", [None, "61234"])
 @pytest.mark.parametrize("service,container_port,setting", [
     ("postgres", "5432", "POSTGRES"), ("registry", "5000", "REGISTRY"),
@@ -426,6 +459,7 @@ def test_stack_up_cleans_partial_compose_state_on_setup_failure(
             "task-image-builder",
             "logs",
             "--no-color",
+            "--timestamps",
             "--tail=300",
         ),
     ]
@@ -621,9 +655,11 @@ def test_worker_claim_canary_retries_transient_initial_connect_error(
     assert attempts == 2
 
 
+@pytest.mark.parametrize("probe_times_out", [False, True])
 def test_failed_teardown_redacts_diagnostics_before_down(
     monkeypatch: Any,
     tmp_path: Path,
+    probe_times_out: bool,
 ) -> None:
     monkeypatch.setenv("COMPOSE_PROJECT_NAME", "deploy")
     calls: list[tuple[str, ...]] = []
@@ -639,6 +675,8 @@ def test_failed_teardown_redacts_diagnostics_before_down(
     def fake_compose(*args: str, **kwargs: Any) -> subprocess.CompletedProcess[str]:
         calls.append(args)
         timeouts.append(kwargs["timeout_sec"])
+        if probe_times_out and "exec" in args:
+            raise subprocess.TimeoutExpired(args, kwargs["timeout_sec"])
         return subprocess.CompletedProcess(
             args,
             0,
@@ -661,7 +699,12 @@ def test_failed_teardown_redacts_diagnostics_before_down(
 
     docker_compose.stack_down_with_diagnostics(failed=True)
 
-    assert calls == [
+    assert [args[4:8] for args in calls[:3]] == [
+        ("exec", "-T", "control-plane", "python"),
+        ("exec", "-T", "postgres", "psql"),
+        ("stats", "--no-stream", "--format", "json"),
+    ]
+    assert calls[3:] == [
         (
             "--profile",
             "worker",
@@ -677,6 +720,7 @@ def test_failed_teardown_redacts_diagnostics_before_down(
             "task-image-builder",
             "logs",
             "--no-color",
+            "--timestamps",
             "--tail=300",
         ),
         (
@@ -689,12 +733,13 @@ def test_failed_teardown_redacts_diagnostics_before_down(
             "--remove-orphans",
         ),
     ]
-    assert timeouts == [
-        docker_compose._COMPOSE_DIAGNOSTICS_TIMEOUT_SEC,
-        docker_compose._COMPOSE_DIAGNOSTICS_TIMEOUT_SEC,
-        docker_compose._COMPOSE_TEARDOWN_TIMEOUT_SEC,
-    ]
+    assert timeouts == [docker_compose._COMPOSE_DIAGNOSTICS_TIMEOUT_SEC] * 5 + [
+        docker_compose._COMPOSE_TEARDOWN_TIMEOUT_SEC]
     payload = diagnostics.read_text(encoding="utf-8")
+    assert "===== Control Plane liveness =====" in payload
+    assert "===== PostgreSQL waits (no query text) =====" in payload
+    assert "===== compose stats --no-stream =====" in payload
+    assert ("capture exceeded its bounded timeout" in payload) == probe_times_out
     assert "===== compose ps -a =====" in payload
     assert "===== compose logs --tail=300 =====" in payload
     assert "===== docker ps for project deploy =====" in payload

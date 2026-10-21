@@ -198,11 +198,11 @@ export default function AdminAccess(): JSX.Element {
         </p>
       </header>
 
-      {isAdmin && !["audit", "tokens"].includes(activeSection) ? (
+      {isAdmin && activeSection !== "audit" ? (
         <Card>
           <Card.Header
             title="Admin actor"
-            description="Recorded in audit events for approve, reject, and platform-admin invite actions."
+            description="Recorded in audit events for platform-admin access and API token actions."
           />
           <Card.Body>
             <label className="block text-sm font-medium text-slate-700" htmlFor="admin-actor">

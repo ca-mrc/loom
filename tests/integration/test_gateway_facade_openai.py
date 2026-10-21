@@ -935,6 +935,39 @@ async def test_facade_surfaces_upstream_errors_with_missing_usage(
     assert extras["_loom_usage_status"] == "missing"
 
 
+@pytest.mark.parametrize("body", [b"not JSON", b"[]"], ids=["non-json", "non-object"])
+async def test_facade_malformed_success_keeps_failed_accounting(facade_setup, body: bytes) -> None:
+    from sqlalchemy import select
+
+    from loom_service.routes.trials import _usage_by_trial_ids
+
+    app, jwt, _, trial_id, conn_id, captures = facade_setup
+    captures["response"] = httpx.Response(200, content=body)
+    result = await _post(app, jwt, **{"x-loom-provider-connection-id": str(conn_id)})
+    assert result.status_code == 502, result.text
+    async with app.state.session_factory() as session:
+        call = (await session.scalars(select(LlmCall).where(LlmCall.trial_id == trial_id))).one()
+        summary = (await _usage_by_trial_ids(session, [trial_id]))[trial_id]
+        receipt = (await session.execute(text(
+            "SELECT provider_http_status, gateway_http_status FROM gateway_dispatch_receipts "
+            "WHERE trial_id = :trial_id"
+        ), {"trial_id": trial_id})).one()
+    assert call.dialect == "openai_facade"
+    assert call.attempt == 1
+    assert call.rate_card_hash == "failed-upstream"
+    assert call.provider_extras["_loom_call_status"] == "failed"
+    assert call.provider_extras["_loom_usage_status"] == "missing"
+    assert call.provider_extras["_loom_failure_category"] == "upstream_invalid_response"
+    assert call.provider_extras["_loom_failure_status_code"] == 200
+    assert "messages" not in call.request_params
+    assert summary["failed_upstream_llm_calls_count"] == 1
+    assert summary["priced_llm_calls_count"] == 0
+    assert summary["estimated_cost_usd"] is None
+    assert summary["cost_status"] == "failed_upstream"
+    assert summary["usage_reporting_status"] == "missing"
+    assert tuple(receipt) == (200, 502)
+
+
 async def test_facade_redacts_api_key_from_upstream_error_body(
     facade_setup,
 ) -> None:

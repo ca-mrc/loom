@@ -15,7 +15,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 from pydantic import SecretStr
-from sqlalchemy import create_engine, delete, insert, text
+from sqlalchemy import create_engine, delete, insert, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -207,6 +207,8 @@ async def gateway_with_provider_connection(
         assert request.headers["authorization"] == "Bearer sk-provider-XYZ"
         if captures.get("timeout"):
             raise httpx.ReadTimeout("secret-transport-canary", request=request)
+        if isinstance(captures.get("response"), httpx.Response):
+            return captures["response"]
         body = json.loads(request.content)
         if body.get("stream") is True:
             payload = {
@@ -908,6 +910,110 @@ async def test_responses_provider_connection_stream_passthrough(
     assert row["provider_extras"]["_loom_pricing_source"] == "tokens-only"
     assert row["trial_id"] == trial_id
     assert row["team_id"] == team_id
+
+
+@pytest.mark.parametrize("reported_usage", [False, True], ids=["missing-usage", "reported-zero"])
+async def test_responses_stream_distinguishes_missing_usage_from_reported_zero(
+    gateway_with_provider_connection, reported_usage: bool,
+) -> None:
+    from loom_service.routes.trials import _usage_by_trial_ids
+
+    app, jwt, _, trial_id, conn_id, captures = gateway_with_provider_connection
+    model = "qwen2.5-coder-7b-instruct"
+    async with app.state.session_factory() as session:
+        connection = await session.get(ProviderConnection, conn_id)
+        connection.pricing_config = {"pricing_mode": "custom", "custom_pricing": {
+            model: {"input_usd_per_1m": 5, "output_usd_per_1m": 15},
+        }}
+        await session.commit()
+    response = {"id": "resp_zero", "model": model}
+    if reported_usage:
+        response["usage"] = {
+            "input_tokens": 0, "output_tokens": 0,
+            "input_tokens_details": {"cached_tokens": 0},
+        }
+    stream = f'data: {json.dumps({"type": "response.completed", "response": response})}\n\n'
+    captures["response"] = httpx.Response(
+        200, text=stream, headers={"content-type": "text/event-stream"},
+    )
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://gw") as client:
+        result = await client.post("/v1/responses", headers={"Authorization": f"Bearer {jwt}"},
+                                   json={"model": model, "input": "hi", "stream": True})
+    assert result.status_code == 200, result.text
+    assert result.text == stream
+    async with app.state.session_factory() as session:
+        call = (await session.scalars(select(LlmCall).where(LlmCall.trial_id == trial_id))).one()
+        summary = (await _usage_by_trial_ids(session, [trial_id]))[trial_id]
+    assert summary["llm_calls_count"] == 1
+    assert summary["usage_reporting_status"] == ("complete" if reported_usage else "missing")
+    assert summary["usage_estimate_confidence"] == ("high" if reported_usage else "missing")
+    assert summary["estimated_cost_usd"] == (0.0 if reported_usage else None)
+    assert summary["cost_status"] == ("estimated" if reported_usage else "price_unknown")
+    assert summary["cost_estimate_confidence"] == ("configured" if reported_usage else "unavailable")
+    if not reported_usage:
+        assert call.provider_extras["_loom_usage_status"] == "missing"
+        assert call.provider_extras["_loom_unpriced_reason"] == "incomplete_usage"
+
+
+async def _assert_failed_responses_accounting(app, trial_id: UUID) -> None:
+    from loom_service.routes.trials import _usage_by_trial_ids
+
+    async with app.state.session_factory() as session:
+        call = (await session.scalars(select(LlmCall).where(LlmCall.trial_id == trial_id))).one()
+        summary = (await _usage_by_trial_ids(session, [trial_id]))[trial_id]
+        receipt = (await session.execute(text(
+            "SELECT provider_http_status, gateway_http_status FROM gateway_dispatch_receipts "
+            "WHERE trial_id = :trial_id"
+        ), {"trial_id": trial_id})).one()
+    assert call.dialect == "openai_responses"
+    assert call.attempt == 1
+    assert call.rate_card_hash == "failed-upstream"
+    assert call.provider_extras["_loom_call_status"] == "failed"
+    assert call.provider_extras["_loom_usage_status"] == "missing"
+    assert call.provider_extras["_loom_failure_category"] == "upstream_invalid_response"
+    assert call.provider_extras["_loom_failure_status_code"] == 200
+    assert "input" not in call.request_params
+    assert summary["failed_upstream_llm_calls_count"] == 1
+    assert summary["priced_llm_calls_count"] == 0
+    assert summary["estimated_cost_usd"] is None
+    assert summary["cost_status"] == "failed_upstream"
+    assert summary["usage_reporting_status"] == "missing"
+    assert tuple(receipt) == (200, 502)
+
+
+@pytest.mark.parametrize(("native", "body"), [
+    (True, b"not JSON"), (True, b"[]"),
+    (False, b"not JSON"), (False, b"[]"), (False, b"{}"),
+], ids=["native-non-json", "native-non-object", "fallback-non-json", "fallback-non-object", "fallback-no-choices"])
+async def test_responses_malformed_success_keeps_failed_accounting(
+    gateway_with_provider_connection, native: bool, body: bytes,
+) -> None:
+    app, jwt, _, trial_id, conn_id, captures = gateway_with_provider_connection
+    async with app.state.session_factory() as session:
+        connection = await session.get(ProviderConnection, conn_id)
+        connection.responses_api_supported = native
+        await session.commit()
+    captures["response"] = httpx.Response(200, content=body)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://gw") as client:
+        result = await client.post("/v1/responses", headers={"Authorization": f"Bearer {jwt}"},
+                                   json={"model": "qwen2.5-coder-7b-instruct", "input": "hi"})
+    assert result.status_code == 502, result.text
+    await _assert_failed_responses_accounting(app, trial_id)
+
+
+@pytest.mark.parametrize("body", [b"not JSON", b"[]", b"{}"],
+                         ids=["non-json", "non-object", "missing-usage"])
+async def test_platform_responses_malformed_success_keeps_failed_accounting(gateway, body: bytes) -> None:
+    app, jwt, _, trial_id = gateway
+    await app.state.upstream_client.aclose()
+    app.state.upstream_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, content=body)),
+    )
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://gw") as client:
+        result = await client.post("/v1/responses", headers={"Authorization": f"Bearer {jwt}"},
+                                   json={"model": "gpt-5", "input": "hi"})
+    assert result.status_code == 502, result.text
+    await _assert_failed_responses_accounting(app, trial_id)
 
 
 async def test_responses_facade_falls_back_to_chat_completions_for_chat_only_provider(

@@ -134,8 +134,20 @@ export async function apiUpload<T>(path: string, formData: FormData): Promise<T>
 }
 
 export async function apiDownload(path: string, filename: string): Promise<void> {
+  let url = `${apiBase()}${path}`;
+  if (/^(?:[a-z][a-z\d+.-]*:|\/\/)/iu.test(path)) {
+    // Delivery exports return public URLs which already include the service
+    // prefix. Keep credentialed downloads inside this deployment's API.
+    const base = new URL(`${apiBase()}/`, window.location.origin);
+    const absolute = new URL(path, base);
+    if (absolute.origin !== base.origin || !absolute.pathname.startsWith(`${base.pathname}api/`)
+      || absolute.username || absolute.password) {
+      throw new Error("Download URL does not belong to this Loom service.");
+    }
+    url = absolute.href;
+  }
   const onUnauthorized = captureUnauthorizedHandler();
-  const resp = await fetch(`${apiBase()}${path}`, {
+  const resp = await fetch(url, {
     headers: authHeaders(),
     credentials: "include",
   });

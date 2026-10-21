@@ -1,20 +1,19 @@
-"""Per-trial sandbox bridge management (#78 Phase A).
+"""Per-trial sandbox bridge management.
 
 Each trial gets its own `--internal` docker network so the sandbox
 container has no host route. The per-node `loom-llm-gateway-sandbox`
-singleton (Phase B) joins each bridge to mediate model traffic; until
-that lands, this module is callable but unwired from Trial.run().
+singleton joins each bridge to mediate model traffic. TrialRunner owns bridge
+setup and teardown when sandbox isolation is enabled.
 
-Subnet allocation: pull a free `/24` from `10.42.{1..254}.0/24` per
-worker. Allocator state is worker-local; multiple workers on the same
-host SHOULD partition the pool (env-configurable second octet planned
-in Phase B) to avoid CIDR collisions across worker processes.
+Subnet allocation: pull a free `/24` from `10.{42+worker_index}.{1..254}.0/24`.
+Allocator state is worker-local; multiple workers on the same host must set
+distinct `LOOM_WORKER_INDEX` values (0–15) to avoid subnet collisions.
 
 Shells out to the `docker` CLI rather than the docker-py SDK because:
 1. `docker network create --internal` is one positional flag we don't
    want to misroute through the SDK's network-driver kwargs;
 2. tests can inject a fake `docker_runner` and verify exact argv;
-3. the singleton (Phase B) will use `docker events`, also CLI-only.
+3. singleton lifecycle management also uses the CLI.
 """
 
 from __future__ import annotations
@@ -169,19 +168,39 @@ async def create_sandbox_bridge(
     last_error: str | None = None
     for _ in range(_MAX_CREATE_RETRIES):
         index, subnet = allocator.acquire()
+        creation = asyncio.create_task(_run_docker_command(runner, [
+            "network", "create",
+            "--internal",
+            "--subnet", subnet,
+            name,
+        ]))
         try:
-            network_id = await runner([
-                "network", "create",
-                "--internal",
-                "--subnet", subnet,
-                name,
-            ])
+            network_id = await asyncio.shield(creation)
             return SandboxBridge(
                 name=name,
                 subnet=subnet,
                 network_id=network_id.strip(),
                 subnet_index=index,
             )
+        except asyncio.CancelledError:
+            # Docker may finish creating the network after caller cancellation.
+            # Keep its slot until the command settles, then remove only the
+            # exact returned ID; a failed create may have collided with a
+            # pre-existing network that this attempt does not own.
+            try:
+                network_id = await _settle_docker_command(creation)
+            except BaseException:
+                allocator.release(index)
+            else:
+                try:
+                    await _settle_docker_command(asyncio.create_task(
+                        _run_docker_command(runner, ["network", "rm", network_id.strip()]),
+                    ))
+                except Exception:
+                    logger.exception("cancelled_sandbox_bridge_cleanup_failed trial=%s", trial_id)
+                finally:
+                    allocator.release(index)
+            raise
         except SandboxNetworkError as exc:
             allocator.release(index)
             msg = str(exc)
@@ -192,10 +211,29 @@ async def create_sandbox_bridge(
                 "sandbox_bridge_create_retry trial=%s subnet=%s msg=%s",
                 trial_id, subnet, msg,
             )
+        except BaseException:
+            allocator.release(index)
+            raise
     raise SandboxNetworkError(
         f"failed to create sandbox bridge after {_MAX_CREATE_RETRIES} "
         f"CIDR-conflict retries: {last_error}",
     )
+
+
+async def _run_docker_command(runner: DockerRunner, argv: Sequence[str]) -> str:
+    # DockerRunner permits any awaitable, including Futures. Invoke it inside
+    # the owned task so synchronous invocation errors also reach slot cleanup.
+    return await runner(argv)
+
+
+async def _settle_docker_command(command: asyncio.Task[str]) -> str:
+    """Drain an issued command despite repeated cancellation of its owner."""
+    while not command.done():
+        try:
+            await asyncio.shield(command)
+        except asyncio.CancelledError:
+            continue
+    return command.result()
 
 
 async def connect_sandbox_to_singleton(

@@ -262,16 +262,30 @@ async def openai_chat_facade(
 
     try:
         body: dict[str, Any] = upstream_response.json()
+        if not isinstance(body, dict):
+            raise ValueError("expected a JSON object")
     except ValueError as e:
+        await record_facade_failed_call(
+            request=request,
+            ctx=ctx,
+            row=row,
+            dialect=_FACADE_DIALECT,
+            model=payload["model"],
+            request_payload=payload,
+            failure_category="upstream_invalid_response",
+            failure_status_code=upstream_response.status_code,
+            failure_error_type=type(e).__name__,
+            attempt=outcome.attempt,
+            correlation=correlation,
+        )
         raise HTTPException(
             status_code=502,
-            detail=f"upstream returned non-JSON body: {e}",
+            detail=f"upstream returned invalid JSON body: {e}",
         ) from e
 
     # Token usage — OpenAI shape is `usage.{prompt,completion,total}_tokens`.
-    # A non-2xx already 4xx'd above, so this is the happy path. Missing
-    # `usage` (some operator endpoints omit it) → 0/0 with a 0 cost row
-    # so attribution still exists for debug.
+    # Missing usage retains attribution with explicit missing-usage metadata;
+    # configured pricing cannot turn unknown usage into verified zero spend.
     usage = DIALECTS["openai_chat"].extract_tokens(body)
     cost_estimate = await compute_facade_cost_estimate(
         row,

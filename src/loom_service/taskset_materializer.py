@@ -283,7 +283,7 @@ async def publish_if_current(
         await session.rollback()
         raise LeaseLost()
 
-    # Preserve Task 2's job-then-TaskSet lock order.
+    # Publication, failure and deletion share the job-then-TaskSet lock order.
     task_set = (await session.execute(
         select(TaskSet)
         .where(
@@ -296,6 +296,9 @@ async def publish_if_current(
         await session.rollback()
         raise LeaseLost()
 
+    has_previous_publication = (await session.execute(
+        select(Task.id).where(Task.task_set_id == task_set_id).limit(1),
+    )).scalar_one_or_none() is not None
     attempt_count = job.attempt_count
     max_attempts = job.max_attempts
     if output.retry_source and attempt_count < max_attempts:
@@ -315,22 +318,10 @@ async def publish_if_current(
                 "updated_at": now,
             },
         )
-        result = await session.execute(
-            update(TaskSet)
-            .where(
-                TaskSet.id == task_set_id,
-                TaskSet.soft_deleted_at.is_(None),
-            )
-            .values(
-                status="materializing",
-                status_reason=output.status_reason,
-                updated_at=now,
-            )
-            .returning(TaskSet.id),
-        )
-        if len(result.scalars().all()) != 1:
-            await session.rollback()
-            raise LeaseLost()
+        if not has_previous_publication:
+            task_set.status = "materializing"
+            task_set.status_reason = output.status_reason
+            task_set.updated_at = now
         await session.commit()
         return
 
@@ -424,15 +415,9 @@ async def publish_if_current(
         for task_row in published_tasks:
             if task_row.config:
                 await ensure_task_image_materializations(session, task_row=task_row)
-    else:
-        has_previous_publication = (await session.execute(
-            select(Task.id)
-            .where(Task.task_set_id == task_set_id)
-            .limit(1),
-        )).scalar_one_or_none() is not None
-        if has_previous_publication:
-            await session.commit()
-            return
+    elif has_previous_publication:
+        await session.commit()
+        return
     result = await session.execute(
         update(TaskSet)
         .where(
@@ -478,6 +463,14 @@ async def _fail_lease(
     if task_set_id is None:
         await session.rollback()
         raise LeaseLost()
+    task_set = (await session.execute(
+        select(TaskSet)
+        .where(TaskSet.id == task_set_id, TaskSet.soft_deleted_at.is_(None))
+        .with_for_update(),
+    )).scalar_one_or_none()
+    if task_set is None:
+        await session.rollback()
+        raise LeaseLost()
     await _update_job_for_lease(
         session,
         lease=lease,
@@ -490,19 +483,13 @@ async def _fail_lease(
             "updated_at": now,
         },
     )
-    result = await session.execute(
-        update(TaskSet)
-        .where(TaskSet.id == task_set_id)
-        .values(
-            status="failed",
-            status_reason=failure_reason,
-            updated_at=now,
-        )
-        .returning(TaskSet.id),
-    )
-    if len(result.scalars().all()) != 1:
-        await session.rollback()
-        raise LeaseLost()
+    has_previous_publication = (await session.execute(
+        select(Task.id).where(Task.task_set_id == task_set_id).limit(1),
+    )).scalar_one_or_none() is not None
+    if not has_previous_publication:
+        task_set.status = "failed"
+        task_set.status_reason = failure_reason
+        task_set.updated_at = now
     await session.commit()
 
 

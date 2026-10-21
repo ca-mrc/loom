@@ -36,6 +36,7 @@ from scripts.ops.nebius_management_transport import ManagementKubernetesTranspor
 from loom_service.environment_management.candidates import _json
 
 if TYPE_CHECKING:
+    from scripts.ops.nebius_development_schema_upgrade import CompletedDevelopmentSchemaSuccessor
     from scripts.ops.nebius_pool_preactivation_operation import (
         CompletedPreactivationCatalog,
         RetainedPreactivationCatalog,
@@ -51,16 +52,30 @@ class HTTPSDevelopmentRuntimeObserver(ManagementKubernetesTransport):
     def __init__(self, *, request: DevelopmentRuntimeInstallRequest, api_server: str,
                  ssl_context: ssl.SSLContext, token: str | None = None,
                  private_files: dict[Path, bytes] | None = None,
-                 preactivation: CompletedPreactivationCatalog | None = None):
+                 preactivation: CompletedPreactivationCatalog | None = None,
+                 schema_successor: CompletedDevelopmentSchemaSuccessor | None = None):
         self.plan = prepare_runtime_install(request)
         self.request, self.private_files = copy.deepcopy(request), dict(private_files or {})
+        self.schema_successor = copy.deepcopy(schema_successor)
+        self._schema_origin = copy.deepcopy(schema_successor)
+        if schema_successor is not None:
+            from scripts.ops.nebius_development_runtime_selection import select_development_runtime
+
+            selected_runtime = select_development_runtime(schema_successor.runtime, schema_successor)
+            if selected_runtime.runtime.request != self.request:
+                raise ValueError('development runtime schema ancestry differs')
+            for path, raw in schema_successor.files.items():
+                if path in self.private_files and self.private_files[path] != raw:
+                    raise ValueError('development runtime schema evidence differs')
+                self.private_files[path] = raw
         self.preactivation = copy.deepcopy(preactivation)
         if preactivation is not None:
             from scripts.ops.nebius_pool_preactivation_operation import load_completed_preactivation
 
             selected = load_completed_preactivation(runtime=preactivation.retained.inputs.runtime,
                 reference=preactivation.retained.reference, repo_root=Path(__file__).resolve().parents[2])
-            if selected != preactivation or selected.retained.runtime != self.request:
+            if (selected != preactivation or selected.retained.runtime != self.request
+                    or selected.retained.inputs.schema_successor != (None if schema_successor is None else schema_successor.reference)):
                 raise ValueError('development runtime catalog ancestry differs')
             for path, raw in selected.files.items():
                 if path in self.private_files and self.private_files[path] != raw:
@@ -93,7 +108,7 @@ class HTTPSDevelopmentRuntimeObserver(ManagementKubernetesTransport):
                 super().__exit__(*args)
 
     def _private_inputs(self) -> None:
-        if self.preactivation != self._preactivation_origin:
+        if self.preactivation != self._preactivation_origin or self.schema_successor != self._schema_origin:
             raise ValueError('development runtime catalog selection changed')
         database = self.request.database
         files = (*database.manager.retained.files.items(), *database.foundation.files.items(), *self.private_files.items())
@@ -135,12 +150,18 @@ class HTTPSDevelopmentRuntimeObserver(ManagementKubernetesTransport):
             record, choices, _ = view
             if _expected_record is not None and record != _expected_record:
                 raise ValueError
+            if self.schema_successor is not None:
+                if _prechild_phase is not None or any(item['status'] != 'complete' for item in record['phases'].values()):
+                    raise ValueError
+                choices = {**choices, **{key: (row,) for key, row in self.schema_successor.resources.items()}}
             preactivation_view = None
             if _preactivation_catalog is not None:
                 from scripts.ops.nebius_pool_preactivation_live import preactivation_runtime_view
 
                 if (self.preactivation is not None or _shared_handoff is not None or _prechild_phase is not None
                         or _preactivation_catalog.runtime != self.request
+                        or _preactivation_catalog.inputs.schema_successor != (
+                            None if self.schema_successor is None else self.schema_successor.reference)
                         or any(item['status'] != 'complete' for item in record['phases'].values())):
                     raise ValueError
                 preactivation_view = preactivation_runtime_view(_preactivation_catalog)
@@ -159,7 +180,8 @@ class HTTPSDevelopmentRuntimeObserver(ManagementKubernetesTransport):
                 completed = _shared_handoff.plan.development.runtime
                 if (self.request != completed.request or self.plan != completed.plan
                         or state_dir != completed.state_dir or _prechild_phase is not None
-                        or self.preactivation != _shared_handoff.plan.preactivation):
+                        or self.preactivation != _shared_handoff.plan.preactivation
+                        or self.schema_successor != _shared_handoff.plan.development.schema_successor):
                     raise ValueError
                 shared_state = Path(manager.operation['state_dir']).parent / 'shared-pool-handoff'
                 shared_view = shared_runtime_view(bindings=_shared_handoff, state_dir=shared_state)

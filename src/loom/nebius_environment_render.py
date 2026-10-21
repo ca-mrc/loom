@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from loom.nebius_environment_contract import EnvironmentRegistrationV1, FoundationBinding
 from loom.nebius_management_authority import INSTALLATION_LABEL, namespace_binding
@@ -22,6 +22,12 @@ from loom.nebius_platform_render import (
     _requested_quantity,
     _service,
 )
+
+if TYPE_CHECKING:
+    from loom.nebius_environment_foundation import (
+        EnvironmentFoundationDeclarationV2,
+        EnvironmentFoundationIdentityV2,
+    )
 
 
 @dataclass(frozen=True)
@@ -94,7 +100,7 @@ def _configuration(
     return config
 
 
-def _closed_execution(row: EnvironmentRegistrationV1) -> list[dict[str, Any]]:
+def _closed_execution(row: EnvironmentRegistrationV1 | EnvironmentFoundationIdentityV2) -> list[dict[str, Any]]:
     docs = []
     for ns in (row.execution_namespace, row.build_namespace):
         docs.append(_network_policy("default-deny", ns, {}, [], []))
@@ -114,7 +120,8 @@ def _closed_execution(row: EnvironmentRegistrationV1) -> list[dict[str, Any]]:
     return docs
 
 
-def _shared_ingress(row: EnvironmentRegistrationV1, foundation: FoundationBinding) -> dict[str, Any]:
+def _shared_ingress(row: EnvironmentRegistrationV1 | EnvironmentFoundationIdentityV2,
+                    foundation: FoundationBinding | EnvironmentFoundationDeclarationV2) -> dict[str, Any]:
     ingress = _obj("Ingress", "loom-web", row.application_namespace, api="networking.k8s.io/v1")
     ingress["spec"] = {
         "ingressClassName": foundation.ingress_class_name,

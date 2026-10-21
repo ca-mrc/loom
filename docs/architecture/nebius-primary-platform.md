@@ -57,9 +57,12 @@ successor is not activation authority, and ambiguous writes are reconciled from
 retained intent and readback rather than retried. See the
 [catalog refresh procedure](../runbooks/nebius-deployment.md#shared-pool-handoff-delivery).
 Management catalog/startup SQL remains pinned to the retained `0176` database.
-Participant handoff and recovery separately support the audited `0176` and `0177`
-layouts; the latter adds publication retention without changing pool guards or
-outboxes. The actuator receives no access to that publication journal. Readiness
+Participant handoff and recovery separately support the audited `0176`, `0177`
+and `0178` layouts. Publication retention in `0177` and management catalog/lifecycle
+history in `0178` do not change pool guards or outboxes. The actuator receives no
+access to those journals, and role qualification rejects even column-level grants
+to them. An older `0175` participant needs an explicit schema upgrade before this
+runtime qualification; read-only diagnostics do not grant writer authority. Readiness
 reports the actual participant revision, and unreviewed revisions remain blocked;
 handoff never upgrades or relabels a database to satisfy these checks.
 Staging also selects seven-day ephemeral lifecycle authority and mandatory fresh
@@ -106,6 +109,89 @@ section locations used by earlier references to this platform contract.
 | <a id="native-task-image-capacity-fairness"></a>[Native task-image capacity fairness](nebius-shared-pools.md#native-task-image-capacity-fairness) | Pools |
 
 ## Managed environment identity and rendering
+
+### Independent full-environment foundations (v2)
+
+`loom.nebius_environment_foundation` represents full development, staging and
+production **data boundaries**, not personal applications. Each declaration binds
+explicit installation, pool, participant, environment and incarnation IDs. Class
+selects protected policy; it does not select an instance, namespace or credential.
+Two environments of the same class can use distinct configured namespaces,
+targets and hostnames on the same physical pool. Personal frontend/API deployments
+continue to reuse the shared-development data boundary.
+
+The `loom.environment-foundation.v2` declaration binds the exact Kubernetes
+origin and `kube-system` UID, shared HTTPS ingress, application-node placement and
+the complete `loom.nebius-environment-platform.v2` configuration. Rendering uses
+the existing platform templates with execution closed: no execution writer Pods,
+zero-Pod execution/build quotas, and disabled local scheduling/capacity admission.
+The standalone deploy helper cannot deploy this format. The database PVC is an
+explicit owned resource created before the StatefulSet, not an unobserved
+controller-created claim. Production requires backups; development can omit the
+backup workload, bucket and credential resources. Artifacts and trajectories may
+share one canonical bucket and its object-access policy; source data remains
+separately scoped.
+
+The protected foundation adapter retains exact intents before provider effects.
+It reuses the existing Kubernetes/Nebius providers and credential generator,
+persists credentials before publishing Secrets, and records observed resource
+IDs. A lost reply is reconciled against the original intent. Foreign collisions,
+missing recorded resources, replaced UIDs and incomplete retained history fail
+closed. There is no patch/delete fallback. An explicit import of a retained v2
+foundation re-observes every exact source ID without reinstalling workloads or
+rotating credentials.
+
+`scripts.ops.nebius_environment_legacy_foundation` imports the full development
+foundation from a completed v1 shared-pool handoff, selected by its pinned private
+operation and exact participant ID. It validates the real terminal children and
+freezes their selected workload/namespace successors alongside the original
+Secrets, database PVC/PV and cloud account/bucket identities. Import performs no
+provider writes, label changes, credential rotation or manager restart. Historical
+manager evidence establishes ancestry; current manager and participant version
+compatibility still require their separate qualification. A standalone or partial
+handoff is rejected. A historical staging workload attachment lacks complete
+Secret/PVC ancestry and cannot alone authorize a full-foundation import.
+
+Existing development, staging and production installations can instead use
+`scripts.ops.nebius_environment_installed_import`. The protected lifecycle
+installation pins a private `loom.installed-legacy-foundation.v2` snapshot with
+the full declaration, protected publication, exact resource UIDs and manifests,
+PVC/PV binding, and cloud project, disk, bucket and credential-subject IDs.
+Ordinary runners supply only the installed operation ID. Import compares actual
+Secret bytes, exact Kubernetes objects, the disk's provider project, active key
+subjects, exclusive object-access groups and all selected bucket grants.
+Production snapshots include the backup subject and bucket. Name matches,
+caller-provided hashes and a partial workload attachment do not establish this
+installed authority.
+
+Subsequent observations use the imported immutable plan and current protected
+credentials without loading peer release history or retired operator files. They
+recheck exact Kubernetes UIDs and configuration, bound storage and the original
+cloud credential subjects. `legacy_bindings_verified` leaves execution state
+unspecified: importing an already running participant cannot claim closed intake,
+grant enrollment, or establish an application/schema upgrade. Public routing and
+runtime qualification remain separate checks against the imported data binding.
+An installed snapshot may also retain its existing participant, catalog,
+publication and active administration head. This explicit runtime predecessor is
+consumed by the release workflow without creating enrollment, staging or startup
+receipts. The workflow must freshly prove the actual binding/head, process and
+platform state before issuing a release. It preserves all data/credential
+objects; only journaled workload, publication-profile and generated native-policy
+successors can relax their retained comparisons.
+
+`scripts.ops.nebius_foundation_readiness` performs a read-only check of completed
+resources, the owned bound PVC, PostgreSQL Pod/StatefulSet/Service/EndpointSlice
+lineage, and the environment's authenticated public dependency endpoint. It
+suppresses inherited client credentials/cookies and rejects redirects. Evidence
+age starts at the earliest read, not the end of provisioning. This is foundation
+readiness, **not** pool enrollment, sole-writer proof, runtime/schema compatibility
+or successful task execution. These source primitives do not establish an
+installed multi-person development environment.
+
+See the [independent pool lifecycle](nebius-shared-pools.md#independent-platform-and-participant-lifecycle-v2)
+for the separate capacity authority and participant transitions.
+
+### Retained v1 full-environment format
 
 This section describes the retained full-environment v1 format. New personal
 applications use the [shared-data, application-only contract](nebius-personal-applications.md) and do not own

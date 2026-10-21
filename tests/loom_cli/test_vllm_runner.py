@@ -1,13 +1,16 @@
 """vllm_runner — subprocess lifecycle, dep-check, health-probe, cleanup.
 
-vLLM itself is a heavy GPU dep; these tests use mocks throughout.
+vLLM itself is a heavy GPU dep; tests use mocks or harmless Python processes.
 Coverage: the orchestration glue (find-free-port + cmd construction +
 poll-until-healthy + graceful-stop), not the vLLM process itself.
 """
 
 from __future__ import annotations
 
+import json
+import signal
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -201,8 +204,137 @@ def test_launch_vllm_end_to_end_with_mocks(
     assert fake_proc in vr._LIVE_PROCESSES
 
 
+@pytest.mark.parametrize("outcome", ["complete", "setup_failed", "cancelled"])
+def test_single_model_keep_alive_transfers_only_completed_process(
+    tmp_xdg_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str,
+) -> None:
+    import asyncio
+
+    from loom_benchmarks import registry
+
+    from loom_cli import run_cmd
+    from loom_cli.__main__ import main
+    from tests.loom_cli.test_task_loader import _StubAdapter
+
+    monkeypatch.setitem(registry.REGISTRY, "keepalive", _StubAdapter(name="keepalive"))
+    monkeypatch.setattr(vr.shutil, "which", lambda _: "/usr/bin/vllm")
+    monkeypatch.setattr(vr.time, "sleep", lambda _: None)
+    monkeypatch.setattr(vr, "_wait_for_ready", lambda *args, **kwargs: None)
+    monkeypatch.setattr(vr, "_query_served_model_name", lambda _: "model")
+    monkeypatch.setattr(vr.signal, "signal", lambda *args: None)
+    exit_callbacks = []
+    monkeypatch.setattr(vr.atexit, "register", exit_callbacks.append)
+    proc = MagicMock()
+    proc.pid = 91919
+    proc.poll.return_value = None
+    launch = MagicMock(return_value=proc)
+    monkeypatch.setattr(vr.subprocess, "Popen", launch)
+    if outcome != "complete":
+        async def fail_setup(*args, **kwargs):
+            raise (asyncio.CancelledError("cancelled") if outcome == "cancelled" else RuntimeError("setup failed"))
+
+        monkeypatch.setattr(run_cmd, "_driver_factory", fail_setup)
+    args = ["run", "--dataset", "keepalive", "--agent", "oracle", "--backend", "fake",
+            "--model", "hf:org/model", "--keep-alive", "--output-dir", str(tmp_path / "out")]
+    try:
+        if outcome == "complete":
+            assert main(args) in {0, 1}
+        else:
+            with pytest.raises(asyncio.CancelledError if outcome == "cancelled" else RuntimeError):
+                main(args)
+        assert proc not in vr._LIVE_PROCESSES
+        for cleanup in exit_callbacks:
+            cleanup()
+        if outcome == "complete":
+            proc.terminate.assert_not_called()
+            assert launch.call_args.kwargs.get("start_new_session") is True
+            assert launch.call_args.kwargs.get("stdin") == subprocess.DEVNULL
+            assert (tmp_path / "out" / "vllm.log").exists()
+        else:
+            proc.terminate.assert_called_once()
+    finally:
+        if proc in vr._LIVE_PROCESSES:
+            vr._LIVE_PROCESSES.remove(proc)
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGHUP"), reason="requires POSIX hangup signals")
+@pytest.mark.parametrize("transferred", [False, True])
+def test_hangup_stops_only_cli_owned_detached_server(tmp_path: Path, transferred: bool) -> None:
+    # Isolate signal handlers and orphan reaping from pytest. The supervisor
+    # becomes a Linux subreaper so even the RED path cleans up its own server.
+    launcher = tmp_path / "launcher.py"
+    launcher.write_text('''
+import signal
+import subprocess
+import sys
+from loom_cli import vllm_runner as vr
+
+server = subprocess.Popen(
+    [sys.executable, "-c", "import time; time.sleep(60)"],
+    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    start_new_session=True,
+)
+vr._LIVE_PROCESSES.append(server)
+vr._install_cleanup_handlers()
+if sys.argv[1] == "True":
+    vr.retain_one(server)
+print(server.pid, flush=True)
+signal.pause()
+''')
+    supervisor = '''
+import ctypes
+import json
+import os
+import select
+import signal
+import subprocess
+import sys
+
+if sys.platform.startswith("linux"):
+    assert ctypes.CDLL(None).prctl(36, 1, 0, 0, 0) == 0  # PR_SET_CHILD_SUBREAPER
+parent = subprocess.Popen(
+    [sys.executable, sys.argv[1], sys.argv[2]],
+    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True,
+)
+server_pid = None
+try:
+    assert select.select([parent.stdout], [], [], 10)[0], "launcher did not become ready"
+    server_pid = int(parent.stdout.readline())
+    parent.send_signal(signal.SIGHUP)
+    _, stderr = parent.communicate(timeout=10)
+    try:
+        os.kill(server_pid, 0)
+        alive = True
+    except ProcessLookupError:
+        alive = False
+    print(json.dumps({"parent_exit": parent.returncode, "server_alive": alive, "stderr": stderr}))
+finally:
+    if parent.poll() is None:
+        parent.kill()
+    parent.communicate(timeout=10)
+    if server_pid is not None:
+        try:
+            os.kill(server_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            os.waitpid(server_pid, 0)
+        except ChildProcessError:
+            pass
+'''
+    result = subprocess.run(
+        [sys.executable, "-c", supervisor, str(launcher), str(transferred)],
+        capture_output=True, text=True, timeout=30, check=True,
+    )
+    observed = json.loads(result.stdout)
+    assert observed["parent_exit"] == -signal.SIGHUP
+    assert observed["server_alive"] is transferred, observed
+
+
+@pytest.mark.parametrize("failure_at", ["process_exit", "settle", "probe"])
 def test_launch_vllm_cleans_up_on_startup_failure(
     monkeypatch: pytest.MonkeyPatch,
+    failure_at: str,
 ) -> None:
     """If wait_for_ready raises (server didn't come up), `_stop_process`
     is invoked on the subprocess rather than being orphaned. (When
@@ -228,12 +360,20 @@ def test_launch_vllm_cleans_up_on_startup_failure(
     stop_calls: list[object] = []
     monkeypatch.setattr(vr, "_stop_process", lambda p: stop_calls.append(p))
 
-    with pytest.raises(RuntimeError, match="exited prematurely"):
+    def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt("startup interrupted")
+
+    if failure_at == "settle":
+        monkeypatch.setattr(vr.time, "sleep", interrupted)
+    elif failure_at == "probe":
+        monkeypatch.setattr(vr, "_wait_for_ready", interrupted)
+    with pytest.raises(RuntimeError if failure_at == "process_exit" else KeyboardInterrupt):
         vr.launch_vllm(vr.VLLMLaunchSpec(
             model="meta-llama/Llama-3.1-8B", port=18235,
         ))
     # _stop_process was called on the failed subprocess
     assert stop_calls == [fake_proc]
+    assert fake_proc not in vr._LIVE_PROCESSES
 
 
 def test_launch_vllm_retries_on_bind_failure(

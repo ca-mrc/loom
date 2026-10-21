@@ -1101,7 +1101,7 @@ describe("AdminAccess", () => {
     });
   });
 
-  it("manages named API tokens without exposing stored raw secrets", async () => {
+  it("manages named API tokens from a direct link without exposing stored raw secrets", async () => {
     setFrontendConfigForTests({
       environment: "staging",
       environmentLabel: "Staging",
@@ -1196,17 +1196,19 @@ describe("AdminAccess", () => {
       },
     );
 
-    renderWithProviders(<AdminAccess />);
+    renderWithProviders(<AdminAccess />, { route: "/admin/access?tab=tokens" });
 
-    expect(await screen.findByRole("tab", { name: "API tokens" })).toBeInTheDocument();
-    await userEvent.type(screen.getByLabelText("Admin actor"), "qianyi");
-    await userEvent.click(screen.getByRole("tab", { name: "API tokens" }));
+    expect(await screen.findByRole("tab", { name: "API tokens" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByRole("heading", { name: "API tokens" })).toBeInTheDocument();
     expect(await screen.findByText("CLI submit")).toBeInTheDocument();
     expect(screen.getByText("abc12345")).toBeInTheDocument();
     expect(screen.queryByText("loom_api_revealed_create_secret")).not.toBeInTheDocument();
 
     await userEvent.type(screen.getByLabelText("Token name"), "Nightly CLI");
+    expect(screen.getByRole("button", { name: "Create API token" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Rotate CLI submit" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Revoke CLI submit" })).toBeDisabled();
+    await userEvent.type(screen.getByLabelText("Admin actor"), "qianyi");
     await userEvent.click(screen.getByLabelText("Manage provider connections"));
     await userEvent.click(screen.getByRole("button", { name: "Create API token" }));
 

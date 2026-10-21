@@ -1,5 +1,11 @@
 # Independent Nebius deployment
 
+For full environments on a platform-owned shared pool, use the
+[independent lifecycle procedure](nebius-environment-lifecycle.md). It covers
+protected target installation, provision/import, enrollment, activation,
+release/rollback and recovery. The procedures below also retain historical
+deployment and shared-handoff paths.
+
 Nebius is the image publication path for both development and production.
 `nebius-candidate` publishes the seven manifest-owned AMD64 images from an exact
 `dev` commit. Production promotes those same immutable digest references through
@@ -720,6 +726,15 @@ releases or pool build recipes, relabel a candidate's schema, or select a newer
 incompatible image to bypass this check. The source-bound protected bundle still
 pins the installer independently. Existing v1 inputs keep their single-source
 contract and cannot contain either v2 selection field.
+
+After that exact-schema installation is complete, an unactivated shared-dev
+runtime with a configured application builder can use the protected
+[closed-development schema successor](nebius-environment-lifecycle.md#upgrade-an-unactivated-shared-development-runtime).
+It upgrades the shared and independent manager databases under separate candidate
+selections, and advances the runtime, personal releases, build recipe and catalog
+together. Its retained successor feeds later activation/handoff while preserving
+these original installation receipts. Image-only release still rejects a schema
+change.
 
 Preflight performs read-only qualification and writes no installation state.
 Installation stages the fixed SQL setup, material, read-only authority and build
@@ -2611,7 +2626,11 @@ schema is `loom.nebius-management-refresh-private-inputs.v1`, with:
   credentials, tenant/region/node-group/cluster identities and CPU/memory quota identities
   remain pinned; the native disk and capacity reader still qualify current
   provider observations before and after the read. The stopped pool-created
-  observer and historical receipts remain unchanged. A canonical-config-only
+  observer and historical receipts remain unchanged. For this source-qualified
+  primary collector, comparison copies omit only the root kubectl
+  `last-applied-configuration` bookkeeping annotation. Labels, other annotations
+  and configuration remain exact; readers without the ordinary-successor proof
+  retain the strict comparison. A canonical-config-only
   edit is insufficient workload proof: finish a genuine backed-up ordinary
   rollout using the current configuration before selecting its deployment here.
   The builder ResourceQuota belongs to the ordinary rollout; management refresh
@@ -2626,6 +2645,11 @@ schema is `loom.nebius-management-refresh-private-inputs.v1`, with:
   the shared prerequisites. Other volume sources and `imagePullSecrets` remain
   pinned; arbitrary ConfigMaps, Secret/projected credentials, PVC additions,
   writable or alternate mounts and other workload scopes remain rejected.
+  When the selected source omits `kubectl.kubernetes.io/restartedAt`, a
+  Deployment retains that existing Pod-template value from the completed pool workload.
+  The exact template-metadata comparison still rejects a newly added, changed
+  or removed restart marker and unrelated annotations. Other historical
+  annotations are not inherited merely because that restart marker is retained.
   For the primary PostgreSQL StatefulSet, this same ordinary proof may select
   only the source-rendered Pod-template `loom.nebius/configuration-revision`
   rollout identifier. Comparison copies omit the root kubectl `last-applied`
