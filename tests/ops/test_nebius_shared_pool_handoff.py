@@ -896,7 +896,9 @@ def test_connected_closed_storage_requires_stopped_gateway_and_fresh_bound_publi
     retained = parent.retain_closed_storage(runtime=RetainedRuntimeReference.model_validate(inputs['runtime']),
         operation_id=uuid4(), target_disk_type='NETWORK_SSD_NON_REPLICATED')
     refresh = retained.inputs.refresh
-    inputs.update(schema_version='loom.nebius-shared-pool-inputs.v3', storage=retained.reference.model_dump(mode='json'))
+    inputs.update(schema_version='loom.nebius-shared-pool-inputs.v4', storage=retained.reference.model_dump(mode='json'))
+    with pytest.raises(ValueError):
+        entry_module.SharedPoolPrivateInputs.model_validate({**inputs, 'schema_version': 'loom.nebius-shared-pool-inputs.v3'})
     private_state._atomic_json(root / 'inputs.json', inputs)
     operation['inputs_sha256'] = hashlib.sha256((root / 'inputs.json').read_bytes()).hexdigest()
     private_state._atomic_json(root / 'operation.json', operation)

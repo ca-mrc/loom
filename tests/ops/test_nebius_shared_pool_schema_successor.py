@@ -78,9 +78,10 @@ def shared_runtime(completed_pool, publisher_cloud, published_source):
 
 
 @pytest.mark.parametrize('staging_observation', ['independent'], indirect=True)
+@pytest.mark.parametrize('storage_first', [False, True])
 @pytest.mark.timeout(300)
 def test_schema_successor_roots_staging_refresh_and_later_handoff(
-        shared_runtime, staging_history, staging_observation, completed_pool, handoff, tmp_path):
+        shared_runtime, staging_history, staging_observation, completed_pool, handoff, tmp_path, storage_first):
     import copy
     import hashlib
     import json
@@ -91,6 +92,7 @@ def test_schema_successor_roots_staging_refresh_and_later_handoff(
     import httpx
     from scripts.ops import nebius_certificates as state
     from scripts.ops import nebius_pool_preactivation_operation as parent
+    from scripts.ops import nebius_pool_storage_operation as storage
     from scripts.ops import nebius_shared_pool_entry as entry
     from scripts.ops.nebius_development_runtime_observation import (
         _READ_PATHS,
@@ -103,16 +105,30 @@ def test_schema_successor_roots_staging_refresh_and_later_handoff(
     from tests.ops.test_nebius_development_schema_consumers import completed_schema_successor
     from tests.ops.test_nebius_development_schema_projection import next_publication
     from tests.ops.test_nebius_development_schema_upgrade import retain_runtime_inputs
+    from tests.ops.test_nebius_shared_pool_handoff import ClosedStorageAPI
 
     request, runtime_api = shared_runtime
     args = dict(runtime=request, observation=staging_observation, legacy=staging_history, repo_root=ROOT)
     original = load_completed_runtime(args['runtime'])
     connection = completed_pool[1]['operator_connection']
     runtime = retain_runtime_inputs(original, connection)
+    physical = None
+    if storage_first:
+        correction = storage.retain_closed_storage(runtime=runtime, operation_id=uuid4(),
+            target_disk_type='NETWORK_SSD_NON_REPLICATED')
+        correction_api = ClosedStorageAPI(correction)
+        correction_api.collector.ready = correction_api.publication_ready = True
+        assert storage.run_closed_storage(retained=correction, api=correction_api)
+        physical = storage.load_completed_storage(runtime=runtime, reference=correction.reference)
     successor = completed_schema_successor(dict(runtime=original, operation_id=uuid4(),
         data_publication=next_publication(original.request.database.data_runtime),
-        manager_publication=next_publication(original.request.database.manager.publication, seed='c')),
+        manager_publication=next_publication(original.request.database.manager.publication, seed='c'),
+        **({} if physical is None else {'storage': physical})),
         connection, tmp_path, runtime_reference=runtime)
+    if physical is not None:
+        assert successor.storage == physical
+        assert successor.projection.before_pool == physical.retained.registration.spec
+        assert successor.projection.after_pool.quota_identities['storage'][3] == 'compute.disk.size.network-ssd-non-replicated'
     source = _advanced_staging_source(args, tmp_path)
     retained = parent.retain_preactivation_catalog(runtime=runtime, source=source,
         operation_id=uuid4(), repo_root=ROOT, schema_successor=successor.reference)
@@ -130,6 +146,15 @@ def test_schema_successor_roots_staging_refresh_and_later_handoff(
     assert plan.development.selection.manager_revision == '0178'
     assert plan.migration.registration.spec == retained.inputs.refresh.after
     assert plan.migration.registration.candidate == successor.projection.manager_publication.bundle.candidate
+    assert plan.storage == physical
+    if physical is not None:
+        assert plan.migration.registration.spec.quota_identities['storage'][3] == 'compute.disk.size.network-ssd-non-replicated'
+        assert physical.files.keys() <= plan.history.keys()
+        assert retained.inputs.storage == physical.retained.reference
+        foreign = copy.deepcopy(physical)
+        object.__setattr__(foreign.retained, 'reference', foreign.retained.reference.model_copy(update={'operation_id': uuid4()}))
+        with pytest.raises(ValueError):
+            prepare_shared_pool_handoff(**selected_args, storage=foreign)
     assert all(path.read_bytes() == raw for path, raw in original.files.items())
     # Exercise the actual GET observer and private input loader against the
     # upgraded resources, while the original completed installation is intact.
@@ -144,6 +169,7 @@ def test_schema_successor_roots_staging_refresh_and_later_handoff(
             row['metadata'].setdefault('resourceVersion', '501')
     with HTTPSDevelopmentRuntimeObserver(request=request, api_server=connection['endpoint'],
             ssl_context=ssl.create_default_context(), preactivation=completed, schema_successor=successor) as observer:
+        assert observer.storage == physical
         for transport in (observer, observer.manager, observer.foundation):
             client_type = type(transport.client)
             transport.client.close()
@@ -162,6 +188,9 @@ def test_schema_successor_roots_staging_refresh_and_later_handoff(
         legacy=staging_history.selector.model_dump(mode='json'), staging_observation_file=str(root / 'staging.json'),
         staging_observation_sha256=hashlib.sha256((root / 'staging.json').read_bytes()).hexdigest(),
         development_guard=json.loads(json.dumps(asdict(guard), default=str)), operator_connection=connection)
+    if physical is not None:
+        inputs.update(schema_version='loom.nebius-shared-pool-inputs.v4',
+            storage=physical.retained.reference.model_dump(mode='json'))
     state._atomic_json(root / 'inputs.json', inputs)
     operation = dict(schema='loom.nebius-shared-pool-operation.v1',
         source_sha=successor.projection.manager_publication.source.source_sha,

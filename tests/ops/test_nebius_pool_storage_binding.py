@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib
 import json
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -91,6 +93,99 @@ def test_storage_successor_rejects_every_unrelated_or_ambiguous_authority_change
     PoolInstallation.model_validate(after)
     with pytest.raises(ValueError):
         module().ClosedPoolStorageRefresh.model_validate(payload)
+
+
+@pytest.fixture
+def retained_storage_projection(tmp_path, monkeypatch):
+    """Keep upstream runtime qualification small; exercise actual storage intake."""
+    from scripts.ops import nebius_certificates as private_state
+    from scripts.ops import nebius_pool_storage_operation as storage
+    from scripts.ops import nebius_shared_pool_entry as entry
+    from scripts.ops.nebius_ingress_stage import _key
+
+    refresh = module().ClosedPoolStorageRefresh.model_validate(selection())
+    root, anchor = tmp_path / 'history', tmp_path / 'anchor'
+    private_state._private_directory(root)
+    private_state._private_directory(anchor)
+    receipt = root / 'operation.json'
+    private_state._atomic_json(receipt, {'status': 'complete'})
+    pins = {receipt: receipt.read_bytes()}
+    reference = entry.RetainedRuntimeReference(operation_path=receipt,
+        operation_sha256=hashlib.sha256(pins[receipt]).hexdigest())
+    registration = SimpleNamespace(spec=refresh.before)
+    request = SimpleNamespace(database=SimpleNamespace(manager=SimpleNamespace(retained=SimpleNamespace(
+        request=SimpleNamespace(registration=registration, retained=SimpleNamespace(operation={
+            'state_dir': str(root / 'manager'), 'anchor_dir': str(anchor)}))))))
+    configuration = {'apiVersion': 'v1', 'kind': 'ConfigMap', 'immutable': True,
+        'metadata': {'name': 'collector', 'namespace': 'loom-dev', 'uid': str(uuid4())},
+        'data': {'LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_STORAGE_NAME': 'compute.disk.size.network-ssd'}}
+    cronjob = {'apiVersion': 'batch/v1', 'kind': 'CronJob',
+        'metadata': {'name': 'collector', 'namespace': 'loom-dev', 'uid': str(uuid4())},
+        'spec': {'suspend': False, 'jobTemplate': {'spec': {'template': {'spec': {'containers': [
+            {'name': 'collector', 'envFrom': [{'configMapRef': {'name': 'collector'}}]}]}}}}}}
+    completed = SimpleNamespace(request=request, resources={_key(configuration): configuration, _key(cronjob): cronjob},
+        files=pins)
+    calls = []
+
+    def load_completed(_request):
+        calls.append(None)
+        storage._unchanged(pins)
+        return copy.deepcopy(completed)
+
+    def retained_completed(_reference, files):
+        result = load_completed(request)
+        files.update(result.files)
+        return result
+
+    # Both APIs represent the same expensive, already-qualified upstream load.
+    monkeypatch.setattr(entry, '_retained_runtime', lambda reference, files: retained_completed(reference, files).request)
+    monkeypatch.setattr(entry, '_retained_completed_runtime', retained_completed, raising=False)
+    monkeypatch.setattr(storage, 'load_completed_runtime', load_completed, raising=False)
+    monkeypatch.setattr(module(), 'load_completed_runtime', load_completed)
+    monkeypatch.setattr(module(), 'prepare_collector_runtime', lambda _database: SimpleNamespace(
+        configuration=configuration, cronjob=cronjob))
+    state, _, _ = storage._paths(request, refresh.operation_id)
+    private_state._private_directory(state.parent)
+    private_state._private_directory(state)
+    inputs = storage.StorageInputs(runtime=reference, refresh=refresh,
+        history={path: hashlib.sha256(raw).hexdigest() for path, raw in pins.items()})
+    private_state._atomic_json(state / 'inputs.json', inputs.model_dump(mode='json'))
+    selected = module().StorageReference(operation_id=refresh.operation_id,
+        inputs_sha256=hashlib.sha256((state / 'inputs.json').read_bytes()).hexdigest())
+    private_state._atomic_json(anchor / (str(selected.operation_id) + '-pool-storage-refresh.json'), storage._anchor(selected, state))
+    return storage, reference, selected, request, receipt, calls
+
+
+def test_storage_load_projects_runtime_once_but_reloads_each_invocation(retained_storage_projection):
+    storage, runtime, reference, request, _, calls = retained_storage_projection
+    first = storage.load_closed_storage(runtime=runtime, reference=reference)
+    assert first.runtime == request
+    assert first.collector.resumed['spec']['suspend'] is False
+    assert first.collector.configuration['data']['LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_STORAGE_NAME'] == (
+        'compute.disk.size.network-ssd-non-replicated')
+    assert len(calls) == 1, 'one storage load repeatedly reconstructed the same completed runtime'
+    assert storage.load_closed_storage(runtime=runtime, reference=reference) == first
+    assert len(calls) == 2, 'completed runtime projection escaped its loading scope'
+
+
+@pytest.mark.parametrize('damage', ['bytes', 'privacy', 'origin'])
+def test_storage_projection_rejects_drift_before_return(retained_storage_projection, monkeypatch, damage):
+    storage, runtime, reference, _, receipt, _ = retained_storage_projection
+    render = module().prepare_collector_runtime
+
+    def changed(database):
+        result = render(database)
+        if damage == 'bytes':
+            receipt.write_bytes(receipt.read_bytes() + b' ')
+        elif damage == 'privacy':
+            receipt.chmod(0o644)
+        else:
+            database.manager.retained.request.registration.spec = module().ClosedPoolStorageRefresh.model_validate(selection()).after
+        return result
+
+    monkeypatch.setattr(module(), 'prepare_collector_runtime', changed)
+    with pytest.raises(ValueError, match='closed storage history unqualified'):
+        storage.load_closed_storage(runtime=runtime, reference=reference)
 
 
 def test_storage_parent_predispatch_failure_does_not_strand_registry_intent(tmp_path):
