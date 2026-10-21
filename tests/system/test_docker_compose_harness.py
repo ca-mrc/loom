@@ -15,6 +15,28 @@ from tests.integration.minio_test_images import MINIO_TEST_IMAGE
 from tests.system import docker_compose
 
 
+@pytest.mark.parametrize("configured", [None, "explicit-system-session"])
+def test_compose_keeps_one_isolated_project_for_start_restart_and_cleanup(
+    monkeypatch: Any, configured: str | None,
+) -> None:
+    projects: list[str] = []
+
+    def run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        projects.append(kwargs["env"]["COMPOSE_PROJECT_NAME"])
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.delenv("COMPOSE_PROJECT_NAME", raising=False)
+    if configured:
+        monkeypatch.setenv("COMPOSE_PROJECT_NAME", configured)
+    monkeypatch.setattr(docker_compose.subprocess, "run", run)
+    docker_compose._compose("up", "-d")
+    docker_compose.start_service("worker", "test-token")
+    docker_compose.stack_down()
+
+    assert len(set(projects)) == 1
+    assert projects[0] == configured if configured else projects[0].startswith("loom-system-")
+
+
 def test_compose_failure_reports_bounded_redacted_output_without_replacing_error(
     monkeypatch: Any, capsys: Any,
 ) -> None:
@@ -141,6 +163,11 @@ def test_compose_mounts_runtime_fixtures_and_uses_fast_test_cancellation() -> No
     services = compose["services"]
     worker = compose["services"]["worker"]
     builder = services["task-image-builder"]
+
+    for service in (worker, builder):
+        assert service["environment"]["LOOM_WORKER_SANDBOX_IDENTITY"] == "${COMPOSE_PROJECT_NAME}"
+    for name in ("control-plane", "llm-gateway", "worker", "task-image-builder"):
+        assert services[name]["image"].endswith(":${COMPOSE_PROJECT_NAME}")
 
     assert worker["environment"]["LOOM_WORKER_FIXTURES_ROOT"] == ("/app/tests/fixtures/tasks")
     assert worker["environment"]["LOOM_WORKER_TRIAL_CANCEL_POLL_INTERVAL_SEC"] == "0.1"
