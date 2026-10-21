@@ -5,6 +5,7 @@ import asyncio
 import copy
 import importlib
 import json
+import traceback
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -307,7 +308,19 @@ async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact
                     return platform.probes.execute(pod, container, command)
                 yield EnvironmentRuntimeProbes(read=platform.probes.read, execute=execute, qualify=qualify, region=region)
             final_inputs = {**observe_inputs, 'platform_policy': platform.policy, 'platform_probe_connection': platform_probe_connection}
-            ready = await readiness.observe_environment_pre_activation(**final_inputs)
+            try:
+                ready = await readiness.observe_environment_pre_activation(**final_inputs)
+            except Exception as error:
+                # Operational wrappers intentionally suppress sensitive causes.
+                # Retain only bounded type/function/line evidence on CI failure.
+                cause = error
+                for _ in range(8):
+                    if cause is None:
+                        break
+                    print(type(cause).__name__, [(frame.name, frame.lineno)
+                        for frame in traceback.extract_tb(cause.__traceback__)[-12:]])
+                    cause = cause.__context__
+                raise
             assert ready['status'] == 'preactivation_runtime_verified_closed'
             assert ready['admission_open'] is False and ready['participant_id'] == str(policy.participant.participant_id)
             assert ready['platform']['platform_operation_id'] == str(platform.operation.operation_id)

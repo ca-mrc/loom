@@ -762,7 +762,7 @@ def _run_orphan_sandbox_cleanup(
 
 
 def _run_trial_cache_eviction(settings: WorkerSettings) -> None:
-    """Best-effort prune of all Loom-managed images.
+    """Best-effort cleanup within this worker's Docker ownership scope.
 
     Docker errors are logged and swallowed by the shared eviction helper;
     opportunistic cleanup must not fail worker boot or claim processing.

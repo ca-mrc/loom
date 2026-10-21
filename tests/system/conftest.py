@@ -9,16 +9,38 @@ the worker_crash test passes `compose_stack["worker_token"]` back to
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+import sys
+from collections.abc import Generator, Iterator
 
 import pytest
 
+from loom.security.redaction import redact_text
 from tests.system.docker_compose import (
     database_url,
+    preserve_compose_diagnostics,
     service_urls,
     stack_down_with_diagnostics,
     stack_up,
 )
+
+
+@pytest.hookimpl(wrapper=True, tryfirst=True)
+def pytest_runtest_makereport(
+    item: pytest.Item,
+) -> Generator[None, pytest.TestReport, pytest.TestReport]:
+    report = yield
+    if report.failed and report.when in {"setup", "call"} and "compose_stack" in getattr(item, "funcargs", {}):
+        # Session teardown can be minutes later, after another test recovers the
+        # stack and pushes the original failure out of the bounded log tail.
+        # Harness tests without the actual fixture must never capture Docker.
+        try:
+            preserve_compose_diagnostics()
+        except Exception as exc:
+            print(
+                f"warning: failed to preserve Compose diagnostics: {redact_text(str(exc))}",
+                file=sys.stderr,
+            )
+    return report
 
 
 @pytest.fixture(scope="session")
