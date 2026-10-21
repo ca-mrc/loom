@@ -176,20 +176,26 @@ def test_manager_probe_qualifies_the_actual_bounded_profile_catalog(settings_cas
 
 @pytest.mark.parametrize('runtime_inputs', [('development',)], indirect=True)
 @pytest.mark.parametrize('settings_case', ['manager'], indirect=True)
-@pytest.mark.parametrize('ancestry', ['installed', 'storage', 'schema', 'preactivation'])
+@pytest.mark.parametrize('ancestry', ['installed', 'storage', 'schema', 'preactivation', 'schema_pending'])
 def test_development_manager_challenges_selected_catalog_bytes(
         settings_case, guest_runtime_inputs, tmp_path, monkeypatch, ancestry):
     """Reserializing an equivalent catalog must not replace its mounted byte identity."""
     from dataclasses import replace
     from types import SimpleNamespace
+    from uuid import uuid4
 
     from scripts.ops import nebius_development_runtime_probes as module
+    from scripts.ops.nebius_development_schema_live import HTTPSDevelopmentSchemaAPI
 
     _, workload, environment, _, _, _, catalog_file = settings_case
     migration, *_ = guest_runtime_inputs
     spec = migration.registration.spec
     registration = replace(migration.registration,
         spec=type(spec).model_validate_json(json.dumps(spec.model_dump(mode='json'), sort_keys=True)))
+    original_registration = registration
+    if ancestry == 'schema_pending':
+        spec = spec.model_copy(update={'operation_id': uuid4()})
+        registration = replace(registration, spec=spec)
     # Legal JSON formatting and map order are not a canonical file encoding.
     mounted = json.dumps(json.loads(catalog_file.read_text()), sort_keys=True, indent=2)
     catalog_file.write_text(mounted)
@@ -202,9 +208,12 @@ def test_development_manager_challenges_selected_catalog_bytes(
         'data': {'profiles.json': mounted}}
     stale = copy.deepcopy(catalog)
     stale['data']['profiles.json'] += '\n'
-    retained = SimpleNamespace(request=SimpleNamespace(registration=registration),
+    retained = SimpleNamespace(request=SimpleNamespace(registration=original_registration),
         resources={catalog_key: catalog if ancestry in {'installed', 'storage'} else stale})
-    probes = object.__new__(module.HTTPSDevelopmentRuntimeProbes)
+    if ancestry == 'schema_pending':
+        retained.resources = {}  # The new schema catalog is not in the original installation.
+    probes = object.__new__(HTTPSDevelopmentSchemaAPI if ancestry == 'schema_pending'
+        else module.HTTPSDevelopmentRuntimeProbes)
     probes.request = SimpleNamespace(database=SimpleNamespace(manager=SimpleNamespace(retained=retained)))
     probes.manager = SimpleNamespace(binding=registration.binding)
     probes.storage = (None if ancestry == 'installed' else
@@ -217,6 +226,10 @@ def test_development_manager_challenges_selected_catalog_bytes(
             resources={catalog_key: catalog if ancestry == 'schema' else stale})
     probes.preactivation = (SimpleNamespace(retained=SimpleNamespace(registration=registration),
         resources=SimpleNamespace(catalog=catalog)) if ancestry == 'preactivation' else None)
+    if ancestry == 'schema_pending':
+        probes.retained = SimpleNamespace(plan=SimpleNamespace(fixed={catalog_key: catalog}),
+            projection=SimpleNamespace(after_pool=spec,
+                manager_publication=SimpleNamespace(bundle=SimpleNamespace(candidate=registration.candidate))))
     participant, = spec.participants
     monkeypatch.setattr(module, 'retained_development_participant', lambda request: participant)
     workload['metadata']['generation'] = 1
