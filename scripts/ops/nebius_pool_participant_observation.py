@@ -959,7 +959,10 @@ class HTTPSParticipantResourceObserver(ManagementKubernetesTransport):
             else:
                 process = identity(history._runtime(target, expected=workload))
                 history.qualify_manager_database(expected=workload)
-                history.qualify_manager_pool_settings(expected=workload)
+                catalog = current['ConfigMap:' + target.namespace
+                    + ':loom-pool-profiles-' + request.registration.spec.operation_id.hex]
+                history.qualify_manager_pool_settings(expected=workload,
+                    catalog_sha256=hashlib.sha256(catalog['data']['profiles.json'].encode()).hexdigest())
             final = self.observe(preparing=preparing)
             if (final.keys() != current.keys()
                     or any(not _matches(final[name], row, _uid(row)) for name, row in current.items())):

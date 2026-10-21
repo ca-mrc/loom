@@ -2538,7 +2538,11 @@ current-UID-owned `0600` file reader and compares their hashes with the exact
 registered participant credential; no operator credential is substituted.
 The manager's settings must select the retained catalog path, and its normal
 profile loader must accept bytes matching the immutable installed catalog before
-and after loading. The gateway has no running predecessor: its closed child UID
+and after loading. The expected file digest identifies the qualified ConfigMap
+bytes in the selected installation or successor history, not merely an equivalent
+profile model: retaining equivalent JSON can reorder maps without replacing the
+mounted file. Registry semantic digests remain separate from this byte identity.
+The gateway has no running predecessor: its closed child UID
 comes from the completed startup journal, and only a replica-count change may
 separate it from the running template. Its real settings must select the registered
 pool, installation, machine and admission epoch, the exact owner-only machine

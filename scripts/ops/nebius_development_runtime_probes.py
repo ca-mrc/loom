@@ -248,9 +248,22 @@ class HTTPSDevelopmentRuntimeProbes(HTTPSDevelopmentRuntimeObserver):
             participant = retained_development_participant(self.request.database.manager.retained.request)
             machine, = (row for row in spec.machines
                 if row.participant_id == participant.participant_id and row.workload_scope == 'environment')
+            catalog_sha256 = None
+            if component == 'manager':
+                # The process reads the retained mounted bytes. Re-serializing
+                # an equivalent catalog after storage/history round-trips can
+                # reorder maps and produce a different byte identity.
+                if self.preactivation is not None:
+                    catalog = self.preactivation.resources.catalog
+                else:
+                    resources = (self.schema_successor.resources if self.schema_successor is not None
+                        else self.request.database.manager.retained.resources)
+                    catalog = resources['ConfigMap:' + self.manager.binding.namespace
+                        + ':loom-pool-profiles-' + spec.operation_id.hex]
+                catalog_sha256 = hashlib.sha256(catalog['data']['profiles.json'].encode()).hexdigest()
             wanted = expected_pool_runtime_settings(component, workload,
                 token_sha256=machine.token_sha256 if component in {'controller', 'actuator'} else None,
-                catalog_sha256=hashlib.sha256(spec.profiles.model_dump_json().encode()).hexdigest() if component == 'manager' else None)
+                catalog_sha256=catalog_sha256)
             nonce = secrets.token_hex(32)
             response = hmac.new(bytes.fromhex(nonce), json.dumps(wanted, sort_keys=True,
                 separators=(',', ':')).encode(), 'sha256').hexdigest()
