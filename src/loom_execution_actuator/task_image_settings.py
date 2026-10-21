@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer
 
 if TYPE_CHECKING:
     from loom_execution_actuator.task_image_renderer import TaskImageJobConfig
@@ -49,6 +49,15 @@ class NativeTaskImageSettings(BaseModel):
     cache_transfer: Literal["tar", "blobs"] = "blobs"
     # BuildKit OCI export shape; archive is today's path, directory is measure-gated.
     oci_export_format: Literal["archive", "directory"] = "archive"
+
+    @model_serializer(mode="wrap")
+    def serialize_settings(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        settings: dict[str, Any] = handler(self)
+        # Old pool contracts predate this field. Keep their omission while the
+        # actuator still uses the runtime default; explicit policies stay frozen.
+        if "io_full_avg10_max" not in self.model_fields_set:
+            settings.pop("io_full_avg10_max", None)
+        return settings
 
     def job_config(self) -> TaskImageJobConfig:
         from loom_execution_actuator.task_image_renderer import TaskImageJobConfig

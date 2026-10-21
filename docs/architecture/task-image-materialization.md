@@ -61,6 +61,11 @@ shape before claiming long-tail acceptance. Authored component timeouts, Job
 deadlines and materialization retry policy are unchanged. Already frozen claims
 without this field retain their historical contract.
 
+Retained builder settings also preserve an omitted I/O policy when serialized,
+so reading an older pool contract does not add a field to its frozen identity.
+The actuator still applies the default 50 at runtime. Explicitly configured
+values, including 50, remain serialized and bound to that contract.
+
 The slim actuator image includes the queued execution-wait reader used by this
 shared admission path. Its image-build smoke imports that reader explicitly:
 process startup alone does not exercise the lazy import made when a build first
