@@ -10,7 +10,7 @@ from pathlib import Path, PurePosixPath
 import pytest
 
 from loom.driver.base import StartOptions
-from loom.driver.service_sandbox import ServiceSandboxDriver
+from loom.driver.service_sandbox import SandboxRPCError, ServiceSandboxDriver
 from loom.errors import DriverAlreadyStartedError, DriverError, DriverNotStartedError
 from loom.models.capabilities import Capabilities
 from loom.models.networking import NoNetwork, Public
@@ -411,3 +411,12 @@ async def test_upload_streams_bounded_chunks_with_exact_content_length(tmp_path:
     assert sum(sizes) == size
     with source.open("rb") as stream:
         assert observed.hexdigest() == hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+@pytest.mark.asyncio
+async def test_unreachable_sandbox_fails_start_with_a_safe_code(tmp_path: Path) -> None:
+    driver = driver_for(tmp_path / "absent.sock")
+    with pytest.raises(SandboxRPCError, match=r"^sandbox health failed \(transport_error\)$"):
+        await driver.start()
+    with pytest.raises(DriverNotStartedError):
+        await driver.exec("true")

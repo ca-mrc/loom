@@ -75,6 +75,9 @@ _PLATFORM_SETUP_REASONS: frozenset[str] = frozenset(
         "internal_error",
         "node_setup_health",
         "setup_failure",
+        # Hosted runtime statuses: a setup phase or the runtime itself failed.
+        "runtime_error",
+        "setup_error",
     }
 )
 

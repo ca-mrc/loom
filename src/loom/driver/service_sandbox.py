@@ -231,6 +231,10 @@ class ServiceSandboxDriver:
             health = response.json()
             if not isinstance(health, dict) or health.get("ready") is not True:
                 raise DriverError("sandbox readiness response invalid")
+        except httpx.HTTPError as exc:
+            # An unreachable sandbox gets a publishable code, not a bare class name.
+            await client.aclose()
+            raise SandboxRPCError("/health", exc) from exc
         except BaseException:
             await client.aclose()
             raise

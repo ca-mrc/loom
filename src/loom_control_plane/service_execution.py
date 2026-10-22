@@ -2650,9 +2650,18 @@ async def _verifier_finalization_payload(
     return {
         "trial_state": "failed",
         "result": result,
-        "failure_reason": "verifier_error",
+        "failure_reason": deferred_verifier_failure_reason(runtime_result.status),
         "failure_message": f"deferred verifier runtime reported {runtime_result.status}",
     }
+
+
+def deferred_verifier_failure_reason(status: str) -> str:
+    """Only the grading command itself failing is a verifier error (#2613).
+
+    Setup, runtime and evidence-capture failures keep the runtime's status,
+    as an attempt's do, so they are not attributed to the benchmark.
+    """
+    return {"timed_out": "verifier_timeout", "task_error": "verifier_error"}.get(status, status)
 
 
 async def recover_deleted_committed_trial(
