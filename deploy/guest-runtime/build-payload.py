@@ -18,7 +18,7 @@ import tarfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
 
@@ -38,9 +38,22 @@ def download(item: dict[str, object], directory: Path) -> Path:
         raise ValueError(f"archive URL must use HTTPS: {url}")
     try:
         for attempt in range(1, 4):
-            failure: HTTPError | TimeoutError | None = None
+            failure: URLError | TimeoutError | None = None
+            reason = "connection timeout"
             try:
-                with urlopen(url, timeout=120) as response, partial.open("wb") as output:
+                response = urlopen(url, timeout=120)
+            except HTTPError as error:
+                error.close()
+                failure = error
+                reason = f"HTTP {error.code}"
+            except URLError as error:
+                if not isinstance(error.reason, TimeoutError):
+                    raise
+                failure = error
+            except TimeoutError as error:
+                failure = error
+            else:
+                with response, partial.open("wb") as output:
                     while True:
                         try:
                             chunk = response.read(64 * 1024)
@@ -48,17 +61,14 @@ def download(item: dict[str, object], directory: Path) -> Path:
                             # Restart a timed-out body from byte zero. Keep
                             # local cache I/O outside this transport boundary.
                             failure = error
+                            reason = "body timeout"
                             break
                         if not chunk:
                             break
                         output.write(chunk)
-            except HTTPError as error:
-                error.close()
-                failure = error
             if failure is None:
                 break
             partial.unlink(missing_ok=True)
-            reason = f"HTTP {failure.code}" if isinstance(failure, HTTPError) else "body timeout"
             print(
                 f"guest archive {expected}: {reason}, attempt {attempt}/3",
                 file=sys.stderr,
