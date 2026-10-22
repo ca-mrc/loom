@@ -403,8 +403,9 @@ verification (`verifier_env_mode`, or `skip_verifier` when the axis is
 returns every reason, so a rejected batch lists all conflicts per task in one
 400 instead of failing on the first. Input `verification` is `shared`,
 `separate`, or `skipped` (#2529). `--skip-verifier` is retired; skip is that
-third value. Hosted admission still rejects `skip_verifier`
-(`verifier_mode_required`). Local workers omit the grader and persist
+third value. Hosted Nebius admits that boolean for trajectory generation and
+compiles an attempt with the agent sandbox only: `verifier_execution=skipped`
+and no verifier phase. Local workers omit the grader and persist
 `skip_verifier`, which export and archive already honor.
 
 `loom.execution-selection.v1` (`docs/evidence/loom.execution-selection.v1.schema.json`)
@@ -428,8 +429,10 @@ separate grader.
 `trial.skip_verifier` and leaves `verifier_env_mode` unset. The local
 harness omits the grader. Succeeded trials may have a null reward;
 export, tbv2, and terminal-result checks accept that only when
-`skip_verifier` is exactly `true`. Hosted Nebius still rejects this
-selection (`verifier_mode_required`).
+`skip_verifier` is exactly `true`. Hosted trajectory generation uses the same
+boolean: the attempt has one agent sandbox and does not grade. Evaluation
+still rejects skip. A graded shared or separate trial still needs its verifier
+artifacts.
 
 ### Shared
 

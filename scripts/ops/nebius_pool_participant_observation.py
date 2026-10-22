@@ -484,30 +484,37 @@ class HTTPSParticipantResourceObserver(ManagementKubernetesTransport):
         from scripts.ops.nebius_development_pool_registration import development_profile_catalog
         from scripts.ops.nebius_development_runtime_external import qualify_runtime_cloud
         from scripts.ops.nebius_development_runtime_retained import load_completed_runtime
+        from scripts.ops.nebius_shared_pool_operation import _history
 
         from loom_control_plane.execution_placement import quota_identity
 
         try:
-            bound, retained = copy.deepcopy(bindings), self.retained
+            bound, retained = copy.deepcopy(bindings), copy.deepcopy(self.retained)
             operator = private_state._private_read(operator_credentials, limit=1024**2)
             connection = (self.api_server, self.client, str(self.client.base_url), dict(self.client.headers))
             current = self.observe_writers(bindings=bound, shared_state=shared_state, preparing=preparing)
             view = _ResourceView(retained, preparing)
             completed = bound.plan.development.runtime
             request = completed.request
-            if load_completed_runtime(request) != completed:
+            if (load_completed_runtime(request) != completed
+                    or not bound.plan.history.items() <= retained.inputs.history.items()):
                 raise ValueError
             collector = prepare_collector_runtime(request.database)
-            config = collector.configuration
+            storage = bound.plan.storage
+            config = collector.configuration if storage is None else storage.resources.configuration
             keys = {_key(config), f"Secret:{config['metadata']['namespace']}:{collector.credential_secret_name}"}
             profiles = development_profile_catalog(request.database.manager.retained.request)
             keys.update(f'Secret:{row.settings.namespace}:{row.settings.registry_secret_name}'
                 for row in profiles.task_images)
             keys.update(f'Secret:{row.settings.namespace}:{row.settings.registry_secret_name}'
                 for row in profiles.application_images)
-            if not keys <= completed.plan.fixed['material'].keys():
+            material_keys = set(completed.plan.fixed['material'])
+            if storage is not None:
+                material_keys.add(_key(config))
+            if not keys <= material_keys:
                 raise ValueError
-            expected = {key: completed.resources[key] for key in keys}
+            effective = bound.plan.effective_runtime_resources
+            expected = {key: effective[key] for key in keys}
 
             def material() -> None:
                 for row in expected.values():
@@ -516,20 +523,22 @@ class HTTPSParticipantResourceObserver(ManagementKubernetesTransport):
                         raise ValueError
 
             def unchanged() -> None:
+                _history(bound)
                 if (bindings != bound or self.retained != retained
                         or (self.api_server, self.client, str(self.client.base_url), dict(self.client.headers)) != connection
                         or private_state._private_read(operator_credentials, limit=1024**2) != operator
-                        or _ResourceView(retained, preparing).files != view.files
                         or any(private_state._private_read(path, limit=4 * 1024**2) != raw
                             for path, raw in completed.files.items())):
                     raise ValueError
+                view.verify_receipts()
 
             unchanged()
             material()
             spec = retained.release.refresh.before
             async with self._publication_catalog(completed=completed, http=http):
                 unchanged()
-                snapshot = await qualify_runtime_cloud(request=request, operator_credentials=operator_credentials)
+                snapshot = await qualify_runtime_cloud(request=request, operator_credentials=operator_credentials,
+                    **({} if storage is None else {'storage': storage.retained.inputs.refresh}))
                 if (snapshot.node_group is None or snapshot.node_group.id != spec.node_group_id
                         or {key: quota_identity(value) for key, value in snapshot.quota_resources.items()} != spec.quota_identities
                         or snapshot.provider_capacity_state != 'available'
@@ -636,7 +645,7 @@ class HTTPSParticipantResourceObserver(ManagementKubernetesTransport):
         try:
             if phase not in {'preflight', 'guarded', 'ready', 'released'}:
                 raise ValueError
-            retained = self.retained
+            retained = copy.deepcopy(self.retained)
             current = self.observe(preparing=preparing)
             view = _ResourceView(retained, preparing)
             original, = (row for row in retained.inputs.previous.guards
@@ -672,9 +681,9 @@ class HTTPSParticipantResourceObserver(ManagementKubernetesTransport):
                         or hashlib.sha256(private_state._private_read(kubeconfig, limit=512 * 1024)).hexdigest() != before_api.kubeconfig_sha256
                         or hashlib.sha256(private_state._private_read(retained.state_dir / 'inputs.json', limit=16 * 1024**2)).hexdigest()
                             != retained.reference.inputs_sha256
-                        or private_state._private_read(marker) != anchor
-                        or _ResourceView(retained, preparing).files != view.files):
+                        or private_state._private_read(marker) != anchor):
                     raise ValueError
+                view.verify_receipts()
 
             def ready(row: Document) -> bool:
                 namespace = row['metadata']['namespace']
@@ -753,7 +762,7 @@ class HTTPSParticipantResourceObserver(ManagementKubernetesTransport):
         from scripts.ops.nebius_pool_participant_operation import _paths
 
         try:
-            bound, retained = copy.deepcopy(bindings), self.retained
+            bound, retained = copy.deepcopy(bindings), copy.deepcopy(self.retained)
             current = self.observe_writers(bindings=bound, shared_state=shared_state, preparing=preparing)
             view = _ResourceView(retained, preparing)
             original_selected = {_key(row): row for row in retained.inputs.current}
@@ -816,9 +825,9 @@ class HTTPSParticipantResourceObserver(ManagementKubernetesTransport):
                         or hashlib.sha256(private_state._private_read(kubeconfig, limit=512 * 1024)).hexdigest() != api.kubeconfig_sha256
                         or hashlib.sha256(private_state._private_read(retained.state_dir / 'inputs.json', limit=16 * 1024**2)).hexdigest()
                             != retained.reference.inputs_sha256
-                        or private_state._private_read(marker) != anchor
-                        or _ResourceView(retained, preparing).files != view.files):
+                        or private_state._private_read(marker) != anchor):
                     raise ValueError
+                view.verify_receipts()
 
             def urls() -> dict[str, str]:
                 return {key: api._workload_database_url(originals[key], url_variable=variable,
@@ -893,7 +902,7 @@ class HTTPSParticipantResourceObserver(ManagementKubernetesTransport):
         try:
             if phase not in {'preflight', 'guarded', 'ready', 'released'}:
                 raise ValueError
-            bound, retained = copy.deepcopy(bindings), self.retained
+            bound, retained = copy.deepcopy(bindings), copy.deepcopy(self.retained)
             current = self.observe(preparing=preparing)
             view = _ResourceView(retained, preparing)
             manager = bound.plan.development.runtime.request.database.manager.retained.request.retained
@@ -926,9 +935,9 @@ class HTTPSParticipantResourceObserver(ManagementKubernetesTransport):
                         or hashlib.sha256(private_state._private_read(retained.state_dir / 'inputs.json', limit=16 * 1024**2)).hexdigest()
                             != retained.reference.inputs_sha256
                         or private_state._private_read(marker) != anchor
-                        or _ResourceView(retained, preparing).files != view.files
                         or any(private_state._private_read(path, limit=4 * 1024**2) != raw for path, raw in manager.files.items())):
                     raise ValueError
+                view.verify_receipts()
 
             def ready() -> bool:
                 actual = history._get('deployment', target.controller['metadata']['name'], target.namespace)
@@ -950,7 +959,10 @@ class HTTPSParticipantResourceObserver(ManagementKubernetesTransport):
             else:
                 process = identity(history._runtime(target, expected=workload))
                 history.qualify_manager_database(expected=workload)
-                history.qualify_manager_pool_settings(expected=workload)
+                catalog = current['ConfigMap:' + target.namespace
+                    + ':loom-pool-profiles-' + request.registration.spec.operation_id.hex]
+                history.qualify_manager_pool_settings(expected=workload,
+                    catalog_sha256=hashlib.sha256(catalog['data']['profiles.json'].encode()).hexdigest())
             final = self.observe(preparing=preparing)
             if (final.keys() != current.keys()
                     or any(not _matches(final[name], row, _uid(row)) for name, row in current.items())):
@@ -982,7 +994,7 @@ class HTTPSParticipantResourceObserver(ManagementKubernetesTransport):
         from scripts.ops.nebius_shared_pool_forward_processes import _gateway_history_target
 
         try:
-            bound, retained = copy.deepcopy(bindings), self.retained
+            bound, retained = copy.deepcopy(bindings), copy.deepcopy(self.retained)
             current = self.observe_writers(bindings=bound, shared_state=shared_state, preparing=preparing)
             view = _ResourceView(retained, preparing)
             manager = bound.plan.development.runtime.request.database.manager.retained.request.retained
@@ -1012,9 +1024,9 @@ class HTTPSParticipantResourceObserver(ManagementKubernetesTransport):
                         or hashlib.sha256(private_state._private_read(retained.state_dir / 'inputs.json', limit=16 * 1024**2)).hexdigest()
                             != retained.reference.inputs_sha256
                         or private_state._private_read(marker) != anchor
-                        or _ResourceView(retained, preparing).files != view.files
                         or any(private_state._private_read(path, limit=4 * 1024**2) != raw for path, raw in manager.files.items())):
                     raise ValueError
+                view.verify_receipts()
 
             def ready() -> None:
                 actual = history._get('deployment', original['metadata']['name'], target.namespace)
@@ -1064,7 +1076,7 @@ class HTTPSParticipantResourceObserver(ManagementKubernetesTransport):
 
         try:
             self._source()
-            bound, retained = copy.deepcopy(bindings), self.retained
+            bound, retained = copy.deepcopy(bindings), copy.deepcopy(self.retained)
             view = _ResourceView(retained, preparing)
             manager = bound.plan.development.runtime.request.database.manager.retained.request.retained
             if (bound.migration.registration.binding != retained.inputs.previous.registration.binding
@@ -1093,9 +1105,9 @@ class HTTPSParticipantResourceObserver(ManagementKubernetesTransport):
                         or hashlib.sha256(private_state._private_read(retained.state_dir / 'inputs.json', limit=16 * 1024**2)).hexdigest()
                             != retained.reference.inputs_sha256
                         or private_state._private_read(marker) != anchor
-                        or _ResourceView(retained, preparing).files != view.files
                         or any(private_state._private_read(path, limit=4 * 1024**2) != raw for path, raw in manager.files.items())):
                     raise ValueError
+                view.verify_receipts()
 
             def read() -> tuple[ParticipantRegistryState, tuple[Any, ...]]:
                 unchanged()
@@ -1131,9 +1143,10 @@ class HTTPSParticipantResourceObserver(ManagementKubernetesTransport):
         """
         from scripts.ops.nebius_shared_pool_forward_census import _forward_options
         from scripts.ops.nebius_shared_pool_handoff_live import _observe_shared_writer_options
+        from scripts.ops.nebius_shared_pool_workloads import _frame
 
         try:
-            bound, retained = copy.deepcopy(bindings), self.retained
+            bound, retained = copy.deepcopy(bindings), copy.deepcopy(self.retained)
             self._source()
             baseline = _forward_options(bound, shared_state)
             if (baseline[0]['outcome'] != 'shared_pool_handoff_complete'
@@ -1216,11 +1229,17 @@ class HTTPSParticipantResourceObserver(ManagementKubernetesTransport):
                     raise ValueError
             result = final
             after = self.observe(preparing=preparing)
+            # Completed root semantics were checked above. Reopen its frame,
+            # anchor and every private receipt; unchanged bytes preserve that
+            # projection without recursively rebuilding the same ancestry.
+            # Both live censuses and effective-permission reviews remain fresh.
             if (bindings != bound or self.retained != retained or after.keys() != current.keys()
                     or any(not _matches(after[key], row, _uid(row)) for key, row in current.items())
-                    or _forward_options(bound, shared_state) != baseline
-                    or _ResourceView(retained, preparing).files != receipts.files):
+                    or _frame(bound, shared_state) != baseline[0]
+                    or {**{shared_state / name: checksum for name, checksum in _files(shared_state).items()},
+                        anchor: hashlib.sha256(private_state._private_read(anchor)).hexdigest()} != files):
                 raise ValueError
+            receipts.verify_receipts()
             return replace(result, input_digest=digest({'reference': retained.reference.model_dump(mode='json'),
                 'census': result.input_digest, 'resources': {key: {'uid': _uid(row), 'body': _stable(row)}
                     for key, row in current.items()}}))

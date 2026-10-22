@@ -6,6 +6,7 @@ opening. The parent owns this adapter's HTTP client and read-only SQL transports
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 from typing import Any
 
@@ -157,7 +158,11 @@ class HTTPSPoolStartupAPI:
             parent, migration = self.parent, self.request.fencing.retirement.migration
             parent.history.qualify_binding(migration, self.request.manager)
             parent.history.qualify_manager_database(expected=expected[_key(self.request.manager)])
-            parent.history.qualify_manager_pool_settings(expected=expected[_key(self.request.manager)])
+            configuration = json.loads(private_state._private_read(self.state / 'configuration/stage.json', limit=4 * 1024**2))
+            catalog = configuration['resources']['ConfigMap:' + migration.registration.binding.namespace
+                + ':loom-pool-profiles-' + migration.registration.spec.operation_id.hex]['observed']
+            parent.history.qualify_manager_pool_settings(expected=expected[_key(self.request.manager)],
+                catalog_sha256=hashlib.sha256(catalog['data']['profiles.json'].encode()).hexdigest())
             gateway_key = 'Deployment:' + migration.registration.binding.namespace + ':loom-pool-gateway'
             parent.history.qualify_gateway_runtime(original=self.closed[gateway_key], expected=expected[gateway_key])
             for target in migration.guards:

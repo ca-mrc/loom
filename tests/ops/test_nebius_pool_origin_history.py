@@ -165,6 +165,7 @@ def test_active_pool_rechecks_authority_after_the_database_read(management_histo
 @pytest.mark.parametrize('successor', [False, True, 'legacy'])
 def test_manager_runtime_uses_the_retained_management_database(management_history, monkeypatch, damage, successor):
     """A template Secret alone cannot qualify the manager's effective settings."""
+    import hashlib
     import json
     import os
     import subprocess
@@ -181,7 +182,15 @@ def test_manager_runtime_uses_the_retained_management_database(management_histor
         manager['spec']['template']['spec']['containers'][0]['env'].append({'name': 'LOOM_SVC_SERVICE_MODE', 'value': 'management'})
     state.target = replace(state.target, controller=copy.deepcopy(manager))
     # Reconstruct the real reader so its immutable history hash binds this input.
-    selected = type(api)(request=api.request, target=state.target, kubeconfig=api.kubeconfig, executable=Path('/usr/bin/kubectl'))
+    request = api.request
+    if successor:
+        registration = request.registration
+        # Retaining a rollout sorts nested maps without rewriting the mounted catalog.
+        spec = type(registration.spec).model_validate_json(json.dumps(registration.spec.model_dump(mode='json'), sort_keys=True))
+        assert spec == registration.spec
+        assert spec.profiles.model_dump_json() != registration.spec.profiles.model_dump_json()
+        request = replace(request, registration=replace(registration, spec=spec))
+    selected = type(api)(request=request, target=state.target, kubeconfig=api.kubeconfig, executable=Path('/usr/bin/kubectl'))
     options = {}
     if successor:
         manager['metadata'].setdefault('annotations', {})['loom.nebius/pool-cutover'] = 'fixture'
@@ -252,8 +261,13 @@ def test_manager_runtime_uses_the_retained_management_database(management_histor
         selected.qualify_manager_database(**options)
         assert len(processes) == 1 and json.loads(processes[0].stdout) == {'status': 'qualified'}
         if successor:
-            selected.qualify_manager_pool_settings(expected=options['expected'])
+            catalog_sha256 = hashlib.sha256(catalog.read_bytes()).hexdigest()
+            selected.qualify_manager_pool_settings(expected=options['expected'], catalog_sha256=catalog_sha256)
             assert len(processes) == 2 and json.loads(processes[-1].stdout) == {'status': 'qualified'}
+            catalog.write_bytes(catalog.read_bytes() + b'\n')
+            with pytest.raises(PoolMigrationError) as error:
+                selected.qualify_manager_pool_settings(expected=options['expected'], catalog_sha256=catalog_sha256)
+            assert error.value.stage == 'management_pool_settings'
         elif legacy:
             selected.qualify_manager_legacy_settings(expected=manager)
             assert len(processes) == 2 and json.loads(processes[-1].stdout) == {'status': 'qualified'}

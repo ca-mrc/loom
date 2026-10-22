@@ -56,13 +56,29 @@ recovery and the first ordinary participant release. A prepared or interrupted
 successor is not activation authority, and ambiguous writes are reconciled from
 retained intent and readback rather than retried. See the
 [catalog refresh procedure](../runbooks/nebius-deployment.md#shared-pool-handoff-delivery).
-Management catalog/startup SQL remains pinned to the retained `0176` database.
-Participant handoff and recovery separately support the audited `0176`, `0177`
-and `0178` layouts. Publication retention in `0177` and management catalog/lifecycle
+If the same native worker group has independently changed its boot-disk type,
+a separate never-used CLOSED-pool storage correction binds accounting to the
+authenticated current disk type. It changes only the storage quota name and
+policy revision, not the group, capacity limits, credentials or profiles. The
+collector is paused and drained, receives an immutable corrected configuration,
+and resumes its original schedule after the exact registry update. Completion
+requires a fresh aggregate observation matching the corrected registration.
+Original installation receipts remain immutable. A later catalog refresh pins
+this completed storage predecessor explicitly; handoff, recovery and ordinary
+releases follow that same ancestry. A storage-only handoff is also supported.
+Neither correction opens admission or grants ordinary releases permission to
+change physical capacity. Used or active pools require a separate transition.
+Without an explicit completed schema successor, management catalog/startup SQL
+remains pinned to the retained `0176` database. A selected schema successor pins
+the exact upgraded manager revision from its protected publication; neither
+handoff nor a historical-manager observation authorizes a schema upgrade.
+Participant handoff and recovery separately support the audited `0175`, `0176`,
+`0177` and `0178` layouts. Publication retention in `0177` and management catalog/lifecycle
 history in `0178` do not change pool guards or outboxes. The actuator receives no
 access to those journals, and role qualification rejects even column-level grants
-to them. An older `0175` participant needs an explicit schema upgrade before this
-runtime qualification; read-only diagnostics do not grant writer authority. Readiness
+to them. This retained-protocol compatibility does not authorize a newer runtime
+against an old schema; candidate/schema qualification still requires its explicit
+upgrade. Read-only diagnostics do not grant writer authority. Readiness
 reports the actual participant revision, and unreviewed revisions remain blocked;
 handoff never upgrades or relabels a database to satisfy these checks.
 Staging also selects seven-day ephemeral lifecycle authority and mandatory fresh

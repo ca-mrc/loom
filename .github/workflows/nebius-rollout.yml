@@ -12,7 +12,7 @@ on:
       operation:
         description: Idle rollout, lease census, inventory, certificates, ingress, or protected management installation
         type: choice
-        options: [rollout, recover, inspect, lease-census, certificate, development-management-certificate, ingress, ingress-rollback, ingress-dns, management-preflight, management-install, management-diagnostic-preflight, management-diagnostic-install, management-recovery-preflight, management-recovery-install, management-refresh-preflight, management-refresh-install, management-pool-preflight, management-pool-install, management-pool-rollback, management-pool-repair-preflight, management-pool-repair-install, management-pool-repair-rollback, development-preflight, development-install, development-management-preflight, development-management-install, development-management-renewal-preflight, development-management-renewal-renew, development-pool-preflight, development-pool-install, development-runtime-preflight, development-runtime-install, shared-pool-preflight, shared-pool-install, shared-pool-recover, shared-pool-refresh-catalog]
+        options: [rollout, recover, inspect, lease-census, certificate, development-management-certificate, ingress, ingress-rollback, ingress-dns, management-preflight, management-install, management-diagnostic-preflight, management-diagnostic-install, management-recovery-preflight, management-recovery-install, management-refresh-preflight, management-refresh-install, management-pool-preflight, management-pool-install, management-pool-rollback, management-pool-repair-preflight, management-pool-repair-install, management-pool-repair-rollback, development-preflight, development-install, development-management-preflight, development-management-install, development-management-renewal-preflight, development-management-renewal-renew, development-pool-preflight, development-pool-install, development-runtime-preflight, development-runtime-install, shared-pool-preflight, shared-pool-install, shared-pool-recover, shared-pool-refresh-catalog, shared-pool-refresh-storage]
         default: rollout
       recovery_run_id:
         description: With recover only, terminal failed rollout whose immutable candidate and guard are resumed
@@ -1160,7 +1160,7 @@ jobs:
       github.repository_id == '1281629473' &&
       github.ref == 'refs/heads/dev' &&
       github.event_name == 'workflow_dispatch' &&
-      (inputs.operation == 'shared-pool-preflight' || inputs.operation == 'shared-pool-install' || inputs.operation == 'shared-pool-recover' || inputs.operation == 'shared-pool-refresh-catalog')
+      (inputs.operation == 'shared-pool-preflight' || inputs.operation == 'shared-pool-install' || inputs.operation == 'shared-pool-recover' || inputs.operation == 'shared-pool-refresh-catalog' || inputs.operation == 'shared-pool-refresh-storage')
     runs-on: ubuntu-24.04
     timeout-minutes: 55
     permissions:
@@ -1182,7 +1182,7 @@ jobs:
         run: |
           python3 - <<'PY'
           import json, os, re, subprocess
-          if os.environ['SHARED_POOL_OPERATION'] not in {'shared-pool-preflight', 'shared-pool-install', 'shared-pool-recover', 'shared-pool-refresh-catalog'}:
+          if os.environ['SHARED_POOL_OPERATION'] not in {'shared-pool-preflight', 'shared-pool-install', 'shared-pool-recover', 'shared-pool-refresh-catalog', 'shared-pool-refresh-storage'}:
               raise SystemExit('Fixed shared pool operation required')
           value = json.loads(os.environ['NEBIUS_SHARED_POOL_OPERATION_JSON'])
           sha = value['source_sha']
@@ -1230,6 +1230,7 @@ jobs:
             shared-pool-install) operation=install ;;
             shared-pool-recover) operation=recover ;;
             shared-pool-refresh-catalog) operation=refresh-catalog ;;
+            shared-pool-refresh-storage) operation=refresh-storage ;;
             *) exit 1 ;;
           esac
           export LOOM_DEPLOY_SSH_KEY_FILE="$RUNNER_TEMP/nebius-shared-pool-key"

@@ -55,17 +55,20 @@ from loom_service.environment_management.candidates import _json
 if TYPE_CHECKING:
     from scripts.ops.nebius_development_schema_upgrade import CompletedDevelopmentSchemaSuccessor
     from scripts.ops.nebius_pool_preactivation_operation import CompletedPreactivationCatalog
+    from scripts.ops.nebius_pool_storage_operation import CompletedClosedStorage
 
 
 class HTTPSDevelopmentRuntimeProbes(HTTPSDevelopmentRuntimeObserver):
     def __init__(self, *, request: DevelopmentRuntimeInstallRequest, api_server: str,
                  ssl_context: ssl.SSLContext, token: str, private_files: dict[Path, bytes] | None = None,
                  preactivation: CompletedPreactivationCatalog | None = None,
-                 schema_successor: CompletedDevelopmentSchemaSuccessor | None = None):
+                 schema_successor: CompletedDevelopmentSchemaSuccessor | None = None,
+                 storage: CompletedClosedStorage | None = None):
         if not token:
             raise ValueError('development runtime probe credential missing')
         super().__init__(request=request, api_server=api_server, ssl_context=ssl_context,
-            token=token, private_files=private_files, preactivation=preactivation, schema_successor=schema_successor)
+            token=token, private_files=private_files, preactivation=preactivation,
+            schema_successor=schema_successor, storage=storage)
         try:
             # The protected gateway strips PATH to os.defpath. Include the
             # standard operator installation directory without trusting ambient
@@ -168,6 +171,8 @@ class HTTPSDevelopmentRuntimeProbes(HTTPSDevelopmentRuntimeObserver):
             from scripts.ops.nebius_development_runtime_selection import DevelopmentRuntimeSelection
 
             return DevelopmentRuntimeSelection(self.schema_successor.runtime, self.schema_successor).registration
+        if self.storage is not None:
+            return self.storage.retained.registration
         return self.request.database.manager.retained.request.registration
 
     @property
@@ -235,6 +240,15 @@ class HTTPSDevelopmentRuntimeProbes(HTTPSDevelopmentRuntimeObserver):
     def _process_identity(pod: dict[str, Any]) -> tuple[Any, ...]:
         return (_uid(pod), pod['status']['containerStatuses'], pod['status'].get('initContainerStatuses', []))
 
+    def _manager_catalog(self) -> dict[str, Any]:
+        """Select the retained document mounted by the qualified manager."""
+        if self.preactivation is not None:
+            return self.preactivation.resources.catalog
+        resources = (self.schema_successor.resources if self.schema_successor is not None
+            else self.request.database.manager.retained.resources)
+        return resources['ConfigMap:' + self.manager.binding.namespace
+            + ':loom-pool-profiles-' + self.effective_registration.spec.operation_id.hex]
+
     def qualify_runtime_settings(self, *, key: str, state_dir: Path) -> None:
         """Challenge real typed settings/catalog/token readers; never return secrets."""
         try:
@@ -243,9 +257,16 @@ class HTTPSDevelopmentRuntimeProbes(HTTPSDevelopmentRuntimeObserver):
             participant = retained_development_participant(self.request.database.manager.retained.request)
             machine, = (row for row in spec.machines
                 if row.participant_id == participant.participant_id and row.workload_scope == 'environment')
+            catalog_sha256 = None
+            if component == 'manager':
+                # The process reads the retained mounted bytes. Re-serializing
+                # an equivalent catalog after storage/history round-trips can
+                # reorder maps and produce a different byte identity.
+                catalog = self._manager_catalog()
+                catalog_sha256 = hashlib.sha256(catalog['data']['profiles.json'].encode()).hexdigest()
             wanted = expected_pool_runtime_settings(component, workload,
                 token_sha256=machine.token_sha256 if component in {'controller', 'actuator'} else None,
-                catalog_sha256=hashlib.sha256(spec.profiles.model_dump_json().encode()).hexdigest() if component == 'manager' else None)
+                catalog_sha256=catalog_sha256)
             nonce = secrets.token_hex(32)
             response = hmac.new(bytes.fromhex(nonce), json.dumps(wanted, sort_keys=True,
                 separators=(',', ':')).encode(), 'sha256').hexdigest()

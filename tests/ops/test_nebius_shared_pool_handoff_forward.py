@@ -150,8 +150,8 @@ from tests.ops.test_nebius_shared_pool_handoff import (
 )
 
 
-@pytest.mark.parametrize('selection', ['foreign-handoff', 'preactivation'])
-def test_shared_probe_rejects_incompatible_catalog_selection_before_io(
+@pytest.mark.parametrize('selection', ['foreign-handoff', 'preactivation', 'storage-correction'])
+def test_shared_probe_rejects_incompatible_successor_selection_before_io(
         tmp_path, selection, manager_entry, retained):
     from scripts.ops.nebius_shared_pool_runtime_observation import HTTPSSharedPoolRuntimeProbes
 
@@ -159,11 +159,12 @@ def test_shared_probe_rejects_incompatible_catalog_selection_before_io(
     probes = object.__new__(HTTPSSharedPoolRuntimeProbes)
     probes.shared_bindings = object()
     message = ('shared runtime observation binding differs' if selection == 'foreign-handoff'
-        else 'shared runtime observation cannot select an in-progress catalog')
+        else 'shared runtime observation cannot select an in-progress successor')
     with pytest.raises(ValueError, match=message):
         probes.inspect(state_dir=tmp_path,
             _shared_handoff=object() if selection == 'foreign-handoff' else None,
-            _preactivation_catalog=object() if selection == 'preactivation' else None)
+            _preactivation_catalog=object() if selection == 'preactivation' else None,
+            _storage_correction=object() if selection == 'storage-correction' else None)
 
 
 @pytest.mark.timeout(420)
@@ -477,7 +478,7 @@ def test_shared_drain_checks_both_databases_and_retains_qualified_paged_backlog(
                     for index, origin in enumerate(page, start=1)]}
     _, documents, handler = runtime_http_inventory(runtime, shared_runtime[1], completed_pool[3].server, handoff[2])
     populate_database_backends(documents)
-    monkeypatch.setattr(shutil, 'which', lambda _: '/usr/bin/kubectl')
+    monkeypatch.setattr(shutil, 'which', lambda _, *, path: '/usr/bin/kubectl')
     guard_run = subprocess.run
     mode = {'history_invalid': True, 'reopen_guard': False}
     closed_reads = []

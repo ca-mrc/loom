@@ -21,11 +21,9 @@ from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_development_runtime_install import DevelopmentRuntimeInstallRequest
 from scripts.ops.nebius_development_runtime_retained import (
     RetainedRuntimeReference,
-    load_completed_runtime,
 )
 from scripts.ops.nebius_development_runtime_selection import (
     DevelopmentRuntimeSelection,
-    select_development_runtime,
 )
 from scripts.ops.nebius_development_runtime_transition import DevelopmentRuntimeWorkloadAPI
 from scripts.ops.nebius_development_schema_upgrade import (
@@ -52,6 +50,7 @@ from scripts.ops.nebius_pool_preactivation_registry import (
     validate_preactivation_registry,
 )
 from scripts.ops.nebius_pool_registration import PoolRegistrationRequest
+from scripts.ops.nebius_pool_storage_binding import StorageReference
 from scripts.ops.nebius_shared_pool_handoff import StagingPoolSource
 from scripts.ops.nebius_shared_pool_operation import _directory
 
@@ -81,6 +80,7 @@ class PreactivationInputs(BaseModel):
     runtime: RetainedRuntimeReference
     schema_successor: DevelopmentSchemaReference | None = None
     predecessor: PreactivationReference | None
+    storage: StorageReference | None = Field(default=None, exclude_if=lambda value: value is None)
     source: StagingPoolSource
     refresh: PoolParticipantRefresh
     manager: dict[str, Any]
@@ -150,27 +150,39 @@ def _anchor(reference: PreactivationReference, state: Path) -> dict[str, Any]:
 
 
 def _basis(*, runtime: RetainedRuntimeReference, predecessor: PreactivationReference | None,
-        repo_root: Path, seen: frozenset[UUID], schema_successor: DevelopmentSchemaReference | None
-        ) -> tuple[DevelopmentRuntimeInstallRequest,
-            PoolRegistrationRequest, dict[str, Any], dict[str, Any], dict[Path, bytes]]:
-    from scripts.ops.nebius_shared_pool_entry import _retained_runtime
+        storage: StorageReference | None, repo_root: Path, seen: frozenset[UUID],
+        schema_successor: DevelopmentSchemaReference | None) -> tuple[DevelopmentRuntimeInstallRequest,
+            PoolRegistrationRequest, dict[str, Any], dict[str, Any], dict[Path, bytes], StorageReference | None]:
+    from scripts.ops.nebius_shared_pool_entry import _retained_completed_runtime
 
     files: dict[Path, bytes] = {}
-    request = _retained_runtime(runtime, files)
+    original = _retained_completed_runtime(runtime, files)
+    request = original.request
     registration = request.database.manager.retained.request.registration
     if predecessor is not None:
         prior = _load(runtime=runtime, reference=predecessor, repo_root=repo_root, seen=seen)
+        if schema_successor is not None and storage is None:
+            storage = prior.inputs.storage
+        if prior.inputs.storage != storage:
+            raise ValueError('catalog physical ancestry changed')
         completed = _completed(prior)
         if prior.inputs.schema_successor != schema_successor:
             raise ValueError
         files = dict(completed.files)
-        return request, prior.registration, completed.resources.manager, completed.resources.catalog, files
-    original = load_completed_runtime(request)
+        return request, prior.registration, completed.resources.manager, completed.resources.catalog, files, storage
     successor = (None if schema_successor is None else
         load_completed_development_schema_successor(runtime=request, reference=schema_successor))
-    selected = select_development_runtime(original, successor)
+    if successor is not None and successor.runtime != original:
+        raise ValueError('catalog schema runtime differs')
+    # Both objects were loaded and qualified in this invocation. The caller
+    # rechecks their merged byte pins after deriving the catalog projection.
+    selected = DevelopmentRuntimeSelection(original, successor)
     registration = selected.registration
     if successor is not None:
+        reference = None if successor.storage is None else successor.storage.retained.reference
+        if storage is not None and storage != reference:
+            raise ValueError('catalog schema storage ancestry differs')
+        storage = reference
         for path, raw in successor.files.items():
             if path in files and files[path] != raw:
                 raise ValueError
@@ -178,12 +190,27 @@ def _basis(*, runtime: RetainedRuntimeReference, predecessor: PreactivationRefer
     namespace = registration.binding.namespace
     manager = selected.resources['Deployment:' + namespace + ':loom-service']
     catalog = selected.resources['ConfigMap:' + namespace + ':loom-pool-profiles-' + registration.spec.operation_id.hex]
-    return request, registration, copy.deepcopy(manager), copy.deepcopy(catalog), files
+    if storage is not None:
+        from scripts.ops.nebius_pool_storage_operation import load_completed_storage
+
+        physical = load_completed_storage(runtime=runtime, reference=storage)
+        if physical.retained.runtime != request:
+            raise ValueError('catalog storage runtime differs')
+        if successor is not None:
+            if successor.storage != physical:
+                raise ValueError('catalog schema storage ancestry differs')
+        else:
+            registration = physical.retained.registration
+        for path, raw in physical.files.items():
+            if path in files and files[path] != raw:
+                raise ValueError
+            files[path] = raw
+    return request, registration, copy.deepcopy(manager), copy.deepcopy(catalog), files, storage
 
 
 def _inputs(*, runtime: RetainedRuntimeReference, predecessor: PreactivationReference | None,
         source: StagingPoolSource, operation_id: UUID, repo_root: Path, seen: frozenset[UUID],
-        schema_successor: DevelopmentSchemaReference | None = None
+        schema_successor: DevelopmentSchemaReference | None = None, storage: StorageReference | None = None
         ) -> tuple[PreactivationInputs, DevelopmentRuntimeInstallRequest, dict[Path, bytes]]:
     if operation_id in seen or len(seen) >= 32 or not operation_id.int:
         raise ValueError
@@ -193,13 +220,13 @@ def _inputs(*, runtime: RetainedRuntimeReference, predecessor: PreactivationRefe
     if (source.publication.source_sha != source.candidate.get('candidate_sha')
             or source.publication.run_id != source.candidate.get('run_id')):
         raise ValueError
-    request, registration, manager, catalog, files = _basis(runtime=runtime, predecessor=predecessor,
-        repo_root=repo_root, seen=seen, schema_successor=schema_successor)
+    request, registration, manager, catalog, files, storage = _basis(runtime=runtime, predecessor=predecessor,
+        repo_root=repo_root, seen=seen, schema_successor=schema_successor, storage=storage)
     if operation_id == request.database.manager.retained.request.registration.spec.operation_id:
         raise ValueError
     refresh = prepare_staging_preactivation_refresh(registration=registration,
         observation=source.observation, candidate=source.candidate, operation_id=operation_id, repo_root=repo_root)
-    result = PreactivationInputs(runtime=runtime, predecessor=predecessor, source=source, refresh=refresh,
+    result = PreactivationInputs(runtime=runtime, predecessor=predecessor, storage=storage, source=source, refresh=refresh,
         schema_version='loom.pool-preactivation-inputs.v2' if schema_successor is not None else 'loom.pool-preactivation-inputs.v1',
         schema_successor=schema_successor,
         manager=manager, catalog=catalog, history={path: hashlib.sha256(raw).hexdigest() for path, raw in files.items()})
@@ -226,7 +253,7 @@ def _load(*, runtime: RetainedRuntimeReference, reference: PreactivationReferenc
         raise ValueError
     expected, request, files = _inputs(runtime=runtime, predecessor=supplied.predecessor,
         source=supplied.source, operation_id=reference.operation_id, repo_root=repo_root, seen=seen,
-        schema_successor=supplied.schema_successor)
+        schema_successor=supplied.schema_successor, storage=supplied.storage)
     if supplied != expected or any(path in files for path in (marker, state / 'inputs.json')):
         raise ValueError
     files.update({marker: marker_raw, state / 'inputs.json': raw})
@@ -274,12 +301,13 @@ def load_completed_preactivation(*, runtime: RetainedRuntimeReference, reference
 
 def retain_preactivation_catalog(*, runtime: RetainedRuntimeReference, source: dict[str, Any],
         operation_id: UUID, repo_root: Path, predecessor: PreactivationReference | None = None,
-        schema_successor: DevelopmentSchemaReference | None = None) -> RetainedPreactivationCatalog:
+        schema_successor: DevelopmentSchemaReference | None = None,
+        storage: StorageReference | None = None) -> RetainedPreactivationCatalog:
     """Local source-qualified preparation, never a cluster/SQL or guard operation."""
     try:
         inputs, request, files = _inputs(runtime=runtime, predecessor=predecessor,
             source=StagingPoolSource.model_validate(copy.deepcopy(source)), operation_id=operation_id,
-            repo_root=repo_root, seen=frozenset(), schema_successor=schema_successor)
+            repo_root=repo_root, seen=frozenset(), schema_successor=schema_successor, storage=storage)
         # Preserve original v1 bytes and their pinned preparation reference.
         value = inputs.model_dump(mode='json', exclude={'schema_successor'} if schema_successor is None else set())
         raw = json.dumps(value, sort_keys=True).encode()

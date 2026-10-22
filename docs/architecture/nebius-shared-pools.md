@@ -84,6 +84,13 @@ recipes, participant profiles and native build policy together. The exact closed
 catalog commits before the manager restarts. Its gateway remains stopped and
 admission remains closed; activation and shared-pool handoff must explicitly select
 the completed successor, including any later preactivation catalog rooted in it.
+If native disk accounting needs correction, complete that CLOSED storage
+successor first and pin it in the schema inputs. The upgraded registry and
+collector retain that physical binding; later catalog, handoff and recovery
+follow the same storage → schema ancestry rather than independent selections.
+Each schema-history load qualifies the original runtime once and reuses that
+result only within the call, rechecking all pinned history before returning.
+Later loads reconstruct the runtime afresh; no completed projection is cached.
 
 The schema parent shares the existing handoff mutation lock and rejects prior
 handoff/recovery/preactivation dispatch. It requires idle work and retired personal
@@ -1124,6 +1131,14 @@ The new manager must have its exact closed registration and active credentials.
 The historical manager instead must pass the read-only retirement check: its
 fenced revision, exact revoked credentials and empty charged/uncertain-work
 journal. It must not satisfy startup readiness or renew retired credentials.
+For a manager with a completed refresh, preflight, forward handoff and recovery
+select the exact target schema from that hash-qualified completion. The read-only
+retirement SQL checks that single revision; it never tries a list of versions
+until one succeeds. Initial-upgrade history retains the existing exact-`0176`
+contract. These historical reads do not relax the new manager's startup or write
+requirements: it remains exactly `0176` unless an explicitly selected completed
+development schema successor binds its upgraded revision. Neither historical
+observation nor handoff migrates either database.
 The new manager and dev consumers undergo actual settings/database challenges;
 current staging service, controller and every actuator are checked against their
 source-qualified current templates, not obsolete rollback templates. Database
@@ -2526,7 +2541,11 @@ current-UID-owned `0600` file reader and compares their hashes with the exact
 registered participant credential; no operator credential is substituted.
 The manager's settings must select the retained catalog path, and its normal
 profile loader must accept bytes matching the immutable installed catalog before
-and after loading. The gateway has no running predecessor: its closed child UID
+and after loading. The expected file digest identifies the qualified ConfigMap
+bytes in the selected installation or successor history, not merely an equivalent
+profile model: retaining equivalent JSON can reorder maps without replacing the
+mounted file. Registry semantic digests remain separate from this byte identity.
+The gateway has no running predecessor: its closed child UID
 comes from the completed startup journal, and only a replica-count change may
 separate it from the running template. Its real settings must select the registered
 pool, installation, machine and admission epoch, the exact owner-only machine
@@ -2880,8 +2899,10 @@ either original or target, including a lost create response. A qualified
 post-migration probe narrows observation to the target. The read-only ledger
 queries support audited manager schemas 0174, 0176, 0177 and 0178 with identical
 legacy pool layouts, while requiring the single selected revision on each read.
-A scoped lifecycle binding cannot pass the exact legacy binding comparison. Default
-pool readers and all fence/revoke/startup writes retain their exact0176 contract.
+A scoped lifecycle binding cannot pass the exact legacy binding comparison.
+Default pool readers and this legacy refresh's fence/revoke/startup writes retain
+their exact `0176` contract. A completed development schema successor separately
+selects its exact upgraded revision for development handoff.
 This does not widen participant schemas or advance shared handoff.
 The refresh installer requalifies it in preflight, immediately before actual
 resource creation and manager patches, around activation qualification and

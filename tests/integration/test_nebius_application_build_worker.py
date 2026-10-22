@@ -4,7 +4,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from contextlib import asynccontextmanager
+import sys
+from contextlib import asynccontextmanager, contextmanager
 from datetime import UTC, datetime, timedelta
 from time import monotonic
 from types import SimpleNamespace
@@ -29,6 +30,50 @@ from tests.integration.test_nebius_pool_participant_http import client
 from tests.integration.test_nebius_pool_registry import machine
 from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_application_image_renderer import build_inputs as build_inputs
+
+
+@contextmanager
+def observe_worker_waits(*, delay_seconds=50):
+    """Expose suspended awaits before pytest's unchanged 60-second deadline.
+
+    Thread stacks only show the asyncio selector for this failure. Emit code
+    locations and cancellation counts, never task reprs, SQL or local values.
+    A loop timer adds no task to cancel or await during worker cleanup.
+    """
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+
+    def snapshot():
+        try:
+            tasks = []
+            for task in list(asyncio.all_tasks(loop))[:64]:
+                awaitable, chain, seen = task.get_coro(), [], set()
+                while awaitable is not None and id(awaitable) not in seen and len(seen) < 64:
+                    seen.add(id(awaitable))
+                    frame = getattr(awaitable, "cr_frame", None) or getattr(awaitable, "gi_frame", None)
+                    if frame is not None:
+                        chain.append({"file": frame.f_code.co_filename,
+                            "line": frame.f_lineno, "function": frame.f_code.co_name})
+                    awaitable = getattr(awaitable, "cr_await", None) or getattr(awaitable, "gi_yieldfrom", None)
+                tasks.append({"cancelling": task.cancelling(), "await_chain": chain})
+            print(json.dumps({"event": "slow_application_build_worker_test",
+                "elapsed_seconds": round(loop.time() - started, 3), "tasks": tasks}),
+                file=sys.stderr, flush=True)
+        except Exception:
+            # Best-effort evidence must not replace the original test failure.
+            pass
+
+    timer = loop.call_later(delay_seconds, snapshot)
+    try:
+        yield
+    finally:
+        timer.cancel()
+
+
+@pytest.fixture
+async def worker_timeout_diagnostics():
+    with observe_worker_waits():
+        yield
 
 
 @asynccontextmanager
@@ -125,7 +170,9 @@ async def cleanup(factory, request):
     return await journal.finalize(gateway, snapshot, pod_list_resource_version="91")
 
 
-async def test_worker_only_marks_ready_after_exact_publication_and_pool_cleanup(environment_registry, build_inputs, tmp_path):
+async def test_worker_only_marks_ready_after_exact_publication_and_pool_cleanup(
+    environment_registry, build_inputs, tmp_path, worker_timeout_diagnostics,
+):
     async with setup_worker(environment_registry, build_inputs, tmp_path) as (factory, registry, requests, _, worker, reader):
         request = requests[0]
         await worker.reconcile_once(request.build.build_id, attempt=1)

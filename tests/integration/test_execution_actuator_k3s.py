@@ -9,6 +9,7 @@ import ssl
 import subprocess
 import tempfile
 import time
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -280,6 +281,41 @@ def _executable_lease(
     )
 
 
+# Images the pinned K3s pulls for its sandbox and packaged addons. Inside the
+# disposable node they would come straight from Docker Hub, bypassing the
+# runner's registry mirror and image cache, once per K3s start.
+K3S_SYSTEM_IMAGES = (
+    "rancher/mirrored-pause:3.6",
+    "rancher/mirrored-coredns-coredns:1.14.3",
+    "rancher/local-path-provisioner:v0.0.36",
+    # The provisioner launches this helper for volume setup and teardown.
+    "rancher/mirrored-library-busybox:1.37.0",
+    "rancher/mirrored-metrics-server:v0.8.1",
+)
+
+
+def _k3s_system_image_archive() -> Path:
+    """Host archive of K3S_SYSTEM_IMAGES for K3s to import at startup."""
+    for image in K3S_SYSTEM_IMAGES:
+        cached = subprocess.run(["docker", "image", "inspect", image], check=False,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+        if cached.returncode != 0:
+            # The host daemon applies the runner's mirror and verifies layer digests.
+            subprocess.run(["docker", "pull", "--quiet", image], check=True, timeout=300,
+                           stdout=subprocess.DEVNULL)
+    ids = _docker("image", "inspect", "--format", "{{.Id}}", *K3S_SYSTEM_IMAGES).split()
+    key = hashlib.sha256("\n".join([*K3S_SYSTEM_IMAGES, *ids]).encode()).hexdigest()[:16]
+    directory = Path(tempfile.gettempdir()) / f"loom-k3s-system-images-{key}"
+    archive = directory / "system-images.tar"
+    if not archive.exists():
+        directory.mkdir(exist_ok=True)
+        partial = directory / f".system-images.{os.getpid()}.partial"
+        subprocess.run(["docker", "save", "--output", str(partial), *K3S_SYSTEM_IMAGES], check=True, timeout=300)
+        # Concurrent test processes share the archive; never expose a partial one.
+        partial.replace(archive)
+    return archive
+
+
 def _start_k3s(*, node_name: str | None = None, ephemeral_storage_floor: str | None = None) -> object:
     from testcontainers.core.container import DockerContainer
 
@@ -316,6 +352,9 @@ def _start_k3s(*, node_name: str | None = None, ephemeral_storage_floor: str | N
                 ]),
             ]
         )
+        # Mount the file, not its directory: K3s keeps import state beside it.
+        .with_volume_mapping(str(_k3s_system_image_archive()),
+                             "/var/lib/rancher/k3s/agent/images/system-images.tar", "ro")
         .with_kwargs(privileged=True)
     )
     container.start()
@@ -586,6 +625,29 @@ async def _wait_for_dns_pods(core: object, *, timeout: float = 60) -> list[objec
     raise AssertionError("disposable k3s did not create a CoreDNS Pod") from last_error
 
 
+def _pod_container_details(pod: object) -> str:
+    """Bound failure evidence without dumping specs, env, or termination output."""
+    def state_details(state):
+        details = {}
+        for phase in ("waiting", "running", "terminated"):
+            value = getattr(state, phase, None)
+            if value is not None:
+                details[phase] = {"reason": (getattr(value, "reason", None) or "")[:128]}
+                if phase == "terminated":
+                    details[phase].update(exit_code=value.exit_code, signal=value.signal)
+        return details
+
+    details = {}
+    for field in ("init_container_statuses", "container_statuses"):
+        statuses = getattr(pod.status, field, None) or []
+        details[field] = [{
+            "name": item.name[:128], "ready": item.ready, "restart_count": item.restart_count,
+            "state": state_details(item.state), "last_state": state_details(item.last_state),
+        } for item in statuses[:8]]
+    rendered = repr(details)
+    return rendered if len(rendered) <= 4096 else rendered[:4080] + "... (truncated)"
+
+
 def _wait_for_pod(core: object, namespace: str, name: str) -> object:
     deadline = time.monotonic() + 60
     last_phase = "missing"
@@ -598,11 +660,45 @@ def _wait_for_pod(core: object, namespace: str, name: str) -> object:
         ):
             return pod
         time.sleep(0.25)
-    raise AssertionError(
+    error = AssertionError(
         f"Pod {namespace}/{name} did not become ready: {last_phase}; "
         f"reason={pod.status.reason}; message={pod.status.message}; "
-        f"conditions={pod.status.conditions}"
+        f"conditions={pod.status.conditions}; containers={_pod_container_details(pod)}"
     )
+    # ContainerCreating predates container logs. Retain the sandbox/CNI and
+    # image-pull events before callers tear down this disposable cluster.
+    # Read only on failure; never retry readiness or dump Pod specs/Secrets.
+    try:
+        from kubernetes import client
+
+        uid = pod.metadata.uid if pod.metadata else None
+        selector = f"involvedObject.uid={uid}" if uid else f"involvedObject.name={name}"
+        configuration = deepcopy(core.api_client.configuration)
+        # Socket timeouts alone do not bound urllib3 Retry-After delays. Keep
+        # the shared readiness client untouched; this failure-only read has no
+        # retries and releases its separate transport immediately afterward.
+        configuration.retries = 0
+        with client.ApiClient(configuration=configuration) as diagnostic_client:
+            # The pinned urllib3 otherwise drops pools without closing them
+            # until GC; an exception traceback can keep those pools alive.
+            diagnostic_client.rest_client.pool_manager.pools.dispose_func = lambda pool: pool.close()
+            try:
+                events = client.CoreV1Api(diagnostic_client).list_namespaced_event(
+                    namespace, limit=32, _request_timeout=(2, 3),
+                    field_selector="involvedObject.kind=Pod," + selector)
+            finally:
+                # This SDK's ApiClient.close() closes only its thread pool.
+                diagnostic_client.rest_client.pool_manager.clear()
+        detail = json.dumps([{
+            "type": (event.type or "")[:32], "reason": (event.reason or "")[:128],
+            "message": (event.message or "")[:1024], "count": event.count,
+            "first_timestamp": event.first_timestamp.isoformat() if event.first_timestamp else None,
+            "last_timestamp": event.last_timestamp.isoformat() if event.last_timestamp else None,
+        } for event in events.items[:32]])[:16384]
+    except Exception as diagnostic_error:
+        detail = type(diagnostic_error).__name__
+    error.add_note("Pod events: " + detail)
+    raise error
 
 
 def _pod_probe(core: object, namespace: str, name: str, url: str) -> str:

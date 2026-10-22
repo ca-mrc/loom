@@ -1,0 +1,311 @@
+"""A closed physical-pool correction cannot change workload or machine authority."""
+from __future__ import annotations
+
+import copy
+import hashlib
+import importlib
+import json
+from types import SimpleNamespace
+from uuid import uuid4
+
+import pytest
+from tests.integration.test_nebius_pool_installation import installation
+
+from loom_service.pool_management.installation import PoolInstallation
+from loom_service.pool_management.participant_refresh import PoolParticipantRefresh
+
+
+def selection():
+    before, _ = installation(('staging', 'development'))
+    before['quota_identities']['storage'][3] = 'compute.disk.size.network-ssd'
+    after = copy.deepcopy(before)
+    after['policy_revision'] = before['policy_revision'] + 1
+    after['quota_identities']['storage'][3] = 'compute.disk.size.network-ssd-non-replicated'
+    return {'schema_version': 'loom.closed-pool-storage-refresh.v1',
+        'operation_id': str(uuid4()), 'target_disk_type': 'NETWORK_SSD_NON_REPLICATED',
+        'before': before, 'after': after}
+
+
+def module():
+    name = 'scripts.ops.nebius_pool_storage_binding'
+    assert importlib.util.find_spec(name) is not None, 'closed physical storage successor is missing'
+    return importlib.import_module(name)
+
+
+def test_storage_successor_preserves_pool_workloads_credentials_and_original_input():
+    payload = selection()
+    frozen = copy.deepcopy(payload)
+    selected = module().ClosedPoolStorageRefresh.model_validate(payload)
+    assert payload == frozen
+    assert selected.after.quota_identities['storage'][3] == 'compute.disk.size.network-ssd-non-replicated'
+    assert selected.after.policy_revision == selected.before.policy_revision + 1
+    assert selected.operation_id != selected.before.operation_id
+    assert selected.before.model_dump(exclude={'policy_revision', 'quota_identities'}) == (
+        selected.after.model_dump(exclude={'policy_revision', 'quota_identities'}))
+    # No active participant-release route may deserialize this closed-only scope.
+    with pytest.raises(ValueError):
+        PoolParticipantRefresh.model_validate(selected.model_dump(mode='json'))
+
+
+@pytest.mark.parametrize('damage', ['quota-parent', 'quota-region', 'quota-unit', 'other-quota',
+    'node-group', 'selector', 'admission', 'machine', 'participant', 'profile',
+    'wrong-quota', 'unknown-disk', 'unchanged-quota', 'operation', 'installation-operation', 'revision'])
+def test_storage_successor_rejects_every_unrelated_or_ambiguous_authority_change(damage):
+    payload = selection()
+    before, after = payload['before'], payload['after']
+    if damage in {'quota-parent', 'quota-region', 'quota-unit'}:
+        index = {'quota-parent': 0, 'quota-region': 1, 'quota-unit': 4}[damage]
+        after['quota_identities']['storage'][index] += '-changed'
+    elif damage == 'other-quota':
+        after['quota_identities']['vcpu'][3] += '-changed'
+    elif damage == 'node-group':
+        after['node_group_id'] += '-changed'
+        after['node_selector']['nebius.com/node-group-id'] = after['node_group_id']
+    elif damage == 'selector':
+        after['node_selector']['foreign'] = 'true'
+    elif damage == 'admission':
+        after['admission']['build_concurrency_limit'] += 1
+    elif damage == 'machine':
+        after['machines'][0]['credential_epoch'] += 1
+    elif damage == 'participant':
+        after['participants'][0]['binding_revision'] += 1
+    elif damage == 'profile':
+        after['profiles']['execution'][0]['runtime_binary_sha256'] = 'sha256:' + 'f' * 64
+    elif damage == 'wrong-quota':
+        after['quota_identities']['storage'][3] = 'compute.disk.size.unrelated'
+    elif damage == 'unknown-disk':
+        payload['target_disk_type'] = 'UNQUALIFIED_DISK'
+    elif damage == 'unchanged-quota':
+        payload['target_disk_type'] = 'NETWORK_SSD'
+        after['quota_identities']['storage'] = copy.deepcopy(before['quota_identities']['storage'])
+    elif damage == 'operation':
+        payload['operation_id'] = before['operation_id']
+    elif damage == 'installation-operation':
+        after['operation_id'] = str(uuid4())
+    else:
+        after['policy_revision'] += 1
+    if damage in {'node-group', 'selector'}:
+        for kind, field in (('execution', 'runtime'), ('task_images', 'target')):
+            for profile in after['profiles'][kind]:
+                profile[field]['node_selector'].update(after['node_selector'])
+    # Individually valid installations do not authorize the delta between them.
+    PoolInstallation.model_validate(before)
+    PoolInstallation.model_validate(after)
+    with pytest.raises(ValueError):
+        module().ClosedPoolStorageRefresh.model_validate(payload)
+
+
+@pytest.fixture
+def retained_storage_projection(tmp_path, monkeypatch):
+    """Keep upstream runtime qualification small; exercise actual storage intake."""
+    from scripts.ops import nebius_certificates as private_state
+    from scripts.ops import nebius_pool_storage_operation as storage
+    from scripts.ops import nebius_shared_pool_entry as entry
+    from scripts.ops.nebius_ingress_stage import _key
+
+    refresh = module().ClosedPoolStorageRefresh.model_validate(selection())
+    root, anchor = tmp_path / 'history', tmp_path / 'anchor'
+    private_state._private_directory(root)
+    private_state._private_directory(anchor)
+    receipt = root / 'operation.json'
+    private_state._atomic_json(receipt, {'status': 'complete'})
+    pins = {receipt: receipt.read_bytes()}
+    reference = entry.RetainedRuntimeReference(operation_path=receipt,
+        operation_sha256=hashlib.sha256(pins[receipt]).hexdigest())
+    registration = SimpleNamespace(spec=refresh.before)
+    request = SimpleNamespace(database=SimpleNamespace(manager=SimpleNamespace(retained=SimpleNamespace(
+        request=SimpleNamespace(registration=registration, retained=SimpleNamespace(operation={
+            'state_dir': str(root / 'manager'), 'anchor_dir': str(anchor)}))))))
+    configuration = {'apiVersion': 'v1', 'kind': 'ConfigMap', 'immutable': True,
+        'metadata': {'name': 'collector', 'namespace': 'loom-dev', 'uid': str(uuid4())},
+        'data': {'LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_STORAGE_NAME': 'compute.disk.size.network-ssd'}}
+    cronjob = {'apiVersion': 'batch/v1', 'kind': 'CronJob',
+        'metadata': {'name': 'collector', 'namespace': 'loom-dev', 'uid': str(uuid4())},
+        'spec': {'suspend': False, 'jobTemplate': {'spec': {'template': {'spec': {'containers': [
+            {'name': 'collector', 'envFrom': [{'configMapRef': {'name': 'collector'}}]}]}}}}}}
+    completed = SimpleNamespace(request=request, resources={_key(configuration): configuration, _key(cronjob): cronjob},
+        files=pins)
+    calls = []
+
+    def load_completed(_request):
+        calls.append(None)
+        storage._unchanged(pins)
+        return copy.deepcopy(completed)
+
+    def retained_completed(_reference, files):
+        result = load_completed(request)
+        files.update(result.files)
+        return result
+
+    # Both APIs represent the same expensive, already-qualified upstream load.
+    monkeypatch.setattr(entry, '_retained_runtime', lambda reference, files: retained_completed(reference, files).request)
+    monkeypatch.setattr(entry, '_retained_completed_runtime', retained_completed, raising=False)
+    monkeypatch.setattr(storage, 'load_completed_runtime', load_completed, raising=False)
+    monkeypatch.setattr(module(), 'load_completed_runtime', load_completed)
+    monkeypatch.setattr(module(), 'prepare_collector_runtime', lambda _database: SimpleNamespace(
+        configuration=configuration, cronjob=cronjob))
+    state, _, _ = storage._paths(request, refresh.operation_id)
+    private_state._private_directory(state.parent)
+    private_state._private_directory(state)
+    inputs = storage.StorageInputs(runtime=reference, refresh=refresh,
+        history={path: hashlib.sha256(raw).hexdigest() for path, raw in pins.items()})
+    private_state._atomic_json(state / 'inputs.json', inputs.model_dump(mode='json'))
+    selected = module().StorageReference(operation_id=refresh.operation_id,
+        inputs_sha256=hashlib.sha256((state / 'inputs.json').read_bytes()).hexdigest())
+    private_state._atomic_json(anchor / (str(selected.operation_id) + '-pool-storage-refresh.json'), storage._anchor(selected, state))
+    return storage, reference, selected, request, receipt, calls
+
+
+def test_storage_load_projects_runtime_once_but_reloads_each_invocation(retained_storage_projection):
+    storage, runtime, reference, request, _, calls = retained_storage_projection
+    first = storage.load_closed_storage(runtime=runtime, reference=reference)
+    assert first.runtime == request
+    assert first.collector.resumed['spec']['suspend'] is False
+    assert first.collector.configuration['data']['LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_STORAGE_NAME'] == (
+        'compute.disk.size.network-ssd-non-replicated')
+    assert len(calls) == 1, 'one storage load repeatedly reconstructed the same completed runtime'
+    assert storage.load_closed_storage(runtime=runtime, reference=reference) == first
+    assert len(calls) == 2, 'completed runtime projection escaped its loading scope'
+
+
+@pytest.mark.parametrize('damage', ['bytes', 'privacy', 'origin'])
+def test_storage_projection_rejects_drift_before_return(retained_storage_projection, monkeypatch, damage):
+    storage, runtime, reference, _, receipt, _ = retained_storage_projection
+    render = module().prepare_collector_runtime
+
+    def changed(database):
+        result = render(database)
+        if damage == 'bytes':
+            receipt.write_bytes(receipt.read_bytes() + b' ')
+        elif damage == 'privacy':
+            receipt.chmod(0o644)
+        else:
+            database.manager.retained.request.registration.spec = module().ClosedPoolStorageRefresh.model_validate(selection()).after
+        return result
+
+    monkeypatch.setattr(module(), 'prepare_collector_runtime', changed)
+    with pytest.raises(ValueError, match='closed storage history unqualified'):
+        storage.load_closed_storage(runtime=runtime, reference=reference)
+
+
+def test_storage_parent_predispatch_failure_does_not_strand_registry_intent(tmp_path):
+    from scripts.ops.nebius_pool_storage_operation import _StorageRegistry
+    from scripts.ops.nebius_pool_storage_registry import (
+        advance_storage_registry,
+        validate_storage_registry,
+    )
+
+    refresh = module().ClosedPoolStorageRefresh.model_validate(selection())
+    effects = []
+    ready = False
+
+    class Database:
+        def observe(self, request):
+            return {**module()._identity(request), 'read_only': True, 'state': 'complete' if effects else 'ready'}
+
+        def commit(self, request):
+            effects.append(request.operation_id)
+            return {**self.observe(request), 'read_only': False}
+
+    def dispatch():
+        if not ready:
+            raise ValueError('parent qualification failed before database dispatch')
+
+    api = _StorageRegistry(Database(), dispatch)
+    state = tmp_path / 'registry'
+
+    def run():
+        return advance_storage_registry(request=refresh, api=api, state_dir=state, qualify=lambda: None)
+
+    with pytest.raises(ValueError):
+        run()
+    assert effects == []
+    assert validate_storage_registry(request=refresh, state_dir=state)['status'] == 'prepared'
+    ready = True
+    assert run() is True
+    assert run() is True
+    assert effects == [refresh.operation_id]
+
+
+@pytest.mark.parametrize('kind', ['configuration', 'workload'])
+@pytest.mark.parametrize('damage', [None, 'delete', 'replace'])
+@pytest.mark.parametrize('boundary', ['parent', 'transport'])
+def test_storage_predispatch_read_failure_preserves_retry_or_damaged_evidence(tmp_path, kind, damage, boundary):
+    from dataclasses import asdict
+
+    from scripts.ops.nebius_development_runtime_transition import advance_runtime_workloads
+    from scripts.ops.nebius_ingress_stage import _key
+    from scripts.ops.nebius_management_material import ManagementBinding
+    from scripts.ops.nebius_management_stage import _stage_fixed_documents
+    from scripts.ops.nebius_management_transport import ManagementNotDispatchedError
+    from scripts.ops.nebius_pool_storage_operation import _StorageStage, _StorageWorkload
+    from tests.ops.test_nebius_development_runtime_transition import transition
+    from tests.support.nebius_phase_api import PhaseAPI
+
+    from loom.nebius_platform_render import digest
+
+    state, changed = tmp_path / 'child', []
+    path = state / ('stage.json' if kind == 'configuration' else 'transition.json')
+    failing = True
+    transport_failed = False
+
+    def qualify():
+        if failing and (boundary == 'parent' or transport_failed) and path.exists():
+            record = json.loads(path.read_bytes())
+            if any(item['status'] in {'intent', 'create_intent'} for item in record['resources'].values()):
+                if damage == 'delete':
+                    path.unlink()
+                elif damage == 'replace':
+                    changed.append(path.read_bytes() + b' ')
+                    path.write_bytes(changed[-1])
+                raise ValueError('read failed before selected transport was invoked')
+
+    if kind == 'configuration':
+        binding = ManagementBinding(str(uuid4()), 'loom-nebius-management-test', str(uuid4()), str(uuid4()))
+        document = {'apiVersion': 'v1', 'kind': 'ConfigMap', 'metadata': {
+            'name': 'collector-quota', 'namespace': binding.namespace}, 'immutable': True, 'data': {'quota': 'selected'}}
+        documents = {_key(document): document}
+        api = PhaseAPI(binding)
+        effects = api.creates
+
+        def run():
+            return _stage_fixed_documents(documents=documents, revision=digest({'documents': documents, 'binding': asdict(binding)}),
+                phase='closed-pool-storage', binding=binding,
+                api=_StorageStage(api, qualify, lambda: None), state_dir=state)
+    else:
+        originals, targets, api, _ = transition.__wrapped__(tmp_path)
+        api.ready = True
+        effects = api.patches
+
+        def run():
+            return advance_runtime_workloads(originals=originals, targets=targets,
+                input_digest='sha256:' + 'a' * 64, phase='stop',
+                api=_StorageWorkload(api, qualify, lambda: None), state_dir=state)
+
+    if boundary == 'transport':
+        name = 'create_resource' if kind == 'configuration' else 'patch_workload'
+        original = getattr(api, name)
+
+        def fail_before_transport(*args):
+            nonlocal transport_failed
+            if failing:
+                transport_failed = True
+                raise ManagementNotDispatchedError('final HTTP preflight failed without emitting a write')
+            return original(*args)
+
+        setattr(api, name, fail_before_transport)
+
+    with pytest.raises((ValueError, RuntimeError)):
+        run()
+    assert effects == []
+    if damage == 'delete':
+        assert not path.exists()
+    elif damage == 'replace':
+        assert path.read_bytes() == changed[-1]
+    else:
+        assert all(item['status'] == 'prepared' for item in json.loads(path.read_bytes())['resources'].values())
+        failing = False
+        assert run()
+        applied = list(effects)
+        assert applied and run()
+        assert effects == applied

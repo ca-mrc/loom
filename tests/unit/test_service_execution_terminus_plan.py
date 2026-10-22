@@ -67,6 +67,80 @@ def test_terminus_plan_preserves_task_environment_and_has_fresh_private_verifier
     assert plan.verifier_after_agent_timeout is False
 
 
+def test_skipped_terminus_plan_has_one_sandbox_and_keeps_the_graded_identity():
+    from loom.execution_runtime_contract import ExecutionRuntimePlanV1
+    from loom.execution_selection import execution_selection_readback
+    from loom.models.networking import resolve_effective_network_policy
+    from loom.pipeline.keys import canonical_digest
+
+    task, trial, profile = _inputs()
+    graded = compile_service_execution_plan(
+        task=task, trial=trial, profile=profile, source_provenance=_provenance(),
+        task_revision_sha256=_REVISION,
+    )
+    policy = resolve_effective_network_policy(
+        baseline=task.environment.baseline_network_policy,
+        override=trial.baseline_network_policy_override,
+    )
+    step = task.steps[0]
+    historical = canonical_digest({
+        "schema_version": "loom.automatic-service-execution-command.v1",
+        "task_revision_sha256": _REVISION,
+        "agent": trial.agent_name,
+        "model": trial.agent_model.model_dump(mode="json"),
+        "request_params": trial.request_params,
+        "effective_network_policy": policy.model_dump(mode="json"),
+        "instruction_file": str(step.instruction_file),
+        "artifacts": step.artifacts,
+        "required_artifacts": step.required_artifacts,
+        "verifier": task.verifier.model_dump(mode="json"),
+    })
+    assert graded.command_identity_sha256 == historical
+
+    skipped_trial = trial.model_copy(update={"skip_verifier": True})
+    reasons = automatic_service_execution_rejections(
+        task, skipped_trial, source_provenance=_provenance(),
+    )
+    assert "verifier_mode_required" not in reasons
+    assert "script_verifier_required" not in reasons
+    assert "exact_verifier_path_required" not in reasons
+    plan = compile_service_execution_plan(
+        task=task, trial=skipped_trial, profile=profile, source_provenance=_provenance(),
+        task_revision_sha256=_REVISION,
+    )
+    assert plan.verifier_execution == "skipped"
+    assert plan.verifier is None
+    assert plan.in_place_verifier is False
+    assert plan.verifier_after_agent_timeout is False
+    assert [s.role_name for s in plan.sidecars] == ["task-sandbox"]
+    assert not any(item.kind == "verifier" for item in plan.output_declarations)
+    assert any(item.relative_path == "artifacts/workspace.tar" and item.required for item in plan.output_declarations)
+    requirements = workload_requirements_from_task(task, skipped_trial)
+    assert requirements.verifier_topology == VerifierTopology.SKIPPED
+    validate_runtime_plan_requirements(plan, requirements)
+    assert ExecutionRuntimePlanV1.model_validate(plan.canonical_payload()) == plan
+    effective = execution_selection_readback(
+        skipped_trial.model_dump(mode="json"), plan,
+    )["effective"]
+    assert effective["verification"] == "skipped"
+    assert effective["fresh_sandbox_grading"] is False
+    assert effective["isolation"] == "container"
+    assert plan.command_identity_sha256 == canonical_digest({
+        "schema_version": "loom.automatic-service-execution-command.v1",
+        "task_revision_sha256": _REVISION,
+        "agent": trial.agent_name,
+        "model": trial.agent_model.model_dump(mode="json"),
+        "request_params": trial.request_params,
+        "effective_network_policy": policy.model_dump(mode="json"),
+        "instruction_file": str(step.instruction_file),
+        "artifacts": step.artifacts,
+        "required_artifacts": step.required_artifacts,
+        "verifier": task.verifier.model_dump(mode="json"),
+        "skip_verifier": True,
+    })
+    assert plan.command_identity_sha256 != graded.command_identity_sha256
+
+
 def test_deferred_verifier_plan_restores_committed_workspace():
     from loom.service_execution_materialization import compile_deferred_verifier_plan
 

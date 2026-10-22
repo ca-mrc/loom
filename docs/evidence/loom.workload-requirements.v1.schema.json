@@ -195,7 +195,8 @@
     "VerifierTopology": {
       "enum": [
         "in_attempt",
-        "separate_execution"
+        "separate_execution",
+        "skipped"
       ],
       "title": "VerifierTopology",
       "type": "string"

@@ -253,8 +253,29 @@ func (p plan) residentPrivateRoles() map[string]bool {
 	return map[string]bool{"task-sandbox": true, "verifier-sandbox": true}
 }
 
+// acceptedPrivateRoles is the sandbox set this plan may carry.
+// verifier_execution=skipped on an attempt means there is no verifier phase.
+// Older plans still place both sandboxes in that pod. A hosted skip places
+// only the agent sandbox.
+func (p plan) acceptedPrivateRoles() map[string]bool {
+	roles := p.residentPrivateRoles()
+	if p.ExecutionRole != "attempt" || p.VerifierExecution != "skipped" || p.Verifier != nil || p.InPlaceVerifier || p.VerifierAfterAgentTimeout {
+		return roles
+	}
+	found := map[string]bool{}
+	for _, item := range p.Sidecars {
+		if item.PrivateSandbox {
+			found[item.RoleName] = true
+		}
+	}
+	if len(found) == 1 && found["task-sandbox"] {
+		return found
+	}
+	return roles
+}
+
 func (p plan) privateSandboxesMatch() bool {
-	expected := p.residentPrivateRoles()
+	expected := p.acceptedPrivateRoles()
 	found := map[string]bool{}
 	for _, item := range p.Sidecars {
 		if item.PrivateSandbox {
@@ -431,7 +452,7 @@ func (p plan) validate() error {
 	}
 	if fixtureCount > 0 && (fixtureCount != 1 || p.TaskImageMaterializationID == nil ||
 		p.AgentImageRef == nil || p.ExecutionRole != "attempt" || p.Composition != "init_payload" ||
-		!p.privateSandboxesMatch() || len(p.Sidecars) != 1+len(p.residentPrivateRoles()) || !p.Sidecars[0].TaskFixture) {
+		!p.privateSandboxesMatch() || len(p.Sidecars) != 1+len(p.acceptedPrivateRoles()) || !p.Sidecars[0].TaskFixture) {
 		return fmt.Errorf("one prepared fixture requires an isolated attempt controller and both sandboxes")
 	}
 	if p.VerifierAfterAgentTimeout && (p.ExecutionRole != "attempt" ||

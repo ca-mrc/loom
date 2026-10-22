@@ -386,7 +386,7 @@
       "name": "liblzma5",
       "version": "5.6.1+really5.4.5-1ubuntu0.3",
       "architecture": "amd64",
-      "url": "https://archive.ubuntu.com/ubuntu/pool/main/x/xz-utils/liblzma5_5.6.1%2breally5.4.5-1ubuntu0.3_amd64.deb",
+      "url": "https://launchpadlibrarian.net/863385162/liblzma5_5.6.1+really5.4.5-1ubuntu0.3_amd64.deb",
       "bytes": 127352,
       "sha256": "d2eabd41ca77d2c2dd9d5d4ef478cccb64ffde6279c47cf4699a857d46785a52"
     },
@@ -674,7 +674,7 @@
       "name": "libsystemd0",
       "version": "255.4-1ubuntu8.17",
       "architecture": "amd64",
-      "url": "https://archive.ubuntu.com/ubuntu/pool/main/s/systemd/libsystemd0_255.4-1ubuntu8.17_amd64.deb",
+      "url": "https://launchpadlibrarian.net/871327446/libsystemd0_255.4-1ubuntu8.17_amd64.deb",
       "bytes": 431784,
       "sha256": "4776d2ac7e21efe2ae31f3f7955a7ccd97277225eecf36910a26faf4544979ae"
     },
@@ -698,7 +698,7 @@
       "name": "libudev1",
       "version": "255.4-1ubuntu8.17",
       "architecture": "amd64",
-      "url": "https://archive.ubuntu.com/ubuntu/pool/main/s/systemd/libudev1_255.4-1ubuntu8.17_amd64.deb",
+      "url": "https://launchpadlibrarian.net/871327447/libudev1_255.4-1ubuntu8.17_amd64.deb",
       "bytes": 177608,
       "sha256": "6efea3770f738db2fd43ebdaed3d91ef0cde8aa8387b4803080af473326ebdb0"
     },

@@ -73,6 +73,21 @@ func TestPlainGuestWithoutDeclaredCapabilitiesIsAccepted(t *testing.T) {
 	}
 }
 
+func TestSkippedGuestPlanAcceptsTheAgentSandboxOnly(t *testing.T) {
+	p := guestPlanPayload(t)
+	sides := p["sidecars"].([]any)
+	p["sidecars"] = sides[:1]
+	p["verifier_execution"] = "skipped"
+	p["verifier"] = nil
+	raw, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decodePlan(raw); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGuestPlanRejectsPartialOrUnsafeAuthority(t *testing.T) {
 	for _, damage := range []string{"ordinary_class", "missing_guest", "one_guest", "empty_caps", "missing_caps", "unknown_cap", "different_caps", "duplicate_caps", "unsorted_caps", "nonroot", "short_volume", "wrong_socket", "wrong_probe", "small_memory", "small_storage", "small_cpu", "bad_timeout", "foreign_sidecar", "wrong_schema", "wrong_runtime", "missing_controller", "storage_unreserved", "small_request", "wrong_image", "skipped_verifier", "separate_verifier"} {
 		t.Run(damage, func(t *testing.T) {

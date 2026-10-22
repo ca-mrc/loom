@@ -697,11 +697,13 @@ def isolated_migration_postgres_url(migration_template_postgres_url: str) -> Ite
 
 
 def retain_pool_schema(postgres_url: str, revision: str = "0176") -> None:
-    """Prepare an owned test database for an explicitly retained pool protocol.
+    """Prepare an owned test database for an explicitly audited pool revision.
 
     Run the real downgrade rather than relabeling a current-head database. This
     must only be used by historical pool tests on their isolated databases.
     """
+    if revision not in {"0175", "0176", "0177", "0178"}:
+        raise ValueError("unsupported retained pool test revision")
     repo_root = Path(__file__).resolve().parents[2]
     cfg = AlembicConfig(str(repo_root / "database" / "migrations" / "alembic.ini"))
     cfg.set_main_option("script_location", str(repo_root / "database" / "migrations"))

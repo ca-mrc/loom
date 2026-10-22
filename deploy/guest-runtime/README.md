@@ -39,9 +39,9 @@ verified archives enter the cache. These are build-time archive retries, not
 task execution retries.
 
 `archive.ubuntu.com` removes a package file from `pool/` once Ubuntu publishes
-a newer version, so a pinned URL there can start returning 404. The `libssl3t64`
-and `libpng16-16t64` entries use direct historical files in Ubuntu's Launchpad
-Librarian archive. Their numeric file URLs were resolved through Launchpad's
+a newer version, so a pinned URL there can start returning 404. The `libssl3t64`,
+`libpng16-16t64`, `liblzma5`, `libsystemd0` and `libudev1` entries use direct
+historical files in Ubuntu's Launchpad Librarian archive. Their numeric file URLs were resolved through Launchpad's
 official `+files` endpoint and verified against the existing sizes and SHA256
 hashes. Direct file URLs avoid the lookup redirect, which previously timed out
 or returned 502 in CI. The previously pinned Ubuntu snapshot URLs also returned

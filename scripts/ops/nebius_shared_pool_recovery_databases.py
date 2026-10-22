@@ -22,6 +22,7 @@ from scripts.ops.nebius_pool_origin_history import (
 )
 from scripts.ops.nebius_shared_pool_database import validate_shared_staging_database
 from scripts.ops.nebius_shared_pool_forward_processes import _gateway_history_target
+from scripts.ops.nebius_shared_pool_handoff import retired_manager_revision
 from scripts.ops.nebius_shared_pool_handoff_live import SharedPoolGuardBindings
 from scripts.ops.nebius_shared_pool_recovery_census import _receipt_files, _recovery_options
 from scripts.ops.nebius_shared_pool_recovery_fence import _entry_choices, _recovery_frame
@@ -132,7 +133,7 @@ def observe_shared_pool_recovery_databases(*, bindings: SharedPoolGuardBindings,
         before_databases = databases()
 
         def states() -> tuple[str, dict[str, str], str]:
-            if old.machine_retirement('observe') != 'revoked':
+            if old.machine_retirement('observe', manager_revision=retired_manager_revision(legacy)) != 'revoked':
                 raise ValueError
             pool = new.activation_pool('observe')
             machines = new.recovery_machine_state()

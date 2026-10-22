@@ -54,6 +54,7 @@ from scripts.ops.nebius_pool_runtime_settings import (
     BOUND_POOL_SETTINGS_COMMAND,
     expected_pool_runtime_settings,
 )
+from scripts.ops.nebius_pool_storage_operation import load_completed_storage
 from scripts.ops.nebius_staging_pool_attachment import prepare_staging_pool_attachment
 
 from loom.nebius_platform_render import digest
@@ -146,7 +147,9 @@ class HTTPSPreactivationOperationAPI:
                 raise ValueError('preactivation connection history differs')
             files[path] = raw
         self.probes = HTTPSDevelopmentRuntimeProbes(request=retained.runtime, api_server=api_server,
-            ssl_context=ssl_context, token=token, private_files=files, schema_successor=self.successor)
+            ssl_context=ssl_context, token=token, private_files=files, schema_successor=self.successor,
+            storage=None if retained.inputs.storage is None else load_completed_storage(
+                runtime=retained.inputs.runtime, reference=retained.inputs.storage))
         try:
             self.catalog = HTTPSParticipantCatalogAPI(request=retained.catalog_request, state_dir=retained.state_dir,
                 api_server=api_server, ssl_context=ssl_context, token=token)

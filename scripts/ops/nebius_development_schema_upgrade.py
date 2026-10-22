@@ -10,17 +10,23 @@ import hashlib
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+)
 from scripts.ops import nebius_certificates as state
 from scripts.ops.nebius_development_runtime_entry import DevelopmentDataRuntimeInputs
 from scripts.ops.nebius_development_runtime_install import DevelopmentRuntimeInstallRequest
 from scripts.ops.nebius_development_runtime_retained import (
     CompletedDevelopmentRuntime,
     RetainedRuntimeReference,
-    load_completed_runtime,
 )
 from scripts.ops.nebius_development_runtime_transition import (
     DevelopmentRuntimeWorkloadAPI,
@@ -45,11 +51,15 @@ from scripts.ops.nebius_management_stage import (
     _stage_fixed_documents,
     _validate_record,
 )
+from scripts.ops.nebius_pool_storage_binding import StorageReference
 
 from loom.nebius_development_schema_database import DevelopmentSchemaProbe, DevelopmentSchemaUpgrade
 from loom.nebius_kubernetes import NebiusKubernetesConnection
 from loom.nebius_platform_render import digest
 from loom_service.environment_management.candidates import _json
+
+if TYPE_CHECKING:
+    from scripts.ops.nebius_pool_storage_operation import CompletedClosedStorage
 
 PHASES = ('stop', 'shared-probe', 'manager-probe', 'shared-backup', 'manager-backup',
     'shared-upgrade', 'manager-upgrade', 'configuration', 'replace', 'policy', 'catalog', 'start',
@@ -86,6 +96,7 @@ class CompletedDevelopmentSchemaSuccessor:
     resources: dict[str, dict[str, Any]]
     files: dict[Path, bytes]
     history_sha256: str
+    storage: CompletedClosedStorage | None = None
 
 
 class DevelopmentSchemaInputs(BaseModel):
@@ -95,6 +106,14 @@ class DevelopmentSchemaInputs(BaseModel):
     data_runtime: DevelopmentDataRuntimeInputs
     manager_runtime: DevelopmentDataRuntimeInputs
     connection: NebiusKubernetesConnection
+    storage: StorageReference | None = None
+
+    @model_serializer(mode='wrap')
+    def retained_fields(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        result: dict[str, Any] = handler(self)
+        if self.storage is None:
+            result.pop('storage', None)
+        return result
 
 
 @dataclass(frozen=True, repr=False)
@@ -107,6 +126,7 @@ class RetainedDevelopmentSchema:
     state_dir: Path
     anchor_dir: Path
     files: dict[Path, bytes]
+    storage: CompletedClosedStorage | None = None
 
 
 def _read(path: Path) -> bytes:
@@ -122,7 +142,8 @@ def _unchanged(files: dict[Path, bytes]) -> None:
 
 def load_development_schema_upgrade(reference: DevelopmentSchemaReference, *,
         operator: bool = False) -> RetainedDevelopmentSchema:
-    from scripts.ops.nebius_shared_pool_entry import _retained_runtime
+    from scripts.ops.nebius_pool_storage_operation import load_completed_storage
+    from scripts.ops.nebius_shared_pool_entry import _retained_completed_runtime
 
     reference = DevelopmentSchemaReference.model_validate(reference.model_dump())
     raw = _read(reference.inputs_path)
@@ -130,11 +151,21 @@ def load_development_schema_upgrade(reference: DevelopmentSchemaReference, *,
         raise ValueError('development_schema_inputs_changed')
     inputs = DevelopmentSchemaInputs.model_validate_json(raw)
     files = {reference.inputs_path: raw}
-    request = _retained_runtime(inputs.runtime, files)
-    runtime = load_completed_runtime(request)
+    # This private load already qualifies the completed runtime and pins its
+    # history. Reuse it only within this call; _unchanged rechecks every pin.
+    runtime = _retained_completed_runtime(inputs.runtime, files)
+    request = runtime.request
+    storage = None if inputs.storage is None else load_completed_storage(runtime=inputs.runtime, reference=inputs.storage)
+    if storage is not None:
+        if storage.retained.runtime != request:
+            raise ValueError('development_schema_storage_runtime_changed')
+        for path, raw in storage.files.items():
+            if path in files and files[path] != raw:
+                raise ValueError('development_schema_storage_history_alias')
+            files[path] = raw
     projection = project_development_schema_successor(runtime=runtime, operation_id=reference.operation_id,
-        data_publication=inputs.data_runtime.selection(), manager_publication=inputs.manager_runtime.selection())
-    plan = schema_runtime_resources(runtime=runtime, projection=projection)
+        data_publication=inputs.data_runtime.selection(), manager_publication=inputs.manager_runtime.selection(), storage=storage)
+    plan = schema_runtime_resources(runtime=runtime, projection=projection, storage=storage)
     if inputs.connection.endpoint.rstrip('/') != request.database.foundation.inputs.config['kubernetes_api_server'].rstrip('/'):
         raise ValueError('development_schema_connection_changed')
     if operator:
@@ -148,13 +179,17 @@ def load_development_schema_upgrade(reference: DevelopmentSchemaReference, *,
     if root != root.resolve() or anchor != anchor.resolve() or not anchor.is_dir():
         raise ValueError('development_schema_state_path_changed')
     _unchanged(files)
-    return RetainedDevelopmentSchema(reference, inputs, runtime, projection, plan, root, anchor, files)
+    return RetainedDevelopmentSchema(reference, inputs, runtime, projection, plan, root, anchor, files, storage)
 
 
 def _identity(retained: RetainedDevelopmentSchema) -> dict[str, Any]:
-    return dict(schema_version='loom.development-schema-operation.v1', reference=retained.reference.model_dump(mode='json'),
+    result = dict(schema_version='loom.development-schema-operation.v1', reference=retained.reference.model_dump(mode='json'),
         history_sha256=retained.runtime.history_sha256, plan_sha256=retained.plan.input_digest,
         state_dir=str(retained.state_dir))
+    if retained.storage is not None:
+        result['storage_history_sha256'] = digest({str(path): hashlib.sha256(raw).hexdigest()
+            for path, raw in retained.storage.files.items()})
+    return result
 
 
 def _anchor(retained: RetainedDevelopmentSchema) -> Path:
@@ -225,7 +260,8 @@ def phase_documents(retained: RetainedDevelopmentSchema, record: dict[str, Any],
     mode, action = phase.split('-')
     return schema_job_documents(retained.runtime, retained.projection, phase,
         predecessor=record['phases'][mode + '-probe']['proof']['database'] if action in {'upgrade', 'inspect'} else None,
-        checkpoint=record['phases'][mode + '-backup']['proof'] if action in {'upgrade', 'inspect'} else None)
+        checkpoint=record['phases'][mode + '-backup']['proof'] if action in {'upgrade', 'inspect'} else None,
+        storage=retained.storage)
 
 
 def transition_documents(retained: RetainedDevelopmentSchema, phase: str
@@ -319,7 +355,7 @@ def validate_phase_proof(retained: RetainedDevelopmentSchema, record: dict[str, 
         return
     mode, action = phase.split('-')
     modes: dict[str, Literal['shared', 'manager']] = {'shared': 'shared', 'manager': 'manager'}
-    selection = schema_database_selection(retained.runtime, retained.projection, modes[mode])
+    selection = schema_database_selection(retained.runtime, retained.projection, modes[mode], storage=retained.storage)
     staged = _staged_resources(retained, record, phase)
     job, = (row for row in staged.values() if row['kind'] == 'Job')
     if not isinstance(proof, dict) or proof.get('job_uid') != _uid(job):
@@ -517,4 +553,4 @@ def load_completed_development_schema_successor(*, runtime: DevelopmentRuntimeIn
             files[path] = _read(path)
     _unchanged(files)
     return CompletedDevelopmentSchemaSuccessor(reference, retained.runtime, retained.projection, resources, files,
-        digest({str(path): hashlib.sha256(raw).hexdigest() for path, raw in files.items()}))
+        digest({str(path): hashlib.sha256(raw).hexdigest() for path, raw in files.items()}), retained.storage)
