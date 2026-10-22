@@ -386,7 +386,7 @@
       "name": "liblzma5",
       "version": "5.6.1+really5.4.5-1ubuntu0.3",
       "architecture": "amd64",
-      "url": "https://archive.ubuntu.com/ubuntu/pool/main/x/xz-utils/liblzma5_5.6.1%2breally5.4.5-1ubuntu0.3_amd64.deb",
+      "url": "https://launchpad.net/ubuntu/+archive/primary/+files/liblzma5_5.6.1+really5.4.5-1ubuntu0.3_amd64.deb",
       "bytes": 127352,
       "sha256": "d2eabd41ca77d2c2dd9d5d4ef478cccb64ffde6279c47cf4699a857d46785a52"
     },
