@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import io
+import json
+import re
 import time
 from pathlib import Path
 from types import ModuleType
@@ -310,3 +312,15 @@ def test_only_verified_cached_bytes_are_reused(
     assert payload_builder.download(locked_archive, tmp_path) == destination
     assert destination.read_bytes() == PAYLOAD
     assert requests == ([] if cached == PAYLOAD else [(URL, 120)])
+
+
+def test_locked_packages_use_immutable_launchpad_files():
+    # archive.ubuntu.com drops a pool file once Ubuntu supersedes its version,
+    # which breaks every payload build at once. Launchpad Librarian files are
+    # permanent; each must be the exact .deb its name, version and arch pin.
+    lock = json.loads((Path(__file__).resolve().parents[2] / "deploy/guest-runtime/sources.lock.json").read_text())
+    for package in lock["packages"]:
+        version = str(package["version"]).split(":", 1)[-1]
+        filename = f"{package['name']}_{version}_{package['architecture']}.deb"
+        match = re.fullmatch(r"https://launchpadlibrarian\.net/[0-9]+/([^/]+)", str(package["url"]))
+        assert match is not None and match.group(1) == filename, package["url"]

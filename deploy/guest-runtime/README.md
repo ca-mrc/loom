@@ -39,15 +39,18 @@ verified archives enter the cache. These are build-time archive retries, not
 task execution retries.
 
 `archive.ubuntu.com` removes a package file from `pool/` once Ubuntu publishes
-a newer version, so a pinned URL there can start returning 404. The `libssl3t64`,
-`libpng16-16t64`, `liblzma5`, `libsystemd0` and `libudev1` entries use direct
-historical files in Ubuntu's Launchpad Librarian archive. Their numeric file URLs were resolved through Launchpad's
-official `+files` endpoint and verified against the existing sizes and SHA256
-hashes. Direct file URLs avoid the lookup redirect, which previously timed out
-or returned 502 in CI. The previously pinned Ubuntu snapshot URLs also returned
-500/502/503 during builds. Package versions, sizes, hashes and extracted files
-are unchanged; the retained source lock and its checksum record the new URLs.
-The same download and integrity checks apply to these historical archives.
+a newer version, so a pinned URL there starts returning 404 and every payload
+build fails. Every package entry therefore uses its direct, permanent file in
+Ubuntu's Launchpad Librarian. Each numeric file URL was resolved through
+Launchpad's official `+files` endpoint
+(`https://launchpad.net/ubuntu/+archive/primary/+files/<file>.deb`) and the
+downloaded bytes were verified against the locked size and SHA256. Direct file
+URLs avoid the lookup redirect, which previously timed out or returned 502 in
+CI; Ubuntu snapshot URLs also returned 500/502/503 during builds. When adding
+or updating a package, pin its Librarian file the same way:
+`tests/ops/test_guest_payload_download.py` rejects any other host and any file
+name that does not match the entry's name, version and architecture. The same
+download and integrity checks apply to every archive.
 
 The output is relocatable and contains regular files rather than absolute
 distro symlinks. `SHA256SUMS` covers all other payload files; `sources.lock.json`
