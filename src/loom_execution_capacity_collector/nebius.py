@@ -10,6 +10,8 @@ from loom_execution_capacity_collector.config import NebiusCapacitySourceSetting
 from loom_execution_capacity_collector.contracts import (
     CapacityPolicyBinding,
     NodeGroupPlacement,
+    NodeIOWindowPressure,
+    NodePlacement,
     ProviderCapacitySnapshot,
     QuotaResource,
     ResourceTotals,
@@ -125,6 +127,16 @@ class NebiusCapacityReader:
 
             platform_client = PlatformServiceClient(sdk)
         self._platforms = platform_client
+
+    async def capture_node_io(self, nodes: list[NodePlacement]) -> dict[str, NodeIOWindowPressure]:
+        """Optional OS monitoring using the same provider identity and inventory.
+
+        A failed metrics read leaves I/O unknown; it never discards quota or
+        Kubernetes resource facts already captured by the ordinary collector.
+        """
+        from loom_execution_capacity_collector.nebius_io import read_node_io_windows
+
+        return await read_node_io_windows(self._settings, self._sdk, nodes)
 
     async def _list_quotas(self) -> list[Any]:
         from nebius.api.nebius.quotas.v1 import (

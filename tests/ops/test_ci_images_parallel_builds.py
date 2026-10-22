@@ -99,7 +99,7 @@ def test_gate_enforces_selected_build_results(
 def test_parallel_builds_keep_native_scan_and_untrusted_permissions() -> None:
     build = _jobs()["build"]
     assert build["permissions"] == {"contents": "read"}
-    assert build["strategy"]["fail-fast"] is False
+    assert "pull_request" in build["strategy"]["fail-fast"] and "merge_group" in build["strategy"]["fail-fast"]
     scripts = "\n".join(step.get("run", "") for step in build["steps"])
     assert "scripts/validate_trivy_release_report.py" in scripts
     assert "--cache-to" not in scripts

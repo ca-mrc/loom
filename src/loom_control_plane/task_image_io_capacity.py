@@ -11,7 +11,12 @@ import math
 from datetime import datetime, timedelta
 from typing import Any
 
-from loom_execution_capacity_collector.contracts import CapacityPlacement, NodePlacement
+from loom_execution_capacity_collector.contracts import (
+    CapacityPlacement,
+    NodeIOPressure,
+    NodeIOWindowPressure,
+    NodePlacement,
+)
 
 
 class NativeIOUnavailable(ValueError):  # noqa: N818 - existing admission interface name
@@ -53,8 +58,26 @@ def _eligible(node: NodePlacement) -> bool:
                 and node.draining is False and node.name)
 
 
+def _pressure(node: NodePlacement) -> NodeIOWindowPressure | NodeIOPressure | None:
+    # A present provider window is authoritative even when stale or hot. Never
+    # downgrade it to an older healthy kernel observation.
+    return node.io_stall_window if node.io_stall_window is not None else node.io_pressure
+
+
+def _percent(node: NodePlacement) -> float:
+    pressure = _pressure(node)
+    assert pressure is not None
+    return (pressure.full_window_percent if isinstance(pressure, NodeIOWindowPressure)
+            else pressure.full_avg10)
+
+
 def _metric_fresh(node: NodePlacement, now: datetime, max_age_seconds: int) -> bool:
-    pressure = node.io_pressure
+    pressure = _pressure(node)
+    if isinstance(pressure, NodeIOWindowPressure) and (
+        pressure.source != "nebius_io_stalled_counter" or node.created_at is None
+        or pressure.window_started_at < node.created_at
+    ):
+        return False
     return bool(pressure is not None and timedelta(0) <= now - pressure.sampled_at
                 <= timedelta(seconds=max_age_seconds))
 
@@ -78,11 +101,15 @@ def _can_land(native: dict[str, Any], node: NodePlacement) -> bool:
 
 
 def _feedback_observed(native: dict[str, Any], node: NodePlacement) -> bool:
-    if _actual_node(native) != node.name or node.io_pressure is None:
+    pressure = _pressure(node)
+    if _actual_node(native) != node.name or pressure is None:
         return False
     binding = _binding(native.get("io_binding"))
     if (binding is not None and binding["mode"] == "node"
-            and binding["node_name"] == node.name and binding["node_uid"] != node.uid):
+            and binding["node_name"] == node.name and (
+                binding["node_uid"] != node.uid
+                or ("provider_id" in binding and binding["provider_id"] != node.provider_id)
+            )):
         return False
     phases = native.get("phases")
     if not isinstance(phases, list):
@@ -97,7 +124,11 @@ def _feedback_observed(native: dict[str, Any], node: NodePlacement) -> bool:
         return False
     at = _time(started[0])
     # This is the actual heavy phase, not a materialization or prepare timestamp.
-    return at is not None and node.io_pressure.sampled_at - at >= timedelta(seconds=10)
+    if isinstance(pressure, NodeIOWindowPressure):
+        # A late endpoint alone can hide a new build behind earlier idle time.
+        # The strict contract already requires at least ten real seconds.
+        return at is not None and pressure.window_started_at >= at
+    return at is not None and pressure.sampled_at - at >= timedelta(seconds=10)
 
 
 def native_io_candidates(
@@ -149,14 +180,14 @@ def native_io_candidates(
             raise _unavailable("binding_invalid")
         if binding["mode"] == "node":
             node = next((row for row in nodes if row.name == binding["node_name"]), None)
-            if node is None or node.uid != binding["node_uid"]:
+            if (node is None or node.uid != binding["node_uid"]
+                    or ("provider_id" in binding and binding["provider_id"] != node.provider_id)):
                 raise _unavailable("node_identity_changed")
             if not _eligible(node):
                 raise _unavailable("node_unavailable")
             if not _metric_fresh(node, now, max_age_seconds):
                 raise _unavailable("observation_unavailable")
-            assert node.io_pressure is not None
-            if node.io_pressure.full_avg10 > max_full_avg10:
+            if _percent(node) > max_full_avg10:
                 raise _unavailable("pressure_exceeded")
             if pending(node):
                 raise _unavailable("feedback_pending")
@@ -168,13 +199,11 @@ def native_io_candidates(
             if any(not _eligible(node) or not _metric_fresh(node, now, max_age_seconds)
                    for node in allowed):
                 raise _unavailable("observation_unavailable")
-            if allowed and not any(node.io_pressure is not None
-                                   and node.io_pressure.full_avg10 <= max_full_avg10
-                                   for node in allowed):
+            if allowed and not any(_percent(node) <= max_full_avg10 for node in allowed):
                 raise _unavailable("pressure_exceeded")
         return [dict(existing_binding)]
 
-    candidates = []
+    candidates: list[tuple[float, dict[str, Any]]] = []
     unknown = False
     for node in nodes:
         if not node.ready or node.unschedulable or node.deleting or node.draining is True:
@@ -182,14 +211,24 @@ def native_io_candidates(
         if not _eligible(node) or not _metric_fresh(node, now, max_age_seconds):
             unknown = True
             continue
-        assert node.io_pressure is not None and node.name is not None
-        if (node.io_pressure.full_avg10 <= max_full_avg10 and not pending(node)
+        pressure = _pressure(node)
+        assert pressure is not None and node.name is not None
+        percent = _percent(node)
+        if (percent <= max_full_avg10 and not pending(node)
                 and (eligible_node_uids is None or node.uid in eligible_node_uids)):
-            candidates.append({"mode": "node", "node_name": node.name, "node_uid": node.uid,
-                               "sampled_at": node.io_pressure.sampled_at.isoformat(),
-                               "full_avg10": node.io_pressure.full_avg10})
+            binding = {"mode": "node", "node_name": node.name, "node_uid": node.uid,
+                       "sampled_at": pressure.sampled_at.isoformat()}
+            if isinstance(pressure, NodeIOWindowPressure):
+                binding.update(provider_id=node.provider_id, source=pressure.source,
+                               window_started_at=pressure.window_started_at.isoformat(),
+                               full_window_percent=percent)
+            else:
+                binding["full_avg10"] = percent
+            candidates.append((percent, binding))
     if candidates:
-        return sorted(candidates, key=lambda row: (row["full_avg10"], row["node_name"]))
+        return [binding for _, binding in sorted(
+            candidates, key=lambda row: (row[0], row[1]["node_name"]),
+        )]
     if unresolved():
         raise _unavailable("feedback_pending")
     if unknown:

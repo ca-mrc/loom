@@ -90,6 +90,51 @@ Kubernetes checks include the Nebius platform and execution contracts. Candidate
 publication uses the protected `nebius-integration` Environment from `dev`;
 PR checks do not receive its credentials. CI does not deploy the live platform.
 
+## Early feedback and heavy-job ordering
+
+Inside `CI`, selected lint/type/codegen, locked-environment, package, Go and
+Terraform checks run first. Selected root tests and the non-Docker integration
+tier follow those checks. Frontend API/type/lint/unit checks also contribute to
+`fast-feedback`, an internal aggregation job, not a required merge context.
+It rejects every selected failure, cancellation or unexpected skip. Unselected
+lanes may skip. Existing changed-path selection, test manifests and coverage
+requests remain in force; full-regression requests still use full manifests.
+Ordinary documentation-only PRs skip feedback when no dependent work is selected.
+Additive image/cluster/staging labels and manual baseline requests still run
+feedback before their selected dependents, even when only documents changed.
+
+Pool, Docker integration, runtime payload and frontend production/browser work
+start only after `fast-feedback` succeeds. Frontend runtime work has its own
+job and is still enforced by `repository-checks`; no test is omitted or repeated.
+The three other source workflows wait in their existing planning jobs before
+releasing image builds, cluster shards or Compose smoke. They read only GitHub's
+native CI run/job results, matching the complete shared run identity: event,
+head, base, PR, update/action and validation-scope labels. A green different-head,
+different-base or narrower-scope run cannot release heavy work. Missing results
+wait at most 90 minutes, with polling backing off from 15 to 120 seconds to
+bound API traffic across concurrent PRs; failed/cancelled feedback and API errors
+fail closed.
+An already cancelled matching CI cannot release work using its earlier green
+feedback. A still-running CI with successful feedback can release heavy work
+without waiting for the remaining heavy jobs to finish.
+Manual source-workflow dispatches remain independent diagnostics because they
+have no companion CI event.
+
+The cross-workflow wait uses the existing three planning runners and read-only
+Actions API permission on those jobs. Waiting therefore has a runner cost; it
+does not create extra heavy runners or repeat the feedback tests. A passing run
+also gives up some parallelism and reinstalls frontend dependencies in its later
+runtime job. Compare first-failure latency, passing-run time and runner-minutes
+per successful merge before claiming a throughput gain. No dependency download,
+cache or retry policy is changed by this ordering work.
+
+PR and merge-group root, integration, pool, Docker, image and cluster matrices
+stop sibling shards on failure. Manual/scheduled/push diagnostics retain all
+selected shards. Docker and cluster pytest stop at the first failure and still
+perform fixture teardown. All four original source gates remain direct native
+Actions jobs; selected blocked/skipped work cannot turn a required gate green.
+There is no custom check publisher, fifth required context or ruleset change.
+
 ## Public image pulls in validation
 
 The protected Docker consumers (root tests, runtime payloads, both integration
@@ -253,15 +298,20 @@ Every platform candidate selects affected modules against its immutable first
 parent; an unavailable boundary retains the whole suite. Shared-pool simulations
 stay skipped, below.
 `nebius-candidate.yml` reuses successful native `CI` pool jobs on that exact
-commit, with GitHub Actions app 15368 and the same manifest, scope and marker
-selection. The planner reconstructs the native group's changed-path selection;
-a passing narrowed shard covers only its complete selected test modules.
+merge-group commit, or the native squash PR whose tested merge has the same Git
+tree as the published candidate. For squash reuse, the planner verifies the
+candidate's merged PR and parent, GitHub Actions app 15368, and each successful
+job's actual merge checkout from the pinned checkout action's initial log. The
+tested merge must have exactly the candidate parent and PR head as its parents.
+The same tree preserves the manifest and selection code; the initial job scope,
+markers and changed paths reconstruct only that job's complete selected modules.
 Only missing modules run before publication, grouped by the existing shard
 policy; covered siblings are omitted and empty jobs are not allocated. Wrong
-heads/workflows and failed or missing jobs cannot supply coverage. A partial job
+heads/workflows, different trees, unavailable checkout logs and failed or missing
+jobs cannot supply coverage. A partial job
 listing retains proven successful modules and schedules the unseen modules;
 without usable evidence every required affected module runs.
-There is no cross-commit reuse or per-test-case cache. This is test scheduling,
+There is no reuse across different Git trees or per-test-case cache. This is test scheduling,
 not an additional branch-admission gate. Image building, scanning and artifact
 qualification remain required, as do rollout idle protection, backup and rollback.
 Scheduled and manual full runs still include the pool suite. Selector labels
@@ -375,11 +425,13 @@ This is a scoped test-budget adjustment, not a repair of the unexplained hosted
 timing variation. Completion on the updated head still needs hosted verification.
 
 The pool job limit remains 50 minutes; other lifecycle and transport limits
-remain unchanged. Every selected successful shard runs all its tests, other
-shards are not cancelled, and `repository-checks` still requires their results.
+remain unchanged. Every selected successful shard runs all its tests. PR and
+merge-group matrices cancel remaining siblings after a failure; manual,
+scheduled and push diagnostics retain all selected shards. `repository-checks`
+still rejects selected failed, cancelled or skipped work.
 Measure execution, allocation wait and serialized merge-group time separately;
 local reductions are not a measured PR-to-deployment hosted speedup. Candidate
-publication continues reusing only successful native coverage on its exact commit,
+publication continues reusing only successful native coverage on its exact candidate tree,
 so a shorter PR wave does not create a delayed duplicate pool wave after merge.
 
 The fast integration lane uses six complete, non-overlapping file shards.
