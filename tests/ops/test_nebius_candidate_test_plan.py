@@ -284,7 +284,6 @@ def test_squash_unproven_job_checkout_or_selection_retains_its_modules(actions, 
             lane="nebius-pool",
             repo_root=ROOT,
             test_scope="nebius",
-            suite="nebius-pool-ops",
             shard_index=0,
             shard_count=20,
         )
