@@ -102,6 +102,23 @@ def test_failed_pod_ancestry_comes_from_same_snapshot(cutover_inputs, cutover_bi
     assert report["ancestry"][0]["owners"][0]["controller"] is False
 
 
+def test_unexpected_preflight_rejection_retains_hidden_binding_location(
+        cutover_inputs, cutover_binding_inventory, capsys):
+    request, tokens = cutover_inputs
+    inventory = copy.deepcopy(cutover_binding_inventory)
+    inventory["rolebindings"][0]["roleRef"]["name"] = PRIVATE
+    # Match the connected test's nested error-stage assertion: pytest's
+    # AssertionError must retain the original, deliberately hidden failure.
+    with pytest.raises(AssertionError), diagnostics.observe_cutover_stage(0):
+        with pytest.raises(ValueError, match="pool_retained_writer_workload_inventory_unqualified"):
+            binding_preflight(request, tokens, inventory)
+    report = read_report(capsys)
+    assert report["snapshot_resource_version"] == "7"
+    assert any(row["function"] == "qualify_pool_writer_bindings" for row in report["locations"])
+    assert any(row["function"] == "qualify_retained_writer_bindings" for row in report["locations"])
+    assert all(token not in json.dumps(report) for token in tokens.values())
+
+
 def test_stage_failure_reports_only_known_journal_phases(cutover_inputs, tmp_path, capsys):
     request, tokens = cutover_inputs
     api = CutoverAPI(request)

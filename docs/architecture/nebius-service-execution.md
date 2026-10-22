@@ -1283,12 +1283,29 @@ timing, redaction, byte-accounting and installed qualification contracts.
 A separate-mode attempt commits its outputs without rewards and leaves the
 trial `running` with `result.verifier_execution.state = "pending"`. Its pod is
 then deleted, so no capacity is held while grading waits. The control-plane
-scheduler pass reserves one verifier lease per attempt after parent cleanup
-completes. Its request id is derived from the parent lease and child plan, so
-repeated or concurrent passes are no-ops. The child keeps the parent's target
+scheduler pass reserves one verifier lease per attempt and retry after parent
+cleanup completes. Local reservation derives its request id from the parent
+lease and child plan; global selection retains one immutable outbox proposal.
+Repeated or concurrent passes cannot reserve a second child. The child keeps the parent's target
 and requirements and receives the parent's committed `workspace.tar`,
 workspace references and mutable paths through the plan's `handoff_input`. The
 runtime places them under `.loom/` outside the task-bundle digest.
+
+In global-pool mode, the scheduler proposes the child only after the exact
+parent's manager release is retained. The manager independently requires that
+parent's committed output and release before granting fresh physical capacity.
+Before retaining or admitting a separate-mode parent, both selection and the
+manager require verifier support on that parent's registered target. A trial-only
+target remains eligible for work that does not require a separate verifier;
+an incompatible selection leaves the trial queued without consuming an attempt.
+The child uses the existing grant, local image/cost/admission, activation,
+stop/drain and qualified release path. It does not consume an agent attempt or
+enter the local capacity writer. Node-share sizing and its original observation
+are inherited unchanged from the parent; that historical sizing is not renewed
+or treated as current free capacity. Admission measures the rendered child's
+Pod against current pool observations and quota. Migration `0179` extends the
+outbox identity guard for this parent-bound lifecycle and retains all previous
+attachment and release checks.
 
 The verifier lease's finalize sets the reward and moves the trial on; the
 materializer archives both bundles, with verifier files under
@@ -1307,11 +1324,16 @@ canonical publication completes. Failure paths:
   returns to `pending` with `retries`, `last_retry_reason` and
   `pending_since`, and the trial stays `running`. Each lease row carries its
   `verifier_retry` number. One verifier per attempt and retry is a database
-  constraint, and so is the per-retry job name (`-vr{n}`) and request id. The
+  constraint. Local reservation derives the per-retry job name (`-vr{n}`)
+  and request id; global reservation supplies a new grant-qualified Job name. The
   next lease is reserved only after the failed verifier's pod is deleted, so
   retries never hold two verifier pods at once. The failed lease's output is
   already fenced, so a late upload cannot commit. A verifier that committed a
   graded result, including reward 0, is never retried.
+- Loss of a global verifier claim uses the same bounded child retry. Exact
+  never-started cancellation or qualified release must finish before another
+  child is eligible. The original agent remains committed and the Trial stays
+  running until grading succeeds or the verifier retry budget is exhausted.
 - If a child cannot be reserved within 30 minutes of the handoff becoming
   pending (the parent's `deleted_at`, or the retry's `pending_since`), or hits
   a permanent error, the trial fails with `verifier_unavailable`. So does a

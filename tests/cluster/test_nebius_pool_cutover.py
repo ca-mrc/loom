@@ -264,7 +264,9 @@ async def test_real_connected_cutover_stages_closed_workloads_and_replays_withou
             foreign["spec"]["template"]["metadata"]["labels"] = labels
             foreign_namespace = foreign["metadata"]["namespace"]
             await asyncio.to_thread(apps.create_namespaced_deployment, foreign_namespace, foreign)
-            with pytest.raises(ValueError, match="pool_retained_writer_workload_inventory_unqualified"):
+            # Unexpected earlier inventory rejection needs its actual hidden
+            # frame; the expected rejection remains silent and unchanged.
+            with observe_cutover_stage(0), pytest.raises(ValueError, match="pool_retained_writer_workload_inventory_unqualified"):
                 await asyncio.to_thread(api.preflight, request)
             assert not (tmp_path / "cutover").exists()
             assert methods and all(method == "GET" for method, _path, _query in methods)

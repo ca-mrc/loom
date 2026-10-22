@@ -46,9 +46,9 @@ def catalog_request(build_inputs):
         image_admission=signed_image_admission_bundle((task.settings.service_image, execution.runtime_image_ref)))
     target = source.model_copy(update={'candidate_sha': '2' * 40})
     arguments = dict(before=before, participant_id=before.participants[0].participant_id,
-        source_schema_revision='0175', target_schema_revision='0178', source_profile=source, runtime_profile=target)
+        source_schema_revision='0175', target_schema_revision='0179', source_profile=source, runtime_profile=target)
     after = _pool_successor(**arguments, operation_id=uuid4())
-    return ClosedDevelopmentCatalogRefresh(**arguments, after=after, manager_schema_revision='0178')
+    return ClosedDevelopmentCatalogRefresh(**arguments, after=after, manager_schema_revision='0179')
 
 
 @pytest.fixture
@@ -145,7 +145,7 @@ def test_closed_schema_catalog_rejects_valid_but_unrelated_contract_changes(cata
     if damage == 'neighbor':
         after['profiles']['execution'][1]['runtime_binary_sha256'] = 'sha256:' + 'd' * 64
     elif damage == 'recipe':
-        after['profiles']['application_images'][0]['recipe']['schema_revision'] = '0179'
+        after['profiles']['application_images'][0]['recipe']['schema_revision'] = '0180'
     elif damage == 'image':
         after['profiles']['task_images'][0]['settings']['service_image'] = 'registry.example/service@sha256:' + 'f' * 64
     elif damage == 'credential':
