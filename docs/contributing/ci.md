@@ -492,8 +492,9 @@ the 35-minute job limit and existing per-test deadlines. Independent cluster-tes
 edits allocate only their nonempty shards, and select the manifest before
 dependency and Skopeo preparation. Selector failure stops
 the shard even if it emitted partial paths; test failure remains a failed job.
-`cluster-smoke-gate` waits for the aggregate result of all selected shards, with
-fail-fast cancellation disabled. This replaces a serial run that exhausted its
+`cluster-smoke-gate` waits for the aggregate result of all selected shards. PR
+and merge-group matrices cancel unfinished siblings after a failure; manual
+diagnostic runs retain independent outcomes. This replaces a serial run that exhausted its
 35-minute limit after completing only 61% of 77 tests; it removes no test paths
 or protected checks. Per-shard duration reporting supports later balance review.
 
@@ -501,6 +502,27 @@ The shared disposable K3s fixture requests normal Docker stop before removing
 the stopped container and its volumes. Its 30-second shutdown allowance does not
 change test deadlines. Stop and removal errors still fail the job. K3s remains
 PID 1; adding an init wrapper would interfere with its cgroup startup sequence.
+
+The actuator module prepares each image when its first consumer needs it, once
+per role per module. The network-policy case builds only its small fixture
+image within its existing 180-second whole-test limit. The production runtime
+is built by its first actual runtime case, within that case's existing
+360-second limit; later cases reuse it. A failed build is retained as a failure,
+and every attempted image tag is cleaned up. Full-module coverage still builds
+and exercises both roles. This corrects an eager runtime build charged to a
+network-only case; it does not claim that the two builds' total work disappeared.
+The cluster job reports bounded stage/cache and wall-time records even on
+failure. Python and reaped-child CPU counters describe the test driver/client,
+not the build daemon; parallel BuildKit stage durations are not additive.
+
+Pod readiness retains its 60-second budget and Running/Ready predicate. Its
+read-only transport copies the original configuration, scoped headers and
+cookie, disables SDK retries on that private client, and bounds each request by
+the remaining budget. Fractional timeout tuples are required by the pinned
+SDK, which ignores scalar floats. Only observed startup TLS EOF and read
+timeouts are polled within the same deadline; authorization, certificate and
+other failures still propagate. The caller's shared/write client stays intact,
+private connections are closed, and late responses cannot establish readiness.
 
 Disposable K3s API discovery does not imply that native DNS or dynamic storage
 is ready. Tests that require these addons opt into `_load_client` readiness:
