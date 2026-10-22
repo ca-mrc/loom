@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import re
+import ssl
 import time
 from pathlib import Path
 from types import ModuleType
@@ -161,8 +162,9 @@ def test_content_mismatch_after_retry_is_not_retried_or_cached(
 
 
 @pytest.mark.parametrize("failures", [1, 2, 3])
-def test_body_timeouts_restart_within_the_existing_attempt_budget(
-    payload_builder, locked_archive, tmp_path, monkeypatch, capsys, failures,
+@pytest.mark.parametrize("phase", ["body", "connection", "wrapped-connection"])
+def test_transport_timeouts_restart_within_the_existing_attempt_budget(
+    payload_builder, locked_archive, tmp_path, monkeypatch, capsys, failures, phase,
 ):
     class InterruptedBody(io.BytesIO):
         def read(self, size=-1):
@@ -176,6 +178,9 @@ def test_body_timeouts_restart_within_the_existing_attempt_budget(
 
     def open_archive(url, *, timeout):
         requests.append((url, timeout))
+        if phase != "body" and len(requests) <= failures:
+            error = TimeoutError("private connection transfer interrupted")
+            raise URLError(error) if phase == "wrapped-connection" else error
         body = (InterruptedBody(b"partial") if len(requests) <= failures
                 else io.BytesIO(PAYLOAD))
         bodies.append(body)
@@ -184,7 +189,8 @@ def test_body_timeouts_restart_within_the_existing_attempt_budget(
     monkeypatch.setattr(payload_builder, "urlopen", open_archive)
     monkeypatch.setattr(time, "sleep", sleeps.append)
     if failures == 3:
-        with pytest.raises(TimeoutError, match="body transfer interrupted"):
+        with pytest.raises(URLError if phase == "wrapped-connection" else TimeoutError,
+                           match="transfer interrupted"):
             payload_builder.download(locked_archive, tmp_path)
         assert not list(tmp_path.iterdir())
     else:
@@ -196,13 +202,15 @@ def test_body_timeouts_restart_within_the_existing_attempt_budget(
     assert sleeps == list(range(1, min(failures, 2) + 1))
     assert all(body.closed for body in bodies)
     diagnostic = capsys.readouterr().err
-    assert "body timeout" in diagnostic and "1/3" in diagnostic
+    assert ("body timeout" if phase == "body" else "connection timeout") in diagnostic
+    assert "1/3" in diagnostic
     assert str(locked_archive["sha256"]) in diagnostic
-    assert "do-not-log" not in diagnostic and "body transfer interrupted" not in diagnostic
+    assert "do-not-log" not in diagnostic and "transfer interrupted" not in diagnostic
 
 
-def test_http_and_body_timeouts_share_one_attempt_budget(
-    payload_builder, locked_archive, tmp_path, monkeypatch,
+@pytest.mark.parametrize("phase", ["body", "connection"])
+def test_http_and_transport_timeouts_share_one_attempt_budget(
+    payload_builder, locked_archive, tmp_path, monkeypatch, phase,
 ):
     class InterruptedBody(io.BytesIO):
         def read(self, size=-1):
@@ -218,6 +226,8 @@ def test_http_and_body_timeouts_share_one_attempt_budget(
             body = io.BytesIO()
             bodies.append(body)
             raise HTTPError(url, 503, "private upstream response", {}, body)
+        if len(requests) == 2 and phase == "connection":
+            raise URLError(TimeoutError("private handshake timeout"))
         body = InterruptedBody() if len(requests) == 2 else io.BytesIO(PAYLOAD)
         bodies.append(body)
         return body
@@ -231,15 +241,16 @@ def test_http_and_body_timeouts_share_one_attempt_budget(
     assert list(tmp_path.iterdir()) == [destination]
 
 
-def test_non_http_transport_error_is_not_retried(
-    payload_builder, locked_archive, tmp_path, monkeypatch,
+@pytest.mark.parametrize("reason", ["connection failed", ssl.SSLCertVerificationError("certificate rejected")])
+def test_other_transport_error_is_not_retried(
+    payload_builder, locked_archive, tmp_path, monkeypatch, reason,
 ):
     requests = []
     sleeps = []
 
     def open_archive(url, *, timeout):
         requests.append((url, timeout))
-        raise URLError("connection failed")
+        raise URLError(reason)
 
     monkeypatch.setattr(payload_builder, "urlopen", open_archive)
     monkeypatch.setattr(time, "sleep", sleeps.append)

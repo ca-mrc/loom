@@ -119,6 +119,38 @@ async def _prepare(session: AsyncSession, principal: PoolPrincipal, request: Poo
         raise PoolAdmissionError from None
 
 
+async def _qualify_verifier_parent(session: AsyncSession, request: PoolExecutionPrepareV1) -> None:
+    """A fresh child grant follows the exact parent's committed output and release.
+
+    Frozen sizing evidence is inherited, not renewed. The normal renderer and
+    current aggregate admission still measure and charge the child's real Pod.
+    """
+    parent_id = request.execution.parent_lease_id
+    parent = await session.scalar(select(NebiusPoolRequest).where(
+        NebiusPoolRequest.pool_id == request.pool_id,
+        NebiusPoolRequest.participant_id == request.key.participant_id,
+        NebiusPoolRequest.workload_kind == "trial",
+        NebiusPoolRequest.local_work_id == parent_id,
+        NebiusPoolRequest.generation == 1,
+    ))
+    if (parent is None or parent.phase != "released" or parent.drain_json is None
+            or parent.drain_json.get("output_state") != "committed"):
+        raise PoolAdmissionError
+    prior = PoolExecutionPrepareV1.model_validate(parent.request_json)
+    runtime, original = request.execution.runtime, prior.execution.runtime
+    if (prior.target_id != request.target_id or prior.origin != request.origin
+            or prior.execution.requirements != request.execution.requirements
+            or original.execution_role != "attempt" or original.verifier_execution != "separate_execution"
+            or runtime.execution_role != "verifier" or runtime.handoff_input is None
+            or (runtime.candidate_sha, runtime.task_revision_sha256, runtime.task_image_ref,
+                runtime.runtime_image_ref, runtime.runtime_binary_sha256) != (
+                original.candidate_sha, original.task_revision_sha256, original.task_image_ref,
+                original.runtime_image_ref, original.runtime_binary_sha256)
+            or request.execution.node_allocation != prior.execution.node_allocation
+            or runtime.node_resource_allocation != original.node_resource_allocation):
+        raise PoolAdmissionError
+
+
 async def _prepare_request(session: AsyncSession, principal: PoolPrincipal, request: PoolPrepareWorkload,
                            profiles: PoolProfiles | None) -> PoolReceiptV1 | PoolWaitingV1:
     request = _WORKLOAD.validate_json(request.model_dump_json())
@@ -158,6 +190,8 @@ async def _prepare_request(session: AsyncSession, principal: PoolPrincipal, requ
             return _receipt(row)
     if pool is None or pool.mode != "global":
         raise PoolAdmissionError
+    if isinstance(request, PoolExecutionPrepareV1) and request.key.workload_kind == "verifier":
+        await _qualify_verifier_parent(session, request)
     priority = await qualify_pool_origin(session, principal, request.origin,
         target_id=request.target_id, workload_kind=request.key.workload_kind,
         application_build=request if isinstance(request, PoolApplicationImagePrepareV1) else None,

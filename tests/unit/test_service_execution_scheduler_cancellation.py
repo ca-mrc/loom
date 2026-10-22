@@ -12,7 +12,6 @@ from loom_control_plane import service_execution_scheduler as scheduler
 
 
 @pytest.mark.parametrize(("cancel_at", "global_mode", "selected"), [
-    ("verifier_commit", True, False),
     ("verifier_commit", False, False),
     ("selection", True, False),
     ("selection", True, True),
@@ -89,7 +88,9 @@ async def test_scheduler_stops_when_readiness_consumes_cancellation(
         done, _ = await asyncio.wait({task}, timeout=0.15)
         assert injected
         assert task in done, f"scheduler kept running after cancellation: {operations[:12]}"
-        assert operations.count("reserve_verifiers") == 1
+        assert operations.count("reserve_verifiers") == (0 if global_mode else 1)
+        if global_mode:
+            assert sessions == 0 and "reserve_local" not in operations
         if cancel_at == "verifier_commit":
             assert "selection" not in operations and "reserve_local" not in operations
         if not task.cancelled():

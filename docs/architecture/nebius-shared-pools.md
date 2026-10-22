@@ -697,6 +697,24 @@ freezes the evidence and allocated runtime together. Missing evidence cannot fal
 back to local allocation. This sizing read grants nothing; the registry still
 checks current physical fit and provider quota for the rendered workload.
 
+Deferred verification uses the same global execution lifecycle. A pending
+separate-mode parent becomes eligible only after its committed output and exact
+manager release are retained. The selector freezes the parent identity, output
+manifest/marker, task/runtime source and verifier retry in a new proposal, then
+requests fresh capacity without incrementing the agent attempt. The manager
+independently qualifies the same participant's released parent, origin, target,
+runtime identity and inherited sizing. The child retains the parent's node-share
+allocation and original sizing observation unchanged; current rendered Pod fit
+and quota still govern its new reservation. Capacity waits do not claim a child
+or hide unrelated queued Trials. A lost claim follows the same retained
+cancellation or stop/drain/release path, then retries only the verifier, bounded
+by the existing retry and handoff limits. Committed grades, including reward 0,
+are never retried. Parent and child canonical archive acknowledgements commit
+together after actual materialization. Migration `0179` adds exact parent and
+verifier attachment checks to the existing immutable outbox guard. Downgrade
+refuses retained verifier history; it cannot erase that release evidence.
+This source-level lifecycle still needs deployed Nebius acceptance.
+
 ### Runtime startup and configuration
 
 Protected process configuration now selects these adapters at startup. The control
@@ -2897,7 +2915,7 @@ request and its existing phase journal. Before migration dispatch they require
 the original revision; a bound migration Job create intent permits observing
 either original or target, including a lost create response. A qualified
 post-migration probe narrows observation to the target. The read-only ledger
-queries support audited manager schemas 0174, 0176, 0177 and 0178 with identical
+queries support audited manager schemas 0174, 0176, 0177, 0178 and 0179 with identical
 legacy pool layouts, while requiring the single selected revision on each read.
 A scoped lifecycle binding cannot pass the exact legacy binding comparison.
 Default pool readers and this legacy refresh's fence/revoke/startup writes retain

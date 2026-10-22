@@ -5,7 +5,7 @@ only provisioning/create/delete; Kubernetes access is qualified and read-only.
 """
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Literal, Protocol
 
 from loom.db.schema import ServiceExecutionLease
 from loom.nebius_pool_contract import PoolNamespaceBindingV1, PoolRequestKeyV1
@@ -30,10 +30,11 @@ class PoolExecutionResources:
 
     def key(self, lease: ServiceExecutionLease) -> PoolRequestKeyV1:
         if (lease.target_id != self.target_id or lease.namespace_name != self.namespace.name
-                or lease.execution_role != "attempt"):
+                or lease.execution_role not in {"attempt", "verifier"}):
             raise PoolHandoffError
+        kind: Literal["trial", "verifier"] = "trial" if lease.execution_role == "attempt" else "verifier"
         return PoolRequestKeyV1(participant_id=self.driver.outbox.participant.participant_id,
-            workload_kind="trial", local_work_id=lease.id, generation=lease.resource_generation)
+            workload_kind=kind, local_work_id=lease.id, generation=lease.resource_generation)
 
     async def probe(self) -> None:
         await self.kubernetes.probe_pool_namespace(self.namespace)

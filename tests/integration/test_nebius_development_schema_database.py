@@ -110,13 +110,13 @@ def test_real_retained_schema_upgrades_preserving_identity_and_granting_new_tabl
     except module.DevelopmentSchemaDatabaseError as error:
         raise AssertionError('disposable upgrade failed qualification') from error.__context__
     assert receipt['status'] == 'complete'
-    assert receipt['revision'] == '0178'
+    assert receipt['revision'] == '0179'
     assert module.read_database_upgrade(installed['url'], request) == receipt
     assert module.upgrade_database(installed['url'], request,
         application_manager_password=installed['password'] if installed['mode'] == 'shared' else None) == receipt
     with psycopg.connect(installed['url'], autocommit=True) as db:
         assert authority(db) == before
-        assert db.execute('SELECT version_num FROM alembic_version').fetchall() == [('0178',)]
+        assert db.execute('SELECT version_num FROM alembic_version').fetchall() == [('0179',)]
         assert db.execute('SELECT name FROM teams WHERE id=%s', (installed['data'],)).fetchone() == ('retained-schema-test',)
         roles = ['loom_service'] + (['loom_control_plane', 'loom_app_runtime_' + installed['data'].hex] if installed['mode'] == 'shared' else [])
         for role in roles:
@@ -135,7 +135,7 @@ def test_real_retained_schema_upgrades_preserving_identity_and_granting_new_tabl
         with psycopg.connect(manager_url, autocommit=True) as db:
             access = ApplicationDatabaseAccess(db, installed['data'])
             app, incarnation = uuid4(), uuid4()
-            role = access.grant(app, incarnation, 1, token_urlsafe(48), schema_revision='0178')
+            role = access.grant(app, incarnation, 1, token_urlsafe(48), schema_revision='0179')
             installed['roles'].append(role)
             # Normal successor application admission does not invalidate the
             # retained migration proof for fixed platform credential identities.
@@ -182,7 +182,7 @@ def test_interrupted_migration_is_never_automatically_reissued(installed, monkey
             application_manager_password=installed['password'] if installed['mode'] == 'shared' else None)
     with psycopg.connect(installed['url'], autocommit=True) as db:
         assert db.execute('SELECT version_num FROM alembic_version').fetchone() == (
-            '0178' if position == 'after' else installed['revision'],)
+            '0179' if position == 'after' else installed['revision'],)
 
 
 @pytest.mark.parametrize('installed', ['shared'], indirect=True)
@@ -326,7 +326,7 @@ def test_schema_lock_remains_held_between_alembic_and_regrant(installed, monkeyp
         with psycopg.connect(manager_url, autocommit=True, options='-c statement_timeout=100') as manager:
             with pytest.raises(ApplicationDatabaseAccessError, match='operation_failed'):
                 ApplicationDatabaseAccess(manager, installed['data']).grant(uuid4(), uuid4(), 1,
-                    token_urlsafe(48), schema_revision='0178')
+                    token_urlsafe(48), schema_revision='0179')
         assert db.execute('SELECT count(*) FROM loom_application_access.generations').fetchone() == (0,)
         original(db, selected)
 

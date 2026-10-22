@@ -10,7 +10,7 @@ from typing import Any, Literal, Protocol
 from uuid import UUID
 
 from pydantic import ValidationError
-from sqlalchemy import Integer, Text, exists, func, or_, select, text, update
+from sqlalchemy import Integer, Select, Text, exists, func, or_, select, text, update
 from sqlalchemy import cast as sql_cast
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -524,27 +524,12 @@ async def _reserve_service_candidate(
     raise ExecutionProvisioningBlockedError("execution_target_unavailable", retry_after_seconds=15)
 
 
-async def reserve_next_verifier_executions(
-    session: AsyncSession,
-    *,
-    pool_id: str,
-    image_admission_keyring: ImageAdmissionKeyring,
-    maximum_deadline_seconds: int = 7200,
-    now: datetime | None = None,
-    limit: int = 32,
-) -> list[ServiceExecutionLease]:
-    """Reserve the deferred verifier of each attempt whose pod has released capacity.
-
-    Stateless and idempotent: the request id derives from the parent lease, the
-    retry number and the child plan, and one verifier per attempt and retry is a
-    database constraint. A retry waits until the failed verifier's pod is gone.
-    """
-
-    current_time = (now or datetime.now(UTC)).astimezone(UTC)
+def verifier_candidates(pool_id: str) -> Select[tuple[ServiceExecutionLease, Trial]]:
+    """One eligibility predicate for local reservation and global proposal."""
     child = aliased(ServiceExecutionLease)
     retries = sql_cast(func.coalesce(
         Trial.result["verifier_execution"]["retries"].astext, "0"), Integer)
-    candidates = (await session.execute(
+    return (
         select(ServiceExecutionLease, Trial)
         .join(Trial, Trial.id == ServiceExecutionLease.trial_id)
         .where(
@@ -569,9 +554,28 @@ async def reserve_next_verifier_executions(
             ),
         )
         .order_by(ServiceExecutionLease.deleted_at, ServiceExecutionLease.id)
-        .limit(limit)
         .with_for_update(of=Trial, skip_locked=True)
-    )).all()
+    )
+
+
+async def reserve_next_verifier_executions(
+    session: AsyncSession,
+    *,
+    pool_id: str,
+    image_admission_keyring: ImageAdmissionKeyring,
+    maximum_deadline_seconds: int = 7200,
+    now: datetime | None = None,
+    limit: int = 32,
+) -> list[ServiceExecutionLease]:
+    """Reserve the deferred verifier of each attempt whose pod has released capacity.
+
+    Stateless and idempotent: the request id derives from the parent lease, the
+    retry number and the child plan, and one verifier per attempt and retry is a
+    database constraint. A retry waits until the failed verifier's pod is gone.
+    """
+
+    current_time = (now or datetime.now(UTC)).astimezone(UTC)
+    candidates = (await session.execute(verifier_candidates(pool_id).limit(limit))).all()
     reserved: list[ServiceExecutionLease] = []
     for parent, trial in candidates:
         try:
@@ -616,15 +620,11 @@ def _fail_verifier_handoff(trial: Trial, *, reason: str, now: datetime) -> None:
     })
 
 
-async def _reserve_verifier_candidate(
-    session: AsyncSession,
-    *,
-    parent: ServiceExecutionLease,
-    trial: Trial,
-    image_admission_keyring: ImageAdmissionKeyring,
-    maximum_deadline_seconds: int,
-    current_time: datetime,
-) -> ServiceExecutionLease:
+async def compile_verifier_candidate(
+    session: AsyncSession, *, parent: ServiceExecutionLease, trial: Trial,
+    maximum_deadline_seconds: int, current_time: datetime,
+) -> tuple[ExecutionRuntimePlanV1, datetime]:
+    """Compile the retained parent workspace without claiming physical capacity."""
     if parent.target_id is None:
         raise ServiceExecutionConflict("verifier parent has no execution target")
     agent_plan = ExecutionRuntimePlanV1.model_validate(parent.runtime_contract_json)
@@ -642,6 +642,21 @@ async def _reserve_verifier_candidate(
     )
     # The verifier's own budget starts at this reservation, not at the agent's.
     deadline_at = _deadline(plan, now=current_time, maximum_seconds=maximum_deadline_seconds)
+    return plan, deadline_at
+
+
+async def _reserve_verifier_candidate(
+    session: AsyncSession,
+    *,
+    parent: ServiceExecutionLease,
+    trial: Trial,
+    image_admission_keyring: ImageAdmissionKeyring,
+    maximum_deadline_seconds: int,
+    current_time: datetime,
+) -> ServiceExecutionLease:
+    plan, deadline_at = await compile_verifier_candidate(session, parent=parent, trial=trial,
+        maximum_deadline_seconds=maximum_deadline_seconds, current_time=current_time)
+    assert parent.target_id is not None
     retry = verifier_retries(trial)
     request: dict[str, object] = {
         "schema_version": "loom.service-execution-verifier-request.v1",
@@ -688,22 +703,23 @@ async def run_service_execution_scheduler_loop(
 
     while not cancellation_requested():
         try:
-            # Deferred verifiers reuse an existing route and admitted capacity,
-            # so both local and global admission modes reserve them here.
-            async with session_factory() as session:
-                verifiers = await reserve_next_verifier_executions(
-                    session,
-                    pool_id=pool_id,
-                    image_admission_keyring=image_admission_keyring,
-                    maximum_deadline_seconds=maximum_deadline_seconds,
-                )
-                await session.commit()
-            if cancellation_requested():
-                return
-            for verifier in verifiers:
-                _LOG.info("service_execution_verifier_reserved", extra={
-                    "trial_id": str(verifier.trial_id), "parent_lease_id": str(verifier.parent_lease_id),
-                })
+            # Each verifier needs new physical capacity after parent cleanup.
+            # Global selection must never enter the local provisioning writer.
+            if global_selector is None:
+                async with session_factory() as session:
+                    verifiers = await reserve_next_verifier_executions(
+                        session,
+                        pool_id=pool_id,
+                        image_admission_keyring=image_admission_keyring,
+                        maximum_deadline_seconds=maximum_deadline_seconds,
+                    )
+                    await session.commit()
+                if cancellation_requested():
+                    return
+                for verifier in verifiers:
+                    _LOG.info("service_execution_verifier_reserved", extra={
+                        "trial_id": str(verifier.trial_id), "parent_lease_id": str(verifier.parent_lease_id),
+                    })
             if global_selector is not None:
                 # A selection is not a lease. Empty/failed global selection never
                 # falls through to the environment-local capacity writer.
