@@ -359,6 +359,14 @@ were verified in follow-up run 39689189236: shard 19 completed 30 tests in
 1238.96-second preactivation-recovery call. These measurements describe that
 cycle; the cause of the run-to-run timing variation is not established.
 
+Run 39694426363 completed the schema-only successor scenario in 221.36 seconds
+including setup, but the combined storage/schema variant reached its
+300-second whole-test limit during retained private-input loading. Only that
+combined variant now uses the connected-storage suite's 600-second budget;
+schema-only retains 300 seconds. Both scenarios and all assertions are unchanged.
+This is a scoped test-budget adjustment, not a repair of the unexplained hosted
+timing variation. Completion on the updated head still needs hosted verification.
+
 The pool job limit remains 50 minutes; other lifecycle and transport limits
 remain unchanged. Every selected successful shard runs all its tests, other
 shards are not cancelled, and `repository-checks` still requires their results.

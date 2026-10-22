@@ -78,8 +78,12 @@ def shared_runtime(completed_pool, publisher_cloud, published_source):
 
 
 @pytest.mark.parametrize('staging_observation', ['independent'], indirect=True)
-@pytest.mark.parametrize('storage_first', [False, True])
-@pytest.mark.timeout(300)
+@pytest.mark.parametrize('storage_first', [
+    pytest.param(False, marks=pytest.mark.timeout(300)),
+    # Storage correction adds its own retained reconstruction to every schema
+    # and handoff read; use the connected-storage suite's whole-test budget.
+    pytest.param(True, marks=pytest.mark.timeout(600)),
+])
 def test_schema_successor_roots_staging_refresh_and_later_handoff(
         shared_runtime, staging_history, staging_observation, completed_pool, handoff, tmp_path, storage_first):
     import copy
