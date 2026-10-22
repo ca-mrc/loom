@@ -311,6 +311,13 @@ heads/workflows, different trees, unavailable checkout logs and failed or missin
 jobs cannot supply coverage. A partial job
 listing retains proven successful modules and schedules the unseen modules;
 without usable evidence every required affected module runs.
+When a read or binding check fails, the plan also reports up to 25
+`evidence_errors`: the owning stage, a fixed error category, the HTTP status when
+available, and applicable numeric run/job IDs. Recognized binding reasons are
+included; raw CLI stderr, response bodies, exception text and credentials are
+never emitted. Use the native candidate plan's diagnostics to distinguish API
+access from unavailable PR associations, checkout logs and checkout bindings;
+a later successful local read does not establish why the native read failed.
 There is no reuse across different Git trees or per-test-case cache. This is test scheduling,
 not an additional branch-admission gate. Image building, scanning and artifact
 qualification remain required, as do rollout idle protection, backup and rollback.
