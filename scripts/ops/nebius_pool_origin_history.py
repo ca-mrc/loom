@@ -455,15 +455,14 @@ ROLLBACK;
         except Exception:
             raise PoolMigrationError('machine_retirement') from None
 
-    def qualify_manager_pool_settings(self, *, expected: dict[str, Any]) -> None:
+    def qualify_manager_pool_settings(self, *, expected: dict[str, Any], catalog_sha256: str) -> None:
         """The exact manager catalog must be readable by its real runtime loader."""
         try:
             if (digest(migration_contract(self.request)) != self.contract_sha256
                     or digest(_target_contract(self.target)) != self.history_sha256
                     or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
                 raise ValueError
-            checksum = hashlib.sha256(self.request.registration.spec.profiles.model_dump_json().encode()).hexdigest()
-            wanted = expected_pool_runtime_settings('manager', expected, catalog_sha256=checksum)
+            wanted = expected_pool_runtime_settings('manager', expected, catalog_sha256=catalog_sha256)
             self._qualify_runtime_settings(self.target, original=self.target.controller, expected=expected,
                 component='manager', wanted=wanted)
             if (digest(migration_contract(self.request)) != self.contract_sha256

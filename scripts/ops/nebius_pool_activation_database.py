@@ -15,12 +15,12 @@ from loom_service.pool_management.capacity import digest
 from loom_service.pool_management.installation import PoolInstallation
 
 PoolActivationState = Literal["closed", "global", "fenced"]
-# Participant databases advance independently of the retained manager. 0177
-# adds publication retention; 0178 adds management catalog/lifecycle tables.
-# Neither changes the handoff/outbox/guard layout; the role guard separately
-# rejects access to those management tables. This is an audited compatibility
-# set, never the automatically discovered migration head.
-PARTICIPANT_SCHEMA_REVISIONS = ("0176", "0177", "0178")
+# Participant databases advance independently of the retained manager. 0176
+# adds Harbor sessions, 0177 publication retention, and 0178 management
+# catalog/lifecycle tables. None changes the 0175 handoff/outbox/guard layout;
+# role qualification separately denies access to the newer management tables.
+# This is an audited set, never an automatic migration head or runtime upgrade.
+PARTICIPANT_SCHEMA_REVISIONS = ("0175", "0176", "0177", "0178")
 # 0175 changes an Oracle archival trigger; 0176 adds Harbor sessions; 0177 adds
 # source-publication retention; 0178 adds separate catalog/lifecycle tables.
 # None changes these legacy manager ledger/read predicates. A scoped-v1 binding

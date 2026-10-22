@@ -51,12 +51,10 @@ class Actions:
 
 @pytest.fixture
 def actions(monkeypatch):
-    monkeypatch.setattr(
-        planner, "candidate_changes", lambda *_: ("scripts/ops/deploy_nebius_platform.py",)
-    )
-    monkeypatch.setattr(
-        planner, "source_changes", lambda *_: ("scripts/ops/deploy_nebius_platform.py",)
-    )
+    # These coverage-reuse cases need the complete lane, not a component edit
+    # whose unrelated consumers are deliberately excluded by selection.
+    monkeypatch.setattr(planner, "candidate_changes", lambda *_: ("uv.lock",))
+    monkeypatch.setattr(planner, "source_changes", lambda *_: ("uv.lock",))
     return Actions()
 
 
@@ -69,6 +67,16 @@ def test_complete_native_coverage_schedules_no_duplicate_tests(actions):
     assert value["required"] is False and value["matrix"] == {"include": []}
     assert value["required_files"] == value["reused_files"] > 0
     assert value["missing_files"] == 0 and value["reused_runs"] == [10]
+
+
+def test_candidate_preserves_shared_pool_coverage_without_reintroducing_it_for_unrelated_changes(monkeypatch):
+    for change, retained in (("scripts/ops/nebius_shared_pool_api.py", True),
+                             ("scripts/ops/ci_reliability_metrics.py", False)):
+        monkeypatch.setattr(planner, "candidate_changes", lambda *_, path=change: (path,))
+        value = planner.plan(ROOT, SHA, read=lambda _: [])
+        assert any(Path(path).name.startswith("test_nebius_shared_pool_") for path in pending(value)) is retained
+        if not retained:
+            assert value["required"] is False
 
 
 def test_job_only_retry_retains_other_successful_jobs_on_same_commit(actions):
@@ -88,7 +96,6 @@ def test_only_files_of_unproven_jobs_are_scheduled(actions, conclusion):
             lane="nebius-pool",
             repo_root=ROOT,
             test_scope="nebius",
-            suite="nebius-pool-ops",
             shard_index=0,
             shard_count=20,
         )

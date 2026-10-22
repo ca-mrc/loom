@@ -768,7 +768,8 @@ composition must be connected and qualified first.
 ### Shared-pool handoff delivery
 
 The separate `shared-pool-preflight`, `shared-pool-install`,
-`shared-pool-recover` and `shared-pool-refresh-catalog` actions use the protected `nebius-rollout` workflow,
+`shared-pool-recover`, `shared-pool-refresh-catalog` and
+`shared-pool-refresh-storage` actions use the protected `nebius-rollout` workflow,
 `NEBIUS_SHARED_POOL_SSH_KEY` and `NEBIUS_SHARED_POOL_OPERATION_JSON`. They do not
 extend the CLOSED-runtime key. They are source-implemented delivery routes, not
 evidence that a grant or multi-owner environment is installed. Complete ordinary
@@ -794,6 +795,53 @@ rejected: resume or recover the anchored operation rather than selecting new
 inputs. A new directory does not bypass live preflight, writer, drain, publication
 or recovery qualification, and is not a second independent handoff.
 
+If the existing native node group's boot-disk type has changed independently of
+the original CLOSED dev registration, correct that binding before refreshing the
+application catalog. Do not patch the immutable collector ConfigMap, replay the
+installation, change the worker group, or weaken quota matching:
+
+1. From the exact integrated tooling, call `retain_closed_storage` in
+   `scripts.ops.nebius_pool_storage_operation`, selecting the original
+   `RetainedRuntimeReference`, a new correction operation UUID and the supported
+   `target_disk_type`. This retains local inputs only. The correction preserves
+   the original pool/installation operation identity, credentials, participants,
+   admission settings and profiles. Only the policy revision and storage quota
+   name may advance. For example, `NETWORK_SSD_NON_REPLICATED` requires
+   `compute.disk.size.network-ssd-non-replicated`; it does not buy or resize disks.
+2. Create a new immutable handoff preparation using private input schema
+   `loom.nebius-shared-pool-inputs.v4` and its `storage` reference
+   (`operation_id`, `inputs_sha256`). Do not select `preactivation` for this
+   pending correction. Keep the original runtime and registered operation
+   identity, and deliver the exact-source, digest-bound shared tooling grant.
+3. Dispatch protected `shared-pool-refresh-storage`. The authenticated provider
+   read must match the selected group and exact disk type. The operation requires
+   the exact never-used CLOSED registry, a stopped gateway and no anchored
+   handoff/recovery. Under the common lock, it journals collector suspension and
+   descendant drain, creates the immutable corrected ConfigMap, updates the
+   suspended collector, commits the exact registry delta, restores the original
+   schedule, and waits for a fresh matching manager-side aggregate observation.
+   It changes no staging workloads, guards, cloud resources or credentials.
+4. `storage_pending` means completion is still awaiting a qualified observation;
+   preserve the same operation and receipts. `shared_pool_storage_refreshed`
+   means correction only: admission and writer-migration flags remain false.
+   Lost write replies resolve through exact readback, never blind retries. Do
+   not delete dispatched history or roll accounting back to a quota inconsistent
+   with the real disks. A used/active pool is outside this operation's authority.
+5. Carry the completed `storage` reference into handoff, or pass it explicitly to
+   `retain_preactivation_catalog` if a catalog refresh is also needed. Every later
+   catalog predecessor must retain the same storage ancestry. Use v4 private
+   inputs with both references for that catalog/handoff path. A catalog's pinned
+   storage reference is authoritative; an unrelated selected head is rejected.
+   Ordinary releases preserve this physical binding and cannot change it.
+
+If development also requires a schema upgrade, complete the storage correction
+first. Pin its completed `storage` reference in the schema upgrade's private
+inputs. The upgrade consumes the corrected registry and collector, then later
+catalog and handoff operations follow that single storage → schema → catalog
+chain. Independently selected, conflicting successors are rejected. Shared-pool
+input v3 retains its schema-only meaning; v4 selects storage explicitly, with
+the matching schema successor when applicable.
+
 If the captured staging release also differs from the catalog frozen at dev
 registration, a new input directory alone is insufficient. Before handoff:
 
@@ -803,9 +851,13 @@ registration, a new input directory alone is insufficient. Before handoff:
    the exact current staging-source envelope and a new operation UUID. This
    creates private immutable inputs only; it does not contact Kubernetes or SQL.
    For a subsequent refresh, explicitly select the previous completed
-   `PreactivationReference` as `predecessor`.
+   `PreactivationReference` as `predecessor`. If a storage correction was required,
+   also select its completed `storage` reference as described above. If a schema
+   upgrade was required, select its completed `schema_successor` reference; that
+   successor must retain the same storage ancestry.
 2. In the new handoff preparation, use private input schema
-   `loom.nebius-shared-pool-inputs.v2` and its `preactivation` reference
+   `loom.nebius-shared-pool-inputs.v2` (v3 with a schema successor, v4 when selecting
+   storage) and its `preactivation` reference
    (`operation_id`, `inputs_sha256`). Keep `runtime` and the shared operation's
    registered `operation_id` unchanged. The staging envelope must be exactly the
    one retained by preactivation. Build and install the exact integrated-source,
@@ -839,14 +891,36 @@ registration, a new input directory alone is insufficient. Before handoff:
    successor while still CLOSED; never weaken catalog equality or roll staging
    backward to make an earlier preparation pass.
 
-Schema compatibility is separate from release/catalog identity. The retained
-management database must still be exactly `0176`. Participant readiness,
-guard/role handoff and recovery accept the audited `0176` and `0177` layouts;
-readiness reports the actual revision. The `0177` publication journal remains
-inaccessible to the actuator. An unknown revision, missing journal or excessive
-role grants blocks qualification. No handoff command migrates a database or
-changes its version marker. Protected read-only lease census also supports
-`0177`; a successful census is not handoff authority.
+Schema compatibility is separate from release/catalog identity. Without an
+explicit completed development schema successor, the new active management
+database must still be exactly `0176`. Selecting that successor instead requires
+its exact upgraded manager revision from the protected publication. Participant
+readiness, guard/role handoff and recovery accept the audited `0175`, `0176`,
+`0177` and `0178` layouts; readiness reports the actual revision. The `0177`
+publication journal and `0178` catalog/lifecycle tables remain inaccessible to
+the actuator. An unknown revision, missing required journal or excessive role
+grants blocks qualification. No handoff command migrates a database or changes
+its version marker. Protected read-only lease census supports these participant
+layouts; a successful census is not handoff authority.
+
+The retained dev participant may remain on its qualified `0175` runtime: `0176`
+adds Harbor sessions without changing the shared-pool journals or guard layout.
+This compatibility does not upgrade its application or permit a newer image
+against an unsupported database. The runtime's own exact schema check remains
+in force. `0177` publication retention, when present, remains inaccessible to
+the actuator; older layouts do not manufacture that journal.
+
+The historical manager is a separate read-only check. Its completed refresh
+receipt selects the exact `target_manager_revision` for retirement observation
+through preflight, forward handoff and recovery. Initial-upgrade history keeps
+the existing exact-`0176` contract. A live schema that differs from the selected
+completion fails; do not migrate history or broaden the new manager's schema
+contract to bypass that failure.
+
+If current workloads differ from the captured configuration's rendered revision,
+check for configuration updates made after the last completed rollout. Preserve
+the mismatch and reconcile through the protected rollout before capturing new
+inputs; do not erase annotations or substitute old configuration to pass preflight.
 
 The `loom.nebius-shared-pool-inputs.v1` private document contains:
 

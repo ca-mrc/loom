@@ -14,10 +14,12 @@ import pytest
 @pytest.mark.parametrize("forbidden", [False, True])
 def test_watch_cli_http_replays_terminal_history_and_enforces_auth(tmp_path, forbidden):
     cursors = []
+    requests = []
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             path = urlsplit(self.path)
+            requests.append(path.path)
             status = 403 if forbidden else 200
             assert self.headers["Authorization"] == "Bearer disposable-test-token"
             if forbidden:
@@ -54,12 +56,26 @@ def test_watch_cli_http_replays_terminal_history_and_enforces_auth(tmp_path, for
     )
     config.chmod(0o600)
     try:
-        result = subprocess.run(
-            [sys.executable, "-m", "loom_cli", "eval", "trial", "watch", "trial-test",
-             "--format", "json", "--limit", "2", "--poll-interval", "0.1"],
-            env={**os.environ, "XDG_CONFIG_HOME": str(tmp_path)},
-            capture_output=True, text=True, timeout=20,
-        )
+        try:
+            # Preserve a stalled child's stack before subprocess.run kills it.
+            # This still executes the installed CLI's actual module entrypoint.
+            result = subprocess.run(
+                [sys.executable, "-c",
+                 "import faulthandler, runpy; faulthandler.dump_traceback_later(15.0); "
+                 "runpy.run_module('loom_cli', run_name='__main__')",
+                 "eval", "trial", "watch", "trial-test",
+                 "--format", "json", "--limit", "2", "--poll-interval", "0.1"],
+                env={**os.environ, "XDG_CONFIG_HOME": str(tmp_path)},
+                capture_output=True, text=True, timeout=20,
+            )
+        except subprocess.TimeoutExpired as exc:
+            diagnostic = exc.stderr or b""
+            if isinstance(diagnostic, bytes):
+                diagnostic = diagnostic.decode("utf-8", errors="replace")
+            pytest.fail(
+                f"watch CLI timed out; HTTP requests: {requests!r}; child traceback:\n{diagnostic}",
+                pytrace=False,
+            )
         if forbidden:
             assert result.returncode != 0
             assert not cursors

@@ -21,6 +21,27 @@ pytestmark = pytest.mark.skipif(os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1"
                                 reason="requires explicitly disposable Kubernetes")
 
 
+def _policy_typecheck_details(observed):
+    """Describe controller progress without dumping policy expressions or messages."""
+    details = []
+    for item in observed[:16]:
+        status = item.status
+        checking = getattr(status, "type_checking", None)
+        details.append({
+            "name": item.metadata.name[:256], "generation": item.metadata.generation,
+            "status_present": status is not None,
+            "observed_generation": getattr(status, "observed_generation", None),
+            "type_checked": checking is not None,
+            "conditions": [{key: (getattr(condition, key, None) or "")[:128]
+                            for key in ("type", "status", "reason")}
+                           for condition in (getattr(status, "conditions", None) or [])[:8]],
+            "warning_fields": [warning.field_ref[:256]
+                               for warning in (getattr(checking, "expression_warnings", None) or [])[:8]],
+        })
+    rendered = repr({"count": len(observed), "policies": details})
+    return rendered if len(rendered) <= 4096 else rendered[:4080] + "... (truncated)"
+
+
 def _can_create_application_secret(http):
     response = http.post("/apis/authorization.k8s.io/v1/selfsubjectaccessreviews", json={
         "apiVersion": "authorization.k8s.io/v1", "kind": "SelfSubjectAccessReview",
@@ -179,7 +200,9 @@ def test_application_manager_can_manage_apps_but_not_shared_or_legacy_resources(
                             if item.status.type_checking.expression_warnings}
                 assert not warnings, repr(warnings)
                 break
-            assert time.monotonic() < deadline, "application policies were not type-checked"
+            assert time.monotonic() < deadline, (
+                "application policies were not type-checked: " + _policy_typecheck_details(observed)
+            )
             time.sleep(0.1)
         token = core.create_namespaced_service_account_token("loom-application-provisioner", authority.namespace,
             client.AuthenticationV1TokenRequest(spec=client.V1TokenRequestSpec(audiences=[], expiration_seconds=600))).status.token

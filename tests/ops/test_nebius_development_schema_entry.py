@@ -11,6 +11,38 @@ import pytest
 from tests.ops.test_nebius_environment_lifecycle_entry import configuration, private
 
 
+def test_schema_inputs_preserve_optional_storage_reference_without_changing_legacy_bytes():
+    from scripts.ops.nebius_development_schema_upgrade import DevelopmentSchemaInputs
+    from scripts.ops.nebius_pool_storage_binding import StorageReference
+
+    # Serialization alone must retain the new explicit authority without adding
+    # a null field to historical v1 inputs. Nested inputs are not exercised here.
+    legacy = DevelopmentSchemaInputs.model_construct()
+    assert legacy.model_dump_json() == '{"schema_version":"loom.development-schema-inputs.v1"}'
+    reference = StorageReference(operation_id=uuid4(), inputs_sha256='a' * 64)
+    selected = DevelopmentSchemaInputs.model_construct(storage=reference)
+    assert selected.model_dump(mode='json') == {
+        'schema_version': 'loom.development-schema-inputs.v1',
+        'storage': {'operation_id': str(reference.operation_id), 'inputs_sha256': 'a' * 64},
+    }
+
+
+def test_schema_anchor_pins_storage_completion_bytes_as_well_as_its_input_reference(tmp_path):
+    from scripts.ops.nebius_development_schema_upgrade import DevelopmentSchemaReference, _identity
+
+    reference = DevelopmentSchemaReference(operation_id=uuid4(), inputs_path=tmp_path / 'inputs.json',
+        inputs_sha256='a' * 64)
+    retained = SimpleNamespace(reference=reference, runtime=SimpleNamespace(history_sha256='b' * 64),
+        plan=SimpleNamespace(input_digest='c' * 64), state_dir=tmp_path / 'operation', storage=None)
+    original = _identity(retained)
+    assert set(original) == {'schema_version', 'reference', 'history_sha256', 'plan_sha256', 'state_dir'}
+    retained.storage = SimpleNamespace(files={tmp_path / 'storage-stage.json': b'first completed receipt'})
+    selected = _identity(retained)
+    assert selected != original
+    retained.storage.files[tmp_path / 'storage-stage.json'] = b'rewritten completed receipt'
+    assert _identity(retained) != selected
+
+
 @pytest.mark.parametrize('action', ['prepare', 'apply', 'recover', 'status'])
 async def test_schema_entry_preserves_identity_only_protocol(tmp_path, monkeypatch, action):
     name = 'scripts.ops.nebius_development_schema_entry'

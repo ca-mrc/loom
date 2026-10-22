@@ -29,6 +29,7 @@ from loom_service.environment_management.candidates import (
 
 if TYPE_CHECKING:
     from scripts.ops.nebius_development_schema_upgrade import CompletedDevelopmentSchemaSuccessor
+    from scripts.ops.nebius_pool_storage_binding import ClosedPoolStorageRefresh
     from scripts.ops.nebius_shared_pool_handoff import StagingForwardPlan, StagingPoolSource
 
 # #2443 introduced the protected shared handoff and its participant protocol.
@@ -110,7 +111,8 @@ async def qualify_staging_source_publication(*, request: DevelopmentRuntimeInsta
 
 async def qualify_runtime_cloud(*, request: DevelopmentRuntimeInstallRequest,
                                 operator_credentials: Path,
-                                schema_successor: CompletedDevelopmentSchemaSuccessor | None = None) -> ProviderCapacitySnapshot:
+                                schema_successor: CompletedDevelopmentSchemaSuccessor | None = None,
+                                storage: ClosedPoolStorageRefresh | None = None) -> ProviderCapacitySnapshot:
     """Read IAM with the operator, then read the pool with its observer key.
 
     No observation is published, image pushed, permit changed or capacity
@@ -120,6 +122,7 @@ async def qualify_runtime_cloud(*, request: DevelopmentRuntimeInstallRequest,
     from nebius.sdk import SDK
 
     try:
+        runtime = prepare_collector_runtime(request.database, storage=storage)
         original = private_state._private_read(operator_credentials, limit=1024**2)
         config = request.database.foundation.inputs.config
         profiles = development_profile_catalog(request.database.manager.retained.request)
@@ -144,7 +147,6 @@ async def qualify_runtime_cloud(*, request: DevelopmentRuntimeInstallRequest,
             with tempfile.TemporaryDirectory(prefix='loom-dev-runtime-cloud-') as scratch:
                 credential = Path(scratch) / 'observer.json'
                 private_state._write_private(credential, request.collector_credential)
-                runtime = prepare_collector_runtime(request.database)
                 prefix = 'LOOM_EXECUTION_CAPACITY_COLLECTOR_'
                 values = {key.removeprefix(prefix).lower(): value for key, value in runtime.configuration['data'].items()
                     if key != prefix + 'COLLECTION_MODE'}
@@ -156,6 +158,10 @@ async def qualify_runtime_cloud(*, request: DevelopmentRuntimeInstallRequest,
                     snapshot = await reader.capture_pool(expected_cluster_id=config['cluster_id'])
                 finally:
                     await reader.close()
+                if storage is not None and (snapshot.node_group is None
+                        or snapshot.node_group.id != storage.after.node_group_id
+                        or snapshot.node_group.template.get('boot_disk_type') != storage.target_disk_type):
+                    raise ValueError('selected native storage type differs')
                 if private_state._private_read(credential, limit=1024**2) != request.collector_credential:
                     raise ValueError
         if private_state._private_read(operator_credentials, limit=1024**2) != original:

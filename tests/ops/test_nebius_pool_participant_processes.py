@@ -150,12 +150,25 @@ def process_connection(resource_connection, tmp_path, monkeypatch):
     return state, connect, keys, {'kubeconfig': kubeconfig, 'executable': Path('/usr/bin/kubectl')}
 
 
-def test_participant_processes_use_current_owned_pods_and_both_probes(process_connection):
+def test_participant_processes_use_current_owned_pods_and_both_probes(process_connection, monkeypatch):
+    from scripts.ops.nebius_pool_participant_observation import _ResourceView
+
     state, _, keys, options = process_connection
+    projections = []
+    original = _ResourceView._pool
+
+    def project(view):
+        projections.append(None)
+        return original(view)
+
     with observer(state.retained, lambda: state.rows)[0] as live:
+        monkeypatch.setattr(_ResourceView, '_pool', project)
         assert live.observe_participant_processes(phase='preflight', **options) == ()
     assert {f'Deployment:{namespace}:{name}' for namespace, name, _, _ in state.process_commands} == keys
     assert len(state.process_commands) == 2 * len(keys)
+    # Receipt semantics are fixed within this read-only scope. Per-process
+    # challenges must reopen the evidence, not project the entire release again.
+    assert len(projections) <= 5
 
 
 @pytest.mark.parametrize('damage', ['database', 'settings', 'credential', 'backend', 'restart'])
@@ -185,7 +198,7 @@ def test_process_observation_follows_real_candidate_write_and_requires_final_rea
         assert live.observe_participant_processes(phase='ready', **options) == ()
 
 
-@pytest.mark.parametrize('damage', ['connection', 'inputs', 'history'])
+@pytest.mark.parametrize('damage', ['connection', 'inputs', 'history', 'receipt', 'retained'])
 def test_participant_processes_reject_late_source_or_connection_change(process_connection, damage):
     state, _, _, options = process_connection
     path = (options['kubeconfig'] if damage == 'connection' else state.retained.state_dir / 'inputs.json'
@@ -193,13 +206,23 @@ def test_participant_processes_reject_late_source_or_connection_change(process_c
     original = path.read_bytes()
 
     def change():
-        path.write_bytes(original + b'\n')
+        if damage == 'retained':
+            live.retained.inputs.candidate['candidate_sha'] = 'e' * 40
+        elif damage == 'receipt':
+            from scripts.ops import nebius_certificates as private_state
+
+            private_state._atomic_json(state.retained.anchor_dir /
+                (str(state.retained.reference.operation_id) + '-pool-effects.json'), {})
+        else:
+            path.write_bytes(original + b'\n')
         state.process_hook = None
 
     state.process_hook = change
     with observer(state.retained, lambda: state.rows)[0] as live:
         with pytest.raises(ValueError, match='preserve'):
             live.observe_participant_processes(phase='ready', **options)
+    if damage in {'receipt', 'retained'}:
+        assert len(state.process_commands) == 2  # Stop before probing the next process.
 
 
 def test_participant_processes_reject_late_actuator_credential_change(process_connection):

@@ -16,6 +16,7 @@ from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_ingress_stage import _key, _uid
 from scripts.ops.nebius_management_stage import _qualified_defaulted
 from scripts.ops.nebius_management_switch import _matches
+from scripts.ops.nebius_management_transport import ManagementNotDispatchedError
 
 from loom.nebius_platform_render import digest
 from loom_service.environment_management.candidates import _json
@@ -130,8 +131,15 @@ subsequent phase intentionally changed their live workload specifications.
                         raise ValueError
                     item['status'] = 'intent'
                     private_state._atomic_json(path, record)
+                    intent = private_state._private_read(path, limit=4 * 1024**2)
                     try:
                         accepted = api.patch_workload(key, actual, targets[key])
+                    except ManagementNotDispatchedError:
+                        if private_state._private_read(path, limit=4 * 1024**2) != intent:
+                            raise ValueError('runtime undispatched evidence changed') from None
+                        item['status'] = 'prepared'
+                        private_state._atomic_json(path, record)
+                        raise
                     except Exception:
                         accepted = True
                     if accepted is False:
