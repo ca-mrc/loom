@@ -274,7 +274,7 @@ class HTTPSDevelopmentSchemaAPI(HTTPSDevelopmentRuntimeProbes):
             raise ValueError('development_schema_operator_material_unqualified')
         unchanged()
         super().__init__(request=retained.runtime.request, api_server=connection.endpoint, ssl_context=ssl_context,
-            token=token, private_files={**retained.runtime.files, **retained.files})
+            token=token, private_files={**retained.runtime.files, **retained.files}, storage=retained.storage)
         self.context, self.token = ssl_context, token
         self.operator_credentials = connection.credentials_file
         self.children = ExitStack()
@@ -372,7 +372,8 @@ class HTTPSDevelopmentSchemaAPI(HTTPSDevelopmentRuntimeProbes):
                         or not await catalog.candidate_follows(candidate_id=selected.publication.candidate_id,
                             current_sha=previous.source.source_sha)):
                     raise ValueError('development_schema_publication_unqualified')
-        await qualify_runtime_cloud(request=self.request, operator_credentials=self.operator_credentials)
+        await qualify_runtime_cloud(request=self.request, operator_credentials=self.operator_credentials,
+            storage=None if self.retained.storage is None else self.retained.storage.retained.inputs.refresh)
         settings = self.manager.retained.inputs.prerequisites
         scope = settings.backup
         required = self._remaining_backup_bytes(record)
@@ -441,7 +442,8 @@ class HTTPSDevelopmentSchemaAPI(HTTPSDevelopmentRuntimeProbes):
                 pod['metadata'].pop('ownerReferences', None)
         planned = list(self.retained.plan.targets.values())
         for phase in ('shared-probe', 'manager-probe', 'shared-backup', 'manager-backup'):
-            job, = (row for row in schema_job_documents(self.retained.runtime, self.retained.projection, phase).values()
+            job, = (row for row in schema_job_documents(self.retained.runtime, self.retained.projection, phase,
+                storage=self.retained.storage).values()
                 if row['kind'] == 'Job')
             qualify_platform_capacity(nodes=nodes, pods=pods, controllers=controllers, planned=[*planned, job],
                 reserve=PlatformEnvelope(budget.cpu_millis, budget.memory_mib, 0, budget.ephemeral_storage_mib),
@@ -528,7 +530,7 @@ class HTTPSDevelopmentSchemaAPI(HTTPSDevelopmentRuntimeProbes):
                 raise ValueError('development_schema_catalog_phase_changed')
         if record is None or record['phases']['stop']['status'] == 'prepared':
             for mode in ('shared', 'manager'):
-                selection = schema_database_selection(self.retained.runtime, projection, mode)
+                selection = schema_database_selection(self.retained.runtime, projection, mode, storage=self.retained.storage)
                 statement = 'BEGIN TRANSACTION READ ONLY; SET LOCAL statement_timeout=10000; SET LOCAL lock_timeout=2000;\n' + schema_idle_sql(selection) + ';\nROLLBACK;'
                 observed = self._sql(selection.namespace, statement)
                 expected = dict(schema_version='loom.development-schema-idle.v1', revision=selection.predecessor_revision,
@@ -770,7 +772,8 @@ class HTTPSDevelopmentSchemaAPI(HTTPSDevelopmentRuntimeProbes):
             raise ValueError('development_schema_report_phase_changed')
         mode, action = phase.split('-')
         modes: dict[str, Literal['shared', 'manager']] = {'shared': 'shared', 'manager': 'manager'}
-        selection = schema_database_selection(self.retained.runtime, self.retained.projection, modes[mode])
+        selection = schema_database_selection(self.retained.runtime, self.retained.projection, modes[mode],
+            storage=self.retained.storage)
         def validate(proof: dict[str, Any]) -> None:
             if action != 'backup':
                 schema.validate_phase_proof(self.retained, record, phase, proof)
@@ -834,6 +837,11 @@ class HTTPSDevelopmentSchemaAPI(HTTPSDevelopmentRuntimeProbes):
     @property
     def manager_revision(self) -> str:
         return candidate_service_schema_head(self.retained.projection.manager_publication.bundle.candidate)
+
+    def _manager_catalog(self) -> dict[str, Any]:
+        # Verification runs before a completed schema-successor receipt exists.
+        return self.retained.plan.fixed['ConfigMap:' + self.manager.binding.namespace
+            + ':loom-pool-profiles-' + self.retained.projection.after_pool.operation_id.hex]
 
     def _running(self, key: str, state_dir: Path) -> tuple[PoolSettingsComponent, dict[str, Any], dict[str, Any]]:
         if state_dir != self.retained.runtime.state_dir:

@@ -132,7 +132,7 @@ def original_platform_inputs():
 
 
 @pytest.fixture
-def staging_history(original_platform_inputs, retained, tmp_path):
+def staging_history(original_platform_inputs, retained, tmp_path, request):
     """Run the existing legacy installer/recovery in an independent fixture root.
 
     Only external I/O is doubled by those fixtures. Calling their builders
@@ -166,7 +166,13 @@ def staging_history(original_platform_inputs, retained, tmp_path):
         cutover = entry.cutover_inputs.__wrapped__(collector, retirement, fencing, runtime)
         with pytest.MonkeyPatch.context() as patch:
             database = entry.database_guard.__wrapped__(runtime, platform, base, patch)
-            operation, _, root = entry.private_cutover.__wrapped__(completed, cutover, database)
+            operation, payload, root = entry.private_cutover.__wrapped__(completed, cutover, database)
+            if getattr(request, 'param', None) == '0174':
+                from tests.ops.test_nebius_management_refresh_predecessor import complete_refresh
+
+                selector, _ = complete_refresh(root, manager_revision='0174')
+                payload['predecessor'] = selector
+                entry.save_private(operation, payload)
             _, completion = finish_cutover(operation, legacy=True)
     return load_completed_pool(PoolPredecessorV1(operation=operation,
         completion_sha256=completion['completion_sha256']), original=root)
@@ -300,6 +306,53 @@ def shared_runtime(completed_pool, publisher_cloud):
     api.database_complete = api.catalog_complete = True
     assert runtime.install_development_runtime(request=request, api=api, execute=True)['status'] == 'development_runtime_installed_closed'
     return request, api
+
+
+@pytest.mark.timeout(180)
+def test_closed_storage_projection_pauses_and_restores_actual_enabled_collector(shared_runtime):
+    from scripts.ops import nebius_pool_storage_binding as storage
+    from scripts.ops.nebius_development_runtime_retained import load_completed_runtime
+
+    request, api = shared_runtime
+    completed = load_completed_runtime(request)
+    original = request.database.manager.retained.request.registration.spec
+    after = original.model_dump(mode='json')
+    after['policy_revision'] += 1
+    after['quota_identities']['storage'][3] = 'compute.disk.size.network-ssd-non-replicated'
+    refresh = storage.ClosedPoolStorageRefresh(schema_version='loom.closed-pool-storage-refresh.v1',
+        operation_id=uuid4(), target_disk_type='NETWORK_SSD_NON_REPLICATED', before=original, after=after)
+    resources = copy.deepcopy(api.store.resources)
+    plan = storage.prepare_storage_collector(runtime=request, refresh=refresh)
+    assert api.store.resources == resources
+    assert load_completed_runtime(request) == completed
+    assert plan.original['spec']['suspend'] is False
+    assert plan.paused['spec']['suspend'] is True
+    assert plan.reconfigured['spec']['suspend'] is True
+    assert plan.resumed['spec']['suspend'] is False
+    name = 'loom-pool-storage-' + refresh.operation_id.hex
+    assert plan.configuration['metadata']['name'] == name
+    assert plan.configuration['immutable'] is True
+    key = 'LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_STORAGE_NAME'
+    assert plan.configuration['data'][key] == 'compute.disk.size.network-ssd-non-replicated'
+    assert plan.configuration['data'] == {
+        **plan.previous_configuration['data'], key: 'compute.disk.size.network-ssd-non-replicated'}
+    # Every image, credential mount, node selection, schedule and other setting
+    # remains the installed one. Only suspension and the fixed config reference move.
+    expected = copy.deepcopy(plan.original['spec'])
+    expected['suspend'] = True
+    assert plan.paused['spec'] == expected
+    expected['jobTemplate']['spec']['template']['spec']['containers'][0]['envFrom'] = [
+        {'configMapRef': {'name': name}}]
+    assert plan.reconfigured['spec'] == expected
+    expected['suspend'] = False
+    assert plan.resumed['spec'] == expected
+    # A syntactically valid physical delta for another policy cannot reuse this history.
+    changed = refresh.model_dump(mode='json')
+    for version in ('before', 'after'):
+        changed[version]['admission']['build_concurrency_limit'] += 1
+    changed = storage.ClosedPoolStorageRefresh.model_validate(changed)
+    with pytest.raises(ValueError, match='storage collector'):
+        storage.prepare_storage_collector(runtime=request, refresh=changed)
 
 
 @pytest.fixture
@@ -483,6 +536,575 @@ def test_preactivation_preparation_preserves_completed_runtime_and_is_immutable(
             parent.retain_preactivation_catalog(**changed)
 
 
+class ClosedStorageAPI:
+    """Real history/CAS/create journals; only external cluster/SQL I/O is doubled."""
+
+    def __init__(self, retained):
+        from tests.ops.test_nebius_development_runtime_transition import RuntimeAPI
+        from tests.ops.test_nebius_management_stage import PhaseAPI
+
+        self.retained = retained
+        self.configuration = PhaseAPI(retained.registration.binding)
+        self.collector = RuntimeAPI({_key(retained.collector.original): retained.collector.original})
+        self.collector.rows[_key(retained.collector.original)]['metadata']['resourceVersion'] = '1'
+        self.registry = self
+        self.registry_state = 'ready'
+        self.commits = 0
+        self.publication_ready = False
+        self.failure = None
+
+    def workload(self, phase, originals, targets):
+        if phase == 'resume':
+            assert self.registry_state == 'complete'
+        return self.collector
+
+    def qualify(self, retained, phase):
+        from scripts.ops import nebius_certificates as private_state
+
+        assert retained == self.retained
+        with pytest.raises(private_state.CertificateError):
+            with private_state._locked_state(retained.anchor_dir / 'shared-pool-handoff-lock'):
+                pytest.fail('storage correction did not hold the handoff lock')
+        if self.failure == phase:
+            raise ValueError('simulated provider/gateway/authority drift')
+
+    def qualify_publication(self, retained, resources):
+        from scripts.ops.nebius_management_switch import _matches
+
+        assert retained == self.retained
+        current = self.collector.rows[_key(resources.collector)]
+        assert _matches(current, resources.collector, current['metadata']['uid'])
+        assert current['spec']['suspend'] is False
+        assert self.registry_state == 'complete'
+        return self.publication_ready
+
+    def observe(self, refresh):
+        from scripts.ops.nebius_pool_storage_binding import _identity
+
+        assert refresh == self.retained.inputs.refresh
+        return {**_identity(refresh), 'state': self.registry_state, 'read_only': True}
+
+    def commit(self, refresh):
+        assert refresh == self.retained.inputs.refresh
+        current = self.collector.rows[_key(self.retained.collector.original)]
+        assert self.collector.ready and current['spec']['suspend'] is True
+        container, = current['spec']['jobTemplate']['spec']['template']['spec']['containers']
+        assert container['envFrom'] == [{'configMapRef': {
+            'name': 'loom-pool-storage-' + refresh.operation_id.hex}}]
+        self.commits += 1
+        if self.failure == 'commit-before':
+            raise OSError('lost before commit')
+        self.registry_state = 'complete'
+        if self.failure == 'commit-after':
+            raise OSError('lost after commit')
+        return {**self.observe(refresh), 'read_only': False}
+
+
+@pytest.mark.parametrize('staging_observation', ['independent'], indirect=True)
+@pytest.mark.timeout(240)
+def test_closed_storage_parent_preserves_history_and_waits_for_drain_and_new_publication(
+        shared_operation, shared_runtime, completed_pool, handoff):
+    import importlib
+    import ssl
+
+    import httpx
+
+    name = 'scripts.ops.nebius_pool_storage_operation'
+    assert importlib.util.find_spec(name) is not None, 'retained closed storage operation is missing'
+    parent = importlib.import_module(name)
+    from scripts.ops.nebius_development_runtime_live import runtime_resource_path
+    from scripts.ops.nebius_development_runtime_observation import HTTPSDevelopmentRuntimeObserver
+    from scripts.ops.nebius_development_runtime_retained import load_completed_runtime
+    from scripts.ops.nebius_shared_pool_entry import RetainedRuntimeReference
+    from tests.ops.test_nebius_development_pool_retained import runtime_http_inventory
+
+    args, bindings = shared_operation
+    _, _, inputs, _, _ = _shared_entry_inputs(args, bindings)
+    runtime = RetainedRuntimeReference.model_validate(inputs['runtime'])
+    original = load_completed_runtime(args['runtime'])
+    parameters = dict(runtime=runtime, operation_id=uuid4(), target_disk_type='NETWORK_SSD_NON_REPLICATED')
+    retained = parent.retain_closed_storage(**parameters)
+    assert parent.retain_closed_storage(**parameters) == retained
+    assert parent.load_closed_storage(runtime=runtime, reference=retained.reference) == retained
+    assert retained.registration.spec.operation_id == original.request.database.manager.retained.request.registration.spec.operation_id
+    with pytest.raises(ValueError):
+        parent.load_completed_storage(runtime=runtime, reference=retained.reference)
+    api = ClosedStorageAPI(retained)
+    _, documents, handler = runtime_http_inventory(args['runtime'], shared_runtime[1], completed_pool[3].server, handoff[2])
+
+    def inspect(completed=None):
+        for row in (*api.collector.rows.values(), *api.configuration.resources.values()):
+            documents[runtime_resource_path(row) + '/' + row['metadata']['name']] = copy.deepcopy(row)
+        with HTTPSDevelopmentRuntimeObserver(request=args['runtime'],
+                api_server=args['runtime'].database.foundation.inputs.config['kubernetes_api_server'],
+                ssl_context=ssl.create_default_context(), storage=completed) as observer:
+            for connection in (observer, observer.manager, observer.foundation):
+                connection.client.close()
+                connection.client = type(completed_pool[3].api.client)(base_url=connection.api_server,
+                    transport=httpx.MockTransport(handler))
+            return observer.inspect(state_dir=original.state_dir,
+                _storage_correction=retained if completed is None else None)
+
+    def run():
+        return parent.run_closed_storage(retained=retained, api=api)
+
+    assert run() is False  # An applied suspension is not proof that Jobs/Pods drained.
+    assert len(api.collector.patches) == 1 and api.commits == 0
+    assert api.configuration.creates == []
+    assert inspect()[_key(retained.collector.original)]['spec']['suspend'] is True
+    api.collector.ready = True
+    api.failure = 'registry'
+    with pytest.raises(ValueError):
+        run()
+    current = inspect()[_key(retained.collector.original)]
+    assert current['spec']['suspend'] is True
+    assert current['spec']['jobTemplate']['spec']['template']['spec']['containers'][0]['envFrom'] == [
+        {'configMapRef': {'name': retained.collector.configuration['metadata']['name']}}]
+    assert api.commits == 0
+    api.failure = 'commit-after'
+    assert run() is False  # Resume does not substitute for fresh aggregate publication.
+    assert len(api.configuration.creates) == 1
+    assert len(api.collector.patches) == 3 and api.commits == 1
+    assert api.collector.rows[_key(retained.collector.original)]['spec']['suspend'] is False
+    with pytest.raises(ValueError):
+        parent.load_completed_storage(runtime=runtime, reference=retained.reference)
+    api.publication_ready = True
+    assert run() is True
+    completed = parent.load_completed_storage(runtime=runtime, reference=retained.reference)
+    assert inspect(completed)[_key(retained.collector.original)]['spec']['suspend'] is False
+    collector = api.collector.rows[_key(retained.collector.original)]
+    correct = copy.deepcopy(collector)
+    collector['spec']['jobTemplate']['spec']['template']['spec']['containers'][0]['image'] = 'unqualified:latest'
+    with pytest.raises(ValueError):
+        inspect(completed)
+    api.collector.rows[_key(retained.collector.original)] = correct
+    assert completed.resources.configuration['data']['LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_STORAGE_NAME'] == (
+        'compute.disk.size.network-ssd-non-replicated')
+    assert all(path.read_bytes() == raw for path, raw in original.files.items())
+    assert run() is True
+    assert len(api.configuration.creates) == 1 and len(api.collector.patches) == 3 and api.commits == 1
+    assert all(path.read_bytes() == raw for path, raw in completed.files.items())
+    # A lost completed child cannot be recreated, even though the live pool matches.
+    child = retained.state_dir / 'registry/registry.json'
+    saved = child.read_bytes()
+    child.unlink()
+    with pytest.raises(ValueError):
+        run()
+    assert not child.exists() and api.commits == 1
+    from scripts.ops import nebius_certificates as private_state
+
+    private_state._write_private(child, saved)
+    assert parent.load_completed_storage(runtime=runtime, reference=retained.reference) == completed
+
+
+@pytest.mark.parametrize('staging_observation', ['independent'], indirect=True)
+@pytest.mark.timeout(180)
+def test_storage_collector_https_uses_execution_namespace_and_preserves_uid_cas(shared_operation):
+    import importlib
+    import ssl
+
+    import httpx
+    from scripts.ops.nebius_development_runtime_live import runtime_resource_path
+    from scripts.ops.nebius_development_runtime_transition import advance_runtime_workloads
+    from scripts.ops.nebius_management_stage import _stage_fixed_documents
+    from scripts.ops.nebius_pool_storage_operation import (
+        retain_closed_storage,
+        storage_configuration_identity,
+        storage_transition_inputs,
+    )
+    from scripts.ops.nebius_shared_pool_entry import RetainedRuntimeReference
+
+    name = 'scripts.ops.nebius_pool_storage_transport'
+    assert importlib.util.find_spec(name) is not None, 'fixed storage collector transport is missing'
+    transport = importlib.import_module(name)
+    args, bindings = shared_operation
+    _, _, inputs, _, _ = _shared_entry_inputs(args, bindings)
+    retained = retain_closed_storage(runtime=RetainedRuntimeReference.model_validate(inputs['runtime']),
+        operation_id=uuid4(), target_disk_type='NETWORK_SSD_NON_REPLICATED')
+    cron = copy.deepcopy(retained.collector.original)
+    cron['metadata'].update(resourceVersion='1', generation=1)
+    path = runtime_resource_path(cron) + '/' + cron['metadata']['name']
+    namespace = cron['metadata']['namespace']
+    rows, effects, checks = {path: cron}, [], []
+    mode = {'fail_read': False, 'lose_reply': False, 'active': True, 'fail_at_dispatch': False}
+    active_pod = {'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {
+        'name': 'old-collector', 'namespace': namespace, 'uid': str(uuid4()),
+        'labels': cron['spec']['jobTemplate']['spec']['template']['metadata']['labels']},
+        'spec': cron['spec']['jobTemplate']['spec']['template']['spec'], 'status': {'phase': 'Running'}}
+
+    def qualify():
+        checks.append(True)
+        if mode['fail_read']:
+            raise ValueError('provider qualification failed')
+        child = retained.state_dir / phase / ('stage.json' if phase == 'configuration' else 'transition.json')
+        if mode['fail_at_dispatch'] and child.exists():
+            if any(item['status'] in {'intent', 'create_intent'}
+                    for item in json.loads(child.read_bytes())['resources'].values()):
+                raise ValueError('provider read failed immediately before HTTP dispatch')
+
+    def respond(message):
+        selected = message.url.path
+        if message.method == 'GET':
+            if selected.endswith('/jobs') or selected.endswith('/pods'):
+                return httpx.Response(200, json={'apiVersion': 'batch/v1' if selected.endswith('/jobs') else 'v1',
+                    'kind': 'JobList' if selected.endswith('/jobs') else 'PodList',
+                    'metadata': {'resourceVersion': '1'},
+                    'items': [active_pod] if selected.endswith('/pods') and mode['active'] else []})
+            return httpx.Response(200, json=rows[selected]) if selected in rows else httpx.Response(404)
+        assert '/namespaces/' + namespace + '/' in selected
+        preview = bool(message.url.params)
+        assert not preview or dict(message.url.params) == {'dryRun': 'All'}
+        if message.method == 'POST':
+            assert selected == '/api/v1/namespaces/loom-nebius-dev-execution/configmaps'
+            value = json.loads(message.content)
+            assert value['immutable'] is True
+            if not preview:
+                value['metadata'].update(uid=str(uuid4()), resourceVersion='1')
+                rows[selected + '/' + value['metadata']['name']] = copy.deepcopy(value)
+                effects.append('configuration')
+            return httpx.Response(201, json=value)
+        assert message.method == 'PATCH' and selected == path
+        patches = json.loads(message.content)
+        current = rows[path]
+        assert patches[:3] == [{'op': 'test', 'path': '/metadata/uid', 'value': current['metadata']['uid']},
+            {'op': 'test', 'path': '/metadata/resourceVersion', 'value': current['metadata']['resourceVersion']},
+            {'op': 'test', 'path': '/spec', 'value': current['spec']}]
+        value = copy.deepcopy(current)
+        for patch in patches[3:]:
+            parts = patch['path'].strip('/').split('/')
+            owner = value
+            for part in parts[:-1]:
+                owner = owner[part]
+            if patch['op'] == 'remove':
+                del owner[parts[-1]]
+            else:
+                owner[parts[-1]] = patch['value']
+        if not preview:
+            value['metadata'].update(resourceVersion=str(int(current['metadata']['resourceVersion']) + 1),
+                generation=current['metadata']['generation'] + 1)
+            rows[path] = value
+            effects.append('collector')
+            if mode['lose_reply']:
+                raise httpx.ReadError('lost committed CAS response')
+        return httpx.Response(200, json=value)
+
+    for phase, transition in (('pause', 'stop'), ('configuration', None), ('reconfigure', 'control'), ('resume', 'start')):
+        with transport.HTTPSStorageCollectorAPI(retained=retained, phase=phase,
+                api_server=args['runtime'].database.foundation.inputs.config['kubernetes_api_server'],
+                ssl_context=ssl.create_default_context(), qualify=qualify) as api:
+            api.client.close()
+            api.client = type(api.client)(base_url=api.api_server, transport=httpx.MockTransport(respond))
+            if transition is None:
+                documents, identity = storage_configuration_identity(retained)
+                mode['fail_at_dispatch'] = True
+                with pytest.raises((ValueError, RuntimeError)):
+                    _stage_fixed_documents(documents=documents, revision=identity['revision'], phase=identity['phase'],
+                        binding=retained.registration.binding, api=api, state_dir=retained.state_dir / phase)
+                assert effects == ['collector']
+                assert all(item['status'] == 'prepared' for item in json.loads(
+                    (retained.state_dir / phase / 'stage.json').read_bytes())['resources'].values())
+                mode['fail_at_dispatch'] = False
+                _stage_fixed_documents(documents=documents, revision=identity['revision'], phase=identity['phase'],
+                    binding=retained.registration.binding, api=api, state_dir=retained.state_dir / phase)
+                with pytest.raises(ValueError):
+                    api.create_resource(retained.collector.previous_configuration)
+            else:
+                originals, targets, fingerprint = storage_transition_inputs(retained, phase)
+                mode['lose_reply'] = phase == 'reconfigure'
+                if phase == 'pause':
+                    mode['fail_read'] = True
+                    with pytest.raises(ValueError):
+                        advance_runtime_workloads(originals=originals, targets=targets, input_digest=fingerprint,
+                            phase=transition, api=api, state_dir=retained.state_dir / phase)
+                    assert effects == []
+                    mode['fail_read'] = False
+                    mode['fail_at_dispatch'] = True
+                    with pytest.raises(ValueError):
+                        advance_runtime_workloads(originals=originals, targets=targets, input_digest=fingerprint,
+                            phase=transition, api=api, state_dir=retained.state_dir / phase)
+                    assert effects == []
+                    assert all(item['status'] == 'prepared' for item in json.loads(
+                        (retained.state_dir / phase / 'transition.json').read_bytes())['resources'].values())
+                    mode['fail_at_dispatch'] = False
+                    try:
+                        waiting = advance_runtime_workloads(originals=originals, targets=targets, input_digest=fingerprint,
+                            phase=transition, api=api, state_dir=retained.state_dir / phase)
+                    except Exception as error:
+                        locations = []
+                        while error is not None:
+                            trace = error.__traceback__
+                            while trace is not None:
+                                locations.append((type(error).__name__, Path(trace.tb_frame.f_code.co_filename).name,
+                                    trace.tb_frame.f_code.co_name, trace.tb_lineno))
+                                trace = trace.tb_next
+                            error = error.__context__
+                        pytest.fail(repr(locations), pytrace=False)
+                    assert waiting is False
+                    assert effects == ['collector']
+                    mode['active'] = False
+                assert advance_runtime_workloads(originals=originals, targets=targets, input_digest=fingerprint,
+                    phase=transition, api=api, state_dir=retained.state_dir / phase)
+                assert advance_runtime_workloads(originals=originals, targets=targets, input_digest=fingerprint,
+                    phase=transition, api=api, state_dir=retained.state_dir / phase)
+    assert effects == ['collector', 'configuration', 'collector', 'collector']
+    assert checks and rows[path]['metadata']['uid'] == retained.collector.original['metadata']['uid']
+    assert rows[path]['spec']['suspend'] is False
+
+
+@pytest.mark.timeout(600)
+def test_connected_closed_storage_requires_stopped_gateway_and_fresh_bound_publication(
+        shared_operation, shared_runtime, completed_pool, handoff, monkeypatch, tmp_path, capsys):
+    """Catch bypassed live checks, old inventory fallback, or premature completion."""
+    import hmac
+    import importlib
+    import os
+    import ssl
+    from types import SimpleNamespace
+
+    import httpx
+    from scripts.ops import nebius_certificates as private_state
+    from scripts.ops import nebius_development_runtime_probes as probes_module
+    from scripts.ops import nebius_pool_storage_operation as parent
+    from scripts.ops import nebius_shared_pool_entry as entry_module
+    from scripts.ops.nebius_development_runtime_live import runtime_resource_path
+    from scripts.ops.nebius_pool_migration_guard import _BOUND_DATABASE_COMMAND
+    from scripts.ops.nebius_pool_runtime_settings import (
+        BOUND_POOL_SETTINGS_COMMAND,
+        expected_pool_runtime_settings,
+    )
+    from scripts.ops.nebius_pool_storage_binding import (
+        _identity,
+        pool_storage_state_sql,
+        refresh_closed_storage_sql,
+    )
+    from scripts.ops.nebius_pool_storage_capacity import (
+        BOUND_CLOSED_STORAGE_CAPACITY_COMMAND,
+        expected_storage_capacity,
+    )
+    from scripts.ops.nebius_shared_pool_entry import RetainedRuntimeReference
+    from tests.ops.test_nebius_development_pool_retained import (
+        populate_database_backends,
+        populate_runtime_pods,
+        runtime_http_inventory,
+    )
+
+    name = 'scripts.ops.nebius_pool_storage_live'
+    assert importlib.util.find_spec(name) is not None, 'connected closed storage adapter is missing'
+    module = importlib.import_module(name)
+    args, bindings = shared_operation
+    root, operation, inputs, _, _ = _shared_entry_inputs(args, bindings)
+    retained = parent.retain_closed_storage(runtime=RetainedRuntimeReference.model_validate(inputs['runtime']),
+        operation_id=uuid4(), target_disk_type='NETWORK_SSD_NON_REPLICATED')
+    refresh = retained.inputs.refresh
+    inputs.update(schema_version='loom.nebius-shared-pool-inputs.v4', storage=retained.reference.model_dump(mode='json'))
+    with pytest.raises(ValueError):
+        entry_module.SharedPoolPrivateInputs.model_validate({**inputs, 'schema_version': 'loom.nebius-shared-pool-inputs.v3'})
+    private_state._atomic_json(root / 'inputs.json', inputs)
+    operation['inputs_sha256'] = hashlib.sha256((root / 'inputs.json').read_bytes()).hexdigest()
+    private_state._atomic_json(root / 'operation.json', operation)
+    monkeypatch.setattr(entry_module, 'SOURCE_RECORD', root / 'shared-pool-source.json')
+    assert hasattr(entry_module, 'load_storage_inputs'), 'pending storage correction needs protected intake'
+    assert entry_module.load_storage_inputs(operation).retained == retained
+    _, documents, fallback = runtime_http_inventory(args['runtime'], shared_runtime[1], completed_pool[3].server, handoff[2])
+    for row in documents.values():
+        row['metadata'].setdefault('resourceVersion', '501')
+        if row['kind'] == 'Deployment' and row['spec']['replicas'] == 0:
+            row['metadata']['generation'] = 1
+            row['status'] = {'observedGeneration': 1, 'replicas': 0}
+    populate_runtime_pods(documents)
+    populate_database_backends(documents)
+    manager_ns = retained.registration.binding.namespace
+    manager_path = '/apis/apps/v1/namespaces/' + manager_ns + '/deployments/loom-service'
+    gateway_path = '/apis/apps/v1/namespaces/' + manager_ns + '/deployments/loom-pool-gateway'
+    collector_path = runtime_resource_path(retained.collector.original) + '/' + retained.collector.original['metadata']['name']
+    documents[collector_path]['metadata']['generation'] = 1
+    execution_ns = retained.collector.original['metadata']['namespace']
+    active_pod = {'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {
+        'name': 'old-collector', 'namespace': execution_ns, 'uid': str(uuid4()),
+        'labels': retained.collector.original['spec']['jobTemplate']['spec']['template']['metadata']['labels']},
+        'spec': retained.collector.original['spec']['jobTemplate']['spec']['template']['spec'], 'status': {'phase': 'Running'}}
+    events, state = [], {'registry': 'ready', 'pending': True, 'active': True, 'failure': None, 'lose_commit': True}
+
+    def respond(message):
+        path = message.url.path
+        assert '/namespaces/loom-staging/' not in path
+        if message.method == 'GET':
+            if path == '/apis/batch/v1/namespaces/' + execution_ns + '/jobs':
+                return httpx.Response(200, json={'apiVersion': 'batch/v1', 'kind': 'JobList',
+                    'metadata': {'resourceVersion': '1'}, 'items': []})
+            if path in documents:
+                value = copy.deepcopy(documents[path])
+                if path == '/api/v1/namespaces/' + execution_ns + '/pods' and state['active']:
+                    value['items'].append(active_pod)
+                if selector := message.url.params.get('labelSelector'):
+                    label, expected = selector.split('=', 1)
+                    value['items'] = [row for row in value['items'] if row['metadata']['labels'].get(label) == expected]
+                return httpx.Response(200, json=value)
+            if '/configmaps/loom-pool-storage-' in path:
+                return httpx.Response(404)
+            return fallback(message)
+        preview = bool(message.url.params)
+        assert not preview or dict(message.url.params) == {'dryRun': 'All'}
+        assert '/namespaces/' + execution_ns + '/' in path
+        if message.method == 'POST':
+            assert path == '/api/v1/namespaces/' + execution_ns + '/configmaps'
+            assert documents[collector_path]['spec']['suspend'] and not state['active']
+            value = json.loads(message.content)
+            assert value['immutable'] is True
+            if not preview:
+                events.append('configuration')
+                value['metadata'].update(uid=str(uuid4()), resourceVersion='502')
+                documents[path + '/' + value['metadata']['name']] = copy.deepcopy(value)
+            return httpx.Response(201, json=value)
+        assert message.method == 'PATCH' and path == collector_path
+        current = documents[path]
+        patches = json.loads(message.content)
+        assert patches[:3] == [{'op': 'test', 'path': '/metadata/uid', 'value': current['metadata']['uid']},
+            {'op': 'test', 'path': '/metadata/resourceVersion', 'value': current['metadata']['resourceVersion']},
+            {'op': 'test', 'path': '/spec', 'value': current['spec']}]
+        value = copy.deepcopy(current)
+        for item in patches[3:]:
+            parts = item['path'].strip('/').split('/')
+            owner = value
+            for part in parts[:-1]:
+                owner = owner[part]
+            if item['op'] == 'remove':
+                del owner[parts[-1]]
+            else:
+                owner[parts[-1]] = item['value']
+        if not value['spec']['suspend']:
+            assert state['registry'] == 'complete'
+        if not preview:
+            events.append('collector')
+            value['metadata']['resourceVersion'] = str(int(current['metadata']['resourceVersion']) + 1)
+            value['metadata']['generation'] = current['metadata']['generation'] + 1
+            documents[path] = value
+        return httpx.Response(200, json=value)
+
+    def execute(argv, **kwargs):
+        assert kwargs['env'] == {'PATH': os.defpath, 'LANG': 'C.UTF-8'}
+        assert argv[argv.index('-n') + 1] == manager_ns
+        command = argv[argv.index('--') + 1:]
+        if command[0] == 'psql':
+            assert command[:-1] == ['psql', '-X', '-qAt', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', 'loom', '-c']
+            query = command[-1]
+            assert query in {pool_storage_state_sql(refresh), refresh_closed_storage_sql(refresh)}
+            writing = query == refresh_closed_storage_sql(refresh)
+            if writing:
+                assert events[-2:] == ['database', 'settings']
+                assert documents[collector_path]['spec']['suspend'] and not state['active']
+                assert state['registry'] == 'ready'
+                events.append('registry')
+                state['registry'] = 'complete'
+                if state.pop('lose_commit', False):
+                    raise OSError('lost committed registry reply')
+            report = {**_identity(refresh), 'read_only': not writing, 'state': state['registry']}
+            if state['failure'] == 'registry':
+                report['state'] = None
+        else:
+            assert command[:2] == ['python', '-c']
+            if command[2] == _BOUND_DATABASE_COMMAND:
+                assert command[3] == 'service'
+                events.append('database')
+            elif command[2] == BOUND_POOL_SETTINGS_COMMAND:
+                assert command[3] == 'manager'
+                # Physical correction preserves the mounted catalog's exact
+                # bytes, not a reserialization of semantically equal profiles.
+                catalog_name = 'loom-pool-profiles-' + refresh.before.operation_id.hex
+                catalog_bytes = documents['/api/v1/namespaces/' + manager_ns + '/configmaps/' + catalog_name]['data']['profiles.json'].encode()
+                wanted = expected_pool_runtime_settings('manager', documents[manager_path],
+                    catalog_sha256=hashlib.sha256(catalog_bytes).hexdigest())
+                assert command[5] == hmac.new(bytes.fromhex(command[4]), json.dumps(wanted, sort_keys=True,
+                    separators=(',', ':')).encode(), 'sha256').hexdigest()
+                events.append('settings')
+            else:
+                assert command[2] == BOUND_CLOSED_STORAGE_CAPACITY_COMMAND and command[3] == str(refresh.after.pool_id)
+                assert state['registry'] == 'complete' and not documents[collector_path]['spec']['suspend']
+                assert command[5] == hmac.new(bytes.fromhex(command[4]), json.dumps(expected_storage_capacity(refresh.after),
+                    sort_keys=True, separators=(',', ':')).encode(), 'sha256').hexdigest()
+                events.append('capacity')
+            report = {'status': 'pending' if command[2] == BOUND_CLOSED_STORAGE_CAPACITY_COMMAND and state['pending'] else 'qualified'}
+        return SimpleNamespace(returncode=0, stdout=json.dumps(report).encode(), stderr=b'')
+
+    async def publication(*, request, http):
+        assert request == retained.runtime
+        if state['failure'] == 'publication':
+            raise ValueError('publication revoked')
+
+    async def cloud(*, request, operator_credentials, storage):
+        assert request == retained.runtime and storage == refresh and operator_credentials == operator
+        if state['failure'] == 'provider':
+            raise ValueError('provider storage drift')
+
+    operator = root / 'operator-key.json'
+    with monkeypatch.context() as patch:
+        patch.setattr(module, 'qualify_runtime_publication', publication)
+        patch.setattr(module, 'qualify_runtime_cloud', cloud)
+        patch.setattr(probes_module.subprocess, 'run', execute)
+        # Patch the external HTTP boundary for every lazily created fixed child.
+        client_type = type(completed_pool[3].api.client)
+        patch.setattr(httpx, 'Client', lambda **kwargs: client_type(
+            base_url=kwargs['base_url'], transport=httpx.MockTransport(respond)))
+        with module.HTTPSClosedStorageOperationAPI(retained=retained, operator_credentials=operator,
+                api_server=args['runtime'].database.foundation.inputs.config['kubernetes_api_server'],
+                ssl_context=ssl.create_default_context(cadata=args['runtime'].database.foundation.bootstrap['material']['loom-platform-db']['ca.crt']),
+                token='operator-test') as api:
+            def run():
+                try:
+                    return parent.run_closed_storage(retained=retained, api=api)
+                except Exception as error:
+                    locations = []
+                    while error is not None:
+                        trace = error.__traceback__
+                        while trace is not None:
+                            locations.append((type(error).__name__, Path(trace.tb_frame.f_code.co_filename).name,
+                                trace.tb_frame.f_code.co_name, trace.tb_lineno))
+                            trace = trace.tb_next
+                        error = error.__context__
+                    pytest.fail(repr(locations), pytrace=False)
+
+            for failure in ('publication', 'provider', 'registry'):
+                state['failure'] = failure
+                with pytest.raises(ValueError):
+                    parent.run_closed_storage(retained=retained, api=api)
+                assert not events
+            state['failure'] = None
+            documents[gateway_path]['spec']['replicas'] = 1
+            with pytest.raises(ValueError):
+                parent.run_closed_storage(retained=retained, api=api)
+            assert not events
+            documents[gateway_path]['spec']['replicas'] = 0
+            assert run() is False
+            assert events == ['collector'] and documents[collector_path]['spec']['suspend']
+            state['active'] = False
+            assert run() is False
+            assert events.count('registry') == 1 and events.count('collector') == 3
+            with pytest.raises(ValueError, match='completed storage correction'):
+                parent.load_completed_storage(runtime=retained.inputs.runtime, reference=retained.reference)
+            state['pending'] = False
+            assert run()
+            assert parent.load_completed_storage(runtime=retained.inputs.runtime, reference=retained.reference)
+            assert events[-3:] == ['database', 'settings', 'capacity']
+            assert run()
+            assert events.count('registry') == 1 and events.count('collector') == 3
+        async def authenticate(connection):
+            assert connection == entry_module.NebiusKubernetesConnection.model_validate(inputs['operator_connection'])
+            return ssl.create_default_context(cadata=args['runtime'].database.foundation.bootstrap['material']['loom-platform-db']['ca.crt']), 'operator-test'
+
+        patch.setattr(entry_module, '_transport', authenticate)
+        assert entry_module.main(str(root / 'operation.json'), 'refresh-storage') == 0
+        result = json.loads(capsys.readouterr().out)
+        assert result['status'] == 'shared_pool_storage_refreshed'
+        assert result['storage_id'] == str(retained.reference.operation_id)
+        assert result['admission_open'] is False and result['writer_migration_complete'] is False
+        assert events.count('registry') == 1 and events.count('collector') == 3
+        # The same completed selection is consumable by handoff intake; it does
+        # not manufacture admission or replay any original installation stage.
+        context = entry_module.load_inputs(operation)
+        assert context.bindings.plan.storage.retained.reference == retained.reference
+        assert context.bindings.migration.registration.spec == retained.registration.spec
+
+
 class PreactivationAPI:
     """Only remote boundaries are doubled; real journals and history are used."""
 
@@ -632,6 +1254,84 @@ def test_preactivation_completion_requires_dispatch_anchor_and_unchanged_childre
         parent.run_preactivation_catalog(retained=retained, api=api, repo_root=ROOT)
     assert api.commits == 1
     child.write_bytes(original)
+
+
+@pytest.mark.parametrize('staging_observation', ['independent'], indirect=True)
+@pytest.mark.timeout(300)
+def test_closed_storage_catalog_and_handoff_follow_one_explicit_ancestry(
+        shared_operation, shared_runtime, completed_pool, handoff, tmp_path):
+    """Catch a catalog/handoff dropping the physical successor or accepting a fork."""
+    import ssl
+
+    import httpx
+    from scripts.ops import nebius_pool_preactivation_operation as catalog
+    from scripts.ops import nebius_pool_storage_operation as storage
+    from scripts.ops.nebius_development_runtime_live import runtime_resource_path
+    from scripts.ops.nebius_development_runtime_observation import HTTPSDevelopmentRuntimeObserver
+    from scripts.ops.nebius_shared_pool_entry import RetainedRuntimeReference
+    from scripts.ops.nebius_shared_pool_handoff import prepare_shared_pool_handoff
+    from scripts.ops.nebius_shared_pool_handoff_live import observe_shared_pool_guard_bindings
+    from tests.ops.test_nebius_development_pool_retained import runtime_http_inventory
+
+    args, bindings = shared_operation
+    _, _, inputs, _, _ = _shared_entry_inputs(args, bindings)
+    runtime = RetainedRuntimeReference.model_validate(inputs['runtime'])
+    retained = storage.retain_closed_storage(runtime=runtime, operation_id=uuid4(), target_disk_type='NETWORK_SSD_NON_REPLICATED')
+    api = ClosedStorageAPI(retained)
+    api.collector.ready = api.publication_ready = True
+    assert storage.run_closed_storage(retained=retained, api=api)
+    physical = storage.load_completed_storage(runtime=runtime, reference=retained.reference)
+    plan = prepare_shared_pool_handoff(**args, storage=physical)
+    assert plan.migration.registration.spec == retained.inputs.refresh.after
+    assert plan.effective_runtime_resources[_key(physical.resources.collector)] == physical.resources.collector
+    source = _advanced_staging_source(args, tmp_path)
+    refreshed = catalog.retain_preactivation_catalog(runtime=runtime, source=source, operation_id=uuid4(),
+        repo_root=ROOT, storage=physical.retained.reference)
+    assert refreshed.inputs.refresh.before == retained.inputs.refresh.after
+    assert refreshed.inputs.refresh.after.quota_identities['storage'][3] == 'compute.disk.size.network-ssd-non-replicated'
+    assert refreshed.inputs.refresh.after.policy_revision == retained.inputs.refresh.after.policy_revision + 1
+    catalog_api = PreactivationAPI(refreshed)
+    catalog_api.manager.ready = True
+    assert catalog.run_preactivation_catalog(retained=refreshed, api=catalog_api, repo_root=ROOT)
+    completed = catalog.load_completed_preactivation(runtime=runtime, reference=refreshed.reference, repo_root=ROOT)
+    selected = {**args, 'observation': source, 'preactivation': completed}
+    plan = prepare_shared_pool_handoff(**selected)
+    assert plan.storage == physical
+    assert plan.migration.registration.spec == refreshed.inputs.refresh.after
+    assert physical.files.keys() <= plan.history.keys()
+    # The catalog's explicit physical ancestry is authoritative, not a second
+    # independently selected latest head. Following catalogs keep that ancestry.
+    next_source = _advanced_staging_source(args, tmp_path, candidate_sha='f' * 40, image_digest='e' * 64)
+    with pytest.raises(ValueError):
+        catalog.retain_preactivation_catalog(runtime=runtime, source=next_source, operation_id=uuid4(),
+            repo_root=ROOT, predecessor=refreshed.reference)
+    successor = catalog.retain_preactivation_catalog(runtime=runtime, source=next_source, operation_id=uuid4(),
+        repo_root=ROOT, predecessor=refreshed.reference, storage=physical.retained.reference)
+    assert successor.inputs.refresh.before == refreshed.inputs.refresh.after
+    foreign = copy.deepcopy(physical)
+    object.__setattr__(foreign.retained, 'reference', foreign.retained.reference.model_copy(update={'operation_id': uuid4()}))
+    with pytest.raises(ValueError):
+        prepare_shared_pool_handoff(**selected, storage=foreign)
+    _, documents, handler = runtime_http_inventory(args['runtime'], shared_runtime[1], completed_pool[3].server, handoff[2])
+    for row in (*api.collector.rows.values(), *api.configuration.resources.values(),
+            *catalog_api.manager.rows.values(), *catalog_api.catalog.resources.values()):
+        documents[runtime_resource_path(row) + '/' + row['metadata']['name']] = copy.deepcopy(row)
+    for row in documents.values():
+        if row['kind'] == 'Secret':
+            row['metadata'].setdefault('resourceVersion', '501')
+    with HTTPSDevelopmentRuntimeObserver(request=args['runtime'], preactivation=completed,
+            api_server=args['runtime'].database.foundation.inputs.config['kubernetes_api_server'],
+            ssl_context=ssl.create_default_context()) as observer:
+        assert observer.storage == physical
+        for connection in (observer, observer.manager, observer.foundation):
+            connection.client.close()
+            connection.client = type(completed_pool[3].api.client)(base_url=connection.api_server, transport=httpx.MockTransport(handler))
+        bound = observe_shared_pool_guard_bindings(**selected, development=observer)
+        assert bound.plan == plan
+        stale_path = runtime_resource_path(physical.resources.collector) + '/' + physical.resources.collector['metadata']['name']
+        documents[stale_path] = retained.collector.original
+        with pytest.raises(ValueError):
+            observer.inspect(state_dir=plan.development.runtime.state_dir)
 
 
 @pytest.mark.parametrize('staging_observation', ['independent'], indirect=True)
@@ -1753,6 +2453,11 @@ def test_shared_private_entry_dispatches_real_parent_and_preserves_uncertain_int
                 for target in bindings.migration.guards}, input_digest=bindings.input_digest,
             authority={}, application_scopes={})
 
+    def checked_writers(**options):
+        if 'bindings' in options:
+            assert options['bindings'] == bindings
+        return concrete.SharedPoolWriterObservation(bindings.plan, '501', {}, {}, bindings.input_digest)
+
     async def publication(**options):
         assert options['request'] == args['runtime']
 
@@ -1762,8 +2467,9 @@ def test_shared_private_entry_dispatches_real_parent_and_preserves_uncertain_int
 
     monkeypatch.setattr(concrete, 'qualify_runtime_publication', publication)
     monkeypatch.setattr(concrete, 'observe_shared_pool_provider', provider)
-    for name in ('observe_shared_pool_writers', 'observe_shared_pool_forward_writers',
-            'observe_shared_pool_processes', 'observe_shared_pool_forward_processes'):
+    for name in ('observe_shared_pool_writers', 'observe_shared_pool_forward_writers'):
+        monkeypatch.setattr(concrete, name, checked_writers)
+    for name in ('observe_shared_pool_processes', 'observe_shared_pool_forward_processes'):
         monkeypatch.setattr(concrete, name, checked)
     real_api = concrete.HTTPSSharedPoolOperationAPI
 
@@ -4016,7 +4722,21 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
                     cause = cause.__context__
                 raise ValueError('participant census unqualified; preserve evidence; ' + ', '.join(frames)) from None
 
-        result = observe()
+        from scripts.ops import nebius_shared_pool_forward_census as forward_census
+
+        projections = []
+        original_options = forward_census._forward_options
+
+        def project(*args, **kwargs):
+            projections.append(None)
+            return original_options(*args, **kwargs)
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(forward_census, '_forward_options', project)
+            result = observe()
+        # The immutable completed root needs one semantic projection. All
+        # evidence and live writers must still be reread across this census.
+        assert len(projections) == 1
         assert not writes
         assert result.workloads[_key(manager)] == manager
         assert any(row['metadata']['namespace'] == 'loom-dev' for row in result.workloads.values())
@@ -4091,12 +4811,15 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
             assert len(writes) == 2
         inventory.clear()
         inventory.update(snapshot)
-        record = retained.state_dir / 'candidate-file-writes/dispatch.json'
-        raw = record.read_bytes()
-        mode['during_read'] = lambda: record.write_bytes(raw + b'\n')
-        with pytest.raises(ValueError, match='preserve'):
-            observe()
-        record.write_bytes(raw)
+        # Candidate and completed shared evidence must both remain fresh even
+        # when their already-validated semantic projections are reused.
+        for record in (retained.state_dir / 'candidate-file-writes/dispatch.json',
+                state / 'forward-activate/activation.json'):
+            raw = record.read_bytes()
+            mode['during_read'] = lambda record=record, raw=raw: record.write_bytes(raw + b'\n')
+            with pytest.raises(ValueError, match='preserve'):
+                observe()
+            record.write_bytes(raw)
         assert observe().workloads[key] == resources[key]
 
         # Exercise the real fence/catalog/manager/open/capacity children with
@@ -4190,9 +4913,12 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
                             machine, = (row for row in retained.release.refresh.before.machines if row.role == 'gateway')
                             wanted = expected_pool_runtime_settings('gateway', gateway, token_sha256=machine.token_sha256)
                         else:
-                            profiles = (retained.release.refresh.after if 'manager' in pool_state.effects else retained.release.refresh.before).profiles
+                            volume, = (row for row in pool_state.manager['spec']['template']['spec']['volumes']
+                                if row['name'] == 'pool-profiles')
+                            catalog = pool_state.api.resources['ConfigMap:' + target.namespace
+                                + ':' + volume['configMap']['name']]
                             wanted = expected_pool_runtime_settings('manager', pool_state.manager,
-                                catalog_sha256=hashlib.sha256(profiles.model_dump_json().encode()).hexdigest())
+                                catalog_sha256=hashlib.sha256(catalog['data']['profiles.json'].encode()).hexdigest())
                         payload = json.dumps(wanted, sort_keys=True, separators=(',', ':')).encode()
                     manager_checks.append(component)
                     assert challenge == hmac.new(bytes.fromhex(nonce), payload, hashlib.sha256).hexdigest()
@@ -4473,8 +5199,12 @@ def _exercise_participant_writer_census(args, bindings, state, parent_api, trans
             registry_keys = {key for key, row in resources.items() if row['kind'] == 'Secret'
                 and row['metadata'].get('labels', {}).get('loom.nebius/development-material-purpose') == 'registry'}
             assert registry_keys
-            collector_config, = (key for key, row in resources.items() if row['kind'] == 'ConfigMap'
-                and row.get('data', {}).get('LOOM_EXECUTION_CAPACITY_COLLECTOR_COLLECTION_MODE') == 'pool')
+            if bindings.plan.storage is None:
+                collector_config, = (key for key, row in resources.items() if row['kind'] == 'ConfigMap'
+                    and row.get('data', {}).get('LOOM_EXECUTION_CAPACITY_COLLECTOR_COLLECTION_MODE') == 'pool')
+            else:
+                collector_config = _key(bindings.plan.storage.resources.configuration)
+                assert observed.quota_resources['storage'].name == 'compute.disk.size.network-ssd-non-replicated'
             for key in (collector_key, reader_key, collector_config, *sorted(registry_keys)):
                 original = copy.deepcopy(resources[key])
                 reads_before = len(provider_reads)
@@ -5001,12 +5731,15 @@ def _exercise_completed_recovery_readers(bindings):
 @pytest.mark.timeout(420)
 async def test_shared_provider_uses_installed_observer_and_retains_scale_zero(
         shared_runtime, staging_history, staging_observation, completed_pool, handoff,
-        publisher_cloud, monkeypatch, tmp_path):
+        publisher_cloud, monkeypatch, tmp_path, shared_operation):
     """The common-pool preflight must use actual observer IAM/pool readbacks."""
     import ssl
 
     import httpx
+    from scripts.ops import nebius_pool_storage_operation as storage
+    from scripts.ops.nebius_development_runtime_live import runtime_resource_path
     from scripts.ops.nebius_development_runtime_observation import HTTPSDevelopmentRuntimeObserver
+    from scripts.ops.nebius_shared_pool_entry import RetainedRuntimeReference
     from scripts.ops.nebius_shared_pool_handoff_live import observe_shared_pool_provider
     from tests.ops.test_nebius_development_pool_retained import (
         runtime_cloud_transport,
@@ -5015,9 +5748,20 @@ async def test_shared_provider_uses_installed_observer_and_retains_scale_zero(
 
     request, parent = shared_runtime
     calls, documents, handler = runtime_http_inventory(request, parent, completed_pool[3].server, handoff[2])
+    args, bindings = shared_operation
+    _, _, inputs, _, _ = _shared_entry_inputs(args, bindings)
+    runtime = RetainedRuntimeReference.model_validate(inputs['runtime'])
+    retained = storage.retain_closed_storage(runtime=runtime, operation_id=uuid4(), target_disk_type='NETWORK_SSD_NON_REPLICATED')
+    storage_api = ClosedStorageAPI(retained)
+    storage_api.collector.ready = storage_api.publication_ready = True
+    assert storage.run_closed_storage(retained=retained, api=storage_api)
+    physical = storage.load_completed_storage(runtime=runtime, reference=retained.reference)
+    for row in (physical.resources.collector, physical.resources.configuration):
+        documents[runtime_resource_path(row) + '/' + row['metadata']['name']] = copy.deepcopy(row)
     operator, sessions, reads, closed, mode = runtime_cloud_transport(request, publisher_cloud, monkeypatch, tmp_path)
-    spec = request.database.manager.retained.request.registration.spec
-    with HTTPSDevelopmentRuntimeObserver(request=request,
+    mode['storage_quota'] = 'compute.disk.size.network-ssd-non-replicated'
+    spec = physical.retained.registration.spec
+    with HTTPSDevelopmentRuntimeObserver(request=request, storage=physical,
             api_server=request.database.foundation.inputs.config['kubernetes_api_server'],
             ssl_context=ssl.create_default_context()) as observer:
         for connection in (observer, observer.manager, observer.foundation):
@@ -5027,10 +5771,12 @@ async def test_shared_provider_uses_installed_observer_and_retains_scale_zero(
 
         async def observe():
             return await observe_shared_pool_provider(runtime=request, observation=staging_observation,
-                legacy=staging_history, repo_root=ROOT, development=observer, operator_credentials=operator)
+                legacy=staging_history, repo_root=ROOT, development=observer, operator_credentials=operator,
+                storage=physical)
 
         result = await observe()
         assert result.provider.node_group.id == spec.node_group_id
+        assert result.provider.quota_resources['storage'].name == 'compute.disk.size.network-ssd-non-replicated'
         assert result.provider.node_count == result.provider.ready_node_count == result.provider.target_node_count == 0
         assert result.provider.provider_capacity_state == 'available' and result.provider.autoscaler_state == 'ready'
         assert reads == [('quotas', request.collector_scope.account_id), ('nodegroup', request.collector_scope.account_id)]

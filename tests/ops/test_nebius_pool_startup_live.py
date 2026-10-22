@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import ssl
 from contextlib import contextmanager
@@ -377,8 +378,12 @@ def test_started_database_proof_derives_exact_successors_and_rechecks_closure(st
             elif damage == 'late_runtime':
                 state.objects[_key(request.manager)]['spec']['replicas'] = 0
 
-        def manager_settings(*, expected):
+        def manager_settings(*, expected, catalog_sha256):
             expected_runtime(request.manager, expected)
+            spec = request.fencing.retirement.migration.registration.spec
+            catalog = state.objects['ConfigMap:' + request.manager['metadata']['namespace']
+                + ':loom-pool-profiles-' + spec.operation_id.hex]
+            assert catalog_sha256 == hashlib.sha256(catalog['data']['profiles.json'].encode()).hexdigest()
             probes.append(('manager_settings', _key(request.manager)))
             if damage == 'manager_settings':
                 raise PoolMigrationError('management_pool_settings')

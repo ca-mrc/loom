@@ -12,7 +12,7 @@ import base64
 import copy
 import hashlib
 import json
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from scripts.ops.nebius_development_runtime_retained import CompletedDevelopmentRuntime
 from scripts.ops.nebius_development_schema_projection import (
@@ -30,17 +30,20 @@ from loom.nebius_development_schema_database import (
 )
 from loom.nebius_platform_bootstrap import database_url
 
+if TYPE_CHECKING:
+    from scripts.ops.nebius_pool_storage_operation import CompletedClosedStorage
+
 
 def _canonical(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False)
 
 
 def schema_database_selection(runtime: CompletedDevelopmentRuntime, projection: DevelopmentSchemaProjection,
-        mode: Literal['shared', 'manager']) -> DevelopmentSchemaSelection:
+        mode: Literal['shared', 'manager'], *, storage: CompletedClosedStorage | None = None) -> DevelopmentSchemaSelection:
     """Bind each database's independent predecessor and protected publication."""
     try:
         expected = project_development_schema_successor(runtime=runtime, operation_id=projection.after_pool.operation_id,
-            data_publication=projection.data_publication, manager_publication=projection.manager_publication)
+            data_publication=projection.data_publication, manager_publication=projection.manager_publication, storage=storage)
         if mode not in {'shared', 'manager'} or expected != projection:
             raise ValueError
         shared = mode == 'shared'
@@ -63,7 +66,7 @@ def _secret_env(name: str, secret: str, key: str) -> dict[str, Any]:
 
 def schema_job_documents(runtime: CompletedDevelopmentRuntime, projection: DevelopmentSchemaProjection,
         phase: str, predecessor: dict[str, Any] | None = None,
-        checkpoint: dict[str, Any] | None = None) -> dict[str, dict[str, Any]]:
+        checkpoint: dict[str, Any] | None = None, *, storage: CompletedClosedStorage | None = None) -> dict[str, dict[str, Any]]:
     """Reproduce exact create-only probe, backup, upgrade or inspect documents.
 
     Upgrade and inspect bind the full independently qualified backup receipt;
@@ -76,10 +79,10 @@ def schema_job_documents(runtime: CompletedDevelopmentRuntime, projection: Devel
         mode = modes[mode_name]
         if action not in {'probe', 'backup', 'upgrade', 'inspect'}:
             raise ValueError
-        selection = schema_database_selection(runtime, projection, mode)
+        selection = schema_database_selection(runtime, projection, mode, storage=storage)
         if action in {'probe', 'backup'} and (predecessor is not None or checkpoint is not None):
             raise ValueError
-        source = schema_original_resources(runtime)
+        source = schema_original_resources(runtime, storage=storage)
         publication = projection.data_publication if mode == 'shared' else projection.manager_publication
         name = 'loom-schema-' + phase + '-' + selection.operation_id.hex
         metadata = {'name': name, 'namespace': selection.namespace, 'labels': {MARKER: str(selection.operation_id)}}

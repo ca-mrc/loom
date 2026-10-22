@@ -59,6 +59,7 @@ def verify_source(config: dict[str, Any]) -> None:
 
 def build_wheels(directory: Path, *, uv: Path) -> Path:
     """Build only committed source; canonical wheel bytes ignore host permissions."""
+    evidence: dict[str, str | int] = {"phase": "prepare", "category": "unclassified"}
     try:
         lock = tomllib.loads((ROOT / "uv.lock").read_text())
         rows = [row for row in lock["package"] if row["name"] == "setuptools"]
@@ -74,20 +75,37 @@ def build_wheels(directory: Path, *, uv: Path) -> Path:
         wheels.mkdir(mode=0o700)
         source = directory / "source"
         source.mkdir(mode=0o700)
+        evidence["phase"] = "archive"
         archived = subprocess.run(["git", "archive", "--format=tar", "HEAD"], cwd=ROOT,
                                   capture_output=True, timeout=60, check=False)
+        if archived.returncode:
+            evidence.update(category="process_exit", exit=archived.returncode)
         if archived.returncode or len(archived.stdout) > 128 * 1024 * 1024:
             raise ValueError()
+        evidence["phase"] = "extract"
         with tarfile.open(fileobj=io.BytesIO(archived.stdout)) as archive:
             archive.extractall(source, filter="data")
         for package in ("loom", "loom-bundle-checksum"):
+            evidence = {"phase": "build", "package": package, "category": "unclassified"}
             result = subprocess.run(
                 [str(uv), "build", "--wheel", "--package", package, "--build-constraints", str(constraints),
                  "--require-hashes", "--no-create-gitignore", "--out-dir", str(wheels)],
                 cwd=source, env={**os.environ, "SOURCE_DATE_EPOCH": "315532800"}, capture_output=True, timeout=180, check=False,
             )
             if result.returncode:
+                # Only fixed categories leave this boundary, never captured output.
+                # These are observed UV markers, not claims about the root cause.
+                stderr = result.stderr[:65_536].lower()
+                category = next((value for marker, value in (
+                    (b"hash mismatch", "hash_mismatch"),
+                    (b"failed to download", "artifact_download"),
+                    (b"failed to fetch", "index_fetch"),
+                    (b"no solution found when resolving", "dependency_resolution"),
+                    (b"build backend returned an error", "build_backend"),
+                ) if marker in stderr), "process_exit")
+                evidence.update(category=category, exit=result.returncode)
                 raise ValueError()
+        evidence = {"phase": "canonicalize", "category": "unclassified"}
         for wheel in wheels.iterdir():
             canonical = io.BytesIO()
             with zipfile.ZipFile(wheel) as original, zipfile.ZipFile(canonical, "w") as target:
@@ -100,8 +118,16 @@ def build_wheels(directory: Path, *, uv: Path) -> Path:
                     target.writestr(entry, original.read(member))
             wheel.write_bytes(canonical.getvalue())
         return wheels
-    except Exception:
-        raise RolloutError("exact-source ingress wheels could not be built") from None
+    except Exception as cause:
+        if isinstance(cause, subprocess.TimeoutExpired):
+            evidence["category"] = "timeout"
+        elif isinstance(cause, OSError):
+            evidence["category"] = "os_error"
+            if type(cause.errno) is int:
+                evidence["errno"] = cause.errno
+        error = RolloutError("exact-source ingress wheels could not be built")
+        error.add_note("wheel-build: " + json.dumps(evidence, sort_keys=True))
+        raise error from None
 
 
 def scan_ingress_image(directory: Path) -> dict[str, str]:

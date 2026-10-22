@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from uuid import UUID, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -22,6 +22,9 @@ from loom.nebius_pool_contract import PoolParticipantV1
 from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1
 from loom_service.environment_management.deployment import ManagementDeployment
 from loom_service.pool_management.installation import PoolInstallation
+
+if TYPE_CHECKING:
+    from scripts.ops.nebius_pool_storage_operation import CompletedClosedStorage
 
 
 def _profile(publication: DevelopmentRuntimePublication) -> ServiceExecutionRuntimeProfileV1:
@@ -121,7 +124,8 @@ class DevelopmentSchemaProjection:
 
 def project_development_schema_successor(*, runtime: CompletedDevelopmentRuntime, operation_id: UUID,
         data_publication: DevelopmentRuntimePublication,
-        manager_publication: DevelopmentRuntimePublication) -> DevelopmentSchemaProjection:
+        manager_publication: DevelopmentRuntimePublication,
+        storage: CompletedClosedStorage | None = None) -> DevelopmentSchemaProjection:
     """Derive configured builder, personal releases and pool references together.
 
     This consumes an already-qualified completed runtime. It never re-renders the
@@ -130,6 +134,13 @@ def project_development_schema_successor(*, runtime: CompletedDevelopmentRuntime
     try:
         database = copy.deepcopy(runtime.request.database)
         before_pool = PoolInstallation.model_validate(database.manager.retained.request.registration.spec.model_dump())
+        if storage is not None:
+            from scripts.ops.nebius_pool_storage_binding import ClosedPoolStorageRefresh
+
+            refresh = ClosedPoolStorageRefresh.model_validate(storage.retained.inputs.refresh.model_dump())
+            if storage.retained.runtime != runtime.request or refresh.before != before_pool:
+                raise ValueError('development_schema_storage_predecessor_changed')
+            before_pool = refresh.after
         before_manager = ManagementDeployment.model_validate(database.manager.deployment.model_dump())
         prefix = before_manager.installation.registry_prefix
         previous_data = database.data_runtime.validate(prefix)

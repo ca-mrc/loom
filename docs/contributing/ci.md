@@ -106,6 +106,18 @@ The separate image BuildKit containers use `config/ci-buildkit.toml` by default;
 an existing readable `/etc/buildkit/loom-ci.toml` retains precedence and is not
 modified. Both pull paths retain every original image reference and digest.
 
+The connected ingress fixture prepares its pinned application images on the host
+with Skopeo before starting disposable K3s, then imports OCI archives and verifies
+the original references and digests. Public fixture sources use explicit anonymous
+authentication (`--src-no-creds`) without discovering runner credentials; TLS
+verification remains enabled. Multi-architecture pins retain the original
+index plus the AMD64 payload, not a replacement child-manifest identity. Only a
+mirror's `toomanyrequests` response permits the same digest from its upstream;
+other acquisition errors fail setup. Deterministic helper coverage exercises that
+fallback; the connected test does not deliberately force a live upstream pull.
+This removes its nested application-image registry dependency, not native K3s
+addon pulls or other test dependencies. Archives are removed after use or failure.
+
 The pinned `setup-uv` action uses v10.0.1, which handles transient manifest
 transport failures with at most three attempts and stops reading the version
 list after the selected version. This addresses the observed single five-second
@@ -286,11 +298,18 @@ writer workflow changes (including its first introduction), and daily. It syncs 
 per lock. `test_ci_wheel_cache_has_one_trusted_writer_and_complete_contents`
 keeps readers read-only and covered by that superset.
 
-The shared worker pool is not in use (dev deploys with `NEBIUS_ROLLOUT_MODE`
-unset, i.e. standalone), so `tests/ops/test_nebius_shared_pool_*.py` are skipped
-by `tests/ops/conftest.py` unless `LOOM_RUN_SHARED_POOL_TESTS=1`. Participant,
-legacy-completion and standalone rollout tests still run: normal rollout uses that
-code. Remove the skip before enabling `NEBIUS_ROLLOUT_MODE=shared`.
+Shared-pool handoff and recovery tests have a separate ownership group within
+the existing pool lane and shards. Direct shared-pool changes and their
+transitively referenced operator/test-fixture dependencies select the affected
+tests; an unrelated operator edit does not select them just because it selects
+the pool lane. Common fixtures, deployment inputs, CI/dependency changes and
+explicit full regressions retain the full shared-pool suite. New shared-pool
+entrypoints without known consumers and unavailable dependency evidence also
+retain coverage. Candidate publication uses the same selection for both pool
+groups and reuses only exact-commit coverage. No opt-in variable or separate job
+is required: activation must be tested before enabling
+`NEBIUS_ROLLOUT_MODE=shared`. These simulations do not establish installed
+readiness or authorize a live handoff.
 
 Go checks validate the retained execution runtime, gateway sandbox, and sandbox
 runtime. JWT and execution-materialization producer contracts also retain Go
@@ -319,7 +338,36 @@ execution test also proves that the pool lane has identical `all` and `nebius`
 module sets before exercising its 20 shards once, instead of repeating identical
 selector/subprocess coverage. Root scopes still execute independently.
 
-The pool job limit remains 50 minutes; individual lifecycle and transport limits
+Run 39471175183 (October 20) exhausted shard 8's budget after its handoff module
+alone took 2445 seconds. Activation, cutover, gateway retirement and recovery
+release now use two existing lightly loaded shards (288 and 280 seconds in that
+run). The development installation module also moves off the 2706-second census
+shard to an existing eight-minute shard. These five whole-file pin changes
+preserve test selection and all scenarios; they add no jobs or runner capacity.
+Their hosted timing must be verified on the new head, not inferred from a local
+pass or a censored timeout.
+
+Run 39677158201 exceeded the general census's 1200-second test limit in its
+preactivation-recovery variant (27.68 seconds setup and 1172.32 seconds call).
+That existing scenario now lives with ordinary recovery in the recovery census
+module on shard 20, using its existing 1500-second whole-test budget. All eight
+census scenarios and their assertions remain. Shard 20 took 552.05 seconds in
+that run; placing the recovery variant there avoids concentrating both the
+participant and recovery matrices on shard 19. Hosted completion and balance
+were verified in follow-up run 39689189236: shard 19 completed 30 tests in
+1728.44 seconds and shard 20 completed 31 in 2484.07 seconds, including the
+1238.96-second preactivation-recovery call. These measurements describe that
+cycle; the cause of the run-to-run timing variation is not established.
+
+Run 39694426363 completed the schema-only successor scenario in 221.36 seconds
+including setup, but the combined storage/schema variant reached its
+300-second whole-test limit during retained private-input loading. Only that
+combined variant now uses the connected-storage suite's 600-second budget;
+schema-only retains 300 seconds. Both scenarios and all assertions are unchanged.
+This is a scoped test-budget adjustment, not a repair of the unexplained hosted
+timing variation. Completion on the updated head still needs hosted verification.
+
+The pool job limit remains 50 minutes; other lifecycle and transport limits
 remain unchanged. Every selected successful shard runs all its tests, other
 shards are not cancelled, and `repository-checks` still requires their results.
 Measure execution, allocation wait and serialized merge-group time separately;
@@ -401,6 +449,9 @@ containerd log tail and CRI sandbox/container listings from its disposable node;
 each command has a five-second deadline and a 16-KiB output tail. Diagnostic
 failures preserve the original error. The retirement fixture also records PVC
 status without logging Secrets or Pod specs.
+The database guard fixture collects the same node/runtime/event evidence before
+teardown when PostgreSQL startup or its subsequent assertions fail. This is
+diagnostic coverage, not a timeout extension or a claimed startup-stall repair.
 The repeat-refresh test also requires this native DNS readiness as an existing
 Deployment/ReplicaSet/Pod reconciliation startup witness before its functional
 30-second window; it adds no startup budget or storage prerequisite.

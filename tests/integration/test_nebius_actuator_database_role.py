@@ -178,7 +178,7 @@ def global_role_database(platform_database):  # noqa: F811 -- imported shared fi
 
 @pytest.mark.parametrize("kind,schema_revision,upgrade_from", [
     (kind, revision, None)
-    for revision in ('0176', '0177', '0178')
+    for revision in ('0175', '0176', '0177', '0178')
     for kind in ('execution', 'build', 'registered-build')
 ] + [pytest.param('execution', '0178', '0175', id='upgrade-0175-to-0178')])
 async def test_global_handoff_runs_as_restricted_actuator_after_guarded_role_stage(
@@ -212,10 +212,10 @@ async def test_global_handoff_runs_as_restricted_actuator_after_guarded_role_sta
         await asyncio.to_thread(retain_pool_schema, url.render_as_string(hide_password=False), upgrade_from)
         with psycopg.connect(global_role_database, autocommit=True) as db:
             assert db.execute('SELECT version_num FROM alembic_version').fetchall() == [(upgrade_from,)]
-            with pytest.raises(psycopg.errors.RaiseException, match='not closed and idle'):
+            with pytest.raises(psycopg.errors.RaiseException, match='journal authority unqualified'):
                 db.execute(migration.pool_runtime_role_sql(owner=str(uuid4()), candidate='a' * 40, action='inspect'), prepare=False)
         # The existing bootstrap is the schema migration authority. Pre-upgrade
-        # diagnostics do not grant runtime writes on an unaudited old schema.
+        # diagnostics do not grant runtime writes even on an audited old schema.
         bootstrap.bootstrap_database({'namespace': 'loom-nebius-platform'})
     # Prove actual migration layouts, not a relabeled current database.
     await asyncio.to_thread(retain_pool_schema, url.render_as_string(hide_password=False), schema_revision)
@@ -229,6 +229,8 @@ async def test_global_handoff_runs_as_restricted_actuator_after_guarded_role_sta
     try:
         with psycopg.connect(url.set(drivername="postgresql").render_as_string(hide_password=False), autocommit=True) as db:
             assert db.execute("SELECT version_num FROM alembic_version").fetchall() == [(schema_revision,)]
+            if schema_revision == "0175":
+                assert db.execute("SELECT to_regclass('harbor_baseline_sessions')").fetchone() == (None,)
             for held_owner, held_candidate in ((None, None), (str(uuid4()), candidate), (owner, "f" * 40)):
                 if held_owner is not None:
                     db.execute("INSERT INTO nebius_rollout_guard(id,owner,candidate_sha) VALUES(1,%s,%s)",

@@ -25,7 +25,10 @@ from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
 from scripts.ops.nebius_management_material import ManagementBinding
 from scripts.ops.nebius_management_stage import _MARKER, _qualified_defaulted
 from scripts.ops.nebius_management_switch import _matches
-from scripts.ops.nebius_management_transport import ManagementKubernetesTransport
+from scripts.ops.nebius_management_transport import (
+    ManagementKubernetesTransport,
+    ManagementNotDispatchedError,
+)
 from scripts.ops.nebius_pool_retirement import qualify_closed_workload_drain
 
 _PATHS = {
@@ -77,7 +80,12 @@ class HTTPSDevelopmentRuntimeResources(ManagementKubernetesTransport):
             raise ValueError('development runtime private inputs changed')
 
     def _request(self, method: str, path: str, *, document: dict[str, Any] | None = None) -> dict[str, Any] | None:
-        self._private_inputs()
+        try:
+            self._private_inputs()
+        except Exception:
+            if method == 'POST':
+                raise ManagementNotDispatchedError('runtime resource preflight failed before HTTP dispatch') from None
+            raise
         return super()._request(method, path, document=document)
 
     def _qualify(self, *, writing: bool) -> None:
@@ -118,8 +126,14 @@ class HTTPSDevelopmentRuntimeResources(ManagementKubernetesTransport):
         return result
 
     def create_resource(self, document: dict[str, Any]) -> None:
-        path = self._approved(document, writing=True)
-        self._qualify(writing=True)
+        try:
+            path = self._approved(document, writing=True)
+        except Exception:
+            raise ManagementNotDispatchedError('resource outside fixed development runtime phase') from None
+        try:
+            self._qualify(writing=True)
+        except Exception:
+            raise ManagementNotDispatchedError('runtime resource preflight failed before HTTP dispatch') from None
         self._request('POST', path, document=document)
 
     def get_database_claim(self) -> dict[str, Any] | None:
@@ -176,6 +190,7 @@ class HTTPSDevelopmentRuntimeWorkloads(ManagementKubernetesTransport):
         return actual
 
     def _patch(self, key: str, before: dict[str, Any], desired: dict[str, Any], *, preview: bool) -> dict[str, Any] | None:
+        dispatched = False
         try:
             original = self.originals[key]
             if desired != self.targets[key] or not _matches(before, original, _uid(original)):
@@ -193,6 +208,7 @@ class HTTPSDevelopmentRuntimeWorkloads(ManagementKubernetesTransport):
                     patches.append({'op': 'remove', 'path': '/metadata/' + field})
             patches.append({'op': 'replace', 'path': '/spec', 'value': desired['spec']})
             self._qualify(writing=True)
+            dispatched = True  # From transport invocation onward, errors are uncertain.
             with self.client.stream('PATCH', self._path(key) + ('?dryRun=All' if preview else ''),
                     json=patches, headers={'Content-Type': 'application/json-patch+json'}) as response:
                 if (response.status_code not in {200, 409, 422}
@@ -217,6 +233,8 @@ class HTTPSDevelopmentRuntimeWorkloads(ManagementKubernetesTransport):
                 _qualified_defaulted(desired, value)
                 return value
         except Exception:
+            if not dispatched:
+                raise ManagementNotDispatchedError('development runtime workload update unconfirmed') from None
             raise ValueError('development runtime workload update unconfirmed') from None
 
     def preview_workload(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> dict[str, Any] | None:

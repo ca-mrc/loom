@@ -1048,15 +1048,21 @@ def runtime_cloud_transport(request, publisher_cloud, monkeypatch, tmp_path):
         assert sdk.identity == scope.account_id and selection.parent_id == scope.tenant_id
         reads.append(('quotas', sdk.identity))
         amounts = {'nodes': 20, 'vcpu': 80, 'memory': 160 * 1024**3, 'storage': 2000 * 1024**3}
-        return SimpleNamespace(items=[_quota(identity[3], identity[4], amounts[name],
+        return SimpleNamespace(items=[_quota(mode.get('storage_quota', identity[3]) if name == 'storage' else identity[3], identity[4], amounts[name],
             amounts[name] if mode['damage'] == 'exhausted' else 0, 1)
             for name, identity in spec.quota_identities.items()], next_page_token='')
     async def group(sdk, selection, **kwargs):
         assert sdk.identity == scope.account_id and selection.id == spec.node_group_id
         reads.append(('nodegroup', sdk.identity))
+        native = _node_group_spec()
+        if mode.get('storage_quota') == 'compute.disk.size.network-ssd-non-replicated':
+            native.template.boot_disk = mk8s.DiskSpec(size_gibibytes=80,
+                type=mk8s.DiskSpec.DiskType.NETWORK_SSD_NON_REPLICATED)
+        if mode.get('native_disk_type') is not None:
+            native.template.boot_disk = SimpleNamespace(size_gibibytes=80, type=_enum(mode['native_disk_type']))
         return SimpleNamespace(metadata=SimpleNamespace(id=spec.node_group_id, resource_version=1,
             parent_id='foreign-cluster' if mode['damage'] == 'cluster' else config['cluster_id']),
-            spec=_node_group_spec(), status=SimpleNamespace(
+            spec=native, status=SimpleNamespace(
                 state=_enum('DELETING' if mode['damage'] == 'deleting' else 'RUNNING'), node_count=0,
                 target_node_count=1 if mode['damage'] == 'scaling' else 0, ready_node_count=0,
                 reconciling=mode['damage'] == 'scaling', events=[]))
@@ -1087,6 +1093,7 @@ def runtime_private_reader(request, tmp_path):
         # Match the constructor's original-catalog selection for this file guard.
         reader.preactivation = reader._preactivation_origin = None
         reader.schema_successor = reader._schema_origin = None
+        reader.storage = reader._storage_origin = None
     files = {}
     for name, raw in (('manager', b'manager'), ('foundation', b'foundation'), ('operator', b'')):
         path = tmp_path / name
@@ -1523,6 +1530,32 @@ async def test_runtime_cloud_uses_observer_credentials_and_rejects_authority_or_
             await module.qualify_runtime_cloud(request=request, operator_credentials=operator)
         assert 'PRIVATE KEY' not in str(error.value) and 'private-test' not in str(error.value)
         assert sessions == closed
+    # Native disk migration invalidates the old quota binding. Only an explicit
+    # storage-only successor may qualify it, using the same observer credentials.
+    from scripts.ops.nebius_pool_storage_binding import ClosedPoolStorageRefresh
+
+    cloud.permits[scope.group_id][0]['spec']['role'] = 'viewer'
+    cloud.permits[request.registry_scope.group_id][0]['spec']['role'] = 'editor'
+    mode.update(damage=None, storage_quota='compute.disk.size.network-ssd-non-replicated')
+    with pytest.raises(ValueError, match='development runtime cloud unqualified'):
+        await module.qualify_runtime_cloud(request=request, operator_credentials=operator)
+    before = request.database.manager.retained.request.registration.spec
+    after = before.model_dump(mode='json')
+    after['policy_revision'] += 1
+    after['quota_identities']['storage'][3] = mode['storage_quota']
+    storage = ClosedPoolStorageRefresh(schema_version='loom.closed-pool-storage-refresh.v1', operation_id=uuid4(),
+        target_disk_type='NETWORK_SSD_NON_REPLICATED', before=before, after=after)
+    snapshot = await module.qualify_runtime_cloud(request=request, operator_credentials=operator, storage=storage)
+    assert snapshot.node_group.id == before.node_group_id
+    assert snapshot.quota_resources['storage'].name == 'compute.disk.size.network-ssd-non-replicated'
+    assert reads[-2:] == [('quotas', scope.account_id), ('nodegroup', scope.account_id)]
+    assert sessions == closed and not sessions[-1].path.exists()
+    assert request.database.manager.retained.request.registration.spec == before
+    for native_disk_type in ('UNSPECIFIED', 'UNRECOGNIZED_NATIVE_DISK', 'NETWORK_SSD'):
+        mode['native_disk_type'] = native_disk_type
+        with pytest.raises(ValueError, match='development runtime cloud unqualified'):
+            await module.qualify_runtime_cloud(request=request, operator_credentials=operator, storage=storage)
+        assert sessions == closed and not sessions[-1].path.exists()
 
 
 

@@ -181,9 +181,11 @@ def retain_runtime_inputs(runtime, connection):
 
 def retain_schema_upgrade(successor_inputs, connection, tmp_path, *, runtime_reference=None):
     runtime_reference = runtime_reference or retain_runtime_inputs(successor_inputs['runtime'], connection)
+    storage = successor_inputs.get('storage')
     inputs = schema.DevelopmentSchemaInputs(runtime=runtime_reference,
         data_runtime=publication_inputs(successor_inputs['data_publication']),
-        manager_runtime=publication_inputs(successor_inputs['manager_publication']), connection=connection)
+        manager_runtime=publication_inputs(successor_inputs['manager_publication']), connection=connection,
+        storage=None if storage is None else storage.retained.reference)
     path = tmp_path / 'schema-inputs.json'
     state._atomic_json(path, inputs.model_dump(mode='json'))
     reference = schema.DevelopmentSchemaReference(operation_id=successor_inputs['operation_id'],
@@ -240,7 +242,8 @@ class SchemaParentAPI:
         if phase in self.reports:
             return copy.deepcopy(self.reports[phase])
         mode, action = phase.split('-')
-        selection = schema_database_selection(self.retained.runtime, self.retained.projection, mode)
+        selection = schema_database_selection(self.retained.runtime, self.retained.projection, mode,
+            storage=self.retained.storage)
         documents = schema.phase_documents(self.retained, record, phase)
         job, = (row for row in documents.values() if row['kind'] == 'Job')
         job_uid = self.store.resources[_key(job)]['metadata']['uid']
@@ -411,8 +414,19 @@ def test_completed_loader_rejects_rewritten_stage_even_if_parent_digest_is_updat
     assert api.catalog_commits == 1
 
 
-def test_completed_loader_rejects_phase_jumps_anchor_and_ancestor_drift(completed_schema):
+def test_completed_loader_rejects_phase_jumps_anchor_and_ancestor_drift(completed_schema, monkeypatch):
+    from scripts.ops import nebius_shared_pool_entry as runtime_entry
+
     retained, api, completed = completed_schema
+    load_runtime = runtime_entry.load_completed_runtime
+    runtime_loads = []
+
+    def counted_runtime(request):
+        runtime_loads.append(request)
+        return load_runtime(request)
+
+    monkeypatch.setattr(runtime_entry, 'load_completed_runtime', counted_runtime)
+    monkeypatch.setattr(schema, 'load_completed_runtime', counted_runtime, raising=False)
     journal = retained.state_dir / 'operation.json'
     parent_raw = journal.read_bytes()
     changed = json.loads(parent_raw)
@@ -427,8 +441,27 @@ def test_completed_loader_rejects_phase_jumps_anchor_and_ancestor_drift(complete
         with pytest.raises((ValueError, RuntimeError)):
             schema.load_completed_development_schema_successor(runtime=retained.runtime.request, reference=retained.reference)
         path.write_bytes(raw)
+    runtime_loads.clear()
     assert schema.load_completed_development_schema_successor(runtime=retained.runtime.request,
         reference=retained.reference) == completed
+    assert len(runtime_loads) == 1, 'one schema load reconstructed its completed runtime more than once'
+
+    # Reusing the fresh projection must still reject changes during that call.
+    project = schema.schema_runtime_resources
+    ancestor, raw = next(iter(retained.runtime.files.items()))
+
+    def changed_ancestor(**kwargs):
+        result = project(**kwargs)
+        ancestor.write_bytes(raw + b' ')
+        return result
+
+    monkeypatch.setattr(schema, 'schema_runtime_resources', changed_ancestor)
+    try:
+        with pytest.raises(ValueError, match='development_schema_history_changed'):
+            schema.load_completed_development_schema_successor(runtime=retained.runtime.request,
+                reference=retained.reference)
+    finally:
+        ancestor.write_bytes(raw)
     assert api.catalog_commits == 1
 
 

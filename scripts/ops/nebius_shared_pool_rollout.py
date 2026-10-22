@@ -103,7 +103,7 @@ def transfer(content: bytes, *, action: str, target: str, key: Path, known_hosts
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--operation", choices=("preflight", "install", "recover", "refresh-catalog"), required=True)
+    parser.add_argument("--operation", choices=("preflight", "install", "recover", "refresh-catalog", "refresh-storage"), required=True)
     parser.add_argument("--requirements", type=Path, required=True)
     parser.add_argument("--evidence-dir", type=Path, required=True)
     parser.add_argument("--prepare-bundle", type=Path, help="Operator preparation; no remote operation")
@@ -143,7 +143,8 @@ def main() -> int:
     (args.evidence_dir / "shared-pool-result.json").write_text(json.dumps(result, sort_keys=True) + "\n")
     print(json.dumps(result, sort_keys=True))
     return 0 if result["status"] in {"prepared", "shared_pool_preflight_qualified", "pending", "shared_pool_handoff_complete",
-        "staging_restored_dev_closed", "catalog_pending", "shared_pool_catalog_refreshed"} else 1
+        "staging_restored_dev_closed", "catalog_pending", "shared_pool_catalog_refreshed",
+        "storage_pending", "shared_pool_storage_refreshed"} else 1
 
 
 if __name__ == "__main__":
