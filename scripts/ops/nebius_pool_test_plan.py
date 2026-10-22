@@ -204,6 +204,7 @@ def plan(
     reused_runs: list[int] = []
     unavailable = False
     errors: list[dict[str, Any]] = []
+    association_counts: dict[str, int] = {}
 
     def unavailable_evidence(
         stage: str, error: Exception, *, run_id: Any = None, job_id: Any = None,
@@ -230,6 +231,17 @@ def plan(
             status = re.search(r"\(HTTP ([1-5][0-9]{2})\)", error.stderr)
             if status:
                 row["http_status"] = int(status[1])
+            for phrase, reason in (
+                ("secondary rate limit", "secondary_rate_limit"),
+                ("api rate limit exceeded", "rate_limit"),
+                ("resource not accessible by integration", "permission_denied"),
+                ("bad credentials", "bad_credentials"),
+            ):
+                if phrase in error.stderr.lower():
+                    row["api_reason"] = reason
+                    break
+        if stage == "squash_pr_association":
+            row.update(association_counts)
         if error.args and isinstance(error.args[0], str) and error.args[0] in EVIDENCE_REASONS:
             row["reason"] = error.args[0]
         for key, value in (("run_id", run_id), ("job_id", job_id)):
@@ -335,9 +347,11 @@ def plan(
             ):
                 raise ValueError("candidate_commit_unqualified")
             stage = "squash_pr_association"
+            associated = evidence(f"commits/{candidate}/pulls?per_page=100")
+            association_counts["associated_prs"] = len(associated)
             candidates = [
                 pr
-                for pr in evidence(f"commits/{candidate}/pulls?per_page=100")
+                for pr in associated
                 if (
                     pr["state"] == "closed"
                     and pr["merged_at"] is not None
@@ -348,6 +362,7 @@ def plan(
                     and pr["head"]["repo"]["id"] == REPOSITORY_ID
                 )
             ]
+            association_counts["matching_prs"] = len(candidates)
             if len(candidates) != 1:
                 raise ValueError("candidate_pr_unqualified")
             [pr] = candidates

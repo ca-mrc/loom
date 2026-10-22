@@ -423,8 +423,32 @@ def test_squash_missing_association_is_distinct_from_an_api_error(actions):
     )
     assert value["evidence_errors"] == [{
         "stage": "squash_pr_association", "error": "validation", "reason": "candidate_pr_unqualified",
+        "associated_prs": 0, "matching_prs": 0,
     }]
     assert value["missing_files"] == value["required_files"] > 0
+
+
+@pytest.mark.parametrize(("message", "status", "reason"), [
+    ("API rate limit exceeded", 403, "rate_limit"),
+    ("secondary rate limit", 403, "secondary_rate_limit"),
+    ("Resource not accessible by integration", 403, "permission_denied"),
+    ("Bad credentials", 401, "bad_credentials"),
+])
+def test_squash_api_diagnostic_distinguishes_safe_failure_categories(actions, message, status, reason):
+    pr = PullRequestActions()
+    original = pr.read
+
+    def read(endpoint):
+        if endpoint.startswith(f"commits/{SHA}/pulls"):
+            raise subprocess.CalledProcessError(1, ["gh", "api"],
+                stderr=f"gh: {message} (HTTP {status})\nAuthorization: Bearer synthetic-secret")
+        return original(endpoint)
+
+    value = planner.plan(ROOT, SHA, read=read, read_log=pr.log)
+    assert value["evidence_errors"] == [{"stage": "squash_pr_association", "error": "github_cli",
+        "http_status": status, "api_reason": reason}]
+    assert value["missing_files"] == value["required_files"] > 0
+    assert "synthetic-secret" not in json.dumps(value)
 
 
 @pytest.mark.parametrize("boundary", ["log_timeout", "checkout_time"])
