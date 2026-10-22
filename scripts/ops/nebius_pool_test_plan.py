@@ -31,6 +31,13 @@ REPOSITORY = "ca-mrc/loom"
 REPOSITORY_ID = 1281629473
 Read = Callable[[str], list[dict[str, Any]]]
 CHECKOUT_ACTION = "actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd"
+EVIDENCE_REASONS = {
+    "actions_read_incomplete", "checkout_log_too_large", "pool_checkout_unqualified",
+    "checkout_time_unqualified", "checkout_log_incomplete", "pool_scope_unqualified",
+    "pool_selection_unqualified", "checkout_sha_unqualified", "checkout_ref_unqualified",
+    "candidate_reuse_budget_exhausted", "pool_job_unqualified", "candidate_commit_unqualified",
+    "candidate_pr_unqualified",
+}
 
 
 def github_pages(path: str) -> list[dict[str, Any]]:
@@ -196,6 +203,53 @@ def plan(
     covered: set[str] = set()
     reused_runs: list[int] = []
     unavailable = False
+    errors: list[dict[str, Any]] = []
+    association_counts: dict[str, int] = {}
+
+    def unavailable_evidence(
+        stage: str, error: Exception, *, run_id: Any = None, job_id: Any = None,
+    ) -> None:
+        nonlocal unavailable
+        unavailable = True
+        if len(errors) >= 25:
+            return
+        # Never serialize stderr, exception text, commands or response bodies:
+        # even a JSON/OS/CLI failure may contain inherited credentials.
+        kind = "validation"
+        if isinstance(error, subprocess.TimeoutExpired):
+            kind = "subprocess_timeout"
+        elif isinstance(error, subprocess.CalledProcessError):
+            kind = "github_cli"
+        elif isinstance(error, json.JSONDecodeError):
+            kind = "invalid_json"
+        elif isinstance(error, OSError):
+            kind = "os_error"
+        elif isinstance(error, LookupError):
+            kind = "missing_field"
+        row: dict[str, Any] = {"stage": stage, "error": kind}
+        if isinstance(error, subprocess.CalledProcessError) and isinstance(error.stderr, str):
+            status = re.search(r"\(HTTP ([1-5][0-9]{2})\)", error.stderr)
+            if status:
+                row["http_status"] = int(status[1])
+            for phrase, reason in (
+                ("secondary rate limit", "secondary_rate_limit"),
+                ("api rate limit exceeded", "rate_limit"),
+                ("resource not accessible by integration", "permission_denied"),
+                ("bad credentials", "bad_credentials"),
+            ):
+                if phrase in error.stderr.lower():
+                    row["api_reason"] = reason
+                    break
+        if stage == "squash_pr_association":
+            row.update(association_counts)
+        if error.args and isinstance(error.args[0], str) and error.args[0] in EVIDENCE_REASONS:
+            row["reason"] = error.args[0]
+        for key, value in (("run_id", run_id), ("job_id", job_id)):
+            if type(value) is int and value > 0:
+                row[key] = value
+        errors.append(row)
+
+    stage = "merge_group_runs"
     try:
         runs = rows(
             read(
@@ -204,10 +258,11 @@ def plan(
             ),
             "workflow_runs",
         )
-    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
         runs = []
-        unavailable = True
+        unavailable_evidence(stage, error)
     for run in runs:
+        stage = "merge_group_run"
         try:
             # Only the actual native dev merge group's CI can be reused. PR
             # heads, a different checkout, filtered runs and renamed statuses
@@ -228,13 +283,16 @@ def plan(
             )
             if title is None or title[1] != candidate:
                 continue
+            stage = "merge_group_check_suite"
             [suite] = read(f"check-suites/{run['check_suite_id']}")
             if suite["app"]["id"] != 15368 or suite["head_sha"] != candidate:
                 continue
+            stage = "merge_group_selection"
             changes = source_changes(root, title[2], candidate)
             selected = set(test_paths(changed_paths=changes))
             # A job-only retry retains other successful jobs on this commit.
             # Use each job's latest result, not only jobs rerun in that attempt.
+            stage = "merge_group_jobs"
             jobs = rows(read(f"actions/runs/{run['id']}/jobs?filter=latest&per_page=100"), "jobs")
             successful = {
                 job["name"]
@@ -252,9 +310,9 @@ def plan(
             if verified:
                 covered.update(verified)
                 reused_runs.append(run["id"])
-        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
             # Retain already qualified coverage from other successful runs.
-            unavailable = True
+            unavailable_evidence(stage, error, run_id=run.get("id"))
     if required - covered:
         # Queue-off native squash creates a new commit, but its tested PR merge
         # can have exactly the same tree. Reuse only that merged PR's own jobs,
@@ -280,6 +338,7 @@ def plan(
             return log_cache[job_id]
 
         try:
+            stage = "candidate_commit"
             [commit] = evidence(f"git/commits/{candidate}")
             [parent] = commit["parents"]
             base, tree = parent["sha"], commit["tree"]["sha"]
@@ -287,9 +346,12 @@ def plan(
                 re.fullmatch(r"[0-9a-f]{40}", value) for value in (base, tree)
             ):
                 raise ValueError("candidate_commit_unqualified")
-            [pr] = [
+            stage = "squash_pr_association"
+            associated = evidence(f"commits/{candidate}/pulls?per_page=100")
+            association_counts["associated_prs"] = len(associated)
+            candidates = [
                 pr
-                for pr in evidence(f"commits/{candidate}/pulls?per_page=100")
+                for pr in associated
                 if (
                     pr["state"] == "closed"
                     and pr["merged_at"] is not None
@@ -300,9 +362,14 @@ def plan(
                     and pr["head"]["repo"]["id"] == REPOSITORY_ID
                 )
             ]
+            association_counts["matching_prs"] = len(candidates)
+            if len(candidates) != 1:
+                raise ValueError("candidate_pr_unqualified")
+            [pr] = candidates
             head, number = pr["head"]["sha"], pr["number"]
             if type(number) is not int or number <= 0 or not re.fullmatch(r"[0-9a-f]{40}", head):
                 raise ValueError("candidate_pr_unqualified")
+            stage = "squash_pr_runs"
             pr_runs = rows(
                 evidence(
                     "actions/workflows/ci.yml/runs?event=pull_request&status=success"
@@ -311,6 +378,7 @@ def plan(
                 "workflow_runs",
             )
             for run in pr_runs:
+                stage = "squash_run"
                 try:
                     if (
                         run["event"] != "pull_request"
@@ -327,9 +395,11 @@ def plan(
                         or not run["display_title"].endswith(f" / pull={number}")
                     ):
                         continue
+                    stage = "squash_check_suite"
                     [suite] = evidence(f"check-suites/{run['check_suite_id']}")
                     if suite["app"]["id"] != 15368 or suite["head_sha"] != head:
                         continue
+                    stage = "squash_jobs"
                     jobs = rows(
                         evidence(f"actions/runs/{run['id']}/jobs?filter=latest&per_page=100"),
                         "jobs",
@@ -347,7 +417,11 @@ def plan(
                         if job["status"] != "completed" or job["conclusion"] != "success":
                             continue
                         try:
-                            checkout, changed = checkout_inputs(job, job_log(job["id"]), number)
+                            stage = "job_log"
+                            log = job_log(job["id"])
+                            stage = "checkout_binding"
+                            checkout, changed = checkout_inputs(job, log, number)
+                            stage = "tested_commit"
                             [tested] = evidence(f"git/commits/{checkout}")
                             if (
                                 tested["sha"] != checkout
@@ -355,6 +429,7 @@ def plan(
                                 or [p["sha"] for p in tested["parents"]] != [base, head]
                             ):
                                 continue
+                            stage = "test_selection"
                             verified.update(
                                 test_paths(
                                     changed_paths=changed,
@@ -368,15 +443,15 @@ def plan(
                             LookupError,
                             TypeError,
                             subprocess.SubprocessError,
-                        ):
-                            unavailable = True
+                        ) as error:
+                            unavailable_evidence(stage, error, run_id=run.get("id"), job_id=job.get("id"))
                     if verified:
                         covered.update(verified)
                         reused_runs.append(run["id"])
-                except (OSError, ValueError, LookupError, TypeError, subprocess.SubprocessError):
-                    unavailable = True
-        except (OSError, ValueError, LookupError, TypeError, subprocess.SubprocessError):
-            unavailable = True
+                except (OSError, ValueError, LookupError, TypeError, subprocess.SubprocessError) as error:
+                    unavailable_evidence(stage, error, run_id=run.get("id"))
+        except (OSError, ValueError, LookupError, TypeError, subprocess.SubprocessError) as error:
+            unavailable_evidence(stage, error)
     covered &= required
     missing = required - covered
     matrix = []
@@ -393,6 +468,7 @@ def plan(
         missing_files=len(missing),
         reused_runs=reused_runs,
         evidence_unavailable=unavailable,
+        evidence_errors=errors,
         matrix={"include": matrix},
     )
 
