@@ -416,6 +416,10 @@ runs the same admission and reports each task's resolved axes without writing.
 Trial and batch detail return `execution_selection` with the requested axes and
 the effective class, verification, isolation and `fresh_sandbox_grading` read
 from each frozen attempt plan; it is `null`/empty until a plan is compiled.
+`verifier_execution=in_attempt` means the grader stayed in the agent pod.
+Shared grading is the plan that sets `in_place_verifier`. A fresh verifier
+sandbox in that same pod, including guest separate, is reported as
+`verification=separate` with `fresh_sandbox_grading` set.
 
 ## Verification is harness-independent
 

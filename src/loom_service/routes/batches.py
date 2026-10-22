@@ -49,7 +49,7 @@ from loom.db.schema import (
     Worker,
 )
 from loom.execution_diagnosis_store import execution_failure_groups
-from loom.execution_selection import execution_selection_readback
+from loom.execution_selection import execution_selection_readback, reported_verification
 from loom.hosted_harness import harnesses_supporting, hosted_harness
 from loom.models.batch import Combination
 from loom.models.cancellation import CancellationRequest
@@ -403,20 +403,21 @@ async def _batch_execution_selection(
     contract = ServiceExecutionLease.runtime_contract_json
     class_id = contract["execution_class_id"].astext
     verifier = contract["verifier_execution"].astext
+    # Canonical plans omit this flag unless the grader runs inside the task sandbox.
+    in_place = contract["in_place_verifier"].astext
     guest = func.jsonb_path_exists(contract, literal_column("'$.sidecars[*].guest_execution'::jsonpath"))
     rows = (
         await session.execute(
-            select(class_id, verifier, guest, func.count(func.distinct(ServiceExecutionLease.trial_id)))
+            select(class_id, verifier, in_place, guest, func.count(func.distinct(ServiceExecutionLease.trial_id)))
             .join(Trial, Trial.id == ServiceExecutionLease.trial_id)
             .where(
                 Trial.batch_id == batch.id,
                 ServiceExecutionLease.execution_role == "attempt",
                 contract.is_not(None),
             )
-            .group_by(class_id, verifier, guest)
+            .group_by(class_id, verifier, in_place, guest)
         )
     ).all()
-    verification = {"in_attempt": "shared", "separate_execution": "separate", "skipped": "skipped"}
     requested = execution_selection_readback(batch.trial_config, None)["requested"]
     harnesses = [
         {"name": combo.get("agent_name"), "version": combo.get("agent_version")}
@@ -425,21 +426,21 @@ async def _batch_execution_selection(
     ]
     if harnesses:
         requested = {**requested, "harness": None, "harnesses": harnesses}
-    return {
-        "requested": requested,
-        "effective": [
-            {
-                "execution_class_id": row_class,
-                "verification": verification.get(row_verifier, row_verifier),
-                "fresh_sandbox_grading": row_verifier == "separate_execution",
-                "isolation": "guest" if row_guest else "container",
-                "trial_count": int(count),
-            }
-            for row_class, row_verifier, row_guest, count in sorted(
-                rows, key=lambda row: (str(row[0]), str(row[1]), bool(row[2])),
-            )
-        ],
-    }
+    effective = []
+    for row_class, row_verifier, row_in_place, row_guest, count in sorted(
+        rows, key=lambda row: (str(row[0]), str(row[1]), str(row[2]), bool(row[3])),
+    ):
+        verification, fresh_sandbox = reported_verification(
+            row_verifier, in_place_verifier=row_in_place == "true",
+        )
+        effective.append({
+            "execution_class_id": row_class,
+            "verification": verification,
+            "fresh_sandbox_grading": fresh_sandbox,
+            "isolation": "guest" if row_guest else "container",
+            "trial_count": int(count),
+        })
+    return {"requested": requested, "effective": effective}
 
 
 class _RerunFailedBatch(BaseModel):
