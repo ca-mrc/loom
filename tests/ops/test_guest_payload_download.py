@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 from types import ModuleType
 from urllib.error import HTTPError, URLError
+from urllib.parse import unquote
 
 import pytest
 
@@ -325,13 +326,69 @@ def test_only_verified_cached_bytes_are_reused(
     assert requests == ([] if cached == PAYLOAD else [(URL, 120)])
 
 
-def test_locked_packages_use_immutable_launchpad_files():
-    # archive.ubuntu.com drops a pool file once Ubuntu supersedes its version,
-    # which breaks every payload build at once. Launchpad Librarian files are
-    # permanent; each must be the exact .deb its name, version and arch pin.
+FALLBACK = "https://files.example.invalid/permanent?token=do-not-log"
+
+
+def test_mirror_404_falls_back_to_the_permanent_file(
+    payload_builder, locked_archive, tmp_path, monkeypatch, capsys,
+):
+    requests = []
+    sleeps = []
+
+    def open_archive(url, *, timeout):
+        requests.append((url, timeout))
+        if url == URL:
+            raise HTTPError(url, 404, "superseded", {}, io.BytesIO())
+        return io.BytesIO(PAYLOAD)
+
+    monkeypatch.setattr(payload_builder, "urlopen", open_archive)
+    monkeypatch.setattr(time, "sleep", sleeps.append)
+    destination = payload_builder.download({**locked_archive, "fallback_url": FALLBACK}, tmp_path)
+
+    assert destination.read_bytes() == PAYLOAD
+    assert requests == [(URL, 120), (FALLBACK, 120)] and sleeps == []
+    assert "do-not-log" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 429])
+def test_other_mirror_errors_do_not_fall_back(
+    payload_builder, locked_archive, tmp_path, monkeypatch, status,
+):
+    requests = []
+
+    def open_archive(url, *, timeout):
+        requests.append((url, timeout))
+        raise HTTPError(url, status, "error", {}, io.BytesIO())
+
+    monkeypatch.setattr(payload_builder, "urlopen", open_archive)
+    with pytest.raises(HTTPError) as error:
+        payload_builder.download({**locked_archive, "fallback_url": FALLBACK}, tmp_path)
+    assert error.value.code == status and requests == [(URL, 120)]
+
+
+def test_fallback_bytes_are_verified_like_the_mirror(
+    payload_builder, locked_archive, tmp_path, monkeypatch,
+):
+    def open_archive(url, *, timeout):
+        if url == URL:
+            raise HTTPError(url, 404, "superseded", {}, io.BytesIO())
+        return io.BytesIO(b"x" * len(PAYLOAD))
+
+    monkeypatch.setattr(payload_builder, "urlopen", open_archive)
+    with pytest.raises(ValueError, match="does not match source lock"):
+        payload_builder.download({**locked_archive, "fallback_url": FALLBACK}, tmp_path)
+    assert not list(tmp_path.iterdir())
+
+
+def test_locked_packages_pair_the_mirror_with_a_permanent_launchpad_file():
+    # archive.ubuntu.com is fast but drops a pool file once Ubuntu supersedes
+    # its version. Every entry keeps the mirror URL for speed and the permanent
+    # Launchpad Librarian file as its 404 fallback, both naming the exact .deb.
     lock = json.loads((Path(__file__).resolve().parents[2] / "deploy/guest-runtime/sources.lock.json").read_text())
     for package in lock["packages"]:
         version = str(package["version"]).split(":", 1)[-1]
         filename = f"{package['name']}_{version}_{package['architecture']}.deb"
-        match = re.fullmatch(r"https://launchpadlibrarian\.net/[0-9]+/([^/]+)", str(package["url"]))
-        assert match is not None and match.group(1) == filename, package["url"]
+        mirror = re.fullmatch(r"https://archive\.ubuntu\.com/ubuntu/pool/[a-z]+/[^/]+/[^/]+/([^/]+)", str(package["url"]))
+        assert mirror is not None and unquote(mirror.group(1)) == filename, package["url"]
+        fallback = re.fullmatch(r"https://launchpadlibrarian\.net/[0-9]+/([^/]+)", str(package.get("fallback_url")))
+        assert fallback is not None and fallback.group(1) == filename, package.get("fallback_url")

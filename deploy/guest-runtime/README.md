@@ -40,18 +40,22 @@ verified archives enter the cache. These are build-time archive retries, not
 task execution retries.
 
 `archive.ubuntu.com` removes a package file from `pool/` once Ubuntu publishes
-a newer version, so a pinned URL there starts returning 404 and every payload
-build fails. Every package entry therefore uses its direct, permanent file in
-Ubuntu's Launchpad Librarian. Each numeric file URL was resolved through
+a newer version, so a pinned URL there starts returning 404. Launchpad's
+Librarian keeps every published file permanently but serves the payload's
+packages several times more slowly, enough to push in-test image builds past
+their timeouts. Each package entry therefore has two sources for the same
+bytes: `url`, its `archive.ubuntu.com` pool file, and `fallback_url`, its
+permanent Librarian file. The downloader uses the fallback only when the mirror
+returns 404; other errors keep their behaviour above, and both sources pass the
+same size and SHA256 checks. Each Librarian URL was resolved through
 Launchpad's official `+files` endpoint
-(`https://launchpad.net/ubuntu/+archive/primary/+files/<file>.deb`) and the
-downloaded bytes were verified against the locked size and SHA256. Direct file
-URLs avoid the lookup redirect, which previously timed out or returned 502 in
-CI; Ubuntu snapshot URLs also returned 500/502/503 during builds. When adding
-or updating a package, pin its Librarian file the same way:
-`tests/ops/test_guest_payload_download.py` rejects any other host and any file
-name that does not match the entry's name, version and architecture. The same
-download and integrity checks apply to every archive.
+(`https://launchpad.net/ubuntu/+archive/primary/+files/<file>.deb`) and its
+downloaded bytes were verified against the locked size and SHA256; the direct
+file URL avoids that endpoint's redirect, which previously timed out or returned
+502 in CI. Ubuntu snapshot URLs also returned 500/502/503 during builds. When
+adding or updating a package, record both URLs:
+`tests/ops/test_guest_payload_download.py` requires the pair and that both name
+the entry's exact name, version and architecture.
 
 The output is relocatable and contains regular files rather than absolute
 distro symlinks. `SHA256SUMS` covers all other payload files; `sources.lock.json`
