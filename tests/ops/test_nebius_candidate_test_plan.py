@@ -310,6 +310,32 @@ def test_squash_reconstructs_the_jobs_actual_narrowed_selection(actions):
     assert pending(value) == pending(full) - {path}
 
 
+def _with_diff_lines(log, *values):
+    stamp = "2026-10-20T19:00:01.1234567Z "
+    extra = "".join(f"\n{stamp}  TEST_DIFF_PATHS: {value}" for value in values)
+    return log.replace("  TEST_CHANGED_PATHS: []", "  TEST_CHANGED_PATHS: []" + extra)
+
+
+def test_squash_does_not_claim_shared_pool_files_a_gated_pr_job_skipped(actions):
+    # The PR forced full regression, but its unrelated diff skipped the
+    # affected_only shared-pool suite. Only those files remain to run.
+    pr = PullRequestActions()
+    diff = json.dumps(["deploy/guest-runtime/sources.lock.json"])
+    value = planner.plan(ROOT, SHA, read=pr.read, read_log=lambda job_id: _with_diff_lines(pr.log(job_id), diff))
+    full = planner.plan(ROOT, SHA, read=lambda _: [])
+    shared = {path for path in pending(full) if Path(path).name.startswith("test_nebius_shared_pool_")}
+    assert shared and pending(value) == shared
+    assert value["reused_files"] == len(pending(full)) - len(shared)
+
+
+@pytest.mark.parametrize("values", [('"unknown"',), ("[]", "[]")])
+def test_squash_rejects_a_malformed_pr_diff(actions, values):
+    pr = PullRequestActions()
+    value = planner.plan(ROOT, SHA, read=pr.read, read_log=lambda job_id: _with_diff_lines(pr.log(job_id), *values))
+    full = planner.plan(ROOT, SHA, read=lambda _: [])
+    assert value["reused_files"] == 0 and pending(value) == pending(full)
+
+
 def test_squash_does_not_guess_between_duplicate_job_names(actions):
     pr = PullRequestActions()
     pr.jobs.append(copy.deepcopy(pr.jobs[0]))

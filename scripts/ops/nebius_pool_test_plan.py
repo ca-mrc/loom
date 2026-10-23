@@ -82,7 +82,9 @@ def github_job_log(job_id: int) -> str:
     return result.stdout
 
 
-def checkout_inputs(job: dict[str, Any], log: str, number: int) -> tuple[str, tuple[str, ...]]:
+def checkout_inputs(
+    job: dict[str, Any], log: str, number: int
+) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
     """Read the pinned checkout action, before any repository command runs.
 
     The run/check-suite SHA is the PR head, not the tested merge commit. Do
@@ -133,6 +135,18 @@ def checkout_inputs(job: dict[str, Any], log: str, number: int) -> tuple[str, tu
     paths = json.loads(hint)
     if not isinstance(paths, list) or not all(isinstance(path, str) for path in paths):
         raise ValueError("pool_selection_unqualified")
+    # Runs before TEST_DIFF_PATHS existed ran affected_only suites in full; an
+    # absent diff reconstructs exactly that. A present diff must be well formed.
+    diff_hints = [
+        line.removeprefix("  TEST_DIFF_PATHS: ")
+        for line in lines
+        if line.startswith("  TEST_DIFF_PATHS: ")
+    ]
+    if len(diff_hints) > 1:
+        raise ValueError("pool_selection_unqualified")
+    diff = json.loads(diff_hints[0]) if diff_hints else []
+    if not isinstance(diff, list) or not all(isinstance(path, str) for path in diff):
+        raise ValueError("pool_selection_unqualified")
     [index] = [
         i
         for i, line in enumerate(lines)
@@ -147,7 +161,7 @@ def checkout_inputs(job: dict[str, Any], log: str, number: int) -> tuple[str, tu
         for line in lines
     ):
         raise ValueError("checkout_ref_unqualified")
-    return sha, tuple(paths)
+    return sha, tuple(paths), tuple(diff)
 
 
 def rows(pages: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
@@ -192,7 +206,8 @@ def plan(
         raise ValueError("pool_shard_policy_missing")
 
     def test_paths(
-        *, changed_paths: tuple[str, ...] = (), shard_index: int = 0, shard_count: int = 1
+        *, changed_paths: tuple[str, ...] = (), diff_paths: tuple[str, ...] = (),
+        shard_index: int = 0, shard_count: int = 1,
     ) -> tuple[str, ...]:
         return selected_test_paths(
             manifest,
@@ -201,6 +216,7 @@ def plan(
             repo_root=root,
             test_scope="nebius",
             changed_paths=changed_paths,
+            diff_paths=diff_paths,
             shard_index=shard_index,
             shard_count=shard_count,
         )
@@ -430,7 +446,7 @@ def plan(
                             stage = "job_log"
                             log = job_log(job["id"])
                             stage = "checkout_binding"
-                            checkout, changed = checkout_inputs(job, log, number)
+                            checkout, changed, diff = checkout_inputs(job, log, number)
                             stage = "tested_commit"
                             [tested] = evidence(f"git/commits/{checkout}")
                             if (
@@ -443,6 +459,7 @@ def plan(
                             verified.update(
                                 test_paths(
                                     changed_paths=changed,
+                                    diff_paths=diff,
                                     shard_index=index,
                                     shard_count=policy.shard_count,
                                 )

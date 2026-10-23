@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING or __package__:
     from scripts.component_ownership import (
+        AFFECTED_ONLY_LANES,
         Manifest,
         _tracked_paths,
         load_manifest,
@@ -22,6 +23,7 @@ if TYPE_CHECKING or __package__:
     )
 else:
     from component_ownership import (
+        AFFECTED_ONLY_LANES,
         Manifest,
         _tracked_paths,
         load_manifest,
@@ -303,6 +305,9 @@ class ValidationPlan:
     web_checks: bool
     reasons: dict[str, tuple[str, ...]]
     test_changes: tuple[str, ...] = ()
+    # The PR's actual diff, kept even when test_changes forces full regression,
+    # so affected_only suites still run only when that diff affects them.
+    test_diff: tuple[str, ...] = ()
     lint_and_static: bool = True
     tests_root: bool = True
     # Pool operator lane: eligible with tests-root; its own matrix decides the final selection.
@@ -344,6 +349,9 @@ class ValidationPlan:
         # Stay below Linux's per-string exec limit; an empty hint retains the
         # complete selected lanes, including historical schema reconstruction.
         outputs["test_changes"] = test_changes if len(test_changes.encode()) <= 65536 else "[]"
+        # Same limit; an empty diff runs affected_only suites in full.
+        test_diff = json.dumps(self.test_diff, separators=(",", ":"))
+        outputs["test_diff"] = test_diff if len(test_diff.encode()) <= 65536 else "[]"
         outputs["reasons_json"] = json.dumps(self.reasons, sort_keys=True, separators=(",", ":"))
         return outputs
 
@@ -771,6 +779,8 @@ def plan_validations(
         # Explicit selector labels and manual runs retain full regression.
         test_changes=paths if event_name in {"pull_request", "merge_group"}
         and not force_baseline and not set(labels) & LABEL_TO_CHECK.keys() else (),
+        test_diff=paths if event_name in {"pull_request", "merge_group"}
+        and not set(labels) & LABEL_TO_CHECK.keys() else (),
         nebius_pool=baseline["tests_root"],
         web_runtime=web_runtime,
         go_packages=go_packages_for_changes(paths, full=force_baseline),
@@ -816,6 +826,7 @@ def main() -> int:
     )
     outputs = plan.github_outputs()
     effective_changes = tuple(json.loads(outputs["test_changes"]))
+    effective_diff = tuple(json.loads(outputs["test_diff"]))
     tracked_paths = _tracked_paths(REPO_ROOT)
     for lane, selected_name, matrix_name in (
         ("tests-root", "tests_root", "tests_root_matrix"),
@@ -829,6 +840,8 @@ def main() -> int:
         matrix = test_shard_matrix(
             _component_ownership_manifest(), tracked_paths=tracked_paths, lane=lane,
             repo_root=REPO_ROOT, changed_paths=effective_changes, test_scope=args.test_scope,
+            # Only lanes whose jobs receive TEST_DIFF_PATHS may plan with it.
+            diff_paths=effective_diff if lane in AFFECTED_ONLY_LANES else (),
         ) if getattr(plan, selected_name) and plan.gate_mode == "full" else ()
         outputs[matrix_name] = json.dumps(matrix, separators=(",", ":"))
         # A compatibility-only edit has no tests in the daily Nebius scope.
