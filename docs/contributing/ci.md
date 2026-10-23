@@ -464,8 +464,10 @@ also need the newer release. Source-built fallback images retain their pinned
 commit, compiler and recipe and are cached as Docker archives. `quay.io/minio/minio`
 no longer serves anonymous pulls, so without the cache every job builds from
 source (about 2 minutes, failing when the Go module proxy resets). CI jobs only
-restore the archives, from `/home/runner/.cache/loom-minio-fixtures`: the cache
-version hashes the path, and `RUNNER_TEMP` differs per hosted worker. The only
+restore the archives, from `.ci-cache/loom-minio-fixtures` inside the checkout: the
+cache version hashes the path, `RUNNER_TEMP` differs per hosted worker, and the
+archive stores the path relative to the workspace, which differs between the
+hosted writer and self-hosted jobs. The only
 writer is `ci-dependency-cache.yml`, which builds every fixture under one key per
 recipe set when `tests/support/minio_images.py` changes on dev, and daily. Each job
 still prepares only the images it selected. Recipe or release changes get a new

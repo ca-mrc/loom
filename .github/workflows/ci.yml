@@ -1176,9 +1176,11 @@ jobs:
         if: steps.manifest.outputs.minio_cache_key != 'none'
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
-          # Read-only; only ci-dependency-cache.yml saves it. A fixed path, since
-          # the cache version hashes it and RUNNER_TEMP differs per hosted worker.
-          path: /home/runner/.cache/loom-minio-fixtures
+          # Read-only; only ci-dependency-cache.yml saves it, on a hosted runner.
+          # The cache version hashes this path and the archive stores it relative
+          # to the workspace, so one literal, workspace-relative path is the only
+          # one that lands in the same place on hosted and self-hosted runners.
+          path: .ci-cache/loom-minio-fixtures
           key: ${{ runner.os }}-${{ steps.manifest.outputs.minio_cache_key }}
 
       - name: Install uv
@@ -1209,7 +1211,7 @@ jobs:
         run: >-
           uv run --no-sync python -m tests.support.minio_images
           --test-paths-file "${{ steps.manifest.outputs.paths_file }}"
-          --cache-dir /home/runner/.cache/loom-minio-fixtures
+          --cache-dir .ci-cache/loom-minio-fixtures
 
       - name: Prepare selected Docker Hub fixtures before test deadlines
         run: >-
@@ -1293,9 +1295,11 @@ jobs:
         if: steps.manifest.outputs.minio_cache_key != 'none'
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
-          # Read-only; only ci-dependency-cache.yml saves it. A fixed path, since
-          # the cache version hashes it and RUNNER_TEMP differs per hosted worker.
-          path: /home/runner/.cache/loom-minio-fixtures
+          # Read-only; only ci-dependency-cache.yml saves it, on a hosted runner.
+          # The cache version hashes this path and the archive stores it relative
+          # to the workspace, so one literal, workspace-relative path is the only
+          # one that lands in the same place on hosted and self-hosted runners.
+          path: .ci-cache/loom-minio-fixtures
           key: ${{ runner.os }}-${{ steps.manifest.outputs.minio_cache_key }}
 
       - name: Install uv
@@ -1326,7 +1330,7 @@ jobs:
         run: >-
           uv run --no-sync python -m tests.support.minio_images
           --test-paths-file "${{ steps.manifest.outputs.paths_file }}"
-          --cache-dir /home/runner/.cache/loom-minio-fixtures
+          --cache-dir .ci-cache/loom-minio-fixtures
 
       - name: Prepare selected Docker Hub fixtures before test deadlines
         run: >-
