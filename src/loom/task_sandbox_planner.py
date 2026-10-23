@@ -253,7 +253,11 @@ def _output_declarations(request: TaskSandboxPlanRequest, topology: _Topology) -
         *((("harness-cache/outcome.json", "diagnostics/harness-cache.json", "agent_native", False),)
           if request.spec.setup is not None and request.spec.setup.cacheable else ()),
         *native,
-        ("workspace.tar", "artifacts/workspace.tar", "task_artifact", True),
+        # An in-place verifier grades the live workdir; the archive is only
+        # debugging evidence there, and its capture failure is recorded (#2589).
+        ("workspace.tar", "artifacts/workspace.tar", "task_artifact", not topology.in_place_verifier),
+        *((("workspace-archive.json", "diagnostics/workspace-archive.json", "diagnostic", False),)
+          if topology.in_place_verifier else ()),
         *(
             () if topology.skipped else (
                 ("verifier/output.json", "verifier/output.json", "verifier", topology.verifier_output_required),
@@ -269,12 +273,12 @@ def _output_declarations(request: TaskSandboxPlanRequest, topology: _Topology) -
             source_path=".loom/service-startup.json", relative_path="diagnostics/service-startup.json",
             kind="task_artifact", required=bool(env.service_lifecycle.startup_command),
         ))
-    if env.workspace_reference_files:
+    if env.workspace_reference_files and not topology.in_place_verifier:
         outputs.append(RuntimeOutputDeclarationV1(
             source_path=".loom/workspace-references.json",
             relative_path="artifacts/workspace-references.json", kind="task_artifact", required=True,
         ))
-    if env.mutable_paths:
+    if env.mutable_paths and not topology.in_place_verifier:
         for name in ("manifest.json", *(f"{index}.tar" for index in range(len(env.mutable_paths)))):
             outputs.append(RuntimeOutputDeclarationV1(
                 source_path=f".loom/mutable-paths/{name}",

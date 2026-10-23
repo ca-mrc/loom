@@ -75,6 +75,7 @@ from loom.trial.workspace_references import (
     import_workspace_with_references,
 )
 from loom.trial.workspace_snapshot import (
+    WorkspaceSnapshotError,
     _export_workspace_archive,
     _import_workspace_archive,
     _strip_private_entries,
@@ -623,7 +624,10 @@ async def run_agent(
                         # Before the snapshot, and before an in-place verifier
                         # refuses planted private paths.
                         await remove_oracle_solution(driver, task.environment.workdir)
-                    if agent_entered:
+                    # Matches the plan's in-place verifier, whose archive is optional.
+                    if agent_entered and in_place and not trial.skip_verifier:
+                        await capture_debug_workspace_archive(driver, workspace, task)
+                    elif agent_entered:
                         archive = workspace / ".loom/workspace.tar"
                         await _export_workspace_archive(
                             driver, task.environment.workdir, archive,
@@ -649,6 +653,7 @@ async def run_agent(
                                 reference_files=task.environment.workspace_reference_files,
                                 reference_symlinks=task.environment.reference_file_symlinks,
                             )
+                    if agent_entered:
                         for path in task_artifact_paths(workspace, task):
                             destination = _safe_workspace_path(workspace / ".loom/collected", path)
                             try:
@@ -719,6 +724,33 @@ def stage_committed_workspace_archive(workspace: Path) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(committed, target)
     return target
+
+
+WORKSPACE_ARCHIVE_OUTCOME = PurePosixPath(".loom/workspace-archive.json")
+
+
+async def capture_debug_workspace_archive(driver: ServiceSandboxDriver, workspace: Path, task: TaskConfig) -> None:
+    """Keep the agent's workdir as debugging evidence for an in-place verifier (#2589).
+
+    Nothing restores it, so it is not validated for handoff and a failure is
+    recorded instead of failing the Trial. Private paths never leave the sandbox.
+    """
+    archive = workspace / ".loom/workspace.tar"
+    try:
+        await _export_workspace_archive(
+            driver, task.environment.workdir, archive, preserve_acls=task.environment.preserve_acls,
+        )
+        await asyncio.to_thread(_strip_private_entries, archive, _POLICY)
+    except (WorkspaceSnapshotError, DriverError, OSError) as exc:
+        archive.unlink(missing_ok=True)
+        # Snapshot and RPC errors carry only Loom-authored text and fixed codes.
+        detail = str(exc) if isinstance(exc, (WorkspaceSnapshotError, SandboxRPCError)) else ""
+        _write_json_atomic(workspace / WORKSPACE_ARCHIVE_OUTCOME, {
+            "schema_version": "loom.workspace-archive-outcome.v1",
+            "state": "failed",
+            "error_type": type(exc).__name__,
+            "detail": detail[:512],
+        })
 
 
 async def _run_verifier(

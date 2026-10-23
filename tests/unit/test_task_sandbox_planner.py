@@ -211,8 +211,12 @@ def test_test_only_harness_compiles_through_the_planner(shared: bool) -> None:
     assert [s.role_name for s in plan.sidecars] == ["task-sandbox"]
     assert plan.in_place_verifier is shared
     assert plan.verifier_execution == ("in_attempt" if shared else "separate_execution")
-    paths = {item.relative_path for item in plan.output_declarations}
-    assert {"artifacts/native.jsonl", "artifacts/answer.txt", "artifacts/workspace.tar"} <= paths
+    outputs = {item.relative_path: item for item in plan.output_declarations}
+    assert {"artifacts/native.jsonl", "artifacts/answer.txt", "artifacts/workspace.tar"} <= set(outputs)
+    # #2589: only a fresh verifier restores the archive. In place it is
+    # debugging evidence whose capture failure is a diagnostic.
+    assert outputs["artifacts/workspace.tar"].required is not shared
+    assert ("diagnostics/workspace-archive.json" in outputs) is shared
     validate_runtime_plan_requirements(plan, workload_requirements_from_task(task, trial))
 
 
