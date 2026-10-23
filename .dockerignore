@@ -7,6 +7,8 @@ __pycache__
 .ruff_cache
 .mypy_cache
 .staging
+# CI-restored cache archives (MinIO fixtures) are not build inputs.
+.ci-cache
 .staging-*
 .worktrees
 worktrees
