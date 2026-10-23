@@ -100,7 +100,7 @@ def test_docker_test_edit_keeps_its_owner_without_fast_integration(tmp_path, mon
 def test_unknown_and_selection_authority_keep_all_lanes_and_full_manifests():
     for path in (
         "unknown/runtime.bin",
-        "scripts/ops/nebius_pool_test_plan.py",
+        "scripts/plan_ci_validations.py",
         "config/component-ownership.toml",
         "uv.lock",
     ):

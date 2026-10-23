@@ -291,7 +291,7 @@ def test_candidate_placement_keeps_publication_budget_and_protected_boundary():
 def test_source_demand_uses_current_rerun_attempt_when_unscoped_jobs_fail(tmp_path):
     supply = module("ci_runner_supply")
     sha = "a" * 40
-    supply.atomic_json(tmp_path / f"{sha}-ci.yml.json", {"jobs": {"tests": {}}})
+    supply.atomic_json(tmp_path / f"{sha}-graph-v{supply.GRAPH_CACHE_VERSION}-ci.yml.json", {"jobs": {"tests": {}}})
     calls = []
 
     class API:

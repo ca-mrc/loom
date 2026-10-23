@@ -48,42 +48,27 @@ run-name: >-
                     contains(github.event.pull_request.labels.*.name, 'ci:coverage-summary') && '1' || '0'),
              github.event.pull_request.number || 'none') }}
 
-# Read-only Nebius image validation for pull requests, merge groups, and manual runs.
+# Read-only Nebius image validation called after CI fast feedback, or run manually.
 # config/component-ownership.toml owns image selection. Native AMD64 builds and
 # Trivy scans validate candidates; Nebius workflows own release publication.
 
 on:
-  pull_request:
-    # Every non-draft PR event reports the protected gate name. Drafts report
-    # a distinct filtered context until the PR becomes ready again.
-    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled]
-  merge_group:
-    types: [checks_requested]
+  workflow_call:
   workflow_dispatch:
 
 permissions:
   contents: read
 
-concurrency:
-  group: >-
-    images-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{
-      github.event_name == 'pull_request' &&
-      (github.event.pull_request.draft ||
-       github.event.action == 'converted_to_draft') &&
-      format('filtered-{0}', github.run_id) || 'authoritative' }}
-  cancel-in-progress: >-
-    ${{ github.event_name == 'pull_request' &&
-        !(github.event.pull_request.draft ||
-          github.event.action == 'converted_to_draft') }}
+# CI owns cancellation for called runs; manual diagnostics run independently.
 
 jobs:
   plan:
     name: image plan
-    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-latest' }}
+    if: '!cancelled()'
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && (github.event_name == 'workflow_dispatch' || vars.LOOM_CI_REUSABLE_SUPPLY_READY == 'true') && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-latest' }}
     permissions:
       contents: read
-      actions: read
-    timeout-minutes: 100
+    timeout-minutes: 10
     outputs:
       required: ${{ steps.plan.outputs.required || steps.event.outputs.required }}
       gate_mode: ${{ steps.required.outputs.gate_mode || steps.event.outputs.gate_mode }}
@@ -228,22 +213,16 @@ jobs:
                   print(f"{name}={json.dumps(rows, separators=(',', ':'))}", file=output)
           PYTHON
 
-      - name: Wait for the same native CI fast feedback
-        if: >-
-          (github.event_name == 'pull_request' || github.event_name == 'merge_group') &&
-          steps.plan.outputs.required == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: python3 scripts/ci_fast_feedback.py wait --timeout-seconds 5400
 
   trivy-binary:
     name: prepare verified Trivy binaries
     needs: [plan]
     if: >-
+      !cancelled() && needs.plan.result == 'success' &&
       needs.plan.outputs.gate_mode == 'full' &&
       needs.plan.outputs.required == 'true' &&
       needs.plan.outputs.images != '[]'
-    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-24.04' }}
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && (github.event_name == 'workflow_dispatch' || vars.LOOM_CI_REUSABLE_SUPPLY_READY == 'true') && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-24.04' }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -283,10 +262,12 @@ jobs:
     name: ${{ matrix.image }} (${{ matrix.platform }})
     needs: [plan, trivy-binary]
     if: >-
+      !cancelled() && needs.plan.result == 'success' &&
+      needs.trivy-binary.result == 'success' &&
       needs.plan.outputs.gate_mode == 'full' &&
       needs.plan.outputs.required == 'true' &&
       needs.plan.outputs.ordinary_builds != '[]'
-    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-24.04' }}
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && (github.event_name == 'workflow_dispatch' || vars.LOOM_CI_REUSABLE_SUPPLY_READY == 'true') && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-24.04' }}
     timeout-minutes: 45
     permissions:
       contents: read
@@ -528,10 +509,12 @@ jobs:
     name: Harbor runtime (linux/amd64)
     needs: [plan, trivy-binary]
     if: >-
+      !cancelled() && needs.plan.result == 'success' &&
+      needs.trivy-binary.result == 'success' &&
       needs.plan.outputs.gate_mode == 'full' &&
       needs.plan.outputs.required == 'true' &&
       needs.plan.outputs.harbor_required == 'true'
-    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-24.04' }}
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && (github.event_name == 'workflow_dispatch' || vars.LOOM_CI_REUSABLE_SUPPLY_READY == 'true') && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-24.04' }}
     timeout-minutes: 45
     permissions:
       contents: read
@@ -547,11 +530,8 @@ jobs:
     steps: *native-image-build-steps
 
   images-gate:
-    name: >-
-      ${{ github.event_name == 'workflow_dispatch' && 'images-gate-manual' ||
-          needs.plan.outputs.gate_mode == 'full' && 'images-gate' ||
-          'images-gate-filtered' }}
-    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-latest' }}
+    name: images result
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && (github.event_name == 'workflow_dispatch' || vars.LOOM_CI_REUSABLE_SUPPLY_READY == 'true') && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-latest' }}
     if: always() && needs.plan.outputs.gate_mode != 'filtered'
     needs: [plan, build, nebius-harness-build]
     steps:

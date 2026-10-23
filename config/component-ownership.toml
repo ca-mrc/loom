@@ -1021,6 +1021,9 @@ exclude_paths = ["tests/ops/test_nebius_shared_pool_*.py"]
 # These recovery CLIs have dedicated lifecycle/archive/idle-protection tests in
 # tests-root; they do not operate the legacy pool transition state machine.
 unaffected_paths = [
+  # This read-only coverage reader has its own candidate-plan regressions;
+  # sharing the nebius_pool_ filename prefix does not make it a pool operator.
+  "scripts/ops/nebius_pool_test_plan.py",
   "scripts/ops/nebius_archive_recovery.py",
   "scripts/ops/nebius_terminal_archive_recovery.py",
   "scripts/ops/nebius_terminal_cleanup_recovery.py",
@@ -1040,7 +1043,6 @@ affected_paths = [
   "config/component-ownership.toml",
   "scripts/component_ownership.py",
   "scripts/plan_ci_validations.py",
-  "scripts/ops/nebius_pool_test_plan.py",
   ".github/workflows/ci.yml",
   ".github/workflows/nebius-candidate.yml",
   "pyproject.toml",
@@ -1056,6 +1058,7 @@ id = "nebius-shared-pool-ops"
 language = "python"
 lane = "nebius-pool"
 include_paths = ["tests/ops/test_nebius_shared_pool_*.py"]
+unaffected_paths = ["scripts/ops/nebius_pool_test_plan.py"]
 component_sources = ["scripts/ops/**/*.py", "scripts/ops/**/*.sh"]
 affected_paths = [
   "scripts/ops/nebius_shared_pool_*.py",
@@ -1068,7 +1071,6 @@ affected_paths = [
   "config/component-ownership.toml",
   "scripts/component_ownership.py",
   "scripts/plan_ci_validations.py",
-  "scripts/ops/nebius_pool_test_plan.py",
   ".github/workflows/ci.yml",
   ".github/workflows/nebius-candidate.yml",
   "pyproject.toml",

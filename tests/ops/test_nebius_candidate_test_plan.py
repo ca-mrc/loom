@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -146,6 +147,7 @@ def test_complete_native_coverage_schedules_no_duplicate_tests(actions):
 
 def test_candidate_preserves_shared_pool_coverage_without_reintroducing_it_for_unrelated_changes(monkeypatch):
     for change, retained in (("scripts/ops/nebius_shared_pool_api.py", True),
+                             ("scripts/ops/nebius_pool_test_plan.py", False),
                              ("scripts/ops/ci_reliability_metrics.py", False)):
         monkeypatch.setattr(planner, "candidate_changes", lambda *_, path=change: (path,))
         value = planner.plan(ROOT, SHA, read=lambda _: [])
@@ -551,6 +553,18 @@ print(json.dumps(out))
     assert json.loads(result.stdout)["missing_files"] == 0
     assert "required=false\n" in output.read_text()
 
+
+def test_installed_github_cli_reads_colored_raw_job_logs():
+    if shutil.which("gh") is None:
+        pytest.skip("GitHub CLI probe runs mandatorily on hosted fast feedback")
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/check_github_cli_logs.py")],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.startswith("gh version ")
+    assert result.stdout.endswith("PASS: colored raw job log preserved\n")
+    assert result.stderr == ""
 
 
 def test_native_cli_escape_guard_does_not_discard_verified_coverage(actions, monkeypatch, capsys):

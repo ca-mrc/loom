@@ -6,6 +6,69 @@ from scripts.plan_ci_validations import GO_CROSSLANGUAGE_CONTRACTS, HEAVY_CHECKS
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+@pytest.mark.parametrize(("path", "regression"), [
+    ("scripts/ops/nebius_pool_test_plan.py", "tests/ops/test_nebius_candidate_test_plan.py"),
+    ("scripts/ops/ci_reliability_metrics.py", "tests/ops/test_ci_reliability_metrics.py"),
+    ("scripts/check_github_cli_logs.py", "tests/ops/test_github_cli_logs_probe.py"),
+])
+def test_ci_metadata_tools_keep_their_regressions_without_restarting_pool(path, regression):
+    from scripts.component_ownership import (
+        _tracked_paths,
+        load_manifest,
+        selected_test_paths,
+        test_shard_matrix,
+    )
+
+    manifest = load_manifest(REPO_ROOT / "config/component-ownership.toml")
+    tracked = _tracked_paths(REPO_ROOT)
+    plan = plan_validations(changed_paths=[path], labels=set(), event_name="pull_request")
+    selection = dict(manifest=manifest, tracked_paths=tracked, repo_root=REPO_ROOT,
+                     changed_paths=plan.test_changes, test_scope="nebius")
+    pool = selected_test_paths(lane="nebius-pool", **selection)
+    assert pool == (), f"metadata-only change unnecessarily selected {len(pool)} pool modules"
+    assert test_shard_matrix(lane="nebius-pool", **selection) == ()
+    assert regression in selected_test_paths(lane="tests-root", **selection)
+    assert plan.lint_and_static and plan.tests_root
+    assert not plan.unowned_runtime and not plan.selected_heavy_checks()
+    assert not any((plan.tests_packages, plan.go_checks, plan.runtime_payload,
+                    plan.nebius_iac, plan.locked_environments))
+
+
+@pytest.mark.parametrize("path", [
+    ".github/workflows/ci.yml", ".github/workflows/nebius-candidate.yml",
+    "scripts/ci_fast_feedback.py", "scripts/plan_ci_validations.py",
+    "config/component-ownership.toml", "scripts/component_ownership.py",
+    "scripts/new_unreviewed_ci_tool.py",
+    "tests/ops/conftest.py", "uv.lock",
+])
+def test_ci_metadata_tool_exception_does_not_suppress_shared_or_unknown_pool_inputs(path):
+    from scripts.component_ownership import _tracked_paths, load_manifest, selected_test_paths
+
+    manifest = load_manifest(REPO_ROOT / "config/component-ownership.toml")
+    tracked = _tracked_paths(REPO_ROOT)
+    common = dict(manifest=manifest, tracked_paths=tracked, repo_root=REPO_ROOT,
+                  lane="nebius-pool", test_scope="nebius")
+    full = selected_test_paths(**common)
+    plan = plan_validations(changed_paths=["scripts/ops/nebius_pool_test_plan.py", path],
+                            labels=set(), event_name="pull_request")
+    assert full and selected_test_paths(changed_paths=plan.test_changes, **common) == full
+
+
+@pytest.mark.parametrize("path", ["scripts/ops/nebius_pool_new_operator.py",
+                                 "scripts/ops/nebius_shared_pool_new_operator.py"])
+def test_ci_metadata_tool_mixed_with_pool_operator_retains_that_operators_coverage(path):
+    from scripts.component_ownership import _tracked_paths, load_manifest, selected_test_paths
+
+    manifest = load_manifest(REPO_ROOT / "config/component-ownership.toml")
+    common = dict(manifest=manifest, tracked_paths=_tracked_paths(REPO_ROOT),
+                  repo_root=REPO_ROOT, lane="nebius-pool", test_scope="nebius")
+    operator = plan_validations(changed_paths=[path], labels=set(), event_name="pull_request")
+    mixed = plan_validations(changed_paths=["scripts/ops/nebius_pool_test_plan.py", path],
+                             labels=set(), event_name="pull_request")
+    expected = selected_test_paths(changed_paths=operator.test_changes, **common)
+    assert expected and selected_test_paths(changed_paths=mixed.test_changes, **common) == expected
+
+
 @pytest.mark.parametrize("path", [
     "scripts/check_ci_action_pins.py", "scripts/check_ci_upgrade_policy.py",
     "scripts/check_repository_paths.py",
