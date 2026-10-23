@@ -46,6 +46,11 @@ pool lifecycle modules merely because the script was previously unclassified.
 Mixed changes retain the actual pool operator's consumers; shared inputs and
 unknown tools keep their conservative fallback.
 
+The native-build fairness fixture uses its explicit release clock for collector
+samples too. A slow setup cannot accidentally create a sample newer than the
+test's admission clock; the production freshness check remains strict. A real
+Postgres regression advances only the fixture's wall clock to cover that case.
+
 The existing four native merge checks, fail-fast behavior, 20 pool shards and
 pre-deployment validation positions are unchanged. This pilot adds no gate,
 runner capacity or nightly-only replacement coverage.
