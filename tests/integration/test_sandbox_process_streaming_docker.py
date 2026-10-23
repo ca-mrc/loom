@@ -15,7 +15,7 @@ from uuid import uuid4
 import httpx
 import pytest
 
-from loom.driver.service_sandbox import ServiceSandboxDriver
+from loom.driver.service_sandbox import SandboxRPCError, ServiceSandboxDriver
 from loom.errors import DriverError
 from loom.models.capabilities import Capabilities
 from loom.models.networking import NoNetwork
@@ -52,7 +52,7 @@ async def locked_down_sandbox(runtime_binary, tmp_path, *, exec_timeout_seconds:
             try:
                 await sandbox.start()
                 break
-            except (OSError, RuntimeError, httpx.TransportError):
+            except (OSError, RuntimeError, httpx.TransportError, SandboxRPCError):
                 if attempt == 99:
                     raise
                 await asyncio.sleep(0.05)
