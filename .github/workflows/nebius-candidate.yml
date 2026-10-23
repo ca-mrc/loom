@@ -73,7 +73,7 @@ jobs:
     runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-24.04' }}
     timeout-minutes: 40
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix: ${{ fromJSON(needs.pool-ops-plan.outputs.matrix) }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5

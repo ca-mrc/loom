@@ -54,11 +54,18 @@ run-name: >-
 #
 # Trigger model:
 #   - workflow_dispatch (manual)
-#   - PRs selected by changed paths or the additive `staging-smoke` label
+#   - CI calls selected PR/merge-group lanes after fast feedback succeeds
 #
 # Expected runtime: bounded by the manifest-owned system suite.
 
 on:
+  workflow_call:
+    inputs:
+      legacy_compatibility:
+        description: "Include historical platform contracts (manual only)"
+        required: false
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       legacy_compatibility:
@@ -66,25 +73,11 @@ on:
         required: false
         type: boolean
         default: false
-  pull_request:
-    types: [labeled, unlabeled, opened, synchronize, reopened, ready_for_review, converted_to_draft]
-  merge_group:
-    types: [checks_requested]
 
 permissions:
   contents: read
 
-concurrency:
-  group: >-
-    staging-smoke-${{ github.event.pull_request.number || github.ref }}-${{
-      github.event_name == 'pull_request' &&
-      (github.event.pull_request.draft ||
-       github.event.action == 'converted_to_draft') &&
-      format('filtered-{0}', github.run_id) || 'authoritative' }}
-  cancel-in-progress: >-
-    ${{ github.event_name == 'pull_request' &&
-        !(github.event.pull_request.draft ||
-          github.event.action == 'converted_to_draft') }}
+# CI owns cancellation for called runs; manual diagnostics run independently.
 
 env:
   CI_TEST_SCOPE: ${{ ((github.event_name == 'workflow_dispatch' && inputs.legacy_compatibility) || github.ref == 'refs/heads/main' || github.base_ref == 'main') && 'all' || 'nebius' }}
@@ -92,12 +85,12 @@ env:
 
 jobs:
   plan:
+    if: '!cancelled()'
     name: staging smoke plan
-    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-latest' }}
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && (github.event_name == 'workflow_dispatch' || vars.LOOM_CI_REUSABLE_SUPPLY_READY == 'true') && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-latest' }}
     permissions:
       contents: read
-      actions: read
-    timeout-minutes: 100
+    timeout-minutes: 10
     outputs:
       required: ${{ steps.plan.outputs.staging_smoke || steps.event.outputs.required }}
       gate_mode: ${{ steps.plan.outputs.gate_mode || steps.event.outputs.gate_mode }}
@@ -177,13 +170,6 @@ jobs:
             --pull-request-base-changed "$PR_BASE_CHANGED" \
             --github-output "$GITHUB_OUTPUT"
 
-      - name: Wait for the same native CI fast feedback
-        if: >-
-          (github.event_name == 'pull_request' || github.event_name == 'merge_group') &&
-          steps.plan.outputs.staging_smoke == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: python3 scripts/ci_fast_feedback.py wait --timeout-seconds 5400
 
   system-smoke:
     name: manifest-owned system smoke
@@ -191,9 +177,10 @@ jobs:
       COMPOSE_PROJECT_NAME: loom-system-${{ github.run_id }}-${{ github.run_attempt }}
     needs: [plan]
     if: >-
+      !cancelled() && needs.plan.result == 'success' &&
       needs.plan.outputs.gate_mode == 'full' &&
       needs.plan.outputs.required == 'true'
-    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-24.04' }}
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && (github.event_name == 'workflow_dispatch' || vars.LOOM_CI_REUSABLE_SUPPLY_READY == 'true') && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-24.04' }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
@@ -236,7 +223,7 @@ jobs:
             --changed-paths-json "$TEST_CHANGED_PATHS" > "$manifest_paths_file"
           mapfile -t test_paths < "$manifest_paths_file"
           [[ ${#test_paths[@]} -gt 0 ]]
-          uv run --no-sync pytest -m "${CI_PYTEST_MARKERS:-not legacy_pool}" --timeout=1200 "${test_paths[@]}"
+          uv run --no-sync pytest -m "${CI_PYTEST_MARKERS:-not legacy_pool}" --timeout=1200 --maxfail=1 "${test_paths[@]}"
 
       - name: Show system-smoke compose diagnostics
         if: failure()
@@ -271,12 +258,8 @@ jobs:
             down -v --remove-orphans --rmi local
 
   staging-smoke-gate:
-    name: >-
-      ${{ github.event_name == 'workflow_dispatch' && 'staging-smoke-gate-manual' ||
-          github.event_name == 'push' && 'staging-smoke-gate-push' ||
-          needs.plan.outputs.gate_mode == 'full' && 'staging-smoke-gate' ||
-          'staging-smoke-gate-filtered' }}
-    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-latest' }}
+    name: staging-smoke result
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && (github.event_name == 'workflow_dispatch' || vars.LOOM_CI_REUSABLE_SUPPLY_READY == 'true') && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-latest' }}
     if: always() && needs.plan.outputs.gate_mode != 'filtered'
     needs: [plan, system-smoke]
     steps:

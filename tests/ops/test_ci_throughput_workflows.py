@@ -127,6 +127,9 @@ GITHUB_HOSTED_CONTROL_JOBS = {
         "fast-coverage",
         "coverage-summary",
         "repository-checks",
+        "images-gate",
+        "cluster-smoke-gate",
+        "staging-smoke-gate",
     },
     ".github/workflows/images.yml": {"plan", "images-gate"},
     ".github/workflows/cluster-smoke.yml": {"plan", "cluster-smoke-gate"},
@@ -204,8 +207,10 @@ def test_source_workflows_share_native_run_identity() -> None:
         "labeled",
         "unlabeled",
     }
-    for workflow in workflows.values():
-        assert set(_workflow_on(workflow)["pull_request"]["types"]) == expected_pr_types
+    assert set(_workflow_on(workflows[".github/workflows/ci.yml"])["pull_request"]["types"]) == expected_pr_types
+    for path, workflow in workflows.items():
+        if path != ".github/workflows/ci.yml":
+            assert set(_workflow_on(workflow)) == {"workflow_call", "workflow_dispatch"}
 
 
 def test_source_workflows_have_no_publisher_generation_contract() -> None:
@@ -277,39 +282,44 @@ def test_draft_classifier_emits_no_checkout_contract(tmp_path: Path) -> None:
 
 
 def test_source_gate_names_are_native_and_stable() -> None:
-    for workflow_path, (gate_id, protected_name) in GATE_CONTRACTS.items():
-        workflow = _workflow(workflow_path)
-        plan_job_id, _ = SOURCE_PLAN_CONTRACTS[workflow_path]
-        plan_ref = f"needs.{plan_job_id}.outputs"
-        expression = _normalized_expression(workflow["jobs"][gate_id]["name"])
-        trusted_recovery = ""
-        if workflow_path == ".github/workflows/ci.yml":
-            trusted_recovery = "github.event_name == 'schedule' && 'repository-checks-scheduled' || "
-
-        push_name = (
-            f"github.event_name == 'push' && '{protected_name}-push' || "
-            if workflow_path != ".github/workflows/images.yml" else ""
-        )
-        assert expression == _normalized_expression(
-            "${{ "
-            f"{trusted_recovery}"
-            f"github.event_name == 'workflow_dispatch' && '{protected_name}-manual' || "
-            f"{push_name}"
-            f"{plan_ref}.gate_mode == 'full' && '{protected_name}' || "
-            f"'{protected_name}-filtered' "
-            "}}"
-        )
-        assert "publisher_active" not in expression
-        assert f"{protected_name}-attempt" not in expression
+    jobs = _workflow(".github/workflows/ci.yml")["jobs"]
+    expression = _normalized_expression(jobs["repository-checks"]["name"])
+    assert expression == _normalized_expression(
+        "${{ github.event_name == 'schedule' && 'repository-checks-scheduled' || "
+        "github.event_name == 'workflow_dispatch' && 'repository-checks-manual' || "
+        "github.event_name == 'push' && 'repository-checks-push' || "
+        "needs.workflow-plan.outputs.gate_mode == 'full' && 'repository-checks' || "
+        "'repository-checks-filtered' }}"
+    )
+    for path, (gate_id, protected_name) in GATE_CONTRACTS.items():
+        assert gate_id in jobs
+        if gate_id != "repository-checks":
+            assert _normalized_expression(jobs[gate_id]["name"]) == _normalized_expression(
+                "${{ "
+                f"github.event_name == 'schedule' && '{protected_name}-scheduled' || "
+                f"github.event_name == 'workflow_dispatch' && '{protected_name}-manual' || "
+                f"github.event_name == 'push' && '{protected_name}-push' || "
+                f"needs.workflow-plan.outputs.gate_mode == 'full' && '{protected_name}' || "
+                f"'{protected_name}-filtered' "
+                "}}"
+            )
+            assert _workflow(path)["jobs"][gate_id]["name"] == (
+                protected_name.removesuffix("-gate") + " result"
+            )
+        assert "publisher_active" not in str(jobs[gate_id])
+        assert f"{protected_name}-attempt" not in str(jobs[gate_id])
 
 
 def test_push_aggregates_cannot_duplicate_protected_names_on_promotion_heads() -> None:
-    for workflow_path, (gate_id, protected_name) in GATE_CONTRACTS.items():
-        workflow = _workflow(workflow_path)
-        if "push" not in _workflow_on(workflow):
-            continue
-        expression = _normalized_expression(workflow["jobs"][gate_id]["name"])
-        assert f"github.event_name == 'push' && '{protected_name}-push'" in expression
+    jobs = _workflow(".github/workflows/ci.yml")["jobs"]
+    assert "github.event_name == 'push' && 'repository-checks-push'" in (
+        _normalized_expression(jobs["repository-checks"]["name"])
+    )
+    for gate_id in ("images-gate", "cluster-smoke-gate", "staging-smoke-gate"):
+        condition = jobs[gate_id]["if"]
+        assert "github.event_name == 'pull_request'" in condition
+        assert "github.event_name == 'merge_group'" in condition
+        assert "github.event_name == 'push'" not in condition
 
 
 def test_no_workflow_can_write_custom_authoritative_states() -> None:
@@ -680,35 +690,35 @@ def test_stable_gate_scripts_have_valid_bash_syntax() -> None:
 
 
 def test_protected_workflows_cover_gate_authority_pr_transitions() -> None:
-    for workflow_path in GATE_CONTRACTS:
-        workflow = _workflow(workflow_path)
-        pull_request = _workflow_on(workflow)["pull_request"]
-
-        assert {
-            "opened",
-            "synchronize",
-            "reopened",
-            "ready_for_review",
-            "converted_to_draft",
-            "labeled",
-            "unlabeled",
-        } <= set(pull_request["types"]), workflow_path
-        # Title/description edits leave the head unchanged. Any run they start
-        # cancels the head's in-progress gate cycle, and a base retarget is
-        # revalidated against the real base by the merge-group run.
-        assert "edited" not in pull_request["types"], workflow_path
+    workflow = _workflow(".github/workflows/ci.yml")
+    pull_request = _workflow_on(workflow)["pull_request"]
+    assert {
+        "opened", "synchronize", "reopened", "ready_for_review",
+        "converted_to_draft", "labeled", "unlabeled",
+    } <= set(pull_request["types"])
+    # Metadata edits cannot restart or cancel admission on an unchanged head.
+    # The merge-group event owns validation against its actual combined base.
+    assert "edited" not in pull_request["types"]
+    assert "paths" not in pull_request
+    assert "checks_requested" in _workflow_on(workflow)["merge_group"]["types"]
 
 
-def test_manual_and_filtered_contexts_have_distinct_event_specific_names() -> None:
-    for workflow_path, (gate_id, protected_name) in GATE_CONTRACTS.items():
-        workflow = _workflow(workflow_path)
-        gate_name = workflow["jobs"][gate_id]["name"]
-
-        assert f"'{protected_name}-manual'" in gate_name
-        assert f"'{protected_name}'" in gate_name
-        assert f"'{protected_name}-filtered'" in gate_name
-        assert "preflight" not in gate_name
-        assert "invalidate" not in gate_name
+def test_manual_and_filtered_contexts_cannot_duplicate_protected_names() -> None:
+    jobs = _workflow(".github/workflows/ci.yml")["jobs"]
+    repository_name = jobs["repository-checks"]["name"]
+    assert "'repository-checks-manual'" in repository_name
+    assert "'repository-checks-filtered'" in repository_name
+    for path, (gate_id, protected_name) in GATE_CONTRACTS.items():
+        if gate_id == "repository-checks":
+            continue
+        gate = jobs[gate_id]
+        assert "outputs.gate_mode != 'filtered'" in gate["if"]
+        assert "github.event_name == 'pull_request'" in gate["if"]
+        assert "github.event_name == 'merge_group'" in gate["if"]
+        assert "workflow_dispatch" not in gate["if"]
+        internal_name = _workflow(path)["jobs"][gate_id]["name"]
+        assert protected_name not in internal_name
+        assert internal_name.endswith(" result")
 
 
 @pytest.mark.parametrize("required", ["", "invalid"])
@@ -909,11 +919,11 @@ def test_repository_checks_rejects_each_missing_or_failed_selected_source(source
     assert result.returncode != 0, (source, failed_result, result.stdout)
 
 
-def test_optional_validation_workflows_have_stable_gate_contexts() -> None:
+def test_reusable_validation_workflows_keep_internal_result_enforcement() -> None:
     contracts = {
         ".github/workflows/images.yml": (
             "images-gate",
-            "images-gate",
+            "images result",
             {
                 "build": "BUILD_RESULT",
                 "nebius-harness-build": "HARNESS_BUILD_RESULT",
@@ -921,12 +931,12 @@ def test_optional_validation_workflows_have_stable_gate_contexts() -> None:
         ),
         ".github/workflows/cluster-smoke.yml": (
             "cluster-smoke-gate",
-            "cluster-smoke-gate",
+            "cluster-smoke result",
             {"cluster-contract": "CONTRACT_RESULT"},
         ),
         ".github/workflows/staging-smoke.yml": (
             "staging-smoke-gate",
-            "staging-smoke-gate",
+            "staging-smoke result",
             {"system-smoke": "SYSTEM_SMOKE_RESULT"},
         ),
     }
@@ -936,8 +946,8 @@ def test_optional_validation_workflows_have_stable_gate_contexts() -> None:
         on_config = _workflow_on(workflow)
         jobs = workflow["jobs"]
 
-        assert "merge_group" in on_config
-        assert "paths" not in on_config["pull_request"]
+        assert set(on_config) == {"workflow_call", "workflow_dispatch"}
+        assert "concurrency" not in workflow
         assert "plan" in jobs
         assert "always()" in jobs[gate_id]["if"]
         assert gate_name in jobs[gate_id]["name"]
@@ -1115,40 +1125,33 @@ def test_ci_planner_uses_merge_base_for_pr_changed_paths_only() -> None:
 
 
 def test_protected_workflows_cancel_only_authoritative_pr_runs() -> None:
-    normalized_cancellations = set()
-    for workflow_path in GATE_CONTRACTS:
-        workflow = _workflow(workflow_path)
-        cancel = _normalized_expression(workflow["concurrency"]["cancel-in-progress"])
-        normalized_cancellations.add(cancel)
-
-        assert "github.event_name == 'pull_request'" in cancel
-        assert "github.event.pull_request.draft" in cancel
-        assert "github.event.action == 'converted_to_draft'" in cancel
-        assert cancel == (
-            "${{ github.event_name == 'pull_request' && "
-            "!(github.event.pull_request.draft || "
-            "github.event.action == 'converted_to_draft') }}"
-        )
-
-    assert len(normalized_cancellations) == 1
+    workflow = _workflow(".github/workflows/ci.yml")
+    cancel = _normalized_expression(workflow["concurrency"]["cancel-in-progress"])
+    assert cancel == (
+        "${{ github.event_name == 'pull_request' && "
+        "!(github.event.pull_request.draft || "
+        "github.event.action == 'converted_to_draft') }}"
+    )
+    for path in GATE_CONTRACTS:
+        if path != ".github/workflows/ci.yml":
+            assert "concurrency" not in _workflow(path)
 
 
 def test_protected_workflows_share_one_per_pr_admission_slot() -> None:
-    for workflow_path in GATE_CONTRACTS:
-        workflow = _workflow(workflow_path)
-        group = _normalized_expression(workflow["concurrency"]["group"])
+    workflow = _workflow(".github/workflows/ci.yml")
+    group = _normalized_expression(workflow["concurrency"]["group"])
 
-        assert "github.event.pull_request.number || github.ref" in group
-        assert "github.run_id" in group
-        assert "filtered-{0}" in group
-        assert "authoritative" in group
-        assert "github.event.pull_request.draft" in group
-        assert "github.event.action == 'converted_to_draft'" in group
-        assert "github.event.action == 'edited'" not in group
-        assert "github.event.changes.base == null" not in group
-        assert "fromJSON(" not in group
-        assert "admission" not in group
-        assert "background" not in group
+    assert "github.event.pull_request.number || github.ref" in group
+    assert "github.run_id" in group
+    assert "filtered-{0}" in group
+    assert "authoritative" in group
+    assert "github.event.pull_request.draft" in group
+    assert "github.event.action == 'converted_to_draft'" in group
+    assert "github.event.action == 'edited'" not in group
+    assert "github.event.changes.base == null" not in group
+    assert "fromJSON(" not in group
+    assert "admission" not in group
+    assert "background" not in group
 
 
 def test_generic_rendered_images_are_covered_by_manifest_matrix() -> None:
@@ -1288,7 +1291,7 @@ def test_staging_gate_consumes_manifest_owned_system_smoke_lane() -> None:
         "uv run --no-sync python scripts/component_ownership.py test-paths --lane system-smoke"
         in scripts
     )
-    assert 'pytest -m "${CI_PYTEST_MARKERS:-not legacy_pool}" --timeout=1200 "${test_paths[@]}"' in scripts
+    assert 'pytest -m "${CI_PYTEST_MARKERS:-not legacy_pool}" --timeout=1200 --maxfail=1 "${test_paths[@]}"' in scripts
     assert (
         "--profile worker --profile task-image-builder down -v --remove-orphans --rmi local"
         in cleanup_script

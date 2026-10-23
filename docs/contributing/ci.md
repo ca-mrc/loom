@@ -16,9 +16,9 @@ Graph entry has no workflow YAML in this repository and is maintained separately
 | Category | Workflow file | Purpose and triggers |
 | --- | --- | --- |
 | Required CI | `ci.yml` | Repository checks on PRs, merge groups, and `main` pushes; full daily regression at 08:23 UTC; manual validation and compatibility checks. |
-| Required CI | `images.yml` | Read-only Nebius AMD64 image builds and scans on PRs, merge groups, and manual dispatch. |
-| Required CI | `cluster-smoke.yml` | Credential-free Kubernetes and pinned-Skopeo disposable TLS-registry contracts on PRs, merge groups and manual dispatch. The merged SHA does not repeat on a dev push. |
-| Required CI | `staging-smoke.yml` | Credential-free Compose system checks on PRs, merge groups, and manual dispatch. |
+| Required CI | `images.yml` | Read-only Nebius AMD64 image builds and scans, called by CI after fast feedback on PRs/merge groups, or dispatched manually. |
+| Required CI | `cluster-smoke.yml` | Credential-free Kubernetes and pinned-Skopeo disposable TLS-registry contracts, called by CI after fast feedback or dispatched manually. No repeat on a dev push. |
+| Required CI | `staging-smoke.yml` | Credential-free Compose system checks, called by CI after fast feedback or dispatched manually. |
 | Contributor compatibility | `macos-locked-environment.yml` | macOS ARM64 locked workspace installation, daily at 09:17 UTC or manually. |
 | CI operations | `ci-retry.yml` | Manual bounded, classified retry by default; an explicit read-only capacity branch supplies disposable single-job hosted workers. |
 | CI operations | `ci-dependency-cache.yml` | Writes the full uv wheel cache and the source-built MinIO fixture archives on relevant `dev` pushes, daily at 07:41 UTC, or manually; PR and merge-group jobs only read them. |
@@ -30,8 +30,10 @@ Graph entry has no workflow YAML in this repository and is maintained separately
 | Nebius deployment | `nebius-rollout.yml` | Application rollout after successful candidate publication or manual dispatch, controlled by `NEBIUS_AUTO_ROLLOUT_ENABLED` and the active-task guard. Separate protected manual operations provide read-only inventory, private certificate qualification, owned ingress installation/paused recovery, fixed wildcard/management DNS publication, and private dev foundation preflight/installation under the same concurrency. Development uses its own operation and digest-bound SSH key; it cannot invoke staging/management commands. Certificate and ingress operations each use dedicated forced-command SSH identities bound to exact tooling, not the Kubernetes-only deployment key. Only ingress installation scans/publishes the pinned image and receives registry credentials; recovery and DNS skip publication. DNS credentials remain on the gateway. |
 | Nebius maintenance | `nebius-image-retention.yml` | Daily retention at 07:23 UTC or manual preview/apply; enabled by `NEBIUS_RELEASE_ENABLED`, with scheduled deletion separately controlled by `NEBIUS_IMAGE_RETENTION_APPLY`. |
 
-The four CI workflows report protected gate contexts for eligible PR and merge
-group runs; manual validation reports separate `*-manual` contexts. Their
+`CI` reports all four protected gate contexts for eligible PR and merge-group
+runs. It calls the image, cluster and staging workflows through native job
+dependencies; those workflows also retain independent manual diagnostics, whose
+internal result names cannot substitute for the four required checks. The
 changed-path planner controls which expensive jobs run. Candidate publication,
 live rollout, and release promotion each retain their own authorization and
 evidence checks.
@@ -103,37 +105,76 @@ Ordinary documentation-only PRs skip feedback when no dependent work is selected
 Additive image/cluster/staging labels and manual baseline requests still run
 feedback before their selected dependents, even when only documents changed.
 
+For PRs selecting heavy work, successful quick checks are followed by a bounded
+base-freshness preflight inside `fast-feedback`. It reads the active branch rules
+and, only under strict status checks without a native merge queue, compares the
+event's base SHA with the current base ref. An already-advanced base fails before
+heavy fan-out. Native queue admission skips this comparison because GitHub
+regenerates merge groups. This uses at most two read-only metadata requests with
+20-second timeouts and adds no gate or permission. It does not lock the base or
+cancel work if the base advances after the preflight.
+
 Pool, Docker integration, runtime payload and frontend production/browser work
 start only after `fast-feedback` succeeds. Frontend runtime work has its own
 job and is still enforced by `repository-checks`; no test is omitted or repeated.
-The three other source workflows wait in their existing planning jobs before
-releasing image builds, cluster shards or Compose smoke. They read only GitHub's
-native CI run/job results, matching the complete shared run identity: event,
-head, base, PR, update/action and validation-scope labels. A green different-head,
-different-base or narrower-scope run cannot release heavy work. Missing results
-wait at most 90 minutes, with polling backing off from 15 to 120 seconds to
-bound API traffic across concurrent PRs; failed/cancelled feedback and API errors
-fail closed.
-An already cancelled matching CI cannot release work using its earlier green
-feedback. A still-running CI with successful feedback can release heavy work
-without waiting for the remaining heavy jobs to finish.
-Manual source-workflow dispatches remain independent diagnostics because they
-have no companion CI event.
+Heavy-job guards explicitly require successful planning and feedback and reject
+cancellation. They do not inherit GitHub's implicit `success()` across skipped
+ancestors: an unselected quick lane may skip without suppressing selected heavy
+work after feedback accepts it. Selected heavy jobs that skip still fail the gate.
+Images, cluster and staging are reusable workflows called by CI only when their
+lane is selected and feedback succeeds. GitHub waits on `needs` before any of
+those workflows' runners are allocated. There is no cross-workflow polling,
+Actions read permission, title matching or separate PR/merge-group run. A single
+CI concurrency group cancels obsolete PR attempts, including their called jobs;
+manual specialist diagnostics remain independent. New nested jobs and their three
+caller gates use GitHub-hosted fallback until the installed supply controller
+passes reusable-graph readback and `LOOM_CI_REUSABLE_SUPPLY_READY=true`; see
+[runner supply](ci-unified-runners.md#reusable-workflow-compatibility).
 
-The cross-workflow wait uses the existing three planning runners and read-only
-Actions API permission on those jobs. Waiting therefore has a runner cost; it
-does not create extra heavy runners or repeat the feedback tests. A passing run
-also gives up some parallelism and reinstalls frontend dependencies in its later
-runtime job. Compare first-failure latency, passing-run time and runner-minutes
-per successful merge before claiming a throughput gain. No dependency download,
-cache or retry policy is changed by this ordering work.
+The four bare gate names are native jobs in the caller CI run. The specialist
+gates reject selected work that failed, was cancelled or unexpectedly skipped,
+and require successful feedback. An unselected lane must be skipped. Each called
+workflow still validates its actual image/shard/smoke results before its caller
+can succeed. The same dependency graph applies to PR heads and merge groups;
+manual/scheduled/push validation cannot emit these three bare specialist names.
+There is no custom check publisher, fifth required context or ruleset change.
 
 PR and merge-group root, integration, pool, Docker, image and cluster matrices
-stop sibling shards on failure. Manual/scheduled/push diagnostics retain all
-selected shards. Docker and cluster pytest stop at the first failure and still
-perform fixture teardown. All four original source gates remain direct native
-Actions jobs; selected blocked/skipped work cannot turn a required gate green.
-There is no custom check publisher, fifth required context or ruleset change.
+stop sibling shards on failure. Candidate supplementary pool tests also stop
+sibling shards; a failed or cancelled shard prevents publication. Docker,
+cluster and staging pytest stop at the first failure and retain diagnostics and
+fixture cleanup. Manual/scheduled source diagnostics retain all selected shards.
+
+`fast-feedback` uses the same `ubuntu-24.04` hosted image as candidate planning
+and executes its installed `gh` against a loopback HTTP response containing
+colored checkout logs. The stdlib-only probe calls the real candidate reader,
+keeps its flags and old-client fallback, isolates authentication/configuration,
+and never calls GitHub. Missing or incompatible `gh` fails feedback before heavy
+work. This requires no tool download or workspace installation. Root regressions
+also exercise the probe where `gh` is installed; OLDLAB guests without that tool
+skip only the duplicate CLI smoke, whose mandatory execution belongs to feedback.
+
+Read-only candidate log readers and CI metrics tools run their owning root
+regressions and static checks without selecting pool lifecycle tests, images,
+Docker or cluster/staging work. A reader filename beginning `nebius_pool_` does
+not make it a runtime operator. Shared selection/workflow authority, lifecycle
+sources, dependencies and unknown paths retain their owning full coverage.
+
+Before publishing a CI repair, reproduce the reported failure through the real
+changed interface using the failing runner's tool version and representative
+input, then verify the repair through the same path. Consolidate diagnostics
+and the fix locally before one Ready publication; a large passing unit suite
+alone does not demonstrate CLI/API compatibility. Preserve strict admission,
+coordinate integration order when the native queue is disabled, and retry only
+the affected failed jobs when evidence supports a transient failure. Adding
+logging alone is not a reason to repeat an entire native test/publication round.
+
+The one-time audit measured 149,605 runner-seconds across five superseded or
+diagnostic iterations. Of that, 15,598 seconds were occupied feedback waiting
+and 15,487 were duplicate candidate pool tests. Those are historical costs,
+not a saving claimed for every future PR. Compare actual execution, retries,
+queue and wall time separately; the final qualification and publication still
+need their normal checks.
 
 ## Public image pulls in validation
 
