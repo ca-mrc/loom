@@ -282,6 +282,30 @@ jobs:
           [[ ${#test_paths[@]} -gt 0 ]]
           uv run --no-sync pytest -m "${CI_PYTEST_MARKERS:-not legacy_pool}" "${test_paths[@]}" --maxfail=1 --durations=15
 
+      - name: Report disposable image build timings
+        if: always()
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          path = Path(os.environ["RUNNER_TEMP"]) / "loom-k3s-image-build-timings.jsonl"
+          if path.exists():
+              try:
+                  with path.open() as stream:
+                      lines = stream.read(65536).splitlines()
+              except (OSError, UnicodeError):
+                  lines = []
+                  print("Disposable image timings unavailable")
+              for line in lines:
+                  try:
+                      record = json.loads(line)
+                  except ValueError:
+                      print("Disposable image timing record unavailable")
+                      continue
+                  print(json.dumps(record, sort_keys=True))
+          PY
+
   cluster-smoke-gate:
     name: >-
       ${{ github.event_name == 'workflow_dispatch' && 'cluster-smoke-gate-manual' ||

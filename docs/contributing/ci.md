@@ -311,6 +311,22 @@ heads/workflows, different trees, unavailable checkout logs and failed or missin
 jobs cannot supply coverage. A partial job
 listing retains proven successful modules and schedules the unseen modules;
 without usable evidence every required affected module runs.
+When a read or binding check fails, the plan also reports up to 25
+`evidence_errors`: the owning stage, a fixed error category, the HTTP status when
+available, and applicable numeric run/job IDs. Known rate-limit and permission
+errors, PR association counts and recognized binding reasons are distinguished;
+raw CLI stderr, response bodies, exception text and credentials are
+never emitted. Use the native candidate plan's diagnostics to distinguish API
+access from unavailable PR associations, checkout logs and checkout bindings;
+a later successful local read does not establish why the native read failed.
+The machine-only job-log reader explicitly allows terminal escape sequences:
+gh 2.102's raw-response guard otherwise rejects normal colored Actions logs.
+The captured log is never printed or stripped; the existing 4 MiB limit and
+exact pinned-checkout proof still apply. Older clients that reject the flag
+locally use their original raw reader; permission, HTTP and transport failures
+do not trigger that compatibility fallback. Remove the old-client fallback
+when the supported developer CLI minimum includes the flag (tracked in #2416).
+Candidate plans print the CLI version alongside their bounded diagnostics.
 There is no reuse across different Git trees or per-test-case cache. This is test scheduling,
 not an additional branch-admission gate. Image building, scanning and artifact
 qualification remain required, as do rollout idle protection, backup and rollback.
@@ -484,8 +500,9 @@ the 35-minute job limit and existing per-test deadlines. Independent cluster-tes
 edits allocate only their nonempty shards, and select the manifest before
 dependency and Skopeo preparation. Selector failure stops
 the shard even if it emitted partial paths; test failure remains a failed job.
-`cluster-smoke-gate` waits for the aggregate result of all selected shards, with
-fail-fast cancellation disabled. This replaces a serial run that exhausted its
+`cluster-smoke-gate` waits for the aggregate result of all selected shards. PR
+and merge-group matrices cancel unfinished siblings after a failure; manual
+diagnostic runs retain independent outcomes. This replaces a serial run that exhausted its
 35-minute limit after completing only 61% of 77 tests; it removes no test paths
 or protected checks. Per-shard duration reporting supports later balance review.
 
@@ -493,6 +510,29 @@ The shared disposable K3s fixture requests normal Docker stop before removing
 the stopped container and its volumes. Its 30-second shutdown allowance does not
 change test deadlines. Stop and removal errors still fail the job. K3s remains
 PID 1; adding an init wrapper would interfere with its cgroup startup sequence.
+
+The actuator module prepares each image when its first consumer needs it, once
+per role per module. The network-policy case builds only its small fixture
+image within its existing 180-second whole-test limit. The production runtime
+is built by its first actual runtime case, within that case's existing
+360-second limit; later cases reuse it. A failed build is retained as a failure,
+and every attempted image tag is cleaned up. Full-module coverage still builds
+and exercises both roles. This corrects an eager runtime build charged to a
+network-only case; it does not claim that the two builds' total work disappeared.
+The cluster job reports stage/cache and wall-time records within a 64 KiB read
+limit even on failure. It reads past earlier shared helper builds so the target
+module's later records are retained. Python and reaped-child CPU counters
+describe the test driver/client, not the build daemon; parallel BuildKit stage
+durations are not additive.
+
+Pod readiness retains its 60-second budget and Running/Ready predicate. Its
+read-only transport copies the original configuration, scoped headers and
+cookie, disables SDK retries on that private client, and bounds each request by
+the remaining budget. Fractional timeout tuples are required by the pinned
+SDK, which ignores scalar floats. Only observed startup TLS EOF and read
+timeouts are polled within the same deadline; authorization, certificate and
+other failures still propagate. The caller's shared/write client stays intact,
+private connections are closed, and late responses cannot establish readiness.
 
 Disposable K3s API discovery does not imply that native DNS or dynamic storage
 is ready. Tests that require these addons opt into `_load_client` readiness:

@@ -4,20 +4,23 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import shlex
 import ssl
 import subprocess
 import tempfile
 import time
-from copy import deepcopy
+from contextlib import contextmanager
+from copy import copy, deepcopy
 from datetime import UTC, datetime, timedelta
+from functools import cached_property
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 import yaml
-from urllib3.exceptions import MaxRetryError, SSLError
+from urllib3.exceptions import MaxRetryError, ReadTimeoutError, SSLError
 
 from loom.db.schema import ServiceExecutionLease
 from loom.execution_contract import (
@@ -518,11 +521,58 @@ def _docker_platform() -> str:
     return f"linux/{normalized}"
 
 
+def _build_stage_timings(log: str) -> list[dict[str, object]]:
+    """Keep stage/cache timing only, never commands, URLs or build output."""
+    stages = {"build", "docker-cli", "guest-build", "guest-verify", "guest-payload", "runtime", "stage-1"}
+    phases = ("load build definition", "load metadata", "load .dockerignore", "load build context",
+              "exporting to image", "exporting layers", "importing cache manifest")
+    rows: dict[str, dict[str, object]] = {}
+    for line in log.splitlines():
+        match = re.match(r"#(\d+) \[([\w-]+)\s+(\d+)/(\d+)\] (FROM|RUN|COPY|WORKDIR|USER|ENTRYPOINT)\b", line)
+        if match and match[2] in stages and len(rows) < 64:
+            rows[match[1]] = {"stage": match[2], "index": int(match[3]),
+                              "instruction": match[5], "cached": False}
+        match = re.match(r"#(\d+) (?:\[internal\] )?(.*)", line)
+        if match and len(rows) < 64:
+            phase = next((value for value in phases if match[2].startswith(value)), None)
+            if phase:
+                rows[match[1]] = {"phase": phase, "cached": False}
+        match = re.fullmatch(r"#(\d+) CACHED", line)
+        if match and match[1] in rows:
+            rows[match[1]]["cached"] = True
+        match = re.fullmatch(r"#(\d+) DONE ([0-9.]+)s", line)
+        if match and match[1] in rows:
+            rows[match[1]]["wall_seconds"] = float(match[2])
+    return list(rows.values())
+
+
+def _build_timing(record: dict[str, object]) -> None:
+    directory = os.environ.get("RUNNER_TEMP")
+    if directory:
+        try:
+            with (Path(directory) / "loom-k3s-image-build-timings.jsonl").open("a") as stream:
+                stream.write(json.dumps(record, sort_keys=True) + "\n")
+        except OSError:
+            # Timing evidence must never replace the actual build outcome.
+            pass
+
+
 def _build_image(*, tag: str, dockerfile: str, platform: str) -> None:
+    import resource
+
     repo_root = Path(__file__).resolve().parents[2]
+    role = "runtime" if dockerfile == "deploy/Dockerfile.execution-runtime" else "fixture"
+    identity = {"role": role, "platform": platform if platform in {"linux/amd64", "linux/arm64"} else "unknown"}
+    started, python_cpu = time.perf_counter(), time.process_time()
+    children = resource.getrusage(resource.RUSAGE_CHILDREN)
+    child_cpu = children.ru_utime + children.ru_stime
+    _build_timing({**identity, "event": "start"})
+    status, log = "interrupted", ""
     try:
-        _docker(
+        completed = subprocess.run([
+            "docker",
             "build",
+            "--progress=plain",
             "--platform",
             platform,
             "--file",
@@ -530,32 +580,63 @@ def _build_image(*, tag: str, dockerfile: str, platform: str) -> None:
             "--tag",
             tag,
             str(repo_root),
-        )
+        ], check=True, capture_output=True, text=True)
+        status, log = "success", completed.stderr
     except subprocess.CalledProcessError as exc:
+        status, log = "failed", exc.stderr or ""
         if exc.stderr:
             # Pytest truncates captured subprocess locals; keep the final build
             # error visible without flooding logs with the complete build output.
             exc.add_note("Docker fixture build stderr (last 16384 characters):\n" + exc.stderr[-16_384:])
         raise
+    finally:
+        children = resource.getrusage(resource.RUSAGE_CHILDREN)
+        _build_timing({**identity, "event": "end", "status": status,
+            "wall_seconds": time.perf_counter() - started,
+            "python_cpu_seconds": time.process_time() - python_cpu,
+            "reaped_child_cpu_seconds": children.ru_utime + children.ru_stime - child_cpu,
+            "cpu_scope": "test driver and reaped client children; excludes build daemon",
+            "stages": _build_stage_timings(log)})
+
+
+class _BuiltImages:
+    """Materialize only images actually consumed by this module's cases."""
+
+    def __init__(self):
+        self.platform = _docker_platform()
+        self.suffix = uuid4().hex[:10]
+        self.attempted: list[str] = []
+        self.failures: dict[str, BaseException] = {}
+
+    def _build(self, role: str, repository: str, dockerfile: str) -> str:
+        if role in self.failures:
+            raise self.failures[role]
+        tag = f"docker.io/library/{repository}:{self.suffix}"
+        self.attempted.append(tag)
+        try:
+            _build_image(tag=tag, dockerfile=dockerfile, platform=self.platform)
+        except BaseException as error:
+            self.failures[role] = error
+            raise
+        return tag
+
+    @cached_property
+    def runtime(self) -> str:
+        return self._build("runtime", "loom-runtime-e2e", "deploy/Dockerfile.execution-runtime")
+
+    @cached_property
+    def fixture(self) -> str:
+        return self._build("fixture", "loom-runtime-fixture", "tests/fixtures/execution_runtime_fixture/Dockerfile")
 
 
 @pytest.fixture(scope="module")
 def built_images() -> object:
-    """Build each disposable-cluster image once per module; every case imports its own copy."""
-    suffix = uuid4().hex[:10]
-    platform = _docker_platform()
-    images = SimpleNamespace(
-        platform=platform,
-        runtime=f"docker.io/library/loom-runtime-e2e:{suffix}",
-        fixture=f"docker.io/library/loom-runtime-fixture:{suffix}",
-    )
+    """Keep one image per role, within the unchanged first consumer's budget."""
+    images = _BuiltImages()
     try:
-        _build_image(tag=images.runtime, dockerfile="deploy/Dockerfile.execution-runtime", platform=platform)
-        _build_image(tag=images.fixture, dockerfile="tests/fixtures/execution_runtime_fixture/Dockerfile",
-                     platform=platform)
         yield images
     finally:
-        for tag in (images.runtime, images.fixture):
+        for tag in images.attempted:
             subprocess.run(["docker", "image", "rm", "--force", tag], check=False, capture_output=True)
 
 
@@ -648,30 +729,67 @@ def _pod_container_details(pod: object) -> str:
     return rendered if len(rendered) <= 4096 else rendered[:4080] + "... (truncated)"
 
 
+@contextmanager
+def _pod_read_transport(core: object):
+    """Bound setup reads without changing the caller's shared/write client."""
+    from kubernetes import client
+
+    configuration = deepcopy(core.api_client.configuration)
+    configuration.retries = 0
+    with client.ApiClient(configuration=configuration) as api_client:
+        api_client.default_headers = deepcopy(getattr(core.api_client, "default_headers", {}))
+        api_client.cookie = getattr(core.api_client, "cookie", None)
+        api_client.rest_client.pool_manager.pools.dispose_func = lambda pool: pool.close()
+        observer = copy(core)
+        observer.api_client = api_client
+        try:
+            yield observer
+        finally:
+            api_client.rest_client.pool_manager.clear()
+
+
 def _wait_for_pod(core: object, namespace: str, name: str) -> object:
     deadline = time.monotonic() + 60
     last_phase = "missing"
-    while time.monotonic() < deadline:
-        pod = core.read_namespaced_pod(name, namespace)
-        last_phase = pod.status.phase
-        if last_phase == "Running" and any(
-            condition.type == "Ready" and condition.status == "True"
-            for condition in (pod.status.conditions or [])
-        ):
-            return pod
-        time.sleep(0.25)
-    error = AssertionError(
-        f"Pod {namespace}/{name} did not become ready: {last_phase}; "
-        f"reason={pod.status.reason}; message={pod.status.message}; "
-        f"conditions={pod.status.conditions}; containers={_pod_container_details(pod)}"
-    )
+    pod = None
+    last_error = None
+    with _pod_read_transport(core) as observer:
+        while (remaining := deadline - time.monotonic()) > 0:
+            try:
+                # This pinned SDK ignores scalar floats. Tuple timeouts retain
+                # the fractional final budget instead of silently becoming None.
+                budget = min(5, remaining)
+                pod = observer.read_namespaced_pod(name, namespace, _request_timeout=(budget / 2, budget / 2))
+            except (MaxRetryError, ReadTimeoutError) as error:
+                reason = error.reason if isinstance(error, MaxRetryError) else error
+                if not (isinstance(reason, ReadTimeoutError) or (
+                    isinstance(reason, SSLError) and reason.args
+                    and isinstance(reason.args[0], ssl.SSLEOFError)
+                )):
+                    raise
+                last_error = error
+            else:
+                last_phase = pod.status.phase
+                if time.monotonic() >= deadline:
+                    break
+                if last_phase == "Running" and any(
+                    condition.type == "Ready" and condition.status == "True"
+                    for condition in (pod.status.conditions or [])
+                ):
+                    return pod
+                last_error = None
+            time.sleep(min(0.25, max(0, deadline - time.monotonic())))
+    detail = (f"reason={pod.status.reason}; message={pod.status.message}; "
+              f"conditions={pod.status.conditions}; containers={_pod_container_details(pod)}"
+              if pod is not None else "no Pod response within the readiness budget")
+    error = AssertionError(f"Pod {namespace}/{name} did not become ready: {last_phase}; {detail}")
     # ContainerCreating predates container logs. Retain the sandbox/CNI and
     # image-pull events before callers tear down this disposable cluster.
     # Read only on failure; never retry readiness or dump Pod specs/Secrets.
     try:
         from kubernetes import client
 
-        uid = pod.metadata.uid if pod.metadata else None
+        uid = pod.metadata.uid if pod is not None and pod.metadata else None
         selector = f"involvedObject.uid={uid}" if uid else f"involvedObject.name={name}"
         configuration = deepcopy(core.api_client.configuration)
         # Socket timeouts alone do not bound urllib3 Retry-After delays. Keep
@@ -698,7 +816,7 @@ def _wait_for_pod(core: object, namespace: str, name: str) -> object:
     except Exception as diagnostic_error:
         detail = type(diagnostic_error).__name__
     error.add_note("Pod events: " + detail)
-    raise error
+    raise error from last_error
 
 
 def _pod_probe(core: object, namespace: str, name: str, url: str) -> str:

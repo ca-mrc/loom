@@ -393,6 +393,106 @@ def test_unavailable_api_retains_tests(actions):
     assert len(pending(value)) == value["required_files"]
 
 
+def test_squash_api_failure_identifies_stage_and_status_without_secret_text(actions):
+    pr = PullRequestActions()
+    original = pr.read
+
+    def read(endpoint):
+        if endpoint.startswith(f"commits/{SHA}/pulls"):
+            raise subprocess.CalledProcessError(
+                1, ["gh", "api"], stderr="gh: denied (HTTP 403)\nAuthorization: Bearer synthetic-secret"
+            )
+        return original(endpoint)
+
+    value = planner.plan(ROOT, SHA, read=read, read_log=pr.log)
+    assert value["evidence_errors"] == [
+        {"stage": "squash_pr_association", "error": "github_cli", "http_status": 403}
+    ]
+    assert value["missing_files"] == value["required_files"] > 0
+    assert "synthetic-secret" not in json.dumps(value)
+    assert "Authorization" not in json.dumps(value)
+
+
+def test_squash_missing_association_is_distinct_from_an_api_error(actions):
+    pr = PullRequestActions()
+    original = pr.read
+    value = planner.plan(
+        ROOT, SHA,
+        read=lambda endpoint: [] if endpoint.startswith(f"commits/{SHA}/pulls") else original(endpoint),
+        read_log=pr.log,
+    )
+    assert value["evidence_errors"] == [{
+        "stage": "squash_pr_association", "error": "validation", "reason": "candidate_pr_unqualified",
+        "associated_prs": 0, "matching_prs": 0,
+    }]
+    assert value["missing_files"] == value["required_files"] > 0
+
+
+@pytest.mark.parametrize(("message", "status", "reason"), [
+    ("API rate limit exceeded", 403, "rate_limit"),
+    ("secondary rate limit", 403, "secondary_rate_limit"),
+    ("Resource not accessible by integration", 403, "permission_denied"),
+    ("Bad credentials", 401, "bad_credentials"),
+])
+def test_squash_api_diagnostic_distinguishes_safe_failure_categories(actions, message, status, reason):
+    pr = PullRequestActions()
+    original = pr.read
+
+    def read(endpoint):
+        if endpoint.startswith(f"commits/{SHA}/pulls"):
+            raise subprocess.CalledProcessError(1, ["gh", "api"],
+                stderr=f"gh: {message} (HTTP {status})\nAuthorization: Bearer synthetic-secret")
+        return original(endpoint)
+
+    value = planner.plan(ROOT, SHA, read=read, read_log=pr.log)
+    assert value["evidence_errors"] == [{"stage": "squash_pr_association", "error": "github_cli",
+        "http_status": status, "api_reason": reason}]
+    assert value["missing_files"] == value["required_files"] > 0
+    assert "synthetic-secret" not in json.dumps(value)
+
+
+@pytest.mark.parametrize("boundary", ["log_timeout", "checkout_time"])
+def test_squash_job_failure_identifies_owning_boundary_and_keeps_other_coverage(actions, boundary):
+    pr = PullRequestActions()
+
+    def log(job_id):
+        if job_id == 100:
+            if boundary == "log_timeout":
+                raise subprocess.TimeoutExpired(["gh", "api"], 20, output="synthetic-secret")
+            return pr.log(job_id).replace("19:00:01.", "19:01:01.")
+        return pr.log(job_id)
+
+    value = planner.plan(ROOT, SHA, read=pr.read, read_log=log)
+    expected = {"stage": "job_log", "error": "subprocess_timeout", "run_id": 10, "job_id": 100}
+    if boundary == "checkout_time":
+        expected.update(stage="checkout_binding", error="validation", reason="checkout_time_unqualified")
+    assert value["evidence_errors"] == [expected]
+    assert 0 < value["missing_files"] < value["required_files"]
+    assert [row["shard_index"] for row in value["matrix"]["include"]] == [0]
+    assert "synthetic-secret" not in json.dumps(value)
+
+
+def test_cli_reports_safe_native_reader_failure_and_preserves_fallback(tmp_path):
+    head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    shim = tmp_path / "gh"
+    shim.write_text("#!/usr/bin/env python3\nimport sys\n"
+                    "sys.stderr.write('gh: denied (HTTP 403)\\nAuthorization: Bearer synthetic-secret')\n"
+                    "sys.exit(1)\n")
+    shim.chmod(0o700)
+    env = dict(os.environ, PATH=str(tmp_path) + os.pathsep + os.environ["PATH"],
+               GH_TOKEN="synthetic-secret")
+    result = subprocess.run([sys.executable, str(ROOT / "scripts/ops/nebius_pool_test_plan.py"),
+                             "--candidate", head], cwd=ROOT, env=env, capture_output=True, text=True, check=True)
+    value = json.loads(result.stdout)
+    assert value["evidence_errors"] == [
+        {"stage": "merge_group_runs", "error": "github_cli", "http_status": 403},
+        {"stage": "candidate_commit", "error": "github_cli", "http_status": 403},
+    ]
+    assert value["required"] and value["missing_files"] == value["required_files"] > 0
+    assert "synthetic-secret" not in result.stdout + result.stderr
+    assert "Authorization" not in result.stdout + result.stderr
+
+
 def test_partial_job_listing_retains_proven_files_and_fills_only_missing(actions):
     good = actions.read
 
@@ -447,6 +547,56 @@ print(json.dumps(out))
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["missing_files"] == 0
     assert "required=false\n" in output.read_text()
+
+
+
+def test_native_cli_escape_guard_does_not_discard_verified_coverage(actions, monkeypatch, capsys):
+    pr = PullRequestActions()
+    original = subprocess.run
+    logs = []
+
+    def run(command, **kwargs):
+        if command[:2] != ["gh", "api"]:
+            return original(command, **kwargs)
+        assert command[-1].endswith("/logs")
+        job_id = int(command[-1].split("/")[-2])
+        if "--allow-escape-sequences" not in command:
+            raise subprocess.CalledProcessError(1, command, stderr=(
+                "the response contains terminal escape sequences; "
+                "pass --allow-escape-sequences to output it anyway\n"))
+        logs.append(job_id)
+        return subprocess.CompletedProcess(command, 0, pr.log(job_id) + "\n\x1b[31mprivate-log-output\x1b[0m", "")
+
+    monkeypatch.setattr(planner.subprocess, "run", run)
+    value = planner.plan(ROOT, SHA, read=pr.read)
+    assert value["reused_files"] == value["required_files"] > 0
+    assert value["missing_files"] == 0 and value["reused_runs"] == [10]
+    assert value["evidence_errors"] == [] and len(logs) == 20
+    assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize("failure", ["unsupported_flag", "permission", "transport", "api_message"])
+def test_job_log_compatibility_retries_only_unsupported_client_flag(monkeypatch, failure):
+    calls = []
+    reasons = {"unsupported_flag": "unknown flag: --allow-escape-sequences",
+               "permission": "gh: Forbidden (HTTP 403)", "transport": "connection reset",
+               "api_message": "gh: unknown flag: --allow-escape-sequences (HTTP 403)"}
+    text = "checkout evidence\n\x1b[31mprivate-log-output\x1b[0m"
+
+    def run(command, **kwargs):
+        calls.append(command)
+        if failure == "unsupported_flag" and "--allow-escape-sequences" not in command:
+            return subprocess.CompletedProcess(command, 0, text, "")
+        raise subprocess.CalledProcessError(1, command, stderr=reasons[failure])
+
+    monkeypatch.setattr(planner.subprocess, "run", run)
+    if failure == "unsupported_flag":
+        assert planner.github_job_log(100) == text
+        assert len(calls) == 2 and "--allow-escape-sequences" not in calls[-1]
+    else:
+        with pytest.raises(subprocess.CalledProcessError):
+            planner.github_job_log(100)
+        assert len(calls) == 1
 
 
 def test_metadata_reader_can_read_merged_prs_without_write_authority():
