@@ -76,10 +76,15 @@ def ready_jobs(jobs: list[dict[str, Any]], workflow: dict[str, Any]) -> list[dic
     """Do not mistake dependency-blocked checks for runnable queue demand."""
     definitions = workflow["jobs"]
     patterns = {key: name_pattern(key, value) for key, value in definitions.items()}
-    matched = {
-        key: [job for job in jobs if pattern.fullmatch(job["name"])]
-        for key, pattern in patterns.items()
-    }
+    matched: dict[str, list[dict[str, Any]]] = {key: [] for key in definitions}
+    for job in jobs:
+        keys = [key for key, pattern in patterns.items() if pattern.fullmatch(job["name"])]
+        # A known static name can also fit a sibling's expression wildcard.
+        # Keep that row with its owning definition, without duplicate demand
+        # or unrelated rows contaminating the sibling's dependency state.
+        static = [key for key in keys if "${{" not in str(definitions[key].get("name", key))]
+        for key in static or keys:
+            matched[key].append(job)
     # A reusable call has no runner. GitHub reports its nested jobs with the
     # caller's display-name prefix, or a single completed row when skipped.
     for key, definition in reversed(list(definitions.items())):

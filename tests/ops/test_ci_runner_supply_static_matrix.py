@@ -83,6 +83,20 @@ def test_real_truncated_static_matrix_allows_build_result_and_outer_gate_demand(
     assert [row["name"] for row in supply.ready_jobs(jobs, graph)] == [queued]
 
 
+@pytest.mark.parametrize("harbor_name", [
+    "images-validation / Harbor runtime (linux/amd64)",
+    "images-validation / Harbor runtime (linux/amd64) (harbor-runtime, loom-harbor-runtime)",
+])
+def test_static_matrix_row_is_counted_once_when_dynamic_sibling_name_also_matches(harbor_name):
+    supply = supply_module()
+    service = "images-validation / service (linux/amd64)"
+    jobs = [job(harbor_name if row["name"] == HARBOR else row["name"],
+                "queued" if row["name"] in {HARBOR, service} else "completed")
+            for row in native_jobs()]
+    graph = supply.source_graph(MetadataAPI(documents(), jobs), ".github/workflows/ci.yml", SHA)
+    assert sorted(row["name"] for row in supply.ready_jobs(jobs, graph)) == sorted([harbor_name, service])
+
+
 @pytest.mark.parametrize("waiting", [RESULT, GATE])
 @pytest.mark.parametrize("second_status", ["in_progress", "completed"])
 def test_all_static_matrix_rows_must_complete_before_downstream_demand(waiting, second_status):
