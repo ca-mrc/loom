@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 import stat
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
@@ -692,6 +692,14 @@ def automatic_service_execution_rejections(
     return tuple(dict.fromkeys(reasons))
 
 
+class ServiceExecutionIncompatibleError(ValueError):
+    """The task and Trial fail automatic service-execution admission."""
+
+    def __init__(self, reasons: Sequence[str]) -> None:
+        self.reasons = tuple(reasons)
+        super().__init__("automatic service execution is incompatible: " + ",".join(self.reasons))
+
+
 def compile_service_execution_plan(
     *,
     task: TaskConfig,
@@ -738,7 +746,7 @@ def compile_service_execution_plan(
         agent_uid=profile.run_as_user, agent_gid=profile.run_as_group,
     )
     if reasons:
-        raise ValueError("automatic service execution is incompatible: " + ",".join(reasons))
+        raise ServiceExecutionIncompatibleError(reasons)
     spec = hosted_harness(trial.agent_name)
     assert spec is not None  # admission rejected unknown harnesses above
     effective_network_policy = resolve_effective_network_policy(
@@ -1155,6 +1163,7 @@ __all__ = [
     "NATIVE_EXECUTION_AGENT_NAMES",
     "ControllerComputeResourcesV1",
     "RuntimeTaskInputV1",
+    "ServiceExecutionIncompatibleError",
     "ServiceExecutionInputBindingV1",
     "ServiceExecutionInputFileV1",
     "ServiceExecutionInputManifestV1",

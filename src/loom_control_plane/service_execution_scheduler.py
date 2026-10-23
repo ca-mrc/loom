@@ -33,6 +33,7 @@ from loom.models.task import TaskConfig, bind_service_execution_runtime_plan
 from loom.models.trial import TrialConfig
 from loom.pipeline.keys import canonical_digest, canonical_uuid5
 from loom.service_execution_materialization import (
+    ServiceExecutionIncompatibleError,
     ServiceExecutionRuntimeProfileV1,
     build_verifier_handoff_manifest,
     compile_deferred_verifier_plan,
@@ -322,6 +323,13 @@ async def _compile_service_candidate(
         raise ServiceExecutionConfigurationError(
             "Native execution configuration violates the runtime contract; review task and trial "
             "settings and the selected runtime profile. No execution attempt was started."
+        ) from None
+    except ServiceExecutionIncompatibleError as exc:
+        # Reachable after submission when the legacy separate default is frozen
+        # here (#2589). Reasons are Loom-authored codes, safe to surface.
+        raise ServiceExecutionConfigurationError(
+            f"Native execution is incompatible with this task and trial ({','.join(exc.reasons)}). "
+            "No execution attempt was started."
         ) from None
 
 
