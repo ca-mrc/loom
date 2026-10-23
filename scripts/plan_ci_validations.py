@@ -154,7 +154,11 @@ OPERATOR_COMPONENT_PREFIXES = (
     "scripts/ops/nebius_development_", "scripts/ops/nebius_management_",
     "scripts/ops/install_nebius",
 )
-OPERATOR_COMPONENT_EXACT = {
+# This live controller provisions CI workers. Its root contracts and native
+# specialist pickups own its behavior; it is not a read-only metadata tool or
+# an input to the platform's historical pool transition state machine.
+CI_RUNNER_COMPONENTS = {"scripts/ops/ci_runner_supply.py"}
+OPERATOR_COMPONENT_EXACT = CI_RUNNER_COMPONENTS | {
     "scripts/ops/nebius_archive_recovery.py",
     "scripts/ops/nebius_terminal_archive_recovery.py",
     "scripts/ops/nebius_terminal_cleanup_recovery.py",
@@ -606,6 +610,9 @@ def plan_validations(
             or bool(test_owner_lanes)
             or policy_tool or go_input or operator_tool
         )
+        if path in CI_RUNNER_COMPONENTS:
+            for name in ("images", "cluster_smoke", "staging_smoke"):
+                select(name, "ci-runner-controller")
         for lane in test_owner_lanes:
             reason = f"test-owner:{lane}:{path}"
             if lane == "integration":
@@ -631,11 +638,11 @@ def plan_validations(
             if select_release_image_matrix(_component_ownership_manifest(), changed_paths=(path,),
                                            force_all=False, image_set="nebius"):
                 select("images", f"go-runtime:{path}")
-        if not (policy_tool or go_input) and (path.startswith("tests/contract/") or (not test_owner_lanes and _matches(path, exact=integration_exact, prefixes=integration_prefixes))):
+        if not (policy_tool or go_input or path in CI_RUNNER_COMPONENTS) and (path.startswith("tests/contract/") or (not test_owner_lanes and _matches(path, exact=integration_exact, prefixes=integration_prefixes))):
             select("integration", f"path:{path}")
             matched_owner = True
         elif (not test_owner_lanes and not _is_frontend_input(path)
-              and not (policy_tool or go_input)
+              and not (policy_tool or go_input or path in CI_RUNNER_COMPONENTS)
               and not path.startswith(NEBIUS_IAC_PREFIXES)):
             # Frontend inputs already select browser and image contracts below.
             # They do not change the Python runtime exercised by this lane.
