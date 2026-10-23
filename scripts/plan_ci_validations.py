@@ -78,7 +78,6 @@ DOCS_STATIC_SUFFIXES = {
 
 PLANNER_PATHS = {
     "scripts/plan_ci_validations.py",
-    "scripts/ops/nebius_pool_test_plan.py",
     "tests/ops/test_plan_ci_validations.py",
 }
 
@@ -96,13 +95,19 @@ OWNERSHIP_AUTHORITY_PATHS = {
     "tests/ops/test_component_ownership_manifest.py",
 }
 
-# These tools validate repository policy, not an application runtime. Their
+# These tools validate repository policy or read CI evidence. Their
 # focused root tests and lint execute the changed tool; unknown tools still
 # retain the stronger fallback below.
 REPOSITORY_POLICY_TOOLS = {
     "scripts/check_ci_action_pins.py",
     "scripts/check_ci_upgrade_policy.py",
     "scripts/check_repository_paths.py",
+    "scripts/check_github_cli_logs.py",
+    # Read-only Actions evidence/reporting tools have dedicated root
+    # regressions. They do not change the pool lifecycle exercised by the
+    # expensive operator lane; unknown CI tools still retain full coverage.
+    "scripts/ops/nebius_pool_test_plan.py",
+    "scripts/ops/ci_reliability_metrics.py",
 }
 GO_INPUT_PREFIXES = (
     "cmd/loom-build-deadline/", "cmd/loom-llm-gateway-sandbox/",

@@ -574,7 +574,8 @@ jobs:
 
   fast-feedback:
     name: fast-feedback
-    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-latest' }}
+    # Match candidate planning's actual gh toolchain; OLDLAB guests omit gh.
+    runs-on: ubuntu-24.04
     needs: [workflow-plan, lint-and-static, locked-environments, tests-packages, go-checks, nebius-iac, tests-root, integration, web-checks]
     if: >-
       always() && needs.workflow-plan.outputs.gate_mode == 'full' &&
@@ -595,6 +596,126 @@ jobs:
         env:
           FEEDBACK_NEEDS: ${{ toJSON(needs) }}
         run: python3 scripts/ci_fast_feedback.py enforce
+      - name: Exercise installed candidate GitHub CLI on colored raw logs
+        run: python3 scripts/check_github_cli_logs.py
+      - name: Check current strict PR base before heavy validation
+        if: >-
+          github.event_name == 'pull_request' &&
+          (needs.workflow-plan.outputs.nebius_pool == 'true' ||
+           needs.workflow-plan.outputs.integration_docker == 'true' ||
+           needs.workflow-plan.outputs.runtime_payload == 'true' ||
+           needs.workflow-plan.outputs.web_runtime == 'true' ||
+           needs.workflow-plan.outputs.images == 'true' ||
+           needs.workflow-plan.outputs.cluster_smoke == 'true' ||
+           needs.workflow-plan.outputs.staging_smoke == 'true')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python3 scripts/ci_fast_feedback.py check-base
+
+  # Calls wait in GitHub's dependency graph; no runner polls another workflow.
+  images-validation:
+    needs: [workflow-plan, fast-feedback]
+    if: >-
+      !cancelled() &&
+      (github.event_name == 'pull_request' || github.event_name == 'merge_group') &&
+      needs.workflow-plan.result == 'success' &&
+      needs.workflow-plan.outputs.gate_mode == 'full' &&
+      needs.workflow-plan.outputs.images == 'true' &&
+      needs.fast-feedback.result == 'success'
+    uses: ./.github/workflows/images.yml
+
+  images-gate:
+    name: >-
+      ${{ github.event_name == 'schedule' && 'images-gate-scheduled' ||
+          github.event_name == 'workflow_dispatch' && 'images-gate-manual' ||
+          github.event_name == 'push' && 'images-gate-push' ||
+          needs.workflow-plan.outputs.gate_mode == 'full' && 'images-gate' ||
+          'images-gate-filtered' }}
+    needs: [workflow-plan, fast-feedback, images-validation]
+    if: >-
+      always() &&
+      (github.event_name == 'pull_request' || github.event_name == 'merge_group') &&
+      needs.workflow-plan.outputs.gate_mode != 'filtered'
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && vars.LOOM_CI_REUSABLE_SUPPLY_READY == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+      - name: Enforce selected specialist validation
+        env:
+          FEEDBACK_NEEDS: ${{ toJSON(needs) }}
+        run: python3 scripts/ci_fast_feedback.py enforce-specialist --selector images
+
+  cluster-validation:
+    needs: [workflow-plan, fast-feedback]
+    if: >-
+      !cancelled() &&
+      (github.event_name == 'pull_request' || github.event_name == 'merge_group') &&
+      needs.workflow-plan.result == 'success' &&
+      needs.workflow-plan.outputs.gate_mode == 'full' &&
+      needs.workflow-plan.outputs.cluster_smoke == 'true' &&
+      needs.fast-feedback.result == 'success'
+    uses: ./.github/workflows/cluster-smoke.yml
+
+  cluster-smoke-gate:
+    name: >-
+      ${{ github.event_name == 'schedule' && 'cluster-smoke-gate-scheduled' ||
+          github.event_name == 'workflow_dispatch' && 'cluster-smoke-gate-manual' ||
+          github.event_name == 'push' && 'cluster-smoke-gate-push' ||
+          needs.workflow-plan.outputs.gate_mode == 'full' && 'cluster-smoke-gate' ||
+          'cluster-smoke-gate-filtered' }}
+    needs: [workflow-plan, fast-feedback, cluster-validation]
+    if: >-
+      always() &&
+      (github.event_name == 'pull_request' || github.event_name == 'merge_group') &&
+      needs.workflow-plan.outputs.gate_mode != 'filtered'
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && vars.LOOM_CI_REUSABLE_SUPPLY_READY == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+      - name: Enforce selected specialist validation
+        env:
+          FEEDBACK_NEEDS: ${{ toJSON(needs) }}
+        run: python3 scripts/ci_fast_feedback.py enforce-specialist --selector cluster_smoke
+
+  staging-validation:
+    needs: [workflow-plan, fast-feedback]
+    if: >-
+      !cancelled() &&
+      (github.event_name == 'pull_request' || github.event_name == 'merge_group') &&
+      needs.workflow-plan.result == 'success' &&
+      needs.workflow-plan.outputs.gate_mode == 'full' &&
+      needs.workflow-plan.outputs.staging_smoke == 'true' &&
+      needs.fast-feedback.result == 'success'
+    uses: ./.github/workflows/staging-smoke.yml
+
+  staging-smoke-gate:
+    name: >-
+      ${{ github.event_name == 'schedule' && 'staging-smoke-gate-scheduled' ||
+          github.event_name == 'workflow_dispatch' && 'staging-smoke-gate-manual' ||
+          github.event_name == 'push' && 'staging-smoke-gate-push' ||
+          needs.workflow-plan.outputs.gate_mode == 'full' && 'staging-smoke-gate' ||
+          'staging-smoke-gate-filtered' }}
+    needs: [workflow-plan, fast-feedback, staging-validation]
+    if: >-
+      always() &&
+      (github.event_name == 'pull_request' || github.event_name == 'merge_group') &&
+      needs.workflow-plan.outputs.gate_mode != 'filtered'
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && vars.LOOM_CI_REUSABLE_SUPPLY_READY == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+      - name: Enforce selected specialist validation
+        env:
+          FEEDBACK_NEEDS: ${{ toJSON(needs) }}
+        run: python3 scripts/ci_fast_feedback.py enforce-specialist --selector staging_smoke
 
   # Heavy execution starts only after the selected quick and affected-test jobs.
   # Reuse the existing manifests; no tests are duplicated or moved out of admission.
@@ -606,6 +727,9 @@ jobs:
     # for pytest alone. Selected only when operator inputs change.
     timeout-minutes: 50
     if: >-
+      !cancelled() &&
+      needs.workflow-plan.result == 'success' &&
+      needs.fast-feedback.result == 'success' &&
       needs.workflow-plan.outputs.nebius_pool == 'true' &&
       needs.workflow-plan.outputs.gate_mode == 'full'
     strategy:
@@ -745,6 +869,9 @@ jobs:
     needs: [workflow-plan, fast-feedback]
     timeout-minutes: 10
     if: >-
+      !cancelled() &&
+      needs.workflow-plan.result == 'success' &&
+      needs.fast-feedback.result == 'success' &&
       needs.workflow-plan.outputs.runtime_payload == 'true' &&
       (needs.workflow-plan.outputs.gate_mode == 'full' ||
        needs.workflow-plan.outputs.gate_mode == 'preflight')
@@ -1070,6 +1197,9 @@ jobs:
     needs: [workflow-plan, fast-feedback]
     timeout-minutes: 20
     if: >-
+      !cancelled() &&
+      needs.workflow-plan.result == 'success' &&
+      needs.fast-feedback.result == 'success' &&
       needs.workflow-plan.outputs.web_runtime == 'true' &&
       needs.workflow-plan.outputs.gate_mode == 'full'
     steps:
@@ -1259,6 +1389,9 @@ jobs:
     needs: [workflow-plan, fast-feedback]
     timeout-minutes: 40
     if: >-
+      !cancelled() &&
+      needs.workflow-plan.result == 'success' &&
+      needs.fast-feedback.result == 'success' &&
       needs.workflow-plan.outputs.gate_mode == 'full' &&
       needs.workflow-plan.outputs.integration_docker == 'true'
     strategy:

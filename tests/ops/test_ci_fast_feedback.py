@@ -6,18 +6,15 @@ import json
 import os
 import subprocess
 import sys
-from copy import deepcopy
 from pathlib import Path
 
 import pytest
 import yaml
-from scripts.ci_fast_feedback import FEEDBACK_JOBS, enforce, pages, wait_for_feedback
+from scripts.ci_fast_feedback import FEEDBACK_JOBS, enforce
 from scripts.plan_ci_validations import plan_validations
 from tests.ops.test_ci_images_parallel_builds import _condition
 
 ROOT = Path(__file__).resolve().parents[2]
-HEAD = "a" * 40
-TITLE = f"gate=full / head={HEAD} / base={'b' * 40} / updated=now / action=synchronize / label=none / labels=000000 / pull=42"
 
 
 def needs() -> dict:
@@ -48,7 +45,7 @@ def test_feedback_cli_executes_actual_aggregation_step():
     workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
     job = workflow["jobs"]["fast-feedback"]
     assert set(job["needs"]) == {"workflow-plan", *FEEDBACK_JOBS}
-    step = job["steps"][-1]
+    step = next(step for step in job["steps"] if step.get("run") == "python3 scripts/ci_fast_feedback.py enforce")
     assert step["env"] == {"FEEDBACK_NEEDS": "${{ toJSON(needs) }}"}
     value = needs()
     for expected in (0, 1):
@@ -62,151 +59,88 @@ def test_feedback_cli_executes_actual_aggregation_step():
         assert result.returncode == expected, result.stderr
 
 
-class API:
-    def __init__(self):
-        self.source = {"event": "pull_request", "head_sha": HEAD, "display_title": TITLE,
-                       "path": ".github/workflows/images.yml"}
-        self.run = {**self.source, "path": ".github/workflows/ci.yml", "id": 7, "run_attempt": 1, "status": "in_progress"}
-        self.jobs = [{"name": "fast-feedback", "run_attempt": 1, "status": "completed", "conclusion": "success"}]
-        self.now = 0.0
-        self.polls = 0
-
-    def fetch(self, path):
-        if path.endswith("/runs/9"):
-            return self.source
-        if "/workflows/ci.yml/runs?" in path:
-            assert f"head_sha={HEAD}" in path
-            assert "event=" + self.source["event"] in path
-            self.polls += 1
-            return {"workflow_runs": [self.run]}
-        assert "/runs/7/jobs?filter=latest&per_page=100&page=" in path
-        return {"jobs": self.jobs}
-
-    def wait(self, seconds=60):
-        return wait_for_feedback("ca-mrc/loom", 9, timeout_seconds=seconds, fetch=self.fetch,
-                                 clock=lambda: self.now, sleep=self.advance)
-
-    def advance(self, seconds):
-        self.now += seconds
+def test_feedback_owns_mandatory_cli_probe_in_candidate_planners_hosted_environment():
+    workflows = ROOT / ".github/workflows"
+    job = yaml.safe_load((workflows / "ci.yml").read_text())["jobs"]["fast-feedback"]
+    candidate = yaml.safe_load((workflows / "nebius-candidate.yml").read_text())["jobs"]["pool-ops-plan"]
+    assert job["runs-on"] == candidate["runs-on"] == "ubuntu-24.04"
+    commands = [step.get("run") for step in job["steps"]]
+    probe = next(step for step in job["steps"] if step.get("run") == "python3 scripts/check_github_cli_logs.py")
+    assert commands.index("python3 scripts/ci_fast_feedback.py enforce") < job["steps"].index(probe)
+    assert job["steps"].index(probe) < commands.index("python3 scripts/ci_fast_feedback.py check-base")
+    assert not probe.get("if") and not probe.get("continue-on-error")
+    assert "env" not in probe  # The probe needs no real GitHub token.
 
 
-@pytest.mark.parametrize("source", ["images", "cluster-smoke", "staging-smoke"])
-@pytest.mark.parametrize("event", ["pull_request", "merge_group"])
-def test_all_heavy_sources_accept_only_successful_native_feedback(source, event):
-    api = API()
-    api.source.update(event=event, path=f".github/workflows/{source}.yml")
-    api.run["event"] = event
-    assert api.wait() == 7
+@pytest.mark.parametrize(("job_name", "selector"), [
+    ("nebius-pool", "nebius_pool"), ("runtime-payload", "runtime_payload"),
+    ("integration-docker", "integration_docker"), ("web-runtime", "web_runtime"),
+])
+@pytest.mark.parametrize("ancestor", FEEDBACK_JOBS)
+def test_successful_feedback_releases_selected_heavy_work_after_unselected_ancestor_skip(job_name, selector, ancestor):
+    # Native run 39979536847 had successful feedback but selected heavy work
+    # skipped because GitHub's implicit success() includes skipped ancestors.
+    job = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"][job_name]
+    values = {
+        "needs.workflow-plan.result": "success", "needs.fast-feedback.result": "success",
+        "needs.workflow-plan.outputs.gate_mode": "full",
+        f"needs.workflow-plan.outputs.{selector}": "true",
+        f"needs.{ancestor}.result": "skipped",
+    }
+    assert _condition(job["if"], values)
+    assert not _condition(job["if"], values, cancelled=True)
+    for result in ("failure", "cancelled", "skipped"):
+        assert not _condition(job["if"], {**values, "needs.fast-feedback.result": result})
+        assert not _condition(job["if"], {**values, "needs.workflow-plan.result": result})
+    assert not _condition(job["if"], {**values, f"needs.workflow-plan.outputs.{selector}": "false"})
 
 
-@pytest.mark.parametrize("result", ["failure", "cancelled", "skipped", "neutral", "timed_out"])
-def test_unsuccessful_native_stage_fails_immediately(result):
-    api = API()
-    api.jobs[0]["conclusion"] = result
-    with pytest.raises(ValueError, match="did not succeed"):
-        api.wait()
-    assert api.now == 0
+@pytest.mark.parametrize(("workflow", "job_name"), [
+    ("images", "plan"), ("images", "trivy-binary"), ("images", "build"),
+    ("images", "nebius-harness-build"), ("cluster-smoke", "plan"),
+    ("cluster-smoke", "cluster-contract"), ("staging-smoke", "plan"),
+    ("staging-smoke", "system-smoke"),
+])
+def test_reusable_nodes_allow_skipped_outer_ancestors_but_require_their_own_dependencies(workflow, job_name):
+    job = yaml.safe_load((ROOT / f".github/workflows/{workflow}.yml").read_text())["jobs"][job_name]
+    values = {
+        "needs.outer-unselected.result": "skipped", "needs.plan.result": "success",
+        "needs.trivy-binary.result": "success", "needs.plan.outputs.gate_mode": "full",
+        "needs.plan.outputs.required": "true", "needs.plan.outputs.images": '[{"image":"service"}]',
+        "needs.plan.outputs.ordinary_builds": '[{"image":"service"}]',
+        "needs.plan.outputs.harbor_required": "true",
+    }
+    condition = job.get("if", "1 == 1")
+    assert _condition(condition, values)
+    assert not _condition(condition, values, cancelled=True)
+    for dependency in job.get("needs", []):
+        for result in ("failure", "cancelled", "skipped"):
+            assert not _condition(condition, {**values, f"needs.{dependency}.result": result})
 
 
-@pytest.mark.parametrize("changed", ["head", "base", "labels", "update", "event", "path"])
-def test_old_head_base_or_scope_success_cannot_release_work(changed):
-    api = API()
-    if changed == "head":
-        api.run["head_sha"] = "c" * 40
-    elif changed == "base":
-        api.run["display_title"] = TITLE.replace("b" * 40, "c" * 40)
-    elif changed == "labels":
-        api.run["display_title"] = TITLE.replace("000000", "001000")
-    elif changed == "update":
-        api.run["display_title"] = TITLE.replace("updated=now", "updated=before")
-    elif changed == "event":
-        api.run["event"] = "push"
-    else:
-        api.run["path"] = ".github/workflows/untrusted.yml"
-    with pytest.raises(TimeoutError):
-        api.wait()
-    assert api.now == 60
-
-
-def test_waits_for_queued_stage_and_does_not_wait_for_heavy_jobs():
-    api = API()
-    api.jobs[0].update(status="queued", conclusion=None)
-    advance = api.advance
-
-    def complete(seconds):
-        advance(seconds)
-        api.jobs[0].update(status="completed", conclusion="success")
-
-    api.advance = complete
-    assert api.wait() == 7
-    assert api.now == 15 and api.run["status"] == "in_progress"
-
-
-@pytest.mark.parametrize("source", ["images", "cluster-smoke", "staging-smoke"])
-@pytest.mark.parametrize("event", ["pull_request", "merge_group"])
-def test_cancelled_parent_cannot_release_heavy_work_with_previously_green_feedback(source, event):
-    api = API()
-    api.source.update(event=event, path=f".github/workflows/{source}.yml")
-    api.run.update(event=event, status="completed", conclusion="cancelled")
-    with pytest.raises(ValueError, match="native CI was cancelled"):
-        api.wait()
-    assert api.now == 0
-
-
-@pytest.mark.parametrize("status", ["in_progress", "completed"])
-def test_successful_feedback_releases_work_without_waiting_for_parent_completion(status):
-    api = API()
-    api.run.update(status=status, conclusion="success" if status == "completed" else None)
-    assert api.wait() == 7
-    assert api.now == 0
-
-
-def test_cancelled_workflow_without_stage_and_duplicate_stage_fail_closed():
-    api = API()
-    api.run["status"] = "completed"
-    api.jobs = []
-    with pytest.raises(ValueError, match="ended without"):
-        api.wait()
-    api.jobs = [deepcopy(API().jobs[0])] * 2
-    with pytest.raises(ValueError, match="ambiguous"):
-        api.wait()
-
-
-def test_reads_all_job_pages_before_deciding_stage_is_missing():
-    paths = []
-
-    def fetch(path):
-        paths.append(path)
-        return {"jobs": [{"name": "other"}] * 100 if path.endswith("&page=1") else API().jobs}
-
-    jobs = pages("/jobs?filter=latest", "jobs", fetch)
-    assert len(paths) == 2 and jobs[-1]["name"] == "fast-feedback"
-
-
-@pytest.mark.parametrize("source", ["images", "cluster-smoke", "staging-smoke"])
-def test_source_plan_waits_before_exposing_success_to_heavy_jobs(source):
-    workflow = yaml.safe_load((ROOT / f".github/workflows/{source}.yml").read_text())
-    plan = workflow["jobs"]["plan"]
-    wait = plan["steps"][-1]
-    assert wait["run"] == "python3 scripts/ci_fast_feedback.py wait --timeout-seconds 5400"
-    assert "pull_request" in wait["if"] and "merge_group" in wait["if"]
-    assert "== 'true'" in wait["if"]
-    assert wait["env"] == {"GH_TOKEN": "${{ github.token }}"}
-    assert plan["permissions"] == {"contents": "read", "actions": "read"}
-    assert "continue-on-error" not in wait and "continue-on-error" not in plan
-    for name, job in workflow["jobs"].items():
-        if name != "plan":
-            assert "plan" in job["needs"]
-
-
-def test_success_from_an_earlier_attempt_cannot_release_a_rerun():
-    api = API()
-    api.run["run_attempt"] = 2
-    with pytest.raises(TimeoutError):
-        api.wait()
-    api.run["status"] = "completed"
-    with pytest.raises(ValueError, match="ended without"):
-        api.wait()
+@pytest.mark.parametrize("event", ["pull_request", "merge_group", "workflow_dispatch", "schedule", "push"])
+@pytest.mark.parametrize("selector", [None, "nebius_pool", "integration_docker", "runtime_payload", "web_runtime", "images", "cluster_smoke", "staging_smoke"])
+def test_base_preflight_runs_only_after_quick_success_for_pr_heavy_work(event, selector):
+    job = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]["fast-feedback"]
+    step = next(step for step in job["steps"] if step.get("run") == "python3 scripts/ci_fast_feedback.py check-base")
+    assert job["steps"].index(step) > next(
+        index for index, item in enumerate(job["steps"])
+        if item.get("run") == "python3 scripts/ci_fast_feedback.py enforce"
+    )
+    assert not step.get("continue-on-error")
+    values = {f"needs.workflow-plan.outputs.{name}": "false" for name in (
+        "nebius_pool", "integration_docker", "runtime_payload", "web_runtime", "images", "cluster_smoke", "staging_smoke",
+    )}
+    values["github.event_name"] = event
+    if selector:
+        values[f"needs.workflow-plan.outputs.{selector}"] = "true"
+    assert _condition(step["if"], values) is (event == "pull_request" and selector is not None)
+    assert not _condition(step["if"], {**values, "needs.quick.result": "failure"})
+    assert step["env"] == {
+        "GH_TOKEN": "${{ github.token }}",
+        "PR_BASE_REF": "${{ github.event.pull_request.base.ref }}",
+        "PR_BASE_SHA": "${{ github.event.pull_request.base.sha }}",
+    }
 
 
 @pytest.mark.parametrize(("event", "label", "dependent"), [
@@ -245,20 +179,3 @@ def test_docs_feedback_follows_actual_selected_work(event, label, dependent):
             values.update({"needs.workflow-plan.result": "success", "needs.fast-feedback.result": "success"})
             for job in ("nebius-pool", "runtime-payload", "web-runtime"):
                 assert _condition(workflow["jobs"][job]["if"], values)
-
-
-def test_wait_backs_off_without_extending_its_deadline():
-    api = API()
-    api.jobs[0].update(status="queued", conclusion=None)
-    intervals = []
-    advance = api.advance
-
-    def record(seconds):
-        intervals.append(seconds)
-        advance(seconds)
-
-    api.advance = record
-    with pytest.raises(TimeoutError):
-        api.wait(seconds=300)
-    assert intervals == [15, 30, 60, 120, 75]
-    assert api.now == 300

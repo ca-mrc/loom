@@ -39,7 +39,13 @@ def test_mutating_workflows_are_serialized_without_cancellation(
 
 
 def test_manual_image_validation_is_outside_pr_cancellation_scope() -> None:
-    workflow = _workflow(".github/workflows/images.yml")
+    for name in ("images", "cluster-smoke", "staging-smoke"):
+        specialist = _workflow(f".github/workflows/{name}.yml")
+        assert set(specialist.get("on", specialist.get(True))) == {
+            "workflow_call", "workflow_dispatch",
+        }
+        assert "concurrency" not in specialist
+    workflow = _workflow(".github/workflows/ci.yml")
     cancellation = " ".join(
         str(workflow["concurrency"]["cancel-in-progress"]).split()
     )

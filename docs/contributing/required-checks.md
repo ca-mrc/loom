@@ -2,8 +2,8 @@
 
 ## Decision
 
-Loom uses the four final GitHub Actions jobs already emitted by its validation
-workflows as pull-request merge authority:
+Loom uses four final native GitHub Actions jobs in `CI` as pull-request merge
+authority:
 
 - `repository-checks`
 - `images-gate`
@@ -17,7 +17,7 @@ GitHub App or CODEOWNER approval is required for `dev` integration.
 The `dev protected admission` ruleset requires these four checks from the
 GitHub Actions app and sets strict required-status-check evaluation to `true`.
 When GitHub's native merge queue is enabled, PR-head checks establish queue
-eligibility; the same four workflows validate the generated merge-group SHA
+eligibility; the same CI dependency graph validates the generated merge-group SHA
 against the current base before squash integration. In that mode, advancing
 `dev` alone is handled by the queue. Conflicts or amendments require a branch
 update and new checks.
@@ -30,9 +30,17 @@ unnecessary competing base updates and validation runs.
 
 ## Check ownership
 
-Each source workflow plans its selected validation lanes and exposes one final,
-fail-closed aggregate job under its stable required name. GitHub Actions owns
-the CheckRun directly. There is no cross-workflow publisher, custom CheckRun,
+CI runs selected quick checks and affected tests first, then calls the image,
+cluster and staging workflows with native `needs` dependencies. They retain
+their existing build/test assertions and manual diagnostics. No runner waits
+for another workflow over the API.
+
+All four stable required names are direct jobs in the caller CI run, bound to
+the original PR or merge-group event. Each specialist gate requires successful
+feedback and its selected reusable workflow result; unexpected skips fail
+closed. Unselected specialist lanes must be skipped. Nested result jobs and
+manual diagnostics cannot replace the four bare names. GitHub Actions owns
+each CheckRun directly (app id `15368`). There is no cross-workflow publisher, custom CheckRun,
 same-name commit status, retired failure, or custom merge controller.
 
 Push-triggered image publication and deployment remain separate from
