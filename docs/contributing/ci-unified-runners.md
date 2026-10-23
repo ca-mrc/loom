@@ -88,6 +88,23 @@ separate temporary state root for the non-`--execute` demand preview. Preview
 reads GitHub metadata and writes only its local graph cache; it does not register,
 dispatch, deregister or cancel runners. Activation remains an operator action.
 
+Verify activation with a fresh current-base PR that selects image, cluster and
+staging validation together. A manual CI dispatch does not call these reusable
+workflows, and rerunning an old PR event can correctly fail the strict-base
+preflight. Record the native nested jobs' requested labels, runner IDs and runner
+names, including image builds, cluster tests and the system smoke; an online
+runner inventory alone does not prove pickup. Confirm their start times follow
+successful fast feedback and that the same head has all four successful bare
+gate names from Actions app `15368`.
+
+Before enabling the capability variable, nested jobs still request hosted
+labels, so zero nested demand in a read-only preview is expected. A replay of
+actual native job names with projected common labels can check graph matching,
+but record it as a simulation and follow it with real pickup after activation.
+To roll back only reusable routing, clear `LOOM_CI_REUSABLE_SUPPLY_READY`, leave
+the existing common queue enabled, and let already queued/running nested jobs
+drain before retiring any idle capacity.
+
 For each slot the controller registers a fresh one-job JIT runner, encrypts the
 JIT config with the repository public key, sets `LOOM_CI_HOSTED_JIT_00` through
 `LOOM_CI_HOSTED_JIT_19`, and dispatches the already registered `ci-retry.yml` capacity branch with a unique
