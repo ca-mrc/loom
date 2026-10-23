@@ -474,6 +474,15 @@ def automatic_service_execution_rejections(
         reasons.append("network_policy_override_not_supported")
         effective_network_policy = env.baseline_network_policy
         network_override_supported = False
+    # A fresh verifier receives only the task's declared artifacts (#2589). A
+    # task that declares none must be graded in place.
+    if (
+        controller
+        and not trial.skip_verifier
+        and resolve_verifier_env_mode(task, trial) == "separate"
+        and not any(step.artifacts or step.required_artifacts for step in task.steps)
+    ):
+        reasons.append("separate_verifier_requires_declared_artifacts")
     if task.agent.continue_until_timeout and not (spec and spec.supports("agent_continuation")):
         reasons.append("agent_continuation_unsupported")
     reasons.extend(item.code for item in execution_requirement_diagnostics(
