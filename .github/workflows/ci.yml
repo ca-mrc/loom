@@ -139,6 +139,7 @@ jobs:
       nebius_iac: ${{ steps.plan.outputs.nebius_iac || steps.event.outputs.nebius_iac }}
       locked_environments: ${{ steps.plan.outputs.locked_environments || steps.event.outputs.locked_environments }}
       test_changes: ${{ steps.plan.outputs.test_changes || '[]' }}
+      test_diff: ${{ steps.plan.outputs.test_diff || '[]' }}
       tests_root_matrix: ${{ steps.plan.outputs.tests_root_matrix || '[]' }}
       nebius_pool_matrix: ${{ steps.plan.outputs.nebius_pool_matrix || '[]' }}
       integration_matrix: ${{ steps.plan.outputs.integration_matrix || '[]' }}
@@ -738,6 +739,8 @@ jobs:
         include: ${{ fromJSON(needs.workflow-plan.outputs.nebius_pool_matrix) }}
     env:
       TEST_CHANGED_PATHS: ${{ needs.workflow-plan.outputs.test_changes }}
+      # Job-level, so candidate reuse reads it from the checkout step's log.
+      TEST_DIFF_PATHS: ${{ needs.workflow-plan.outputs.test_diff }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
@@ -756,7 +759,7 @@ jobs:
           set -euo pipefail
           manifest_paths_file="${RUNNER_TEMP}/nebius-pool-manifest.txt"
           python3 scripts/component_ownership.py test-paths --lane nebius-pool --test-scope "${CI_TEST_SCOPE:-all}" \
-            --changed-paths-json "$TEST_CHANGED_PATHS" \
+            --changed-paths-json "$TEST_CHANGED_PATHS" --diff-paths-json "${TEST_DIFF_PATHS:-[]}" \
             --shard-index "$SHARD_INDEX" --shard-count "$SHARD_COUNT" \
             > "$manifest_paths_file"
           test -s "$manifest_paths_file"

@@ -56,6 +56,11 @@ class Component:
     exclude_paths: tuple[str, ...] = ()
 
 
+# Lanes whose planner matrix and CI job both receive the PR diff
+# (TEST_DIFF_PATHS), so an affected_only suite is selected identically in both.
+AFFECTED_ONLY_LANES = frozenset({"nebius-pool"})
+
+
 @dataclass(frozen=True)
 class TestSuite:
     id: str
@@ -73,6 +78,10 @@ class TestSuite:
     # Component-local operators may select their transitive test consumers.
     # Other affected inputs retain the complete suite.
     component_sources: tuple[str, ...] = ()
+    # A PR or merge group that forces full regression (unowned, authority or
+    # dependency paths) still runs this suite only when its actual diff is
+    # affected. Push, scheduled and manual runs remain complete.
+    affected_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -423,6 +432,7 @@ def _test_suite(raw: dict[str, Any]) -> TestSuite:
             "unaffected_paths",
             "affected_paths",
             "component_sources",
+            "affected_only",
         },
         context,
     )
@@ -468,6 +478,14 @@ def _test_suite(raw: dict[str, Any]) -> TestSuite:
         raise ManifestError(f"{context}.component_sources must be a string array")
     component_sources = tuple(_safe_path(item, context=f"{context}.component_sources", allow_glob=True)
                               for item in raw_sources)
+    affected_only = raw.get("affected_only", False)
+    if type(affected_only) is not bool:
+        raise ManifestError(f"{context}.affected_only must be a boolean")
+    if affected_only and not affected_paths:
+        raise ManifestError(f"{context}.affected_only requires affected_paths")
+    if affected_only and lane not in AFFECTED_ONLY_LANES:
+        raise ManifestError(f"{context}.affected_only is supported only in lanes: "
+                            + ", ".join(sorted(AFFECTED_ONLY_LANES)))
     return TestSuite(
         id=_required_slug(raw, "id", context),
         language=language,
@@ -479,6 +497,7 @@ def _test_suite(raw: dict[str, Any]) -> TestSuite:
         unaffected_paths=unaffected_paths,
         affected_paths=affected_paths,
         component_sources=component_sources,
+        affected_only=affected_only,
     )
 
 
@@ -1530,7 +1549,7 @@ def _imported_test_modules(paths: tuple[str, ...], *, repo_root: Path) -> frozen
 
 def select_affected_test_suites(
     manifest: Manifest, paths: tuple[str, ...], *, changed_paths: tuple[str, ...],
-    repo_root: Path | None = None,
+    repo_root: Path | None = None, diff_paths: tuple[str, ...] = (),
 ) -> tuple[str, ...]:
     """Skip an expensive suite only for its explicitly audited unrelated inputs.
 
@@ -1538,9 +1557,28 @@ def select_affected_test_suites(
     dependencies and the suite's own tests retain coverage. Unannotated suites
     remain complete. A suite with ``affected_paths`` runs only when a change
     matches them or touches its tests or the test helpers they import.
+
+    ``diff_paths`` is a PR's actual diff when ``changed_paths`` is empty only
+    because the planner forced full regression. Every other suite stays
+    complete; an ``affected_only`` suite runs in full only if that diff
+    affects it.
     """
     if not changed_paths:
-        return paths
+        if not diff_paths:
+            return paths
+        affected: dict[str, bool] = {}
+        kept = []
+        for path in paths:
+            owner = manifest.test_owner_for_path(path)
+            if owner.affected_only:
+                if owner.id not in affected:
+                    own = tuple(item for item in paths if manifest.test_owner_for_path(item) == owner)
+                    affected[owner.id] = bool(select_affected_test_suites(
+                        manifest, own, changed_paths=diff_paths, repo_root=repo_root))
+                if not affected[owner.id]:
+                    continue
+            kept.append(path)
+        return tuple(kept)
 
     @lru_cache(maxsize=1)
     def operator_graph() -> dict[str, set[str]]:
@@ -1695,7 +1733,7 @@ def _component_test_consumers(
 
 def selected_test_paths(
     manifest: Manifest, *, tracked_paths: tuple[str, ...], lane: str, repo_root: Path,
-    changed_paths: tuple[str, ...] = (), test_scope: str = "all",
+    changed_paths: tuple[str, ...] = (), diff_paths: tuple[str, ...] = (), test_scope: str = "all",
     shard_index: int = 0, shard_count: int = 1,
     shard_strategy: str | None = None, suite: str | None = None,
 ) -> tuple[str, ...]:
@@ -1714,8 +1752,8 @@ def selected_test_paths(
     # set, exactly as test_shard_matrix plans it. Selection never depends on
     # which files share a shard.
     selected = set(_selected_lane_paths(manifest, paths, changed_paths=changed_paths,
-                                        tracked_paths=tracked_paths, repo_root=repo_root,
-                                        test_scope=test_scope))
+                                        diff_paths=diff_paths, tracked_paths=tracked_paths,
+                                        repo_root=repo_root, test_scope=test_scope))
     paths = tuple(path for path in shard_paths(
         paths, shard_index=shard_index, shard_count=shard_count,
         strategy=policy.strategy if policy is not None else shard_strategy or "round-robin",
@@ -1730,12 +1768,13 @@ def selected_test_paths(
 def _selected_lane_paths(
     manifest: Manifest, paths: tuple[str, ...], *, changed_paths: tuple[str, ...],
     tracked_paths: tuple[str, ...], repo_root: Path, test_scope: str,
+    diff_paths: tuple[str, ...] = (),
 ) -> tuple[str, ...]:
     """The one selection contract shared by matrix planning and shard execution."""
     selected = narrow_test_only_changes(paths, changed_paths=changed_paths,
                                         tracked_paths=tracked_paths, repo_root=repo_root)
     selected = select_affected_test_suites(manifest, selected, changed_paths=changed_paths,
-                                           repo_root=repo_root)
+                                           repo_root=repo_root, diff_paths=diff_paths)
     return select_test_scope(manifest, selected, scope=test_scope)
 
 
@@ -1763,15 +1802,15 @@ def guest_payload_consumers(paths: tuple[str, ...], *, repo_root: Path) -> froze
 
 def test_shard_matrix(
     manifest: Manifest, *, tracked_paths: tuple[str, ...], lane: str, repo_root: Path,
-    changed_paths: tuple[str, ...] = (), test_scope: str = "all",
+    changed_paths: tuple[str, ...] = (), diff_paths: tuple[str, ...] = (), test_scope: str = "all",
 ) -> tuple[dict[str, Any], ...]:
     """Start only nonempty shards, retaining stable whole-module assignments."""
     paths = test_paths_for_lane(manifest, tracked_paths=tracked_paths, lane=lane)
     if not paths:
         raise ManifestError(f"CI lane has no tracked test paths: {lane}")
     selected_set = set(_selected_lane_paths(manifest, paths, changed_paths=changed_paths,
-                                            tracked_paths=tracked_paths, repo_root=repo_root,
-                                            test_scope=test_scope))
+                                            diff_paths=diff_paths, tracked_paths=tracked_paths,
+                                            repo_root=repo_root, test_scope=test_scope))
     policy = manifest.test_shard_policy(lane)
     count = policy.shard_count if policy is not None else 1
     guest_consumers = guest_payload_consumers(paths, repo_root=repo_root)
@@ -1959,6 +1998,8 @@ def _parser() -> argparse.ArgumentParser:
     test_paths.add_argument("--test-scope", choices=("all", "nebius"), default="all")
     test_paths.add_argument("--changed-paths-json", default="[]",
                             help="Narrow independent test-only edits; [] always runs the full lane.")
+    test_paths.add_argument("--diff-paths-json", default="[]",
+                            help="A PR's actual diff; gates affected_only suites when changed paths are [].")
     test_paths.add_argument("--shard-index", type=int, default=0)
     test_paths.add_argument("--shard-count", type=int, default=1)
     test_paths.add_argument(
@@ -2082,9 +2123,13 @@ def main(argv: list[str] | None = None) -> int:
             if not isinstance(changes, list) or not all(isinstance(path, str) for path in changes):
                 raise ManifestError("changed paths must be a JSON string array")
             changed_paths = tuple(_safe_path(path, context="changed path") for path in changes)
+            diff = json.loads(args.diff_paths_json)
+            if not isinstance(diff, list) or not all(isinstance(path, str) for path in diff):
+                raise ManifestError("diff paths must be a JSON string array")
+            diff_paths = tuple(_safe_path(path, context="diff path") for path in diff)
             paths = selected_test_paths(
                 manifest, tracked_paths=tracked_paths, lane=args.lane, repo_root=repo_root,
-                changed_paths=changed_paths, test_scope=args.test_scope,
+                changed_paths=changed_paths, diff_paths=diff_paths, test_scope=args.test_scope,
                 shard_index=args.shard_index, shard_count=args.shard_count,
                 shard_strategy=args.shard_strategy, suite=args.suite,
             )
