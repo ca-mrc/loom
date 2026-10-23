@@ -60,13 +60,23 @@ def github_pages(path: str) -> list[dict[str, Any]]:
 
 
 def github_job_log(job_id: int) -> str:
-    result = subprocess.run(
-        ["gh", "api", f"repos/{REPOSITORY}/actions/jobs/{job_id}/logs"],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=20,
-    )
+    endpoint = f"repos/{REPOSITORY}/actions/jobs/{job_id}/logs"
+
+    def read(*flags: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(["gh", "api", *flags, endpoint],
+                              check=True, capture_output=True, text=True, timeout=20)
+
+    try:
+        # This is a private machine read, never terminal output. Recent gh
+        # rejects normal Actions logs containing ANSI; retain their exact text
+        # for the existing checkout proof rather than stripping/reformatting.
+        result = read("--allow-escape-sequences")
+    except subprocess.CalledProcessError as error:
+        # Older clients do not have the flag. Retry only that local argument
+        # rejection; HTTP, permission and transport failures remain failures.
+        if (error.stderr or "").splitlines()[:1] != ["unknown flag: --allow-escape-sequences"]:
+            raise
+        result = read()
     if len(result.stdout) > 4 * 1024 * 1024:
         raise ValueError("checkout_log_too_large")
     return result.stdout

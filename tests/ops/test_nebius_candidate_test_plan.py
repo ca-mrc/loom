@@ -549,6 +549,56 @@ print(json.dumps(out))
     assert "required=false\n" in output.read_text()
 
 
+
+def test_native_cli_escape_guard_does_not_discard_verified_coverage(actions, monkeypatch, capsys):
+    pr = PullRequestActions()
+    original = subprocess.run
+    logs = []
+
+    def run(command, **kwargs):
+        if command[:2] != ["gh", "api"]:
+            return original(command, **kwargs)
+        assert command[-1].endswith("/logs")
+        job_id = int(command[-1].split("/")[-2])
+        if "--allow-escape-sequences" not in command:
+            raise subprocess.CalledProcessError(1, command, stderr=(
+                "the response contains terminal escape sequences; "
+                "pass --allow-escape-sequences to output it anyway\n"))
+        logs.append(job_id)
+        return subprocess.CompletedProcess(command, 0, pr.log(job_id) + "\n\x1b[31mprivate-log-output\x1b[0m", "")
+
+    monkeypatch.setattr(planner.subprocess, "run", run)
+    value = planner.plan(ROOT, SHA, read=pr.read)
+    assert value["reused_files"] == value["required_files"] > 0
+    assert value["missing_files"] == 0 and value["reused_runs"] == [10]
+    assert value["evidence_errors"] == [] and len(logs) == 20
+    assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize("failure", ["unsupported_flag", "permission", "transport", "api_message"])
+def test_job_log_compatibility_retries_only_unsupported_client_flag(monkeypatch, failure):
+    calls = []
+    reasons = {"unsupported_flag": "unknown flag: --allow-escape-sequences",
+               "permission": "gh: Forbidden (HTTP 403)", "transport": "connection reset",
+               "api_message": "gh: unknown flag: --allow-escape-sequences (HTTP 403)"}
+    text = "checkout evidence\n\x1b[31mprivate-log-output\x1b[0m"
+
+    def run(command, **kwargs):
+        calls.append(command)
+        if failure == "unsupported_flag" and "--allow-escape-sequences" not in command:
+            return subprocess.CompletedProcess(command, 0, text, "")
+        raise subprocess.CalledProcessError(1, command, stderr=reasons[failure])
+
+    monkeypatch.setattr(planner.subprocess, "run", run)
+    if failure == "unsupported_flag":
+        assert planner.github_job_log(100) == text
+        assert len(calls) == 2 and "--allow-escape-sequences" not in calls[-1]
+    else:
+        with pytest.raises(subprocess.CalledProcessError):
+            planner.github_job_log(100)
+        assert len(calls) == 1
+
+
 def test_metadata_reader_can_read_merged_prs_without_write_authority():
     workflow = yaml.safe_load((ROOT / ".github/workflows/nebius-candidate.yml").read_text())
     assert workflow["jobs"]["pool-ops-plan"]["permissions"] == {

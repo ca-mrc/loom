@@ -297,7 +297,7 @@ jobs:
               except (OSError, UnicodeError):
                   lines = []
                   print("Disposable image timings unavailable")
-              for line in lines[:8]:
+              for line in lines:
                   try:
                       record = json.loads(line)
                   except ValueError:

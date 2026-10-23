@@ -319,6 +319,14 @@ raw CLI stderr, response bodies, exception text and credentials are
 never emitted. Use the native candidate plan's diagnostics to distinguish API
 access from unavailable PR associations, checkout logs and checkout bindings;
 a later successful local read does not establish why the native read failed.
+The machine-only job-log reader explicitly allows terminal escape sequences:
+gh 2.102's raw-response guard otherwise rejects normal colored Actions logs.
+The captured log is never printed or stripped; the existing 4 MiB limit and
+exact pinned-checkout proof still apply. Older clients that reject the flag
+locally use their original raw reader; permission, HTTP and transport failures
+do not trigger that compatibility fallback. Remove the old-client fallback
+when the supported developer CLI minimum includes the flag (tracked in #2416).
+Candidate plans print the CLI version alongside their bounded diagnostics.
 There is no reuse across different Git trees or per-test-case cache. This is test scheduling,
 not an additional branch-admission gate. Image building, scanning and artifact
 qualification remain required, as do rollout idle protection, backup and rollback.
@@ -511,9 +519,11 @@ is built by its first actual runtime case, within that case's existing
 and every attempted image tag is cleaned up. Full-module coverage still builds
 and exercises both roles. This corrects an eager runtime build charged to a
 network-only case; it does not claim that the two builds' total work disappeared.
-The cluster job reports bounded stage/cache and wall-time records even on
-failure. Python and reaped-child CPU counters describe the test driver/client,
-not the build daemon; parallel BuildKit stage durations are not additive.
+The cluster job reports stage/cache and wall-time records within a 64 KiB read
+limit even on failure. It reads past earlier shared helper builds so the target
+module's later records are retained. Python and reaped-child CPU counters
+describe the test driver/client, not the build daemon; parallel BuildKit stage
+durations are not additive.
 
 Pod readiness retains its 60-second budget and Running/Ready predicate. Its
 read-only transport copies the original configuration, scoped headers and
