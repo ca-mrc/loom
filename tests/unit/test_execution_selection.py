@@ -230,3 +230,28 @@ def test_resolved_selection_reports_skipped_without_resolving_shared_or_separate
     assert execution_selection_readback(
         skipped.model_dump(mode="json", exclude_defaults=True), None,
     )["requested"]["verification"] == "skipped"
+
+
+@pytest.mark.parametrize(
+    ("agent", "mode", "skip", "declared", "rejected"),
+    [
+        ("terminus-2", "separate", False, False, True),
+        ("terminus-2", "separate", False, True, False),
+        ("terminus-2", "shared", False, False, False),
+        ("terminus-2", "separate", True, False, False),
+        ("direct-completion", "separate", False, False, False),
+    ],
+)
+def test_separate_verification_requires_declared_artifacts(agent, mode, skip, declared, rejected):
+    # #2589: a fresh verifier receives only declared artifacts. A workspace
+    # task that declares none, such as every TB2 task, is graded in place.
+    task, trial, profile = _inputs()
+    if not declared:
+        task = task.model_copy(update={"steps": [
+            step.model_copy(update={"artifacts": [], "required_artifacts": []}) for step in task.steps
+        ]})
+    trial = trial.model_copy(update={"agent_name": agent, "verifier_env_mode": mode, "skip_verifier": skip})
+
+    reasons = _reasons(task, trial, profile)
+
+    assert ("separate_verifier_requires_declared_artifacts" in reasons) is rejected

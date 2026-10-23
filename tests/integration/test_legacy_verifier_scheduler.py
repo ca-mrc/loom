@@ -42,6 +42,8 @@ async def test_scheduler_persists_revision_bound_default_before_admission(
             task = await session.get(Task, trial.task_id)
             shared = deepcopy(task.config)
             shared["verifier"]["env_mode"] = "shared"
+            # A fresh verifier receives only declared artifacts (#2589).
+            shared["steps"][0]["artifacts"] = ["answer.txt"]
             task.config = shared
             task.checksum = catalog_checksum
             task.legacy_separate_verifier_checksum = marker
@@ -97,5 +99,45 @@ async def test_scheduler_persists_revision_bound_default_before_admission(
             if guard_owned:
                 await release(session, owner="test-verifier-rollout", candidate="a" * 40)
                 await session.commit()
+            await _clean_image_links(session, trial_id)
+        await engine.dispose()
+
+
+async def test_scheduler_fails_a_legacy_separate_trial_without_declared_artifacts(postgres_url):
+    # #2589: the frozen default can make a queued trial separate after
+    # submission. It must fail that trial, not escape the scheduler loop.
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    trial_id = None
+    try:
+        async with sessions() as session:
+            trial_id, ids = await _seed_preparing_trial(session, now=now, state="ready")
+            trial = await session.get(Trial, trial_id)
+            task = await session.get(Task, trial.task_id)
+            shared = deepcopy(task.config)
+            shared["verifier"]["env_mode"] = "shared"
+            shared["steps"][0]["artifacts"] = []
+            task.config = shared
+            task.checksum = task.legacy_separate_verifier_checksum = "2" * 64
+            trial.config = {**trial.config, "verifier_env_mode": None}
+            for identity in ids.values():
+                image = await session.get(TaskImageMaterialization, identity)
+                image.task_config = deepcopy(shared)
+                if image.cpu_arch == "x86_64":
+                    image.registry_images = {"task": TASK_IMAGE}
+            await session.commit()
+
+            assert await reserve_next_service_execution(
+                session, environment="staging", pool_id="nebius-cpu",
+                image_admission_keyring=IMAGE_ADMISSION_KEYRING, now=now,
+            ) is None
+            await session.commit()
+            await session.refresh(trial)
+            assert trial.state == "failed" and trial.attempt_count == 0
+            assert trial.failure_reason == "service_execution_configuration_invalid"
+            assert "separate_verifier_requires_declared_artifacts" in trial.failure_message
+    finally:
+        async with sessions() as session:
             await _clean_image_links(session, trial_id)
         await engine.dispose()

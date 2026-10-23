@@ -847,8 +847,14 @@
       {
         "kind": "task_artifact",
         "relative_path": "artifacts/workspace.tar",
-        "required": true,
+        "required": false,
         "source_path": ".loom/workspace.tar"
+      },
+      {
+        "kind": "diagnostic",
+        "relative_path": "diagnostics/workspace-archive.json",
+        "required": false,
+        "source_path": ".loom/workspace-archive.json"
       },
       {
         "kind": "verifier",
@@ -1511,8 +1517,14 @@
       {
         "kind": "task_artifact",
         "relative_path": "artifacts/workspace.tar",
-        "required": true,
+        "required": false,
         "source_path": ".loom/workspace.tar"
+      },
+      {
+        "kind": "diagnostic",
+        "relative_path": "diagnostics/workspace-archive.json",
+        "required": false,
+        "source_path": ".loom/workspace-archive.json"
       },
       {
         "kind": "verifier",

@@ -11,7 +11,7 @@ import httpx
 import pytest
 
 from loom.driver.docker import DockerDriver
-from loom.driver.service_sandbox import ServiceSandboxDriver
+from loom.driver.service_sandbox import SandboxRPCError, ServiceSandboxDriver
 from loom.models.capabilities import Capabilities
 from loom.models.networking import NoNetwork
 from loom.trial.mutable_snapshot import export_mutable_paths, import_mutable_paths
@@ -67,7 +67,7 @@ async def acl_drivers(request, acl_image, native_binary, tmp_path):  # noqa: F81
                     try:
                         await driver.start()
                         break
-                    except (OSError, RuntimeError, httpx.TransportError):
+                    except (OSError, RuntimeError, httpx.TransportError, SandboxRPCError):
                         if attempt == 99:
                             raise
                         await asyncio.sleep(0.05)
