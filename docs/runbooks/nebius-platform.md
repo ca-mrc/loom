@@ -1621,6 +1621,18 @@ or repeat a failed backup automatically. Diagnose and fix the failure before an
 explicit operator attempt or the recovery operation below; a later successful
 deployment clears the automatic failure block.
 
+Failed kubectl commands retain a safe `reason_code` in the deployment receipt,
+alongside the existing phase and message. SSH exit 255 is classified from known
+client diagnostics as `SSHConnectTimeout`, `SSHConnectionClosed`,
+`SSHAuthenticationFailed`, or `SSHHostKeyFailed`; an unrecognized SSH failure is
+`SSHCommandFailed`. Exit 255 alone does not prove a transport failure because a
+remote command can return that status too. A process deadline is `CommandTimeout`.
+Kubernetes API reason codes and task-identity admission denials keep their existing
+precedence. Raw stderr, connection arguments and manifest content are not retained.
+These classifications do not retry commands, change deadlines or release a held
+guard. An older `CommandFailed` receipt cannot recover discarded diagnostics;
+inspect the available connection and phase evidence before an explicit recovery.
+
 For recovery, inspect the recorded phase, migration and workload state first.
 Fix the diagnosed cause, confirm the original workflow is terminal, and use the
 protected recovery operation for the existing single-primary integration platform:
