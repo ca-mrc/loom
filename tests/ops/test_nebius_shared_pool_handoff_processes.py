@@ -1,6 +1,9 @@
 """Shared handoff processes lifecycle regressions."""
 from __future__ import annotations
 
+from contextlib import nullcontext
+
+from tests.ops.test_nebius_development_pool_retained import system_kubectl as system_kubectl
 from tests.ops.test_nebius_shared_pool_handoff import (
     ROOT as ROOT,
 )
@@ -148,6 +151,9 @@ from tests.ops.test_nebius_shared_pool_handoff import (
 from tests.ops.test_nebius_shared_pool_handoff import (
     uuid4 as uuid4,
 )
+from tests.support.nebius_shared_pool_history import captured_predecessor_history
+
+pytestmark = [*pytestmark, pytest.mark.usefixtures('system_kubectl')]
 
 
 # Hosted-runner activation took 587s including its independent fixture.
@@ -159,8 +165,9 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
         shared_runtime, staging_history, staging_observation, completed_pool, handoff, monkeypatch, forward_processes):
     """Reject active old authority, failed real challenges and changed bindings.
 
-    Only Kubernetes transport and remote process output are doubled. Omitting a
-    required probe or using old staging templates must fail this connected test.
+    Initial binding and concrete activation connect real predecessor files.
+    Forward/recovery contracts capture those fixed disk inputs per case; current
+    child journals, process probes and every fault selector remain exercised.
     """
     import base64
     import hmac
@@ -610,10 +617,13 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
         assert checked == {'old-revoked', 'new-closed', 'telemetry', ('guard', 'loom-dev'), ('guard', staging.namespace),
             *((check, namespace, name) for namespace, name in roles for check in ('settings', 'database'))}
         assert 'private-test-only' not in repr(result)
+        history_io = (captured_predecessor_history(bindings=result.bindings, monkeypatch=monkeypatch)
+            if forward_processes in (True, 'recovery-databases') else nullcontext())
         if forward_processes in {'recovery-databases', 'recovery-processes'}:
-            _exercise_recovery_databases(bindings=result.bindings, documents=documents, mode=mode, checked=checked,
-                commands=commands, probes=probes, process_observation=forward_processes == 'recovery-processes',
-                args=dict(runtime=request, observation=staging_observation, legacy=staging_history, repo_root=ROOT))
+            with history_io:
+                _exercise_recovery_databases(bindings=result.bindings, documents=documents, mode=mode, checked=checked,
+                    commands=commands, probes=probes, process_observation=forward_processes == 'recovery-processes',
+                    args=dict(runtime=request, observation=staging_observation, legacy=staging_history, repo_root=ROOT))
             return
         if forward_processes:
             with HTTPSSharedPoolRuntimeProbes(bindings=result.bindings,
@@ -623,11 +633,12 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
                 for connection in (shared_probes, shared_probes.manager, shared_probes.foundation):
                     connection.client.close()
                     connection.client = type(completed_pool[3].api.client)(base_url=connection.api_server, transport=httpx.MockTransport(handle))
-                _exercise_forward_processes(bindings=result.bindings, development=shared_probes, documents=documents,
-                    mode=mode, checked=checked, commands=commands, add=add, calls=calls,
-                    activation_transport=forward_processes == 'activation',
-                    observation_only=forward_processes == 'process-observation',
-                    args=dict(runtime=request, observation=staging_observation, legacy=staging_history, repo_root=ROOT))
+                with history_io:
+                    _exercise_forward_processes(bindings=result.bindings, development=shared_probes, documents=documents,
+                        mode=mode, checked=checked, commands=commands, add=add, calls=calls,
+                        activation_transport=forward_processes == 'activation',
+                        observation_only=forward_processes == 'process-observation',
+                        args=dict(runtime=request, observation=staging_observation, legacy=staging_history, repo_root=ROOT))
             return
         baseline = copy.deepcopy(documents)
         for damage in ('old-active', 'new-not-closed', 'guard-held', 'settings:' + staging.namespace,
