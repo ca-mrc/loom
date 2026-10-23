@@ -24,7 +24,7 @@ class LocalFilesystemDriver(ServiceSandboxDriver):
         stdout, stderr = await process.communicate()
         return ExecResult(return_code=process.returncode, stdout=stdout, stderr=stderr, duration_sec=0)
 
-    async def upload(self, src, dst):
+    async def _upload_file(self, src, dst, *, workspace_archive=False):
         shutil.copyfile(src, str(dst))
 
 
