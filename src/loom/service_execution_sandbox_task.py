@@ -32,7 +32,12 @@ from loom.attempt_deadline import AttemptDeadline
 from loom.driver.service_sandbox import SandboxRPCError, ServiceSandboxDriver
 from loom.errors import AgentError, DriverError, exception_info
 from loom.execution_contract import effective_guest_capabilities
-from loom.harbor_verifier_script import VERIFIER_SCRIPT_PATH, offline_verifier_run_sh_bytes
+from loom.harbor_verifier_script import (
+    VERIFIER_SCRIPT_PATH,
+    native_verifier_run_sh_bytes,
+    native_verifier_workdir_run_sh_bytes,
+    offline_verifier_run_sh_bytes,
+)
 from loom.hosted_harness import (
     HARNESS_SETUP_PHASE,
     MAX_SETUP_CACHE_BYTES,
@@ -46,6 +51,7 @@ from loom.models.networking import NetworkPolicy, hosted_http_egress
 from loom.models.task import TaskConfig, normalize_steps
 from loom.models.trial import TrialConfig
 from loom.models.verifier import VerifierResult
+from loom.mutable_paths import validate_task_workdir
 from loom.service_execution_oracle import (
     ORACLE_SOLUTION_PATHS,
     oracle_usage,
@@ -85,15 +91,25 @@ from loom.verifier_runtime import resolve_verifier_env_mode
 _PRIVATE_PATHS = ("tests/**", "verifier/**", "solution/**", "upstream-task.toml", ".loom/**")
 _POLICY = WorkspaceStagingPolicy(_PRIVATE_PATHS, _PRIVATE_PATHS, ())
 _PRIVATE_VERIFIER_INPUT_ROOT = PurePosixPath("/loom/verifier/task")
+# Image preparation creates /loom/verifier for the resolved sandbox identity.
+# Keep trusted Oracle assets there, never in the business/Git working tree.
+_PRIVATE_ORACLE_SOLUTION_DIR = PurePosixPath("/loom/verifier/oracle/solution")
+
+
+def _harbor_verifier_kind(workspace: Path, task: TaskConfig) -> str | None:
+    """Recognize complete platform templates; custom/modified scripts stay native."""
+    if task.verifier.args.get("script_path") != VERIFIER_SCRIPT_PATH:
+        return None
+    wrapper = _safe_workspace_path(workspace, VERIFIER_SCRIPT_PATH)
+    templates = {"native": native_verifier_run_sh_bytes(), "offline": offline_verifier_run_sh_bytes()}
+    if not wrapper.is_file() or wrapper.stat().st_size not in {len(body) for body in templates.values()}:
+        return None
+    body = wrapper.read_bytes()
+    return next((kind for kind, expected in templates.items() if body == expected), None)
 
 
 def _uses_harbor_private_inputs(workspace: Path, task: TaskConfig) -> bool:
-    """Recognize only our complete immutable wrapper, never custom scripts."""
-    if task.verifier.args.get("script_path") != VERIFIER_SCRIPT_PATH:
-        return False
-    wrapper = _safe_workspace_path(workspace, VERIFIER_SCRIPT_PATH)
-    expected = offline_verifier_run_sh_bytes()
-    return wrapper.is_file() and wrapper.stat().st_size == len(expected) and wrapper.read_bytes() == expected
+    return _harbor_verifier_kind(workspace, task) is not None
 
 
 def _agent_input_exclusions(task: TaskConfig) -> tuple[str, ...]:
@@ -172,6 +188,15 @@ def sandbox_driver(role: str, task: TaskConfig, trial: TrialConfig) -> ServiceSa
             raise ServiceExecutionTaskError("guest_transfer_limit_invalid") from None
         if not 0 < max_transfer <= 10 * 1024**3:
             raise ServiceExecutionTaskError("guest_transfer_limit_invalid")
+    raw_archive_budget = os.environ.get("LOOM_WORKSPACE_MAX_ARCHIVE_BYTES")
+    try:
+        archive_budget = int(raw_archive_budget) if raw_archive_budget is not None else max_transfer
+    except ValueError:
+        raise ServiceExecutionTaskError("workspace_archive_limit_invalid") from None
+    if not 0 < archive_budget <= 10 * 1024**3:
+        raise ServiceExecutionTaskError("workspace_archive_limit_invalid")
+    if task.environment.storage_mb is not None:
+        archive_budget = min(archive_budget, task.environment.storage_mb * 1024**2)
     if hosted_http_egress(network_policy) is not None:
         url = urlsplit(os.environ.get("LOOM_TASK_EGRESS_PROXY", ""))
         if url.scheme != "http" or url.hostname != "127.0.0.1" or not url.port:
@@ -187,6 +212,7 @@ def sandbox_driver(role: str, task: TaskConfig, trial: TrialConfig) -> ServiceSa
         network_policy=network_policy,
         command_environment=command_environment,
         max_transfer_bytes=max_transfer,
+        max_workspace_archive_bytes=archive_budget,
     )
 
 
@@ -475,6 +501,12 @@ async def run_agent(
     # workdir belong to the resolved runtime environment. Freeze exclusions
     # before the sandbox can return a task-controlled replacement task.toml.
     input_exclusions = _agent_input_exclusions(original_task if original_task is not None else task)
+    harbor_inputs = _uses_harbor_private_inputs(workspace, task)
+    if harbor_inputs:
+        # The existing image/workdir contract forbids /, /tmp and overlap with
+        # protected verifier roots. Do not invent a privileged fallback path.
+        validate_task_workdir(task.environment.workdir)
+        input_exclusions += tuple(escape(str(step.instruction_file)) for step in task.steps)
     raw_deadline = os.environ.get("LOOM_EXECUTION_PHASE_DEADLINE")
     deadline = AttemptDeadline.from_wall_deadline(float(raw_deadline)) if raw_deadline else None
     grace = float(os.environ.get("LOOM_EXECUTION_TERMINATION_GRACE_SECONDS", "30"))
@@ -492,6 +524,7 @@ async def run_agent(
     lifecycle = task.environment.service_lifecycle
     spec = _workspace_spec(trial)
     solution_staged = False
+    solution_dir = _PRIVATE_ORACLE_SOLUTION_DIR if harbor_inputs else None
     timed_out = False
     finalizing = False
     termination_signals = 0
@@ -521,8 +554,14 @@ async def run_agent(
                 await materialize_workspace(
                     driver=driver, task_dir=workspace, dst=task.environment.workdir, policy=_POLICY,
                     excluded_paths=input_exclusions,
-                    trusted_private_paths=ORACLE_SOLUTION_PATHS if spec.stages_solution else (),
+                    trusted_private_paths=(
+                        ORACLE_SOLUTION_PATHS if spec.stages_solution and not harbor_inputs else ()
+                    ),
                 )
+                if spec.stages_solution and solution_dir is not None:
+                    await materialize_workspace(
+                        driver=driver, task_dir=workspace / "solution", dst=solution_dir,
+                    )
                 if task.environment.preserve_acls:
                     from loom.trial.workspace_acls import require_acl_support
 
@@ -552,6 +591,8 @@ async def run_agent(
                     await run_oracle(
                         driver=driver, task_dir=workspace, workspace=output, task_config=task,
                         trial_config=trial, trial_id=trial_id, deadline=deadline,
+                        solution_dir=solution_dir,
+                        execution_cwd=task.environment.workdir if harbor_inputs else None,
                     )
                 elif spec.controller_phase == "terminus-2":
                     await run_terminus2(
@@ -622,7 +663,9 @@ async def run_agent(
                     if solution_staged and driver_started:
                         # Before the snapshot, and before an in-place verifier
                         # refuses planted private paths.
-                        await remove_oracle_solution(driver, task.environment.workdir)
+                        await remove_oracle_solution(
+                            driver, task.environment.workdir, solution_dir=solution_dir,
+                        )
                     if agent_entered:
                         archive = workspace / ".loom/workspace.tar"
                         await _export_workspace_archive(
@@ -726,8 +769,11 @@ async def _run_verifier(
     begin_cleanup: Callable[[], None],
 ) -> None:
     in_place = resolve_verifier_env_mode(task, trial) == "shared"
-    separate_private_inputs = (not in_place) and _uses_harbor_private_inputs(workspace, task)
-    input_root = _PRIVATE_VERIFIER_INPUT_ROOT if separate_private_inputs else task.environment.workdir
+    harbor_kind = _harbor_verifier_kind(workspace, task)
+    if harbor_kind is not None:
+        validate_task_workdir(task.environment.workdir)
+    private_inputs = harbor_kind is not None
+    input_root = _PRIVATE_VERIFIER_INPUT_ROOT if private_inputs else task.environment.workdir
     driver = sandbox_driver("task-sandbox" if in_place else "verifier-sandbox", task, trial)
     driver_started = False
     failure: BaseException | None = None
@@ -784,7 +830,7 @@ async def _run_verifier(
                     reference_symlinks=task.environment.reference_file_symlinks,
                 )
         remote_output = (
-            _PRIVATE_VERIFIER_INPUT_ROOT.parent / "output.json" if separate_private_inputs
+            _PRIVATE_VERIFIER_INPUT_ROOT.parent / "output.json" if private_inputs
             else task.environment.workdir / ".loom/verifier/output.json"
         )
         # The trusted file RPC creates parents under the runtime identity and
@@ -793,13 +839,22 @@ async def _run_verifier(
         with tempfile.NamedTemporaryFile() as empty_report:
             await driver.upload(Path(empty_report.name), remote_output)
         script_path = str(task.verifier.args["script_path"])
-        if separate_private_inputs:
+        if private_inputs:
             script_path = str(input_root / script_path)
+            if harbor_kind == "native":
+                # Keep the imported wrapper immutable. The trusted runtime
+                # bridge runs original test.sh against the business cwd.
+                bridge_path = input_root.parent / "run.sh"
+                with tempfile.NamedTemporaryFile() as bridge:
+                    Path(bridge.name).write_bytes(native_verifier_workdir_run_sh_bytes())
+                    await driver.upload(Path(bridge.name), bridge_path)
+                script_path = str(bridge_path)
         result = await driver.exec(
             "/bin/sh " + shlex.quote(script_path),
             cwd=task.environment.workdir,
             env={"LOOM_TASK_DIR": str(input_root),
-                 "LOOM_VERIFIER_OUTPUT": str(remote_output)},
+                 "LOOM_VERIFIER_OUTPUT": str(remote_output),
+                 **({"LOOM_HARBOR_WORKDIR": str(task.environment.workdir)} if private_inputs else {})},
             timeout_sec=(trial.override_verifier_timeout_sec or task.verifier.timeout_sec)
             * trial.verifier_timeout_multiplier,
         )

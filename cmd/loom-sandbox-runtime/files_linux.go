@@ -69,6 +69,13 @@ func readFile(path string) (*os.File, error) {
 	return f, nil
 }
 
+func sameFileReadVersion(before, after os.FileInfo) bool {
+	b, bok := before.Sys().(*syscall.Stat_t)
+	a, aok := after.Sys().(*syscall.Stat_t)
+	return bok && aok && os.SameFile(before, after) && before.Size() == after.Size() &&
+		before.ModTime() == after.ModTime() && b.Ctim == a.Ctim
+}
+
 // Read only the literal link text. Pin its parent using the same no-follow
 // traversal as file transfers; readlinkat never dereferences the leaf.
 func readSymlink(path string) (string, error) {
