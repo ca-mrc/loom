@@ -484,11 +484,14 @@ def test_cli_reports_safe_native_reader_failure_and_preserves_fallback(tmp_path)
     result = subprocess.run([sys.executable, str(ROOT / "scripts/ops/nebius_pool_test_plan.py"),
                              "--candidate", head], cwd=ROOT, env=env, capture_output=True, text=True, check=True)
     value = json.loads(result.stdout)
-    assert value["evidence_errors"] == [
-        {"stage": "merge_group_runs", "error": "github_cli", "http_status": 403},
-        {"stage": "candidate_commit", "error": "github_cli", "http_status": 403},
-    ]
-    assert value["required"] and value["missing_files"] == value["required_files"] > 0
+    # The CLI only plans the checked-out HEAD. Squash-reuse lookup runs only
+    # when HEAD's changes select pool tests, which a PR merge may not.
+    expected = [{"stage": "merge_group_runs", "error": "github_cli", "http_status": 403}]
+    if value["required_files"]:
+        expected.append({"stage": "candidate_commit", "error": "github_cli", "http_status": 403})
+    assert value["evidence_errors"] == expected
+    assert value["required"] == (value["missing_files"] == value["required_files"] > 0)
+    assert value["missing_files"] == value["required_files"]
     assert "synthetic-secret" not in result.stdout + result.stderr
     assert "Authorization" not in result.stdout + result.stderr
 

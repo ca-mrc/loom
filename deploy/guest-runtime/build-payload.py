@@ -33,56 +33,70 @@ def download(item: dict[str, object], directory: Path) -> Path:
     if destination.exists() and digest(destination) == expected:
         return destination
     partial = destination.with_suffix(".partial")
-    url = str(item["url"])
-    if not url.startswith("https://"):
-        raise ValueError(f"archive URL must use HTTPS: {url}")
+    # The mirror is fast but drops superseded files (404); the fallback is the
+    # permanent Launchpad Librarian copy of the same bytes.
+    sources = [str(item["url"]), *([str(item["fallback_url"])] if "fallback_url" in item else [])]
+    for url in sources:
+        if not url.startswith("https://"):
+            raise ValueError(f"archive URL must use HTTPS: {url}")
     try:
-        for attempt in range(1, 4):
-            failure: URLError | TimeoutError | None = None
-            reason = "connection timeout"
-            try:
-                response = urlopen(url, timeout=120)
-            except HTTPError as error:
-                error.close()
-                failure = error
-                reason = f"HTTP {error.code}"
-            except URLError as error:
-                if not isinstance(error.reason, TimeoutError):
-                    raise
-                failure = error
-            except TimeoutError as error:
-                failure = error
-            else:
-                with response, partial.open("wb") as output:
-                    while True:
-                        try:
-                            chunk = response.read(64 * 1024)
-                        except TimeoutError as error:
-                            # Restart a timed-out body from byte zero. Keep
-                            # local cache I/O outside this transport boundary.
-                            failure = error
-                            reason = "body timeout"
-                            break
-                        if not chunk:
-                            break
-                        output.write(chunk)
+        for index, url in enumerate(sources):
+            failure = _fetch(url, partial, expected, last_source=index == len(sources) - 1)
             if failure is None:
                 break
-            partial.unlink(missing_ok=True)
-            print(
-                f"guest archive {expected}: {reason}, attempt {attempt}/3",
-                file=sys.stderr,
-                flush=True,
-            )
-            if (isinstance(failure, HTTPError) and failure.code not in {500, 502, 503, 504}) or attempt == 3:
-                raise failure
-            time.sleep(attempt)
         if partial.stat().st_size != item["bytes"] or digest(partial) != expected:
             raise ValueError(f"archive content does not match source lock: {url}")
         partial.replace(destination)
         return destination
     finally:
         partial.unlink(missing_ok=True)
+
+
+def _fetch(url: str, partial: Path, expected: str, *, last_source: bool) -> HTTPError | None:
+    """Download url into partial; return the 404 to fall back on, or raise."""
+    for attempt in range(1, 4):
+        failure: URLError | TimeoutError | None = None
+        reason = "connection timeout"
+        try:
+            response = urlopen(url, timeout=120)
+        except HTTPError as error:
+            error.close()
+            failure = error
+            reason = f"HTTP {error.code}"
+        except URLError as error:
+            if not isinstance(error.reason, TimeoutError):
+                raise
+            failure = error
+        except TimeoutError as error:
+            failure = error
+        else:
+            with response, partial.open("wb") as output:
+                while True:
+                    try:
+                        chunk = response.read(64 * 1024)
+                    except TimeoutError as error:
+                        # Restart a timed-out body from byte zero. Keep
+                        # local cache I/O outside this transport boundary.
+                        failure = error
+                        reason = "body timeout"
+                        break
+                    if not chunk:
+                        break
+                    output.write(chunk)
+        if failure is None:
+            return None
+        partial.unlink(missing_ok=True)
+        print(
+            f"guest archive {expected}: {reason}, attempt {attempt}/3",
+            file=sys.stderr,
+            flush=True,
+        )
+        if isinstance(failure, HTTPError) and failure.code == 404 and not last_source:
+            return failure
+        if (isinstance(failure, HTTPError) and failure.code not in {500, 502, 503, 504}) or attempt == 3:
+            raise failure
+        time.sleep(attempt)
+    raise AssertionError("attempt loop always returns or raises")
 
 
 def run(*args: str | Path) -> str:
