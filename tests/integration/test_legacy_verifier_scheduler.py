@@ -117,6 +117,7 @@ async def test_scheduler_fails_a_legacy_separate_trial_without_declared_artifact
             task = await session.get(Task, trial.task_id)
             shared = deepcopy(task.config)
             shared["verifier"]["env_mode"] = "shared"
+            shared["steps"][0]["artifacts"] = []
             task.config = shared
             task.checksum = task.legacy_separate_verifier_checksum = "2" * 64
             trial.config = {**trial.config, "verifier_env_mode": None}
