@@ -151,10 +151,10 @@ async def test_snapshot_hooks_preserve_public_files_without_root(tmp_path: Path)
                 return_code=process.returncode, stdout=stdout, stderr=stderr, duration_sec=0
             )
 
-        async def upload(self, src, dst):
+        async def _upload_file(self, src, dst, **kwargs):
             shutil.copyfile(src, str(dst))
 
-        async def download(self, src, dst):
+        async def _download_file(self, src, dst, **kwargs):
             shutil.copyfile(str(src), dst)
 
     base = driver_for(tmp_path / "unused.sock")
@@ -420,3 +420,339 @@ async def test_unreachable_sandbox_fails_start_with_a_safe_code(tmp_path: Path) 
         await driver.start()
     with pytest.raises(DriverNotStartedError):
         await driver.exec("true")
+
+
+@pytest.mark.asyncio
+async def test_download_http_rejection_keeps_status_and_safe_byte_diagnostics(tmp_path: Path) -> None:
+    import httpx
+
+    driver = driver_for(tmp_path / "unused.sock", limit=8)
+    target = tmp_path.resolve() / "download"
+    target.write_bytes(b"old")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(
+        413, headers={"X-Loom-Sandbox-Error": "file_too_large",
+                      "X-Loom-File-Size": "9", "X-Loom-File-Limit": "8"},
+        text="private-path private-body",
+    )), base_url="http://sandbox") as client:
+        driver._client = client
+        with pytest.raises(SandboxRPCError) as failure:
+            await driver.download(PurePosixPath("/private-path"), target)
+    assert "HTTP 413; file_too_large" in str(failure.value)
+    assert "download" in str(failure.value) and "bytes=9" in str(failure.value)
+    assert "limit=8" in str(failure.value) and "private-" not in str(failure.value)
+    assert target.read_bytes() == b"old"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("declared", ["4", "9"])
+async def test_download_inexact_body_does_not_publish_incomplete_file(tmp_path: Path, declared: str) -> None:
+    import httpx
+
+    driver = driver_for(tmp_path / "unused.sock")
+    target = tmp_path.resolve() / "download"
+    target.write_bytes(b"old")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(
+        200, content=b"short", headers={"Content-Length": declared},
+    )), base_url="http://sandbox") as client:
+        driver._client = client
+        with pytest.raises(DriverError, match="declared size"):
+            await driver.download(PurePosixPath("/app/file"), target)
+    assert target.read_bytes() == b"old"
+    assert sorted(p.name for p in target.parent.iterdir()) == ["download"]
+
+
+@pytest.mark.asyncio
+async def test_workspace_archives_stream_both_ways_with_separate_budget(tmp_path: Path) -> None:
+    import io
+    import tarfile
+
+    import httpx
+
+    from loom.models.exec import ExecResult
+
+    content = b"workspace" * 1000
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as tar:
+        info = tarfile.TarInfo("result.txt")
+        info.size = len(content)
+        tar.addfile(info, io.BytesIO(content))
+    payload = buffer.getvalue()
+    requests = []
+    class ArchiveDriver(ServiceSandboxDriver):
+        async def exec(self, cmd, **kwargs):
+            return ExecResult(return_code=0, stdout=b"", stderr=b"", duration_sec=0)
+    base = driver_for(tmp_path / "unused.sock", limit=8)
+    driver = ArchiveDriver(tmp_path / "unused.sock", capabilities=base.capabilities,
+        network_policy=Public(), max_transfer_bytes=8, max_workspace_archive_bytes=len(payload))
+    async def handle(request):
+        requests.append((request.method, request.url.path))
+        if request.url.path == "/file":
+            return httpx.Response(413, headers={"X-Loom-Sandbox-Error": "file_too_large"})
+        assert request.url.path == "/workspace-archive"
+        assert request.url.params["path"].startswith("/tmp/loom-workspace-")
+        if request.method == "GET":
+            return httpx.Response(200, content=payload)
+        assert int(request.headers["Content-Length"]) == len(payload)
+        body = bytearray()
+        async for chunk in request.stream:
+            assert len(chunk) <= 1024 * 1024
+            body.extend(chunk)
+        assert bytes(body) == payload
+        return httpx.Response(204)
+    archive = tmp_path.resolve() / "archive.tar"
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle), base_url="http://sandbox") as client:
+        driver._client = client
+        await driver.export_workspace_archive(PurePosixPath("/app"), archive)
+        assert archive.read_bytes() == payload
+        await driver.import_workspace_archive(archive, PurePosixPath("/app"))
+        with pytest.raises(DriverError, match="transfer limit"):
+            await driver.upload(archive, PurePosixPath("/app/ordinary"))
+        with pytest.raises(SandboxRPCError, match="HTTP 413"):
+            await driver.download(PurePosixPath("/app/ordinary"), archive)
+    assert requests == [("GET", "/workspace-archive"), ("PUT", "/workspace-archive"), ("GET", "/file")]
+    assert archive.read_bytes() == payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("workspace", [False, True])
+async def test_download_interruption_is_atomic_and_safe(tmp_path: Path, workspace: bool) -> None:
+    import httpx
+
+    class Interrupted(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"part"
+            raise httpx.ReadError("private-path private-body")
+    driver = driver_for(tmp_path / "unused.sock", limit=16)
+    target = tmp_path.resolve() / "download"
+    target.write_bytes(b"old")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(
+        200, headers={"Content-Length": "8"}, stream=Interrupted(),
+    )), base_url="http://sandbox") as client:
+        driver._client = client
+        with pytest.raises(SandboxRPCError) as failure:
+            await driver._download_file(PurePosixPath("/tmp/loom-workspace-" + "a"*32 + ".tar"),
+                                        target, workspace_archive=workspace)
+    assert "transport_error" in str(failure.value) and "private-" not in str(failure.value)
+    assert target.read_bytes() == b"old" and not driver._requests
+    assert [p.name for p in target.parent.iterdir()] == ["download"]
+
+
+@pytest.mark.asyncio
+async def test_workspace_download_rejects_oversized_metadata_before_body(tmp_path: Path) -> None:
+    import httpx
+
+    class Unreadable(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            raise AssertionError("oversized body must not be read")
+            yield b""
+    driver = driver_for(tmp_path / "unused.sock", limit=8)
+    target = tmp_path.resolve() / "archive.tar"
+    target.write_bytes(b"old")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(
+        200, headers={"Content-Length": "9"}, stream=Unreadable(),
+    )), base_url="http://sandbox") as client:
+        driver._client = client
+        with pytest.raises(DriverError, match="transfer limit"):
+            await driver._download_file(PurePosixPath("/tmp/loom-workspace-" + "a"*32 + ".tar"),
+                                        target, workspace_archive=True)
+    assert target.read_bytes() == b"old"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mutation", [b"tiny", b"changed!", b"grown-data"])
+async def test_upload_detects_source_change_even_with_original_body_already_read(tmp_path: Path, mutation: bytes) -> None:
+    import httpx
+
+    source = tmp_path / "source"
+    source.write_bytes(b"original")
+    driver = driver_for(tmp_path / "unused.sock", limit=16)
+    async def handle(request):
+        async for chunk in request.stream:
+            assert chunk == b"origina"
+            source.write_bytes(mutation)
+        return httpx.Response(204)
+    class MutatingReceiver(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            return await handle(request)
+    async with httpx.AsyncClient(transport=MutatingReceiver(), base_url="http://sandbox") as client:
+        driver._client = client
+        with pytest.raises(DriverError, match=r"source (changed|grew)"):
+            await driver.upload(source, PurePosixPath("/app/file"))
+
+
+@pytest.mark.asyncio
+async def test_workspace_transfer_streams_more_than_one_chunk_and_rejects_import_budget(tmp_path: Path) -> None:
+    import httpx
+
+    payload = b"archive" * 400_000
+    source = tmp_path / "source"
+    source.write_bytes(payload)
+    base = driver_for(tmp_path / "unused.sock", limit=8)
+    driver = ServiceSandboxDriver(tmp_path / "unused.sock", capabilities=base.capabilities,
+        network_policy=Public(), max_transfer_bytes=8, max_workspace_archive_bytes=len(payload))
+    class ArchiveStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            for start in range(0, len(payload), 512 * 1024):
+                yield payload[start:start + 512 * 1024]
+    class StreamingTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            assert request.url.path == "/workspace-archive"
+            if request.method == "GET":
+                return httpx.Response(200, stream=ArchiveStream(), headers={"Content-Length": str(len(payload))})
+            sizes = []
+            received = bytearray()
+            async for chunk in request.stream:
+                sizes.append(len(chunk))
+                received.extend(chunk)
+            assert len(sizes) > 1 and max(sizes) <= 1024 * 1024
+            assert bytes(received) == payload
+            return httpx.Response(204)
+    destination = tmp_path.resolve() / "downloaded"
+    remote = PurePosixPath("/tmp/loom-workspace-" + "a" * 32 + ".tar")
+    async with httpx.AsyncClient(transport=StreamingTransport(), base_url="http://sandbox") as client:
+        driver._client = client
+        await driver._upload_file(source, remote, workspace_archive=True)
+        await driver._download_file(remote, destination, workspace_archive=True)
+        assert destination.read_bytes() == payload
+        source.write_bytes(payload + b"x")
+        with pytest.raises(DriverError, match="transfer limit"):
+            await driver._upload_file(source, remote, workspace_archive=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", ["-1", "private-path", str(2**63)])
+async def test_file_http_diagnostics_discard_untrusted_header_text(tmp_path: Path, size: str) -> None:
+    import httpx
+
+    driver = driver_for(tmp_path / "unused.sock")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(413,
+        headers={"X-Loom-Sandbox-Error": "private-path", "X-Loom-File-Size": size,
+                 "X-Loom-File-Limit": "private-body"})), base_url="http://sandbox") as client:
+        driver._client = client
+        with pytest.raises(SandboxRPCError) as failure:
+            await driver.download(PurePosixPath("/private-path"), tmp_path.resolve() / "output")
+    assert str(failure.value) == "sandbox file_transfer download failed (HTTP 413; http_error)"
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_workspace_download_without_publishing_partial_file(tmp_path: Path) -> None:
+    import httpx
+
+    started = asyncio.Event()
+    closed = asyncio.Event()
+    class PendingArchive(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"part"
+            started.set()
+            await asyncio.Event().wait()
+        async def aclose(self):
+            closed.set()
+    driver = driver_for(tmp_path / "unused.sock")
+    target = tmp_path.resolve() / "archive.tar"
+    target.write_bytes(b"old")
+    driver._client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(
+        200, stream=PendingArchive(), headers={"Content-Length": "8"})), base_url="http://sandbox")
+    transfer = asyncio.create_task(driver._download_file(
+        PurePosixPath("/tmp/loom-workspace-" + "a" * 32 + ".tar"), target, workspace_archive=True))
+    await asyncio.wait_for(started.wait(), timeout=1)
+    await driver.stop()
+    assert transfer.cancelled() and closed.is_set() and not driver._requests
+    assert target.read_bytes() == b"old"
+    assert [p.name for p in target.parent.iterdir()] == ["archive.tar"]
+
+
+@pytest.mark.asyncio
+async def test_changed_upload_does_not_complete_real_http_body(tmp_path: Path, monkeypatch) -> None:
+    """An HTTP receiver commits at Content-Length, not iterator completion."""
+    import io
+    import tempfile
+
+    import httpx
+
+    remote = b"old"
+    handled = asyncio.Event()
+    async def receive(reader, writer):
+        nonlocal remote
+        try:
+            headers = (await reader.readuntil(b"\r\n\r\n")).decode().split("\r\n")
+            length = next(int(h.split(":", 1)[1]) for h in headers if h.lower().startswith("content-length:"))
+            remote = await reader.readexactly(length)
+            writer.write(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            await writer.drain()
+        except asyncio.IncompleteReadError:
+            pass
+        finally:
+            writer.close()
+            await writer.wait_closed()
+            handled.set()
+    source = tmp_path / "source"
+    source.write_bytes(b"A" * (2 * 1024 * 1024))
+    original = asyncio.to_thread
+    reads = 0
+    async def mutate_after_read(fn, *args, **kwargs):
+        nonlocal reads
+        result = await original(fn, *args, **kwargs)
+        if getattr(fn, "__name__", "") == "read" and isinstance(getattr(fn, "__self__", None), io.BufferedReader):
+            reads += 1
+            if reads == 2:
+                with source.open("r+b") as output:
+                    output.write(b"B")
+        return result
+    monkeypatch.setattr(asyncio, "to_thread", mutate_after_read)
+    with tempfile.TemporaryDirectory(dir="/tmp", prefix="loom-upload-") as directory:
+        socket = Path(directory) / "rpc.sock"
+        server = await asyncio.start_unix_server(receive, path=socket)
+        driver = driver_for(socket, limit=4 * 1024 * 1024)
+        async with server, httpx.AsyncClient(transport=httpx.AsyncHTTPTransport(uds=str(socket)), base_url="http://sandbox") as client:
+            driver._client = client
+            with pytest.raises(DriverError, match="source changed"):
+                await driver._upload_file(source, PurePosixPath("/tmp/loom-workspace-" + "a" * 32 + ".tar"), workspace_archive=True)
+            await asyncio.wait_for(handled.wait(), timeout=1)
+    assert reads == 2 and remote == b"old"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", [b"", b"x"])
+async def test_upload_empty_and_single_byte_files_complete(tmp_path: Path, payload: bytes) -> None:
+    import httpx
+
+    source = tmp_path / "source"
+    source.write_bytes(payload)
+    driver = driver_for(tmp_path / "unused.sock")
+    class Receiver(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            received = b"".join([chunk async for chunk in request.stream])
+            assert received == payload
+            assert int(request.headers["Content-Length"]) == len(payload)
+            return httpx.Response(204)
+    async with httpx.AsyncClient(transport=Receiver(), base_url="http://sandbox") as client:
+        driver._client = client
+        await driver._upload_file(source, PurePosixPath("/tmp/loom-workspace-" + "a" * 32 + ".tar"), workspace_archive=True)
+
+
+@pytest.mark.asyncio
+async def test_empty_upload_changed_before_request_never_sends_headers(tmp_path: Path, monkeypatch) -> None:
+    import os
+
+    import httpx
+
+    source = tmp_path / "source"
+    source.write_bytes(b"")
+    driver = driver_for(tmp_path / "unused.sock")
+    original = os.fstat
+    calls = 0
+    def mutate_after_stat(fd):
+        nonlocal calls
+        info = original(fd)
+        calls += 1
+        if calls == 1:
+            source.write_bytes(b"grown")
+        return info
+    monkeypatch.setattr(os, "fstat", mutate_after_stat)
+    class NoRequest(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            raise AssertionError("zero-length body can commit at headers; validate before sending")
+    async with httpx.AsyncClient(transport=NoRequest(), base_url="http://sandbox") as client:
+        driver._client = client
+        with pytest.raises(DriverError, match="source grew"):
+            await driver._upload_file(source, PurePosixPath("/tmp/loom-workspace-" + "a" * 32 + ".tar"), workspace_archive=True)

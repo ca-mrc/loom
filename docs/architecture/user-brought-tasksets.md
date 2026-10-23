@@ -103,6 +103,23 @@ or `file_invalid_target`. Raw filesystem errors, paths and uploaded contents
 are never included in the RPC error. An upload failure precedes Oracle/model
 execution and must not be counted as a verifier score of zero.
 
+For the platform's exact native/offline Harbor verifier bridges, runtime inputs
+and reports are staged outside the task's business workdir, including shared
+verification. Instructions are passed from the controller rather than uploaded
+into a task-owned Git tree. Oracle's reference assets are staged privately and
+the script executes from the resolved task workdir; ordinary Loom Oracles keep
+their solution-sibling working-directory contract. Original Harbor test scripts
+and imported wrapper bytes remain unchanged.
+
+Workspace archive transfer uses a dedicated, bounded streaming channel for
+runtime-generated temporary archive names. Its budget comes from the frozen
+artifact/storage limits; the ordinary single-file transfer limit is unchanged.
+Both export and import retain atomic publication, exact-length validation and
+symlink restrictions. Transfer failures identify the operation, HTTP status and
+fixed reason (plus bounded size/limit values), never raw paths or response bodies.
+This transport boundary does not change whether an archive is required for
+grading or used for verifier handoff.
+
 ## Storage limits
 
 TaskSets have no per-team count limit. Both ordinary submission and deployment
