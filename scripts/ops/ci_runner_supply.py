@@ -25,7 +25,7 @@ SOURCE_WORKFLOWS = frozenset(
 )
 SOURCE_REPOSITORY = "ca-mrc/loom"
 SECRET_PREFIX = "LOOM_CI_HOSTED_JIT_"
-GRAPH_CACHE_VERSION = 2
+GRAPH_CACHE_VERSION = 3
 
 
 class SupplyError(RuntimeError):
@@ -65,7 +65,11 @@ def name_pattern(job_id: str, job: dict[str, Any]) -> re.Pattern[str]:
         return re.compile(r"^" + prefix + re.escape(source_id) + r"(?:-filtered)?$")
     if not any(parts):
         raise SupplyError("unsupported expression-only job name")
-    return re.compile("^" + prefix + ".+?".join(re.escape(part) for part in parts) + "$")
+    # GitHub appends matrix values when a matrix job has a static name; long
+    # values may be truncated before the closing parenthesis. Non-matrix and
+    # expression-named jobs retain their exact existing matching rules.
+    suffix = r"(?: \(.+)?" if job.get("matrix") and len(parts) == 1 else ""
+    return re.compile("^" + prefix + ".+?".join(re.escape(part) for part in parts) + suffix + "$")
 
 
 def ready_jobs(jobs: list[dict[str, Any]], workflow: dict[str, Any]) -> list[dict[str, Any]]:
@@ -132,6 +136,8 @@ def source_graph(api: API, path: str, sha: str) -> dict[str, Any]:
                 raise SupplyError("unsupported job dependency graph")
             definition = {"name": value.get("name", job_id), "name_prefix": name_prefix,
                           "needs": inherited + [key_prefix + item for item in needs]}
+            if isinstance(value.get("strategy"), dict) and "matrix" in value["strategy"]:
+                definition["matrix"] = True
             definitions[key] = definition
             added.append(key)
             if "uses" in value:

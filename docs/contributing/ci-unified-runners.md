@@ -65,9 +65,11 @@ never enters Actions secrets or job environments.
 CI calls image, cluster and staging validation after fast feedback. GitHub names
 those jobs with the caller prefix, for example `images-validation / image plan`.
 The hosted-supply controller must understand both nested dependencies and the
-runner-free call nodes. The version-2 graph reader resolves only local workflow
+runner-free call nodes. The version-3 graph reader resolves only local workflow
 files at the same source-run SHA and invalidates old graph/count caches. It does
-not execute workflow contents or read a moving branch.
+not execute workflow contents or read a moving branch. It retains matrix metadata
+so static job names with GitHub's appended or truncated matrix values still
+contribute to demand and unblock their dependent result jobs.
 
 A source PR does not update the installed controller. Until the reviewed
 `ci_runner_supply.py` has been installed through the existing management-host
