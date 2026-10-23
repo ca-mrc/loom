@@ -50,6 +50,7 @@ def _harbor_shaped_config(**env_updates: object) -> dict:
         "verifier": {
             "name": "script",
             "user": "root",
+            "env_mode": "separate",
             "args": {"script_path": DEFAULT_VERIFIER_SCRIPT_PATH},
         },
         "steps": [{"name": "main", "instruction_file": "instruction.md"}],
@@ -97,7 +98,7 @@ def test_adapt_fills_resources_forces_gateway_and_verifier(tmp_path: Path) -> No
     assert env["network_policies_supported"] == ["gateway-only"]
     assert env["baseline_network_policy"] == {"kind": "gateway-only"}
     assert adapted["verifier"]["user"] == "root"
-    assert adapted["verifier"]["env_mode"] == "shared"
+    assert adapted["verifier"]["env_mode"] == "separate"
     assert adapted["verifier"]["args"]["script_path"] == VERIFIER_SCRIPT_PATH
     assert adapted["verifier"]["args"] == {"script_path": VERIFIER_SCRIPT_PATH}
     assert stats.resources_filled
@@ -350,19 +351,3 @@ def test_ingest_preserves_explicit_web_allowlist_and_identity(tmp_path: Path) ->
     assert adapted["environment"]["user"] == "1001:1002"
     assert adapted["environment"]["environment"] == {"HOME": "/home/miles"}
     assert not stats.network_forced_gateway_only
-
-
-@pytest.mark.parametrize(("authored", "expected"), [(None, "shared"), ("shared", "shared"), ("separate", "separate")])
-def test_adapt_grades_in_place_unless_separate_is_authored(tmp_path: Path, authored, expected) -> None:
-    # #2589: a fresh verifier receives only declared artifacts, so omission is
-    # in-place grading, as Harbor runs it. An authored mode is never rewritten.
-    staged = tmp_path / "bundle"
-    staged.mkdir()
-    _write_runtime_inputs(staged)
-    config = _harbor_shaped_config()
-    if authored is not None:
-        config["verifier"]["env_mode"] = authored
-
-    adapted, _ = adapt_bundle_for_nebius_terminus(staged, config)
-
-    assert adapted["verifier"]["env_mode"] == expected

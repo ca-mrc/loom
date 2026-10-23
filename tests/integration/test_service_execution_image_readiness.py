@@ -88,8 +88,7 @@ async def _seed_preparing_trial(
         },
         "agent": {"name": "terminus-2"},
         "verifier": {"name": "script", "args": {"script_path": "verifier/check.sh"}},
-        # A fresh verifier receives only declared artifacts (#2589).
-        "steps": [{"name": "main", "instruction_file": "instruction.md", "artifacts": ["answer.txt"]}],
+        "steps": [{"name": "main", "instruction_file": "instruction.md"}],
     }
     if fixture:
         task.config["environment"].update({

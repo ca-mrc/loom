@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 import stat
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
@@ -474,15 +474,6 @@ def automatic_service_execution_rejections(
         reasons.append("network_policy_override_not_supported")
         effective_network_policy = env.baseline_network_policy
         network_override_supported = False
-    # A fresh verifier receives only the task's declared artifacts (#2589). A
-    # task that declares none must be graded in place.
-    if (
-        controller
-        and not trial.skip_verifier
-        and resolve_verifier_env_mode(task, trial) == "separate"
-        and not any(step.artifacts or step.required_artifacts for step in task.steps)
-    ):
-        reasons.append("separate_verifier_requires_declared_artifacts")
     if task.agent.continue_until_timeout and not (spec and spec.supports("agent_continuation")):
         reasons.append("agent_continuation_unsupported")
     reasons.extend(item.code for item in execution_requirement_diagnostics(
@@ -692,14 +683,6 @@ def automatic_service_execution_rejections(
     return tuple(dict.fromkeys(reasons))
 
 
-class ServiceExecutionIncompatibleError(ValueError):
-    """The task and Trial fail automatic service-execution admission."""
-
-    def __init__(self, reasons: Sequence[str]) -> None:
-        self.reasons = tuple(reasons)
-        super().__init__("automatic service execution is incompatible: " + ",".join(self.reasons))
-
-
 def compile_service_execution_plan(
     *,
     task: TaskConfig,
@@ -746,7 +729,7 @@ def compile_service_execution_plan(
         agent_uid=profile.run_as_user, agent_gid=profile.run_as_group,
     )
     if reasons:
-        raise ServiceExecutionIncompatibleError(reasons)
+        raise ValueError("automatic service execution is incompatible: " + ",".join(reasons))
     spec = hosted_harness(trial.agent_name)
     assert spec is not None  # admission rejected unknown harnesses above
     effective_network_policy = resolve_effective_network_policy(
@@ -1163,7 +1146,6 @@ __all__ = [
     "NATIVE_EXECUTION_AGENT_NAMES",
     "ControllerComputeResourcesV1",
     "RuntimeTaskInputV1",
-    "ServiceExecutionIncompatibleError",
     "ServiceExecutionInputBindingV1",
     "ServiceExecutionInputFileV1",
     "ServiceExecutionInputManifestV1",

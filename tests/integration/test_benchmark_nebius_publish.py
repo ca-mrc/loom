@@ -59,7 +59,6 @@ kind = "gateway-only"
 name = "terminus-2"
 [verifier]
 name = "script"
-env_mode = "shared"
 [verifier.args]
 script_path = "verifier/check.sh"
 [[steps]]
