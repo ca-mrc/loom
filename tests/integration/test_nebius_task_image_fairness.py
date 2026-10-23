@@ -114,6 +114,7 @@ async def _free(sessions, target, now, *, quota_nodes=1):
     async with sessions() as session, session.begin():
         free = _healthy_placement(
             target_id=target.target_id, nodes=1, used_nodes=1, quota_nodes=quota_nodes,
+            sampled_at=now,
         )
         await _record(session, target.target_id, now + timedelta(seconds=1), free)
 
@@ -253,6 +254,19 @@ async def test_invalid_execution_wait_cannot_hold_builder_capacity(waiting_execu
         native = await reserve_native_task_image_capacity(session, attempt_id=attempt.id,
             now=claim_at)
         assert native["capacity_reserved_at"]
+
+
+async def test_released_capacity_remains_admissible_after_slow_fixture_work(waiting_execution, monkeypatch):
+    """Slow SQL/setup must not put the test's collector ahead of admission."""
+    *_, now = waiting_execution
+
+    class SlowWallClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return (now + timedelta(seconds=30)).astimezone(tz)
+
+    monkeypatch.setitem(globals(), "datetime", SlowWallClock)
+    await test_invalid_execution_wait_cannot_hold_builder_capacity(waiting_execution, "parent_finished")
 
 
 async def test_actual_spare_quota_admits_build_and_waiting_execution(waiting_execution):
