@@ -115,7 +115,9 @@ Workspace archive transfer uses a dedicated, bounded streaming channel for
 runtime-generated temporary archive names. Its budget comes from the frozen
 artifact/storage limits; the ordinary single-file transfer limit is unchanged.
 Both export and import retain atomic publication, exact-length validation and
-symlink restrictions. Transfer failures identify the operation, HTTP status and
+symlink restrictions. Source archives remain immutable during transfer;
+descriptor checks reject changes visible in file size or timestamps.
+Transfer failures identify the operation, HTTP status and
 fixed reason (plus bounded size/limit values), never raw paths or response bodies.
 This transport boundary does not change whether an archive is required for
 grading or used for verifier handoff.

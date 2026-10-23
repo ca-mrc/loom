@@ -561,6 +561,8 @@ async def test_workspace_download_rejects_oversized_metadata_before_body(tmp_pat
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mutation", [b"tiny", b"changed!", b"grown-data"])
 async def test_upload_detects_source_change_even_with_original_body_already_read(tmp_path: Path, mutation: bytes) -> None:
+    import os
+
     import httpx
 
     source = tmp_path / "source"
@@ -570,6 +572,9 @@ async def test_upload_detects_source_change_even_with_original_body_already_read
         async for chunk in request.stream:
             assert chunk == b"origina"
             source.write_bytes(mutation)
+            # Inject a distinct metadata version, as the Go Chtimes test does;
+            # Linux writes within one timestamp tick need not advance it.
+            os.utime(source, ns=(1_000_000_000, 1_000_000_000))
         return httpx.Response(204)
     class MutatingReceiver(httpx.AsyncBaseTransport):
         async def handle_async_request(self, request):
@@ -665,6 +670,7 @@ async def test_stop_cancels_workspace_download_without_publishing_partial_file(t
 async def test_changed_upload_does_not_complete_real_http_body(tmp_path: Path, monkeypatch) -> None:
     """An HTTP receiver commits at Content-Length, not iterator completion."""
     import io
+    import os
     import tempfile
 
     import httpx
@@ -697,6 +703,9 @@ async def test_changed_upload_does_not_complete_real_http_body(tmp_path: Path, m
             if reads == 2:
                 with source.open("r+b") as output:
                     output.write(b"B")
+                # Explicitly change the descriptor version; Linux writes in
+                # one timestamp tick need not do so automatically (Go Chtimes).
+                os.utime(source, ns=(1_000_000_000, 1_000_000_000))
         return result
     monkeypatch.setattr(asyncio, "to_thread", mutate_after_read)
     with tempfile.TemporaryDirectory(dir="/tmp", prefix="loom-upload-") as directory:
