@@ -15,7 +15,21 @@ ROOT = Path(__file__).resolve().parents[2]
 def test_ci_validation_keeps_hosted_fallback_and_opt_in_common_queue(name: str) -> None:
     source = (ROOT / f".github/workflows/{name}.yml").read_text()
     workflow = yaml.safe_load(source)
-    for job in workflow["jobs"].values():
+    for job_id, job in workflow["jobs"].items():
+        if name == "ci" and job_id == "fast-feedback":
+            candidate = yaml.safe_load((ROOT / ".github/workflows/nebius-candidate.yml").read_text())
+            assert job["runs-on"] == candidate["jobs"]["pool-ops-plan"]["runs-on"] == "ubuntu-24.04"
+            continue
+        if "uses" in job:
+            assert name == "ci"
+            assert job["uses"] in {
+                "./.github/workflows/images.yml",
+                "./.github/workflows/cluster-smoke.yml",
+                "./.github/workflows/staging-smoke.yml",
+            }
+            assert "runs-on" not in job
+            assert "steps" not in job
+            continue
         placement = str(job["runs-on"])
         assert "needs." not in placement
         assert "vars.LOOM_CI_UNIFIED_RUNNERS == 'true'" in placement

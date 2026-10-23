@@ -77,6 +77,8 @@ def test_images_untrusted_build_is_read_only_and_cannot_publish_or_write_cache(
     assert workflow["permissions"] == {"contents": "read"}
     assert build["permissions"] == {"contents": "read"}
     assert _normalized_expression(build["if"]) == (
+        "!cancelled() && needs.plan.result == 'success' && "
+        "needs.trivy-binary.result == 'success' && "
         "needs.plan.outputs.gate_mode == 'full' && "
         "needs.plan.outputs.required == 'true' && "
         f"needs.plan.outputs.{matrix_output} != '[]'"
@@ -141,7 +143,7 @@ def test_images_permissions_are_an_exact_job_allowlist() -> None:
         "images-gate",
     ):
         effective = jobs[job_name].get("permissions", workflow["permissions"])
-        assert effective == ({"contents": "read", "actions": "read"} if job_name == "plan" else {"contents": "read"})
+        assert effective == {"contents": "read"}
         assert "environment" not in jobs[job_name]
         assert "id-token" not in effective
         assert all(value != "write" for value in effective.values())
@@ -228,9 +230,9 @@ def test_staging_pr_gate_is_credential_free_and_does_not_depend_on_real_aws() ->
     assert "${{ secrets." not in str(workflow)
     assert "ci-aws" not in str(workflow)
 
-    for job_name, job in jobs.items():
+    for job in jobs.values():
         effective = job.get("permissions", workflow["permissions"])
-        assert effective == ({"contents": "read", "actions": "read"} if job_name == "plan" else {"contents": "read"})
+        assert effective == {"contents": "read"}
         assert "environment" not in job
         assert "id-token" not in effective
         assert all(value != "write" for value in effective.values())

@@ -34,7 +34,8 @@ def test_dev_image_plan_matches_runtime_set(tmp_path, path, expected):
 
 def test_candidate_validation_has_no_push_trigger():
     workflow = yaml.safe_load((ROOT / '.github/workflows/images.yml').read_text())
-    assert set(workflow[True]) == {'pull_request', 'merge_group', 'workflow_dispatch'}
+    assert set(workflow[True]) == {'workflow_call', 'workflow_dispatch'}
+    assert 'concurrency' not in workflow
 
 
 @pytest.mark.parametrize("image,required,build,harness,accepted", [
