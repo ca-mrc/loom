@@ -337,7 +337,7 @@ and the external phase API double live in `tests/support/`, so importing a
 fixture no longer imports unrelated renderer or management-stage test cases.
 Every platform candidate selects affected modules against its immutable first
 parent; an unavailable boundary retains the whole suite. Shared-pool simulations
-stay skipped, below.
+have their own, narrower rule, below.
 `nebius-candidate.yml` reuses successful native `CI` pool jobs on that exact
 merge-group commit, or the native squash PR whose tested merge has the same Git
 tree as the published candidate. For squash reuse, the planner verifies the
@@ -416,11 +416,17 @@ Shared-pool handoff and recovery tests have a separate ownership group within
 the existing pool lane and shards. Direct shared-pool changes and their
 transitively referenced operator/test-fixture dependencies select the affected
 tests; an unrelated operator edit does not select them just because it selects
-the pool lane. Common fixtures, deployment inputs, CI/dependency changes and
-explicit full regressions retain the full shared-pool suite. New shared-pool
-entrypoints without known consumers and unavailable dependency evidence also
-retain coverage. Candidate publication uses the same selection for both pool
-groups and reuses only exact-commit coverage. No opt-in variable or separate job
+the pool lane. Common fixtures, deployment inputs, CI/dependency changes,
+selector labels, dev pushes, the daily schedule and manual runs retain the full
+shared-pool suite. The suite is `affected_only`: when an unowned or other
+forcing path makes a PR or merge group run full regression, the planner still
+passes the actual diff as `test_diff` (`TEST_DIFF_PATHS` in the pool job), and
+the suite runs only if that diff affects it. An empty or oversized diff keeps
+it. New shared-pool entrypoints without known consumers and unavailable
+dependency evidence also retain coverage. Candidate publication uses the same
+selection for both pool groups and reuses only exact-commit coverage; squash
+reuse reads each PR job's `TEST_DIFF_PATHS`, and treats older jobs without it
+as having run the full suite, as they did. No opt-in variable or separate job
 is required: activation must be tested before enabling
 `NEBIUS_ROLLOUT_MODE=shared`. These simulations do not establish installed
 readiness or authorize a live handoff.

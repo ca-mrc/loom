@@ -1054,10 +1054,14 @@ affected_paths = [
 # Discover referenced operators through these tests and their fixture imports;
 # direct shared-pool entrypoints without known consumers keep the whole suite.
 # Keep the same lane/shards and candidate coverage-reuse contract.
+# affected_only: a PR whose unowned or other forcing paths select full
+# regression still skips this ~190 runner-minute suite unless its diff affects
+# it. Dev pushes, the daily schedule and manual runs keep the whole suite.
 id = "nebius-shared-pool-ops"
 language = "python"
 lane = "nebius-pool"
 include_paths = ["tests/ops/test_nebius_shared_pool_*.py"]
+affected_only = true
 unaffected_paths = ["scripts/ops/nebius_pool_test_plan.py"]
 component_sources = ["scripts/ops/**/*.py", "scripts/ops/**/*.sh"]
 affected_paths = [
