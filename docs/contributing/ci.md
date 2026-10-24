@@ -384,6 +384,12 @@ exact-absence assertions remain before merge. No test is moved to candidate
 publication, nightly validation or deployment, and no mutable fixture is shared
 between cases.
 
+The recovery and preactivation-recovery census scenarios run as separate whole
+modules on two existing pool shards. Each keeps its 1500-second case limit,
+fixtures and fault assertions. Their combined allowed budgets plus the other
+modules exceeded one job's 50-minute budget; the separation retains all 20
+shards and the existing job deadline without dropping either scenario.
+
 The October 16 rebalance keeps the measured scenario boundaries: deploy-job
 failures and completion faults run the same delivery lifecycle from
 `test_nebius_pool_participant_delivery_{job_failures,completion}.py`.
