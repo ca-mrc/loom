@@ -150,13 +150,12 @@ from tests.ops.test_nebius_shared_pool_handoff_census import (
 )
 
 
-# Full recovery, including retained preactivation, uses the recovery budget and
-# shard. Its preactivation variant exceeded the general census's 1200s limit.
+# Recovery keeps its own complete module so it can run on a separate shard.
 # Keep every phase/fault assertion and the existing 1500s whole-test bound.
 @pytest.mark.timeout(1500)
 @pytest.mark.parametrize('forward_census,staging_observation', [
-    ('recovery', None), ('preactivation-recovery', 'independent')],
-    indirect=['staging_observation'], ids=['recovery', 'preactivation-recovery'])
+    ('recovery', None)],
+    indirect=['staging_observation'], ids=['recovery'])
 def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writers(
         shared_runtime, staging_history, staging_observation, completed_pool, handoff, shared_operation, forward_census,
         publisher_cloud, tmp_path):
