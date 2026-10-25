@@ -1,6 +1,8 @@
 """Shared handoff census lifecycle regressions."""
 from __future__ import annotations
 
+from contextlib import nullcontext
+
 from tests.ops.test_nebius_shared_pool_handoff import (
     ROOT as ROOT,
 )
@@ -145,6 +147,7 @@ from tests.ops.test_nebius_shared_pool_handoff import (
 from tests.ops.test_nebius_shared_pool_handoff import (
     uuid4 as uuid4,
 )
+from tests.support.nebius_shared_pool_history import captured_predecessor_history
 
 
 @pytest.mark.timeout(1200)
@@ -359,10 +362,17 @@ def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writ
         transport.client = type(completed_pool[3].api.client)(base_url=transport.api_server,
             transport=httpx.MockTransport(respond))
         if forward_census and forward_census != 'personal':
-            _exercise_forward_writer_census(shared_operation, transport, inventory, kinds, calls, mode,
-                recovery=forward_census == 'recovery',
-                participant=forward_census if forward_census in {'participant', 'preparation'} else False,
-                publisher_cloud=publisher_cloud)
+            # Recovery varies live census inputs and current child journals.
+            # Capture fixed predecessors only after storage/preactivation has
+            # qualified its final binding; initial/forward census stays physical.
+            with pytest.MonkeyPatch.context() as patch:
+                history_io = (captured_predecessor_history(bindings=shared_operation[1], monkeypatch=patch)
+                    if forward_census == 'recovery' else nullcontext())
+                with history_io:
+                    _exercise_forward_writer_census(shared_operation, transport, inventory, kinds, calls, mode,
+                        recovery=forward_census == 'recovery',
+                        participant=forward_census if forward_census in {'participant', 'preparation'} else False,
+                        publisher_cloud=publisher_cloud)
             return
         from scripts.ops.nebius_shared_pool_handoff_live import observe_shared_pool_writers
 

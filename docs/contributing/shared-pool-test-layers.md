@@ -15,7 +15,7 @@ complete installed platform for every transaction-result combination.
 | --- | --- | --- |
 | Fast-root activation record | Opening, guard release, pool/guard fencing; response loss before and after commit; ordered one-dispatch behavior; intent-save failure; runtime refusal; terminal cancellation | Fresh in-memory storage and remote-transaction ports per case. The production engine and choice functions are unchanged. These rules run before the heavy pool lane. |
 | Ordinary activation stage | Both transaction types in each direction connected to real private journals; all existing retained-authority, startup, malformed-record and cancellation-entry cases | Real journal readers/writers and the original remote API double. Four representative transaction cases replace the repeated eight-case matrix; all eight combinations remain at the rule layer. |
-| Forward/recovery process contracts | The existing process, SQL, readiness and late-drift fault matrices, with every selector and assertion retained | Completed predecessor files captured separately for each case. Current child journals and all remote-observation behavior remain live within the test. |
+| Forward/recovery process and recovery census contracts | The existing process, SQL, readiness, writer census and late-drift fault matrices, with every selector and assertion retained | Completed predecessor files captured separately for each case. Current child journals and all remote-observation behavior remain live within the test. |
 | Connected process/activation | Initial binding and the concrete activation transport, including unknown opening/release replies and refusal after completion | Real predecessor reads and real current journals, with the existing Kubernetes/SQL transport doubles. Observation-only and recovery-process connections retain this boundary too. |
 
 The contract input double is limited to paths already pinned by the genuine
@@ -24,6 +24,14 @@ refuses any current handoff child path, preserves read bounds and rechecks the
 physical predecessor history after restoring the real reader. It is neither a
 production cache nor a substitute for live qualification. No mutable state is
 shared between test cases.
+
+The two census-recovery cases capture inputs only after storage and optional
+preactivation have qualified the final predecessor binding. Their forward and
+recovery child receipts, intent transitions, in-read receipt mutation and live
+writer/plan mutations remain real. Initial, forward and preparation census
+cases keep physical predecessor reads. This applies the same contract-input
+boundary to recovery without raising the existing 50-minute pool job limit or
+moving either recovery case to another lane.
 
 Physical private-file protections remain covered by the certificate/storage
 tests and the connected history/entrypoint suites. New process or local-receipt
@@ -86,3 +94,12 @@ comparison above owns the performance claim. Neither result is hosted CI or
 PR-to-deployment acceptance. The original batch delegated all 9,465 `fsync`
 calls to the OS: their combined measured cost was only 0.19s on this host, so no
 fsync bypass was added.
+
+The census-recovery follow-up passed both original cases before and after the
+same fixed-input boundary. Real `os.open` calls fell from 23,431,435 to
+4,608,329; all 5,144 `fsync` calls remained real. Pytest reported 1,832.55s
+before and 1,848.39s after. The baseline spanned a host suspension, so these
+times are not a controlled performance comparison, and no elapsed-time
+improvement or hosted job-budget guarantee is claimed. Case placement and
+native shard-budget qualification remain a separate concern from reducing
+predecessor I/O.
