@@ -527,6 +527,11 @@ still prepares only the images it selected. Recipe or release changes get a new
 key, and invalid archives fall back to normal pinned-image preparation. The lazy
 per-fixture resolver remains available for local tests.
 
+The disposable MinIO runtime keeps a minimum curl version instead of requiring
+an old APK revision that Alpine has replaced. Its curl and CA security floors
+accept newer published revisions; the MinIO commit, compiler and base-image
+digest stay fixed. See Alpine's [package pinning and version retention](https://wiki.alpinelinux.org/wiki/Apk#Package_pinning).
+
 System smoke uses a Compose project per run/attempt and Docker-assigned loopback
 ports; it discovers actual service endpoints once and passes the registry endpoint
 to the image builder without changing the original port mappings.

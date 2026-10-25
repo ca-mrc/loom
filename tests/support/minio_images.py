@@ -56,7 +56,7 @@ SOURCE_FIXTURES = (
 def _dockerfile(spec: SourceFixture) -> str:
     # curl supports the existing Compose healthcheck; coreutils preserves the
     # upstream entrypoint's optional chroot --userspec behavior.
-    # Alpine replaces certificate-data revisions in its repository, and its
+    # Alpine replaces curl and certificate-data revisions in its repository, and its
     # architecture indexes can roll at different times. Keep a security floor
     # while accepting the currently published trust-store revision.
     return f'''FROM {spec.compiler} AS build
@@ -71,7 +71,7 @@ RUN GODEBUG=http2client=0 CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldfl
 -X github.com/minio/minio/cmd.CommitID={spec.commit} \
 -X github.com/minio/minio/cmd.ShortCommitID={spec.commit[:12]}" -o /out/minio .
 FROM alpine@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40
-RUN apk add --no-cache curl=8.22.0-r0 "ca-certificates>=20260909-r0" coreutils=9.8-r1
+RUN apk add --no-cache "curl>=8.22.0-r0" "ca-certificates>=20260909-r0" coreutils=9.8-r1
 COPY --from=build /out/minio /usr/bin/minio
 COPY --from=build /src/minio-{spec.commit}/dockerscripts/docker-entrypoint.sh /usr/bin/docker-entrypoint.sh
 RUN chmod 755 /usr/bin/docker-entrypoint.sh
