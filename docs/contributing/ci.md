@@ -271,6 +271,11 @@ errors remain fatal during combine, XML and text reporting.
 Instrumented root, package and integration jobs explicitly select the current
 `pyproject.toml`; pytest-cov propagates its resolved path to Python children,
 including historical renderers with a different working directory and config.
+The slim-image copied-source import probe removes pytest-cov child-startup
+variables from its isolated interpreter. That probe exercises the Dockerfile's
+packaged imports without the checkout's test plugins; its disposable copy is
+not current-checkout coverage. Current source measurement and unrelated
+missing-source failures remain active.
 Request `ci:coverage-summary` or dispatch CI with `coverage_summary=true` for
 full selection within the active scope and combined accounting. Nebius coverage
 is reported without applying the historical all-platform **70%** floor to a
@@ -648,6 +653,19 @@ messages; the existing Pod-creation and overall test deadlines remain unchanged.
 The 75-minute integration budget retains room for optional coverage and runner
 variation. File counts alone do not measure shard balance; use the per-shard
 duration reports from the current head.
+
+The three complete independent-environment installation cases retain a real
+administration status CLI invocation, followed by connected observations through
+the complete `run_administration` entry in their worker thread. Each observation
+reads the current files, verifies authorization/hash/schema, opens a fresh real
+read-only PostgreSQL transaction, commits and disposes its engine. No receipt is
+cached. The reusable enrollment fixture defaults to the CLI, and its dedicated
+CLI apply/status/invalid-hash checks remain. The real CLI keeps its 30-second
+subprocess bound; connected observations use a 30-second cooperative async
+deadline, within the unchanged 180-second complete-case cap. The platform grant
+fixture samples the PostgreSQL clock before opening its mutation transaction,
+matching the audit clock while retaining the original five-minute validity.
+Immediate readiness inspection grants use the same database timebase.
 
 All four development validation workflows support the opt-in unified native
 runner queue, with GitHub-hosted fallback and exclusions as described in

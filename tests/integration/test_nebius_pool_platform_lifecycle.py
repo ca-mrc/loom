@@ -3,11 +3,11 @@ from __future__ import annotations
 
 import importlib
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from loom.db.nebius_pool_schema import NebiusPoolBinding, NebiusPoolParticipant
 from loom_execution_capacity_collector.contracts import CapacityPlacement
@@ -60,13 +60,62 @@ async def prepare(sessions, *, platform_input=None):
 
 
 async def apply(sessions, request, *, authority='platform'):
+    # Audit created_at uses the database transaction clock. Issue the fixture
+    # grant from the same clock before opening the mutation transaction.
+    async with sessions() as session:
+        issued_at = await session.scalar(select(func.clock_timestamp()))
     grant = PoolAdministrationAuthorizationV2(schema_version='loom.pool-administration-authorization.v2',
         authorization_id=uuid4(), installation_id=request.installation_id, pool_id=request.pool_id,
         authority=authority, request_sha256=digest(request.model_dump(mode='json')),
-        issued_at=datetime.now(UTC), expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        issued_at=issued_at, expires_at=issued_at + timedelta(minutes=5),
         **({} if authority == 'platform' else dict(participant_id=uuid4(), environment_id=uuid4(), incarnation=uuid4())))
     async with sessions.begin() as session:
         return await administer(session, request.model_dump_json().encode(), grant, action='apply')
+
+
+async def test_platform_authority_retains_a_current_grant_when_fixture_host_clock_is_ahead(sessions, monkeypatch):
+    from loom.db.nebius_pool_lifecycle_schema import NebiusPoolLifecycleOperation
+    from loom_service.pool_management.inspection import PoolInspectionV2, qualify_inspection
+
+    _, spec, installed, authority, capture, opening = await prepare(sessions)
+    await capture()
+    operation = opening(installed.operation_id, authority)
+    actual_administer = administer
+    actual_datetime = datetime
+
+    class AheadClock(actual_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return actual_datetime.now(tz) + timedelta(milliseconds=20)
+
+    async def delayed_administer(session, content, grant, *, action):
+        # Begin the real transaction before the artificial delay. PostgreSQL's
+        # audit DEFAULT now() retains this start time; the authorization check
+        # uses clock_timestamp() after the delay. Both must qualify the grant.
+        await session.execute(select(func.pg_sleep(0.1)))
+        return await actual_administer(session, content, grant, action=action)
+
+    with monkeypatch.context() as patch:
+        patch.setitem(globals(), 'datetime', AheadClock)
+        patch.setitem(globals(), 'administer', delayed_administer)
+        committed = await apply(sessions, operation)
+    await capture()
+    async with sessions() as session:
+        audit = await session.get(NebiusPoolLifecycleOperation, UUID(committed['authorization_id']))
+        authorization = PoolAdministrationAuthorizationV2.model_validate(audit.request_json['authorization'])
+        database_now = await session.scalar(select(func.clock_timestamp()))
+    request = PoolInspectionV2(schema_version='loom.pool-inspection.v2', operation_id=uuid4(),
+        installation_id=spec.installation_id, pool_id=spec.pool_id, require_capacity=True,
+        platform_authorization_id=authorization.authorization_id)
+    read_grant = authorization.model_copy(update={'authorization_id': uuid4(),
+        'request_sha256': digest(request.model_dump(mode='json')),
+        'issued_at': database_now, 'expires_at': database_now + timedelta(minutes=5)})
+    async with sessions.begin() as session:
+        await session.execute(text('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY'))
+        snapshot = qualify_inspection(await administer(session, request.model_dump_json().encode(), read_grant,
+            action='status'), request, read_grant.authorization_id)
+    assert snapshot.platform_authority.authorization_id == authorization.authorization_id
+    assert authorization.expires_at - authorization.issued_at == timedelta(minutes=5)
 
 
 async def test_empty_platform_opens_without_any_environment_and_exact_old_replay_never_reopens(sessions):

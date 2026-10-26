@@ -1,4 +1,4 @@
-"""Current-checkout coverage must not absorb archived candidate revisions."""
+"""Current-checkout coverage must not absorb disposable source trees."""
 from __future__ import annotations
 
 import json
@@ -113,6 +113,46 @@ def test_historical_candidate_execution_does_not_enter_current_source_coverage(t
     report = json.loads((tmp_path / "coverage.json").read_text())
     assert not any("loom-candidate-manifests-" in path for path in report["files"])
     assert report["files"]["src/loom/__init__.py"]["executed_lines"] == [1, 2, 3]
+
+
+def test_copied_image_imports_do_not_enter_current_source_coverage(tmp_path, ci_coverage_args):
+    """Run the actual slim-image copy/import check, remove it, then report."""
+    source = tmp_path / "src" / "owned.py"
+    source.parent.mkdir()
+    source.write_text("FLAVOR = 'current'\ndef current_only():\n    return FLAVOR\n")
+    (tmp_path / "packages").mkdir()
+    (tmp_path / "pyproject.toml").write_bytes(CONFIG.read_bytes())
+    (tmp_path / "pytest.ini").write_text("[pytest]\n")
+    env = _coverage_env(tmp_path)
+    driver = tmp_path / "test_sample.py"
+    driver.write_text(
+        "import runpy, shutil\nfrom pathlib import Path\n"
+        "def test_sample():\n"
+        f"    root = Path({str(tmp_path)!r})\n"
+        "    current = runpy.run_path(str(root / 'src/owned.py'))\n"
+        "    assert current['current_only']() == 'current'\n"
+        f"    checks = runpy.run_path({str(ROOT / 'tests/unit/test_production_dockerfiles.py')!r})\n"
+        "    image = root / 'image'\n"
+        "    image.mkdir()\n"
+        "    checks['test_actuator_image_copied_source_imports_both_processes_without_checkout_fallback'](image)\n"
+        "    assert (image / 'src/loom/__init__.py').is_file()\n"
+        "    shutil.rmtree(image)\n"
+    )
+    result = _run([sys.executable, "-B", "-m", "pytest", "-p", "no:cacheprovider", "-q",
+        "-c", str(tmp_path / "pytest.ini"), "--rootdir", str(tmp_path),
+        "--basetemp", str(tmp_path / "child-pytest"), *ci_coverage_args, str(driver)], cwd=tmp_path, env=env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    combined_env = _combine(tmp_path, env)
+    for command in ("xml", "report"):
+        result = _run([sys.executable, "-B", "-m", "coverage", command, "--rcfile", str(CONFIG)],
+            cwd=tmp_path, env=combined_env)
+        assert result.returncode == 0, result.stdout + result.stderr
+    result = _run([sys.executable, "-B", "-m", "coverage", "json", "--rcfile", str(CONFIG),
+        "-o", str(tmp_path / "coverage.json")], cwd=tmp_path, env=combined_env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    report = json.loads((tmp_path / "coverage.json").read_text())
+    assert not any("image/src/" in path for path in report["files"])
+    assert report["files"]["src/owned.py"]["executed_lines"] == [1, 2, 3]
 
 
 @pytest.mark.parametrize("report", ["xml", "report"])

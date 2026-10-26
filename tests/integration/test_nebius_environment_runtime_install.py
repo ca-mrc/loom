@@ -43,7 +43,8 @@ async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact
     if complete_release:
         from tests.support.nebius_environment_release import signed_publication
         publication = signed_publication(publication, tmp_path / 'signer.pem')
-    async with prepared(sessions, tmp_path, inputs, publication) as (issuer, policy, clients, remote, api):
+    async with prepared(sessions, tmp_path, inputs, publication,
+            repeat_administration_in_process=True) as (issuer, policy, clients, remote, api):
         profiles = policy.profiles.model_dump(mode='json')
         profiles['task_images'][0]['settings']['registry_repository'] = cloud.repositories[0]
         # This fixture has no authorized cache identity; it tests canonical
@@ -55,6 +56,7 @@ async def test_installation_stages_only_enrolled_owner_closed_and_recovers_exact
         machines = tuple(row.model_copy(update={'token_sha256': hashlib.sha256(token.encode()).hexdigest()}) for row in policy.machines)
         policy = replace(policy, profiles=profiles, machines=machines)
         enrollment = await issuer.issue_enrollment(policy=policy, operation_id=uuid4(), **clients)
+        assert api.administration_process_calls == 1, 'every workflow must cross the real status CLI boundary'
         job = _load(policy.host, enrollment)
         if committed_enrollment:
             async with sessions.begin() as session:
