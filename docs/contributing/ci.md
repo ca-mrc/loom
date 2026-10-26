@@ -264,6 +264,10 @@ The actual tests are selected from `config/component-ownership.toml`.
 ## Coverage collection
 
 Python root/package/integration tests normally run without coverage instrumentation.
+Coverage excludes only archived `loom-candidate-manifests-*/src/loom` source
+roots. Historical renderers still execute in their owning tests, and their
+coverage never counts as the current checkout's source. Other missing source
+errors remain fatal during combine, XML and text reporting.
 Request `ci:coverage-summary` or dispatch CI with `coverage_summary=true` for
 full selection within the active scope and combined accounting. Nebius coverage
 is reported without applying the historical all-platform **70%** floor to a
@@ -310,7 +314,9 @@ Dependency Graph has no repository YAML.
 | Unknown or shared authority | Complete applicable regression, with a full file-selection hint. |
 
 All selected source results still feed the same four app-bound required gates.
-Nightly/manual and explicit full requests preserve stronger coverage. Global
+Nightly/manual and explicit full requests preserve stronger coverage within
+the default suite scope; the unlaunched shared simulations require their own
+explicit manual input below. Global
 Python type checks, frontend coverage populations and broad Docker COPY inputs
 are real dependencies; ownership globs cannot make those inputs disappear.
 Selection failures propagate before pytest or toolchain execution. The audit's
@@ -336,7 +342,7 @@ regressions without the unrelated pool transition suite. Shared platform fixture
 and the external phase API double live in `tests/support/`, so importing a
 fixture no longer imports unrelated renderer or management-stage test cases.
 Every platform candidate selects affected modules against its immutable first
-parent; an unavailable boundary retains the whole suite. Shared-pool simulations
+parent; an unavailable boundary retains the default pool suite. Shared-pool simulations
 have their own, narrower rule, below.
 `nebius-candidate.yml` reuses successful native `CI` pool jobs on that exact
 merge-group commit, or the native squash PR whose tested merge has the same Git
@@ -371,7 +377,7 @@ Candidate plans print the CLI version alongside their bounded diagnostics.
 There is no reuse across different Git trees or per-test-case cache. This is test scheduling,
 not an additional branch-admission gate. Image building, scanning and artifact
 qualification remain required, as do rollout idle protection, backup and rollback.
-Scheduled and manual full runs still include the pool suite. Selector labels
+Scheduled and manual full runs still include the ordinary pool suite. Selector labels
 retain full file selection in the validation lanes they request.
 
 Participant attachment tests own the three supported target rosters: ordinary,
@@ -418,24 +424,33 @@ writer workflow changes (including its first introduction), and daily. It syncs 
 per lock. `test_ci_wheel_cache_has_one_trusted_writer_and_complete_contents`
 keeps readers read-only and covered by that superset.
 
-Shared-pool handoff and recovery tests have a separate ownership group within
-the existing pool lane and shards. Direct shared-pool changes and their
-transitively referenced operator/test-fixture dependencies select the affected
-tests; an unrelated operator edit does not select them just because it selects
-the pool lane. Common fixtures, deployment inputs, CI/dependency changes,
-selector labels, dev pushes, the daily schedule and manual runs retain the full
-shared-pool suite. The suite is `affected_only`: when an unowned or other
-forcing path makes a PR or merge group run full regression, the planner still
-passes the actual diff as `test_diff` (`TEST_DIFF_PATHS` in the pool job), and
-the suite runs only if that diff affects it. An empty or oversized diff keeps
-it. New shared-pool entrypoints without known consumers and unavailable
-dependency evidence also retain coverage. Candidate publication uses the same
-selection for both pool groups and reuses only exact-commit coverage; squash
-reuse reads each PR job's `TEST_DIFF_PATHS`, and treats older jobs without it
-as having run the full suite, as they did. No opt-in variable or separate job
-is required: activation must be tested before enabling
-`NEBIUS_ROLLOUT_MODE=shared`. These simulations do not establish installed
-readiness or authorize a live handoff.
+Shared-pool handoff, migration, recovery and census simulations belong to the
+`nebius-shared-pool-ops` suite. The combined shared system has not launched, so
+this suite is `manual_only`: ordinary PRs, merge groups, pushes, schedules and
+candidate supplementary tests exclude it, including changes to the shared code,
+common fixtures and dependencies. Fast activation rules and all independent
+environment/operator suites keep their existing validation positions. The
+`nebius-pool` lane remains enabled; only this ownership group is excluded.
+
+For explicit qualification, dispatch `CI` with `shared_pool_simulations=true`.
+The planner accepts the flag only for `workflow_dispatch`, emits it to the
+pool matrix and each executing job, and preserves the complete manual scenario
+set. Local selection uses `scripts/component_ownership.py test-paths --lane
+nebius-pool --include-shared-pool true --suite nebius-shared-pool-ops`. This
+prints the manifest; passing its paths to pytest runs the complete scenarios.
+The existing `affected_only` / `test_diff` rules remain available inside explicit
+selection. Empty-diff manual qualification runs the whole shared suite.
+
+Candidate supplementary execution uses the default selection. Squash coverage
+reuse reads `SHARED_POOL_SIMULATIONS` alongside the job's actual changed-path
+and diff hints; a skipped simulation is never counted as covered. Logs without
+that switch cannot prove optional simulation coverage. Excluded files cannot
+contribute to the candidate's required/reused counts. Merge-group reuse covers
+only default modules. Before shared feature launch, complete installed qualification under
+#1915, review the measured long-scenario budgets and remove `manual_only` in a
+reviewed change that restores automatic coverage. A successful manual simulation
+alone neither establishes installed readiness nor authorizes shared activation.
+See [shared-pool validation layers](shared-pool-test-layers.md).
 
 Go checks validate the retained execution runtime, gateway sandbox, and sandbox
 runtime. JWT and execution-materialization producer contracts also retain Go

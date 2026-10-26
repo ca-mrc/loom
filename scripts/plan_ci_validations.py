@@ -308,6 +308,7 @@ class ValidationPlan:
     # The PR's actual diff, kept even when test_changes forces full regression,
     # so affected_only suites still run only when that diff affects them.
     test_diff: tuple[str, ...] = ()
+    shared_pool_simulations: bool = False
     lint_and_static: bool = True
     tests_root: bool = True
     # Pool operator lane: eligible with tests-root; its own matrix decides the final selection.
@@ -333,6 +334,7 @@ class ValidationPlan:
                 "full_gate",
                 "docs_only",
                 "unowned_runtime",
+                "shared_pool_simulations",
                 *HEAVY_CHECKS,
                 *BASELINE_CHECKS,
                 "nebius_pool",
@@ -425,9 +427,13 @@ def plan_validations(
     pull_request_draft: bool = False,
     pull_request_base_changed: bool = False,
     manifest_registration_only: bool = False,
+    shared_pool_simulations: bool = False,
 ) -> ValidationPlan:
     if event_name not in SUPPORTED_EVENTS:
         raise ValueError(f"unsupported event_name: {event_name}")
+
+    if shared_pool_simulations and event_name != "workflow_dispatch":
+        raise ValueError("shared-pool simulations require an explicit manual workflow_dispatch")
 
     event_relevant = True
     full_gate = True
@@ -781,6 +787,7 @@ def plan_validations(
         and not force_baseline and not set(labels) & LABEL_TO_CHECK.keys() else (),
         test_diff=paths if event_name in {"pull_request", "merge_group"}
         and not set(labels) & LABEL_TO_CHECK.keys() else (),
+        shared_pool_simulations=shared_pool_simulations,
         nebius_pool=baseline["tests_root"],
         web_runtime=web_runtime,
         go_packages=go_packages_for_changes(paths, full=force_baseline),
@@ -793,6 +800,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--changed-files", type=Path, required=True)
     parser.add_argument("--labels-json", default="[]")
+    parser.add_argument("--shared-pool-simulations", choices=("true", "false"), default="false")
     parser.add_argument("--event-name", required=True)
     parser.add_argument("--pull-request-action", default="")
     parser.add_argument("--pull-request-action-label", default="")
@@ -823,6 +831,7 @@ def main() -> int:
         pull_request_draft=args.pull_request_draft == "true",
         pull_request_base_changed=args.pull_request_base_changed == "true",
         manifest_registration_only=manifest_registration_only(REPO_ROOT, args.base_sha, changed_paths),
+        shared_pool_simulations=args.shared_pool_simulations == "true",
     )
     outputs = plan.github_outputs()
     effective_changes = tuple(json.loads(outputs["test_changes"]))
@@ -842,6 +851,7 @@ def main() -> int:
             repo_root=REPO_ROOT, changed_paths=effective_changes, test_scope=args.test_scope,
             # Only lanes whose jobs receive TEST_DIFF_PATHS may plan with it.
             diff_paths=effective_diff if lane in AFFECTED_ONLY_LANES else (),
+            include_shared_pool=plan.shared_pool_simulations,
         ) if getattr(plan, selected_name) and plan.gate_mode == "full" else ()
         outputs[matrix_name] = json.dumps(matrix, separators=(",", ":"))
         # A compatibility-only edit has no tests in the daily Nebius scope.

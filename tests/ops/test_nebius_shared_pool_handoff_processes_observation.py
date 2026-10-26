@@ -1,6 +1,7 @@
 """Shared handoff processes lifecycle regressions."""
 from __future__ import annotations
 
+from tests.ops.test_nebius_development_pool_retained import system_kubectl as system_kubectl
 from tests.ops.test_nebius_shared_pool_handoff import (
     ROOT as ROOT,
 )
@@ -151,6 +152,8 @@ from tests.ops.test_nebius_shared_pool_handoff import (
 from tests.ops.test_nebius_shared_pool_handoff_processes import (
     test_shared_process_preflight_reads_current_databases_and_retired_authority as _exercise_scenario,
 )
+
+pytestmark = [*pytestmark, pytest.mark.usefixtures('system_kubectl')]
 
 
 @pytest.mark.timeout(1200)

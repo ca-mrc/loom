@@ -1,6 +1,7 @@
 """Protected participant refresh preserves every other participant and its work."""
 from __future__ import annotations
 
+import asyncio
 import copy
 import importlib
 from datetime import UTC, datetime, timedelta
@@ -29,8 +30,33 @@ def module():
     return importlib.import_module(name)
 
 
-def selection():
-    before, tokens = installation(('staging', 'development'))
+def _run_capacity_refresh_cli(environment, tmp_path):
+    from tests.integration.test_nebius_pool_startup_capacity import _run_expiry_probe
+
+    command = '''import runpy, sys
+_record("cli_runtime_import_started")
+from sqlalchemy.ext.asyncio import AsyncEngine
+_record("cli_runtime_import_finished")
+_dispose = AsyncEngine.dispose
+async def _diagnosed_dispose(self, *args, **kwargs):
+    _record("engine_dispose_started")
+    try:
+        return await _dispose(self, *args, **kwargs)
+    finally:
+        _record("engine_dispose_finished")
+AsyncEngine.dispose = _diagnosed_dispose
+sys.argv = ["loom_service.pool_management.participant_refresh", "capacity"]
+_record("cli_import_started")
+runpy.run_module("loom_service.pool_management.participant_refresh", run_name="__main__", alter_sys=True)
+'''
+    # Execute the real __main__ path with its normal argv/protocol. Timing and
+    # stacks stay in a test-only file and the original 25s budget still applies.
+    return _run_expiry_probe(command, environment=environment, tmp_path=tmp_path,
+        nonce='', signature='', timeout=25, traceback_after=20)
+
+
+def selection(*, now=None):
+    before, tokens = installation(('staging', 'development'), now=now)
     before['node_selector'] = copy.deepcopy(before['profiles']['execution'][0]['runtime']['node_selector'])
     after = copy.deepcopy(before)
     after['operation_id'] = str(uuid4())
@@ -100,7 +126,9 @@ def test_refresh_rejects_widened_scope_even_when_both_installations_are_valid(da
 
 
 async def setup(sessions, *, observation_max_age_seconds=None):
-    value, tokens = selection()
+    async with sessions() as session:
+        database_now = await session.scalar(select(func.clock_timestamp()))
+    value, tokens = selection(now=database_now)
     if observation_max_age_seconds is not None:
         for version in ('before', 'after'):
             value[version]['admission']['observation_max_age_seconds'] = observation_max_age_seconds
@@ -343,16 +371,15 @@ async def test_capacity_read_requires_fresh_post_open_component_without_demandin
     if condition in {'fresh', 'missing'}:
         import json
         import os
-        import subprocess
-        import sys
 
         path = tmp_path / 'refresh.json'
         path.write_text(request.model_dump_json())
-        child = subprocess.run([sys.executable, '-m', 'loom_service.pool_management.participant_refresh', 'capacity'],
-            env={**os.environ, 'LOOM_POOL_PARTICIPANT_REFRESH_FILE': str(path),
+        child, evidence = await asyncio.to_thread(_run_capacity_refresh_cli,
+            {**os.environ, 'LOOM_POOL_PARTICIPANT_REFRESH_FILE': str(path),
                 'LOOM_POOL_PARTICIPANT_REFRESH_DB_URL': sessions.kw['bind'].url.render_as_string(hide_password=False)},
-            text=True, capture_output=True, timeout=25, check=False)
-        assert child.stderr == ''
+            tmp_path)
+        assert child.stderr == b'', evidence
+        assert 'engine_dispose_started' in evidence and 'engine_dispose_finished' in evidence, evidence
         if condition == 'fresh':
             assert child.returncode == 0
             receipt = json.loads(child.stdout)

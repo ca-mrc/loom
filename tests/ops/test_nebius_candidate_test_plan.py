@@ -145,15 +145,12 @@ def test_complete_native_coverage_schedules_no_duplicate_tests(actions):
     assert value["missing_files"] == 0 and value["reused_runs"] == [10]
 
 
-def test_candidate_preserves_shared_pool_coverage_without_reintroducing_it_for_unrelated_changes(monkeypatch):
-    for change, retained in (("scripts/ops/nebius_shared_pool_api.py", True),
-                             ("scripts/ops/nebius_pool_test_plan.py", False),
-                             ("scripts/ops/ci_reliability_metrics.py", False)):
+def test_candidate_keeps_unlaunched_shared_simulations_out_even_for_shared_changes(monkeypatch):
+    for change in ("scripts/ops/nebius_shared_pool_api.py", "scripts/ops/nebius_pool_test_plan.py",
+                   "scripts/ops/ci_reliability_metrics.py"):
         monkeypatch.setattr(planner, "candidate_changes", lambda *_, path=change: (path,))
         value = planner.plan(ROOT, SHA, read=lambda _: [])
-        assert any(Path(path).name.startswith("test_nebius_shared_pool_") for path in pending(value)) is retained
-        if not retained:
-            assert value["required"] is False
+        assert not any(Path(path).name.startswith("test_nebius_shared_pool_") for path in pending(value))
 
 
 def test_native_squash_reuses_the_actual_tested_merge_tree(actions, monkeypatch):
@@ -316,16 +313,27 @@ def _with_diff_lines(log, *values):
     return log.replace("  TEST_CHANGED_PATHS: []", "  TEST_CHANGED_PATHS: []" + extra)
 
 
-def test_squash_does_not_claim_shared_pool_files_a_gated_pr_job_skipped(actions):
-    # The PR forced full regression, but its unrelated diff skipped the
-    # affected_only shared-pool suite. Only those files remain to run.
+@pytest.mark.parametrize("simulations", ["false", "true", None])
+def test_squash_does_not_claim_shared_pool_simulations_as_candidate_coverage(actions, simulations):
     pr = PullRequestActions()
-    diff = json.dumps(["deploy/guest-runtime/sources.lock.json"])
-    value = planner.plan(ROOT, SHA, read=pr.read, read_log=lambda job_id: _with_diff_lines(pr.log(job_id), diff))
+    def log(job_id):
+        value = pr.log(job_id)
+        if simulations is not None:
+            value = value.replace("  TEST_CHANGED_PATHS: []",
+                "  TEST_CHANGED_PATHS: []\n2026-10-20T19:00:01.1234567Z   SHARED_POOL_SIMULATIONS: " + simulations)
+        return value
+    value = planner.plan(ROOT, SHA, read=pr.read, read_log=log)
     full = planner.plan(ROOT, SHA, read=lambda _: [])
-    shared = {path for path in pending(full) if Path(path).name.startswith("test_nebius_shared_pool_")}
-    assert shared and pending(value) == shared
-    assert value["reused_files"] == len(pending(full)) - len(shared)
+    assert not any("/test_nebius_shared_pool_" in path for path in pending(full))
+    assert not value["required"] and value["reused_files"] == full["required_files"]
+
+
+@pytest.mark.parametrize("hint", ["maybe", "false\n2026-10-20T19:00:01.1234567Z   SHARED_POOL_SIMULATIONS: false"])
+def test_squash_rejects_malformed_or_duplicate_manual_switch(actions, hint):
+    pr = PullRequestActions()
+    value = planner.plan(ROOT, SHA, read=pr.read, read_log=lambda job_id: pr.log(job_id).replace(
+        "  TEST_CHANGED_PATHS: []", "  TEST_CHANGED_PATHS: []\n2026-10-20T19:00:01.1234567Z   SHARED_POOL_SIMULATIONS: " + hint))
+    assert value["required"] and value["reused_files"] == 0
 
 
 @pytest.mark.parametrize("values", [('"unknown"',), ("[]", "[]")])
@@ -691,3 +699,13 @@ if sys.argv[1]=='run':
     executed = {arg for arg in json.loads(recorded.read_text()) if arg.startswith("tests/")}
     assert executed == set(row["paths"]) and path not in executed
     assert "-x" in json.loads(recorded.read_text())
+
+
+@pytest.mark.parametrize("switch, expected", [("false", False), ("true", True), (None, False)])
+def test_checkout_evidence_preserves_the_actual_manual_switch(switch, expected):
+    pr = PullRequestActions()
+    log = pr.log(100)
+    if switch is not None:
+        log = log.replace("  TEST_CHANGED_PATHS: []",
+            "  TEST_CHANGED_PATHS: []\n2026-10-20T19:00:01.1234567Z   SHARED_POOL_SIMULATIONS: " + switch)
+    assert planner.checkout_inputs(pr.jobs[0], log, 7)[3] is expected

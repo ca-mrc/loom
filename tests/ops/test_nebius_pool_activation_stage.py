@@ -109,9 +109,9 @@ def test_opening_is_anchored_before_dispatch_and_all_guards_follow_global_proof(
     assert set(api.guards.values()) == {'open'}
 
 
-@pytest.mark.parametrize('operation', ['open', 'release'])
-@pytest.mark.parametrize('when', ['before', 'after'])
+@pytest.mark.parametrize(('operation', 'when'), [('open', 'after'), ('release', 'before')])
 def test_uncertain_opening_and_guard_release_are_observed_without_repeating(closed_startup, operation, when):
+    """Connect both transaction kinds to real journals; the core owns the full matrix."""
     start(closed_startup)
     api = ActivationAPI(closed_startup)
     api.failure = (operation, when)
@@ -203,9 +203,9 @@ def test_cancellation_fences_global_then_local_authority_without_runtime_health(
     assert api.calls == calls
 
 
-@pytest.mark.parametrize('operation', ['fence', 'guard-fence'])
-@pytest.mark.parametrize('when', ['before', 'after'])
+@pytest.mark.parametrize(('operation', 'when'), [('fence', 'before'), ('guard-fence', 'after')])
 def test_uncertain_cancellation_writes_never_repeat_or_enable_legacy_restore(closed_startup, operation, when):
+    """Connect both recovery writes to disk; the core covers both loss boundaries."""
     start(closed_startup)
     api = ActivationAPI(closed_startup)
     advance(closed_startup, api)
