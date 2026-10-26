@@ -350,6 +350,28 @@ def test_mirror_404_falls_back_to_the_permanent_file(
     assert "do-not-log" not in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("status", [500, 502, 503, 504])
+def test_unavailable_mirror_falls_back_after_its_retries(
+    payload_builder, locked_archive, tmp_path, monkeypatch, status,
+):
+    requests = []
+    sleeps = []
+
+    def open_archive(url, *, timeout):
+        requests.append((url, timeout))
+        if url == URL:
+            raise HTTPError(url, status, "unavailable", {}, io.BytesIO())
+        return io.BytesIO(PAYLOAD)
+
+    monkeypatch.setattr(payload_builder, "urlopen", open_archive)
+    monkeypatch.setattr(time, "sleep", sleeps.append)
+    destination = payload_builder.download({**locked_archive, "fallback_url": FALLBACK}, tmp_path)
+
+    assert destination.read_bytes() == PAYLOAD
+    assert requests == [(URL, 120)] * 3 + [(FALLBACK, 120)]
+    assert sleeps == [1, 2]
+
+
 @pytest.mark.parametrize("status", [400, 401, 403, 429])
 def test_other_mirror_errors_do_not_fall_back(
     payload_builder, locked_archive, tmp_path, monkeypatch, status,
