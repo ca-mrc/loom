@@ -198,7 +198,10 @@ pins = [
   { path = "tests/ops/test_nebius_shared_pool_handoff_processes_recovery.py", shard_index = 17 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_processes_observation.py", shard_index = 10 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_census.py", shard_index = 18 },
+  # Each recovery scenario retains its 1500s bound. Keep them in different
+  # existing jobs so their allowed budgets do not consume one 50m job together.
   { path = "tests/ops/test_nebius_shared_pool_handoff_census_recovery.py", shard_index = 19 },
+  { path = "tests/ops/test_nebius_shared_pool_handoff_census_preactivation_recovery.py", shard_index = 3 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_fences.py", shard_index = 4 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_authority.py", shard_index = 11 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_release.py", shard_index = 6 },
@@ -1054,10 +1057,14 @@ affected_paths = [
 # Discover referenced operators through these tests and their fixture imports;
 # direct shared-pool entrypoints without known consumers keep the whole suite.
 # Keep the same lane/shards and candidate coverage-reuse contract.
+# affected_only: a PR whose unowned or other forcing paths select full
+# regression still skips this ~190 runner-minute suite unless its diff affects
+# it. Dev pushes, the daily schedule and manual runs keep the whole suite.
 id = "nebius-shared-pool-ops"
 language = "python"
 lane = "nebius-pool"
 include_paths = ["tests/ops/test_nebius_shared_pool_*.py"]
+affected_only = true
 unaffected_paths = ["scripts/ops/nebius_pool_test_plan.py"]
 component_sources = ["scripts/ops/**/*.py", "scripts/ops/**/*.sh"]
 affected_paths = [

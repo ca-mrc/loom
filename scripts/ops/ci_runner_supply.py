@@ -25,7 +25,7 @@ SOURCE_WORKFLOWS = frozenset(
 )
 SOURCE_REPOSITORY = "ca-mrc/loom"
 SECRET_PREFIX = "LOOM_CI_HOSTED_JIT_"
-GRAPH_CACHE_VERSION = 2
+GRAPH_CACHE_VERSION = 3
 
 
 class SupplyError(RuntimeError):
@@ -65,17 +65,26 @@ def name_pattern(job_id: str, job: dict[str, Any]) -> re.Pattern[str]:
         return re.compile(r"^" + prefix + re.escape(source_id) + r"(?:-filtered)?$")
     if not any(parts):
         raise SupplyError("unsupported expression-only job name")
-    return re.compile("^" + prefix + ".+?".join(re.escape(part) for part in parts) + "$")
+    # GitHub appends matrix values when a matrix job has a static name; long
+    # values may be truncated before the closing parenthesis. Non-matrix and
+    # expression-named jobs retain their exact existing matching rules.
+    suffix = r"(?: \(.+)?" if job.get("matrix") and len(parts) == 1 else ""
+    return re.compile("^" + prefix + ".+?".join(re.escape(part) for part in parts) + suffix + "$")
 
 
 def ready_jobs(jobs: list[dict[str, Any]], workflow: dict[str, Any]) -> list[dict[str, Any]]:
     """Do not mistake dependency-blocked checks for runnable queue demand."""
     definitions = workflow["jobs"]
     patterns = {key: name_pattern(key, value) for key, value in definitions.items()}
-    matched = {
-        key: [job for job in jobs if pattern.fullmatch(job["name"])]
-        for key, pattern in patterns.items()
-    }
+    matched: dict[str, list[dict[str, Any]]] = {key: [] for key in definitions}
+    for job in jobs:
+        keys = [key for key, pattern in patterns.items() if pattern.fullmatch(job["name"])]
+        # A known static name can also fit a sibling's expression wildcard.
+        # Keep that row with its owning definition, without duplicate demand
+        # or unrelated rows contaminating the sibling's dependency state.
+        static = [key for key in keys if "${{" not in str(definitions[key].get("name", key))]
+        for key in static or keys:
+            matched[key].append(job)
     # A reusable call has no runner. GitHub reports its nested jobs with the
     # caller's display-name prefix, or a single completed row when skipped.
     for key, definition in reversed(list(definitions.items())):
@@ -132,6 +141,8 @@ def source_graph(api: API, path: str, sha: str) -> dict[str, Any]:
                 raise SupplyError("unsupported job dependency graph")
             definition = {"name": value.get("name", job_id), "name_prefix": name_prefix,
                           "needs": inherited + [key_prefix + item for item in needs]}
+            if isinstance(value.get("strategy"), dict) and "matrix" in value["strategy"]:
+                definition["matrix"] = True
             definitions[key] = definition
             added.append(key)
             if "uses" in value:

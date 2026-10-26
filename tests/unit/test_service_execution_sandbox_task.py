@@ -286,14 +286,17 @@ async def test_phase_handoff_preserves_declared_state_at_original_absolute_path(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("agent_error", [False, True])
-@pytest.mark.parametrize("wrapper_kind", ["native", "harbor", "modified_harbor", "same_size_modified_harbor"])
+@pytest.mark.parametrize("wrapper_kind", ["native", "harbor", "harbor_native", "modified_harbor", "same_size_modified_harbor"])
 async def test_phase_handoff_keeps_tests_private_and_quiesces_before_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_error: bool, wrapper_kind: str,
 ):
-    from loom.nebius_terminus_ingest import offline_verifier_run_sh_bytes
+    from loom.harbor_verifier_script import (
+        native_verifier_run_sh_bytes,
+        offline_verifier_run_sh_bytes,
+    )
 
     task, trial, _ = _inputs()
-    separate_private_inputs = wrapper_kind == "harbor"
+    separate_private_inputs = wrapper_kind in {"harbor", "harbor_native"}
     if wrapper_kind != "native":
         task.verifier.args["script_path"] = "verifier/run.sh"
     (tmp_path / "instruction.md").write_text("Produce answer.txt")
@@ -302,7 +305,8 @@ async def test_phase_handoff_keeps_tests_private_and_quiesces_before_snapshot(
     (tmp_path / "verifier").mkdir()
     (tmp_path / "verifier/check.sh").write_text("trusted verifier")
     if wrapper_kind != "native":
-        wrapper = offline_verifier_run_sh_bytes()
+        wrapper = (native_verifier_run_sh_bytes() if wrapper_kind == "harbor_native"
+                   else offline_verifier_run_sh_bytes())
         if wrapper_kind == "modified_harbor":
             wrapper += b"\n"
         elif wrapper_kind == "same_size_modified_harbor":
@@ -322,7 +326,11 @@ async def test_phase_handoff_keeps_tests_private_and_quiesces_before_snapshot(
         return uuid4(), uuid4()
 
     async def terminus(**kwargs):
-        assert agent.filesystem[PurePosixPath("/app/instruction.md")] == b"Produce answer.txt"
+        assert kwargs["instruction"] == "Produce answer.txt"
+        if separate_private_inputs:
+            assert PurePosixPath("/app/instruction.md") not in agent.filesystem
+        else:
+            assert agent.filesystem[PurePosixPath("/app/instruction.md")] == b"Produce answer.txt"
         assert not any(path.parts[2] in {"tests", "verifier", "solution", ".loom"}
                        for path in agent.filesystem)
         agent.filesystem[PurePosixPath("/app/answer.txt")] = b"42"
@@ -352,7 +360,9 @@ async def test_phase_handoff_keeps_tests_private_and_quiesces_before_snapshot(
         assert verifier.filesystem[private_root / "tests/check.py"] == b"trusted assertions"
         assert env["LOOM_TASK_DIR"] == str(private_root)
         if separate_private_inputs:
-            assert cmd == "/bin/sh /loom/verifier/task/verifier/run.sh"
+            expected = ("/bin/sh /loom/verifier/run.sh" if wrapper_kind == "harbor_native"
+                        else "/bin/sh /loom/verifier/task/verifier/run.sh")
+            assert cmd == expected
             assert env["LOOM_VERIFIER_OUTPUT"] == "/loom/verifier/output.json"
             assert not any(path.is_relative_to("/app/tests") or path.is_relative_to("/app/verifier")
                            or path.is_relative_to("/app/solution") for path in verifier.filesystem)
@@ -691,3 +701,275 @@ async def test_in_place_archive_failure_is_recorded_and_does_not_fail_the_agent(
         "error_type": "WorkspaceSnapshotError",
         "detail": "agent workspace contains unsupported device, FIFO, or socket: /app/s",
     }
+
+
+@pytest.mark.parametrize("kind", ["native", "offline"])
+@pytest.mark.parametrize("modified", [False, True])
+def test_harbor_layout_recognizes_only_complete_known_templates(tmp_path, kind, modified):
+    from loom import service_execution_sandbox_task as module
+    from loom.harbor_verifier_script import (
+        native_verifier_run_sh_bytes,
+        offline_verifier_run_sh_bytes,
+    )
+
+    task, _, _ = _inputs()
+    task.verifier.args["script_path"] = "verifier/run.sh"
+    wrapper = native_verifier_run_sh_bytes() if kind == "native" else offline_verifier_run_sh_bytes()
+    (tmp_path / "verifier").mkdir()
+    if modified:
+        wrapper = wrapper.replace(b"# ", b"##", 1)
+    (tmp_path / "verifier/run.sh").write_bytes(wrapper)
+    assert module._uses_harbor_private_inputs(tmp_path, task) is not modified
+
+
+class _FilesystemSandbox:
+    """Real shells and files in disposable directories; no Docker or root access."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.executions = []
+        self.stopped_processes = False
+        self.stopped = False
+        self.healthchecks = 0
+
+    async def start(self):
+        pass
+
+    async def stop(self):
+        self.stopped = True
+
+    async def stop_processes(self):
+        self.stopped_processes = True
+
+    async def run_healthcheck(self, _):
+        self.healthchecks += 1
+
+    async def upload(self, src, dst):
+        import shutil
+
+        target = Path(dst)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, target)
+        target.chmod(src.stat().st_mode & 0o777)
+
+    async def download(self, src, dst):
+        import shutil
+
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, dst)
+
+    async def export_workspace_archive(self, src, dst):
+        import tarfile
+
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(dst, "w") as archive:
+            archive.add(str(src), arcname=".")
+
+    async def exec(self, cmd, *, user=None, cwd=None, env=None, **kwargs):
+        import os
+        import sys
+
+        assert user is None  # Native staging must not require privilege escalation.
+        self.executions.append((cmd, cwd, env))
+        effective_env = {
+            **os.environ, "PATH": str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"],
+            "LOOM_HARBOR_LOG_DIR": str(self.root / "logs"),
+            "LOOM_HARBOR_TEST_DIR": str(self.root / "tests"),
+            **(env or {}),
+        }
+        process = await asyncio.create_subprocess_exec(
+            "/bin/sh", "-c", cmd, cwd=str(cwd) if cwd else str(self.root), env=effective_env,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate()
+        return ExecResult(return_code=process.returncode, stdout=stdout, stderr=stderr, duration_sec=0)
+
+
+@pytest.mark.parametrize("requirement", ["shell-whitelist", "git-clean"])
+@pytest.mark.parametrize("extra_business_file", [False, True])
+async def test_shared_native_harbor_executes_with_clean_business_tree(
+    tmp_path, monkeypatch, requirement, extra_business_file,
+):
+    import shlex
+
+    from loom import service_execution_sandbox_task as module
+    from loom.harbor_verifier_script import native_verifier_run_sh_bytes
+    from loom.models.trial import TrialConfig
+    from loom.service_execution_oracle import parse_oracle_events
+
+    controller, sandbox = tmp_path / "controller", tmp_path / "sandbox"
+    controller.mkdir()
+    business = sandbox / "app"
+    business.mkdir(parents=True)
+    private = sandbox / "loom/verifier/task"
+    task, _, _ = _inputs()
+    task = task.model_copy(update={"environment": task.environment.model_copy(update={
+        "workdir": PurePosixPath(business),
+    })})
+    task.verifier.args["script_path"] = "verifier/run.sh"
+    trial = TrialConfig(agent_name="oracle", agent_model=None, verifier_env_mode="shared")
+    (controller / "instruction.md").write_text("Do not commit this harness input")
+    (controller / "verifier").mkdir()
+    (controller / "verifier/run.sh").write_bytes(native_verifier_run_sh_bytes())
+    (controller / "tests").mkdir()
+    (controller / "solution").mkdir()
+    business_q = shlex.quote(str(business))
+    if requirement == "shell-whitelist":
+        # Preserve the exact four-file whitelist that failed in RST 9c53e03e.
+        solve = "for name in daftarnama2 result.txt empty_result.txt README.md; do echo output > \"$name\"; done\n"
+        assertion = (
+            'allowed = {"daftarnama2", "result.txt", "empty_result.txt", "README.md"}\n'
+            'unexpected = set(os.listdir(root)) - allowed\n'
+            'assert not unexpected, f"Unexpected files/dirs: {sorted(unexpected)}"\n'
+            'assert all(os.path.isfile(os.path.join(root, name)) for name in allowed)\n'
+        )
+    else:
+        # Preserve the whole-repository clean-worktree requirement from RST 841b7e07.
+        solve = (
+            'git init -q\ngit config user.name "Oracle Test"\n'
+            'git config user.email oracle@example.test\necho output > README.md\n'
+            'git add README.md\ngit commit -qm "Deliver artifact"\n'
+        )
+        assertion = (
+            'assert not subprocess.check_output(["git", "-C", root, "status", "--porcelain"])\n'
+        )
+    (controller / "solution/solve.sh").write_text(
+        "#!/bin/sh\nset -eu\n" + f"cd {business_q}\n" + solve,
+    )
+    # The authored test.sh runs against business state, even though its trusted
+    # file is outside that tree. No chmod/ignore/cleanup may hide extra outputs.
+    (controller / "tests/test.sh").write_text(
+        "#!/bin/sh\nset -eu\n"
+        "trap 'test -f \"$LOOM_HARBOR_LOG_DIR/reward.txt\" || echo 0 > \"$LOOM_HARBOR_LOG_DIR/reward.txt\"' EXIT\n"
+        f"test \"$PWD\" = {business_q}\n"
+        "python - <<'CHECK'\nimport os, subprocess\n"
+        f"root = {str(business)!r}\n" + assertion + "CHECK\n"
+        'echo 1 > "$LOOM_HARBOR_LOG_DIR/reward.txt"\n',
+    )
+    driver = _FilesystemSandbox(sandbox)
+    monkeypatch.setattr(module, "_PRIVATE_VERIFIER_INPUT_ROOT", PurePosixPath(private))
+    monkeypatch.setattr(module, "_PRIVATE_ORACLE_SOLUTION_DIR", PurePosixPath(private.parent / "oracle/solution"), raising=False)
+    monkeypatch.setattr(module, "sandbox_driver", lambda *_: driver)
+    monkeypatch.setenv("LOOM_GATEWAY_URL", "http://127.0.0.1:9999")
+    monkeypatch.setenv("LOOM_TASK_ARTIFACTS_JSON", "[]")
+
+    async def identity(_):
+        return uuid4(), uuid4()
+
+    monkeypatch.setattr(module, "_execution_identity", identity)
+    await run_agent(controller, task, trial)
+    assert not driver.stopped_processes  # Shared service/process lifetime is preserved.
+    assert not (private / "tests/test.sh").exists()  # Withheld until grading.
+    assert not (private.parent / "oracle/solution").exists()  # Cleaned before snapshot.
+    if extra_business_file:
+        (business / "unexpected.txt").write_text("must remain a failure")
+    await run_verifier(controller, task, trial)
+    result = json.loads((controller / ".loom/verifier/output.json").read_text())
+    assert result["rewards"] == {"resolved": 0 if extra_business_file else 1}
+    trace = parse_oracle_events((controller / ".loom/agent/trajectory.jsonl").read_bytes())
+    assert trace[0].cwd == str(business)
+    assert not (business / "instruction.md").exists()
+    assert not (business / "solution").exists()
+    assert driver.stopped_processes and driver.stopped
+    assert not (business / "tests").exists()
+    assert not (business / "verifier").exists()
+    assert not (business / ".loom").exists()
+
+
+@pytest.mark.parametrize("workdir", ["/", "/tmp", "/loom/verifier/task"])
+async def test_harbor_external_layout_does_not_broaden_supported_workdirs(tmp_path, workdir):
+    from loom.harbor_verifier_script import native_verifier_run_sh_bytes
+
+    task, trial, _ = _inputs()
+    task = task.model_copy(update={"environment": task.environment.model_copy(update={
+        "workdir": PurePosixPath(workdir),
+    })})
+    task.verifier.args["script_path"] = "verifier/run.sh"
+    (tmp_path / "verifier").mkdir()
+    (tmp_path / "verifier/run.sh").write_bytes(native_verifier_run_sh_bytes())
+    with pytest.raises(ValueError, match="task workdir requires"):
+        await run_agent(tmp_path, task, trial)
+
+
+@pytest.mark.parametrize("kind", ["native", "offline"])
+@pytest.mark.parametrize("reward", [0, 1])
+async def test_shared_harbor_private_inputs_and_report_leave_business_tree_untouched(
+    tmp_path, monkeypatch, kind, reward,
+):
+    from loom import service_execution_sandbox_task as module
+    from loom.harbor_verifier_script import (
+        native_verifier_run_sh_bytes,
+        native_verifier_workdir_run_sh_bytes,
+        offline_verifier_run_sh_bytes,
+    )
+
+    task, trial, _ = _inputs()
+    task.verifier.args["script_path"] = "verifier/run.sh"
+    trial = trial.model_copy(update={"verifier_env_mode": "shared"})
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests/check.py").write_text("private evaluator")
+    (tmp_path / "verifier").mkdir()
+    wrapper = native_verifier_run_sh_bytes() if kind == "native" else offline_verifier_run_sh_bytes()
+    (tmp_path / "verifier/run.sh").write_bytes(wrapper)
+    driver = Sandbox()
+    business = {PurePosixPath("/app/README.md"): b"unchanged business output"}
+    driver.filesystem.update(business)
+
+    def execute(cmd, user, cwd, env):
+        if env is not None and "LOOM_VERIFIER_OUTPUT" in env:
+            private = module._PRIVATE_VERIFIER_INPUT_ROOT
+            assert cwd == task.environment.workdir
+            assert driver.filesystem[private / "tests/check.py"] == b"private evaluator"
+            assert driver.filesystem[private / "verifier/run.sh"] == wrapper
+            assert env["LOOM_TASK_DIR"] == str(private)
+            assert env["LOOM_HARBOR_WORKDIR"] == "/app"
+            if kind == "native":
+                assert cmd == "/bin/sh /loom/verifier/run.sh"
+                assert driver.filesystem[private.parent / "run.sh"] == native_verifier_workdir_run_sh_bytes()
+            else:
+                assert cmd == "/bin/sh /loom/verifier/task/verifier/run.sh"
+            assert {p: body for p, body in driver.filesystem.items() if p.is_relative_to("/app")} == business
+            driver.filesystem[PurePosixPath(env["LOOM_VERIFIER_OUTPUT"])] = json.dumps({
+                "rewards": {"resolved": reward},
+            }).encode()
+        return ExecResult(return_code=0, stdout=b"", stderr=b"", duration_sec=0)
+
+    driver.exec_handler = execute
+    monkeypatch.setattr(module, "sandbox_driver", lambda *_: driver)
+    await run_verifier(tmp_path, task, trial)
+    result = json.loads((tmp_path / ".loom/verifier/output.json").read_text())
+    assert result["rewards"] == {"resolved": reward}
+    assert (tmp_path / "verifier/run.sh").read_bytes() == wrapper  # Input remains immutable.
+
+
+@pytest.mark.parametrize("raw", ["", "not-a-budget", "0", "-1", str(10 * 1024**3 + 1)])
+def test_workspace_archive_budget_rejects_invalid_controller_limits(tmp_path, monkeypatch, raw):
+    from loom import service_execution_sandbox_task as module
+
+    task, trial, _ = _inputs()
+    monkeypatch.setattr(module, "_frozen_network_policy", lambda: task.environment.baseline_network_policy)
+    monkeypatch.setenv("LOOM_WORKSPACE_MAX_ARCHIVE_BYTES", raw)
+    with pytest.raises(module.ServiceExecutionTaskError, match="workspace_archive_limit_invalid"):
+        module.sandbox_driver("task-sandbox", task, trial)
+
+
+@pytest.mark.parametrize("raw, expected_mib", [(None, 256), (str(400 * 1024**2), 400), (str(1024**3), 512)])
+@pytest.mark.parametrize("guest", [False, True])
+def test_workspace_archive_budget_is_independent_and_bounded_by_storage(
+    monkeypatch, raw, expected_mib, guest,
+):
+    from loom import service_execution_sandbox_task as module
+
+    task, trial, _ = _inputs()
+    task = task.model_copy(update={"environment": task.environment.model_copy(update={"storage_mb": 512})})
+    monkeypatch.setattr(module, "_frozen_network_policy", lambda: task.environment.baseline_network_policy)
+    monkeypatch.setattr(module, "in_guest", lambda *_: guest)
+    monkeypatch.setenv("LOOM_SANDBOX_MAX_TRANSFER_BYTES", str(300 * 1024**2))
+    if raw is None:
+        monkeypatch.delenv("LOOM_WORKSPACE_MAX_ARCHIVE_BYTES", raising=False)
+        expected_mib = 300 if guest else 256
+    else:
+        monkeypatch.setenv("LOOM_WORKSPACE_MAX_ARCHIVE_BYTES", raw)
+    driver = module.sandbox_driver("task-sandbox", task, trial)
+    assert driver._max_transfer == (300 if guest else 256) * 1024**2
+    assert driver._max_workspace_archive == expected_mib * 1024**2

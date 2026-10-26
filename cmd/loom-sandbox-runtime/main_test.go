@@ -33,7 +33,7 @@ func testClient(t *testing.T) *http.Client {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := &http.Server{Handler: (runtimeServer{1024, 3 * time.Second, nil}).handler()}
+	server := &http.Server{Handler: (runtimeServer{maxTransfer: 1024, maxTimeout: 3 * time.Second}).handler()}
 	go server.Serve(listener)
 	t.Cleanup(func() { server.Close() })
 	client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -264,7 +264,7 @@ func TestStopProcessesFinishesAfterRequestCancellation(t *testing.T) {
 	if runtime.GOOS != "linux" || os.Getpid() != 1 {
 		t.Skip("cleanup requires an isolated Linux PID namespace with the runtime as PID 1")
 	}
-	handler := (runtimeServer{1024, 3 * time.Second, nil}).handler()
+	handler := (runtimeServer{maxTransfer: 1024, maxTimeout: 3 * time.Second}).handler()
 	execute := func(command string) execResult {
 		t.Helper()
 		data, _ := json.Marshal(execRequest{Argv: []string{"/bin/sh", "-c", command}})

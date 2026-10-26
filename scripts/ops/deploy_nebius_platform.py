@@ -53,6 +53,31 @@ PHASE_FILES = (
 class DeploymentError(ValueError):
     """A deployment boundary failed; its message contains no secret values."""
 
+    def __init__(self, message: str, *, reason_code: str | None = None):
+        super().__init__(message)
+        self.reason_code = reason_code
+
+
+def _ssh_failure_reason(stderr: str) -> str:
+    """Recognize client diagnostics without persisting any captured text.
+
+    Only the SSH exit-255 path calls this classifier. Unknown output remains
+    unknown: a remote command can also exit 255, so that status alone is not
+    evidence of a connection failure.
+    """
+    text = stderr.lower()
+    if "host key verification failed" in text or "remote host identification has changed" in text:
+        return "SSHHostKeyFailed"
+    if "permission denied (publickey" in text:
+        return "SSHAuthenticationFailed"
+    if "connection timed out" in text or "operation timed out" in text or "timed out during banner exchange" in text:
+        return "SSHConnectTimeout"
+    if any(marker in text for marker in (
+        "connection reset", "connection closed", "closed by remote host", "broken pipe",
+    )):
+        return "SSHConnectionClosed"
+    return "SSHCommandFailed"
+
 
 class TaskIdentityPolicyDeniedError(DeploymentError):
     def __init__(self, policy_name: str):
@@ -338,15 +363,22 @@ class Kubectl:
                 "-o", "UserKnownHostsFile=" + os.environ["LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE"],
                 "-i", os.environ["LOOM_DEPLOY_SSH_KEY_FILE"], target, shlex.join(command),
             ]
-        result = subprocess.run(
-            command,
-            input=stdin,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-            env={'PATH': os.defpath, 'LANG': 'C.UTF-8'} if self.local_executable is not None else None,
-        )
+        try:
+            result = subprocess.run(
+                command,
+                input=stdin,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+                env={'PATH': os.defpath, 'LANG': 'C.UTF-8'} if self.local_executable is not None else None,
+            )
+        except subprocess.TimeoutExpired:
+            # TimeoutExpired includes argv and may retain secret-bearing output.
+            # Keep the original failure semantics without serializing those bytes.
+            raise DeploymentError(
+                f"kubectl {args[0]} failed: CommandTimeout", reason_code="CommandTimeout",
+            ) from None
         if result.returncode:
             denied = re.search(
                 r"ValidatingAdmissionPolicy '([a-z0-9-]+-private-root-v1)' with binding '[a-z0-9-]+' denied request",
@@ -357,15 +389,15 @@ class Kubectl:
             # Preserve API reason codes without serializing message bodies,
             # URLs, Secret data, or arbitrary application logs.
             match = re.search(r"Error from server \(([A-Za-z]{1,64})\)", result.stderr)
-            reason = (
-                match.group(1)
-                if match
-                else (
-                    "DeadlineExceeded" if "timed out waiting" in result.stderr else "CommandFailed"
-                )
-            )
+            if match:
+                reason = match.group(1)
+            elif target and result.returncode == 255:
+                reason = _ssh_failure_reason(result.stderr)
+            else:
+                reason = "DeadlineExceeded" if "timed out waiting" in result.stderr else "CommandFailed"
             raise DeploymentError(
-                f"kubectl {args[0]} failed with exit code {result.returncode}: {reason}"
+                f"kubectl {args[0]} failed with exit code {result.returncode}: {reason}",
+                reason_code=reason,
             )
         return result.stdout if preserve_output else result.stdout.strip()
 
@@ -1353,7 +1385,9 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None,
         evidence["error_type"] = type(exc).__name__
         if isinstance(exc, DeploymentError):
             evidence["reason"] = str(exc)
-            if str(exc) in {
+            if exc.reason_code is not None:
+                evidence["reason_code"] = exc.reason_code
+            elif str(exc) in {
                 "application_database_access_active", "application_database_schema_guard_not_installed",
                 "application_database_readiness_unavailable",
             }:

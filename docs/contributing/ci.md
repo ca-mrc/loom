@@ -337,7 +337,7 @@ and the external phase API double live in `tests/support/`, so importing a
 fixture no longer imports unrelated renderer or management-stage test cases.
 Every platform candidate selects affected modules against its immutable first
 parent; an unavailable boundary retains the whole suite. Shared-pool simulations
-stay skipped, below.
+have their own, narrower rule, below.
 `nebius-candidate.yml` reuses successful native `CI` pool jobs on that exact
 merge-group commit, or the native squash PR whose tested merge has the same Git
 tree as the published candidate. For squash reuse, the planner verifies the
@@ -384,6 +384,12 @@ exact-absence assertions remain before merge. No test is moved to candidate
 publication, nightly validation or deployment, and no mutable fixture is shared
 between cases.
 
+The recovery and preactivation-recovery census scenarios run as separate whole
+modules on two existing pool shards. Each keeps its 1500-second case limit,
+fixtures and fault assertions. Their combined allowed budgets plus the other
+modules exceeded one job's 50-minute budget; the separation retains all 20
+shards and the existing job deadline without dropping either scenario.
+
 The October 16 rebalance keeps the measured scenario boundaries: deploy-job
 failures and completion faults run the same delivery lifecycle from
 `test_nebius_pool_participant_delivery_{job_failures,completion}.py`.
@@ -416,11 +422,17 @@ Shared-pool handoff and recovery tests have a separate ownership group within
 the existing pool lane and shards. Direct shared-pool changes and their
 transitively referenced operator/test-fixture dependencies select the affected
 tests; an unrelated operator edit does not select them just because it selects
-the pool lane. Common fixtures, deployment inputs, CI/dependency changes and
-explicit full regressions retain the full shared-pool suite. New shared-pool
-entrypoints without known consumers and unavailable dependency evidence also
-retain coverage. Candidate publication uses the same selection for both pool
-groups and reuses only exact-commit coverage. No opt-in variable or separate job
+the pool lane. Common fixtures, deployment inputs, CI/dependency changes,
+selector labels, dev pushes, the daily schedule and manual runs retain the full
+shared-pool suite. The suite is `affected_only`: when an unowned or other
+forcing path makes a PR or merge group run full regression, the planner still
+passes the actual diff as `test_diff` (`TEST_DIFF_PATHS` in the pool job), and
+the suite runs only if that diff affects it. An empty or oversized diff keeps
+it. New shared-pool entrypoints without known consumers and unavailable
+dependency evidence also retain coverage. Candidate publication uses the same
+selection for both pool groups and reuses only exact-commit coverage; squash
+reuse reads each PR job's `TEST_DIFF_PATHS`, and treats older jobs without it
+as having run the full suite, as they did. No opt-in variable or separate job
 is required: activation must be tested before enabling
 `NEBIUS_ROLLOUT_MODE=shared`. These simulations do not establish installed
 readiness or authorize a live handoff.
@@ -505,8 +517,10 @@ also need the newer release. Source-built fallback images retain their pinned
 commit, compiler and recipe and are cached as Docker archives. `quay.io/minio/minio`
 no longer serves anonymous pulls, so without the cache every job builds from
 source (about 2 minutes, failing when the Go module proxy resets). CI jobs only
-restore the archives, from `/home/runner/.cache/loom-minio-fixtures`: the cache
-version hashes the path, and `RUNNER_TEMP` differs per hosted worker. The only
+restore the archives, from `.ci-cache/loom-minio-fixtures` inside the checkout: the
+cache version hashes the path, `RUNNER_TEMP` differs per hosted worker, and the
+archive stores the path relative to the workspace, which differs between the
+hosted writer and self-hosted jobs. The only
 writer is `ci-dependency-cache.yml`, which builds every fixture under one key per
 recipe set when `tests/support/minio_images.py` changes on dev, and daily. Each job
 still prepares only the images it selected. Recipe or release changes get a new

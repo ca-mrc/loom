@@ -246,6 +246,9 @@ def test_cache_key_is_shared_by_selections_and_changes_with_any_recipe(monkeypat
 def test_minio_fixture_cache_has_one_trusted_writer_at_one_path():
     # The cache version hashes the path, and RUNNER_TEMP differs per hosted
     # worker, so per-job saves under RUNNER_TEMP were never restored elsewhere.
+    # The archive also stores the path relative to the workspace: a hosted
+    # writer's /home/runner/.cache path unpacked outside self-hosted runners'
+    # expected directory, so every job rebuilt MinIO after a cache hit.
     from pathlib import Path
 
     import yaml
@@ -259,11 +262,14 @@ def test_minio_fixture_cache_has_one_trusted_writer_at_one_path():
                 if "minio" not in str(inputs.get("key", "")) and "minio" not in str(inputs.get("path", "")):
                     continue
                 uses = str(step.get("uses", ""))
-                assert inputs["path"] == "/home/runner/.cache/loom-minio-fixtures", (path.name, step["name"])
+                assert inputs["path"] == ".ci-cache/loom-minio-fixtures", (path.name, step["name"])
                 (saves if uses.startswith("actions/cache/save@") else restores).append(path.name)
                 assert uses.startswith(("actions/cache/save@", "actions/cache/restore@")), uses
             for step in job.get("steps", []):
-                if "tests.support.minio_images" in str(step.get("run", "")) and "--save-cache true" in step["run"]:
+                run = str(step.get("run", ""))
+                if "tests.support.minio_images" in run and "--cache-dir" in run:
+                    assert "--cache-dir .ci-cache/loom-minio-fixtures" in run, (path.name, step["name"])
+                if "tests.support.minio_images" in run and "--save-cache true" in run:
                     saves.append(path.name + ":prepare")
     assert sorted(set(saves)) == ["ci-dependency-cache.yml", "ci-dependency-cache.yml:prepare"]
     assert restores.count("ci.yml") == 2

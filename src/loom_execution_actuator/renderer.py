@@ -133,6 +133,13 @@ def _sidecar(
         result["volumeMounts"] = []
         result["securityContext"].update(runAsUser=65532, runAsGroup=65532)
     elif value.private_sandbox:
+        if max_artifact_bytes is not None:
+            # This is the frozen artifact budget, not a task-selected RPC
+            # limit. Keep the ordinary file channel's smaller limit intact.
+            archive_budget = min(max_artifact_bytes, value.resources.ephemeral_storage_mib * 1024**2)
+            result["env"] = [item for item in result["env"]
+                             if item["name"] != "LOOM_WORKSPACE_MAX_ARCHIVE_BYTES"]
+            result["env"].append({"name": "LOOM_WORKSPACE_MAX_ARCHIVE_BYTES", "value": str(archive_budget)})
         result["securityContext"] = _security_context(read_only_root=False)
         if value.identity is not None:
             identity = value.identity

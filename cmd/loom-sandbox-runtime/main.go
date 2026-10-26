@@ -165,9 +165,10 @@ type guestTaskIdentity struct {
 }
 
 type runtimeServer struct {
-	maxTransfer int64
-	maxTimeout  time.Duration
-	identity    *guestTaskIdentity
+	maxTransfer         int64
+	maxTimeout          time.Duration
+	identity            *guestTaskIdentity
+	maxWorkspaceArchive int64
 }
 
 type execRequest struct {
@@ -219,6 +220,8 @@ func (s runtimeServer) handler() http.Handler {
 	s.registerProcesses(mux, newProcessTable(maxManagedProcesses))
 	mux.HandleFunc("PUT /file", s.upload)
 	mux.HandleFunc("GET /file", s.download)
+	mux.HandleFunc("PUT /workspace-archive", s.upload)
+	mux.HandleFunc("GET /workspace-archive", s.download)
 	mux.HandleFunc("GET /readlink", s.readlink)
 	mux.HandleFunc("POST /restore-directory", s.restoreDirectory)
 	var pauseMu sync.Mutex
@@ -443,6 +446,10 @@ func (s runtimeServer) execute(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s runtimeServer) upload(w http.ResponseWriter, r *http.Request) {
+	limit, ok := s.fileTransferLimit(w, r)
+	if !ok {
+		return
+	}
 	mode := uint64(0644)
 	if raw := r.Header.Get("X-File-Mode"); raw != "" {
 		var err error
@@ -452,17 +459,17 @@ func (s runtimeServer) upload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if r.ContentLength > s.maxTransfer {
-		http.Error(w, "file too large", 413)
+	if r.ContentLength > limit {
+		fileTransferError(w, http.StatusRequestEntityTooLarge, "file_too_large", "file upload rejected", r.ContentLength, limit)
 		return
 	}
 	err := withTaskFS(s.identity, func() error {
-		return writeFile(r.URL.Query().Get("path"), http.MaxBytesReader(w, r.Body, s.maxTransfer), uint32(mode))
+		return writeFile(r.URL.Query().Get("path"), http.MaxBytesReader(w, r.Body, limit), uint32(mode))
 	})
 	if err != nil {
 		var oversized *http.MaxBytesError
 		if errors.As(err, &oversized) {
-			http.Error(w, "file too large", 413)
+			fileTransferError(w, http.StatusRequestEntityTooLarge, "file_too_large", "file upload rejected", r.ContentLength, limit)
 			return
 		}
 		// Publish only fixed reason codes. Filesystem errors may contain private
@@ -477,14 +484,17 @@ func (s runtimeServer) upload(w http.ResponseWriter, r *http.Request) {
 			errors.Is(err, syscall.ENOTDIR), errors.Is(err, syscall.EISDIR):
 			reason = "file_invalid_target"
 		}
-		w.Header().Set("X-Loom-Sandbox-Error", reason)
-		http.Error(w, "file upload rejected", 400)
+		fileTransferError(w, http.StatusBadRequest, reason, "file upload rejected", r.ContentLength, limit)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s runtimeServer) download(w http.ResponseWriter, r *http.Request) {
+	limit, ok := s.fileTransferLimit(w, r)
+	if !ok {
+		return
+	}
 	var f *os.File
 	err := withTaskFS(s.identity, func() error {
 		var openErr error
@@ -492,26 +502,34 @@ func (s runtimeServer) download(w http.ResponseWriter, r *http.Request) {
 		return openErr
 	})
 	if err != nil {
-		http.Error(w, "file download rejected", 400)
+		reason := "file_io_error"
+		switch {
+		case errors.Is(err, syscall.ENOENT):
+			reason = "file_not_found"
+		case errors.Is(err, syscall.EACCES), errors.Is(err, syscall.EPERM):
+			reason = "file_permission_denied"
+		case errors.Is(err, errInvalidFileTarget), errors.Is(err, syscall.ELOOP), errors.Is(err, syscall.ENOTDIR):
+			reason = "file_invalid_target"
+		}
+		fileTransferError(w, http.StatusBadRequest, reason, "file download rejected", -1, limit)
 		return
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil || !info.Mode().IsRegular() {
-		http.Error(w, "not a regular file", 400)
+		fileTransferError(w, http.StatusBadRequest, "file_invalid_target", "file download rejected", -1, limit)
 		return
 	}
-	limit := s.maxTransfer
 	if raw := r.URL.Query().Get("max_bytes"); raw != "" {
 		requested, err := strconv.ParseInt(raw, 10, 64)
 		if err != nil || requested < 0 || requested > limit {
-			http.Error(w, "invalid file budget", 400)
+			fileTransferError(w, http.StatusBadRequest, "file_budget_invalid", "file download rejected", info.Size(), limit)
 			return
 		}
 		limit = requested
 	}
 	if info.Size() > limit {
-		http.Error(w, "file too large", 413)
+		fileTransferError(w, http.StatusRequestEntityTooLarge, "file_too_large", "file download rejected", info.Size(), limit)
 		return
 	}
 	metadata, ok := info.Sys().(*syscall.Stat_t)
@@ -525,7 +543,51 @@ func (s runtimeServer) download(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-File-Unix-Mode", strconv.FormatUint(uint64(metadata.Mode), 8))
 	w.Header().Set("X-File-UID", strconv.FormatUint(uint64(metadata.Uid), 10))
 	w.Header().Set("X-File-GID", strconv.FormatUint(uint64(metadata.Gid), 10))
-	_, _ = io.CopyN(w, f, info.Size())
+	// Hold the last byte until the descriptor has been checked again. A short
+	// read or changed file must terminate an incomplete HTTP body, so clients
+	// never atomically publish a successful-looking partial snapshot.
+	var last [1]byte
+	if info.Size() > 0 {
+		if _, err := io.CopyN(w, f, info.Size()-1); err != nil {
+			panic(http.ErrAbortHandler)
+		}
+		if _, err := io.ReadFull(f, last[:]); err != nil {
+			panic(http.ErrAbortHandler)
+		}
+	}
+	after, err := f.Stat()
+	if err != nil || !sameFileReadVersion(info, after) {
+		panic(http.ErrAbortHandler)
+	}
+	if info.Size() > 0 {
+		_, _ = w.Write(last[:])
+	}
+}
+
+var workspaceArchivePath = regexp.MustCompile(`^/tmp/loom-workspace-[0-9a-f]{32}\.tar$`)
+
+func (s runtimeServer) fileTransferLimit(w http.ResponseWriter, r *http.Request) (int64, bool) {
+	if r.URL.Path != "/workspace-archive" {
+		return s.maxTransfer, true
+	}
+	limit := s.maxWorkspaceArchive
+	if limit == 0 {
+		limit = s.maxTransfer
+	}
+	if !workspaceArchivePath.MatchString(r.URL.Query().Get("path")) {
+		fileTransferError(w, http.StatusBadRequest, "file_invalid_target", "workspace archive rejected", -1, limit)
+		return 0, false
+	}
+	return limit, true
+}
+
+func fileTransferError(w http.ResponseWriter, status int, reason, message string, size, limit int64) {
+	w.Header().Set("X-Loom-Sandbox-Error", reason)
+	if size >= 0 {
+		w.Header().Set("X-Loom-File-Size", strconv.FormatInt(size, 10))
+	}
+	w.Header().Set("X-Loom-File-Limit", strconv.FormatInt(limit, 10))
+	http.Error(w, message, status)
 }
 
 func (s runtimeServer) readlink(w http.ResponseWriter, r *http.Request) {
@@ -564,6 +626,15 @@ func main() {
 	check := flag.String("check-socket", "", "check an existing Unix socket and exit")
 	guest := flag.Bool("guest-channel", false, "serve the private guest virtio-serial channel")
 	limit := flag.Int64("max-transfer-bytes", 256*1024*1024, "maximum file transfer size")
+	var archiveDefault int64
+	if raw := os.Getenv("LOOM_WORKSPACE_MAX_ARCHIVE_BYTES"); raw != "" {
+		var err error
+		archiveDefault, err = strconv.ParseInt(raw, 10, 64)
+		if err != nil || archiveDefault <= 0 {
+			log.Fatal("workspace archive limit invalid")
+		}
+	}
+	archiveLimit := flag.Int64("max-workspace-archive-bytes", archiveDefault, "workspace archive budget; zero uses ordinary file limit")
 	timeout := flag.Int("exec-timeout-seconds", 900, "maximum and default exec deadline")
 	taskUID := flag.String("task-uid", "", "frozen in-guest uid")
 	taskGID := flag.String("task-gid", "", "frozen in-guest gid")
@@ -576,7 +647,7 @@ func main() {
 		}
 		return
 	}
-	if (*socket == "" && !*guest) || (*socket != "" && *guest) || *limit <= 0 || *timeout <= 0 {
+	if (*socket == "" && !*guest) || (*socket != "" && *guest) || *limit <= 0 || *archiveLimit < 0 || *timeout <= 0 {
 		log.Fatal("socket and positive limits required")
 	}
 	identity, err := parseGuestTaskIdentity(*taskUID, *taskGID, *taskGroups, *taskHome)
@@ -605,7 +676,7 @@ func main() {
 	defer listener.Close()
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
-	server := &http.Server{Handler: (runtimeServer{*limit, time.Duration(*timeout) * time.Second, identity}).handler(), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second, BaseContext: func(net.Listener) context.Context { return ctx }}
+	server := &http.Server{Handler: (runtimeServer{maxTransfer: *limit, maxTimeout: time.Duration(*timeout) * time.Second, identity: identity, maxWorkspaceArchive: *archiveLimit}).handler(), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second, BaseContext: func(net.Listener) context.Context { return ctx }}
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
