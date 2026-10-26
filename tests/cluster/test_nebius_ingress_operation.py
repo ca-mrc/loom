@@ -60,11 +60,12 @@ pytestmark = pytest.mark.skipif(os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1"
                                 reason="requires an explicitly disposable Kubernetes API")
 
 
-def _prepare_fixture_image(image, directory):
+def _prepare_fixture_image(image, directory, mirror_limited=None):
     # Host-side OCI transport preserves original bytes without requiring the
     # nested node's resolver for application images. Classic Docker save can
     # reconstruct the manifest and change its digest.
     source = image.replace("docker.io/library/", "public.ecr.aws/docker/library/")
+    upstream = source.replace("public.ecr.aws/docker/library/", "docker.io/library/")
     with TemporaryDirectory(dir=directory) as scratch:
         layout = Path(scratch) / "layout"
         layout.mkdir()
@@ -83,13 +84,20 @@ def _prepare_fixture_image(image, directory):
                     error.add_note("Host fixture image acquisition failed: " + (error.stderr or "")[-4096:])
                     raise
 
-        try:
-            copy(source)
-        except subprocess.CalledProcessError as error:
-            # Skopeo reports registry HTTP 429 as the distribution error code.
-            if "toomanyrequests:" not in (error.stderr or "").lower():
-                raise
-            copy(source.replace("public.ecr.aws/docker/library/", "docker.io/library/"))
+        if mirror_limited:
+            copy(upstream)
+        else:
+            try:
+                copy(source)
+            except subprocess.CalledProcessError as error:
+                # Skopeo reports registry HTTP 429 as the distribution error code.
+                if "toomanyrequests:" not in (error.stderr or "").lower():
+                    raise
+                # A data-limited runner IP gets 429 for every request, after
+                # skopeo's ~30s backoff per request. Pay that once per fixture.
+                if mirror_limited is not None:
+                    mirror_limited.add(source.split("/", 1)[0])
+                copy(upstream)
         archive = Path(scratch) / "image.oci.tar"
         with tarfile.open(archive, "w") as saved:
             for name in ("oci-layout", "index.json", "blobs"):
@@ -101,8 +109,9 @@ def _prepare_fixture_image(image, directory):
 def fixture_images(tmp_path):
     # Finish host acquisition before starting Kubernetes, and remove every
     # archive even when setup or the later test fails before importing it.
+    mirror_limited = set()
     with TemporaryDirectory(dir=tmp_path) as directory:
-        yield {image: _prepare_fixture_image(image, Path(directory))
+        yield {image: _prepare_fixture_image(image, Path(directory), mirror_limited)
                for image in (TRAEFIK, PYTHON, POSTGRES, GUARD_PYTHON)}
 
 
@@ -328,8 +337,15 @@ def test_connected_installation_recovers_then_cuts_over_with_installed_guard(
     namespace, node_name = platform["namespace"], "computeinstance-ingressfixture"
     tools = tmp_path / "tooling"
     tools.mkdir(mode=0o700)
+    # Elapsed phase times appear in a failure, including a pytest-timeout.
+    started, phases = time.monotonic(), []
+
+    def phase(name):
+        phases.append(f"{name}={time.monotonic() - started:.1f}s")
+
     uv = Path(shutil.which("uv"))
     build_wheels(tools, uv=uv)
+    phase("wheels")
     subprocess.run([str(uv), "export", "--locked", "--no-default-groups", "--extra", "cluster", "--group", "nebius-certificates",
                     "--no-emit-workspace", "--format", "requirements-txt", "--no-header", "--quiet",
                     "--output-file", str(tools / "requirements.txt")], cwd=ROOT, check=True, timeout=60)
@@ -338,6 +354,7 @@ def test_connected_installation_recovers_then_cuts_over_with_installed_guard(
     try:
         from kubernetes import client
         _, core, _ = _load_client(container)
+        phase("k3s")
         ns = core.create_namespace(client.V1Namespace(metadata=client.V1ObjectMeta(name=namespace)))
         binding = replace(binding, namespace=namespace, namespace_uid=ns.metadata.uid,
                           kube_system_uid=core.read_namespace("kube-system").metadata.uid)
@@ -348,6 +365,7 @@ def test_connected_installation_recovers_then_cuts_over_with_installed_guard(
         subprocess.run(["docker", "cp", str(tools) + "/.", ident + ":/tmp/loom-ingress-qualification/"], check=True, timeout=60)
         for image, archive in fixture_images.items():
             _import_fixture_image(container, image, archive)
+        phase("images")
         image = "cr.eu-north1.nebius.cloud/test/loom-shared-ingress@" + TRAEFIK.split("@", 1)[1]
         _run(container, "ctr", "images", "tag", TRAEFIK, image)
         _run(container, "kubectl", "wait", "--for=create", "node/" + node_name, "--timeout=60s")
@@ -422,6 +440,7 @@ server.socket=context.wrap_socket(server.socket,server_side=True); server.serve_
                     break
             assert time.monotonic() < deadline, "guard fixture startup deadline"
             time.sleep(0.25)
+        phase("guard")
         for pod in ("loom-web", "postgres"):
             _run(container, "kubectl", "wait", "pod/" + pod, "-n", namespace, "--for=condition=Ready", "--timeout=60s", timeout=70)
         _run(container, "kubectl", "rollout", "status", "deployment/coredns", "-n", "kube-system", "--timeout=60s", timeout=70)
@@ -441,6 +460,7 @@ server.socket=context.wrap_socket(server.socket,server_side=True); server.serve_
         trust = original_context(cadata=roots[0].public_bytes(serialization.Encoding.PEM).decode() + old_tls["tls.crt"])
         monkeypatch.setattr(ssl, "create_default_context", lambda: trust)
         state = tmp_path / "ingress-state"
+        phase("backends")
         with pytest.raises(OperationError) as failure:
             install_ingress(api=api, certificate_config=config, state_dir=state, roots=roots)
         record = (json.loads((state / "cutover/cutover.json").read_text())
@@ -464,7 +484,9 @@ server.socket=context.wrap_socket(server.socket,server_side=True); server.serve_
         # reuse the immutable stage ownership record, never adopt objects by name.
         (state / "cutover").rename(state / "recovered-cutover")
         api = LiveIngressAPI(kubeconfig, **kwargs)
+        phase("interrupted+rollback")
         result = install_ingress(api=api, certificate_config=config, state_dir=state, roots=roots)
+        phase("install")
         assert result["status"] == "complete"
         assert install_ingress(api=api, certificate_config=config, state_dir=state, roots=roots) == result
         after = core.read_namespaced_service("loom-web", namespace)
@@ -488,6 +510,7 @@ server.socket=context.wrap_socket(server.socket,server_side=True); server.serve_
             return qualify_dns_target(api=api, certificate_config=config, state_dir=state)
 
         target = qualify()
+        phase("dns-qualify")
         assert target["address"] == public_address and target["service_uid"] == public.metadata.uid
         dns = Provider()
         dns.rows = {"*.dev": [], "management": []}
@@ -511,6 +534,8 @@ server.socket=context.wrap_socket(server.socket,server_side=True); server.serve_
             with alpn.wrap_socket(stream, server_hostname=old_host) as secure:
                 assert secure.selected_alpn_protocol() == "acme-tls/1"
     except BaseException as error:
+        phase("failed")
+        error.add_note("phase timeline: " + " ".join(phases))
         try:
             node = container.get_wrapped_container()
             node.reload()

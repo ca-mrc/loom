@@ -910,8 +910,31 @@ async def _wait_for_policy_programming(
             return
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise AssertionError(f"kube-router programming did not converge: {gaps}\nlast filter snapshot:\n{rules[-65536:]}")
+            error = AssertionError(f"kube-router programming did not converge: {gaps}\nlast filter snapshot:\n{rules[-65536:]}")
+            if gaps == ["FORWARD has no kube-router hook"]:
+                error.add_note(await asyncio.to_thread(_policy_controller_diagnostics, container))
+            raise error
         await asyncio.sleep(min(0.25, remaining))
+
+
+def _policy_controller_diagnostics(container: object) -> str:
+    """Bounded evidence for a missing hook: other iptables backend, controller log."""
+    notes = []
+    try:
+        legacy = container.exec(["iptables-legacy-save", "-t", "filter"])
+        text = legacy.output.decode("utf-8", errors="replace")
+        notes.append(f"legacy backend exit={legacy.exit_code} kube-router rules="
+                     f"{sum('KUBE-ROUTER' in line for line in text.splitlines())}")
+    except Exception as error:
+        notes.append(f"legacy backend unreadable: {type(error).__name__}")
+    try:
+        stdout, stderr = container.get_logs()
+        lines = [line for line in (stdout + stderr).decode("utf-8", errors="replace").splitlines()
+                 if any(marker in line.lower() for marker in ("netpol", "network policy", "kube-router", "iptables"))]
+        notes.append("k3s policy controller log:\n" + "\n".join(line[:512] for line in lines[-40:]))
+    except Exception as error:
+        notes.append(f"k3s log unreadable: {type(error).__name__}")
+    return "\n".join(notes)
 
 
 async def test_allowed_peer_waits_for_service_convergence(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -973,6 +996,23 @@ async def test_policy_readiness_failure_preserves_bounded_rules(exit_code: int) 
     with pytest.raises(AssertionError, match="tail-evidence") as error:
         await _wait_for_policy_programming(container, _EXPECTED_POLICY, timeout=0.01)
     assert len(str(error.value)) < 67000
+
+
+async def test_missing_forward_hook_reports_other_backend_and_controller_log() -> None:
+    def inspect(command):
+        if command == ["iptables-legacy-save", "-t", "filter"]:
+            return SimpleNamespace(exit_code=0, output=b"*filter\n:KUBE-ROUTER-FORWARD - [0:0]\n-A FORWARD -j KUBE-ROUTER-FORWARD\n")
+        assert command == ["iptables-save", "-t", "filter"]
+        return SimpleNamespace(exit_code=0, output=b"*filter\n:FORWARD ACCEPT [0:0]\nCOMMIT\n")
+
+    logs = (b"I1025 Starting network policy controller\nI1025 unrelated\n", b"E1025 netpol: sync failed\n")
+    container = SimpleNamespace(exec=inspect, get_logs=lambda: logs)
+    with pytest.raises(AssertionError, match="FORWARD has no kube-router hook") as error:
+        await _wait_for_policy_programming(container, _EXPECTED_POLICY, timeout=0.01)
+    note = "\n".join(error.value.__notes__)
+    assert "legacy backend exit=0 kube-router rules=2" in note
+    assert "Starting network policy controller" in note and "netpol: sync failed" in note
+    assert "unrelated" not in note
 
 
 async def test_actuator_api_converges_against_disposable_k3s() -> None:
