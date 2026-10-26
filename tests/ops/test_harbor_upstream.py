@@ -361,3 +361,115 @@ else:
     assert result.returncode == 0, result.stderr
     assert "Candidate is Ready" in summary.read_text()
     assert not output.exists()
+
+
+@pytest.mark.parametrize("scenario", ["manual-conflict", "clean-refresh", "merge-failure"])
+def test_candidate_refresh_preserves_human_amendments_and_reports_conflicts(
+    tmp_path: Path, scenario: str
+) -> None:
+    """Run the actual preparation shell against a disposable Git remote."""
+    root, remote = tmp_path / "checkout", tmp_path / "origin.git"
+    root.mkdir()
+
+    def git(*args: str, cwd: Path = root) -> str:
+        result = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=False)
+        assert result.returncode == 0, result.stdout + result.stderr
+        return result.stdout.strip()
+
+    git("init", "--bare", str(remote))
+    git("init", "--initial-branch=dev")
+    git("config", "user.name", "Refresh Test")
+    git("config", "user.email", "refresh@example.invalid")
+    git("remote", "add", "origin", str(remote))
+    paths = {MANIFEST, *(relative for relative, _, _ in PIN_LOCATIONS), "scripts/ops/harbor_upstream.py"}
+    for relative in paths:
+        destination = root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes((ROOT / relative).read_bytes())
+    lock = root / "deploy/worker-image.lock"
+    lock.write_text("base dependency evidence\n")
+    git("add", ".")
+    git("commit", "-qm", "Base")
+    git("switch", "-c", "bot/harbor-upstream")
+    (root / "human-amendment.txt").write_text("Preserve this reviewed amendment.\n")
+    lock.write_text("human dependency amendment\n")
+    git("add", ".")
+    git("commit", "-qm", "Human candidate amendment")
+    candidate_head = git("rev-parse", "HEAD")
+    git("push", "-q", "origin", "HEAD")
+    git("switch", "dev")
+    if scenario == "manual-conflict":
+        lock.write_text("new dev dependency evidence\n")
+    else:
+        (root / "base-improvement.txt").write_text("Keep this new base behavior.\n")
+    git("add", ".")
+    git("commit", "-qm", "New dev work")
+    base_head = git("rev-parse", "HEAD")
+    git("push", "-q", "origin", "HEAD")
+    git("branch", "-D", "bot/harbor-upstream")
+    git("fetch", "-q", "origin")
+    if scenario == "merge-failure":
+        hook = root / ".git/hooks/pre-merge-commit"
+        hook.write_text("#!/bin/sh\nexit 17\n")
+        hook.chmod(0o755)
+
+    binaries = tmp_path / "bin"
+    binaries.mkdir()
+    gh = binaries / "gh"
+    gh.write_text(f"""#!{Path(sys.executable).resolve()}
+import json, os, sys
+args = sys.argv[1:]
+with open(os.environ['COMMAND_LOG'], 'a') as output:
+    output.write(json.dumps(args) + '\\n')
+if args[:2] == ['pr', 'list']:
+    print(json.dumps([{{'number': 9, 'isDraft': True, 'url': 'https://example.invalid/pr/9'}}]))
+elif args[:2] == ['pr', 'view']:
+    print('true' if 'isDraft,state' in args else 'https://example.invalid/pr/9')
+elif args[:2] != ['pr', 'edit']:
+    sys.exit('unexpected GitHub mutation or qualification')
+""")
+    gh.chmod(0o755)
+    summary, output, commands = tmp_path / "summary.md", tmp_path / "output", tmp_path / "commands.jsonl"
+    workflow = yaml.safe_load((ROOT / ".github/workflows/harbor-upstream.yml").read_text())
+    prepare = next(step for step in workflow["jobs"]["candidate"]["steps"] if step.get("id") == "candidate")
+    result = subprocess.run(["/bin/bash", "-c", prepare["run"]], cwd=root, capture_output=True, text=True,
+        timeout=30, env={**os.environ, "PATH": str(binaries) + os.pathsep + os.environ["PATH"],
+            "COMMAND_LOG": str(commands), "GITHUB_REPOSITORY": "ca-mrc/loom",
+            "CANDIDATE_BRANCH": "bot/harbor-upstream", "RUNNER_TEMP": str(tmp_path),
+            "GITHUB_STEP_SUMMARY": str(summary), "GITHUB_OUTPUT": str(output),
+            "UPSTREAM_REVISION": "a" * 40, "UPSTREAM_VERSION": "0.24.0",
+            "COMPARE_URL": "https://example.invalid/compare", "GITHUB_SERVER_URL": "https://example.invalid",
+            "GITHUB_RUN_ID": "123"})
+    recorded = [json.loads(line) for line in commands.read_text().splitlines()]
+    assert git("merge-base", "--is-ancestor", candidate_head, "HEAD") == ""
+    assert (root / "human-amendment.txt").read_text() == "Preserve this reviewed amendment.\n"
+    assert lock.read_text() == "human dependency amendment\n"
+    outputs = output.read_text() if output.exists() else ""
+    if scenario != "clean-refresh":
+        assert result.returncode != 0
+        expected_status = "action_required" if scenario == "manual-conflict" else "failed"
+        assert f"refresh_status={expected_status}" in outputs
+        assert "prepared=true" not in outputs
+        assert git("rev-parse", "HEAD") == candidate_head
+        assert git("rev-parse", "refs/remotes/origin/bot/harbor-upstream") == candidate_head
+        assert git("status", "--porcelain") == ""
+        assert not (root / ".git/MERGE_HEAD").exists()
+        assert recorded == [["pr", "list", "--repo", "ca-mrc/loom", "--base", "dev", "--head",
+            "bot/harbor-upstream", "--state", "open", "--json", "number,isDraft,url"]]
+        text = summary.read_text()
+        if scenario == "manual-conflict":
+            assert "action required" in text.lower()
+            assert "deploy/worker-image.lock" in text
+        else:
+            assert "without content conflicts" in text
+            assert "action required" not in text.lower()
+        assert candidate_head in text and base_head in text
+        assert "not been accepted" in text
+    else:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "prepared=true" in outputs
+        assert git("merge-base", "--is-ancestor", base_head, "HEAD") == ""
+        assert git("rev-parse", "refs/remotes/origin/bot/harbor-upstream") == git("rev-parse", "HEAD")
+        assert load_pin(root).source_revision == "a" * 40
+        assert load_pin(root).version == "0.24.0"
+        assert any(args[:2] == ["pr", "edit"] for args in recorded)

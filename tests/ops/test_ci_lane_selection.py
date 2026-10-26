@@ -150,7 +150,8 @@ def test_shared_pool_scope_tracks_consumers_not_the_entire_operator_lane(changes
     root = Path(__file__).resolve().parents[2]
     manifest = load_manifest(root / "config/component-ownership.toml")
     selected = selected_test_paths(manifest, tracked_paths=_tracked_paths(root),
-        lane="nebius-pool", repo_root=root, changed_paths=changes, test_scope="nebius")
+        lane="nebius-pool", repo_root=root, changed_paths=changes, test_scope="nebius",
+        include_shared_pool=True)
     assert any(Path(path).name.startswith("test_nebius_shared_pool_") for path in selected) is retained
     if not retained:
         assert selected == ()
@@ -173,7 +174,8 @@ def test_forced_full_regression_runs_shared_pool_only_for_an_affecting_diff(diff
 
     root = Path(__file__).resolve().parents[2]
     manifest = load_manifest(root / "config/component-ownership.toml")
-    common = dict(tracked_paths=_tracked_paths(root), lane="nebius-pool", repo_root=root, test_scope="nebius")
+    common = dict(tracked_paths=_tracked_paths(root), lane="nebius-pool", repo_root=root,
+                  test_scope="nebius", include_shared_pool=True)
     full = selected_test_paths(manifest, **common)
     selected = selected_test_paths(manifest, changed_paths=(), diff_paths=diff, **common)
     shared = {path for path in full if Path(path).name.startswith("test_nebius_shared_pool_")}
@@ -291,7 +293,8 @@ def test_shard_manifests_execute_exactly_the_planned_selection(changes, lane, tm
     # needed to test this contract. Whole-repository shard ownership is audited
     # separately; repeating its import graph once per real shard adds no case.
     manifest = replace(manifest, test_sharding=(TestShardPolicy(lane, 3, "round-robin", None, ()),))
-    common = dict(tracked_paths=tuple(files), lane=lane, repo_root=tmp_path, changed_paths=changes)
+    common = dict(tracked_paths=tuple(files), lane=lane, repo_root=tmp_path, changed_paths=changes,
+                  include_shared_pool=True)
     planned = selected_test_paths(manifest, **common)
     full_lane = lane == "tests-root" or changes in (
         ("uv.lock",), ("tests/ops/nebius_participant_external_fixture.py",))

@@ -73,15 +73,17 @@ class TestSuite:
     unaffected_paths: tuple[str, ...] = ()
     # Opt-in for heavy suites: on a PR or merge group, run only when a change
     # touches these inputs, the suite's own tests or the test helpers they import.
-    # Everything else is validated after merge, before deployment.
+    # Unannotated suites remain complete; manual_only is a separate opt-in.
     affected_paths: tuple[str, ...] = ()
     # Component-local operators may select their transitive test consumers.
     # Other affected inputs retain the complete suite.
     component_sources: tuple[str, ...] = ()
     # A PR or merge group that forces full regression (unowned, authority or
     # dependency paths) still runs this suite only when its actual diff is
-    # affected. Push, scheduled and manual runs remain complete.
+    # affected. Empty hints retain coverage, subject to manual_only below.
     affected_only: bool = False
+    # Unlaunched shared-pool simulations run only during explicit qualification.
+    manual_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -433,6 +435,7 @@ def _test_suite(raw: dict[str, Any]) -> TestSuite:
             "affected_paths",
             "component_sources",
             "affected_only",
+            "manual_only",
         },
         context,
     )
@@ -478,6 +481,11 @@ def _test_suite(raw: dict[str, Any]) -> TestSuite:
         raise ManifestError(f"{context}.component_sources must be a string array")
     component_sources = tuple(_safe_path(item, context=f"{context}.component_sources", allow_glob=True)
                               for item in raw_sources)
+    manual_only = raw.get("manual_only", False)
+    if type(manual_only) is not bool:
+        raise ManifestError(f"{context}.manual_only must be a boolean")
+    if manual_only and lane != "nebius-pool":
+        raise ManifestError(f"{context}.manual_only requires the nebius-pool lane")
     affected_only = raw.get("affected_only", False)
     if type(affected_only) is not bool:
         raise ManifestError(f"{context}.affected_only must be a boolean")
@@ -498,6 +506,7 @@ def _test_suite(raw: dict[str, Any]) -> TestSuite:
         affected_paths=affected_paths,
         component_sources=component_sources,
         affected_only=affected_only,
+        manual_only=manual_only,
     )
 
 
@@ -1734,6 +1743,7 @@ def _component_test_consumers(
 def selected_test_paths(
     manifest: Manifest, *, tracked_paths: tuple[str, ...], lane: str, repo_root: Path,
     changed_paths: tuple[str, ...] = (), diff_paths: tuple[str, ...] = (), test_scope: str = "all",
+    include_shared_pool: bool = False,
     shard_index: int = 0, shard_count: int = 1,
     shard_strategy: str | None = None, suite: str | None = None,
 ) -> tuple[str, ...]:
@@ -1753,7 +1763,8 @@ def selected_test_paths(
     # which files share a shard.
     selected = set(_selected_lane_paths(manifest, paths, changed_paths=changed_paths,
                                         diff_paths=diff_paths, tracked_paths=tracked_paths,
-                                        repo_root=repo_root, test_scope=test_scope))
+                                        repo_root=repo_root, test_scope=test_scope,
+                                        include_shared_pool=include_shared_pool))
     paths = tuple(path for path in shard_paths(
         paths, shard_index=shard_index, shard_count=shard_count,
         strategy=policy.strategy if policy is not None else shard_strategy or "round-robin",
@@ -1768,9 +1779,11 @@ def selected_test_paths(
 def _selected_lane_paths(
     manifest: Manifest, paths: tuple[str, ...], *, changed_paths: tuple[str, ...],
     tracked_paths: tuple[str, ...], repo_root: Path, test_scope: str,
-    diff_paths: tuple[str, ...] = (),
+    diff_paths: tuple[str, ...] = (), include_shared_pool: bool = False,
 ) -> tuple[str, ...]:
     """The one selection contract shared by matrix planning and shard execution."""
+    if not include_shared_pool:
+        paths = tuple(path for path in paths if not manifest.test_owner_for_path(path).manual_only)
     selected = narrow_test_only_changes(paths, changed_paths=changed_paths,
                                         tracked_paths=tracked_paths, repo_root=repo_root)
     selected = select_affected_test_suites(manifest, selected, changed_paths=changed_paths,
@@ -1803,6 +1816,7 @@ def guest_payload_consumers(paths: tuple[str, ...], *, repo_root: Path) -> froze
 def test_shard_matrix(
     manifest: Manifest, *, tracked_paths: tuple[str, ...], lane: str, repo_root: Path,
     changed_paths: tuple[str, ...] = (), diff_paths: tuple[str, ...] = (), test_scope: str = "all",
+    include_shared_pool: bool = False,
 ) -> tuple[dict[str, Any], ...]:
     """Start only nonempty shards, retaining stable whole-module assignments."""
     paths = test_paths_for_lane(manifest, tracked_paths=tracked_paths, lane=lane)
@@ -1810,7 +1824,8 @@ def test_shard_matrix(
         raise ManifestError(f"CI lane has no tracked test paths: {lane}")
     selected_set = set(_selected_lane_paths(manifest, paths, changed_paths=changed_paths,
                                             diff_paths=diff_paths, tracked_paths=tracked_paths,
-                                            repo_root=repo_root, test_scope=test_scope))
+                                            repo_root=repo_root, test_scope=test_scope,
+                                            include_shared_pool=include_shared_pool))
     policy = manifest.test_shard_policy(lane)
     count = policy.shard_count if policy is not None else 1
     guest_consumers = guest_payload_consumers(paths, repo_root=repo_root)
@@ -1996,8 +2011,10 @@ def _parser() -> argparse.ArgumentParser:
     )
     test_paths.add_argument("--lane", required=True)
     test_paths.add_argument("--test-scope", choices=("all", "nebius"), default="all")
+    test_paths.add_argument("--include-shared-pool", choices=("true", "false"), default="false",
+                            help="Include unlaunched shared-pool simulations for manual qualification.")
     test_paths.add_argument("--changed-paths-json", default="[]",
-                            help="Narrow independent test-only edits; [] always runs the full lane.")
+                            help="Narrow independent test-only edits; [] retains the default lane selection.")
     test_paths.add_argument("--diff-paths-json", default="[]",
                             help="A PR's actual diff; gates affected_only suites when changed paths are [].")
     test_paths.add_argument("--shard-index", type=int, default=0)
@@ -2132,6 +2149,7 @@ def main(argv: list[str] | None = None) -> int:
                 changed_paths=changed_paths, diff_paths=diff_paths, test_scope=args.test_scope,
                 shard_index=args.shard_index, shard_count=args.shard_count,
                 shard_strategy=args.shard_strategy, suite=args.suite,
+                include_shared_pool=args.include_shared_pool == "true",
             )
             for path in paths:
                 print(path)

@@ -84,7 +84,7 @@ def github_job_log(job_id: int) -> str:
 
 def checkout_inputs(
     job: dict[str, Any], log: str, number: int
-) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
+) -> tuple[str, tuple[str, ...], tuple[str, ...], bool]:
     """Read the pinned checkout action, before any repository command runs.
 
     The run/check-suite SHA is the PR head, not the tested merge commit. Do
@@ -147,6 +147,13 @@ def checkout_inputs(
     diff = json.loads(diff_hints[0]) if diff_hints else []
     if not isinstance(diff, list) or not all(isinstance(path, str) for path in diff):
         raise ValueError("pool_selection_unqualified")
+    simulation_hints = [line.removeprefix("  SHARED_POOL_SIMULATIONS: ") for line in lines
+                        if line.startswith("  SHARED_POOL_SIMULATIONS: ")]
+    if len(simulation_hints) > 1 or any(value not in {"true", "false"} for value in simulation_hints):
+        raise ValueError("pool_selection_unqualified")
+    # Missing evidence cannot prove that optional simulations executed. This
+    # conservatively undercounts older jobs and never promotes a skipped module.
+    simulations = simulation_hints == ["true"]
     [index] = [
         i
         for i, line in enumerate(lines)
@@ -161,7 +168,7 @@ def checkout_inputs(
         for line in lines
     ):
         raise ValueError("checkout_ref_unqualified")
-    return sha, tuple(paths), tuple(diff)
+    return sha, tuple(paths), tuple(diff), simulations
 
 
 def rows(pages: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
@@ -207,7 +214,7 @@ def plan(
 
     def test_paths(
         *, changed_paths: tuple[str, ...] = (), diff_paths: tuple[str, ...] = (),
-        shard_index: int = 0, shard_count: int = 1,
+        shard_index: int = 0, shard_count: int = 1, include_shared_pool: bool = False,
     ) -> tuple[str, ...]:
         return selected_test_paths(
             manifest,
@@ -219,6 +226,7 @@ def plan(
             diff_paths=diff_paths,
             shard_index=shard_index,
             shard_count=shard_count,
+            include_shared_pool=include_shared_pool,
         )
 
     try:
@@ -446,7 +454,7 @@ def plan(
                             stage = "job_log"
                             log = job_log(job["id"])
                             stage = "checkout_binding"
-                            checkout, changed, diff = checkout_inputs(job, log, number)
+                            checkout, changed, diff, simulations = checkout_inputs(job, log, number)
                             stage = "tested_commit"
                             [tested] = evidence(f"git/commits/{checkout}")
                             if (
@@ -460,6 +468,7 @@ def plan(
                                 test_paths(
                                     changed_paths=changed,
                                     diff_paths=diff,
+                                    include_shared_pool=simulations,
                                     shard_index=index,
                                     shard_count=policy.shard_count,
                                 )

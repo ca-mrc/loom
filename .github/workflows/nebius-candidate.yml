@@ -31,6 +31,8 @@ concurrency:
 jobs:
   # Successful native CI on this candidate tree already owns its selected
   # coverage. Verify its checkout and run only missing complete modules.
+  # Unlaunched shared-pool simulations are manual CI qualification, never
+  # supplementary candidate execution or inferred coverage.
   # Missing/unreadable evidence retains tests; image qualification stays below.
   pool-ops-plan:
     name: Plan missing pool operator tests

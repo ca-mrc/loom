@@ -65,6 +65,11 @@ on:
     - cron: "23 8 * * *"
   workflow_dispatch:
     inputs:
+      shared_pool_simulations:
+        description: "Qualify unlaunched shared-pool handoff/recovery simulations (manual only)"
+        required: false
+        type: boolean
+        default: false
       legacy_compatibility:
         description: "Include historical platform tests and both integration tiers (manual only)"
         required: false
@@ -146,6 +151,7 @@ jobs:
       stale_draft: ${{ steps.stale.outputs.stale_draft || 'false' }}
       test_changes: ${{ steps.plan.outputs.test_changes || '[]' }}
       test_diff: ${{ steps.plan.outputs.test_diff || '[]' }}
+      shared_pool_simulations: ${{ steps.plan.outputs.shared_pool_simulations || 'false' }}
       tests_root_matrix: ${{ steps.plan.outputs.tests_root_matrix || '[]' }}
       nebius_pool_matrix: ${{ steps.plan.outputs.nebius_pool_matrix || '[]' }}
       integration_matrix: ${{ steps.plan.outputs.integration_matrix || '[]' }}
@@ -227,6 +233,7 @@ jobs:
           DISPATCH_INTEGRATION: ${{ inputs.integration || inputs.legacy_compatibility }}
           DISPATCH_INTEGRATION_DOCKER: ${{ inputs.integration_docker || inputs.legacy_compatibility }}
           DISPATCH_COVERAGE_SUMMARY: ${{ inputs.coverage_summary }}
+          DISPATCH_SHARED_POOL: ${{ github.event_name == 'workflow_dispatch' && inputs.shared_pool_simulations || false }}
         run: |
           set -euo pipefail
           case "$EVENT_NAME" in
@@ -276,6 +283,7 @@ jobs:
             --changed-files /tmp/loom-changed-files.txt \
             --labels-json "$PR_LABELS_JSON" \
             --event-name "$EVENT_NAME" \
+            --shared-pool-simulations "${DISPATCH_SHARED_POOL:-false}" \
             --pull-request-action "$PR_ACTION" \
             --pull-request-action-label "$PR_ACTION_LABEL" \
             --pull-request-draft "$PR_DRAFT" \
@@ -492,7 +500,7 @@ jobs:
           [[ ${#test_paths[@]} -gt 0 ]]
           coverage_args=(-p no:cov)
           if [[ "$COVERAGE_ENABLED" == "true" ]]; then
-            coverage_args=(--cov=src --cov=packages --cov-report=)
+            coverage_args=(--cov=src --cov=packages --cov-report= --cov-config=pyproject.toml)
           fi
           uv run --no-sync pytest -m "${CI_PYTEST_MARKERS:-not legacy_pool}" "${test_paths[@]}" \
             -x --durations=25 \
@@ -768,6 +776,7 @@ jobs:
       TEST_CHANGED_PATHS: ${{ needs.workflow-plan.outputs.test_changes }}
       # Job-level, so candidate reuse reads it from the checkout step's log.
       TEST_DIFF_PATHS: ${{ needs.workflow-plan.outputs.test_diff }}
+      SHARED_POOL_SIMULATIONS: ${{ needs.workflow-plan.outputs.shared_pool_simulations }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
@@ -787,6 +796,7 @@ jobs:
           manifest_paths_file="${RUNNER_TEMP}/nebius-pool-manifest.txt"
           python3 scripts/component_ownership.py test-paths --lane nebius-pool --test-scope "${CI_TEST_SCOPE:-all}" \
             --changed-paths-json "$TEST_CHANGED_PATHS" --diff-paths-json "${TEST_DIFF_PATHS:-[]}" \
+            --include-shared-pool "${SHARED_POOL_SIMULATIONS:-false}" \
             --shard-index "$SHARD_INDEX" --shard-count "$SHARD_COUNT" \
             > "$manifest_paths_file"
           test -s "$manifest_paths_file"
@@ -879,7 +889,7 @@ jobs:
           fi
           coverage_args=(-p no:cov)
           if [[ "$COVERAGE_ENABLED" == "true" ]]; then
-            coverage_args=(--cov=src --cov=packages --cov-report=)
+            coverage_args=(--cov=src --cov=packages --cov-report= --cov-config=pyproject.toml)
           fi
           uv run --no-sync pytest -m "${CI_PYTEST_MARKERS:-not legacy_pool}" "${test_paths[@]}" \
             "${coverage_args[@]}"
@@ -1389,7 +1399,7 @@ jobs:
           [[ ${#test_paths[@]} -gt 0 ]]
           coverage_args=(-p no:cov)
           if [[ "$COVERAGE_ENABLED" == "true" ]]; then
-            coverage_args=(--cov=src --cov=packages --cov-report=)
+            coverage_args=(--cov=src --cov=packages --cov-report= --cov-config=pyproject.toml)
           fi
           uv run --no-sync pytest "${test_paths[@]}" \
             -m "not docker and (${CI_PYTEST_MARKERS:-not legacy_pool})" \

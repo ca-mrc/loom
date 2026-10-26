@@ -17,7 +17,8 @@ from tests.unit.test_nebius_application_image_renderer import build_inputs as bu
 from tests.unit.test_nebius_pool_profiles import document
 
 
-def installation(environments=("production", "staging", "development")):
+def installation(environments=("production", "staging", "development"), *, now=None):
+    now = datetime.now(UTC) if now is None else now
     participant, _, profiles = document()
     participants, executions, builds = [], [], []
     for index, environment in enumerate(environments):
@@ -41,7 +42,7 @@ def installation(environments=("production", "staging", "development")):
         raw[identity] = secret
         credentials.append({"machine_id": str(identity), "role": role, "participant_id": owner, "credential_epoch": 1,
             "token_sha256": hashlib.sha256(secret.encode()).hexdigest(),
-            "issued_at": datetime.now(UTC).isoformat(), "expires_at": (datetime.now(UTC) + timedelta(days=30)).isoformat()})
+            "issued_at": now.isoformat(), "expires_at": (now + timedelta(days=30)).isoformat()})
     return {"schema_version": "loom.pool-installation.v1", "operation_id": str(uuid4()),
         "pool_id": str(participant.pool_id), "installation_id": str(participant.installation_id),
         "cluster_id": "cluster-1", "node_group_id": "group-1", "admission_epoch": 2, "policy_revision": 1,
