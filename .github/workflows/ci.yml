@@ -120,29 +120,35 @@ jobs:
     name: workflow-plan
     runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-latest' }}
     timeout-minutes: 5
+    # Read-only live PR and run state, to recognize a stale draft payload.
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
     outputs:
-      event_relevant: ${{ steps.plan.outputs.event_relevant || steps.event.outputs.event_relevant }}
-      full_gate: ${{ steps.plan.outputs.full_gate || steps.event.outputs.full_gate }}
-      gate_mode: ${{ steps.plan.outputs.gate_mode || steps.event.outputs.gate_mode }}
-      docs_only: ${{ steps.plan.outputs.docs_only || steps.event.outputs.docs_only }}
-      integration: ${{ steps.plan.outputs.integration || steps.event.outputs.integration }}
-      integration_docker: ${{ steps.plan.outputs.integration_docker || steps.event.outputs.integration_docker }}
-      images: ${{ steps.plan.outputs.images || steps.event.outputs.images }}
-      cluster_smoke: ${{ steps.plan.outputs.cluster_smoke || steps.event.outputs.cluster_smoke }}
-      staging_smoke: ${{ steps.plan.outputs.staging_smoke || steps.event.outputs.staging_smoke }}
-      coverage_summary: ${{ steps.plan.outputs.coverage_summary || steps.event.outputs.coverage_summary }}
-      web_checks: ${{ steps.plan.outputs.web_checks || steps.event.outputs.web_checks }}
+      event_relevant: ${{ steps.plan.outputs.event_relevant || steps.filtered.outputs.event_relevant }}
+      full_gate: ${{ steps.plan.outputs.full_gate || steps.filtered.outputs.full_gate }}
+      gate_mode: ${{ steps.plan.outputs.gate_mode || steps.filtered.outputs.gate_mode }}
+      docs_only: ${{ steps.plan.outputs.docs_only || steps.filtered.outputs.docs_only }}
+      integration: ${{ steps.plan.outputs.integration || steps.filtered.outputs.integration }}
+      integration_docker: ${{ steps.plan.outputs.integration_docker || steps.filtered.outputs.integration_docker }}
+      images: ${{ steps.plan.outputs.images || steps.filtered.outputs.images }}
+      cluster_smoke: ${{ steps.plan.outputs.cluster_smoke || steps.filtered.outputs.cluster_smoke }}
+      staging_smoke: ${{ steps.plan.outputs.staging_smoke || steps.filtered.outputs.staging_smoke }}
+      coverage_summary: ${{ steps.plan.outputs.coverage_summary || steps.filtered.outputs.coverage_summary }}
+      web_checks: ${{ steps.plan.outputs.web_checks || steps.filtered.outputs.web_checks }}
       web_runtime: ${{ steps.plan.outputs.web_runtime }}
       go_packages: ${{ steps.plan.outputs.go_packages || '["./cmd/...","./internal/..."]' }}
       iac_targets: ${{ steps.plan.outputs.iac_targets || '[]' }}
-      lint_and_static: ${{ steps.plan.outputs.lint_and_static || steps.event.outputs.lint_and_static }}
-      tests_root: ${{ steps.plan.outputs.tests_root || steps.event.outputs.tests_root }}
-      nebius_pool: ${{ steps.plan.outputs.nebius_pool || steps.event.outputs.nebius_pool }}
-      tests_packages: ${{ steps.plan.outputs.tests_packages || steps.event.outputs.tests_packages }}
-      go_checks: ${{ steps.plan.outputs.go_checks || steps.event.outputs.go_checks }}
-      runtime_payload: ${{ steps.plan.outputs.runtime_payload || steps.event.outputs.runtime_payload }}
-      nebius_iac: ${{ steps.plan.outputs.nebius_iac || steps.event.outputs.nebius_iac }}
-      locked_environments: ${{ steps.plan.outputs.locked_environments || steps.event.outputs.locked_environments }}
+      lint_and_static: ${{ steps.plan.outputs.lint_and_static || steps.filtered.outputs.lint_and_static }}
+      tests_root: ${{ steps.plan.outputs.tests_root || steps.filtered.outputs.tests_root }}
+      nebius_pool: ${{ steps.plan.outputs.nebius_pool || steps.filtered.outputs.nebius_pool }}
+      tests_packages: ${{ steps.plan.outputs.tests_packages || steps.filtered.outputs.tests_packages }}
+      go_checks: ${{ steps.plan.outputs.go_checks || steps.filtered.outputs.go_checks }}
+      runtime_payload: ${{ steps.plan.outputs.runtime_payload || steps.filtered.outputs.runtime_payload }}
+      nebius_iac: ${{ steps.plan.outputs.nebius_iac || steps.filtered.outputs.nebius_iac }}
+      locked_environments: ${{ steps.plan.outputs.locked_environments || steps.filtered.outputs.locked_environments }}
+      stale_draft: ${{ steps.stale.outputs.stale_draft || 'false' }}
       test_changes: ${{ steps.plan.outputs.test_changes || '[]' }}
       test_diff: ${{ steps.plan.outputs.test_diff || '[]' }}
       shared_pool_simulations: ${{ steps.plan.outputs.shared_pool_simulations || 'false' }}
@@ -151,7 +157,7 @@ jobs:
       integration_matrix: ${{ steps.plan.outputs.integration_matrix || '[]' }}
       integration_docker_matrix: ${{ steps.plan.outputs.integration_docker_matrix || '[]' }}
     steps:
-      - name: Classify filtered event before checkout
+      - name: Classify draft event payload
         id: event
         shell: bash
         env:
@@ -159,47 +165,60 @@ jobs:
             ${{ github.event_name == 'pull_request' &&
                 (github.event.pull_request.draft ||
                  github.event.action == 'converted_to_draft') }}
-        run: |
-          set -euo pipefail
-          if [[ "$FILTERED_EVENT" == "true" ]]; then
-            {
-              echo 'checkout_required=false'
-              echo 'event_relevant=false'
-              echo 'full_gate=false'
-              echo 'gate_mode=filtered'
-              echo 'docs_only=true'
-              echo 'integration=false'
-              echo 'integration_docker=false'
-              echo 'images=false'
-              echo 'cluster_smoke=false'
-              echo 'staging_smoke=false'
-              echo 'coverage_summary=false'
-              echo 'web_checks=false'
-              echo 'lint_and_static=false'
-              echo 'tests_root=false'
-              echo 'nebius_pool=false'
-              echo 'tests_packages=false'
-              echo 'go_checks=false'
-              echo 'runtime_payload=false'
-              echo 'nebius_iac=false'
-              echo 'locked_environments=false'
-            } >> "$GITHUB_OUTPUT"
-          else
-            echo 'checkout_required=true' >> "$GITHUB_OUTPUT"
-          fi
+        run: echo "draft_payload=$FILTERED_EVENT" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-        if: steps.event.outputs.checkout_required == 'true'
         with:
           fetch-depth: 0
 
+      # A draft payload can get a newer suite than the Ready run on the same
+      # head; filtering it would hide that run's required contexts.
+      - name: Recheck draft event against the live pull request
+        id: stale
+        if: steps.event.outputs.draft_payload == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 scripts/ci_stale_draft_event.py
+
+      - name: Filter draft event
+        id: filtered
+        if: >-
+          steps.event.outputs.draft_payload == 'true' &&
+          steps.stale.outputs.stale_draft != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo 'event_relevant=false'
+            echo 'full_gate=false'
+            echo 'gate_mode=filtered'
+            echo 'docs_only=true'
+            echo 'integration=false'
+            echo 'integration_docker=false'
+            echo 'images=false'
+            echo 'cluster_smoke=false'
+            echo 'staging_smoke=false'
+            echo 'coverage_summary=false'
+            echo 'web_checks=false'
+            echo 'lint_and_static=false'
+            echo 'tests_root=false'
+            echo 'nebius_pool=false'
+            echo 'tests_packages=false'
+            echo 'go_checks=false'
+            echo 'runtime_payload=false'
+            echo 'nebius_iac=false'
+            echo 'locked_environments=false'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Enforce repository path policy
-        if: steps.event.outputs.checkout_required == 'true'
+        if: steps.filtered.outcome == 'skipped'
         run: python3 scripts/check_repository_paths.py
 
       - name: Plan required validations
         id: plan
-        if: steps.event.outputs.checkout_required == 'true'
+        if: steps.filtered.outcome == 'skipped'
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -209,6 +228,7 @@ jobs:
           PR_ACTION: ${{ github.event.action }}
           PR_ACTION_LABEL: ${{ github.event.label.name }}
           PR_DRAFT: ${{ github.event.pull_request.draft || false }}
+          PR_STALE_DRAFT: ${{ steps.stale.outputs.stale_draft == 'true' }}
           PR_BASE_CHANGED: ${{ github.event.changes.base != null }}
           DISPATCH_INTEGRATION: ${{ inputs.integration || inputs.legacy_compatibility }}
           DISPATCH_INTEGRATION_DOCKER: ${{ inputs.integration_docker || inputs.legacy_compatibility }}
@@ -267,6 +287,7 @@ jobs:
             --pull-request-action "$PR_ACTION" \
             --pull-request-action-label "$PR_ACTION_LABEL" \
             --pull-request-draft "$PR_DRAFT" \
+            --pull-request-stale-draft "${PR_STALE_DRAFT:-false}" \
             --pull-request-base-changed "$PR_BASE_CHANGED" \
             --base-sha "${BASE_SHA:-}" \
             --github-output "$GITHUB_OUTPUT"
@@ -634,6 +655,8 @@ jobs:
       needs.workflow-plan.outputs.images == 'true' &&
       needs.fast-feedback.result == 'success'
     uses: ./.github/workflows/images.yml
+    with:
+      stale_draft: ${{ needs.workflow-plan.outputs.stale_draft == 'true' }}
 
   images-gate:
     name: >-
@@ -668,6 +691,8 @@ jobs:
       needs.workflow-plan.outputs.cluster_smoke == 'true' &&
       needs.fast-feedback.result == 'success'
     uses: ./.github/workflows/cluster-smoke.yml
+    with:
+      stale_draft: ${{ needs.workflow-plan.outputs.stale_draft == 'true' }}
 
   cluster-smoke-gate:
     name: >-
@@ -702,6 +727,8 @@ jobs:
       needs.workflow-plan.outputs.staging_smoke == 'true' &&
       needs.fast-feedback.result == 'success'
     uses: ./.github/workflows/staging-smoke.yml
+    with:
+      stale_draft: ${{ needs.workflow-plan.outputs.stale_draft == 'true' }}
 
   staging-smoke-gate:
     name: >-

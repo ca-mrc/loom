@@ -226,8 +226,15 @@ def test_source_workflows_have_no_publisher_generation_contract() -> None:
         assert "authoritative-gates.yml" not in plan_step["run"]
 
 
-def test_only_draft_events_finish_before_checkout_or_gate() -> None:
-    for workflow_path, (plan_job_id, plan_step_id) in SOURCE_PLAN_CONTRACTS.items():
+CALLED_PLAN_CONTRACTS = {
+    path: contract
+    for path, contract in SOURCE_PLAN_CONTRACTS.items()
+    if path != ".github/workflows/ci.yml"
+}
+
+
+def test_called_workflows_filter_only_draft_payloads_ci_did_not_upgrade() -> None:
+    for workflow_path, (plan_job_id, plan_step_id) in CALLED_PLAN_CONTRACTS.items():
         workflow = _workflow(workflow_path)
         jobs = workflow["jobs"]
         plan_job = jobs[plan_job_id]
@@ -242,10 +249,8 @@ def test_only_draft_events_finish_before_checkout_or_gate() -> None:
 
         assert event_step["id"] == "event"
         filtered_event = _normalized_expression(event_step["env"]["FILTERED_EVENT"])
-        assert "github.event.pull_request.draft" in filtered_event
-        assert "github.event.action == 'converted_to_draft'" in filtered_event
         assert filtered_event == (
-            "${{ github.event_name == 'pull_request' && "
+            "${{ github.event_name == 'pull_request' && !inputs.stale_draft && "
             "(github.event.pull_request.draft || "
             "github.event.action == 'converted_to_draft') }}"
         )
@@ -256,9 +261,55 @@ def test_only_draft_events_finish_before_checkout_or_gate() -> None:
         assert "needs." in jobs[gate_id]["if"]
         assert "outputs.gate_mode != 'filtered'" in jobs[gate_id]["if"]
 
+        stale_input = _workflow_on(workflow)["workflow_call"]["inputs"]["stale_draft"]
+        assert stale_input["type"] == "boolean"
+        assert stale_input["default"] is False
+        planner = next(step for step in plan_job["steps"] if "plan_ci_validations.py" in step.get("run", ""))
+        assert planner["env"]["PR_STALE_DRAFT"] == "${{ inputs.stale_draft == true }}"
+        assert '--pull-request-stale-draft "${PR_STALE_DRAFT:-false}"' in planner["run"]
+
+
+def test_ci_rechecks_draft_payloads_against_the_live_pull_request() -> None:
+    workflow = _workflow(".github/workflows/ci.yml")
+    jobs = workflow["jobs"]
+    plan_job = jobs["workflow-plan"]
+    steps = plan_job["steps"]
+    ids = [step.get("id") or step.get("uses", "").split("@")[0] for step in steps]
+    assert ids[:4] == ["event", "actions/checkout", "stale", "filtered"]
+
+    event, _checkout, stale, filtered = steps[:4]
+    assert _normalized_expression(event["env"]["FILTERED_EVENT"]) == (
+        "${{ github.event_name == 'pull_request' && "
+        "(github.event.pull_request.draft || "
+        "github.event.action == 'converted_to_draft') }}"
+    )
+    assert "gate_mode" not in event["run"]
+    assert stale["if"] == "steps.event.outputs.draft_payload == 'true'"
+    assert stale["run"] == "python3 scripts/ci_stale_draft_event.py"
+    assert stale["env"]["GH_TOKEN"] == "${{ github.token }}"
+    assert stale["env"]["HEAD_SHA"] == "${{ github.event.pull_request.head.sha }}"
+    assert _normalized_expression(filtered["if"]) == (
+        "steps.event.outputs.draft_payload == 'true' && "
+        "steps.stale.outputs.stale_draft != 'true'"
+    )
+    assert "gate_mode=filtered" in filtered["run"]
+    planner = next(step for step in steps if step.get("id") == "plan")
+    assert planner["if"] == "steps.filtered.outcome == 'skipped'"
+    assert planner["env"]["PR_STALE_DRAFT"] == "${{ steps.stale.outputs.stale_draft == 'true' }}"
+    assert '--pull-request-stale-draft "${PR_STALE_DRAFT:-false}"' in planner["run"]
+    assert plan_job["outputs"]["stale_draft"] == "${{ steps.stale.outputs.stale_draft || 'false' }}"
+    assert plan_job["permissions"] == {"contents": "read", "pull-requests": "read", "actions": "read"}
+
+    for caller in ("images-validation", "cluster-validation", "staging-validation"):
+        assert jobs[caller]["with"] == {
+            "stale_draft": "${{ needs.workflow-plan.outputs.stale_draft == 'true' }}",
+        }
+    for gate_id in ("repository-checks", "images-gate", "cluster-smoke-gate", "staging-smoke-gate"):
+        assert "outputs.gate_mode != 'filtered'" in jobs[gate_id]["if"]
+
 
 def test_draft_classifier_emits_no_checkout_contract(tmp_path: Path) -> None:
-    for workflow_path, (plan_job_id, _plan_step_id) in SOURCE_PLAN_CONTRACTS.items():
+    for workflow_path, (plan_job_id, _plan_step_id) in CALLED_PLAN_CONTRACTS.items():
         event_step = _workflow(workflow_path)["jobs"][plan_job_id]["steps"][0]
         github_output = tmp_path / (Path(workflow_path).stem + "-output.txt")
         result = subprocess.run(
@@ -279,6 +330,24 @@ def test_draft_classifier_emits_no_checkout_contract(tmp_path: Path) -> None:
         assert "checkout_required=false" in outputs
         assert "gate_mode=filtered" in outputs
         assert "publisher_active" not in outputs
+
+
+def test_ci_filter_step_emits_the_filtered_contract(tmp_path: Path) -> None:
+    filtered = next(
+        step for step in _workflow(".github/workflows/ci.yml")["jobs"]["workflow-plan"]["steps"]
+        if step.get("id") == "filtered"
+    )
+    github_output = tmp_path / "output.txt"
+    result = subprocess.run(
+        ["bash"], input=filtered["run"], text=True, capture_output=True,
+        env={**os.environ, "GITHUB_OUTPUT": str(github_output)}, check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    outputs = dict(line.split("=", 1) for line in github_output.read_text(encoding="utf-8").splitlines())
+    assert outputs["gate_mode"] == "filtered"
+    assert outputs["full_gate"] == "false"
+    assert {key for key, value in outputs.items() if value == "true"} == {"docs_only"}
 
 
 def test_source_gate_names_are_native_and_stable() -> None:

@@ -368,6 +368,7 @@ def _pull_request_gate_mode(
     action_label: str,
     draft: bool,
     base_changed: bool,
+    stale_draft: bool = False,
 ) -> tuple[bool, bool, str]:
     """Return event relevance, full-gate eligibility, and the gate context mode.
 
@@ -375,9 +376,11 @@ def _pull_request_gate_mode(
     metadata suite can leave native auto-merge blocked despite older successful
     checks on the same head. Only drafts are filtered before checkout; changed
     paths and the current labels still select the actual validation work.
+    A draft payload the workflow confirmed stale against a Ready PR on the same
+    head is not filtered: its suite is newer than that PR's full suite.
     """
 
-    if draft or action == "converted_to_draft":
+    if (draft or action == "converted_to_draft") and not stale_draft:
         return False, False, "filtered"
     return True, True, "full"
 
@@ -430,6 +433,7 @@ def plan_validations(
     pull_request_action_label: str = "",
     pull_request_draft: bool = False,
     pull_request_base_changed: bool = False,
+    pull_request_stale_draft: bool = False,
     manifest_registration_only: bool = False,
     shared_pool_simulations: bool = False,
 ) -> ValidationPlan:
@@ -448,6 +452,7 @@ def plan_validations(
             action_label=pull_request_action_label,
             draft=pull_request_draft,
             base_changed=pull_request_base_changed,
+            stale_draft=pull_request_stale_draft,
         )
 
     paths = tuple(dict.fromkeys(path.strip() for path in changed_paths if path.strip()))
@@ -821,6 +826,11 @@ def main() -> int:
         choices=("true", "false"),
         default="false",
     )
+    parser.add_argument(
+        "--pull-request-stale-draft",
+        choices=("true", "false"),
+        default="false",
+    )
     parser.add_argument("--base-sha", default="")
     parser.add_argument("--github-output", type=Path, required=True)
     parser.add_argument("--test-scope", choices=("all", "nebius"), default=os.environ.get("CI_TEST_SCOPE", "all"))
@@ -837,6 +847,7 @@ def main() -> int:
         pull_request_action_label=args.pull_request_action_label,
         pull_request_draft=args.pull_request_draft == "true",
         pull_request_base_changed=args.pull_request_base_changed == "true",
+        pull_request_stale_draft=args.pull_request_stale_draft == "true",
         manifest_registration_only=manifest_registration_only(REPO_ROOT, args.base_sha, changed_paths),
         shared_pool_simulations=args.shared_pool_simulations == "true",
     )

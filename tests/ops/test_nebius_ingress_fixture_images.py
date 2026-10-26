@@ -155,7 +155,7 @@ def test_fixture_import_attempts_both_cleanups_without_masking_original_failure(
 def test_fixture_archive_cleanup_includes_images_not_imported(monkeypatch, tmp_path, preparation_failure):
     prepared = []
 
-    def prepare(image, directory):
+    def prepare(image, directory, mirror_limited):
         path = directory / str(len(prepared))
         path.write_bytes(b"image archive")
         prepared.append(path)
@@ -173,3 +173,43 @@ def test_fixture_archive_cleanup_includes_images_not_imported(monkeypatch, tmp_p
         archives.close()
     assert prepared and all(not path.exists() for path in prepared)
     assert not list(tmp_path.iterdir())
+
+
+def test_a_data_limited_mirror_is_tried_once_per_fixture(monkeypatch, tmp_path):
+    # ECR Public answers a data-limited runner IP with 429 for every request,
+    # each after ~30s of client backoff; four images used to pay it four times.
+    copies = []
+
+    def run(args, **kwargs):
+        mode, source, destination = args[9:]
+        copies.append(source.removeprefix("docker://").split("/", 1)[0])
+        if source.startswith("docker://public.ecr.aws/"):
+            raise subprocess.CalledProcessError(1, args, stderr="reading manifest: toomanyrequests: Data limit exceeded")
+        layout = Path(destination.removeprefix("oci:").split(":", 1)[0])
+        (layout / "oci-layout").write_text('{"imageLayoutVersion":"1.0.0"}')
+        (layout / "index.json").write_text(mode)
+        (layout / "blobs").mkdir(exist_ok=True)
+
+    monkeypatch.setattr(fixture.subprocess, "run", run)
+    archives = fixture.fixture_images.__wrapped__(tmp_path)
+    assert len(next(archives)) == 4
+    archives.close()
+    assert copies == ["public.ecr.aws"] + ["docker.io"] * 8
+
+
+def test_a_healthy_mirror_serves_every_fixture_image(monkeypatch, tmp_path):
+    copies = []
+
+    def run(args, **kwargs):
+        mode, source, destination = args[9:]
+        copies.append(source.removeprefix("docker://").split("/", 1)[0])
+        layout = Path(destination.removeprefix("oci:").split(":", 1)[0])
+        (layout / "oci-layout").write_text('{"imageLayoutVersion":"1.0.0"}')
+        (layout / "index.json").write_text(mode)
+        (layout / "blobs").mkdir(exist_ok=True)
+
+    monkeypatch.setattr(fixture.subprocess, "run", run)
+    archives = fixture.fixture_images.__wrapped__(tmp_path)
+    assert len(next(archives)) == 4
+    archives.close()
+    assert copies == ["public.ecr.aws"] * 8

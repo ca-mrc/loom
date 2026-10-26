@@ -85,6 +85,22 @@ work; selected failures, cancellations and unexpected skips still block merging.
 Draft filtering, current-head/base requirements, and native squash auto-merge
 retain the [repository contract](../../CONTRIBUTING.md).
 
+GitHub evaluates required checks from a workflow's newest run on a head, and
+does not order runs by event time. A Draft `synchronize` delivered in the same
+second as `ready_for_review` can get the newer run (#2635). Filtered, it hides
+the Ready run's four contexts, and re-running that older run does not restore
+them. `workflow-plan` therefore checks out every PR event, and
+`scripts/ci_stale_draft_event.py` reads the live PR and this head's CI runs
+with read-only `pull-requests`/`actions` tokens. A Draft payload runs the full
+gate only when the live PR is open, Ready, on the same head, and its newest
+`gate=full` run is older. It passes `stale_draft` to the image, cluster and
+staging workflows so they plan instead of filtering. A genuine Draft, a newer
+head, a newer full run, no full run within about 30 seconds, or an unreadable
+API keeps the event filtered. The upgraded run keeps its `gate=filtered` run
+name and Draft concurrency slot. Candidate reuse therefore ignores it, and a
+later push does not cancel it. The older Ready run also completes, so each
+occurrence costs one extra full run (seven heads Oct 15–26).
+
 The manifest retains ownership of both historical and Nebius tests. Daily dev CI
 selects Nebius and common contracts; historical compatibility is manual. PR image CI uses the same seven-image Nebius set as candidate publication,
 builds only affected AMD64 images and scans the resulting artifacts. Disposable
