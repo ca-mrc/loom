@@ -33,7 +33,9 @@ def download(item: dict[str, object], directory: Path) -> Path:
     if destination.exists() and digest(destination) == expected:
         return destination
     partial = destination.with_suffix(".partial")
-    # The mirror is fast but drops superseded files (404); the fallback is the
+    # The mirror is fast but drops superseded files. A 404 falls back
+    # immediately. After three tries, 500/502/503/504 do too: the mirror
+    # returns 503 while a pool file is being removed. The fallback is the
     # permanent Launchpad Librarian copy of the same bytes.
     sources = [str(item["url"]), *([str(item["fallback_url"])] if "fallback_url" in item else [])]
     for url in sources:
@@ -53,7 +55,7 @@ def download(item: dict[str, object], directory: Path) -> Path:
 
 
 def _fetch(url: str, partial: Path, expected: str, *, last_source: bool) -> HTTPError | None:
-    """Download url into partial; return the 404 to fall back on, or raise."""
+    """Download url into partial. Return a mirror failure to fall back on, or raise."""
     for attempt in range(1, 4):
         failure: URLError | TimeoutError | None = None
         reason = "connection timeout"
@@ -91,9 +93,12 @@ def _fetch(url: str, partial: Path, expected: str, *, last_source: bool) -> HTTP
             file=sys.stderr,
             flush=True,
         )
-        if isinstance(failure, HTTPError) and failure.code == 404 and not last_source:
+        unavailable = isinstance(failure, HTTPError) and failure.code in {500, 502, 503, 504}
+        if isinstance(failure, HTTPError) and not last_source and (
+            failure.code == 404 or (unavailable and attempt == 3)
+        ):
             return failure
-        if (isinstance(failure, HTTPError) and failure.code not in {500, 502, 503, 504}) or attempt == 3:
+        if (isinstance(failure, HTTPError) and not unavailable) or attempt == 3:
             raise failure
         time.sleep(attempt)
     raise AssertionError("attempt loop always returns or raises")
