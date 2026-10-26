@@ -292,12 +292,16 @@ def test_private_root_policy_accepts_only_the_constrained_pod_shape(tmp_path: Pa
         container.stop()
 
 
-def _guest_pod(namespace: str, *, emulated_auth: bool = False) -> dict:
+def _guest_pod(namespace: str, *, emulated_auth: bool = False, shared: bool = False) -> dict:
     from loom.execution_contract import workload_requirements_from_task
     from loom.pipeline.keys import canonical_digest
     from tests.unit.test_guest_execution_materialization import _compile, _guest_inputs
 
     task, trial, profile = _guest_inputs(*(["emulated_pkcs11_authentication"] if emulated_auth else []))
+    if shared:
+        task = task.model_copy(update={"verifier": task.verifier.model_copy(update={"env_mode": "shared"})})
+        trial = trial.model_copy(update={"verifier_env_mode": "shared"})
+        profile = profile.model_copy(update={"supports_shared_guest": True})
     if emulated_auth:
         profile = profile.model_copy(update={"supports_emulated_pkcs11": True})
     plan = _compile(task, trial, profile)
@@ -377,6 +381,17 @@ def test_single_policy_allows_bound_guest_and_native_shapes_only(tmp_path: Path,
             time.sleep(0.2)
         assert result.exit_code == 0, result.output.decode()
         assert apply([_pod(namespace)], dry_run=True).exit_code == 0
+        if not emulated_auth:
+            shared = _guest_pod(namespace, shared=True)
+            admitted = apply([shared], dry_run=True)
+            assert admitted.exit_code == 0, admitted.output.decode()
+            assert [c["name"] for c in shared["spec"]["initContainers"] if c["name"] in {"task-sandbox", "verifier-sandbox"}] == ["task-sandbox"]
+            missing_disk = deepcopy(shared)
+            missing_disk["spec"]["volumes"] = [
+                volume for volume in missing_disk["spec"]["volumes"]
+                if volume["name"] != "task-sandbox-guest-state"
+            ]
+            assert apply([missing_disk], dry_run=True).exit_code != 0
         for damage in ("owner-target", "foreign-target", "host-cap", "writable-root", "foreign-state", "host-volume", "unbounded-state", "memory-state", "shell", "probe", "host-sysctl"):
             changed = deepcopy(guest)
             sidecar = next(c for c in changed["spec"]["initContainers"] if c["name"] == "task-sandbox")
