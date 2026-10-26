@@ -77,6 +77,7 @@ async def commit_output(sessions, current, store, *, reward=None):
             "trajectory/events.jsonl": _trace(current.trial_id)[1],
             "accounting/usage.json": canonical_document(oracle_usage()),
             "artifacts/workspace.tar": b"committed workspace",
+            "artifacts/workspace-references.json": b"{}",
         }
         if current.execution_role == "attempt"
         else {"verifier/output.json": canonical_document({"rewards": {"passed": reward}})}

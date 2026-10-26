@@ -121,6 +121,31 @@ async def test_native_workspace_handoff_keeps_deletions_and_private_inputs(servi
     assert checked.return_code == 0, checked.stderr
 
 
+async def test_real_venv_survives_a_same_image_handoff(service_sandboxes):
+    # #2589: separate/guest grading receives the full workdir. The venv's link
+    # to the image interpreter is kept and checked; an agent-only target is
+    # omitted and reported instead of failing the handoff.
+    from loom.trial.workspace import WorkspaceStagingPolicy
+    from loom.trial.workspace_snapshot import handoff_workspace_snapshot
+
+    agent, verifier = service_sandboxes
+    created = await agent.exec(
+        "python3 -m venv --without-pip /app/venv && printf '#!/bin/sh\\n' > /tmp/agent-only "
+        "&& chmod 755 /tmp/agent-only && ln -s /tmp/agent-only /app/scratch",
+    )
+    assert created.return_code == 0, created.stderr
+    omissions = await handoff_workspace_snapshot(
+        agent_driver=agent, verifier_driver=verifier, workdir=PurePosixPath("/app"),
+        policy=WorkspaceStagingPolicy(("tests/**",), ("tests/**",), ()),
+    )
+    assert [(item.path, item.reason) for item in omissions.links] == [("scratch", "target_differs")]
+    checked = await verifier.exec(
+        "test -L /app/venv/bin/python && test ! -e /app/scratch && "
+        "/app/venv/bin/python -c \"import sys; assert sys.prefix == '/app/venv', sys.prefix\"",
+    )
+    assert checked.return_code == 0, checked.stderr
+
+
 async def test_service_survives_consistent_snapshot_and_private_verifier(service_sandboxes, tmp_path):
     agent, verifier = service_sandboxes
     checked = await verifier.exec("mkdir -p /tests; echo private > /tests/secret")

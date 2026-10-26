@@ -75,6 +75,7 @@ _MIN_SANDBOX_EXEC_LIMIT_SECONDS = 900
 # Outputs a deferred verifier produces; everything else belongs to the attempt.
 _VERIFIER_OWNED_OUTPUTS = frozenset({
     "diagnostics/verifier-exception.json", "verifier/output.json", "artifacts/verifier/ctrf.json",
+    "diagnostics/workspace-handoff.json",
 })
 
 
@@ -258,6 +259,12 @@ def _output_declarations(request: TaskSandboxPlanRequest, topology: _Topology) -
         ("workspace.tar", "artifacts/workspace.tar", "task_artifact", not topology.in_place_verifier),
         *((("workspace-archive.json", "diagnostics/workspace-archive.json", "diagnostic", False),)
           if topology.in_place_verifier else ()),
+        # A fresh verifier restores the archive against this manifest and
+        # reports the links it omitted beside its result.
+        *((("workspace-references.json", "artifacts/workspace-references.json", "task_artifact", True),)
+          if not topology.in_place_verifier else ()),
+        *((("verifier/workspace-handoff.json", "diagnostics/workspace-handoff.json", "diagnostic", False),)
+          if not topology.in_place_verifier and not topology.skipped else ()),
         *(
             () if topology.skipped else (
                 ("verifier/output.json", "verifier/output.json", "verifier", topology.verifier_output_required),
@@ -272,11 +279,6 @@ def _output_declarations(request: TaskSandboxPlanRequest, topology: _Topology) -
         outputs.append(RuntimeOutputDeclarationV1(
             source_path=".loom/service-startup.json", relative_path="diagnostics/service-startup.json",
             kind="task_artifact", required=bool(env.service_lifecycle.startup_command),
-        ))
-    if env.workspace_reference_files and not topology.in_place_verifier:
-        outputs.append(RuntimeOutputDeclarationV1(
-            source_path=".loom/workspace-references.json",
-            relative_path="artifacts/workspace-references.json", kind="task_artifact", required=True,
         ))
     if env.mutable_paths and not topology.in_place_verifier:
         for name in ("manifest.json", *(f"{index}.tar" for index in range(len(env.mutable_paths)))):

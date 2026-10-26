@@ -235,6 +235,7 @@ def test_separate_mode_emits_the_existing_deferred_verifier_contract() -> None:
     assert verifier.main.argv[3] == plan.main.argv[3]  # the attempt's trusted controller module
     assert {o.relative_path for o in verifier.output_declarations} <= {
         "diagnostics/verifier-exception.json", "verifier/output.json", "artifacts/verifier/ctrf.json",
+        "diagnostics/workspace-handoff.json",
     }
 
 
