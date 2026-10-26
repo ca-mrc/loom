@@ -9,6 +9,7 @@ from uuid import uuid4
 import pytest
 
 from loom.driver.fake import FakeDriver
+from loom.errors import DriverError
 from loom.models.exec import ExecResult
 from loom.service_execution_sandbox_task import run_agent, run_verifier
 from tests.unit.test_service_execution_terminus_plan import _inputs
@@ -282,6 +283,10 @@ async def test_phase_handoff_preserves_declared_state_at_original_absolute_path(
     await run_verifier(tmp_path, task, trial)
     manifest = json.loads((tmp_path / ".loom/mutable-paths/manifest.json").read_text())
     assert [item["path"] for item in manifest["paths"]] == ["/data", "/home/agent"]
+    # #2589: the fresh verifier reports omitted links beside its result.
+    assert json.loads((tmp_path / ".loom/verifier/workspace-handoff.json").read_text()) == {
+        "schema_version": "loom.workspace-handoff.v1", "omitted_links": [], "omitted_count": 0,
+    }
 
 
 @pytest.mark.asyncio
@@ -616,6 +621,145 @@ async def test_verifier_primary_failure_survives_cleanup_and_driver_stop_failure
     assert "private-" not in stderr
     assert "secondary verifier stop_processes failure (DriverError)" in stderr
     assert "secondary verifier stop failure (DriverError)" in stderr
+
+
+class _VenvSandbox(Sandbox):
+    """The agent ran `python3 -m venv /app/venv`, linking the image interpreter."""
+
+    async def export_workspace_archive(self, src, dst):
+        import io
+        import tarfile
+
+        # Shared mode keeps agent processes for grading, so it is not quiesced.
+        with tarfile.open(dst, "w") as archive:
+            for name in (".", "venv", "venv/bin"):
+                directory = tarfile.TarInfo(name)
+                directory.type, directory.mode = tarfile.DIRTYPE, 0o755
+                archive.addfile(directory)
+            link = tarfile.TarInfo("venv/bin/python3")
+            link.type, link.linkname = tarfile.SYMTYPE, "/usr/bin/python3"
+            archive.addfile(link)
+            report = tarfile.TarInfo("report.txt")
+            report.size = 2
+            archive.addfile(report, io.BytesIO(b"ok"))
+
+    # The trusted native RPCs fingerprint the image interpreter (Debian layout).
+    async def inspect_reference_symlink(self, path):
+        if str(path) != "/usr/bin/python3":
+            raise DriverError("sandbox symlink inspection failed")
+        return "python3.11"
+
+    async def inspect_reference_file(self, path, *, max_bytes):
+        if str(path) != "/usr/bin/python3.11":
+            raise DriverError("sandbox reference inspection failed")
+        return {"path": str(path), "size_bytes": 6, "mode": 0o755, "uid": 0, "gid": 0, "sha256": "a" * 64}
+
+
+def _agent_run(tmp_path, monkeypatch, driver, *, shared: bool):
+    from loom import service_execution_sandbox_task as module
+
+    task, trial, _ = _inputs()
+    if shared:
+        trial = trial.model_copy(update={"verifier_env_mode": "shared"})
+    (tmp_path / "instruction.md").write_text("Create a virtual environment")
+    monkeypatch.setenv("LOOM_GATEWAY_URL", "http://127.0.0.1:9999")
+    monkeypatch.setenv("LOOM_TASK_ARTIFACTS_JSON", "[]")
+    monkeypatch.setattr(module, "sandbox_driver", lambda *_: driver)
+
+    async def identity(_):
+        return uuid4(), uuid4()
+
+    async def terminus(**kwargs):
+        (kwargs["workspace"] / "trajectory.jsonl").write_bytes(b"")
+
+    monkeypatch.setattr(module, "_execution_identity", identity)
+    monkeypatch.setattr(module, "run_terminus2", terminus)
+    return module.run_agent(tmp_path, task, trial)
+
+
+@pytest.mark.asyncio
+async def test_in_place_verifier_keeps_an_agent_venv_without_restore_validation(tmp_path, monkeypatch):
+    # #2589: an absolute link into the image fails restore validation, but an
+    # in-place verifier grades the live workdir and never restores the archive.
+    await _agent_run(tmp_path, monkeypatch, _VenvSandbox(), shared=True)
+
+    import tarfile
+
+    with tarfile.open(tmp_path / ".loom/workspace.tar") as archive:
+        assert archive.getmember("venv/bin/python3").linkname == "/usr/bin/python3"
+    assert not (tmp_path / ".loom/workspace-archive.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_fresh_verifier_handoff_keeps_a_venv_link_to_the_image_interpreter(tmp_path, monkeypatch):
+    # #2589: separate/guest receives the full workdir. The link stays a link,
+    # bound to the image interpreter it resolves to in both sandboxes.
+    import tarfile
+
+    await _agent_run(tmp_path, monkeypatch, _VenvSandbox(), shared=False)
+
+    with tarfile.open(tmp_path / ".loom/workspace.tar") as archive:
+        assert archive.getmember("venv/bin/python3").linkname == "/usr/bin/python3"
+    manifest = json.loads((tmp_path / ".loom/workspace-references.json").read_text())
+    assert [item["target"] for item in manifest["discovered"]] == ["/usr/bin/python3"]
+    assert manifest["discovered"][0]["references"][0] == {"path": "/usr/bin/python3", "target": "python3.11"}
+    assert manifest["omitted"] == [] and manifest["omitted_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_fresh_verifier_handoff_omits_a_link_it_cannot_verify(tmp_path, monkeypatch):
+    import tarfile
+
+    class Unverifiable(_VenvSandbox):
+        async def inspect_reference_file(self, path, *, max_bytes):
+            raise DriverError("sandbox reference inspection failed")
+
+    await _agent_run(tmp_path, monkeypatch, Unverifiable(), shared=False)
+
+    with tarfile.open(tmp_path / ".loom/workspace.tar") as archive:
+        assert "venv/bin/python3" not in archive.getnames() and "report.txt" in archive.getnames()
+    manifest = json.loads((tmp_path / ".loom/workspace-references.json").read_text())
+    assert manifest["omitted"] == [
+        {"path": "venv/bin/python3", "target": "/usr/bin/python3", "reason": "target_unverifiable"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_in_place_archive_timeout_is_recorded_and_does_not_fail_the_agent(tmp_path, monkeypatch):
+    from loom import service_execution_sandbox_task as module
+
+    class SlowSandbox(Sandbox):
+        async def export_workspace_archive(self, src, dst):
+            dst.write_bytes(b"partial")
+            await asyncio.sleep(10)
+
+    monkeypatch.setattr(module, "DEBUG_ARCHIVE_TIMEOUT_SECONDS", 0.05)
+    await _agent_run(tmp_path, monkeypatch, SlowSandbox(), shared=True)
+
+    assert not (tmp_path / ".loom/workspace.tar").exists()
+    outcome = json.loads((tmp_path / ".loom/workspace-archive.json").read_text())
+    assert (outcome["state"], outcome["error_type"], outcome["detail"]) == ("failed", "TimeoutError", "")
+
+
+@pytest.mark.asyncio
+async def test_in_place_archive_failure_is_recorded_and_does_not_fail_the_agent(tmp_path, monkeypatch):
+    from loom.trial.workspace_snapshot import WorkspaceSnapshotError
+
+    class FailingSandbox(Sandbox):
+        async def export_workspace_archive(self, src, dst):
+            dst.write_bytes(b"partial")
+            raise WorkspaceSnapshotError("agent workspace contains unsupported device, FIFO, or socket: /app/s")
+
+    await _agent_run(tmp_path, monkeypatch, FailingSandbox(), shared=True)
+
+    assert not (tmp_path / ".loom/workspace.tar").exists()
+    outcome = json.loads((tmp_path / ".loom/workspace-archive.json").read_text())
+    assert outcome == {
+        "schema_version": "loom.workspace-archive-outcome.v1",
+        "state": "failed",
+        "error_type": "WorkspaceSnapshotError",
+        "detail": "agent workspace contains unsupported device, FIFO, or socket: /app/s",
+    }
 
 
 @pytest.mark.parametrize("kind", ["native", "offline"])

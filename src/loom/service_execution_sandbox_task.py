@@ -77,14 +77,16 @@ from loom.trial.workspace import (
     refuse_planted_private_paths,
 )
 from loom.trial.workspace_references import (
+    HandoffOmissions,
     export_workspace_references,
     import_workspace_with_references,
+    manifest_path,
 )
 from loom.trial.workspace_snapshot import (
+    WorkspaceSnapshotError,
     _export_workspace_archive,
     _import_workspace_archive,
     _strip_private_entries,
-    _validate_workspace_archive,
 )
 from loom.verifier_runtime import resolve_verifier_env_mode
 
@@ -666,18 +668,25 @@ async def run_agent(
                         await remove_oracle_solution(
                             driver, task.environment.workdir, solution_dir=solution_dir,
                         )
-                    if agent_entered:
+                    # Matches the plan's in-place verifier, whose archive is optional.
+                    if agent_entered and in_place and not trial.skip_verifier:
+                        await capture_debug_workspace_archive(driver, workspace, task)
+                    elif agent_entered:
                         archive = workspace / ".loom/workspace.tar"
                         await _export_workspace_archive(
                             driver, task.environment.workdir, archive,
                             preserve_acls=task.environment.preserve_acls,
                         )
                         await asyncio.to_thread(_strip_private_entries, archive, _POLICY)
-                        await asyncio.to_thread(
-                            _validate_workspace_archive, archive, _POLICY,
-                            root=task.environment.workdir,
-                            external_reference_files=frozenset(task.environment.workspace_reference_files),
+                        # Validates the archive for a fresh verifier. Links to
+                        # unverifiable targets are omitted and reported (#2589).
+                        omissions = await export_workspace_references(
+                            driver, archive, root=task.environment.workdir, policy=_POLICY,
+                            reference_files=task.environment.workspace_reference_files,
+                            reference_symlinks=task.environment.reference_file_symlinks,
                         )
+                        if omissions.count:
+                            print(f"workspace handoff omitted {omissions.count} link(s)", file=sys.stderr)
                         if task.environment.mutable_paths:
                             await export_mutable_paths(
                                 driver, task.environment.mutable_paths, workspace / ".loom/mutable-paths",
@@ -686,12 +695,7 @@ async def run_agent(
                                 reference_files=task.environment.mutable_path_reference_files,
                                 reference_symlinks=task.environment.reference_file_symlinks,
                             )
-                        if task.environment.workspace_reference_files:
-                            await export_workspace_references(
-                                driver, archive, root=task.environment.workdir, policy=_POLICY,
-                                reference_files=task.environment.workspace_reference_files,
-                                reference_symlinks=task.environment.reference_file_symlinks,
-                            )
+                    if agent_entered:
                         for path in task_artifact_paths(workspace, task):
                             destination = _safe_workspace_path(workspace / ".loom/collected", path)
                             try:
@@ -764,6 +768,37 @@ def stage_committed_workspace_archive(workspace: Path) -> Path:
     return target
 
 
+WORKSPACE_ARCHIVE_OUTCOME = PurePosixPath(".loom/workspace-archive.json")
+WORKSPACE_HANDOFF_REPORT = PurePosixPath(".loom/verifier/workspace-handoff.json")
+# Debug evidence must not hold up grading; the phase deadline still applies.
+DEBUG_ARCHIVE_TIMEOUT_SECONDS = 300.0
+
+
+async def capture_debug_workspace_archive(driver: ServiceSandboxDriver, workspace: Path, task: TaskConfig) -> None:
+    """Keep the agent's workdir as debugging evidence for an in-place verifier (#2589).
+
+    Nothing restores it, so it is not validated for handoff and a failure is
+    recorded instead of failing the Trial. Private paths never leave the sandbox.
+    """
+    archive = workspace / ".loom/workspace.tar"
+    try:
+        async with asyncio.timeout(DEBUG_ARCHIVE_TIMEOUT_SECONDS):
+            await _export_workspace_archive(
+                driver, task.environment.workdir, archive, preserve_acls=task.environment.preserve_acls,
+            )
+            await asyncio.to_thread(_strip_private_entries, archive, _POLICY)
+    except (WorkspaceSnapshotError, DriverError, OSError, TimeoutError) as exc:
+        archive.unlink(missing_ok=True)
+        # Snapshot and RPC errors carry only Loom-authored text and fixed codes.
+        detail = str(exc) if isinstance(exc, (WorkspaceSnapshotError, SandboxRPCError)) else ""
+        _write_json_atomic(workspace / WORKSPACE_ARCHIVE_OUTCOME, {
+            "schema_version": "loom.workspace-archive-outcome.v1",
+            "state": "failed",
+            "error_type": type(exc).__name__,
+            "detail": detail[:512],
+        })
+
+
 async def _run_verifier(
     workspace: Path, task: TaskConfig, trial: TrialConfig, *, deadline: AttemptDeadline | None, grace: float,
     begin_cleanup: Callable[[], None],
@@ -809,18 +844,21 @@ async def _run_verifier(
             archive = stage_committed_workspace_archive(workspace)
             # The archive was validated by the agent phase before durable capture;
             # it stays in the private controller workspace between phases.
-            if task.environment.workspace_reference_files:
-                await import_workspace_with_references(
+            if manifest_path(archive).is_file() or task.environment.workspace_reference_files:
+                omissions = await import_workspace_with_references(
                     driver, archive, task.environment.workdir, policy=_POLICY,
                     preserve_acls=task.environment.preserve_acls,
                     reference_files=task.environment.workspace_reference_files,
                     reference_symlinks=task.environment.reference_file_symlinks,
                 )
             else:
+                # An agent phase exported before #2589 wrote no manifest.
                 await _import_workspace_archive(
                     driver, archive, task.environment.workdir, policy=_POLICY,
                     preserve_acls=task.environment.preserve_acls,
                 )
+                omissions = HandoffOmissions()
+            _write_json_atomic(workspace / WORKSPACE_HANDOFF_REPORT, omissions.report())
             if task.environment.mutable_paths:
                 await import_mutable_paths(
                     driver, task.environment.mutable_paths, workspace / ".loom/mutable-paths",

@@ -8,6 +8,7 @@ from pathlib import PurePosixPath
 
 import pytest
 
+from loom.errors import DriverError
 from loom.trial.workspace import WorkspaceStagingPolicy
 from loom.trial.workspace_snapshot import WorkspaceSnapshotError
 
@@ -39,11 +40,14 @@ class Inspector:
         self.mutate_on_import = False
 
     async def inspect_reference_symlink(self, path):
-        assert path == ALIAS
+        if path != ALIAS:
+            raise DriverError("sandbox symlink inspection failed")
         return self.target
 
     async def inspect_reference_file(self, path, *, max_bytes):
-        assert path == LEAF and max_bytes >= 6
+        if path != LEAF:
+            raise DriverError("sandbox reference inspection failed")
+        assert max_bytes >= 6
         return dict(self.record)
 
     async def import_workspace_archive(self, src, dst, *, policy, preserve_acls, external_reference_files):
@@ -58,14 +62,14 @@ class Inspector:
 
 async def export(driver, archive):
     from loom.trial.workspace_references import export_workspace_references
-    await export_workspace_references(driver, archive, root=ROOT, policy=POLICY,
-                                     reference_files=REFERENCES, reference_symlinks=ALIASES)
+    return await export_workspace_references(driver, archive, root=ROOT, policy=POLICY,
+                                            reference_files=REFERENCES, reference_symlinks=ALIASES)
 
 
 async def restore(driver, archive):
     from loom.trial.workspace_references import import_workspace_with_references
-    await import_workspace_with_references(driver, archive, ROOT, policy=POLICY,
-                                          reference_files=REFERENCES, reference_symlinks=ALIASES)
+    return await import_workspace_with_references(driver, archive, ROOT, policy=POLICY,
+                                                 reference_files=REFERENCES, reference_symlinks=ALIASES)
 
 
 async def test_manifest_binds_archive_and_declared_alias_to_regular_executable(tmp_path):
@@ -115,11 +119,27 @@ async def test_post_restore_reference_change_fails_handoff(tmp_path):
     assert verifier.imported
 
 
-async def test_invalid_export_removes_prior_manifest_and_rejects_unknown_external_leaf(tmp_path):
+async def test_unknown_external_leaf_is_omitted_and_reported(tmp_path):
+    # #2589: an external link that cannot be verified is not a handoff failure.
+    archive = tmp_path / "workspace.tar"
+    make_archive(archive, external="/usr/local/bin/unknown")
+    exported = await export(Inspector(), archive)
+    assert [(item.path, item.reason) for item in exported.links] == [("venv/bin/python3", "target_unverifiable")]
+    with tarfile.open(archive) as stream:
+        assert "venv/bin/python3" not in stream.getnames()
+    verifier = Inspector()
+    restored = await restore(verifier, archive)
+    assert verifier.imported and restored.links == exported.links and restored.count == 1
+
+
+async def test_invalid_export_removes_prior_manifest(tmp_path):
     archive = tmp_path / "workspace.tar"
     make_archive(archive)
     await export(Inspector(), archive)
-    make_archive(archive, external="/usr/local/bin/unknown")
+    make_archive(archive, external="../../outside")
+    with tarfile.open(archive, "a") as stream:
+        member = tarfile.TarInfo("venv/bin/python3/write-through")
+        stream.addfile(member, io.BytesIO(b""))
     with pytest.raises(WorkspaceSnapshotError):
         await export(Inspector(), archive)
     assert not (tmp_path / "workspace-references.json").exists()

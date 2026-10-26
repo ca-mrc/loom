@@ -22,10 +22,19 @@ from uuid import uuid4
 if TYPE_CHECKING:
     from loom.driver.base import Driver
     from loom.trial.workspace import WorkspaceStagingPolicy
+    from loom.trial.workspace_references import HandoffOmissions
 
 
 class WorkspaceSnapshotError(RuntimeError):
     """The agent workspace cannot be transferred without changing semantics."""
+
+
+class WorkspaceLinkEscapesError(WorkspaceSnapshotError):
+    """A symlink resolves outside the workdir; the handoff may omit it (#2589)."""
+
+
+# Declared task references plus links discovered in the agent workdir.
+MAX_WORKSPACE_REFERENCES = 32
 
 
 async def handoff_workspace_snapshot(
@@ -35,18 +44,29 @@ async def handoff_workspace_snapshot(
     workdir: PurePosixPath,
     policy: WorkspaceStagingPolicy,
     preserve_acls: bool = False,
-) -> None:
-    """Copy one validated public workspace snapshot between sandbox drivers."""
+) -> HandoffOmissions:
+    """Copy one validated public workspace snapshot between sandbox drivers.
+
+    Returns the links omitted because their image target could not be verified.
+    """
 
     import tempfile
+
+    from loom.trial.workspace_references import (
+        export_workspace_references,
+        import_workspace_with_references,
+    )
 
     with tempfile.TemporaryDirectory(prefix="loom-verifier-handoff-") as temp:
         archive = Path(temp) / "workspace.tar"
         await _export_workspace_archive(agent_driver, workdir, archive, preserve_acls=preserve_acls)
         await asyncio.to_thread(_strip_private_entries, archive, policy)
-        await asyncio.to_thread(_validate_workspace_archive, archive, policy, root=workdir)
-        await _import_workspace_archive(
-            verifier_driver, archive, workdir, policy=policy, preserve_acls=preserve_acls,
+        await export_workspace_references(
+            agent_driver, archive, root=workdir, policy=policy, reference_files=(),
+        )
+        return await import_workspace_with_references(
+            verifier_driver, archive, workdir, policy=policy, reference_files=(),
+            preserve_acls=preserve_acls,
         )
 
 
@@ -253,6 +273,7 @@ def _validate_workspace_archive(
     external_reference_files: frozenset[PurePosixPath] = frozenset(),
     allow_relative_references: bool = False,
     transferred_file_targets: dict[PurePosixPath, int] | None = None,
+    resolve_links: bool = True,
 ) -> None:
     """Fail closed unless every archive entry is safe to overlay.
 
@@ -262,6 +283,8 @@ def _validate_workspace_archive(
     Absolute symlink targets require a declared root and must stay inside it,
     except exact external leaves whose fingerprints the mutable caller checks.
     Targets are checked without changing the archived strings.
+    ``resolve_links=False`` runs every structural check except link targets,
+    before a handoff omits links it cannot carry (#2589).
     """
 
     if root is not None and (root.anchor != "/" or len(root.parts) < 2 or ".." in root.parts):
@@ -272,7 +295,8 @@ def _validate_workspace_archive(
         if root is None:
             raise WorkspaceSnapshotError("external references require an absolute snapshot root")
         try:
-            validate_mutable_reference_files(tuple(external_reference_files), paths=(root,), workdir=root)
+            validate_mutable_reference_files(tuple(external_reference_files), paths=(root,), workdir=root,
+                                             limit=MAX_WORKSPACE_REFERENCES)
         except ValueError as exc:
             raise WorkspaceSnapshotError("unsafe external snapshot reference") from exc
 
@@ -323,7 +347,7 @@ def _validate_workspace_archive(
 
     file_targets = transferred_file_targets or {}
     references = external_reference_files | file_targets.keys()
-    for path in symlink_targets:
+    for path in symlink_targets if resolve_links else ():
         _resolve_symlink_chain(path, symlink_targets, policy, root=root,
                                external_reference_files=references,
                                allow_relative_references=allow_relative_references,
@@ -375,6 +399,56 @@ def _strip_private_entries(
         filtered.unlink(missing_ok=True)
 
 
+def _archive_symlinks(archive: Path) -> dict[PurePosixPath, str]:
+    """Literal symlink targets by member path; the archive is validated separately."""
+    try:
+        with tarfile.open(archive, mode="r:*") as stream:
+            return {_member_path(member.name): member.linkname for member in stream if member.issym()}
+    except (tarfile.TarError, OSError) as exc:
+        raise WorkspaceSnapshotError("agent workspace archive is unreadable") from exc
+
+
+def _escaping_symlinks(
+    archive: Path, policy: WorkspaceStagingPolicy, *, root: PurePosixPath,
+    external_reference_files: frozenset[PurePosixPath],
+) -> list[PurePosixPath]:
+    """Links that resolve outside the root, directly or through another link.
+
+    Every other resolution failure (private targets, cycles) still fails closed
+    in validation; only leaving the workdir is a candidate for omission.
+    """
+    links = _archive_symlinks(archive)
+    escaping = []
+    for path in sorted(links):
+        try:
+            _resolve_symlink_chain(path, links, policy, root=root,
+                                   external_reference_files=external_reference_files)
+        except WorkspaceLinkEscapesError:
+            escaping.append(path)
+        except WorkspaceSnapshotError:
+            continue
+    return escaping
+
+
+def _omit_symlinks(archive: Path, paths: frozenset[PurePosixPath]) -> None:
+    """Rewrite the archive without these symlink members, keeping everything else."""
+    filtered = archive.with_name(f"{archive.name}.links")
+    try:
+        with tarfile.open(archive, mode="r:*") as source, tarfile.open(
+            filtered, mode="w", format=tarfile.PAX_FORMAT,
+        ) as target:
+            for member in source.getmembers():
+                if member.issym() and _member_path(member.name) in paths:
+                    continue
+                fileobj = source.extractfile(member) if member.isreg() else None
+                target.addfile(member, fileobj)
+        os.replace(filtered, archive)
+    except (tarfile.TarError, OSError) as exc:
+        raise WorkspaceSnapshotError("agent workspace archive is unreadable") from exc
+    finally:
+        filtered.unlink(missing_ok=True)
+
+
 def _member_path(raw: str) -> PurePosixPath:
     path = PurePosixPath(raw)
     if path.is_absolute() or ".." in path.parts:
@@ -393,7 +467,7 @@ def _symlink_components(
     if target.is_absolute():
         assert root is not None
         if not target.is_relative_to(root):
-            raise WorkspaceSnapshotError(f"workspace symlink target escapes workdir: {raw}")
+            raise WorkspaceLinkEscapesError(f"workspace symlink target escapes workdir: {raw}")
         # Keep terminal slash/dot tokens: they are traversal after a file,
         # even though PurePosixPath would silently remove them.
         parts = raw.split("/")[1:]
@@ -401,7 +475,7 @@ def _symlink_components(
             while parts and parts[0] in {"", "."}:
                 parts.pop(0)
             if not parts or parts.pop(0) != component:
-                raise WorkspaceSnapshotError(f"workspace symlink target escapes workdir: {raw}")
+                raise WorkspaceLinkEscapesError(f"workspace symlink target escapes workdir: {raw}")
         return True, tuple(parts)
     return False, tuple(raw.split("/"))
 
@@ -478,7 +552,7 @@ def _resolve_symlink_chain(
             continue
         if part == "..":
             if not stack:
-                raise WorkspaceSnapshotError(f"workspace symlink target escapes workdir: {start}")
+                raise WorkspaceLinkEscapesError(f"workspace symlink target escapes workdir: {start}")
             stack.pop()
             continue
         current = PurePosixPath(*stack, part)
@@ -518,6 +592,8 @@ def _is_private(policy: WorkspaceStagingPolicy, path: PurePosixPath) -> bool:
 
 
 __all__ = [
+    "MAX_WORKSPACE_REFERENCES",
+    "WorkspaceLinkEscapesError",
     "WorkspaceSnapshotError",
     "handoff_workspace_snapshot",
 ]
