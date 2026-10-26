@@ -296,6 +296,24 @@ def test_converting_to_draft_filters_gate_until_ready_again() -> None:
     assert plan.gate_mode == "filtered"
 
 
+@pytest.mark.parametrize(
+    ("action", "draft"), [("synchronize", True), ("converted_to_draft", False)],
+)
+def test_stale_draft_payload_for_a_ready_head_runs_the_full_gate(action: str, draft: bool) -> None:
+    plan = plan_validations(
+        changed_paths=["src/loom/config.py"],
+        labels=set(),
+        event_name="pull_request",
+        pull_request_action=action,
+        pull_request_draft=draft,
+        pull_request_stale_draft=True,
+    )
+
+    assert plan.event_relevant is True
+    assert plan.full_gate is True
+    assert plan.gate_mode == "full"
+
+
 def test_docs_only_selects_no_heavy_validation() -> None:
     plan = plan_validations(
         changed_paths=["docs/user-guide.md", "CONTRIBUTING.md"],

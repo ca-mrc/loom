@@ -54,6 +54,12 @@ run-name: >-
 
 on:
   workflow_call:
+    inputs:
+      stale_draft:
+        description: "CI confirmed this draft payload is stale for a Ready PR on the same head"
+        required: false
+        type: boolean
+        default: false
   workflow_dispatch:
 
 permissions:
@@ -81,7 +87,7 @@ jobs:
         shell: bash
         env:
           FILTERED_EVENT: >-
-            ${{ github.event_name == 'pull_request' &&
+            ${{ github.event_name == 'pull_request' && !inputs.stale_draft &&
                 (github.event.pull_request.draft ||
                  github.event.action == 'converted_to_draft') }}
         run: |
@@ -117,6 +123,7 @@ jobs:
           PR_ACTION: ${{ github.event.action }}
           PR_ACTION_LABEL: ${{ github.event.label.name }}
           PR_DRAFT: ${{ github.event.pull_request.draft || false }}
+          PR_STALE_DRAFT: ${{ inputs.stale_draft == true }}
           PR_BASE_CHANGED: ${{ github.event.changes.base != null }}
         run: |
           set -euo pipefail
@@ -150,6 +157,7 @@ jobs:
             --pull-request-action "$PR_ACTION" \
             --pull-request-action-label "$PR_ACTION_LABEL" \
             --pull-request-draft "$PR_DRAFT" \
+            --pull-request-stale-draft "${PR_STALE_DRAFT:-false}" \
             --pull-request-base-changed "$PR_BASE_CHANGED" \
             --github-output "$GITHUB_OUTPUT"
 

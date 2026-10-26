@@ -213,7 +213,11 @@ secrets.
   against the actual base; queue-off integration must earn current-head checks
   against the actual protected target.
   Finish label updates before the final CI cycle. Draft events remain filtered
-  and cannot authorize a merge.
+  and cannot authorize a merge. A push to a Draft PR followed within seconds
+  by Ready for review can deliver the Draft event's run after the Ready run.
+  CI rechecks a Draft event against the live PR. If the PR is Ready on the
+  same head and its newest full run is older, the Draft event's run validates
+  in full instead of hiding that run's checks.
 - Do not assume labels are the only way to select validation. For example,
   relevant image paths select `images-gate` automatically; `ci:images` adds
   Nebius AMD64 image validation when the changed paths do not already require it.
