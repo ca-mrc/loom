@@ -79,6 +79,43 @@ jobs:
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          merge_dev_or_report() {
+            local candidate_head base_head conflicts refresh_status
+            candidate_head="$(git rev-parse HEAD)"
+            base_head="$(git rev-parse origin/dev)"
+            if git merge --no-edit origin/dev; then
+              return 0
+            fi
+            conflicts="$(git diff --name-only --diff-filter=U)"
+            if git rev-parse --verify --quiet MERGE_HEAD >/dev/null; then
+              git merge --abort
+            fi
+            if [[ -n "$conflicts" ]]; then
+              refresh_status=action_required
+              {
+                echo '### Harbor candidate refresh: action required'
+                echo 'The candidate has substantive conflicts with dev. Resolve them on the existing Draft while preserving human amendments, then rerun preparation.'
+                echo 'Conflicting files:'
+                echo '```text'
+                printf '%s\n' "$conflicts"
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+            else
+              refresh_status=failed
+              {
+                echo '### Harbor candidate refresh failed without content conflicts'
+                echo 'Inspect the Git error above and repair the merge/tooling failure before retrying.'
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+            {
+              printf 'Candidate head: %s\n\n' "$candidate_head"
+              printf 'Dev base: %s\n\n' "$base_head"
+              echo 'Any pending merge was aborted. No candidate changes were pushed and offline qualification did not run.'
+              echo 'The candidate remains Draft and has not been accepted.'
+            } >> "$GITHUB_STEP_SUMMARY"
+            printf 'refresh_status=%s\n' "$refresh_status" >> "$GITHUB_OUTPUT"
+            return 1
+          }
           gh pr list --repo "$GITHUB_REPOSITORY" --base dev \
             --head "$CANDIDATE_BRANCH" --state open --json number,isDraft,url \
             > "$RUNNER_TEMP/harbor-pr.json"
@@ -91,8 +128,8 @@ jobs:
             fi
             git switch --track "origin/$CANDIDATE_BRANCH"
             # Preserve human amendments and never force-push a reviewed branch.
-            # Conflicts leave the existing Draft untouched and fail this run.
-            git merge --no-edit origin/dev
+            # Conflicts require deliberate reconciliation on the existing Draft.
+            merge_dev_or_report
           else
             if git show-ref --verify --quiet "refs/remotes/origin/$CANDIDATE_BRANCH"; then
               # A merged candidate may leave its branch behind. Reuse it only
@@ -106,7 +143,7 @@ jobs:
                 exit 1
               fi
               git switch --track "origin/$CANDIDATE_BRANCH"
-              git merge --no-edit origin/dev
+              merge_dev_or_report
             else
               git switch -c "$CANDIDATE_BRANCH"
             fi

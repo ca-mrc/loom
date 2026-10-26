@@ -56,17 +56,20 @@ def test_ci_metadata_tool_exception_does_not_suppress_shared_or_unknown_pool_inp
 
 @pytest.mark.parametrize("path", ["scripts/ops/nebius_pool_new_operator.py",
                                  "scripts/ops/nebius_shared_pool_new_operator.py"])
-def test_ci_metadata_tool_mixed_with_pool_operator_retains_that_operators_coverage(path):
+@pytest.mark.parametrize("include_shared_pool", [False, True])
+def test_ci_metadata_tool_mixed_with_pool_operator_retains_that_operators_coverage(path, include_shared_pool):
     from scripts.component_ownership import _tracked_paths, load_manifest, selected_test_paths
 
     manifest = load_manifest(REPO_ROOT / "config/component-ownership.toml")
     common = dict(manifest=manifest, tracked_paths=_tracked_paths(REPO_ROOT),
-                  repo_root=REPO_ROOT, lane="nebius-pool", test_scope="nebius")
+                  repo_root=REPO_ROOT, lane="nebius-pool", test_scope="nebius",
+                  include_shared_pool=include_shared_pool)
     operator = plan_validations(changed_paths=[path], labels=set(), event_name="pull_request")
     mixed = plan_validations(changed_paths=["scripts/ops/nebius_pool_test_plan.py", path],
                              labels=set(), event_name="pull_request")
     expected = selected_test_paths(changed_paths=operator.test_changes, **common)
-    assert expected and selected_test_paths(changed_paths=mixed.test_changes, **common) == expected
+    assert bool(expected) == (include_shared_pool or "nebius_shared_pool_" not in path)
+    assert selected_test_paths(changed_paths=mixed.test_changes, **common) == expected
 
 
 @pytest.mark.parametrize("path", [

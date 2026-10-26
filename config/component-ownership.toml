@@ -1009,6 +1009,20 @@ exclude_paths = [
   "tests/unit/test_nebius_runtime_render.py",
   "tests/unit/pipeline/test_behavior_input_import.py",
   "tests/ops/test_nebius*pool*.py",
+  "tests/ops/test_ci_runner_*.py",
+  "tests/ops/test_ci_unified_runner_supply.py",
+]
+# This standalone controller is not imported by application/runtime modules.
+# Mixed application, fixture and unknown inputs retain their ordinary coverage.
+unaffected_paths = ["scripts/ops/ci_runner_supply.py"]
+
+[[test_suites]]
+id = "ci-runner-controller"
+language = "python"
+lane = "tests-root"
+include_paths = [
+  "tests/ops/test_ci_runner_*.py",
+  "tests/ops/test_ci_unified_runner_supply.py",
 ]
 
 [[test_suites]]
@@ -1057,14 +1071,15 @@ affected_paths = [
 # Discover referenced operators through these tests and their fixture imports;
 # direct shared-pool entrypoints without known consumers keep the whole suite.
 # Keep the same lane/shards and candidate coverage-reuse contract.
-# affected_only: a PR whose unowned or other forcing paths select full
-# regression still skips this ~190 runner-minute suite unless its diff affects
-# it. Dev pushes, the daily schedule and manual runs keep the whole suite.
+# Manual qualification keeps every scenario before shared feature launch.
+# affected_only still narrows explicitly requested local selections by diff;
+# manual_only excludes this suite from all automatic and candidate execution.
 id = "nebius-shared-pool-ops"
 language = "python"
 lane = "nebius-pool"
 include_paths = ["tests/ops/test_nebius_shared_pool_*.py"]
 affected_only = true
+manual_only = true
 unaffected_paths = ["scripts/ops/nebius_pool_test_plan.py"]
 component_sources = ["scripts/ops/**/*.py", "scripts/ops/**/*.sh"]
 affected_paths = [

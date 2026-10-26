@@ -299,6 +299,13 @@ module = [
 ]
 ignore_missing_imports = true
 
+[tool.coverage.run]
+# The pinned candidate renderer executes a different revision in a disposable
+# archive. Its imports must not count as current-checkout coverage or be mapped
+# onto current source after the archive is removed. Keep other missing-source
+# errors visible; only this historical execution tree is outside collection.
+omit = ["*/loom-candidate-manifests-*/src/loom/*"]
+
 [tool.coverage.paths]
 # Normalize local, GitHub-hosted, and isolated JIT checkout roots for aggregation.
 source = [

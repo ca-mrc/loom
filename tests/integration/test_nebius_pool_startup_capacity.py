@@ -39,7 +39,9 @@ from tests.integration.test_nebius_pool_registry import sessions as sessions
 async def prepare_startup_capacity(sessions, tmp_path, damage=None, *, executable=False):
     from scripts.ops.nebius_pool_startup_capacity import expected_startup_capacity
 
-    config, tokens = installation()
+    async with sessions() as session:
+        database_now = await session.scalar(select(func.clock_timestamp()))
+    config, tokens = installation(now=database_now)
     if executable:
         for profile in config['profiles']['execution']:
             profile['runtime']['node_selector'] = dict(config['node_selector'])
@@ -103,6 +105,24 @@ async def prepare_startup_capacity(sessions, tmp_path, damage=None, *, executabl
     nonce = 'ab' * 32
     signature = hmac.new(bytes.fromhex(nonce), json.dumps(expected, sort_keys=True, separators=(',', ':')).encode(), 'sha256').hexdigest()
     return spec, tokens, environment, token, nonce, signature, gateway
+
+
+async def test_capacity_fixture_issues_credentials_on_the_database_clock(sessions, tmp_path, monkeypatch):
+    from tests.integration import test_nebius_pool_installation as installation_fixtures
+
+    class AheadClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.now(tz) + timedelta(days=1)
+
+    # Reproduce a fixture host ahead of its disposable database without changing
+    # either clock or the production credential validity checks.
+    monkeypatch.setattr(installation_fixtures, 'datetime', AheadClock)
+    spec, *_ = await prepare_startup_capacity(sessions, tmp_path)
+    async with sessions() as session:
+        database_now = await session.scalar(select(func.clock_timestamp()))
+    assert all(machine.issued_at <= database_now < machine.expires_at for machine in spec.machines)
+    assert all(machine.expires_at - machine.issued_at == timedelta(days=30) for machine in spec.machines)
 
 
 @pytest.mark.parametrize('operation', ['probe', 'activate', 'active-probe'])

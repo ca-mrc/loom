@@ -11,6 +11,7 @@ import sys
 import tomllib
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import replace
+from pathlib import Path
 from uuid import UUID, uuid4, uuid5
 
 import httpx
@@ -25,7 +26,7 @@ from loom_service.environment_management.candidates import (
     ProtectedPublication,
 )
 from loom_service.environment_management.kubernetes_provider import KubernetesEnvironmentProvider
-from loom_service.pool_management.administration import administer
+from loom_service.pool_management.administration import administer, run_administration
 from loom_service.pool_management.capacity import digest
 from loom_service.pool_management.profiles import PoolProfileCatalog
 from tests.integration.test_nebius_pool_participant_lifecycle import platform
@@ -48,7 +49,9 @@ def issuer():
 
 
 @asynccontextmanager
-async def prepared(sessions, tmp_path, platform_inputs, publication, *, kind='development'):
+async def prepared(sessions, tmp_path, platform_inputs, publication, *, kind='development',
+        repeat_administration_in_process=False):
+    """Keep the CLI boundary, with optional connected reads for long workflows."""
     subject = issuer()
     from scripts.ops import nebius_environment_foundation as foundations
     from scripts.ops import nebius_pool_administration_dispatch as dispatch
@@ -117,6 +120,7 @@ async def prepared(sessions, tmp_path, platform_inputs, publication, *, kind='de
         class API(PhaseAPI):
             request = None
             pending = False
+            administration_process_calls = 0
 
             def administration_report(self, state_dir):
                 if self.pending:
@@ -137,10 +141,28 @@ async def prepared(sessions, tmp_path, platform_inputs, publication, *, kind='de
                         env[item['name']] = str(process / item['value'].rsplit('/', 1)[-1])
                     else:
                         env[item['name']] = item['value']
-                result = subprocess.run([sys.executable, '-m', 'loom_service.pool_management.administration'],
-                    env=env, capture_output=True, text=True, timeout=30)
-                assert result.returncode == 0, result.stdout + result.stderr
-                return {'job_uid': str(uuid4()), 'pod_uid': str(uuid4()), 'receipt': json.loads(result.stdout)}
+                if repeat_administration_in_process and self.administration_process_calls:
+                    # These callbacks run in to_thread. Each observation still
+                    # reads current files, checks the pinned authorization and
+                    # schema, opens a fresh real read-only transaction, commits
+                    # and disposes its engine. Never reuse a status/receipt.
+                    try:
+                        receipt = asyncio.run(asyncio.wait_for(run_administration(
+                            request_file=Path(env['LOOM_POOL_ADMINISTRATION_FILE']),
+                            authorization_file=Path(env['LOOM_POOL_ADMINISTRATION_AUTHORIZATION_FILE']),
+                            authorization_sha256=env['LOOM_POOL_ADMINISTRATION_AUTHORIZATION_SHA256'],
+                            db_url=env['LOOM_POOL_ADMINISTRATION_DB_URL'], action='status'), timeout=30))
+                    except Exception:
+                        raise AssertionError('pool_administration_unavailable') from None
+                    # Preserve the CLI JSON transport boundary too.
+                    receipt = json.loads(json.dumps(receipt))
+                else:
+                    self.administration_process_calls += 1
+                    result = subprocess.run([sys.executable, '-m', 'loom_service.pool_management.administration'],
+                        env=env, capture_output=True, text=True, timeout=30)
+                    assert result.returncode == 0, result.stdout + result.stderr
+                    receipt = json.loads(result.stdout)
+                return {'job_uid': str(uuid4()), 'pod_uid': str(uuid4()), 'receipt': receipt}
 
         api = API(runtime.binding)
         api.platform_input = platform_input

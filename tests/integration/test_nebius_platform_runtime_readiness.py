@@ -6,7 +6,7 @@ import copy
 import importlib
 import json
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
@@ -20,7 +20,7 @@ from scripts.ops.nebius_pool_administration_dispatch import (
     retain_authorized_operation,
 )
 from scripts.ops.nebius_pool_administration_job import PoolAdministrationRuntimeV2
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 
 from loom.db.nebius_pool_lifecycle_schema import NebiusPoolLifecycleOperation
 from loom.nebius_kubernetes import NebiusKubernetesConnection
@@ -67,7 +67,10 @@ async def prepared_platform_runtime(sessions, tmp_path, running, *, damage=None,
     request = PoolInspectionV2(schema_version='loom.pool-inspection.v2', operation_id=uuid4(),
         installation_id=spec.installation_id, pool_id=spec.pool_id, require_capacity=True,
         platform_authorization_id=grant.authorization_id)
-    now = datetime.now(UTC)
+    # Match administration's database clock instead of racing a fixture host
+    # clock against the immediate read-only authorization check.
+    async with sessions() as session:
+        now = await session.scalar(select(func.clock_timestamp()))
     read_grant = grant.model_copy(update={'authorization_id': uuid4(), 'request_sha256': digest(request.model_dump(mode='json')),
         'issued_at': now, 'expires_at': now + timedelta(minutes=5)})
     async with sessions.begin() as session:
@@ -173,3 +176,22 @@ async def test_platform_runtime_uses_its_own_authority_without_environment_histo
         assert [row['component'] for row in result['processes']] == ['manager', 'gateway']
         assert context.commands == ['manager', 'service', 'gateway', 'gateway']
         assert 'private-' not in json.dumps(result)
+
+
+async def test_readiness_inspection_grant_uses_database_clock_when_fixture_host_is_ahead(
+        sessions, tmp_path, running, monkeypatch):
+    actual_datetime = datetime
+
+    class AheadClock(actual_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return actual_datetime.now(tz) + timedelta(seconds=1)
+
+    # Only this fixture's wall clock moves; real administration and PostgreSQL
+    # must still qualify the newly issued read grant without a grace period.
+    monkeypatch.setitem(globals(), 'datetime', AheadClock)
+    context = await prepared_platform_runtime(sessions, tmp_path, running)
+    result = context.subject.observe_platform_runtime(policy=context.policy,
+        snapshot=context.snapshot, probes=context.probes)
+    assert result['status'] == 'platform_runtime_verified'
+    assert result['platform_operation_id'] == str(context.operation.operation_id)
