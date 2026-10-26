@@ -3,14 +3,27 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG = ROOT / "pyproject.toml"
+
+
+@pytest.fixture(params=["tests-root", "tests-packages", "integration"])
+def ci_coverage_args(request):
+    """Use each real CI entrypoint's arguments, including config propagation."""
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
+    commands = "\n".join(step.get("run", "") for step in workflow["jobs"][request.param]["steps"])
+    matches = re.findall(r"coverage_args=\((--cov=src[^)\n]*)\)", commands)
+    assert len(matches) == 1
+    return shlex.split(matches[0])
 
 
 def _run(argv: list[str], *, cwd: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
@@ -35,7 +48,7 @@ def _combine(tmp_path: Path, env: dict[str, str]) -> dict[str, str]:
     return combined_env
 
 
-def test_historical_candidate_execution_does_not_enter_current_source_coverage(tmp_path):
+def test_historical_candidate_execution_does_not_enter_current_source_coverage(tmp_path, ci_coverage_args):
     """Exercise real git archive, candidate Python, cleanup, combine, XML and text."""
     source = tmp_path / "src" / "loom" / "__init__.py"
     source.parent.mkdir(parents=True)
@@ -65,6 +78,9 @@ def test_historical_candidate_execution_does_not_enter_current_source_coverage(t
         assert result.returncode == 0, result.stdout + result.stderr
     candidate = _run(["git", "rev-parse", "HEAD"], cwd=tmp_path, env=env).stdout.strip()
     source.write_text("FLAVOR = 'current'\ndef current_only():\n    return FLAVOR\n")
+    # CI starts with the current config in its checkout. The archived renderer
+    # lacks that checkout's pyproject, so subprocess collection must inherit it.
+    (tmp_path / "pyproject.toml").write_bytes(CONFIG.read_bytes())
     (tmp_path / "pytest.ini").write_text("[pytest]\n")
     driver = tmp_path / "test_sample.py"
     driver.write_text(
@@ -84,8 +100,7 @@ def test_historical_candidate_execution_does_not_enter_current_source_coverage(t
     )
     result = _run([sys.executable, "-B", "-m", "pytest", "-p", "no:cacheprovider", "-q",
         "-c", str(tmp_path / "pytest.ini"), "--rootdir", str(tmp_path),
-        "--basetemp", str(tmp_path / "child-pytest"), "--cov=src", "--cov=packages", "--cov-report=",
-        "--cov-config", str(CONFIG), str(driver)], cwd=tmp_path, env=env)
+        "--basetemp", str(tmp_path / "child-pytest"), *ci_coverage_args, str(driver)], cwd=tmp_path, env=env)
     assert result.returncode == 0, result.stdout + result.stderr
     combined_env = _combine(tmp_path, env)
     for command in ("xml", "report"):

@@ -268,6 +268,9 @@ Coverage excludes only archived `loom-candidate-manifests-*/src/loom` source
 roots. Historical renderers still execute in their owning tests, and their
 coverage never counts as the current checkout's source. Other missing source
 errors remain fatal during combine, XML and text reporting.
+Instrumented root, package and integration jobs explicitly select the current
+`pyproject.toml`; pytest-cov propagates its resolved path to Python children,
+including historical renderers with a different working directory and config.
 Request `ci:coverage-summary` or dispatch CI with `coverage_summary=true` for
 full selection within the active scope and combined accounting. Nebius coverage
 is reported without applying the historical all-platform **70%** floor to a
@@ -323,6 +326,12 @@ Selection failures propagate before pytest or toolchain execution. The audit's
 native CI sample took 41m06s (109.47 runner-minutes, longest job 12m20s), with a
 30m08s ready-to-start delay for one root shard. These are baseline measurements,
 not a claimed post-change hosted speedup.
+
+`scripts/ops/ci_runner_supply.py` has a dedicated `ci-runner-controller` test
+owner. A change confined to that controller selects its root contracts and
+native image, cluster and staging validation. Mixed application, shared-fixture,
+dependency and unknown inputs retain their applicable regression coverage;
+shared simulations still require the explicit manual input.
 
 ## Pool operator tests run before deployment
 
@@ -541,6 +550,11 @@ recipe set when `tests/support/minio_images.py` changes on dev, and daily. Each 
 still prepares only the images it selected. Recipe or release changes get a new
 key, and invalid archives fall back to normal pinned-image preparation. The lazy
 per-fixture resolver remains available for local tests.
+
+The disposable MinIO runtime keeps a minimum curl version instead of requiring
+an old APK revision that Alpine has replaced. Its curl and CA security floors
+accept newer published revisions; the MinIO commit, compiler and base-image
+digest stay fixed.
 
 System smoke uses a Compose project per run/attempt and Docker-assigned loopback
 ports; it discovers actual service endpoints once and passes the registry endpoint
