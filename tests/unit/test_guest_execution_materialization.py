@@ -511,6 +511,10 @@ def test_shared_guest_keeps_one_live_sandbox_and_requires_deployment_readiness()
     assert plan.verifier is not None
     assert plan.verifier_execution == "in_attempt"
     assert ExecutionRuntimePlanV1.model_validate(plan.canonical_payload()) == plan
+    shared_readback = execution_selection_readback(trial.model_dump(mode="json"), plan)["effective"]
+    assert shared_readback["verification"] == "shared"
+    assert shared_readback["fresh_sandbox_grading"] is False
+    assert shared_readback["isolation"] == "guest"
     validate_runtime_plan_requirements(plan, workload_requirements_from_task(task, trial))
     raw = plan.canonical_payload()
     raw["sidecars"][0]["role_name"] = "verifier-sandbox"
