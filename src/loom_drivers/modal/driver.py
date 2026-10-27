@@ -38,6 +38,7 @@ from loom.driver.base import (
     ExecHandle,
     StartOptions,
 )
+from loom.driver.healthcheck import run_command_healthcheck
 from loom.errors import (
     DriverAlreadyStartedError,
     DriverError,
@@ -456,24 +457,7 @@ class ModalDriver:
         self._require_running()
         if hc is None:
             return
-        loop = asyncio.get_running_loop()
-        deadline_start = loop.time() + hc.start_period_sec
-        consecutive_failures = 0
-        while True:
-            in_grace = loop.time() < deadline_start
-            try:
-                r = await self.exec(hc.command, timeout_sec=hc.timeout_sec)
-                if r.return_code == 0:
-                    return
-            except TimeoutError:
-                logger.debug("modal healthcheck timed out")
-            if not in_grace:
-                consecutive_failures += 1
-                if consecutive_failures > hc.retries:
-                    raise DriverError(
-                        f"Modal healthcheck failed after {hc.retries} retries: {hc.command!r}",
-                    )
-            await asyncio.sleep(hc.interval_sec)
+        await run_command_healthcheck(self, hc)
 
     async def billed_seconds(self) -> float:
         """Wall-clock seconds Modal billed for this sandbox so far.

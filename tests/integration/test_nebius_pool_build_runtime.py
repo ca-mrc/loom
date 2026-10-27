@@ -326,3 +326,27 @@ async def test_one_broken_runtime_does_not_starve_other_selected_builds(sessions
         second_row = await session.get(TaskImageMaterialization, second.key.local_work_id)
         assert first_row.state == "claimed" and not first_row.registry_images
         assert second_row.state == "ready" and second_row.registry_images
+
+
+@pytest.mark.parametrize("archives", [{"task": {}}, [], None])
+async def test_ordinary_pool_publication_rejects_unissued_or_malformed_archives(sessions, tmp_path, archives):
+    from loom_execution_actuator.pool_build_runtime import PoolNativeBuildController
+
+    app, token, _, request, journal = await selected(sessions, tmp_path)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as http:
+        driver = PoolBuildDriver(outbox=journal, management=client(http, token))
+        handoff = await driver.advance(request.key)
+        job = await gateway_job(sessions, handoff)
+        finish(job, request)
+        terminated = job["pods"][0]["status"]["containerStatuses"][0]["state"]["terminated"]
+        receipt = json.loads(terminated["message"])
+        receipt["image_archives"] = archives
+        terminated["message"] = json.dumps(receipt)
+        await PoolNativeBuildController(driver=driver, kubernetes=Reader(job)).run_once()
+    row, attempt = await local_rows(sessions, request)
+    assert row.state == "failed" and row.failure_reason == "build_publication_receipt_invalid"
+    assert not row.registry_images and "configmap" not in attempt.native_build
+    assert attempt.native_build["pool_output"]["output_state"] == "unavailable"
+    assert not attempt.native_build["pool_output"]["registry_images"]
+    assert not attempt.native_build.get("capacity_released_at")
+    assert (await journal.get(request.key)).phase == "stop_pending"

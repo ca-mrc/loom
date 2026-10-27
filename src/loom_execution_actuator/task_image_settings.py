@@ -20,6 +20,7 @@ class NativeTaskImageSettings(BaseModel):
     service_image: str
     source_secret_name: str = "loom-task-build-source"
     cache_secret_name: str | None = None
+    archive_secret_name: str | None = Field(default=None, exclude_if=lambda value: value is None)
     registry_secret_name: str = "loom-task-build-registry"
     registry_auth_kind: Literal["docker-config", "nebius"] = "nebius"
     storage_endpoint: str
@@ -63,7 +64,7 @@ class NativeTaskImageSettings(BaseModel):
         from loom_execution_actuator.task_image_renderer import TaskImageJobConfig
 
         return TaskImageJobConfig(**{key: getattr(self, key) for key in (
-            "service_image", "source_secret_name", "cache_secret_name", "registry_secret_name", "registry_auth_kind",
+            "service_image", "source_secret_name", "cache_secret_name", "archive_secret_name", "registry_secret_name", "registry_auth_kind",
             "cpu_millis", "memory_mib", "ephemeral_storage_mib", "max_processes", "active_deadline_seconds",
             "snapshotter", "export_cache_mode", "oci_export_format",
         )})

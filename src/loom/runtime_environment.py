@@ -13,8 +13,24 @@ def validate_runtime_environment(value: dict[str, str]) -> dict[str, str]:
     for name, item in value.items():
         # Official Python images publish this public signing-key fingerprint.
         public_fingerprint = name == "GPG_KEY" and re.fullmatch(r"[A-Fa-f0-9]{40}|[A-Fa-f0-9]{64}", item)
-        if _ENV_NAME.fullmatch(name) is None or (_SECRET_ENV.search(name) and not public_fingerprint):
+        # VNC keyboard event pacing is a public numeric setting, not key material.
+        public_key_delay = name == "VNC_KEY_DELAY_MS" and re.fullmatch(r"[0-9]{1,6}", item)
+        if _ENV_NAME.fullmatch(name) is None or (_SECRET_ENV.search(name) and not (public_fingerprint or public_key_delay)):
             raise ValueError("process environment contains a forbidden name")
         if "\x00" in item or len(item.encode("utf-8")) > MAX_ENV_VALUE_BYTES:
             raise ValueError("process environment value is invalid")
+    return value
+
+
+def validate_task_environment(value: dict[str, str], *, allow_runtime_controls: bool = False) -> dict[str, str]:
+    """Authored fixture values stay inside the sandbox, outside controller authority."""
+    if len(value) > 64:
+        raise ValueError("task environment exceeds 64 entries")
+    for name, item in value.items():
+        platform_control = allow_runtime_controls and name == "LOOM_WORKSPACE_MAX_ARCHIVE_BYTES"
+        if (_ENV_NAME.fullmatch(name) is None or (name.startswith("LOOM_") and not platform_control)
+                or name in {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "KUBECONFIG"}):
+            raise ValueError("task environment contains a reserved name")
+        if "\x00" in item or len(item.encode("utf-8")) > MAX_ENV_VALUE_BYTES:
+            raise ValueError("task environment value is invalid")
     return value

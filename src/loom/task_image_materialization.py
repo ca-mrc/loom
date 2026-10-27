@@ -32,6 +32,7 @@ from loom.db.schema import (
 from loom.execution_architecture import execution_cpu_arch
 from loom.models.task import TaskConfig
 from loom.sandbox_identity import published_supplementary_groups
+from loom.task_image_archives import PreparedImageArchiveV1, compose_archive_components
 from loom.task_image_metadata import TaskImageRuntimeMetadataV1
 
 if TYPE_CHECKING:
@@ -68,6 +69,7 @@ class TaskImageExecutionGrantV1(BaseModel):
     task_source: str | None
     task_source_provenance: dict[str, Any]
     registry_images: dict[str, ImmutableRegistryImage]
+    image_archives: dict[str, PreparedImageArchiveV1] = Field(default_factory=dict, exclude_if=lambda value: not value)
     image_runtime_metadata: dict[str, TaskImageRuntimeMetadataV1] = Field(default_factory=dict, exclude_if=lambda value: not value)
 
     @field_validator("registry_images")
@@ -80,11 +82,19 @@ class TaskImageExecutionGrantV1(BaseModel):
     @model_validator(mode="after")
     def matches_frozen_task_snapshot(self) -> TaskImageExecutionGrantV1:
         task = TaskConfig.model_validate(self.task_config)
+        if (task.verifier.environment is not None and task.verifier.environment.cpu_arch not in {"any", self.cpu_arch}):
+            raise ValueError("independent verifier architecture differs from the image grant")
         if self.cpu_arch not in declared_task_image_architectures(task):
             raise ValueError("cpu_arch is not required by the frozen task snapshot")
         expected = required_task_image_components(task)
         if set(self.registry_images) != expected:
             raise ValueError("registry_images do not match the frozen task snapshot")
+        expected_archives = set(compose_archive_components(self.task_config).values())
+        if set(self.image_archives) != expected_archives:
+            raise ValueError("prepared Compose archives do not cover the frozen components")
+        for component, archive in self.image_archives.items():
+            if archive.image_ref != self.registry_images[component]:
+                raise ValueError("prepared archive differs from the frozen image")
         for component, metadata in self.image_runtime_metadata.items():
             if metadata.image_ref != self.registry_images.get(component):
                 raise ValueError("OCI runtime metadata does not match the published image")
@@ -116,38 +126,45 @@ def resolve_prepared_task(
     if task != TaskConfig.model_validate(grant.task_config):
         raise ValueError("prepared images do not match the frozen task")
     payload = task.model_dump(mode="json")
-    environment = payload["environment"]
-    environment["cpu_arch"] = grant.cpu_arch
-    if task.environment.dockerfile is not None:
-        environment.update(
-            dockerfile=None, docker_build_context=None, docker_build_args={},
-            docker_build_target=None, docker_image=grant.registry_images["task"],
-        )
-    if task.environment.user == "image" or task.environment.image_entrypoint or task.environment.image_workdir:
-        metadata = grant.image_runtime_metadata.get("task")
-        if metadata is None:
-            raise ValueError("task image OCI runtime metadata is unavailable; rebuild before execution")
-        environment["environment"] = {**metadata.environment, **environment["environment"]}
-        if task.environment.user == "image":
-            environment["user"] = f"{metadata.uid}:{metadata.gid}"
-            environment["environment"].setdefault("HOME", metadata.home)
-        if task.environment.image_workdir:
-            environment["workdir"] = metadata.workdir
-        if task.environment.image_entrypoint:
-            environment["entrypoint"] = list(metadata.entrypoint)
-        environment["image_entrypoint"] = False
-        environment["image_workdir"] = False
-    metadata = grant.image_runtime_metadata.get("task")
-    if metadata is not None:
-        groups = published_supplementary_groups(
-            task.environment.user, metadata.uid, metadata.supplementary_groups, agent_uid=agent_uid,
-        )
-        if groups:
-            environment["supplementary_groups"] = list(groups)
-    for sidecar in environment["sidecars"]:
-        if sidecar["dockerfile"] is not None:
-            sidecar.update(dockerfile=None, docker_build_context=None,
-                           docker_image=grant.registry_images[f"sidecar:{sidecar['name']}"])
+    environments = [("task", task.environment, payload["environment"])]
+    if task.verifier.environment is not None:
+        environments.append(("verifier", task.verifier.environment, payload["verifier"]["environment"]))
+    for component, original, environment in environments:
+        environment["cpu_arch"] = grant.cpu_arch
+        if original.dockerfile is not None:
+            environment.update(dockerfile=None, docker_build_context=None, docker_build_args={},
+                               docker_build_target=None, docker_image=grant.registry_images[component])
+        metadata = grant.image_runtime_metadata.get(component)
+        if original.user == "image" or original.image_entrypoint or original.image_workdir:
+            if metadata is None:
+                raise ValueError(f"{component} image OCI runtime metadata is unavailable; rebuild before execution")
+            environment["environment"] = {**metadata.environment, **environment["environment"]}
+            if original.user == "image":
+                environment["user"] = f"{metadata.uid}:{metadata.gid}"
+                environment["environment"].setdefault("HOME", metadata.home)
+            if original.image_workdir:
+                environment["workdir"] = metadata.workdir
+            if original.image_entrypoint:
+                environment["entrypoint"] = list(metadata.entrypoint)
+            environment["image_entrypoint"] = False
+            environment["image_workdir"] = False
+        if metadata is not None:
+            groups = published_supplementary_groups(
+                original.user, metadata.uid, metadata.supplementary_groups, agent_uid=agent_uid,
+            )
+            if groups:
+                environment["supplementary_groups"] = list(groups)
+        if original.native_compose is not None:
+            for service in environment["native_compose"]["services"]:
+                name = (component if service["name"] == "main" else
+                        ("compose:" if component == "task" else "verifier-compose:") + service["name"])
+                if service["build"] is not None:
+                    service.update(build=None, image=grant.registry_images[name])
+        prefix = "sidecar:" if component == "task" else "verifier-sidecar:"
+        for sidecar in environment["sidecars"]:
+            if sidecar["dockerfile"] is not None:
+                sidecar.update(dockerfile=None, docker_build_context=None,
+                               docker_image=grant.registry_images[prefix + sidecar['name']])
     return TaskConfig.model_validate(payload)
 
 
@@ -187,9 +204,7 @@ def required_task_image_architectures(task: TaskConfig) -> tuple[NativeCPUArch, 
 
 def declared_task_image_architectures(task: TaskConfig) -> tuple[NativeCPUArch, ...]:
     """Read historical grants without rewriting their architecture identity."""
-    has_dockerfile = task.environment.dockerfile is not None or any(
-        sidecar.dockerfile is not None for sidecar in task.environment.sidecars
-    )
+    has_dockerfile = bool(required_task_image_components(task))
     if not has_dockerfile:
         return ()
     if task.environment.cpu_arch == "any":
@@ -199,13 +214,17 @@ def declared_task_image_architectures(task: TaskConfig) -> tuple[NativeCPUArch, 
 
 def required_task_image_components(task: TaskConfig) -> set[str]:
     components: set[str] = set()
-    if task.environment.dockerfile is not None:
-        components.add("task")
-    components.update(
-        f"sidecar:{sidecar.name}"
-        for sidecar in task.environment.sidecars
-        if sidecar.dockerfile is not None
-    )
+    environments = [("task", "sidecar:", task.environment)]
+    if task.verifier.environment is not None:
+        environments.append(("verifier", "verifier-sidecar:", task.verifier.environment))
+    for name, prefix, env in environments:
+        if env.dockerfile is not None:
+            components.add(name)
+        components.update(prefix + sidecar.name for sidecar in env.sidecars if sidecar.dockerfile is not None)
+        if env.native_compose is not None:
+            compose_prefix = "compose:" if name == "task" else "verifier-compose:"
+            components.update(compose_prefix + service.name for service in env.native_compose.services
+                              if service.name != "main" and service.build is not None)
     return components
 
 
@@ -558,5 +577,6 @@ async def get_trial_task_image_execution_grant(
         task_source=row.task_source,
         task_source_provenance=row.task_source_provenance,
         registry_images=row.registry_images,
+        image_archives=(attempt.native_build or {}).get("image_archives", {}) if attempt else {},
         image_runtime_metadata=(attempt.native_build or {}).get("image_runtime_metadata", {}) if attempt else {},
     )

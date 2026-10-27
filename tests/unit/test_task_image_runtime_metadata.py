@@ -156,8 +156,13 @@ def test_root_directory_tar_record_and_public_gpg_fingerprint_are_supported(tmp_
     assert read_task_image_runtime_metadata(image)["environment"]["GPG_KEY"] == "A" * 40
 
 
-@pytest.mark.parametrize("entry", ["API_KEY=private-value", "GPG_KEY=private-value"])
+@pytest.mark.parametrize("entry", ["API_KEY=private-value", "GPG_KEY=private-value", "VNC_KEY_DELAY_MS=private-value"])
 def test_secret_environment_values_are_not_exposed(tmp_path, entry):
     image = _image(tmp_path / "image", [_layer({"etc/passwd": PASSWD})], {"Env": [entry]})
     with pytest.raises(ValueError, match=r"^OCI runtime metadata unsupported$"):
         read_task_image_runtime_metadata(image)
+
+
+def test_public_vnc_keyboard_delay_is_preserved(tmp_path):
+    image = _image(tmp_path / "image", [_layer({"etc/passwd": PASSWD})], {"Env": ["VNC_KEY_DELAY_MS=35"]})
+    assert read_task_image_runtime_metadata(image)["environment"]["VNC_KEY_DELAY_MS"] == "35"

@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import hashlib
+import http.server
 import importlib.util
 import io
 import json
 import re
+import socket
 import ssl
+import threading
 import time
 from http.client import IncompleteRead, RemoteDisconnected
 from pathlib import Path
 from types import ModuleType
 from urllib.error import HTTPError, URLError
 from urllib.parse import unquote
+from urllib.request import urlopen
 
 import pytest
 
@@ -556,3 +560,50 @@ def test_locked_packages_pair_the_mirror_with_a_permanent_launchpad_file():
         assert mirror is not None and unquote(mirror.group(1)) == filename, package["url"]
         fallback = re.fullmatch(r"https://launchpadlibrarian\.net/[0-9]+/([^/]+)", str(package.get("fallback_url")))
         assert fallback is not None and fallback.group(1) == filename, package.get("fallback_url")
+
+
+def test_actual_http_peer_disconnect_recovers_verified_archive(
+    payload_builder, locked_archive, tmp_path, monkeypatch,
+):
+    requests = []
+    sleeps = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            requests.append(self.path)
+            if len(requests) < 3:
+                self.connection.shutdown(socket.SHUT_RDWR)
+                self.connection.close()
+                return
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(PAYLOAD)))
+            self.end_headers()
+            self.wfile.write(PAYLOAD)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    def open_loopback_fixture(url, *, timeout):
+        assert url == URL
+        # Keep the public HTTPS source contract; only the fixture's transport
+        # is replaced with a real local HTTP peer that closes before headers.
+        return urlopen(f"http://127.0.0.1:{server.server_port}/archive", timeout=timeout)
+
+    monkeypatch.setattr(payload_builder, "urlopen", open_loopback_fixture)
+    monkeypatch.setattr(time, "sleep", sleeps.append)
+    try:
+        destination = payload_builder.download(locked_archive, tmp_path)
+        assert destination.read_bytes() == PAYLOAD
+        assert destination.name == locked_archive["sha256"]
+        assert list(tmp_path.iterdir()) == [destination]
+        assert requests == ["/archive"] * 3
+        assert sleeps == [1, 2]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+        assert not thread.is_alive()

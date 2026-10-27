@@ -463,3 +463,22 @@ async def test_native_oracle_accepts_staged_solution_and_business_cwd(tmp_path: 
     assert driver.commands[-1] == (
         "rm -rf -- " + shlex.quote(str(solution_dir)), task.environment.workdir,
     )
+
+
+async def test_oracle_solution_environment_reaches_only_solver_exec(tmp_path: Path) -> None:
+    task, _, _ = _inputs()
+    task = task.model_copy(update={'solution_environment': {'MODE': 'strict', 'LITERAL': 'a; b'}})
+    calls = []
+
+    class EnvironmentDriver(_Driver):
+        async def exec(self, cmd, *, env=None, **kwargs):
+            calls.append((cmd, env))
+            return await super().exec(cmd, **kwargs)
+
+    driver = EnvironmentDriver()
+    await run_oracle(driver=driver, task_dir=_task_dir(tmp_path), workspace=tmp_path / 'out',
+                     task_config=task, trial_config=_oracle(), trial_id=uuid4())
+    await remove_oracle_solution(driver, task.environment.workdir)
+    assert calls[0][1] == {'MODE': 'strict', 'LITERAL': 'a; b'}
+    assert calls[1][1] is None
+    assert 'LITERAL' not in (tmp_path / 'out/trajectory.jsonl').read_text()

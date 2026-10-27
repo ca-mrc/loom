@@ -552,6 +552,8 @@ def effective_guest_capabilities(
 
     declared = task.environment.execution_requirements
     capabilities = ALL_GUEST_EXECUTION_CAPABILITIES.intersection(declared.capabilities if declared else ())
+    if task.environment.native_compose is not None:
+        capabilities = capabilities | {"nested_docker"}
     isolation = trial.isolation if trial is not None else None
     if isolation == "container":
         return None
@@ -573,6 +575,8 @@ def workload_requirements_from_task(
 
     env = task.environment
     capabilities = env.execution_requirements.capabilities if env.execution_requirements else ()
+    if env.native_compose is not None and "nested_docker" not in capabilities:
+        capabilities = (*capabilities, "nested_docker")
     needs_guest_kernel = effective_guest_capabilities(task, trial) is not None
     if env.dockerfile is not None:
         materialization = ImageMaterialization.TASK_DOCKERFILE
@@ -614,7 +618,8 @@ def workload_requirements_from_task(
                 declared_harness is not None
                 and declared_harness.task_declared_separate_verifier
                 and task.verifier.env_mode == "separate"
-                and not _task_declares_guest_execution(task)
+                and (not _task_declares_guest_execution(task)
+                     or (task.environment.native_compose is not None and task.verifier.environment is not None))
             )
         else:
             # Retained services cannot outlive the agent pod, so the compiler
@@ -622,20 +627,28 @@ def workload_requirements_from_task(
             separate = (
                 is_workspace_harness(trial.agent_name)
                 and resolve_verifier_env_mode(task, trial) == "separate"
-                and not needs_guest_kernel
+                and (not needs_guest_kernel
+                     or (task.environment.native_compose is not None and task.verifier.environment is not None))
                 and task.environment.service_lifecycle is None
             )
         verifier_topology = (
             VerifierTopology.SEPARATE_EXECUTION if separate else VerifierTopology.IN_ATTEMPT
         )
+    cpus, memory_mb, storage_mb = env.cpus, env.memory_mb, env.storage_mb
+    if env.native_compose is not None and cpus is not None and memory_mb is not None and storage_mb is not None:
+        from loom.guest_compose import compose_resource_envelope
+        envelope = compose_resource_envelope(
+            env.native_compose, main_cpus=cpus, main_memory_mb=memory_mb, main_storage_mb=storage_mb,
+        )
+        cpus, memory_mb, storage_mb = envelope.cpus, envelope.memory_mb, envelope.storage_mb
     return WorkloadRequirementsV1(
         operating_system=env.os,
         cpu_architecture=env.cpu_arch,
         gpu_vendor=env.gpu_vendor,
         gpu_count=env.gpus,
-        cpu_millis=round(env.cpus * 1000) if env.cpus is not None else None,
-        memory_mib=env.memory_mb,
-        ephemeral_storage_mib=env.storage_mb,
+        cpu_millis=round(cpus * 1000) if cpus is not None else None,
+        memory_mib=memory_mb,
+        ephemeral_storage_mib=storage_mb,
         isolation_level=(
             IsolationLevel.DEDICATED_GUEST_KERNEL if needs_guest_kernel
             else IsolationLevel.SHARED_KERNEL
@@ -656,7 +669,12 @@ def workload_requirements_from_task(
         nested_containers=False,
         host_devices="dpdk_networking" in capabilities,
         host_specialized=False,
-        execution_requirements=env.execution_requirements,
+        execution_requirements=(
+            TaskExecutionRequirementsV1(
+                capabilities=tuple(capabilities),
+                prerequisites=env.execution_requirements.prerequisites if env.execution_requirements else (),
+            ) if env.native_compose is not None else env.execution_requirements
+        ),
     )
 
 

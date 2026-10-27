@@ -97,3 +97,26 @@ func TestRuntimeInjectsAuthoritativePhaseDeadline(t *testing.T) {
 		t.Fatalf("deadline not bound to parent phase: %v", deadline)
 	}
 }
+
+func TestCollectionFinalizationBudgetPreservesAgentDeadline(t *testing.T) {
+	workspace, output := t.TempDir(), t.TempDir()
+	p := timeoutHandoffPlan(workspace, "124")
+	p.Main.FinalizationTimeoutSeconds = 2
+	p.Main.Argv = []string{"/bin/sh", "-c", "trap 'sleep 1.2; printf captured > collected; exit 124' TERM; while :; do sleep 1; done"}
+	start := time.Now()
+	var agentDeadline time.Time
+	result, err := runPlan(context.Background(), p, workspace, output, nil, func(role string, cutoff time.Time) {
+		if role == "agent" && !cutoff.IsZero() {
+			agentDeadline = cutoff
+		}
+	})
+	if err == nil || len(result.Phases) != 2 || result.Phases[0].ExitCode != 124 {
+		t.Fatalf("collection budget lost safe handoff: %#v, %v", result, err)
+	}
+	if agentDeadline.After(start.Add(1500 * time.Millisecond)) {
+		t.Fatal("collection extended model deadline")
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "collected")); err != nil {
+		t.Fatal(err)
+	}
+}

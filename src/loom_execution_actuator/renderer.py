@@ -322,6 +322,8 @@ def render_execution_job(
                    max_artifact_bytes=plan.max_artifact_bytes)
           for sidecar in plan.sidecars],
     ]
+    from loom.compose_image_inputs import compose_image_inputs
+    compose_images = compose_image_inputs(plan)
     phase_count = len(plan.setup) + 1 + int(plan.verifier is not None)
     output_bytes = (
         plan.max_artifact_bytes + 2 * phase_count * plan.max_log_bytes_per_stream
@@ -419,6 +421,14 @@ def render_execution_job(
         },
     }
     pod = job["spec"]["template"]["spec"]
+    if compose_images:
+        pod["volumes"].extend([
+            {"name": "compose-images", "emptyDir": {"sizeLimit": f"{plan.compose_input_storage_mib()}Mi"}},
+        ])
+        pod["containers"][0]["volumeMounts"].append({
+            "name": "compose-images", "mountPath": "/loom/compose-images",
+        })
+
     for sidecar in plan.sidecars:
         if sidecar.guest_execution is not None:
             pod["volumes"].append({

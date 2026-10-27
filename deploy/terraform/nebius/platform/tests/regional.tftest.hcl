@@ -116,3 +116,24 @@ run "managed_regional_identities" {
     error_message = "Only the explicitly selected regional module may be added."
   }
 }
+
+run "root_preserves_explicit_cpu_execution_capacity" {
+  command = plan
+  variables {
+    integration_platform = {
+      bucket_prefix       = "loom-platform-test"
+      execution_preset    = "32vcpu-128gb"
+      execution_disk_type = "NETWORK_SSD_NON_REPLICATED"
+      execution_disk_gib  = 279
+    }
+  }
+  assert {
+    condition = (
+      var.integration_platform.execution_preset == "32vcpu-128gb" &&
+      var.integration_platform.execution_disk_gib == 279 &&
+      var.integration_platform.execution_max_nodes == 100 &&
+      length(module.regional_execution) == 0
+    )
+    error_message = "The root schema must forward explicit CPU execution sizing without activating a regional pool or changing the capacity ceiling."
+  }
+}

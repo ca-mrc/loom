@@ -24,6 +24,7 @@ variable "integration_platform" {
     system_disk_gib            = optional(number, 80)
     system_max_pods            = optional(number, 64)
     system_create_before_drain = optional(bool, false)
+    execution_preset           = optional(string, "16vcpu-64gb")
     execution_max_nodes        = optional(number, 100)
     execution_disk_type        = optional(string, "NETWORK_SSD")
     execution_disk_gib         = optional(number, 80)

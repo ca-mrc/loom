@@ -24,6 +24,7 @@ var (
 	keyID             = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 	envName           = regexp.MustCompile(`^[A-Z_][A-Z0-9_]{0,127}$`)
 	secretEnv         = regexp.MustCompile(`(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|KUBECONFIG)`)
+	publicKeyDelay    = regexp.MustCompile(`^[0-9]{1,6}$`)
 	publicFingerprint = regexp.MustCompile(`^(?:[A-Fa-f0-9]{40}|[A-Fa-f0-9]{64})$`)
 	workspacePath     = regexp.MustCompile(`^/workspace(?:/[-A-Za-z0-9._]+)*$`)
 	sandboxHome       = regexp.MustCompile(`^/(?:[-A-Za-z0-9._]+/)*[-A-Za-z0-9._]+$`)
@@ -38,11 +39,12 @@ type resources struct {
 }
 
 type phase struct {
-	Role             string            `json:"role"`
-	Argv             []string          `json:"argv"`
-	WorkingDirectory string            `json:"working_directory"`
-	TimeoutSeconds   int64             `json:"timeout_seconds"`
-	Environment      map[string]string `json:"environment"`
+	Role                       string            `json:"role"`
+	Argv                       []string          `json:"argv"`
+	WorkingDirectory           string            `json:"working_directory"`
+	TimeoutSeconds             int64             `json:"timeout_seconds"`
+	FinalizationTimeoutSeconds int64             `json:"finalization_timeout_seconds,omitempty"`
+	Environment                map[string]string `json:"environment"`
 }
 
 type probe struct {
@@ -470,7 +472,8 @@ func (p plan) validate() error {
 			return fmt.Errorf("controller resources require an isolated attempt controller")
 		}
 		for _, item := range p.Sidecars {
-			if item.PrivateSandbox && item.Resources != p.TaskResources {
+			if item.PrivateSandbox && ((p.ExecutionRole == "verifier" && item.RoleName == "verifier-sandbox") ||
+				(p.ExecutionRole != "verifier" && item.RoleName == "task-sandbox")) && item.Resources != p.TaskResources {
 				return fmt.Errorf("controller sizing must preserve task and verifier resources")
 			}
 		}
@@ -478,6 +481,23 @@ func (p plan) validate() error {
 			return fmt.Errorf("controller resources require an isolated attempt controller")
 		}
 		expectedControllerStorage := p.TaskResources.EphemeralStorageMiB
+		if p.ExecutionRole == "attempt" {
+			if raw := p.Main.Environment["LOOM_TASK_ENVIRONMENT_JSON"]; raw != "" {
+				var environment struct {
+					NativeCompose json.RawMessage `json:"native_compose"`
+					StorageMiB    int64           `json:"storage_mb"`
+				}
+				if err := json.Unmarshal([]byte(raw), &environment); err != nil {
+					return fmt.Errorf("invalid resolved task environment")
+				}
+				if len(environment.NativeCompose) != 0 && string(environment.NativeCompose) != "null" {
+					if environment.StorageMiB <= 0 || environment.StorageMiB > 1048576 {
+						return fmt.Errorf("Compose image inputs require declared storage")
+					}
+					expectedControllerStorage += environment.StorageMiB + 3072
+				}
+			}
+		}
 		for _, sidecar := range p.Sidecars {
 			if sidecar.GuestExecution != nil {
 				expectedControllerStorage += p.RuntimeVolumeMiB
@@ -499,7 +519,7 @@ func (p plan) validate() error {
 			}{
 				{p.ResourceRequests.Controller, limits},
 				{p.ResourceRequests.TaskSandbox, p.TaskResources},
-				{p.ResourceRequests.VerifierSandbox, p.TaskResources},
+				{p.ResourceRequests.VerifierSandbox, p.verifierResources()},
 			} {
 				if pair.request == nil {
 					continue
@@ -549,7 +569,7 @@ func (p plan) validate() error {
 			}{
 				{p.ResourceRequests.Controller, controller},
 				{p.ResourceRequests.TaskSandbox, p.TaskResources},
-				{p.ResourceRequests.VerifierSandbox, p.TaskResources},
+				{p.ResourceRequests.VerifierSandbox, p.verifierResources()},
 			} {
 				if pair.request != nil && pair.request.MemoryMiB != pair.limit.MemoryMiB {
 					return fmt.Errorf("node allocation memory requests must equal limits")
@@ -568,7 +588,8 @@ func (p plan) validate() error {
 		requiredImages = append(requiredImages, *p.AgentImageRef)
 	}
 	for _, item := range p.Sidecars {
-		if p.TaskImageMaterializationID != nil && (item.TaskFixture || (item.PrivateSandbox && item.ImageRef == p.TaskImageRef)) {
+		if p.TaskImageMaterializationID != nil && (item.TaskFixture || (item.PrivateSandbox && (item.ImageRef == p.TaskImageRef ||
+			(item.RoleName == "verifier-sandbox" && item.TaskImageComponent != nil && *item.TaskImageComponent == "verifier")))) {
 			continue
 		}
 		requiredImages = append(requiredImages, item.ImageRef)
@@ -577,6 +598,15 @@ func (p plan) validate() error {
 		return err
 	}
 	return nil
+}
+
+func (p plan) verifierResources() resources {
+	for _, item := range p.Sidecars {
+		if item.RoleName == "verifier-sandbox" {
+			return item.Resources
+		}
+	}
+	return p.TaskResources
 }
 
 func validRelativeOutputPath(value string) bool {
@@ -662,6 +692,9 @@ func (bundle executionImageAdmission) validate(requiredImages []string, now time
 }
 
 func (p phase) validate() error {
+	if p.FinalizationTimeoutSeconds < 0 || p.FinalizationTimeoutSeconds > 3600 || (p.FinalizationTimeoutSeconds != 0 && p.Role != "agent") {
+		return fmt.Errorf("invalid phase finalization budget")
+	}
 	if p.Role != "setup" && p.Role != "agent" && p.Role != "verifier" {
 		return fmt.Errorf("invalid phase role")
 	}
@@ -706,7 +739,7 @@ func (s sidecar) validate(known map[string]bool) error {
 		if s.PrivateSandbox || s.Identity != nil || s.GuestTaskIdentity != nil || len(s.DependsOn) != 0 || len(s.Environment) != 0 {
 			return fmt.Errorf("fixture cannot share a sandbox identity or trusted sidecar contract")
 		}
-	} else if s.TaskImageComponent != nil || s.Hostname != nil || strings.HasPrefix(s.RoleName, "fixture-") {
+	} else if (s.TaskImageComponent != nil && !(s.PrivateSandbox && s.RoleName == "verifier-sandbox" && *s.TaskImageComponent == "verifier")) || s.Hostname != nil || strings.HasPrefix(s.RoleName, "fixture-") {
 		return fmt.Errorf("fixture metadata and roles require explicit fixture isolation")
 	}
 	if s.Identity != nil {
@@ -758,7 +791,11 @@ func (s sidecar) validate(known map[string]bool) error {
 		}
 	}
 	for name, value := range s.Environment {
-		if !validEnvironmentEntry(name, value) {
+		valid := validEnvironmentEntry(name, value)
+		if s.PrivateSandbox {
+			valid = validTaskEnvironmentEntry(name, value)
+		}
+		if !valid {
 			return fmt.Errorf("invalid sidecar environment")
 		}
 	}
@@ -768,8 +805,13 @@ func (s sidecar) validate(known map[string]bool) error {
 	return s.ReadinessProbe.validate()
 }
 
+func validTaskEnvironmentEntry(name, value string) bool {
+	reserved := (strings.HasPrefix(name, "LOOM_") && name != "LOOM_WORKSPACE_MAX_ARCHIVE_BYTES") || name == "HTTP_PROXY" || name == "HTTPS_PROXY" || name == "ALL_PROXY" || name == "NO_PROXY" || name == "KUBECONFIG"
+	return envName.MatchString(name) && !reserved && !strings.ContainsRune(value, '\x00') && len(value) <= 4096
+}
+
 func validEnvironmentEntry(name, value string) bool {
-	public := name == "GPG_KEY" && publicFingerprint.MatchString(value)
+	public := (name == "GPG_KEY" && publicFingerprint.MatchString(value)) || (name == "VNC_KEY_DELAY_MS" && publicKeyDelay.MatchString(value))
 	return envName.MatchString(name) && (!secretEnv.MatchString(name) || public) && !strings.ContainsRune(value, '\x00') && len(value) <= 4096
 }
 

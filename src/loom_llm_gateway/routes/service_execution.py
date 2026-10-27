@@ -25,6 +25,7 @@ from loom.db.schema import (
 from loom.execution_runtime_contract import ExecutionRuntimePlanV1
 from loom.llm_call_ledger import read_service_execution_llm_calls as read_lease_calls
 from loom.pipeline.artifact_commit import ArtifactCommitError
+from loom.task_image_archives import PreparedImageArchiveV1
 from loom.trajectory.upload_observation import UploadSpan, observe_upload
 from loom_control_plane.service_execution_output import (
     ResolvedServiceExecutionHandoff,
@@ -397,6 +398,49 @@ async def get_service_execution_input_file(
             "X-Loom-Content-SHA256": item.sha256,
         },
     )
+
+
+async def _prepared_image_archives(request: Request, lease_id: UUID, generation: int, role: str) -> dict[str, PreparedImageArchiveV1]:
+    from loom_control_plane.service_execution_output import resolve_service_execution_image_archives
+    lease = await _authorize(request, _peer(lease_id, generation, role), purpose="input")
+    async with request.app.state.session_factory() as session:
+        try:
+            return await resolve_service_execution_image_archives(session, lease=lease,
+                artifacts_bucket=request.app.state.settings.artifacts_bucket)
+        except ServiceExecutionBrokerError as exc:
+            raise _broker_http(exc) from exc
+
+
+@router.get("/inputs/images/manifest")
+async def get_prepared_image_manifest(request: Request, lease_id: LeaseIdHeader,
+                                      generation: GenerationHeader, role: RoleHeader) -> dict[str, dict[str, str | int]]:
+    archives = await _prepared_image_archives(request, lease_id, generation, role)
+    # Object locations and version tokens remain on the trusted storage side.
+    return {name: {"image_ref": item.image_ref, "size_bytes": item.object.size_bytes,
+                   "sha256": "sha256:" + item.object.content_sha256}
+            for name, item in archives.items()}
+
+
+@router.get("/inputs/images/{service}")
+async def get_prepared_image_archive(service: str, request: Request, lease_id: LeaseIdHeader,
+                                     generation: GenerationHeader, role: RoleHeader) -> StreamingResponse:
+    archives = await _prepared_image_archives(request, lease_id, generation, role)
+    if service not in archives:
+        raise HTTPException(status_code=404, detail="prepared_image_service_not_found")
+    descriptor = archives[service].object
+    store = request.app.state.artifact_store
+    try:
+        facts = await store.stat_object(bucket=descriptor.bucket, key=descriptor.object_key,
+                                        version_id=descriptor.version_id)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="prepared_image_object_unavailable") from exc
+    if (facts.version_id != descriptor.version_id or facts.content_length != descriptor.size_bytes
+            or facts.checksum_sha256 != "sha256:" + descriptor.content_sha256):
+        raise HTTPException(status_code=409, detail="prepared_image_object_drift")
+    return StreamingResponse(store.stream_object(bucket=descriptor.bucket, key=descriptor.object_key,
+        version_id=descriptor.version_id, chunk_size=1024 * 1024), media_type="application/octet-stream",
+        headers={"Content-Length": str(descriptor.size_bytes),
+                 "X-Loom-Content-SHA256": "sha256:" + descriptor.content_sha256})
 
 
 async def _resolved_handoff(

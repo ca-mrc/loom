@@ -61,6 +61,11 @@ async def completed(sessions, tmp_path, *, outcome="success", started=True):
             controller = PoolNativeBuildController(driver=driver, kubernetes=reader)
             await controller.run_once()
             assert (await journal.get(request.key)).phase == "stop_pending"
+            if outcome == "success":
+                row, attempt = await local_rows(sessions, request)
+                assert row.state == "ready" and row.registry_images
+                assert attempt.native_build["pool_output"]["output_state"] == "committed"
+                assert attempt.native_build["pool_output"]["registry_images"]
             # Real gateway journal + identity checks at the external HTTP boundary.
             if started:
                 for kind in ("Job", "ConfigMap"):

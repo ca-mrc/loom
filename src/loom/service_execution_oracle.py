@@ -85,6 +85,7 @@ async def run_oracle(
     agent = OracleAgent(
         task_dir=task_dir, trial_id=trial_id, workdir=task_config.environment.workdir,
         solution_dir=solution_dir, execution_cwd=execution_cwd,
+        solution_environment=dict(task_config.solution_environment),
     )
     await agent.run(
         instruction="", env=driver, trajectory=cast(Any, trajectory), mcp=(), skills_dir=None,

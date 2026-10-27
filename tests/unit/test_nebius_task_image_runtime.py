@@ -1718,3 +1718,22 @@ def test_prepare_fails_closed_when_the_base_cannot_be_prepared(tmp_path, monkeyp
     monkeypatch.setattr(runtime, "_client", lambda _claim, _secret: FakeS3(objects))
     with pytest.raises(runtime.BuildPreparationError, match="image preparation supports"):
         runtime.prepare(claim, tmp_path / "work", tmp_path / "secrets")
+
+
+def test_publisher_resolves_independent_verifier_oci_metadata(source_bundle, tmp_path, publisher):
+    claim, _ = source_bundle
+    claim['task_config']['verifier']['environment'] = {
+        'os':'linux','cpu_arch':'x86_64','dockerfile':'tests/Dockerfile','docker_build_context':'tests',
+        'user':'image','image_workdir':True,'image_entrypoint':True,
+    }
+    work=tmp_path/'work'
+    (work/'oci').mkdir(parents=True)
+    _write_native_oci(work/'oci/0000.tar')
+    _write_native_oci(work/'oci/0001.tar',runtime_config={
+        'User':'0:0','WorkingDir':'/grading','Entrypoint':['/grading-init'],'Env':['HOME=/root'],
+    })
+    receipt=runtime.publish(claim,work,tmp_path/'secrets',receipt_path=tmp_path/'receipt.json')
+    assert set(receipt['registry_images'])=={'task','verifier'}
+    metadata=receipt['image_runtime_metadata']['verifier']
+    assert metadata['image_ref']==receipt['registry_images']['verifier']
+    assert metadata['workdir']=='/grading' and metadata['entrypoint']==['/grading-init']

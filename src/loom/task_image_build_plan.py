@@ -39,7 +39,7 @@ MAX_TASK_IMAGE_BUILD_COMPONENTS = 128
 _BARE_DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 _METADATA_DIGEST_RE = re.compile(r"sha256:([0-9a-f]{64})")
 _BUCKET_RE = re.compile(r"[a-z0-9](?:[a-z0-9.-]{1,61}[a-z0-9])?")
-_COMPONENT_RE = re.compile(r"(?:task|sidecar:[A-Za-z0-9][A-Za-z0-9_.-]{0,127})")
+_COMPONENT_RE = re.compile(r"(?:task|verifier|(?:verifier-)?(?:sidecar|compose):[A-Za-z0-9][A-Za-z0-9_.-]{0,127})")
 
 
 class _MaterializationRow(Protocol):
@@ -341,6 +341,23 @@ def _derived_components(
         if dockerfile is not None:
             dockerfile_sidecars.append((f"sidecar:{sidecar.name}", dockerfile, context))
     definitions.extend(dockerfile_sidecars)
+    if task.verifier.environment is not None:
+        verifier = task.verifier.environment.model_dump(mode="json")
+        dockerfile = _raw_optional_path(verifier, "dockerfile", label="verifier Dockerfile")
+        context = _raw_optional_path(verifier, "docker_build_context", label="verifier context")
+        if dockerfile is not None:
+            definitions.append(("verifier", dockerfile, context))
+        for sidecar in sorted(verifier["sidecars"], key=lambda item: item["name"]):
+            dockerfile = _raw_optional_path(sidecar, "dockerfile", label="verifier sidecar Dockerfile")
+            context = _raw_optional_path(sidecar, "docker_build_context", label="verifier sidecar context")
+            if dockerfile is not None:
+                definitions.append(("verifier-sidecar:" + sidecar["name"], dockerfile, context))
+    for prefix, environment in (("compose:", task.environment), ("verifier-compose:", task.verifier.environment)):
+        if environment is not None and environment.native_compose is not None:
+            for service in environment.native_compose.services:
+                if service.name != "main" and service.build is not None:
+                    definitions.append((prefix + service.name, service.build.dockerfile, service.build.context))
+    definitions.sort(key=lambda item: (item[0] != "task", item[0]))
 
     if not definitions:
         raise ValueError("frozen task has no Dockerfile-backed component")

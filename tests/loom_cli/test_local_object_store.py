@@ -53,3 +53,15 @@ async def test_presign_returns_file_url(tmp_path: Path) -> None:
     store = LocalDiskObjectStore(root=tmp_path)
     url = await store.presign_put(bucket="b", key="k", expires_sec=60)
     assert url.startswith("file://")
+
+
+async def test_unversioned_reads_work_but_exact_versions_never_fall_back_to_latest(tmp_path: Path) -> None:
+    store = LocalDiskObjectStore(root=tmp_path)
+    await store.put_object(bucket="b", key="k", body=b"old")
+    await store.put_object(bucket="b", key="k", body=b"latest")
+    assert (await store.stat_object(bucket="b", key="k", version_id=None)).content_length == 6
+    assert b"".join([chunk async for chunk in store.stream_object(bucket="b", key="k", version_id=None)]) == b"latest"
+    with pytest.raises(ValueError, match="does not support versioned reads"):
+        await store.stat_object(bucket="b", key="k", version_id="old-version")
+    with pytest.raises(ValueError, match="does not support versioned reads"):
+        _ = [chunk async for chunk in store.stream_object(bucket="b", key="k", version_id="old-version")]

@@ -284,6 +284,7 @@ def create_candidate(
     supports_task_web_egress: bool = False,
     service_lifecycle_ready: bool = False,
     supports_task_identity: bool = False,
+    supports_native_compose: bool = False,
     supports_terminus2_multi_model: bool = False,
     guest_runtime: Literal["qemu-tcg-v1"] | None = None,
     supports_emulated_pkcs11: bool = False,
@@ -336,6 +337,7 @@ def create_candidate(
         service_lifecycle_ready=service_lifecycle_ready,
         supports_task_artifact_inputs=True,
         supports_task_identity=supports_task_identity,
+        supports_native_compose=supports_native_compose,
         terminus2_multi_model_policies=(
             HOSTED_TERMINUS2_MULTI_MODEL_POLICIES if supports_terminus2_multi_model else frozenset()
         ),
@@ -764,6 +766,7 @@ def build(args: argparse.Namespace) -> None:
                 supports_task_web_egress=getattr(args, "supports_task_web_egress", False),
                 service_lifecycle_ready=getattr(args, "service_lifecycle_ready", False),
                 supports_task_identity=getattr(args, "supports_task_identity", False),
+                supports_native_compose=getattr(args, "supports_native_compose", False),
                 supports_terminus2_multi_model=getattr(args, "supports_terminus2_multi_model", False),
                 guest_runtime=getattr(args, "guest_runtime", None),
                 supports_emulated_pkcs11=getattr(args, "supports_emulated_pkcs11", False),
@@ -812,6 +815,7 @@ def main() -> int:
         command.add_argument("--supports-task-web-egress", action="store_true")
         command.add_argument("--service-lifecycle-ready", action="store_true")
         command.add_argument("--supports-task-identity", action="store_true")
+        command.add_argument("--supports-native-compose", action="store_true")
         command.add_argument("--supports-terminus2-multi-model", action="store_true")
         command.add_argument("--guest-runtime", choices=("qemu-tcg-v1",))
         command.add_argument("--supports-emulated-pkcs11", action="store_true")
@@ -840,6 +844,7 @@ def main() -> int:
                 supports_task_web_egress=args.supports_task_web_egress,
                 service_lifecycle_ready=args.service_lifecycle_ready,
                 supports_task_identity=args.supports_task_identity,
+                supports_native_compose=args.supports_native_compose,
                 supports_terminus2_multi_model=args.supports_terminus2_multi_model,
                 guest_runtime=args.guest_runtime,
                 supports_emulated_pkcs11=args.supports_emulated_pkcs11,

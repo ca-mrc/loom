@@ -88,12 +88,20 @@ def test_legacy_plan_has_no_new_environment_contract():
 
 
 @pytest.mark.parametrize("raw", ["{broken", '{"os":"linux","unknown":"private-value"}',
-    '{"os":"linux","user":"image"}', '{"os":"linux","environment":{"API_KEY":"private-value"}}'])
+    '{"os":"linux","user":"image"}', '{"os":"linux","environment":{"LOOM_GATEWAY_TOKEN":"private-value"}}'])
 def test_invalid_environment_handoff_is_sanitized(raw):
     from loom.task_environment_handoff import decode_resolved_task_environment
     with pytest.raises(ValueError, match=r"^resolved_task_environment_invalid$") as caught:
         decode_resolved_task_environment(raw)
     assert caught.value.__cause__ is None
+
+
+def test_private_fixture_environment_is_preserved_in_resolved_handoff():
+    from loom.task_environment_handoff import decode_resolved_task_environment
+
+    environment = decode_resolved_task_environment(
+        '{"os":"linux","environment":{"API_KEY":"fixture-only"}}')
+    assert environment.environment == {"API_KEY": "fixture-only"}
 
 
 @pytest.mark.parametrize("phase", [HARNESS_SETUP_PHASE, "terminus-2", "verify-sandbox"])

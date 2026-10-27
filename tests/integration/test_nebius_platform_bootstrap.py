@@ -192,6 +192,16 @@ async def _exercise_native_builder_role(database: str) -> None:
                 await heartbeat_task_image_materialization(session, **ownership)
                 images = {"task": "registry.example/tasks@sha256:" + "a" * 64}
                 if outcome == "ready":
+                    from loom.task_image_archives import PreparedImageArchiveV1
+                    from loom_control_plane.task_image_archive_retention import (
+                        register_archive_objects,
+                    )
+                    archive = PreparedImageArchiveV1.model_validate({"image_ref": images["task"], "object": {
+                        "bucket": "fixture-artifacts", "object_key": f"task-image-archives/{attempt.id}/main.tar",
+                        "version_id": "immutable-fixture-version", "content_sha256": "a" * 64, "size_bytes": 10,
+                    }})
+                    await register_archive_objects(session, attempt, {"task": archive})
+                    await register_archive_objects(session, attempt, {"task": archive})
                     await complete_task_image_materialization(session, **ownership, registry_images=images)
                 else:
                     await fail_task_image_materialization(session, **ownership, registry_images=images,
@@ -363,13 +373,13 @@ def test_fresh_bootstrap_repeat_and_database_privileges(
                     connection.execute("DELETE FROM gateway_dispatch_receipts")
                 connection.rollback()
                 for table in (
-                    "batches", "task_image_materialization_attempts",
-                    "task_image_publication_evidence", "nebius_pool_build_outbox",
+                    "batches", "task_image_publication_evidence", "nebius_pool_build_outbox",
                 ):
                     with pytest.raises(psycopg.errors.InsufficientPrivilege):
                         connection.execute("SELECT 1 FROM " + table + " LIMIT 0")
                     connection.rollback()
-                for table in ("task_image_materializations", "trial_task_image_materializations"):
+                connection.execute("SELECT 1 FROM task_image_materialization_attempts LIMIT 0")
+                for table in ("task_image_materializations", "trial_task_image_materializations", "task_image_materialization_attempts"):
                     assert connection.execute(
                         "SELECT has_table_privilege(current_user, %s, 'INSERT,UPDATE,DELETE')", (table,),
                     ).fetchone() == (False,)
@@ -379,6 +389,8 @@ def test_fresh_bootstrap_repeat_and_database_privileges(
                         "SELECT has_table_privilege(current_user, %s, 'INSERT,UPDATE,DELETE')", (table,),
                     ).fetchone() == (False,)
                 for table, denied in (
+                    ("data_lifecycle_authorities", "UPDATE,DELETE"),
+                    ("data_lifecycle_objects", "UPDATE,DELETE"),
                     ("task_image_materializations", "INSERT,DELETE"),
                     ("task_image_materialization_attempts", "DELETE"),
                     ("task_image_publication_evidence", "UPDATE,DELETE"),

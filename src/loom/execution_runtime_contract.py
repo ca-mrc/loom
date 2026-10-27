@@ -30,7 +30,11 @@ from loom.execution_contract import (
 from loom.execution_image_admission import ExecutionImageAdmissionBundleV1
 from loom.execution_requirements import ALL_GUEST_EXECUTION_CAPABILITIES, GuestExecutionCapability
 from loom.models.networking import NetworkPolicy, TaskHttpEgress, WebAllowlist, hosted_http_egress
-from loom.runtime_environment import MAX_ENV_VALUE_BYTES, validate_runtime_environment
+from loom.runtime_environment import (
+    MAX_ENV_VALUE_BYTES,
+    validate_runtime_environment,
+    validate_task_environment,
+)
 from loom.sandbox_identity import SandboxIdentityV1
 
 _DIGEST_REF = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
@@ -98,11 +102,12 @@ class ExecutionResourceRequestsV1(_Strict):
 
     def validate_limits(
         self, *, controller: ContainerResourcesV1, task: ContainerResourcesV1,
+        verifier: ContainerResourcesV1 | None = None,
     ) -> None:
         for role, requested, limit in (
             ("controller", self.controller, controller),
             ("task_sandbox", self.task_sandbox, task),
-            ("verifier_sandbox", self.verifier_sandbox, task),
+            ("verifier_sandbox", self.verifier_sandbox, verifier or task),
         ):
             if requested is not None and any(
                 getattr(requested, field) > getattr(limit, field)
@@ -135,7 +140,16 @@ class ProcessPhaseV1(_Strict):
     argv: tuple[str, ...] = Field(min_length=1, max_length=128)
     working_directory: str = Field(pattern=r"^(?:/app|/workspace(?:/[-A-Za-z0-9._]+)*)$")
     timeout_seconds: int = Field(gt=0, le=86_400)
+    # Agent/model access ends at timeout_seconds. Only the trusted controller's
+    # collection and handoff may use this additional bounded interval.
+    finalization_timeout_seconds: int = Field(default=0, ge=0, le=3600, exclude_if=lambda value: value == 0)
     environment: dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _finalization_role(self) -> ProcessPhaseV1:
+        if self.finalization_timeout_seconds and self.role != "agent":
+            raise ValueError("only agent phases have a finalization budget")
+        return self
 
     @field_validator("working_directory")
     @classmethod
@@ -224,6 +238,10 @@ class SidecarContainerV1(_Strict):
 
     @model_validator(mode="after")
     def _identity_is_private(self) -> SidecarContainerV1:
+        if self.private_sandbox:
+            validate_task_environment(self.environment, allow_runtime_controls=True)
+        else:
+            validate_runtime_environment(self.environment)
         if self.task_fixture:
             from loom.task_fixtures import validate_fixture_component, validate_fixture_hostname
 
@@ -232,7 +250,9 @@ class SidecarContainerV1(_Strict):
             if (self.private_sandbox or self.identity is not None or self.guest_task_identity is not None
                     or self.depends_on or self.environment):
                 raise ValueError("fixture cannot share a sandbox identity or trusted sidecar contract")
-        elif self.task_image_component is not None or self.hostname is not None or self.role_name.startswith("fixture-"):
+        elif ((self.task_image_component is not None and not (
+                self.task_image_component == "verifier" and self.role_name == "verifier-sandbox" and self.private_sandbox))
+              or self.hostname is not None or self.role_name.startswith("fixture-")):
             raise ValueError("fixture metadata and roles require explicit fixture isolation")
         if self.identity is not None and not self.private_sandbox:
             raise ValueError("task identity requires a private sandbox")
@@ -274,7 +294,7 @@ class SidecarContainerV1(_Strict):
     @field_validator("environment")
     @classmethod
     def _nonsecret_environment(cls, value: dict[str, str]) -> dict[str, str]:
-        ProcessPhaseV1._environment_is_nonsecret(value)
+        # Private/trusted semantics are checked with the complete sidecar.
         return value
 
 
@@ -424,6 +444,28 @@ class ExecutionRuntimePlanV1(_Strict):
             cls._images_are_immutable(value)
         return value
 
+    def compose_archive_storage_mib(self) -> int:
+        """Prepared OCI archives retain their source-declared input budget."""
+        from loom.task_environment_handoff import (
+            RESOLVED_TASK_ENVIRONMENT,
+            decode_resolved_task_environment,
+        )
+        raw = self.main.environment.get(RESOLVED_TASK_ENVIRONMENT)
+        if self.execution_role != "attempt" or raw is None:
+            return 0
+        environment = decode_resolved_task_environment(raw)
+        if environment.native_compose is None:
+            return 0
+        if environment.storage_mb is None:
+            raise ValueError("Compose image inputs require declared storage")
+        return environment.storage_mb
+
+    def compose_input_storage_mib(self) -> int:
+        """Original archives plus one bounded classic-Docker transport copy."""
+        from loom.task_image_archives import MAX_ARCHIVE_BYTES
+        declared = self.compose_archive_storage_mib()
+        return declared + MAX_ARCHIVE_BYTES // 1024**2 if declared else 0
+
     def resident_private_roles(self) -> set[str]:
         """Sandboxes that exist in this pod, not ones admitted later."""
         if self.execution_role == "verifier":
@@ -459,7 +501,13 @@ class ExecutionRuntimePlanV1(_Strict):
             and not self.in_place_verifier
             and not self.verifier_after_agent_timeout
         )
-        single_guest = self.in_place_verifier or skipped_guest
+        deferred_guest = (
+            self.verifier_execution == VerifierExecution.SEPARATE_EXECUTION
+            and self.verifier is None
+            and not self.in_place_verifier
+            and not self.verifier_after_agent_timeout
+        )
+        single_guest = self.in_place_verifier or skipped_guest or deferred_guest
         if guests and (
             {sidecar.role_name for sidecar in guests} != (
                 {"task-sandbox"} if single_guest else {"task-sandbox", "verifier-sandbox"}
@@ -469,7 +517,8 @@ class ExecutionRuntimePlanV1(_Strict):
             or (
                 self.verifier_execution != VerifierExecution.SKIPPED
                 if skipped_guest
-                else self.verifier_execution != VerifierExecution.IN_ATTEMPT
+                else (self.verifier_execution != VerifierExecution.SEPARATE_EXECUTION
+                      if deferred_guest else self.verifier_execution != VerifierExecution.IN_ATTEMPT)
             )
             or self.runtime_volume_mib < 1024
             or self.controller_resources is None
@@ -588,11 +637,13 @@ class ExecutionRuntimePlanV1(_Strict):
                 or {sidecar.role_name for sidecar in sandboxes} != self.resident_private_roles()
             ):
                 raise ValueError("controller resources require an isolated attempt controller")
-            if any(sidecar.resources != self.task_resources for sidecar in sandboxes):
+            if any(sidecar.resources != self.task_resources for sidecar in sandboxes
+                   if sidecar.role_name == ("verifier-sandbox" if self.execution_role == "verifier" else "task-sandbox")):
                 raise ValueError("controller sizing must preserve task and verifier resources")
             if (self.node_resource_allocation is None
                     and self.controller_resources.ephemeral_storage_mib
-                    != self.task_resources.ephemeral_storage_mib + (self.runtime_volume_mib if guests else 0)):
+                    != self.task_resources.ephemeral_storage_mib + (self.runtime_volume_mib if guests else 0)
+                    + self.compose_input_storage_mib()):
                 raise ValueError("controller sizing must preserve task-derived storage")
         if guests:
             declared = (self.node_resource_allocation.declared_task
@@ -608,11 +659,14 @@ class ExecutionRuntimePlanV1(_Strict):
                 or self.execution_role not in {"attempt", "verifier"}
                 or self.composition != RuntimeComposition.INIT_PAYLOAD
                 or {sidecar.role_name for sidecar in sandboxes} != self.resident_private_roles()
-                or any(sidecar.resources != self.task_resources for sidecar in sandboxes)
+                or any(sidecar.resources != self.task_resources for sidecar in sandboxes
+                       if sidecar.role_name == ("verifier-sandbox" if self.execution_role == "verifier" else "task-sandbox"))
             ):
                 raise ValueError("resource requests require an isolated attempt controller")
             self.resource_requests.validate_limits(
                 controller=self.execution_resources, task=self.task_resources,
+                verifier=next((sidecar.resources for sidecar in sandboxes
+                               if sidecar.role_name == "verifier-sandbox"), None),
             )
         if self.node_resource_allocation is not None:
             allocation = self.node_resource_allocation
@@ -697,7 +751,8 @@ class ExecutionRuntimePlanV1(_Strict):
             if not (
                 self.task_image_materialization_id is not None
                 and (sidecar.task_fixture or (
-                    sidecar.private_sandbox and sidecar.image_ref == self.task_image_ref
+                    sidecar.private_sandbox and (sidecar.image_ref == self.task_image_ref or
+                        (sidecar.role_name == "verifier-sandbox" and sidecar.task_image_component == "verifier"))
                 ))
             )
         )
