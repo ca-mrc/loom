@@ -27,13 +27,15 @@ without executing package installation hooks. An unavailable pinned archive
 fails the build. Updating dependencies requires updating the lock and running
 the full payload verification and guest capability tests.
 
-For HTTP 500, 502, 503 or 504, or a connection/TLS-handshake or response-body
-timeout, the downloader shares one budget of at most three attempts, waiting
+For HTTP 500, 502, 503 or 504, a connection/TLS-handshake or response-body
+timeout, a connection reset (including a remote disconnect without a response),
+an unexpected TLS EOF, or an explicit incomplete-read error while reading the
+body, the downloader shares one budget of at most three attempts, waiting
 one and then two seconds between attempts. Each attempt retains the 120-second
 network timeout; an interrupted body restarts from byte zero. Diagnostics
-identify the locked archive by SHA256, HTTP status or connection/body-timeout
+identify the locked archive by SHA256, HTTP status or connection/body interruption
 category, and attempt count, without logging URLs or response bodies.
-Certificate-validation errors, other HTTP errors, other transport failures,
+Certificate-validation errors, other TLS errors, other HTTP errors, other transport failures,
 local filesystem failures and size/hash mismatches fail without
 retries. Failed downloads remove their partial files; only complete,
 verified archives enter the cache. These are build-time archive retries, not
@@ -45,9 +47,10 @@ Librarian keeps every published file permanently but serves the payload's
 packages several times more slowly, enough to push in-test image builds past
 their timeouts. Each package entry therefore has two sources for the same
 bytes: `url`, its `archive.ubuntu.com` pool file, and `fallback_url`, its
-permanent Librarian file. The downloader uses the fallback only when the mirror
-returns 404; other errors keep their behaviour above, and both sources pass the
-same size and SHA256 checks. Each Librarian URL was resolved through
+permanent Librarian file. The downloader uses the fallback when the mirror
+returns 404, or exhausts its three attempts on HTTP 500, 502, 503 or 504.
+Exhausted transport errors fail without trying the fallback. Both sources pass
+the same size and SHA256 checks. Each Librarian URL was resolved through
 Launchpad's official `+files` endpoint
 (`https://launchpad.net/ubuntu/+archive/primary/+files/<file>.deb`) and its
 downloaded bytes were verified against the locked size and SHA256; the direct
