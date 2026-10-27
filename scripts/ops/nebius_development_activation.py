@@ -8,13 +8,16 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from scripts.ops.nebius_development_pool_registration import retained_development_participant
 from scripts.ops.nebius_development_runtime_install import DevelopmentRuntimeInstallRequest
 from scripts.ops.nebius_development_runtime_retained import (
     CompletedDevelopmentRuntime,
     load_completed_runtime,
+)
+from scripts.ops.nebius_development_runtime_selection import (
+    DevelopmentRuntimeSelection,
+    select_development_runtime,
 )
 from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
 from scripts.ops.nebius_management_prerequisites import inventory_resources
@@ -26,6 +29,9 @@ from scripts.ops.nebius_pool_gateway_authority import (
 
 from loom.nebius_platform_render import digest
 from loom_service.pool_management.installation_render import render_gateway
+
+if TYPE_CHECKING:
+    from scripts.ops.nebius_development_schema_upgrade import CompletedDevelopmentSchemaSuccessor
 
 MARKER = 'loom.nebius/development-activation-operation'
 
@@ -40,33 +46,40 @@ class DevelopmentActivationPlan:
     build_namespace_target: dict[str, Any]
     build_policy: dict[str, dict[str, Any]]
     input_digest: str
+    schema_successor: CompletedDevelopmentSchemaSuccessor | None = None
+
+    @property
+    def selection(self) -> DevelopmentRuntimeSelection:
+        return DevelopmentRuntimeSelection(self.runtime, self.schema_successor)
 
 
-def prepare_development_activation(request: DevelopmentRuntimeInstallRequest) -> DevelopmentActivationPlan:
+def prepare_development_activation(request: DevelopmentRuntimeInstallRequest, *,
+        schema_successor: CompletedDevelopmentSchemaSuccessor | None = None) -> DevelopmentActivationPlan:
     """Derive only catalog-fixed gateway grants and exact dev resource successors."""
     try:
         runtime = load_completed_runtime(request)
+        selected = select_development_runtime(runtime, schema_successor)
         database = runtime.request.database
-        registration = database.manager.retained.request.registration
+        registration = selected.registration
         spec, binding = registration.spec, registration.binding
-        participant = retained_development_participant(database.manager.retained.request)
+        participant = selected.participant
         if binding.namespace != 'loom-nebius-management-dev' or database.foundation.inputs.config['namespace'] != 'loom-dev':
             raise ValueError
         rendered = render_gateway(spec, namespace=binding.namespace,
-            service_image=database.manager.publication.bundle.candidate['images']['service']['image_ref'],
+            service_image=selected.manager_publication.bundle.candidate['images']['service']['image_ref'],
             kubernetes_endpoint=database.foundation.inputs.config['kubernetes_api_server'])
         authority = {_key(row): copy.deepcopy(row) for row in rendered['authority']}
-        if authority.keys() & runtime.resources.keys():
+        if authority.keys() & selected.resources.keys():
             raise ValueError
         gateway, = rendered['workload']
-        original = copy.deepcopy(runtime.resources[_key(gateway)])
+        original = copy.deepcopy(selected.resources[_key(gateway)])
         if original['spec']['replicas'] != 0 or MARKER in original['metadata'].get('annotations', {}):
             raise ValueError
         target = _snapshot(original)
         target['spec'] = copy.deepcopy(gateway['spec'])
         target['spec']['replicas'] = 1
         target['metadata'].setdefault('annotations', {})[MARKER] = str(database.operation_id)
-        namespace = copy.deepcopy(runtime.resources['Namespace:-:' + participant.build_namespace.name])
+        namespace = copy.deepcopy(selected.resources['Namespace:-:' + participant.build_namespace.name])
         if (_uid(namespace) != str(participant.build_namespace.uid)
                 or namespace['metadata']['labels']['pod-security.kubernetes.io/enforce'] != 'restricted'
                 or MARKER in namespace['metadata'].get('annotations', {})):
@@ -77,21 +90,22 @@ def prepare_development_activation(request: DevelopmentRuntimeInstallRequest) ->
         # exact builder exception; audit/warn labels and all other metadata stay.
         build_target['metadata']['labels']['pod-security.kubernetes.io/enforce'] = 'privileged'
         build_target['metadata'].setdefault('annotations', {})[MARKER] = str(database.operation_id)
-        policy = {key: copy.deepcopy(runtime.resources[key])
+        policy = {key: copy.deepcopy(selected.resources[key])
             for key, row in runtime.plan.fixed['isolation'].items()
             if row['kind'] in {'ValidatingAdmissionPolicy', 'ValidatingAdmissionPolicyBinding'}}
         if len(policy) != 2:
             raise ValueError
-        checksum = digest({'history': runtime.history_sha256, 'authority': authority,
+        checksum = digest({'history': runtime.history_sha256 if schema_successor is None else schema_successor.history_sha256, 'authority': authority,
             'gateway_original': original, 'gateway_target': target, 'build_namespace_original': namespace,
             'build_namespace_target': build_target, 'build_policy': policy})
-        return DevelopmentActivationPlan(runtime, authority, original, target, namespace, build_target, policy, checksum)
+        return DevelopmentActivationPlan(runtime, authority, original, target, namespace, build_target, policy, checksum, schema_successor)
     except Exception:
         raise ValueError('development activation intent unqualified') from None
 
 
 def review_development_gateway_permissions(request: DevelopmentRuntimeInstallRequest, *,
-        transport: ManagementKubernetesTransport, granted: bool) -> tuple[str, ...]:
+        transport: ManagementKubernetesTransport, granted: bool,
+        schema_successor: CompletedDevelopmentSchemaSuccessor | None = None) -> tuple[str, ...]:
     """Inspect the fixed dev gateway, including grants outside dev namespaces.
 
     This makes only inventory GETs and nonpersisted permission reviews. It never
@@ -103,9 +117,9 @@ def review_development_gateway_permissions(request: DevelopmentRuntimeInstallReq
     try:
         if type(granted) is not bool:
             raise ValueError
-        plan = prepare_development_activation(request)
+        plan = prepare_development_activation(request, schema_successor=schema_successor)
         database = plan.runtime.request.database
-        registration = database.manager.retained.request.registration
+        registration = plan.selection.registration
         if transport.api_server != database.foundation.inputs.config['kubernetes_api_server']:
             raise ValueError
 
@@ -136,7 +150,7 @@ def review_development_gateway_permissions(request: DevelopmentRuntimeInstallReq
         authority = list(plan.authority.values()) if granted else []
         for namespace in namespaces:
             review_gateway_rules(transport.client, manager_namespace=manager, namespace=namespace, authority=authority)
-        if permissions() != original or prepare_development_activation(request) != plan:
+        if permissions() != original or prepare_development_activation(request, schema_successor=schema_successor) != plan:
             raise ValueError
         return namespaces
     except Exception:

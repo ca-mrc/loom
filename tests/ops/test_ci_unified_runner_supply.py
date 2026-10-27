@@ -250,8 +250,8 @@ def test_candidate_demand_tracks_ready_jobs_and_preserves_direct_hosted_qualific
     class API:
         def pages(self, path, key):
             if path == "/actions/runs?status=queued":
-                return [{"id": 7, "path": workflow_path, "head_sha": "a" * 40}]
-            if path == "/actions/runs/7/jobs?filter=latest":
+                return [{"id": 7, "path": workflow_path, "head_sha": "a" * 40, "run_attempt": 1}]
+            if path == "/actions/runs/7/attempts/1/jobs":
                 return jobs
             return []
 
@@ -286,3 +286,69 @@ def test_candidate_placement_keeps_publication_budget_and_protected_boundary():
     assert "360 || 180" in publish["timeout-minutes"]
     assert dispatcher["jobs"]["capacity"]["timeout-minutes"] >= 180 + 15
     assert candidate["concurrency"]["cancel-in-progress"] is False
+
+
+def test_source_demand_uses_current_rerun_attempt_when_unscoped_jobs_fail(tmp_path):
+    supply = module("ci_runner_supply")
+    sha = "a" * 40
+    supply.atomic_json(tmp_path / f"{sha}-graph-v{supply.GRAPH_CACHE_VERSION}-ci.yml.json", {"jobs": {"tests": {}}})
+    calls = []
+
+    class API:
+        def pages(self, path, key):
+            calls.append(path)
+            if path == "/actions/runs?status=in_progress":
+                return [{"id": 7, "path": ".github/workflows/ci.yml", "head_sha": sha, "run_attempt": 2}]
+            if path == "/actions/runs/7/jobs?filter=latest":
+                raise supply.SupplyError("GitHub GET /actions/runs/7/jobs returned HTTP 502")
+            if path == "/actions/runs/7/attempts/1/jobs":
+                return [{"name": "tests", "status": "completed", "labels": [supply.SHARED_LABEL]}]
+            if path == "/actions/runs/7/attempts/2/jobs":
+                return [{"name": "tests", "status": "queued", "labels": [supply.SHARED_LABEL]}]
+            assert path.startswith("/actions/runs?status=")
+            return []
+
+    assert supply.source_demand(API(), tmp_path, now=100) == 1
+    assert "/actions/runs/7/attempts/2/jobs" in calls
+    assert "/actions/runs/7/attempts/1/jobs" not in calls
+    assert "/actions/runs/7/jobs?filter=latest" not in calls
+
+
+@pytest.mark.parametrize("attempt", [None, 0, -1, "2", 2.0, True])
+def test_source_demand_rejects_invalid_or_missing_attempt_without_cache_update(tmp_path, attempt):
+    supply = module("ci_runner_supply")
+    previous = {"observed_at": 1, "ready_jobs": 3}
+    supply.atomic_json(tmp_path / "demand-cache.json", previous)
+
+    class API:
+        def pages(self, path, key):
+            if path == "/actions/runs?status=queued":
+                run = {"id": 7, "path": ".github/workflows/ci.yml", "head_sha": "a" * 40}
+                if attempt is not None:
+                    run["run_attempt"] = attempt
+                return [run]
+            assert path.startswith("/actions/runs?status=")
+            return []
+
+    with pytest.raises(supply.SupplyError, match=r"invalid.*attempt"):
+        supply.source_demand(API(), tmp_path, now=100)
+    assert supply.load_json(tmp_path / "demand-cache.json", None) == previous
+
+
+def test_source_demand_attempt_inventory_failure_still_fails_closed(tmp_path):
+    supply = module("ci_runner_supply")
+    previous = {"observed_at": 1, "ready_jobs": 3}
+    supply.atomic_json(tmp_path / "demand-cache.json", previous)
+
+    class API:
+        def pages(self, path, key):
+            if path == "/actions/runs?status=queued":
+                return [{"id": 7, "path": ".github/workflows/ci.yml", "head_sha": "a" * 40, "run_attempt": 2}]
+            if path == "/actions/runs/7/attempts/2/jobs":
+                raise supply.SupplyError("GitHub GET /actions/runs/7/attempts/2/jobs returned HTTP 502")
+            assert path.startswith("/actions/runs?status=")
+            return []
+
+    with pytest.raises(supply.SupplyError, match="HTTP 502"):
+        supply.source_demand(API(), tmp_path, now=100)
+    assert supply.load_json(tmp_path / "demand-cache.json", None) == previous

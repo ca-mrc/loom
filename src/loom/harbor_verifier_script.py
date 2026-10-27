@@ -91,3 +91,16 @@ REWARD_PY
 
 def native_verifier_run_sh_bytes() -> bytes:
     return _NATIVE_VERIFIER_RUN_SH
+
+
+def native_verifier_workdir_run_sh_bytes() -> bytes:
+    """Runtime bridge for private inputs with a separate business working tree.
+
+    The imported wrapper and original test.sh remain immutable. Only the
+    platform-owned bridge selects the execution directory independently from
+    the private task asset directory; old callers retain their default cwd.
+    """
+    return _NATIVE_VERIFIER_RUN_SH.replace(
+        b'(cd "$task_dir" && bash "$task_dir/tests/test.sh")',
+        b'(cd "${LOOM_HARBOR_WORKDIR:-$task_dir}" && bash "$task_dir/tests/test.sh")',
+    )

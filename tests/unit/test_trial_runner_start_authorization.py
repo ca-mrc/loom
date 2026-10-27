@@ -1,6 +1,7 @@
 """Online start must precede even factories, sidecars and local-model launch."""
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
 
@@ -8,6 +9,7 @@ import pytest
 
 from loom.agent.gateway_client import FakeLLMGatewayClient
 from loom.trajectory.storage import FakeObjectStore
+from loom_worker.sandbox_network import SandboxBridge, SandboxNetworkAllocator
 from loom_worker.trial_runner import LocalTrialRunner
 from tests._trial_config_defaults import stub_trial_config
 from tests.integration.test_trial_runner import _task_config
@@ -90,3 +92,51 @@ async def test_positive_start_precedes_first_factory_and_stays_one_use(tmp_path)
     with pytest.raises(RuntimeError, match="already attempted"):
         await subject.run()
     assert events == ["authorized", "driver"]
+
+
+@pytest.mark.parametrize("stage", ["gateway", "agent", "verifier", "jwt"])
+@pytest.mark.parametrize("failure", [RuntimeError, asyncio.CancelledError])
+async def test_setup_failure_releases_acquired_bridge(tmp_path, monkeypatch, stage, failure):
+    from loom_worker import trial_runner as module
+
+    subject = runner(tmp_path, AsyncMock(return_value=True))
+    allocator = SandboxNetworkAllocator()
+    subject.sandbox_allocator = allocator
+    subject.sandbox_singleton = Mock()
+    subject.driver_factory = Mock(return_value=SimpleNamespace(
+        capabilities=SimpleNamespace(supports_custom_network=True),
+    ))
+    acquired = []
+
+    async def create(**kwargs):
+        index, subnet = allocator.acquire()
+        bridge = SandboxBridge("owned-test-bridge", subnet, "owned-test-id", index)
+        acquired.append(bridge)
+        return bridge
+
+    async def teardown(*, bridge, allocator):
+        assert bridge is acquired[0]
+        allocator.release(bridge.subnet_index)
+
+    cleanup = AsyncMock(side_effect=teardown)
+    monkeypatch.setattr(module, "create_sandbox_bridge", create)
+    monkeypatch.setattr(module, "teardown_sandbox_bridge", cleanup)
+    if stage == "gateway":
+        monkeypatch.setattr(LocalTrialRunner, "_resolve_gateway", AsyncMock(side_effect=failure("setup failed")))
+    elif stage == "agent":
+        subject.agent_factory.side_effect = failure("setup failed")
+    elif stage == "verifier":
+        subject.verifier_factory.side_effect = failure("setup failed")
+    else:
+        subject.sandbox_secrets_root = tmp_path / "secrets"
+        subject.sandbox_mint_token = AsyncMock(side_effect=failure("setup failed"))
+    try:
+        with pytest.raises(failure, match="setup failed"):
+            await subject.run()
+        cleanup.assert_awaited_once()
+        assert allocator.in_use_count == 0
+        assert subject._active_agent is None
+    finally:
+        # A RED run uses fake networks; release only the fixture's reserved slot.
+        if acquired and allocator.in_use_count:
+            allocator.release(acquired[0].subnet_index)

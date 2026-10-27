@@ -42,6 +42,30 @@ An explicitly selected non-script verifier (such as `pytest`) or a custom
 script path keeps its existing intake behavior and does not receive this bridge.
 
 The projected verifier defaults to `shared`; explicit modes are preserved.
+For container tasks, an omitted user becomes `environment.user = "image"` until
+the final OCI image is built. Publication resolves USER against the final image's
+passwd/group files and records concrete UID/GID/HOME, workdir, ENTRYPOINT and
+non-secret image environment alongside its immutable image reference. Scheduling
+binds this metadata into the existing image grant, then compiles one concrete
+execution plan. Explicit task users, workdirs and environment values take
+precedence. Missing or unsupported metadata fails before execution.
+The adapter also sets `environment.image_entrypoint = true`; the resolved image
+ENTRYPOINT prefixes the bounded sandbox command, replacing CMD, so initializers
+such as PostgreSQL startup still run. The trusted controller and ordinary Loom
+tasks retain their existing nonroot identity. Only concrete root private task
+containers receive bounded installation capabilities; host/network privileges,
+filesystem sharing, process sharing and service-account tokens remain forbidden.
+Guest/Compose workbenches retain their separately admitted explicit root path;
+inherited or explicit ENTRYPOINT startup is not supported inside a guest and
+is rejected at admission with `guest_image_entrypoint_unsupported`.
+This metadata path currently requires a Dockerfile build. A prebuilt-only image
+requesting image defaults is rejected with `task_image_runtime_metadata_required`;
+it needs a supported inspected-image binding before those defaults can execute.
+Identity files or their parent paths using links are explicitly unsupported by
+the bounded metadata reader. Unresolvable identities and unsupported inherited
+workdirs fail image publication. Original archives and historical trial inputs
+are retained throughout rebuild and validation.
+
 An independent verifier environment or `tests/Dockerfile` defaults to
 `separate` and remains an explicit runtime requirement. Compose files are
 retained byte-for-byte. A bounded single-service local-build workbench is
@@ -65,6 +89,38 @@ after deploying this change. Rebuild uses the retained archive and publishes a
 new materialization; it does not edit historical trial inputs. `ready` confirms
 materialization, not successful task execution or support for every declared
 runtime requirement.
+
+Rebuild updates retained task IDs in place so existing Trial references remain
+valid. New task IDs are inserted and removed, unreferenced IDs are deleted in
+the same fenced publication transaction. Removing a task still referenced by
+history remains rejected atomically. Existing Trials keep their frozen native
+image-materialization associations; rebuilding does not attach the new revision
+to those Trials.
+
+Sandbox file-transfer failures expose only fixed reason codes such as
+`file_permission_denied`, `file_read_only_filesystem`, `file_io_error`,
+or `file_invalid_target`. Raw filesystem errors, paths and uploaded contents
+are never included in the RPC error. An upload failure precedes Oracle/model
+execution and must not be counted as a verifier score of zero.
+
+For the platform's exact native/offline Harbor verifier bridges, runtime inputs
+and reports are staged outside the task's business workdir, including shared
+verification. Instructions are passed from the controller rather than uploaded
+into a task-owned Git tree. Oracle's reference assets are staged privately and
+the script executes from the resolved task workdir; ordinary Loom Oracles keep
+their solution-sibling working-directory contract. Original Harbor test scripts
+and imported wrapper bytes remain unchanged.
+
+Workspace archive transfer uses a dedicated, bounded streaming channel for
+runtime-generated temporary archive names. Its budget comes from the frozen
+artifact/storage limits; the ordinary single-file transfer limit is unchanged.
+Both export and import retain atomic publication, exact-length validation and
+symlink restrictions. Source archives remain immutable during transfer;
+descriptor checks reject changes visible in file size or timestamps.
+Transfer failures identify the operation, HTTP status and
+fixed reason (plus bounded size/limit values), never raw paths or response bodies.
+This transport boundary does not change whether an archive is required for
+grading or used for verifier handoff.
 
 ## Storage limits
 
@@ -193,6 +249,20 @@ Supported source types are `hf`, `git`, `https`, `jsonl-inline`, and
 `script` verifier. A bundle upload contains complete task directories and can
 use each task's own verifier.
 
+JSONL sources use physical newlines between JSON objects. Escaped newlines
+inside string values are preserved, and a final newline is optional. Literal
+`\n` between records is not a JSONL record delimiter.
+
+`limits.max_instances` bounds how many tasks materialization selects from a
+source, including an uploaded bundle. Omitting it uses the default of 500, even
+when `limits` is empty or contains only `timeout_per_task_s`. Intake and TaskSet
+detail responses expose `default_max_instances_applied` in their existing
+`warnings` list with the effective maximum. For a larger source, explicitly set
+the intended selection limit, for example `limits: {max_instances: 1000}`.
+An explicit limit, including 500, does not produce this default warning.
+This selection limit does not set execution concurrency or reserve compute;
+normal resource admission, shared quotas and scheduling still govern execution.
+
 For uploaded bundles, materialization derives the `oracle_eligible` catalog
 tag from the presence of the regular file `solution/solve.sh` in each validated
 task directory. Oracle admission therefore works with a script verifier and
@@ -209,9 +279,22 @@ transform blobs are fetched.
 
 ## Materialization
 
-Submission stores the manifest and uploaded blobs under a team-scoped object
-prefix, creates a `task_sets` row and current `task_set_manifests` row, and
-queues a `task_set_materialization_jobs` record. The materializer claims jobs
+Before uploading blobs, submission durably reserves the TaskSet slug, manifest
+and a non-claimable job. During this interval the TaskSet is `failed` with reason
+`intake_incomplete`; the job explains that upload may still be in progress.
+The reservation has a one-hour expiry and is not held. Upload and final activation
+lock the job before the TaskSet, matching publication and deletion. Activation
+atomically restores the requested lifecycle metadata, clears the incomplete
+reason, and queues the `task_set_materialization_jobs` record.
+
+A failed or interrupted intake retains this identity so its team-scoped blobs
+remain discoverable by expiry and retention garbage collection. A lost commit
+acknowledgement never triggers compensating blob deletion: the final commit may
+have succeeded. Inspect the TaskSet after a submission error. An incomplete
+intake cannot be rebuilt; submit with a new slug, or retry the original slug after
+retention cleanup has removed it. Soft deletion alone does not free the slug.
+
+The materializer claims jobs
 with a lease, converts valid instances into canonical task bundles and `tasks`
 rows, records bounded error summaries, and publishes the resulting status and
 task count.
@@ -219,6 +302,10 @@ task count.
 Rebuild creates a new materialization job for the stored manifest. Claim
 fencing prevents concurrent active jobs for the same TaskSet and allows stale
 claims to be recovered.
+When a previous publication is usable, retryable source errors, exhausted retries
+and worker failures preserve its `ready` or `partial` state and task rows. The
+new job retains the failure diagnostics. Successful replacement still publishes
+the new tasks and status atomically.
 
 ## CLI
 
@@ -234,8 +321,10 @@ loom tasksets delete ID_OR_SLUG [--format text|json]
 
 The service routes are implemented in
 [`src/loom_service/routes/tasksets.py`](../../src/loom_service/routes/tasksets.py).
-Manifest validation and materialization live under `src/loom/taskset_*`, and
-the persistence model is in [`src/loom/db/schema.py`](../../src/loom/db/schema.py).
+Manifest validation and row conversion live under `src/loom/models/taskset.py`
+and `src/loom/taskset/`; intake and worker orchestration live in
+`src/loom_service/taskset_intake.py` and `src/loom_service/taskset_materializer.py`.
+The persistence model is in [`src/loom/db/schema.py`](../../src/loom/db/schema.py).
 
 ## Web discovery and import review
 

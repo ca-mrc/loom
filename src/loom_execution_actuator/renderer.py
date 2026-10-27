@@ -133,6 +133,13 @@ def _sidecar(
         result["volumeMounts"] = []
         result["securityContext"].update(runAsUser=65532, runAsGroup=65532)
     elif value.private_sandbox:
+        if max_artifact_bytes is not None:
+            # This is the frozen artifact budget, not a task-selected RPC
+            # limit. Keep the ordinary file channel's smaller limit intact.
+            archive_budget = min(max_artifact_bytes, value.resources.ephemeral_storage_mib * 1024**2)
+            result["env"] = [item for item in result["env"]
+                             if item["name"] != "LOOM_WORKSPACE_MAX_ARCHIVE_BYTES"]
+            result["env"].append({"name": "LOOM_WORKSPACE_MAX_ARCHIVE_BYTES", "value": str(archive_budget)})
         result["securityContext"] = _security_context(read_only_root=False)
         if value.identity is not None:
             identity = value.identity
@@ -182,6 +189,15 @@ def _sidecar(
                 "--max-transfer-bytes", str(max_artifact_bytes),
                 "--exec-timeout-seconds", value.argv[-1],
             ]
+            if value.guest_task_identity is not None:
+                task_identity = value.guest_task_identity
+                groups = ",".join(str(item) for item in task_identity.supplementary_groups) or "-"
+                result["command"].extend([
+                    "--task-uid", str(task_identity.run_as_user),
+                    "--task-gid", str(task_identity.run_as_group),
+                    "--task-groups", groups,
+                    "--task-home", task_identity.home,
+                ])
             if "nested_docker" in value.guest_execution.capabilities:
                 result["command"].append("--nested-docker")
     return result

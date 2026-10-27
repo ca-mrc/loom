@@ -3,8 +3,7 @@
 Supported keys for `set`:
   - `token.<provider>` — upstream LLM API key
     (provider in {anthropic, openai, google})
-  - `server_url`       — optional Control Plane URL for additive
-    result POSTing from `loom run`
+  - `server_url`       — service URL for authenticated hosted commands
   - `local.<name>.base_url` — register a locally-served
     OpenAI-compatible LLM server (vLLM, ollama, llama.cpp,
     lm-studio). `<name>` is your chosen identifier

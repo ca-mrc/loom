@@ -17,7 +17,7 @@ import re
 import secrets
 import subprocess
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 from urllib.parse import urlencode
 from uuid import UUID
 
@@ -34,6 +34,10 @@ from scripts.ops.nebius_management_gateway import (
 from scripts.ops.nebius_management_prerequisites import inventory_resources
 from scripts.ops.nebius_management_stage import _canonical_quantities
 from scripts.ops.nebius_management_switch import _matches, _stable
+from scripts.ops.nebius_pool_activation_database import (
+    PARTICIPANT_SCHEMA_REVISIONS,
+    _participant_schema_unqualified_sql,
+)
 from scripts.ops.nebius_pool_guard_activation import pool_guard_activation_sql
 from scripts.ops.nebius_pool_legacy_settings import (
     BOUND_LEGACY_SETTINGS_COMMAND,
@@ -66,6 +70,9 @@ from loom.nebius_pool_contract import PoolParticipantV1
 from loom.nebius_pool_priority import PoolWorkOriginV1, pool_request_priority
 from loom.nebius_rollout_guard import ACTIVITY_SQL, LOCK_KEY
 from loom_service.environment_management.candidates import _json
+
+if TYPE_CHECKING:
+    from scripts.ops.nebius_pool_refresh import PoolManagerRefresh
 
 # The same settings instance is checked and used to open SQL. No new option or
 # probe module is required in retained old images: their existing typed settings
@@ -347,7 +354,7 @@ SET LOCAL statement_timeout='10s'; SET LOCAL lock_timeout='2s'; SET LOCAL search
 DO $pool_cutover_readiness$
 DECLARE access_ready BOOLEAN;
 BEGIN
-    IF (SELECT version_num FROM public.alembic_version) IS DISTINCT FROM '0176'
+    IF {_participant_schema_unqualified_sql()}
     THEN RAISE EXCEPTION 'pool cutover schema unqualified'; END IF;
     IF NOT pg_try_advisory_xact_lock({LOCK_KEY}) OR EXISTS (
         SELECT 1 FROM public.nebius_rollout_guard
@@ -392,7 +399,7 @@ WITH pending AS (
     SELECT key,origin,source_matches FROM pending WHERE key COLLATE "C">'{cursor}' COLLATE "C"
      ORDER BY key COLLATE "C" LIMIT 128
 )
-SELECT json_build_object('status','observed','schema_revision','0176',
+SELECT json_build_object('status','observed','schema_revision',(SELECT version_num FROM public.alembic_version),
     'rows',COALESCE(json_agg(page ORDER BY key COLLATE "C"),'[]'::json)) FROM page;
 ROLLBACK;
 """
@@ -406,7 +413,7 @@ def qualify_cutover_readiness_page(report: Any, *, participant: PoolParticipantV
     """
     cursor = _backlog_cursor(after)
     if (not isinstance(report, dict) or set(report) != {"status", "schema_revision", "rows"}
-            or report["status"] != "observed" or report["schema_revision"] != "0176"
+            or report["status"] != "observed" or report["schema_revision"] not in PARTICIPANT_SCHEMA_REVISIONS
             or not isinstance(report["rows"], list) or len(report["rows"]) > 128):
         raise ValueError("pool_cutover_database_report_unqualified")
     origins = []
@@ -470,7 +477,7 @@ DO $pool_runtime_role$
 DECLARE item RECORD;
 BEGIN
     {closure}
-    IF (SELECT version_num FROM alembic_version) IS DISTINCT FROM '0176'
+    IF {_participant_schema_unqualified_sql()}
     THEN RAISE EXCEPTION 'pool runtime role database is not closed and idle'; END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='loom_actuator' AND rolcanlogin
         AND NOT (rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls))
@@ -513,14 +520,22 @@ BEGIN
           OR (item.name<>'task_bundle_sources' AND has_any_column_privilege('loom_actuator',item.name,'UPDATE'))
         THEN RAISE EXCEPTION 'pool runtime source journal authority unqualified'; END IF;
     END LOOP;
-    FOR item IN SELECT unnest(ARRAY['task_bundle_source_writes','task_bundle_source_versions']) AS name LOOP
+    FOR item IN SELECT unnest(ARRAY['task_bundle_source_writes','task_bundle_source_versions','task_source_publications']) AS name LOOP
+        IF item.name='task_source_publications' AND (SELECT version_num FROM public.alembic_version) IN ('0175','0176')
+          AND to_regclass('public.task_source_publications') IS NULL THEN CONTINUE; END IF;
         IF has_table_privilege('loom_actuator',item.name,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
           OR has_any_column_privilege('loom_actuator',item.name,'SELECT,INSERT,UPDATE,REFERENCES')
         THEN RAISE EXCEPTION 'pool runtime source publication authority unqualified'; END IF;
     END LOOP;
     FOR item IN SELECT unnest(ARRAY['nebius_pool_bindings','nebius_pool_participants','nebius_pool_requests',
         'nebius_pool_machines','nebius_pool_machine_credentials','nebius_pool_captures','nebius_pool_observations',
-        'nebius_pool_effects','nebius_pool_cleanup_observations','nebius_pool_cancellations']) AS name LOOP
+        'nebius_pool_effects','nebius_pool_cleanup_observations','nebius_pool_cancellations',
+        'nebius_pool_participant_catalogs','nebius_pool_profile_documents',
+        'nebius_pool_lifecycle_operations','nebius_pool_participant_lifecycle']) AS name LOOP
+        IF item.name IN ('nebius_pool_participant_catalogs','nebius_pool_profile_documents',
+            'nebius_pool_lifecycle_operations','nebius_pool_participant_lifecycle')
+          AND (SELECT version_num FROM public.alembic_version) IN ('0175','0176','0177')
+          AND to_regclass('public.' || item.name) IS NULL THEN CONTINUE; END IF;
         IF has_table_privilege('loom_actuator',item.name,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
           OR has_any_column_privilege('loom_actuator',item.name,'SELECT,INSERT,UPDATE,REFERENCES')
         THEN RAISE EXCEPTION 'pool runtime management authority unqualified'; END IF;
@@ -532,12 +547,14 @@ SELECT json_build_object('status','{'staged' if action == 'stage' else 'qualifie
 
 
 class KubectlPoolGuardAPI:
-    def __init__(self, *, request: PoolMigrationRequest, kubeconfig: Path, executable: Path):
+    def __init__(self, *, request: PoolMigrationRequest, kubeconfig: Path, executable: Path,
+                 refresh: PoolManagerRefresh | None = None):
         try:
             if (not kubeconfig.is_absolute() or kubeconfig != kubeconfig.resolve()
                     or not executable.is_absolute()):
                 raise ValueError
             self.request = request
+            self.refresh = refresh
             self.contract_sha256 = digest(migration_contract(request))
             self.kubeconfig = kubeconfig
             self.kubeconfig_sha256 = hashlib.sha256(private_state._private_read(kubeconfig, limit=512 * 1024)).hexdigest()
@@ -1036,8 +1053,12 @@ class KubectlPoolGuardAPI:
         qualify_database_destination(url, target.namespace)
         database = self._get("statefulset", "loom-postgres", target.namespace)
         service = self._get("service", "loom-postgres", target.namespace)
+        retained_database = binding.statefulset
+        if self.refresh is not None:
+            database, retained_database = self.refresh.database_documents(
+                original=retained_database, current=database, service=binding.service)
         pod = qualify_database_pod(namespace=target.namespace, database=database, service=service,
-            retained_database=binding.statefulset, retained_service=binding.service,
+            retained_database=retained_database, retained_service=binding.service,
             listing=self._pods(target.namespace, "loom-postgres"))
         self._database_backend(target, service=service, pod=pod)
         self._namespaces(target)

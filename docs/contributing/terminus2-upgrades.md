@@ -39,6 +39,12 @@ provenance fallbacks. It preflights every known consumer before writing. It does
 not rewrite patches, loosen dependencies or fabricate frozen build evidence.
 Rebuild and regenerate the existing worker dependency evidence with
 `scripts/ops/update_worker_image_lock.sh` before considering the candidate Ready.
+Ordinary worker builds retain the recorded third-party pins. Use
+`LOOM_WORKER_REFRESH_DEPENDENCIES=true` only for an explicit broader dependency
+maintenance update; review and qualify that graph before using its new freeze.
+After regeneration, read the pin report fields: `active_pins_match` and
+`frozen_worker.matches_pin` must be true, and `regeneration_required` false.
+The command's exit status alone does not establish frozen-worker qualification.
 
 ## Automatic candidates
 

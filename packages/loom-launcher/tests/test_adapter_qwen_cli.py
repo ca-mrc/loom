@@ -34,9 +34,9 @@ def test_build_invocation_argv() -> None:
         "openai",
         "--openai-base-url",
         "https://gateway.example",
-        "--openai-api-key",
-        "step-token",
     ]
+    assert env["OPENAI_API_KEY"] == "step-token"
+    assert "step-token" not in str(argv)
 
 
 async def test_capture_via_pty(make_handle) -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -95,6 +96,35 @@ def test_main_promotion_workflow_is_direct_minimal_check() -> None:
     assert "secrets." not in str(job)
     assert job["env"]["GH_TOKEN"] == "${{ github.token }}"
     assert "scripts/ops/main_promotion_gate.py" in str(job)
+    assert '--output-json main-promotion-evidence.json' in str(job)
+    upload, = (step for step in job['steps'] if step.get('uses', '').startswith('actions/upload-artifact@'))
+    assert upload['with'] == {
+        'name': 'main-promotion-evidence-${{ github.run_id }}-${{ github.run_attempt }}',
+        'path': 'main-promotion-evidence.json', 'if-no-files-found': 'error'}
+
+
+@pytest.mark.parametrize('identity', [None, ('102', '3'), ('102', 'invalid'), ('102', '0')])
+def test_main_evidence_output_requires_protected_run_identity(tmp_path, monkeypatch, capsys, identity):
+    from scripts.ops import main_promotion_gate
+
+    output = tmp_path / 'main-promotion-evidence.json'
+    monkeypatch.setattr(main_promotion_gate, 'GhCLI', lambda: FakeAPI(_payloads()))
+    monkeypatch.setattr('sys.argv', ['main_promotion_gate', '--repository', REPOSITORY,
+        '--candidate-sha', CANDIDATE_SHA, '--dispatch-sha', CANDIDATE_SHA, '--pr-number', str(PR_NUMBER),
+        '--release-gate-run-id', str(RUN_ID), '--output-json', str(output)])
+    monkeypatch.delenv('GITHUB_RUN_ID', raising=False)
+    monkeypatch.delenv('GITHUB_RUN_ATTEMPT', raising=False)
+    if identity is not None:
+        monkeypatch.setenv('GITHUB_RUN_ID', identity[0])
+        monkeypatch.setenv('GITHUB_RUN_ATTEMPT', identity[1])
+    result = main_promotion_gate.main()
+    if identity == ('102', '3'):
+        assert result == 0
+        assert json.loads(output.read_text()) == dict(_verify(), schema_version='loom.main-promotion-evidence.v2',
+            gate_run={'run_id': 102, 'run_attempt': 3})
+    else:
+        assert result == 1 and not output.exists()
+        assert 'main gate run identity unavailable' in capsys.readouterr().err
 
 
 def test_main_promotion_accepts_exact_current_release_gated_dev() -> None:

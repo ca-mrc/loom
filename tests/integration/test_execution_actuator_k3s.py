@@ -2,20 +2,25 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
+import re
 import shlex
 import ssl
 import subprocess
 import tempfile
 import time
+from contextlib import contextmanager
+from copy import copy, deepcopy
 from datetime import UTC, datetime, timedelta
+from functools import cached_property
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 import yaml
-from urllib3.exceptions import MaxRetryError, SSLError
+from urllib3.exceptions import MaxRetryError, ReadTimeoutError, SSLError
 
 from loom.db.schema import ServiceExecutionLease
 from loom.execution_contract import (
@@ -279,11 +284,55 @@ def _executable_lease(
     )
 
 
+# Images the pinned K3s pulls for its sandbox and packaged addons. Inside the
+# disposable node they would come straight from Docker Hub, bypassing the
+# runner's registry mirror and image cache, once per K3s start.
+K3S_SYSTEM_IMAGES = (
+    "rancher/mirrored-pause:3.6",
+    "rancher/mirrored-coredns-coredns:1.14.3",
+    "rancher/local-path-provisioner:v0.0.36",
+    # The provisioner launches this helper for volume setup and teardown.
+    "rancher/mirrored-library-busybox:1.37.0",
+    "rancher/mirrored-metrics-server:v0.8.1",
+)
+
+
+def _k3s_system_image_archive() -> Path:
+    """Host archive of K3S_SYSTEM_IMAGES for K3s to import at startup."""
+    for image in K3S_SYSTEM_IMAGES:
+        cached = subprocess.run(["docker", "image", "inspect", image], check=False,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+        if cached.returncode != 0:
+            # The host daemon applies the runner's mirror and verifies layer digests.
+            subprocess.run(["docker", "pull", "--quiet", image], check=True, timeout=300,
+                           stdout=subprocess.DEVNULL)
+    ids = _docker("image", "inspect", "--format", "{{.Id}}", *K3S_SYSTEM_IMAGES).split()
+    key = hashlib.sha256("\n".join([*K3S_SYSTEM_IMAGES, *ids]).encode()).hexdigest()[:16]
+    directory = Path(tempfile.gettempdir()) / f"loom-k3s-system-images-{key}"
+    archive = directory / "system-images.tar"
+    if not archive.exists():
+        directory.mkdir(exist_ok=True)
+        partial = directory / f".system-images.{os.getpid()}.partial"
+        subprocess.run(["docker", "save", "--output", str(partial), *K3S_SYSTEM_IMAGES], check=True, timeout=300)
+        # Concurrent test processes share the archive; never expose a partial one.
+        partial.replace(archive)
+    return archive
+
+
 def _start_k3s(*, node_name: str | None = None, ephemeral_storage_floor: str | None = None) -> object:
     from testcontainers.core.container import DockerContainer
 
+    class DisposableK3sContainer(DockerContainer):
+        def stop(self, force: bool = False, delete_volume: bool = True) -> None:
+            # Testcontainers directly force-removes by default. Let K3s PID 1
+            # terminate its children before removal, without an init wrapper
+            # that would interfere with its root-cgroup startup sequence.
+            if self._container is not None:
+                self._container.stop(timeout=30)
+            super().stop(force=force, delete_volume=delete_volume)
+
     container = (
-        DockerContainer(
+        DisposableK3sContainer(
             "rancher/k3s@sha256:08fdebd14db9ab7d5ea821d5bfa95d02341a6ef886842fcc8d9dfd0e9fa9e0cd"
         )
         .with_exposed_ports(6443)
@@ -306,15 +355,96 @@ def _start_k3s(*, node_name: str | None = None, ephemeral_storage_floor: str | N
                 ]),
             ]
         )
+        # Mount the file, not its directory: K3s keeps import state beside it.
+        .with_volume_mapping(str(_k3s_system_image_archive()),
+                             "/var/lib/rancher/k3s/agent/images/system-images.tar", "ro")
         .with_kwargs(privileged=True)
     )
     container.start()
     return container
 
 
-def _load_client(container: object) -> tuple[object, object, object]:
+_NATIVE_ADDONS = {'dns': 'coredns', 'storage': 'local-path-provisioner'}
+
+
+def _native_addon_diagnostics(core: object, required: tuple[str, ...]) -> str:
+    """Bounded native-system status only; no Pod specs, credentials or logs."""
+    result: dict[str, object] = {}
+    names = tuple(_NATIVE_ADDONS[name] for name in required)
+    try:
+        pods = core.list_namespaced_pod('kube-system', limit=64, _request_timeout=(2, 3)).items
+        result['pods'] = [{'name': pod.metadata.name, 'phase': pod.status.phase, 'reason': pod.status.reason,
+            'pod_ip': pod.status.pod_ip,
+            'conditions': [{'type': condition.type, 'status': condition.status}
+                for condition in pod.status.conditions or []],
+            'containers': [{'name': status.name, 'ready': status.ready,
+                'container_id': status.container_id,
+                'waiting': status.state.waiting.reason if status.state and status.state.waiting else None}
+                for status in (pod.status.init_container_statuses or []) + (pod.status.container_statuses or [])]}
+            for pod in pods if any(pod.metadata.name.startswith(name + '-') for name in names)]
+    except Exception as error:
+        result['pods'] = type(error).__name__
+    try:
+        # Normal Pulling/Pulled/Created/Started events distinguish image and
+        # container startup from sandbox failures; warnings alone cannot.
+        events = core.list_namespaced_event('kube-system', limit=64, _request_timeout=(2, 3)).items
+        result['events'] = [{'object': event.involved_object.name, 'type': event.type, 'reason': event.reason,
+            'message': (event.message or '')[:1024], 'count': event.count,
+            'first_timestamp': event.first_timestamp.isoformat() if event.first_timestamp else None,
+            'last_timestamp': event.last_timestamp.isoformat() if event.last_timestamp else None}
+            for event in events if any(event.involved_object.name == name
+                or (event.involved_object.name or '').startswith(name + '-') for name in names)]
+    except Exception as error:
+        result['events'] = type(error).__name__
+    return json.dumps(result)[-16384:]
+
+
+def _wait_for_native_addons(core: object, required: tuple[str, ...], *, deadline: float) -> None:
+    """Read native addon readiness within the client's original startup budget."""
+    from kubernetes import client
+
+    apps = client.AppsV1Api(core.api_client)
+    discovery = client.DiscoveryV1Api(core.api_client)
+    pending = list(required)
+    while deadline - time.monotonic() > 0:
+        pending = []
+        for name in required:
+            try:
+                deployment = apps.read_namespaced_deployment(_NATIVE_ADDONS[name], 'kube-system',
+                    _request_timeout=min(5, max(0.01, deadline - time.monotonic())))
+            except client.exceptions.ApiException as error:
+                if error.status != 404:
+                    raise
+                pending.append(name + ': Deployment absent')
+                continue
+            count = deployment.spec.replicas or 0
+            status = deployment.status
+            if (count < 1 or (status.observed_generation or 0) < deployment.metadata.generation
+                    or (status.updated_replicas or 0) < count or (status.ready_replicas or 0) < count
+                    or (status.available_replicas or 0) < count
+                    or not any(row.type == 'Available' and row.status == 'True' for row in status.conditions or [])):
+                pending.append(name + ': Deployment not ready/available')
+                continue
+            if name == 'dns':
+                slices = discovery.list_namespaced_endpoint_slice('kube-system',
+                    label_selector='kubernetes.io/service-name=kube-dns',
+                    _request_timeout=min(5, max(0.01, deadline - time.monotonic())))
+                if not any(endpoint.conditions and endpoint.conditions.ready is True and endpoint.addresses
+                        for item in slices.items for endpoint in item.endpoints or []):
+                    pending.append('dns: kube-dns has no ready endpoint')
+        if not pending:
+            return
+        time.sleep(min(0.25, max(0, deadline - time.monotonic())))
+    error = AssertionError(f'disposable k3s native addons did not become ready: {pending}')
+    error.add_note(_native_addon_diagnostics(core, required))
+    raise error
+
+
+def _load_client(container: object, *, required_addons: tuple[str, ...] = ()) -> tuple[object, object, object]:
     from kubernetes import client, config
 
+    if not isinstance(required_addons, tuple) or any(name not in _NATIVE_ADDONS for name in required_addons):
+        raise ValueError('unknown disposable k3s native addon')
     deadline = time.monotonic() + 90
     # K3s PID 1 evacuates the root cgroup and enables subtree controllers before
     # its startup banner. Docker exec during that window inserts another root
@@ -364,6 +494,8 @@ def _load_client(container: object) -> tuple[object, object, object]:
                         last_error = "bootstrap Service allocation pending"
                     else:
                         if service.spec.cluster_ip not in (None, "", "None"):
+                            if required_addons:
+                                _wait_for_native_addons(core, required_addons, deadline=deadline)
                             return client, core, batch
                         last_error = "bootstrap Service has no allocated ClusterIP"
         time.sleep(1)
@@ -389,11 +521,58 @@ def _docker_platform() -> str:
     return f"linux/{normalized}"
 
 
+def _build_stage_timings(log: str) -> list[dict[str, object]]:
+    """Keep stage/cache timing only, never commands, URLs or build output."""
+    stages = {"build", "docker-cli", "guest-build", "guest-verify", "guest-payload", "runtime", "stage-1"}
+    phases = ("load build definition", "load metadata", "load .dockerignore", "load build context",
+              "exporting to image", "exporting layers", "importing cache manifest")
+    rows: dict[str, dict[str, object]] = {}
+    for line in log.splitlines():
+        match = re.match(r"#(\d+) \[([\w-]+)\s+(\d+)/(\d+)\] (FROM|RUN|COPY|WORKDIR|USER|ENTRYPOINT)\b", line)
+        if match and match[2] in stages and len(rows) < 64:
+            rows[match[1]] = {"stage": match[2], "index": int(match[3]),
+                              "instruction": match[5], "cached": False}
+        match = re.match(r"#(\d+) (?:\[internal\] )?(.*)", line)
+        if match and len(rows) < 64:
+            phase = next((value for value in phases if match[2].startswith(value)), None)
+            if phase:
+                rows[match[1]] = {"phase": phase, "cached": False}
+        match = re.fullmatch(r"#(\d+) CACHED", line)
+        if match and match[1] in rows:
+            rows[match[1]]["cached"] = True
+        match = re.fullmatch(r"#(\d+) DONE ([0-9.]+)s", line)
+        if match and match[1] in rows:
+            rows[match[1]]["wall_seconds"] = float(match[2])
+    return list(rows.values())
+
+
+def _build_timing(record: dict[str, object]) -> None:
+    directory = os.environ.get("RUNNER_TEMP")
+    if directory:
+        try:
+            with (Path(directory) / "loom-k3s-image-build-timings.jsonl").open("a") as stream:
+                stream.write(json.dumps(record, sort_keys=True) + "\n")
+        except OSError:
+            # Timing evidence must never replace the actual build outcome.
+            pass
+
+
 def _build_image(*, tag: str, dockerfile: str, platform: str) -> None:
+    import resource
+
     repo_root = Path(__file__).resolve().parents[2]
+    role = "runtime" if dockerfile == "deploy/Dockerfile.execution-runtime" else "fixture"
+    identity = {"role": role, "platform": platform if platform in {"linux/amd64", "linux/arm64"} else "unknown"}
+    started, python_cpu = time.perf_counter(), time.process_time()
+    children = resource.getrusage(resource.RUSAGE_CHILDREN)
+    child_cpu = children.ru_utime + children.ru_stime
+    _build_timing({**identity, "event": "start"})
+    status, log = "interrupted", ""
     try:
-        _docker(
+        completed = subprocess.run([
+            "docker",
             "build",
+            "--progress=plain",
             "--platform",
             platform,
             "--file",
@@ -401,32 +580,63 @@ def _build_image(*, tag: str, dockerfile: str, platform: str) -> None:
             "--tag",
             tag,
             str(repo_root),
-        )
+        ], check=True, capture_output=True, text=True)
+        status, log = "success", completed.stderr
     except subprocess.CalledProcessError as exc:
+        status, log = "failed", exc.stderr or ""
         if exc.stderr:
             # Pytest truncates captured subprocess locals; keep the final build
             # error visible without flooding logs with the complete build output.
             exc.add_note("Docker fixture build stderr (last 16384 characters):\n" + exc.stderr[-16_384:])
         raise
+    finally:
+        children = resource.getrusage(resource.RUSAGE_CHILDREN)
+        _build_timing({**identity, "event": "end", "status": status,
+            "wall_seconds": time.perf_counter() - started,
+            "python_cpu_seconds": time.process_time() - python_cpu,
+            "reaped_child_cpu_seconds": children.ru_utime + children.ru_stime - child_cpu,
+            "cpu_scope": "test driver and reaped client children; excludes build daemon",
+            "stages": _build_stage_timings(log)})
+
+
+class _BuiltImages:
+    """Materialize only images actually consumed by this module's cases."""
+
+    def __init__(self):
+        self.platform = _docker_platform()
+        self.suffix = uuid4().hex[:10]
+        self.attempted: list[str] = []
+        self.failures: dict[str, BaseException] = {}
+
+    def _build(self, role: str, repository: str, dockerfile: str) -> str:
+        if role in self.failures:
+            raise self.failures[role]
+        tag = f"docker.io/library/{repository}:{self.suffix}"
+        self.attempted.append(tag)
+        try:
+            _build_image(tag=tag, dockerfile=dockerfile, platform=self.platform)
+        except BaseException as error:
+            self.failures[role] = error
+            raise
+        return tag
+
+    @cached_property
+    def runtime(self) -> str:
+        return self._build("runtime", "loom-runtime-e2e", "deploy/Dockerfile.execution-runtime")
+
+    @cached_property
+    def fixture(self) -> str:
+        return self._build("fixture", "loom-runtime-fixture", "tests/fixtures/execution_runtime_fixture/Dockerfile")
 
 
 @pytest.fixture(scope="module")
 def built_images() -> object:
-    """Build each disposable-cluster image once per module; every case imports its own copy."""
-    suffix = uuid4().hex[:10]
-    platform = _docker_platform()
-    images = SimpleNamespace(
-        platform=platform,
-        runtime=f"docker.io/library/loom-runtime-e2e:{suffix}",
-        fixture=f"docker.io/library/loom-runtime-fixture:{suffix}",
-    )
+    """Keep one image per role, within the unchanged first consumer's budget."""
+    images = _BuiltImages()
     try:
-        _build_image(tag=images.runtime, dockerfile="deploy/Dockerfile.execution-runtime", platform=platform)
-        _build_image(tag=images.fixture, dockerfile="tests/fixtures/execution_runtime_fixture/Dockerfile",
-                     platform=platform)
         yield images
     finally:
-        for tag in (images.runtime, images.fixture):
+        for tag in images.attempted:
             subprocess.run(["docker", "image", "rm", "--force", tag], check=False, capture_output=True)
 
 
@@ -496,23 +706,117 @@ async def _wait_for_dns_pods(core: object, *, timeout: float = 60) -> list[objec
     raise AssertionError("disposable k3s did not create a CoreDNS Pod") from last_error
 
 
+def _pod_container_details(pod: object) -> str:
+    """Bound failure evidence without dumping specs, env, or termination output."""
+    def state_details(state):
+        details = {}
+        for phase in ("waiting", "running", "terminated"):
+            value = getattr(state, phase, None)
+            if value is not None:
+                details[phase] = {"reason": (getattr(value, "reason", None) or "")[:128]}
+                if phase == "terminated":
+                    details[phase].update(exit_code=value.exit_code, signal=value.signal)
+        return details
+
+    details = {}
+    for field in ("init_container_statuses", "container_statuses"):
+        statuses = getattr(pod.status, field, None) or []
+        details[field] = [{
+            "name": item.name[:128], "ready": item.ready, "restart_count": item.restart_count,
+            "state": state_details(item.state), "last_state": state_details(item.last_state),
+        } for item in statuses[:8]]
+    rendered = repr(details)
+    return rendered if len(rendered) <= 4096 else rendered[:4080] + "... (truncated)"
+
+
+@contextmanager
+def _pod_read_transport(core: object):
+    """Bound setup reads without changing the caller's shared/write client."""
+    from kubernetes import client
+
+    configuration = deepcopy(core.api_client.configuration)
+    configuration.retries = 0
+    with client.ApiClient(configuration=configuration) as api_client:
+        api_client.default_headers = deepcopy(getattr(core.api_client, "default_headers", {}))
+        api_client.cookie = getattr(core.api_client, "cookie", None)
+        api_client.rest_client.pool_manager.pools.dispose_func = lambda pool: pool.close()
+        observer = copy(core)
+        observer.api_client = api_client
+        try:
+            yield observer
+        finally:
+            api_client.rest_client.pool_manager.clear()
+
+
 def _wait_for_pod(core: object, namespace: str, name: str) -> object:
     deadline = time.monotonic() + 60
     last_phase = "missing"
-    while time.monotonic() < deadline:
-        pod = core.read_namespaced_pod(name, namespace)
-        last_phase = pod.status.phase
-        if last_phase == "Running" and any(
-            condition.type == "Ready" and condition.status == "True"
-            for condition in (pod.status.conditions or [])
-        ):
-            return pod
-        time.sleep(0.25)
-    raise AssertionError(
-        f"Pod {namespace}/{name} did not become ready: {last_phase}; "
-        f"reason={pod.status.reason}; message={pod.status.message}; "
-        f"conditions={pod.status.conditions}"
-    )
+    pod = None
+    last_error = None
+    with _pod_read_transport(core) as observer:
+        while (remaining := deadline - time.monotonic()) > 0:
+            try:
+                # This pinned SDK ignores scalar floats. Tuple timeouts retain
+                # the fractional final budget instead of silently becoming None.
+                budget = min(5, remaining)
+                pod = observer.read_namespaced_pod(name, namespace, _request_timeout=(budget / 2, budget / 2))
+            except (MaxRetryError, ReadTimeoutError) as error:
+                reason = error.reason if isinstance(error, MaxRetryError) else error
+                if not (isinstance(reason, ReadTimeoutError) or (
+                    isinstance(reason, SSLError) and reason.args
+                    and isinstance(reason.args[0], ssl.SSLEOFError)
+                )):
+                    raise
+                last_error = error
+            else:
+                last_phase = pod.status.phase
+                if time.monotonic() >= deadline:
+                    break
+                if last_phase == "Running" and any(
+                    condition.type == "Ready" and condition.status == "True"
+                    for condition in (pod.status.conditions or [])
+                ):
+                    return pod
+                last_error = None
+            time.sleep(min(0.25, max(0, deadline - time.monotonic())))
+    detail = (f"reason={pod.status.reason}; message={pod.status.message}; "
+              f"conditions={pod.status.conditions}; containers={_pod_container_details(pod)}"
+              if pod is not None else "no Pod response within the readiness budget")
+    error = AssertionError(f"Pod {namespace}/{name} did not become ready: {last_phase}; {detail}")
+    # ContainerCreating predates container logs. Retain the sandbox/CNI and
+    # image-pull events before callers tear down this disposable cluster.
+    # Read only on failure; never retry readiness or dump Pod specs/Secrets.
+    try:
+        from kubernetes import client
+
+        uid = pod.metadata.uid if pod is not None and pod.metadata else None
+        selector = f"involvedObject.uid={uid}" if uid else f"involvedObject.name={name}"
+        configuration = deepcopy(core.api_client.configuration)
+        # Socket timeouts alone do not bound urllib3 Retry-After delays. Keep
+        # the shared readiness client untouched; this failure-only read has no
+        # retries and releases its separate transport immediately afterward.
+        configuration.retries = 0
+        with client.ApiClient(configuration=configuration) as diagnostic_client:
+            # The pinned urllib3 otherwise drops pools without closing them
+            # until GC; an exception traceback can keep those pools alive.
+            diagnostic_client.rest_client.pool_manager.pools.dispose_func = lambda pool: pool.close()
+            try:
+                events = client.CoreV1Api(diagnostic_client).list_namespaced_event(
+                    namespace, limit=32, _request_timeout=(2, 3),
+                    field_selector="involvedObject.kind=Pod," + selector)
+            finally:
+                # This SDK's ApiClient.close() closes only its thread pool.
+                diagnostic_client.rest_client.pool_manager.clear()
+        detail = json.dumps([{
+            "type": (event.type or "")[:32], "reason": (event.reason or "")[:128],
+            "message": (event.message or "")[:1024], "count": event.count,
+            "first_timestamp": event.first_timestamp.isoformat() if event.first_timestamp else None,
+            "last_timestamp": event.last_timestamp.isoformat() if event.last_timestamp else None,
+        } for event in events.items[:32]])[:16384]
+    except Exception as diagnostic_error:
+        detail = type(diagnostic_error).__name__
+    error.add_note("Pod events: " + detail)
+    raise error from last_error
 
 
 def _pod_probe(core: object, namespace: str, name: str, url: str) -> str:
@@ -606,8 +910,31 @@ async def _wait_for_policy_programming(
             return
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise AssertionError(f"kube-router programming did not converge: {gaps}\nlast filter snapshot:\n{rules[-65536:]}")
+            error = AssertionError(f"kube-router programming did not converge: {gaps}\nlast filter snapshot:\n{rules[-65536:]}")
+            if gaps == ["FORWARD has no kube-router hook"]:
+                error.add_note(await asyncio.to_thread(_policy_controller_diagnostics, container))
+            raise error
         await asyncio.sleep(min(0.25, remaining))
+
+
+def _policy_controller_diagnostics(container: object) -> str:
+    """Bounded evidence for a missing hook: other iptables backend, controller log."""
+    notes = []
+    try:
+        legacy = container.exec(["iptables-legacy-save", "-t", "filter"])
+        text = legacy.output.decode("utf-8", errors="replace")
+        notes.append(f"legacy backend exit={legacy.exit_code} kube-router rules="
+                     f"{sum('KUBE-ROUTER' in line for line in text.splitlines())}")
+    except Exception as error:
+        notes.append(f"legacy backend unreadable: {type(error).__name__}")
+    try:
+        stdout, stderr = container.get_logs()
+        lines = [line for line in (stdout + stderr).decode("utf-8", errors="replace").splitlines()
+                 if any(marker in line.lower() for marker in ("netpol", "network policy", "kube-router", "iptables"))]
+        notes.append("k3s policy controller log:\n" + "\n".join(line[:512] for line in lines[-40:]))
+    except Exception as error:
+        notes.append(f"k3s log unreadable: {type(error).__name__}")
+    return "\n".join(notes)
 
 
 async def test_allowed_peer_waits_for_service_convergence(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -669,6 +996,23 @@ async def test_policy_readiness_failure_preserves_bounded_rules(exit_code: int) 
     with pytest.raises(AssertionError, match="tail-evidence") as error:
         await _wait_for_policy_programming(container, _EXPECTED_POLICY, timeout=0.01)
     assert len(str(error.value)) < 67000
+
+
+async def test_missing_forward_hook_reports_other_backend_and_controller_log() -> None:
+    def inspect(command):
+        if command == ["iptables-legacy-save", "-t", "filter"]:
+            return SimpleNamespace(exit_code=0, output=b"*filter\n:KUBE-ROUTER-FORWARD - [0:0]\n-A FORWARD -j KUBE-ROUTER-FORWARD\n")
+        assert command == ["iptables-save", "-t", "filter"]
+        return SimpleNamespace(exit_code=0, output=b"*filter\n:FORWARD ACCEPT [0:0]\nCOMMIT\n")
+
+    logs = (b"I1025 Starting network policy controller\nI1025 unrelated\n", b"E1025 netpol: sync failed\n")
+    container = SimpleNamespace(exec=inspect, get_logs=lambda: logs)
+    with pytest.raises(AssertionError, match="FORWARD has no kube-router hook") as error:
+        await _wait_for_policy_programming(container, _EXPECTED_POLICY, timeout=0.01)
+    note = "\n".join(error.value.__notes__)
+    assert "legacy backend exit=0 kube-router rules=2" in note
+    assert "Starting network policy controller" in note and "netpol: sync failed" in note
+    assert "unrelated" not in note
 
 
 async def test_actuator_api_converges_against_disposable_k3s() -> None:
@@ -760,7 +1104,9 @@ async def test_attempt_network_policy_allows_only_dns_and_gateway(built_images: 
     try:
         with tempfile.TemporaryDirectory(prefix="loom-network-k3s-") as temporary:
             root = Path(temporary)
-            container = await asyncio.to_thread(_start_k3s)
+            # Match the other disposable networking fixtures: a large host disk
+            # can have ample free space while breaching kubelet's percentage floor.
+            container = await asyncio.to_thread(_start_k3s, ephemeral_storage_floor="1Gi")
             _, core, _ = await asyncio.to_thread(_load_client, container)
             dns_pods = await _wait_for_dns_pods(core)
             await asyncio.to_thread(
@@ -991,6 +1337,29 @@ async def test_attempt_network_policy_allows_only_dns_and_gateway(built_images: 
             await asyncio.to_thread(container.stop)
 
 
+async def _runtime_pod_logs(core, namespace, pod_name, runtime_plan):
+    """Capture bounded fixture diagnostics before the disposable cluster exits."""
+    logs: dict[str, str] = {}
+    for container_name in (
+        "runtime-materializer",
+        *(item.role_name for item in runtime_plan.sidecars),
+        "execution",
+    ):
+        try:
+            logs[container_name] = await asyncio.to_thread(
+                core.read_namespaced_pod_log,
+                pod_name,
+                namespace,
+                container=container_name,
+                tail_lines=200,
+                limit_bytes=65536,
+                _request_timeout=5,
+            )
+        except Exception as exc:
+            logs[container_name] = f"unavailable: {exc}"
+    return logs
+
+
 @pytest.mark.timeout(360)
 @pytest.mark.parametrize("prepared_fixture,termination", [(False, None), (True, "deadline"), (True, "fixture_exit")],
                          ids=["trusted-sidecar", "prepared-fixture-deadline", "prepared-fixture-exit"])
@@ -1009,7 +1378,9 @@ async def test_runtime_executes_task_native_sidecar_and_verifier_without_docker_
                 _runtime_binary_digest, runtime_tag, root, platform
             )
             container = await asyncio.to_thread(_start_k3s)
-            client_module, core, batch = await asyncio.to_thread(_load_client, container)
+            client_module, core, batch = await asyncio.to_thread(
+                _load_client, container, required_addons=("dns",) if not prepared_fixture else ()
+            )
             runtime_image_ref = await asyncio.to_thread(
                 _import_image,
                 container,
@@ -1133,20 +1504,10 @@ async def test_runtime_executes_task_native_sidecar_and_verifier_without_docker_
                     if failed_pods.items:
                         failed_pod = failed_pods.items[0]
                         details = client.ApiClient().sanitize_for_serialization(failed_pod.status)
-                        for container_name in (
-                            "runtime-materializer",
-                            *(item.role_name for item in ExecutionRuntimePlanV1.model_validate(lease.runtime_contract_json).sidecars),
-                            "execution",
-                        ):
-                            try:
-                                logs[container_name] = await asyncio.to_thread(
-                                    core.read_namespaced_pod_log,
-                                    failed_pod.metadata.name,
-                                    namespace,
-                                    container=container_name,
-                                )
-                            except Exception as exc:
-                                logs[container_name] = f"unavailable: {exc}"
+                        logs = await _runtime_pod_logs(
+                            core, namespace, failed_pod.metadata.name,
+                            ExecutionRuntimePlanV1.model_validate(lease.runtime_contract_json),
+                        )
                     raise AssertionError(
                         f"runtime Job failed: {observation} pod={details} logs={logs}"
                     )
@@ -1192,8 +1553,12 @@ async def test_runtime_executes_task_native_sidecar_and_verifier_without_docker_
                     if current_pods.items
                     else None
                 )
+                logs = (await _runtime_pod_logs(
+                    core, namespace, current_pods.items[0].metadata.name,
+                    ExecutionRuntimePlanV1.model_validate(lease.runtime_contract_json),
+                )) if current_pods.items else {}
                 raise AssertionError(
-                    f"runtime Job did not succeed: observation={observation} pod={details}"
+                    f"runtime Job did not succeed: observation={observation} pod={details} logs={logs}"
                 )
 
             pods = await asyncio.to_thread(

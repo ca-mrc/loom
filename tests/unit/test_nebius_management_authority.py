@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_environment_contract import foundation_from, registration_for
 from tests.unit.test_nebius_management_render import management_inputs as management_inputs
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 INSTALLATION = "30000000-0000-4000-8000-000000000001"
 

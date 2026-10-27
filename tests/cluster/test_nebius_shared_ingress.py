@@ -24,8 +24,8 @@ from loom.nebius_environment_render import render_environment
 from loom.nebius_platform_render import _namespace, build_platform
 from loom.nebius_shared_ingress import SharedIngressInstallation, render_shared_ingress
 from tests.integration.test_execution_actuator_k3s import _load_client, _start_k3s
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_environment_contract import BOB, registration_for
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 from tests.unit.test_nebius_shared_ingress import ingress_input as ingress_input
 
 # Qualified upstream versions; production inputs require their native registry mirrors.
@@ -127,7 +127,10 @@ def _add_failure_diagnostics(container, namespace, error, *, core=None):
         ["docker", "top", ident, "-eo", "pid,ppid,stat,wchan:32,comm"],
         *[["docker", "exec", ident, *command] for command in (
             ["kubectl", "--request-timeout=3s", "get", "pods", "-A", "-o", "wide"],
-            ["kubectl", "--request-timeout=3s", "get", "events", "-A", "--field-selector", "type=Warning"],
+            ["kubectl", "--request-timeout=3s", "get", "events", "-A", "--sort-by=.metadata.creationTimestamp"],
+            ["tail", "-n", "200", "/var/lib/rancher/k3s/agent/containerd/containerd.log"],
+            ["crictl", "pods"],
+            ["crictl", "ps", "-a"],
             ["iptables-save", "-c", "-t", "filter"],
             ["kubectl", "--request-timeout=3s", "logs", "-n", namespace,
              "deployment/loom-shared-ingress", "--tail=60"],
@@ -138,7 +141,7 @@ def _add_failure_diagnostics(container, namespace, error, *, core=None):
     for command in commands:
         try:
             result = subprocess.run(command, text=True, capture_output=True, timeout=5)
-            detail = f"exit={result.returncode}\n{result.stdout}{result.stderr}"
+            detail = f"exit={result.returncode}\n{(result.stdout + result.stderr)[-16300:]}"
         except subprocess.TimeoutExpired as diagnostic_error:
             # communicate() carries bytes even with text=True on a timeout.
             output = diagnostic_error.output or b""
@@ -147,7 +150,7 @@ def _add_failure_diagnostics(container, namespace, error, *, core=None):
                 output = output.decode(errors="replace")
             if isinstance(stderr, bytes):
                 stderr = stderr.decode(errors="replace")
-            detail = f"TimeoutExpired\n{output}{stderr}"
+            detail = f"TimeoutExpired\n{(output + stderr)[-16300:]}"
         except Exception as diagnostic_error:
             detail = f"{type(diagnostic_error).__name__}: {diagnostic_error}"
         error.add_note(" ".join(command) + "\n" + detail[-16384:])
@@ -185,6 +188,12 @@ def test_failure_diagnostics_continue_after_error_and_bound_output(monkeypatch):
         assert 0 < kwargs["timeout"] <= 5
         if "iptables-save" in args:
             return subprocess.CompletedProcess(args, 1, "", "rules unavailable")
+        if "tail" in args:
+            return subprocess.CompletedProcess(args, 0, "RunPodSandbox returned sandbox-id", "")
+        if "crictl" in args:
+            return subprocess.CompletedProcess(args, 0, "runtime " + args[-1], "")
+        if "events" in args and "type=Warning" not in args:
+            return subprocess.CompletedProcess(args, 0, "Normal Pulling addon image", "")
         return subprocess.CompletedProcess(args, 0, "x" * 100000 + "useful tail", "")
 
     monkeypatch.setattr(subprocess, "run", command)
@@ -193,6 +202,11 @@ def test_failure_diagnostics_continue_after_error_and_bound_output(monkeypatch):
     assert any("rules unavailable" in note for note in error.__notes__)
     assert any("useful tail" in note for note in error.__notes__)
     assert all(len(note) < 17000 for note in error.__notes__)
+    assert all("\nexit=" in note for note in error.__notes__)
+    notes = "\n".join(error.__notes__)
+    assert "RunPodSandbox returned sandbox-id" in notes
+    assert "runtime pods" in notes and "runtime -a" in notes
+    assert "Normal Pulling addon image" in notes
 
 
 @pytest.mark.parametrize("pods_unavailable", [False, True])

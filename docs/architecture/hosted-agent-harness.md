@@ -239,6 +239,13 @@ phase. Egress is enforced twice:
 
 A failed install is classified `setup_error`, not an agent failure.
 
+Harness installation runs only in the agent execution. A deferred verifier
+grades the committed workspace in its fresh `verifier-sandbox`; its plan does
+not inherit the agent's setup command, install egress or install-cache binding.
+It does not need the agent CLI, and has no `task-sandbox` socket for that
+installation. The task's verifier dependencies and declared task network policy
+remain unchanged.
+
 ### Install cache
 
 A `HarnessSetup` that declares `install_root` (a dedicated absolute directory
@@ -353,9 +360,9 @@ Revocation is the end of the agent phase. The token also expires with the
 lease deadline and is never present in the sandbox.
 
 **The model is bound to the Trial.** A native Trial admits its `agent_model`.
-Terminus-2 `student_teacher_student` also admits the materialized teacher when
-the runtime profile enables that policy; `beta_mixture`,
-`student_to_teacher_turns`, and other agents remain rejected. On every model
+An enabled Terminus-2 student/teacher policy also admits the materialized
+teacher when the runtime profile lists that policy. Other agents remain
+rejected. On every model
 route the broker can reach (OpenAI chat and Responses, Anthropic messages,
 Gemini, each in facade and plain form), the Gateway's `authorize_trial_model`
 compares the requested model, and the provider that route records, with that
@@ -396,8 +403,9 @@ verification (`verifier_env_mode`, or `skip_verifier` when the axis is
 returns every reason, so a rejected batch lists all conflicts per task in one
 400 instead of failing on the first. Input `verification` is `shared`,
 `separate`, or `skipped` (#2529). `--skip-verifier` is retired; skip is that
-third value. Hosted admission still rejects `skip_verifier`
-(`verifier_mode_required`). Local workers omit the grader and persist
+third value. Hosted Nebius admits that boolean for trajectory generation and
+compiles an attempt with the agent sandbox only: `verifier_execution=skipped`
+and no verifier phase. Local workers omit the grader and persist
 `skip_verifier`, which export and archive already honor.
 
 `loom.execution-selection.v1` (`docs/evidence/loom.execution-selection.v1.schema.json`)
@@ -408,6 +416,10 @@ runs the same admission and reports each task's resolved axes without writing.
 Trial and batch detail return `execution_selection` with the requested axes and
 the effective class, verification, isolation and `fresh_sandbox_grading` read
 from each frozen attempt plan; it is `null`/empty until a plan is compiled.
+`verifier_execution=in_attempt` means the grader stayed in the agent pod.
+Shared grading is the plan that sets `in_place_verifier`. A fresh verifier
+sandbox in that same pod, including guest separate, is reported as
+`verification=separate` with `fresh_sandbox_grading` set.
 
 ## Verification is harness-independent
 
@@ -421,8 +433,10 @@ separate grader.
 `trial.skip_verifier` and leaves `verifier_env_mode` unset. The local
 harness omits the grader. Succeeded trials may have a null reward;
 export, tbv2, and terminal-result checks accept that only when
-`skip_verifier` is exactly `true`. Hosted Nebius still rejects this
-selection (`verifier_mode_required`).
+`skip_verifier` is exactly `true`. Hosted trajectory generation uses the same
+boolean: the attempt has one agent sandbox and does not grade. Evaluation
+still rejects skip. A graded shared or separate trial still needs its verifier
+artifacts.
 
 ### Shared
 

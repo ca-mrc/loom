@@ -54,13 +54,27 @@ def _receipts(postgres_url: str, trial_id: UUID) -> list[dict[str, object]]:
 
 async def _terminal_receipts(postgres_url: str, trial_id: UUID) -> list[dict[str, object]]:
     # HTTP body delivery and the middleware's bounded audit commit are
-    # independent observations; wait explicitly rather than racing the DB.
+    # independent observations. The synchronous reader must run off the
+    # servers' event loop so it cannot starve the audit commit's own budget.
     for _ in range(100):
-        rows = _receipts(postgres_url, trial_id)
+        reader = asyncio.create_task(asyncio.to_thread(_receipts, postgres_url, trial_id))
+        try:
+            rows = await asyncio.shield(reader)
+        except asyncio.CancelledError:
+            # Cancelling a thread await does not stop its database query.
+            # Drain it before fixture teardown, preserving cancellation even
+            # if the reader fails or the caller cancels again while draining.
+            drained = asyncio.gather(reader, return_exceptions=True)
+            while not drained.done():
+                try:
+                    await asyncio.shield(drained)
+                except asyncio.CancelledError:
+                    pass
+            raise
         if rows and all(row["gateway_outcome"] != "pending" for row in rows):
             return rows
         await asyncio.sleep(0.02)
-    raise AssertionError("Gateway audit did not terminalize within two seconds")
+    raise AssertionError("Gateway audit did not terminalize after 100 receipt checks")
 
 
 @pytest.mark.parametrize(

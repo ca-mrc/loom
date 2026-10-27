@@ -11,7 +11,7 @@ import copy
 import hashlib
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
@@ -20,9 +20,9 @@ from scripts.ops.nebius_development_activation import (
     DevelopmentActivationPlan,
     prepare_development_activation,
 )
-from scripts.ops.nebius_development_pool_registration import retained_development_participant
 from scripts.ops.nebius_development_runtime_install import DevelopmentRuntimeInstallRequest
 from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
+from scripts.ops.nebius_management_refresh_predecessor import CompletedRefresh, CompletedUpgrade
 from scripts.ops.nebius_pool_material import machine_documents
 from scripts.ops.nebius_pool_migration import (
     PoolGuardTarget,
@@ -41,9 +41,32 @@ from loom.nebius_platform_render import digest
 from loom_service.environment_management.candidates import ProtectedPublication
 from loom_service.pool_management.installation import PoolInstallation
 
+if TYPE_CHECKING:
+    from scripts.ops.nebius_development_schema_upgrade import CompletedDevelopmentSchemaSuccessor
+    from scripts.ops.nebius_pool_preactivation_operation import CompletedPreactivationCatalog
+    from scripts.ops.nebius_pool_storage_operation import CompletedClosedStorage
+
 MARKER = 'loom.nebius/shared-pool-handoff-operation'
 _LEGACY_MARKERS = {'loom.nebius/pool-retirement-operation', 'loom.nebius/pool-cutover-operation',
     'loom.nebius/pool-startup-operation'}
+
+
+def retired_manager_revision(legacy: CompletedPoolCutover) -> str:
+    """Select the completed migration, not a guessed current database revision.
+
+    Callers qualify this completion chain before and after observing its old
+    manager. A completed refresh pins its target schema. Initial upgrades retain
+    the existing exact-0176 observation contract; this is no version fallback or
+    authority to start/migrate a historical manager.
+    """
+    if legacy.completion.outcome != 'legacy':
+        raise ValueError('historical manager requires completed legacy outcome')
+    predecessor = legacy.context.predecessor
+    if isinstance(predecessor, CompletedRefresh):
+        return predecessor.resources.target_manager_revision
+    if isinstance(predecessor, CompletedUpgrade):
+        return '0176'
+    raise ValueError('historical manager predecessor unqualified')
 
 
 class StagingPoolSource(BaseModel):
@@ -78,6 +101,20 @@ class SharedPoolHandoffPlan:
     staging_reader_authority: dict[str, dict[str, Any]]
     history: dict[Path, str]
     input_digest: str
+    preactivation: CompletedPreactivationCatalog | None = None
+    storage: CompletedClosedStorage | None = None
+
+    @property
+    def effective_runtime_resources(self) -> dict[str, dict[str, Any]]:
+        """Current catalog/manager overlay; original installation stays intact."""
+        resources = copy.deepcopy(self.development.selection.resources)
+        if self.storage is not None and self.development.schema_successor is None:
+            for row in (self.storage.resources.configuration, self.storage.resources.collector):
+                resources[_key(row)] = copy.deepcopy(row)
+        if self.preactivation is not None:
+            for row in (self.preactivation.resources.manager, self.preactivation.resources.catalog):
+                resources[_key(row)] = copy.deepcopy(row)
+        return resources
 
 
 def prepare_staging_forward(*, registration: PoolRegistrationRequest, observation: dict[str, Any],
@@ -196,7 +233,10 @@ def prepare_staging_forward(*, registration: PoolRegistrationRequest, observatio
 
 
 def prepare_shared_pool_handoff(*, runtime: DevelopmentRuntimeInstallRequest,
-        observation: dict[str, Any], legacy: CompletedPoolCutover, repo_root: Path) -> SharedPoolHandoffPlan:
+        observation: dict[str, Any], legacy: CompletedPoolCutover, repo_root: Path,
+        preactivation: CompletedPreactivationCatalog | None = None,
+        schema_successor: CompletedDevelopmentSchemaSuccessor | None = None,
+        storage: CompletedClosedStorage | None = None) -> SharedPoolHandoffPlan:
     """Compose completed CLOSED dev and current staging without replaying either.
 
     The complete migration contract is used only for fixed staging projection.
@@ -205,20 +245,34 @@ def prepare_shared_pool_handoff(*, runtime: DevelopmentRuntimeInstallRequest,
     The protected parent still owns live sole-writer and provider qualification.
     """
     try:
-        development = prepare_development_activation(runtime)
+        from scripts.ops.nebius_pool_storage_operation import resolve_runtime_storage
+
+        development = prepare_development_activation(runtime, schema_successor=schema_successor)
         completed = development.runtime
         database = completed.request.database
-        pool = database.manager.retained.request
-        registration = pool.registration
-        participant = retained_development_participant(pool)
+        registration = development.selection.registration
+        storage = resolve_runtime_storage(runtime=runtime, preactivation=preactivation,
+            schema_successor=schema_successor, storage=storage)
+        if storage is not None and schema_successor is None:
+            registration = storage.retained.registration
+        if preactivation is not None:
+            from scripts.ops.nebius_pool_preactivation_operation import load_completed_preactivation
+
+            selected = load_completed_preactivation(runtime=preactivation.retained.inputs.runtime,
+                reference=preactivation.retained.reference, repo_root=repo_root)
+            if (selected != preactivation or selected.retained.runtime != runtime
+                    or selected.retained.inputs.schema_successor != (None if schema_successor is None else schema_successor.reference)):
+                raise ValueError
+            registration = selected.retained.registration
+        participant = development.selection.participant
         # The completed dev runtime retains its own verified registration source.
         # Staging can independently retain a different approved publication.
-        if (database.manager.publication.bundle.candidate != registration.candidate
+        if (development.selection.manager_publication.bundle.candidate != registration.candidate
                 or len(registration.spec.participants) != 2):
             raise ValueError
         staging = prepare_staging_forward(registration=registration, observation=observation,
             legacy=legacy, repo_root=repo_root)
-        controller = completed.resources['Deployment:loom-dev:loom-control-plane']
+        controller = development.selection.resources['Deployment:loom-dev:loom-control-plane']
         dev_guard = PoolGuardTarget(participant_id=participant.participant_id, namespace='loom-dev',
             namespace_uid=UUID(database.foundation.binding.namespace_uid), controller=copy.deepcopy(controller))
         migration = PoolMigrationRequest(registration=registration, guards=(dev_guard, staging.attachment.guard))
@@ -280,7 +334,18 @@ def prepare_shared_pool_handoff(*, runtime: DevelopmentRuntimeInstallRequest,
         if len(originals) != 2 or len(readers) != 2:
             raise ValueError
         history = dict(legacy.history)
-        for path, raw in completed.files.items():
+        catalog_files = {} if schema_successor is None else dict(schema_successor.files)
+        if preactivation is not None:
+            if any(path in catalog_files and catalog_files[path] != raw for path, raw in preactivation.files.items()):
+                raise ValueError
+            catalog_files.update(preactivation.files)
+        if storage is not None:
+            if any(path in catalog_files and catalog_files[path] != raw for path, raw in storage.files.items()):
+                raise ValueError
+            catalog_files = {**storage.files, **catalog_files}
+        if any(path in completed.files and completed.files[path] != raw for path, raw in catalog_files.items()):
+            raise ValueError
+        for path, raw in {**completed.files, **catalog_files}.items():
             checksum = hashlib.sha256(raw).hexdigest()
             if path in history and history[path] != checksum:
                 raise ValueError
@@ -294,6 +359,6 @@ def prepare_shared_pool_handoff(*, runtime: DevelopmentRuntimeInstallRequest,
             'staging_reader_authority': readers,
             'history': {str(path): value for path, value in history.items()}})
         return SharedPoolHandoffPlan(development, staging, migration, targets, material, originals, role_targets,
-            readers, history, checksum)
+            readers, history, checksum, preactivation, storage)
     except Exception:
         raise ValueError('shared pool handoff intent unqualified') from None

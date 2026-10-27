@@ -13,7 +13,6 @@ import httpx
 import pytest
 from scripts.ops.nebius_ingress_stage import _key
 from scripts.ops.nebius_pool_participant_operation import retain_participant_rollout
-from tests.ops.test_nebius_management_stage import PhaseAPI
 from tests.ops.test_nebius_pool_participant_catalog import live_children
 from tests.ops.test_nebius_pool_participant_creation import terminal_pod
 from tests.ops.test_nebius_pool_participant_operation import catalog_inputs as catalog_inputs
@@ -24,6 +23,7 @@ from tests.ops.test_nebius_pool_participant_operation import release_inputs as r
 from tests.ops.test_nebius_pool_participant_operation import (
     staging_attachment_inputs as staging_attachment_inputs,
 )
+from tests.support.nebius_phase_api import PhaseAPI as PhaseAPI
 
 from loom_service.pool_management.capacity import digest
 

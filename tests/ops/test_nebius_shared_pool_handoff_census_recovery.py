@@ -150,13 +150,15 @@ from tests.ops.test_nebius_shared_pool_handoff_census import (
 )
 
 
-# The full recovery matrix reached terminal verification at 900s in CI.
-# Keep every phase/fault assertion; this case has its own shard placement.
+# Recovery keeps its own complete module so it can run on a separate shard.
+# Keep every phase/fault assertion and the existing 1500s whole-test bound.
 @pytest.mark.timeout(1500)
-@pytest.mark.parametrize('forward_census', ['recovery'])
+@pytest.mark.parametrize('forward_census,staging_observation', [
+    ('recovery', None)],
+    indirect=['staging_observation'], ids=['recovery'])
 def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writers(
         shared_runtime, staging_history, staging_observation, completed_pool, handoff, shared_operation, forward_census,
-        publisher_cloud):
+        publisher_cloud, tmp_path):
     """Run the unchanged recovery scenario with its independent fixture graph."""
     _exercise_scenario(shared_runtime, staging_history, staging_observation, completed_pool, handoff, shared_operation, forward_census,
-        publisher_cloud)
+        publisher_cloud, tmp_path)

@@ -29,7 +29,7 @@ def case(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     now = datetime.now(UTC)
     task_config = _task(agent={"name": "terminus-2", "version": "2.0.0"})
     trial_config = _trial().model_copy(update={"agent_name": "terminus-2"})
-    trial = SimpleNamespace(id=trial_id, team_id=team_id, task_id="task-1", state="succeeded",
+    trial = SimpleNamespace(id=trial_id, team_id=team_id, batch_id=None, task_id="task-1", state="succeeded",
                             attempt_count=1, config=trial_config.model_dump(mode="json"),
                             trajectory_index={"trajectory_uri": "s3://trajectories/old/events.jsonl",
                                               "atif_uri": "s3://trajectories/old/atif.json"},

@@ -127,6 +127,9 @@ GITHUB_HOSTED_CONTROL_JOBS = {
         "fast-coverage",
         "coverage-summary",
         "repository-checks",
+        "images-gate",
+        "cluster-smoke-gate",
+        "staging-smoke-gate",
     },
     ".github/workflows/images.yml": {"plan", "images-gate"},
     ".github/workflows/cluster-smoke.yml": {"plan", "cluster-smoke-gate"},
@@ -204,8 +207,10 @@ def test_source_workflows_share_native_run_identity() -> None:
         "labeled",
         "unlabeled",
     }
-    for workflow in workflows.values():
-        assert set(_workflow_on(workflow)["pull_request"]["types"]) == expected_pr_types
+    assert set(_workflow_on(workflows[".github/workflows/ci.yml"])["pull_request"]["types"]) == expected_pr_types
+    for path, workflow in workflows.items():
+        if path != ".github/workflows/ci.yml":
+            assert set(_workflow_on(workflow)) == {"workflow_call", "workflow_dispatch"}
 
 
 def test_source_workflows_have_no_publisher_generation_contract() -> None:
@@ -221,8 +226,15 @@ def test_source_workflows_have_no_publisher_generation_contract() -> None:
         assert "authoritative-gates.yml" not in plan_step["run"]
 
 
-def test_only_draft_events_finish_before_checkout_or_gate() -> None:
-    for workflow_path, (plan_job_id, plan_step_id) in SOURCE_PLAN_CONTRACTS.items():
+CALLED_PLAN_CONTRACTS = {
+    path: contract
+    for path, contract in SOURCE_PLAN_CONTRACTS.items()
+    if path != ".github/workflows/ci.yml"
+}
+
+
+def test_called_workflows_filter_only_draft_payloads_ci_did_not_upgrade() -> None:
+    for workflow_path, (plan_job_id, plan_step_id) in CALLED_PLAN_CONTRACTS.items():
         workflow = _workflow(workflow_path)
         jobs = workflow["jobs"]
         plan_job = jobs[plan_job_id]
@@ -237,10 +249,8 @@ def test_only_draft_events_finish_before_checkout_or_gate() -> None:
 
         assert event_step["id"] == "event"
         filtered_event = _normalized_expression(event_step["env"]["FILTERED_EVENT"])
-        assert "github.event.pull_request.draft" in filtered_event
-        assert "github.event.action == 'converted_to_draft'" in filtered_event
         assert filtered_event == (
-            "${{ github.event_name == 'pull_request' && "
+            "${{ github.event_name == 'pull_request' && !inputs.stale_draft && "
             "(github.event.pull_request.draft || "
             "github.event.action == 'converted_to_draft') }}"
         )
@@ -251,9 +261,55 @@ def test_only_draft_events_finish_before_checkout_or_gate() -> None:
         assert "needs." in jobs[gate_id]["if"]
         assert "outputs.gate_mode != 'filtered'" in jobs[gate_id]["if"]
 
+        stale_input = _workflow_on(workflow)["workflow_call"]["inputs"]["stale_draft"]
+        assert stale_input["type"] == "boolean"
+        assert stale_input["default"] is False
+        planner = next(step for step in plan_job["steps"] if "plan_ci_validations.py" in step.get("run", ""))
+        assert planner["env"]["PR_STALE_DRAFT"] == "${{ inputs.stale_draft == true }}"
+        assert '--pull-request-stale-draft "${PR_STALE_DRAFT:-false}"' in planner["run"]
+
+
+def test_ci_rechecks_draft_payloads_against_the_live_pull_request() -> None:
+    workflow = _workflow(".github/workflows/ci.yml")
+    jobs = workflow["jobs"]
+    plan_job = jobs["workflow-plan"]
+    steps = plan_job["steps"]
+    ids = [step.get("id") or step.get("uses", "").split("@")[0] for step in steps]
+    assert ids[:4] == ["event", "actions/checkout", "stale", "filtered"]
+
+    event, _checkout, stale, filtered = steps[:4]
+    assert _normalized_expression(event["env"]["FILTERED_EVENT"]) == (
+        "${{ github.event_name == 'pull_request' && "
+        "(github.event.pull_request.draft || "
+        "github.event.action == 'converted_to_draft') }}"
+    )
+    assert "gate_mode" not in event["run"]
+    assert stale["if"] == "steps.event.outputs.draft_payload == 'true'"
+    assert stale["run"] == "python3 scripts/ci_stale_draft_event.py"
+    assert stale["env"]["GH_TOKEN"] == "${{ github.token }}"
+    assert stale["env"]["HEAD_SHA"] == "${{ github.event.pull_request.head.sha }}"
+    assert _normalized_expression(filtered["if"]) == (
+        "steps.event.outputs.draft_payload == 'true' && "
+        "steps.stale.outputs.stale_draft != 'true'"
+    )
+    assert "gate_mode=filtered" in filtered["run"]
+    planner = next(step for step in steps if step.get("id") == "plan")
+    assert planner["if"] == "steps.filtered.outcome == 'skipped'"
+    assert planner["env"]["PR_STALE_DRAFT"] == "${{ steps.stale.outputs.stale_draft == 'true' }}"
+    assert '--pull-request-stale-draft "${PR_STALE_DRAFT:-false}"' in planner["run"]
+    assert plan_job["outputs"]["stale_draft"] == "${{ steps.stale.outputs.stale_draft || 'false' }}"
+    assert plan_job["permissions"] == {"contents": "read", "pull-requests": "read", "actions": "read"}
+
+    for caller in ("images-validation", "cluster-validation", "staging-validation"):
+        assert jobs[caller]["with"] == {
+            "stale_draft": "${{ needs.workflow-plan.outputs.stale_draft == 'true' }}",
+        }
+    for gate_id in ("repository-checks", "images-gate", "cluster-smoke-gate", "staging-smoke-gate"):
+        assert "outputs.gate_mode != 'filtered'" in jobs[gate_id]["if"]
+
 
 def test_draft_classifier_emits_no_checkout_contract(tmp_path: Path) -> None:
-    for workflow_path, (plan_job_id, _plan_step_id) in SOURCE_PLAN_CONTRACTS.items():
+    for workflow_path, (plan_job_id, _plan_step_id) in CALLED_PLAN_CONTRACTS.items():
         event_step = _workflow(workflow_path)["jobs"][plan_job_id]["steps"][0]
         github_output = tmp_path / (Path(workflow_path).stem + "-output.txt")
         result = subprocess.run(
@@ -276,40 +332,63 @@ def test_draft_classifier_emits_no_checkout_contract(tmp_path: Path) -> None:
         assert "publisher_active" not in outputs
 
 
-def test_source_gate_names_are_native_and_stable() -> None:
-    for workflow_path, (gate_id, protected_name) in GATE_CONTRACTS.items():
-        workflow = _workflow(workflow_path)
-        plan_job_id, _ = SOURCE_PLAN_CONTRACTS[workflow_path]
-        plan_ref = f"needs.{plan_job_id}.outputs"
-        expression = _normalized_expression(workflow["jobs"][gate_id]["name"])
-        trusted_recovery = ""
-        if workflow_path == ".github/workflows/ci.yml":
-            trusted_recovery = "github.event_name == 'schedule' && 'repository-checks-scheduled' || "
+def test_ci_filter_step_emits_the_filtered_contract(tmp_path: Path) -> None:
+    filtered = next(
+        step for step in _workflow(".github/workflows/ci.yml")["jobs"]["workflow-plan"]["steps"]
+        if step.get("id") == "filtered"
+    )
+    github_output = tmp_path / "output.txt"
+    result = subprocess.run(
+        ["bash"], input=filtered["run"], text=True, capture_output=True,
+        env={**os.environ, "GITHUB_OUTPUT": str(github_output)}, check=False,
+    )
 
-        push_name = (
-            f"github.event_name == 'push' && '{protected_name}-push' || "
-            if workflow_path != ".github/workflows/images.yml" else ""
-        )
-        assert expression == _normalized_expression(
-            "${{ "
-            f"{trusted_recovery}"
-            f"github.event_name == 'workflow_dispatch' && '{protected_name}-manual' || "
-            f"{push_name}"
-            f"{plan_ref}.gate_mode == 'full' && '{protected_name}' || "
-            f"'{protected_name}-filtered' "
-            "}}"
-        )
-        assert "publisher_active" not in expression
-        assert f"{protected_name}-attempt" not in expression
+    assert result.returncode == 0, result.stderr
+    outputs = dict(line.split("=", 1) for line in github_output.read_text(encoding="utf-8").splitlines())
+    assert outputs["gate_mode"] == "filtered"
+    assert outputs["full_gate"] == "false"
+    assert {key for key, value in outputs.items() if value == "true"} == {"docs_only"}
+
+
+def test_source_gate_names_are_native_and_stable() -> None:
+    jobs = _workflow(".github/workflows/ci.yml")["jobs"]
+    expression = _normalized_expression(jobs["repository-checks"]["name"])
+    assert expression == _normalized_expression(
+        "${{ github.event_name == 'schedule' && 'repository-checks-scheduled' || "
+        "github.event_name == 'workflow_dispatch' && 'repository-checks-manual' || "
+        "github.event_name == 'push' && 'repository-checks-push' || "
+        "needs.workflow-plan.outputs.gate_mode == 'full' && 'repository-checks' || "
+        "'repository-checks-filtered' }}"
+    )
+    for path, (gate_id, protected_name) in GATE_CONTRACTS.items():
+        assert gate_id in jobs
+        if gate_id != "repository-checks":
+            assert _normalized_expression(jobs[gate_id]["name"]) == _normalized_expression(
+                "${{ "
+                f"github.event_name == 'schedule' && '{protected_name}-scheduled' || "
+                f"github.event_name == 'workflow_dispatch' && '{protected_name}-manual' || "
+                f"github.event_name == 'push' && '{protected_name}-push' || "
+                f"needs.workflow-plan.outputs.gate_mode == 'full' && '{protected_name}' || "
+                f"'{protected_name}-filtered' "
+                "}}"
+            )
+            assert _workflow(path)["jobs"][gate_id]["name"] == (
+                protected_name.removesuffix("-gate") + " result"
+            )
+        assert "publisher_active" not in str(jobs[gate_id])
+        assert f"{protected_name}-attempt" not in str(jobs[gate_id])
 
 
 def test_push_aggregates_cannot_duplicate_protected_names_on_promotion_heads() -> None:
-    for workflow_path, (gate_id, protected_name) in GATE_CONTRACTS.items():
-        workflow = _workflow(workflow_path)
-        if "push" not in _workflow_on(workflow):
-            continue
-        expression = _normalized_expression(workflow["jobs"][gate_id]["name"])
-        assert f"github.event_name == 'push' && '{protected_name}-push'" in expression
+    jobs = _workflow(".github/workflows/ci.yml")["jobs"]
+    assert "github.event_name == 'push' && 'repository-checks-push'" in (
+        _normalized_expression(jobs["repository-checks"]["name"])
+    )
+    for gate_id in ("images-gate", "cluster-smoke-gate", "staging-smoke-gate"):
+        condition = jobs[gate_id]["if"]
+        assert "github.event_name == 'pull_request'" in condition
+        assert "github.event_name == 'merge_group'" in condition
+        assert "github.event_name == 'push'" not in condition
 
 
 def test_no_workflow_can_write_custom_authoritative_states() -> None:
@@ -680,35 +759,35 @@ def test_stable_gate_scripts_have_valid_bash_syntax() -> None:
 
 
 def test_protected_workflows_cover_gate_authority_pr_transitions() -> None:
-    for workflow_path in GATE_CONTRACTS:
-        workflow = _workflow(workflow_path)
-        pull_request = _workflow_on(workflow)["pull_request"]
-
-        assert {
-            "opened",
-            "synchronize",
-            "reopened",
-            "ready_for_review",
-            "converted_to_draft",
-            "labeled",
-            "unlabeled",
-        } <= set(pull_request["types"]), workflow_path
-        # Title/description edits leave the head unchanged. Any run they start
-        # cancels the head's in-progress gate cycle, and a base retarget is
-        # revalidated against the real base by the merge-group run.
-        assert "edited" not in pull_request["types"], workflow_path
+    workflow = _workflow(".github/workflows/ci.yml")
+    pull_request = _workflow_on(workflow)["pull_request"]
+    assert {
+        "opened", "synchronize", "reopened", "ready_for_review",
+        "converted_to_draft", "labeled", "unlabeled",
+    } <= set(pull_request["types"])
+    # Metadata edits cannot restart or cancel admission on an unchanged head.
+    # The merge-group event owns validation against its actual combined base.
+    assert "edited" not in pull_request["types"]
+    assert "paths" not in pull_request
+    assert "checks_requested" in _workflow_on(workflow)["merge_group"]["types"]
 
 
-def test_manual_and_filtered_contexts_have_distinct_event_specific_names() -> None:
-    for workflow_path, (gate_id, protected_name) in GATE_CONTRACTS.items():
-        workflow = _workflow(workflow_path)
-        gate_name = workflow["jobs"][gate_id]["name"]
-
-        assert f"'{protected_name}-manual'" in gate_name
-        assert f"'{protected_name}'" in gate_name
-        assert f"'{protected_name}-filtered'" in gate_name
-        assert "preflight" not in gate_name
-        assert "invalidate" not in gate_name
+def test_manual_and_filtered_contexts_cannot_duplicate_protected_names() -> None:
+    jobs = _workflow(".github/workflows/ci.yml")["jobs"]
+    repository_name = jobs["repository-checks"]["name"]
+    assert "'repository-checks-manual'" in repository_name
+    assert "'repository-checks-filtered'" in repository_name
+    for path, (gate_id, protected_name) in GATE_CONTRACTS.items():
+        if gate_id == "repository-checks":
+            continue
+        gate = jobs[gate_id]
+        assert "outputs.gate_mode != 'filtered'" in gate["if"]
+        assert "github.event_name == 'pull_request'" in gate["if"]
+        assert "github.event_name == 'merge_group'" in gate["if"]
+        assert "workflow_dispatch" not in gate["if"]
+        internal_name = _workflow(path)["jobs"][gate_id]["name"]
+        assert protected_name not in internal_name
+        assert internal_name.endswith(" result")
 
 
 @pytest.mark.parametrize("required", ["", "invalid"])
@@ -856,12 +935,13 @@ REPOSITORY_SELECTED_RESULTS = {
     "DOCKER_SELECTED": "DOCKER_RESULT",
     "COVERAGE_SELECTED": "COVERAGE_RESULT",
     "WEB_SELECTED": "WEB_RESULT",
+    "WEB_RUNTIME_SELECTED": "WEB_RUNTIME_RESULT",
 }
 
 
 def _repository_result_environment(**overrides: str) -> dict[str, str]:
     env = {"PLAN_RESULT": "success", "GATE_MODE": "full", "DOCS_ONLY": "false",
-           "FAST_COVERAGE_RESULT": "skipped"}
+           "FAST_COVERAGE_RESULT": "skipped", "FEEDBACK_RESULT": "success"}
     for selected, result in REPOSITORY_SELECTED_RESULTS.items():
         env[selected], env[result] = "false", "skipped"
     return {**env, **overrides}
@@ -895,7 +975,7 @@ def test_repository_checks_preserves_result_semantics(selected: str, validation_
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.parametrize("source", [*REPOSITORY_SELECTED_RESULTS, "FAST_COVERAGE_RESULT", "PLAN_RESULT"])
+@pytest.mark.parametrize("source", [*REPOSITORY_SELECTED_RESULTS, "FAST_COVERAGE_RESULT", "PLAN_RESULT", "FEEDBACK_RESULT"])
 @pytest.mark.parametrize("failed_result", ["failure", "cancelled", "skipped"])
 def test_repository_checks_rejects_each_missing_or_failed_selected_source(source: str, failed_result: str) -> None:
     if source in REPOSITORY_SELECTED_RESULTS:
@@ -908,11 +988,11 @@ def test_repository_checks_rejects_each_missing_or_failed_selected_source(source
     assert result.returncode != 0, (source, failed_result, result.stdout)
 
 
-def test_optional_validation_workflows_have_stable_gate_contexts() -> None:
+def test_reusable_validation_workflows_keep_internal_result_enforcement() -> None:
     contracts = {
         ".github/workflows/images.yml": (
             "images-gate",
-            "images-gate",
+            "images result",
             {
                 "build": "BUILD_RESULT",
                 "nebius-harness-build": "HARNESS_BUILD_RESULT",
@@ -920,12 +1000,12 @@ def test_optional_validation_workflows_have_stable_gate_contexts() -> None:
         ),
         ".github/workflows/cluster-smoke.yml": (
             "cluster-smoke-gate",
-            "cluster-smoke-gate",
+            "cluster-smoke result",
             {"cluster-contract": "CONTRACT_RESULT"},
         ),
         ".github/workflows/staging-smoke.yml": (
             "staging-smoke-gate",
-            "staging-smoke-gate",
+            "staging-smoke result",
             {"system-smoke": "SYSTEM_SMOKE_RESULT"},
         ),
     }
@@ -935,8 +1015,8 @@ def test_optional_validation_workflows_have_stable_gate_contexts() -> None:
         on_config = _workflow_on(workflow)
         jobs = workflow["jobs"]
 
-        assert "merge_group" in on_config
-        assert "paths" not in on_config["pull_request"]
+        assert set(on_config) == {"workflow_call", "workflow_dispatch"}
+        assert "concurrency" not in workflow
         assert "plan" in jobs
         assert "always()" in jobs[gate_id]["if"]
         assert gate_name in jobs[gate_id]["name"]
@@ -967,15 +1047,19 @@ def test_optional_validation_workflows_have_stable_gate_contexts() -> None:
             assert f'"${result_env}"' in gate_script
 
 
-def test_repository_checks_context_is_parallel_aggregator() -> None:
+def test_repository_checks_keeps_four_gate_contract_with_staged_execution() -> None:
     workflow = _workflow(".github/workflows/ci.yml")
     jobs = workflow["jobs"]
 
     assert "fast-checks" not in jobs
     assert set(jobs["fast-coverage"]["needs"]) == {"workflow-plan", "tests-root", "tests-packages"}
     assert "coverage_summary == 'true'" in jobs["fast-coverage"]["if"]
-    assert set(jobs["integration"]["needs"]) == {"workflow-plan"}
-    assert set(jobs["integration-docker"]["needs"]) == {"workflow-plan"}
+    quick = {"workflow-plan", "lint-and-static", "locked-environments", "tests-packages", "go-checks", "nebius-iac"}
+    assert set(jobs["integration"]["needs"]) == quick
+    assert set(jobs["tests-root"]["needs"]) == quick
+    for job in ("integration-docker", "nebius-pool", "runtime-payload", "web-runtime"):
+        assert set(jobs[job]["needs"]) == {"workflow-plan", "fast-feedback"}
+    assert set(jobs["fast-feedback"]["needs"]) == quick | {"tests-root", "integration", "web-checks"}
     assert "go_checks == 'true'" in jobs["go-checks"]["if"]
     assert "gate_mode == 'full'" in jobs["integration"]["if"]
     assert "gate_mode == 'full'" in jobs["integration-docker"]["if"]
@@ -983,14 +1067,14 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
     assert set(jobs["repository-checks"]["needs"]) == {
         "workflow-plan", "locked-environments", "lint-and-static", "runtime-payload", "nebius-iac",
         "tests-root", "nebius-pool", "tests-packages", "fast-coverage", "go-checks", "integration",
-        "integration-docker", "coverage-summary", "web-checks",
+        "integration-docker", "coverage-summary", "web-checks", "web-runtime", "fast-feedback",
     }
     assert "always()" in jobs["repository-checks"]["if"]
     for job_name in (
         "lint-and-static",
-        "tests-root",
         "tests-packages",
-        "runtime-payload",
+        "go-checks",
+        "nebius-iac",
     ):
         assert set(jobs[job_name]["needs"]) == {"workflow-plan"}
     assert "gate_mode == 'full'" in jobs["runtime-payload"]["if"]
@@ -1046,8 +1130,11 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
     assert "npm run lint" in web_script
     assert "vitest run --coverage" in web_script
     assert "npm run test:coverage" in web_script
-    assert "npm run build" in web_script
-    assert "npm run test:e2e" in web_script
+    runtime_script = "\n".join(step.get("run", "") for step in jobs["web-runtime"]["steps"])
+    assert "npm run build" in runtime_script
+    assert "npm run test:e2e" in runtime_script
+    assert "npm run build" not in web_script
+    assert "npm run test:e2e" not in web_script
 
 
 @pytest.mark.parametrize("lane,output", [
@@ -1107,40 +1194,33 @@ def test_ci_planner_uses_merge_base_for_pr_changed_paths_only() -> None:
 
 
 def test_protected_workflows_cancel_only_authoritative_pr_runs() -> None:
-    normalized_cancellations = set()
-    for workflow_path in GATE_CONTRACTS:
-        workflow = _workflow(workflow_path)
-        cancel = _normalized_expression(workflow["concurrency"]["cancel-in-progress"])
-        normalized_cancellations.add(cancel)
-
-        assert "github.event_name == 'pull_request'" in cancel
-        assert "github.event.pull_request.draft" in cancel
-        assert "github.event.action == 'converted_to_draft'" in cancel
-        assert cancel == (
-            "${{ github.event_name == 'pull_request' && "
-            "!(github.event.pull_request.draft || "
-            "github.event.action == 'converted_to_draft') }}"
-        )
-
-    assert len(normalized_cancellations) == 1
+    workflow = _workflow(".github/workflows/ci.yml")
+    cancel = _normalized_expression(workflow["concurrency"]["cancel-in-progress"])
+    assert cancel == (
+        "${{ github.event_name == 'pull_request' && "
+        "!(github.event.pull_request.draft || "
+        "github.event.action == 'converted_to_draft') }}"
+    )
+    for path in GATE_CONTRACTS:
+        if path != ".github/workflows/ci.yml":
+            assert "concurrency" not in _workflow(path)
 
 
 def test_protected_workflows_share_one_per_pr_admission_slot() -> None:
-    for workflow_path in GATE_CONTRACTS:
-        workflow = _workflow(workflow_path)
-        group = _normalized_expression(workflow["concurrency"]["group"])
+    workflow = _workflow(".github/workflows/ci.yml")
+    group = _normalized_expression(workflow["concurrency"]["group"])
 
-        assert "github.event.pull_request.number || github.ref" in group
-        assert "github.run_id" in group
-        assert "filtered-{0}" in group
-        assert "authoritative" in group
-        assert "github.event.pull_request.draft" in group
-        assert "github.event.action == 'converted_to_draft'" in group
-        assert "github.event.action == 'edited'" not in group
-        assert "github.event.changes.base == null" not in group
-        assert "fromJSON(" not in group
-        assert "admission" not in group
-        assert "background" not in group
+    assert "github.event.pull_request.number || github.ref" in group
+    assert "github.run_id" in group
+    assert "filtered-{0}" in group
+    assert "authoritative" in group
+    assert "github.event.pull_request.draft" in group
+    assert "github.event.action == 'converted_to_draft'" in group
+    assert "github.event.action == 'edited'" not in group
+    assert "github.event.changes.base == null" not in group
+    assert "fromJSON(" not in group
+    assert "admission" not in group
+    assert "background" not in group
 
 
 def test_generic_rendered_images_are_covered_by_manifest_matrix() -> None:
@@ -1280,9 +1360,10 @@ def test_staging_gate_consumes_manifest_owned_system_smoke_lane() -> None:
         "uv run --no-sync python scripts/component_ownership.py test-paths --lane system-smoke"
         in scripts
     )
-    assert 'pytest -m "${CI_PYTEST_MARKERS:-not legacy_pool}" --timeout=1200 "${test_paths[@]}"' in scripts
+    assert 'pytest -m "${CI_PYTEST_MARKERS:-not legacy_pool}" --timeout=1200 --maxfail=1 "${test_paths[@]}"' in scripts
     assert (
-        "--profile worker --profile task-image-builder down -v --remove-orphans" in cleanup_script
+        "--profile worker --profile task-image-builder down -v --remove-orphans --rmi local"
+        in cleanup_script
     )
     assert pytest_step["env"]["LOOM_SYSTEM_SMOKE_DIAGNOSTICS"] == (
         "${{ runner.temp }}/system-smoke-compose.log"
@@ -1418,3 +1499,56 @@ def test_manual_coverage_request_selects_integration_through_workflow_planner(tm
     values = dict(line.split("=", 1) for line in output.read_text().splitlines())
     assert values["coverage_summary"] == values["integration"] == "true"
     assert values["docs_only"] == "false"
+
+
+@pytest.mark.parametrize("heavy_job", ["nebius-pool", "integration-docker", "runtime-payload", "web-runtime"])
+def test_heavy_jobs_wait_for_native_fast_feedback(heavy_job: str) -> None:
+    from tests.ops.test_ci_images_parallel_builds import _condition
+
+    job = _workflow(".github/workflows/ci.yml")["jobs"][heavy_job]
+    assert set(job["needs"]) == {"workflow-plan", "fast-feedback"}
+    values = {"needs.workflow-plan.result": "success", "needs.fast-feedback.result": "success"}
+    values.update({f"needs.workflow-plan.outputs.{name}": "true" for name in (
+        "nebius_pool", "integration_docker", "runtime_payload", "web_runtime",
+    )})
+    values["needs.workflow-plan.outputs.gate_mode"] = "full"
+    assert _condition(job["if"], values)
+    for result in ("failure", "cancelled", "skipped"):
+        values["needs.fast-feedback.result"] = result
+        assert not _condition(job["if"], values)
+
+
+@pytest.mark.parametrize("job_name", ["tests-root", "integration"])
+def test_affected_tests_wait_for_static_failures_and_allow_unselected_lanes(job_name: str) -> None:
+    from tests.ops.test_ci_images_parallel_builds import _condition
+
+    job = _workflow(".github/workflows/ci.yml")["jobs"][job_name]
+    values = {f"needs.{name}.result": "skipped" for name in job["needs"]}
+    values["needs.workflow-plan.result"] = "success"
+    values.update({f"needs.workflow-plan.outputs.{name}": "false" for name in (
+        "lint_and_static", "locked_environments", "tests_packages", "go_checks", "nebius_iac",
+    )})
+    values["needs.workflow-plan.outputs.tests_root"] = "true"
+    values["needs.workflow-plan.outputs.integration"] = "true"
+    values["needs.workflow-plan.outputs.gate_mode"] = "full"
+    assert _condition(job["if"], values)
+    values["needs.workflow-plan.outputs.lint_and_static"] = "true"
+    for result in ("failure", "skipped", "cancelled"):
+        values["needs.lint-and-static.result"] = result
+        assert not _condition(job["if"], values)
+    values["needs.lint-and-static.result"] = "success"
+    assert _condition(job["if"], values)
+    values["needs.workflow-plan.outputs.gate_mode"] = "filtered"
+    assert not _condition(job["if"], values)
+
+
+def test_admission_matrices_stop_siblings_but_manual_diagnostics_continue() -> None:
+    from tests.ops.test_ci_images_parallel_builds import _condition
+
+    jobs = _workflow(".github/workflows/ci.yml")["jobs"]
+    for job_name in ("tests-root", "integration", "nebius-pool", "integration-docker"):
+        policy = jobs[job_name]["strategy"]["fail-fast"]
+        for event in ("pull_request", "merge_group", "workflow_dispatch", "schedule", "push"):
+            assert _condition(policy.strip("${} "), {"github.event_name": event}) == (
+                event in {"pull_request", "merge_group"}
+            )

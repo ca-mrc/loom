@@ -103,6 +103,9 @@ def test_schema_component_scope_retains_database_and_unknown_inputs(changes, ret
     (("src/loom/config.py",), False),
     (("src/loom_service/app.py", "web/src/main.tsx"), False),
     (("docs/contributing/ci.md",), False),
+    (("scripts/ops/inventory_legacy_structures.py",), False),
+    (("tests/support/nebius_platform.py",), True),
+    (("tests/support/nebius_phase_api.py",), True),
     (("scripts/ops/nebius_shared_pool_api.py",), True),
     (("scripts/ops/deploy_nebius_platform.py",), True),
     (("deploy/k8s/control-plane.yaml",), True),
@@ -113,8 +116,8 @@ def test_schema_component_scope_retains_database_and_unknown_inputs(changes, ret
     ((), True),
 ])
 def test_pool_operator_suite_runs_on_operator_inputs_only(changes, retained):
-    # Pool operator tests are ~90% of tests-root time. Deployment runs them on
-    # every dev head (nebius-candidate.yml); a PR runs them only for its inputs.
+    # Operator inputs and imported fixtures retain their pool consumers. The
+    # candidate reuses exact-commit native coverage instead of repeating it.
     from pathlib import Path
 
     from scripts.component_ownership import load_manifest, select_affected_test_suites
@@ -128,19 +131,139 @@ def test_pool_operator_suite_runs_on_operator_inputs_only(changes, retained):
     assert regular in selected
 
 
+@pytest.mark.parametrize(("changes", "retained"), [
+    (("scripts/ops/ci_reliability_metrics.py",), False),
+    (("scripts/ops/ci_hosted_worker.py", "src/loom/config.py"), False),
+    (("scripts/ops/nebius_shared_pool_api.py",), True),
+    (("scripts/ops/nebius_management_transport.py",), True),
+    (("scripts/ops/nebius_closed_registry.py",), True),
+    (("tests/ops/nebius_participant_external_fixture.py",), True),
+    (("tests/ops/conftest.py",), True),
+    (("uv.lock",), True),
+    ((), True),
+])
+def test_shared_pool_scope_tracks_consumers_not_the_entire_operator_lane(changes, retained):
+    from pathlib import Path
+
+    from scripts.component_ownership import _tracked_paths, load_manifest, selected_test_paths
+
+    root = Path(__file__).resolve().parents[2]
+    manifest = load_manifest(root / "config/component-ownership.toml")
+    selected = selected_test_paths(manifest, tracked_paths=_tracked_paths(root),
+        lane="nebius-pool", repo_root=root, changed_paths=changes, test_scope="nebius",
+        include_shared_pool=True)
+    assert any(Path(path).name.startswith("test_nebius_shared_pool_") for path in selected) is retained
+    if not retained:
+        assert selected == ()
+
+
+@pytest.mark.parametrize(("diff", "retained"), [
+    (("deploy/guest-runtime/sources.lock.json",), False),
+    (("deploy/guest-runtime/sources.lock.json", "src/loom/execution_selection.py"), False),
+    (("scripts/ops/nebius_shared_pool_api.py", "deploy/guest-runtime/README.md"), True),
+    ((".github/workflows/ci.yml",), True),
+    (("uv.lock",), True),
+    ((), True),
+])
+def test_forced_full_regression_runs_shared_pool_only_for_an_affecting_diff(diff, retained):
+    # An unowned path forces full regression (no narrowing hint), but the
+    # affected_only shared-pool suite still follows the PR's actual diff.
+    from pathlib import Path
+
+    from scripts.component_ownership import _tracked_paths, load_manifest, selected_test_paths
+
+    root = Path(__file__).resolve().parents[2]
+    manifest = load_manifest(root / "config/component-ownership.toml")
+    common = dict(tracked_paths=_tracked_paths(root), lane="nebius-pool", repo_root=root,
+                  test_scope="nebius", include_shared_pool=True)
+    full = selected_test_paths(manifest, **common)
+    selected = selected_test_paths(manifest, changed_paths=(), diff_paths=diff, **common)
+    shared = {path for path in full if Path(path).name.startswith("test_nebius_shared_pool_")}
+    assert shared
+    assert set(selected) == (set(full) if retained else set(full) - shared)
+
+
+@pytest.mark.parametrize(("event", "labels", "kept"), [
+    ("pull_request", (), True),
+    ("merge_group", (), True),
+    ("pull_request", ("bug",), True),
+    ("pull_request", ("ci:integration",), False),
+    ("push", (), False),
+    ("schedule", (), False),
+    ("workflow_dispatch", (), False),
+])
+def test_planner_keeps_the_pr_diff_when_it_forces_full_regression(event, labels, kept):
+    from scripts.plan_ci_validations import LABEL_TO_CHECK
+
+    assert set(labels) - {"bug"} <= LABEL_TO_CHECK.keys()
+    paths = ["deploy/guest-runtime/sources.lock.json"]
+    outputs = plan_validations(changed_paths=paths, labels=set(labels), event_name=event).github_outputs()
+    assert outputs["test_changes"] == "[]"
+    assert json.loads(outputs["test_diff"]) == (paths if kept else [])
+
+
+def test_oversized_diff_falls_back_to_the_complete_suite():
+    from dataclasses import replace
+
+    baseline = plan("deploy/guest-runtime/README.md")
+    paths = tuple(f"deploy/guest-runtime/{index:05}-{'x' * 80}.md" for index in range(800))
+    assert replace(baseline, test_diff=paths).github_outputs()["test_diff"] == "[]"
+
+
+@pytest.mark.parametrize(("change", "error"), [
+    ({"affected_only": "yes"}, "affected_only must be a boolean"),
+    ({"affected_only": True, "affected_paths": []}, "affected_only requires affected_paths"),
+    ({"affected_only": True, "lane": "integration"}, "affected_only is supported only in lanes: nebius-pool"),
+])
+def test_affected_only_is_validated(change, error):
+    from scripts.component_ownership import ManifestError, _test_suite
+
+    raw = {"id": "heavy", "language": "python", "lane": "nebius-pool",
+           "include_paths": ["tests/ops/test_heavy_*.py"], "affected_paths": ["scripts/ops/heavy.py"], **change}
+    with pytest.raises(ManifestError, match=error):
+        _test_suite(raw)
+
+
+def test_only_the_shared_pool_suite_is_affected_only():
+    from pathlib import Path
+
+    from scripts.component_ownership import load_manifest
+
+    root = Path(__file__).resolve().parents[2]
+    manifest = load_manifest(root / "config/component-ownership.toml")
+    assert {suite.id for suite in manifest.test_suites if suite.affected_only} == {"nebius-shared-pool-ops"}
+
+
+def test_pool_job_and_planner_share_the_pr_diff():
+    from pathlib import Path
+
+    import yaml
+
+    root = Path(__file__).resolve().parents[2]
+    jobs = yaml.safe_load((root / ".github/workflows/ci.yml").read_text())["jobs"]
+    assert jobs["workflow-plan"]["outputs"]["test_diff"] == "${{ steps.plan.outputs.test_diff || '[]' }}"
+    pool = jobs["nebius-pool"]
+    # Job-level env is printed in the checkout step log that candidate reuse reads.
+    assert pool["env"]["TEST_DIFF_PATHS"] == "${{ needs.workflow-plan.outputs.test_diff }}"
+    [step] = [step for step in pool["steps"] if step.get("id") == "manifest"]
+    assert '--diff-paths-json "${TEST_DIFF_PATHS:-[]}"' in step["run"]
+
+
 @pytest.mark.parametrize("changes", [
     ("tests/ops/nebius_participant_external_fixture.py",),
     ("scripts/ops/nebius_shared_pool_api.py",),
-    ("src/loom/config.py",),
+    ("scripts/ops/ci_reliability_metrics.py",),
+    ("uv.lock",),
 ])
 @pytest.mark.parametrize("lane", ["tests-root", "nebius-pool"])
-def test_shard_manifests_execute_exactly_the_planned_selection(changes, lane):
+def test_shard_manifests_execute_exactly_the_planned_selection(changes, lane, tmp_path):
     # Select from the whole lane, then shard: each job must run its part of the
     # planned set, never a set decided by which files share its shard.
+    from dataclasses import replace
     from pathlib import Path
 
     from scripts.component_ownership import (
-        _tracked_paths,
+        TestShardPolicy,
         load_manifest,
         selected_test_paths,
         test_shard_matrix,
@@ -148,9 +271,36 @@ def test_shard_manifests_execute_exactly_the_planned_selection(changes, lane):
 
     root = Path(__file__).resolve().parents[2]
     manifest = load_manifest(root / "config/component-ownership.toml")
-    tracked = _tracked_paths(root)
-    common = dict(tracked_paths=tracked, lane=lane, repo_root=root, changed_paths=changes)
+    prefix = "test_nebius_shared_pool" if lane == "nebius-pool" else "test_ci_selection_fixture"
+    tests = tuple(f"tests/ops/{prefix}_{suffix}.py" for suffix in ("alpha", "beta", "gamma", "delta"))
+    files = {
+        # A string-loaded test helper lives in another shard. Selecting within
+        # each shard loses this edge and conservatively runs unrelated siblings.
+        tests[0]: f'from importlib import import_module\nVALUE = import_module("tests.ops.{prefix}_beta").VALUE\n',
+        tests[1]: "from tests.ops.nebius_participant_external_fixture import VALUE\n",
+        tests[2]: "def test_unrelated(): pass\n",
+        tests[3]: "def test_other(): pass\n",
+        "tests/ops/nebius_participant_external_fixture.py": "from scripts.ops.nebius_shared_pool_api import VALUE\n",
+        "scripts/ops/nebius_shared_pool_api.py": "VALUE = 1\n",
+        "scripts/ops/ci_reliability_metrics.py": "VALUE = 2\n",
+        "uv.lock": "",
+    }
+    for path, source in files.items():
+        target = tmp_path / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(source)
+    # Real ownership policy and real selection, but only the dependency graph
+    # needed to test this contract. Whole-repository shard ownership is audited
+    # separately; repeating its import graph once per real shard adds no case.
+    manifest = replace(manifest, test_sharding=(TestShardPolicy(lane, 3, "round-robin", None, ()),))
+    common = dict(tracked_paths=tuple(files), lane=lane, repo_root=tmp_path, changed_paths=changes,
+                  include_shared_pool=True)
     planned = selected_test_paths(manifest, **common)
+    full_lane = lane == "tests-root" or changes in (
+        ("uv.lock",), ("tests/ops/nebius_participant_external_fixture.py",))
+    expected = tests if full_lane else (
+        () if changes == ("scripts/ops/ci_reliability_metrics.py",) else tests[:2])
+    assert set(planned) == set(expected)
     policy = manifest.test_shard_policy(lane)
     assert policy is not None
     shards = [selected_test_paths(manifest, **common, shard_index=index, shard_count=policy.shard_count)
@@ -219,7 +369,7 @@ def test_pool_operator_suite_gates_every_platform_candidate():
     assert 'os.environ["TEST_PATHS_JSON"]' in run
     assert "mapfile -t test_paths" in run and '"${test_paths[@]}"' in run
     assert jobs["pool-ops-plan"]["permissions"] == {
-        "contents": "read", "actions": "read", "checks": "read"}
+        "contents": "read", "actions": "read", "checks": "read", "pull-requests": "read"}
     assert "environment" not in jobs["pool-ops-plan"]
     assert jobs["publish"]["needs"] == ["pool-ops-plan", "pool-ops-tests"]
     assert "needs.pool-ops-plan.result == 'success'" in jobs["publish"]["if"]

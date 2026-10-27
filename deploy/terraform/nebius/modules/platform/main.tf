@@ -9,6 +9,8 @@ variable "integration_platform" {
     system_max_pods            = optional(number, 64)
     system_create_before_drain = optional(bool, false)
     execution_max_nodes        = optional(number, 100)
+    execution_disk_type        = optional(string, "NETWORK_SSD")
+    execution_disk_gib         = optional(number, 80)
     native_builder_group_id    = optional(string)
   })
   default = null
@@ -22,9 +24,13 @@ variable "integration_platform" {
       floor(var.integration_platform.system_max_pods) == var.integration_platform.system_max_pods &&
       var.integration_platform.execution_max_nodes >= 1 && var.integration_platform.execution_max_nodes <= 100 &&
       floor(var.integration_platform.execution_max_nodes) == var.integration_platform.execution_max_nodes &&
+      contains(["NETWORK_SSD", "NETWORK_SSD_NON_REPLICATED"], var.integration_platform.execution_disk_type) &&
+      var.integration_platform.execution_disk_gib >= 80 && var.integration_platform.execution_disk_gib <= 8192 &&
+      floor(var.integration_platform.execution_disk_gib) == var.integration_platform.execution_disk_gib &&
+      (var.integration_platform.execution_disk_type != "NETWORK_SSD_NON_REPLICATED" || var.integration_platform.execution_disk_gib % 93 == 0) &&
       (var.integration_platform.native_builder_group_id == null ? true : can(regex("^group-[a-z0-9]+$", var.integration_platform.native_builder_group_id)))
     )
-    error_message = "Integration needs a unique bucket prefix, a supported system preset, an integer system disk from 80 to 1024 GiB, an integer system Pod limit from 16 to 110, and an integer execution ceiling from 1 through the native API maximum of 100 nodes."
+    error_message = "Integration needs a unique bucket prefix, a supported system preset, an integer system disk from 80 to 1024 GiB, an integer system Pod limit from 16 to 110, an integer execution ceiling from 1 to 100, and an execution disk from 80 to 8192 GiB of type NETWORK_SSD or NETWORK_SSD_NON_REPLICATED (multiples of 93 GiB for NRD)."
   }
 }
 
@@ -73,8 +79,8 @@ locals {
     }
   ]
   integration_nodes = var.integration_platform == null ? {} : {
-    system    = { preset = var.integration_platform.system_preset, minimum = 1, maximum = 1, disk = var.integration_platform.system_disk_gib }
-    execution = { preset = "16vcpu-64gb", minimum = 0, maximum = var.integration_platform.execution_max_nodes, disk = 80 }
+    system    = { preset = var.integration_platform.system_preset, minimum = 1, maximum = 1, disk = var.integration_platform.system_disk_gib, disk_type = "NETWORK_SSD" }
+    execution = { preset = "16vcpu-64gb", minimum = 0, maximum = var.integration_platform.execution_max_nodes, disk = var.integration_platform.execution_disk_gib, disk_type = var.integration_platform.execution_disk_type }
   }
 }
 
@@ -138,6 +144,15 @@ resource "nebius_storage_v1_bucket" "integration" {
   lifecycle { prevent_destroy = true }
 }
 
+# Bucket policies authorize object operations. The native catalog publisher
+# additionally reads versioning through S3, which needs a resource-scoped permit.
+resource "nebius_iam_v1_access_permit" "integration_catalog_metadata" {
+  for_each    = local.integration
+  parent_id   = nebius_iam_v1_group.integration_store["canonical"].id
+  resource_id = nebius_storage_v1_bucket.integration["artifacts"].id
+  role        = "storage.viewer"
+}
+
 resource "nebius_iam_v2_access_key" "integration_store" {
   for_each    = local.integration_identities
   parent_id   = var.project_id
@@ -189,7 +204,7 @@ resource "nebius_mk8s_v1_node_group" "integration" {
       ], each.key == "execution" ? [
       { key = "loom.nebius/execution", value = "true", effect = "NO_SCHEDULE" }
     ] : [])
-    boot_disk          = { type = "NETWORK_SSD", size_gibibytes = each.value.disk }
+    boot_disk          = { type = each.value.disk_type, size_gibibytes = each.value.disk }
     network_interfaces = [{ subnet_id = var.subnet_id }]
     resources          = { platform = "cpu-e2", preset = each.value.preset }
     reservation_policy = { policy = "FORBID" }

@@ -51,7 +51,7 @@ def _settings(tmp_path: Path) -> ExecutionCapacityCollectorSettings:
         quota_nodes_name="non-gpu-vms",
         quota_vcpu_name="non-gpu-vcpu",
         quota_memory_name="non-gpu-memory",
-        quota_storage_name="ssd-storage",
+        quota_storage_name="compute.disk.size.network-ssd",
         quota_nodes_unit="count",
         quota_vcpu_unit="vcpu",
         quota_memory_unit="byte",
@@ -541,7 +541,7 @@ async def test_nebius_reader_validates_quota_units_region_and_node_group_state(
                     _quota("non-gpu-vms", "count", 20, 3, 1),
                     _quota("non-gpu-vcpu", "vcpu", 80, 12, 2),
                     _quota("non-gpu-memory", "byte", 160 * gib, 24 * gib, 3),
-                    _quota("ssd-storage", "byte", 2000 * gib, 300 * gib, 4),
+                    _quota("compute.disk.size.network-ssd", "byte", 2000 * gib, 300 * gib, 4),
                 ],
                 next_page_token="",
             )
@@ -613,7 +613,7 @@ async def test_nebius_reader_ignores_error_events_only_after_node_group_converge
         _quota("non-gpu-vms", "count", 20, 4, 1),
         _quota("non-gpu-vcpu", "vcpu", 200, 68, 2),
         _quota("non-gpu-memory", "byte", 640 * gib, 256 * gib, 3),
-        _quota("ssd-storage", "byte", 2000 * gib, 300 * gib, 4),
+        _quota("compute.disk.size.network-ssd", "byte", 2000 * gib, 300 * gib, 4),
     ]
     failed_scale_event = SimpleNamespace(
         last_occurrence=SimpleNamespace(
@@ -671,7 +671,7 @@ async def test_nebius_reader_uses_tenant_quotas_and_derives_unexposed_memory(
             items=[
                 _quota("non-gpu-vms", "count", 20, 3, 1),
                 _quota("non-gpu-vcpu", "vcpu", 80, 12, 2),
-                _quota("ssd-storage", "byte", 2000 * gib, 300 * gib, 4),
+                _quota("compute.disk.size.network-ssd", "byte", 2000 * gib, 300 * gib, 4),
             ],
             next_page_token="",
         )
@@ -860,7 +860,8 @@ def test_collector_manifest_is_active_configured_and_strictly_read_only() -> Non
             "apiGroups": [""],
             "resources": ["nodes", "pods"],
             "verbs": ["get", "list"],
-        }
+        },
+        {"apiGroups": [""], "resources": ["nodes/stats"], "verbs": ["get"]},
     ]
     config = next(row for row in documents if row["kind"] == "ConfigMap")
     assert config["metadata"]["namespace"] == "loom-nebius-development"
@@ -953,6 +954,49 @@ def _platform_client() -> Any:
     )
 
 
+@pytest.mark.asyncio
+async def test_native_disk_class_rejects_old_storage_quota_before_publication(tmp_path: Path) -> None:
+    from nebius.api.nebius.mk8s.v1 import DiskSpec
+
+    settings = _settings(tmp_path).model_copy(update={
+        "quota_storage_name": "compute.disk.size.network-ssd",
+    })
+    spec = _node_group_spec()
+    spec.template.boot_disk = DiskSpec(
+        size_gibibytes=93, type=DiskSpec.DiskType.NETWORK_SSD_NON_REPLICATED,
+    )
+    reader = NebiusCapacityReader(
+        settings, sdk=object(), quota_client=object(), node_group_client=object(),
+        platform_client=_platform_client(),
+    )
+    with pytest.raises(NebiusObservationError, match=r"storage quota.*boot disk"):
+        await reader._node_group_placement(SimpleNamespace(
+            spec=spec, status=SimpleNamespace(node_count=0),
+        ))
+
+
+@pytest.mark.asyncio
+async def test_nrd_disk_charges_its_actual_raw_size_and_quota_class(tmp_path: Path) -> None:
+    from nebius.api.nebius.mk8s.v1 import DiskSpec
+
+    settings = _settings(tmp_path).model_copy(update={
+        "quota_storage_name": "compute.disk.size.network-ssd-non-replicated",
+    })
+    spec = _node_group_spec()
+    spec.template.boot_disk = DiskSpec(
+        size_gibibytes=93, type=DiskSpec.DiskType.NETWORK_SSD_NON_REPLICATED,
+    )
+    reader = NebiusCapacityReader(
+        settings, sdk=object(), quota_client=object(), node_group_client=object(),
+        platform_client=_platform_client(),
+    )
+    placement = await reader._node_group_placement(SimpleNamespace(
+        spec=spec, status=SimpleNamespace(node_count=0),
+    ))
+    assert placement.raw_node.storage_mib == 93 * 1024
+    assert placement.template["boot_disk_type"] == "NETWORK_SSD_NON_REPLICATED"
+
+
 def _daemon(*, uid: str, cpu: str = "100m", generation: int = 2, gpu: bool = False) -> Any:
     spec = SimpleNamespace(
         containers=[_resource_container(cpu=cpu, memory="128Mi")],
@@ -987,6 +1031,137 @@ async def _capture_nodes(
         target_id="nebius-eu-north1-staging",
         node_label_selector="target=staging",
     )
+
+
+@pytest.mark.asyncio
+async def test_inventory_preserves_node_creation_without_direct_kubelet_probe(monkeypatch) -> None:
+    node = _node("node-1")
+    created = datetime(2026, 10, 20, tzinfo=UTC)
+    node.metadata.creation_timestamp = created
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("ordinary inventory must not require unsupported kubelet serving trust")
+
+    monkeypatch.setattr("loom_execution_capacity_collector.kubernetes.read_kubelet_summary",
+                        forbidden, raising=False)
+    snapshot = await _capture_nodes([node], [])
+    observed = snapshot.nodes[0]
+    assert observed.uid == node.metadata.uid and observed.name == "node-1"
+    assert observed.created_at == created
+    assert observed.io_pressure is None and observed.io_stall_window is None
+    assert snapshot.allocatable.cpu_millis == 3500
+
+
+def test_node_io_pressure_contract_rejects_unqualified_values_and_preserves_history() -> None:
+    from pydantic import ValidationError
+
+    from loom_execution_capacity_collector.contracts import NodeIOPressure, NodePlacement
+
+    for damage in [float("nan"), float("inf"), -1.0, 100.01]:
+        with pytest.raises(ValidationError):
+            NodeIOPressure(sampled_at=datetime.now(UTC), full_avg10=damage)
+    with pytest.raises(ValidationError):
+        NodeIOPressure(sampled_at=datetime(2026, 10, 20), full_avg10=0.0)
+    pressure = NodeIOPressure(sampled_at=datetime.now(UTC), full_avg10=44.5)
+    # CP reads placement from JSONB in Python mode, not model_validate_json.
+    assert NodeIOPressure.model_validate(json.loads(pressure.model_dump_json())) == pressure
+    historical = {"uid": "old-node", "provider_id": "nebius://old", "ready": True,
+                  "unschedulable": False, "deleting": False, "draining": None,
+                  "allocatable": {"cpu_millis": 1000, "memory_mib": 1000, "storage_mib": 1000},
+                  "requested": {"cpu_millis": 0, "memory_mib": 0, "storage_mib": 0},
+                  "pod_slots": 10, "used_pod_slots": 0, "managed_pods": []}
+    assert NodePlacement.model_validate(historical).model_dump(mode="json") == historical
+    stored = {**historical, "name": "node-1", "io_pressure": pressure.model_dump(mode="json")}
+    assert NodePlacement.model_validate(json.loads(json.dumps(stored))).model_dump(mode="json") == stored
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("metrics_failure", [False, True])
+async def test_provider_io_window_publishes_with_unchanged_resource_inventory(tmp_path, metrics_failure):
+    from datetime import timedelta
+
+    from loom_execution_capacity_collector.contracts import NodeIOWindowPressure
+
+    now = datetime.now(UTC)
+    actual_node = _node("node-1")
+    actual_node.metadata.creation_timestamp = now - timedelta(minutes=10)
+    snapshot = await _capture_nodes([actual_node], [])
+    pressure = NodeIOWindowPressure(window_started_at=now-timedelta(seconds=20),
+                                    sampled_at=now-timedelta(seconds=5), full_window_percent=12.5)
+
+    class Provider(_Provider):
+        async def capture(self, policy):
+            base = await super().capture(policy)
+            return base.model_copy(update={"node_group": NodeGroupPlacement(
+                id="nodegroup-test", max_nodes=10, node_count=3, template={},
+                raw_node=ResourceTotals(cpu_millis=4000, memory_mib=8192, storage_mib=102400))})
+
+        async def capture_node_io(self, nodes):
+            assert len(nodes) == 1 and nodes[0].uid == actual_node.metadata.uid
+            if metrics_failure:
+                raise TimeoutError("private transport diagnostics must not be persisted")
+            return {nodes[0].uid: pressure}
+
+    class Kubernetes:
+        async def capture(self, **_):
+            return snapshot
+
+    control = _ControlPlane()
+    await collect_capacity_observation(_settings(tmp_path), control_plane=control,
+                                      provider=Provider(), kubernetes=Kubernetes())
+    observation = control.observations[0]
+    assert observation.allocatable_cpu_millis == 3500
+    assert observation.provider_quota_vcpu_millis == 80_000
+    assert observation.requested_memory_mib == snapshot.requested.memory_mib
+    assert observation.placement.nodes[0].io_stall_window == (None if metrics_failure else pressure)
+    assert observation.placement.nodes[0].io_pressure is None
+    wire = observation.model_dump(mode="json")
+    assert "private transport" not in json.dumps(wire)
+    assert "full_avg10" not in json.dumps(wire)
+
+
+@pytest.mark.asyncio
+async def test_provider_io_deadline_cancels_read_and_still_publishes_resources(tmp_path, monkeypatch):
+    import asyncio
+
+    import loom_execution_capacity_collector.collector as module
+
+    ended = []
+    snapshot = await _capture_nodes([_node("node-1")], [])
+
+    class Provider(_Provider):
+        async def capture_node_io(self, nodes):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                ended.append("read_cancelled")
+
+    class Kubernetes:
+        async def capture(self, **_):
+            return snapshot
+
+    real_timeout = asyncio.timeout
+    monkeypatch.setattr(module.asyncio, "timeout", lambda _: real_timeout(0.01))
+    control = _ControlPlane()
+    await collect_capacity_observation(_settings(tmp_path), control_plane=control,
+                                      provider=Provider(), kubernetes=Kubernetes())
+    assert ended == ["read_cancelled"]
+    assert control.observations[0].allocatable_cpu_millis == 3500
+    assert control.observations[0].provider_quota_vcpu_millis == 80_000
+
+
+@pytest.mark.parametrize("duration", [0, 9.99, 60.01, -15])
+def test_io_window_contract_rejects_invalid_intervals(duration):
+    from datetime import timedelta
+
+    from pydantic import ValidationError
+
+    from loom_execution_capacity_collector.contracts import NodeIOWindowPressure
+
+    now = datetime.now(UTC)
+    with pytest.raises(ValidationError):
+        NodeIOWindowPressure(window_started_at=now-timedelta(seconds=duration),
+                             sampled_at=now, full_window_percent=0.0)
 
 
 @pytest.mark.asyncio
@@ -1152,7 +1327,7 @@ async def test_native_shape_and_zero_quota_override_old_policy_billing_shape(
     quotas = [
         _quota("non-gpu-vms", "count", 0, 0, 1),
         _quota("non-gpu-vcpu", "vcpu", 0, 0, 2),
-        _quota("ssd-storage", "byte", 0, 0, 3),
+        _quota("compute.disk.size.network-ssd", "byte", 0, 0, 3),
     ]
     native = SimpleNamespace(
         metadata=SimpleNamespace(id="nodegroup-test", parent_id="cluster-test", resource_version=9),
@@ -1210,7 +1385,7 @@ async def test_native_shape_and_zero_quota_override_old_policy_billing_shape(
     assert "memory" not in snapshot.quota_resources
     assert snapshot.quota_resources["storage"].used == 81920
     assert snapshot.quota_resources["storage"].parent_id == "tenant-test"
-    assert snapshot.quota_resources["storage"].name == "ssd-storage"
+    assert snapshot.quota_resources["storage"].name == "compute.disk.size.network-ssd"
     assert snapshot.quota_resources["vcpu"].used == 16000
 
     class Kubernetes:

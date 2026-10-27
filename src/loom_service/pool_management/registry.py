@@ -5,8 +5,6 @@ are connected. A prepare never creates a Job or releases an outstanding grant.
 """
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Annotated
 from uuid import UUID, uuid4
@@ -30,7 +28,6 @@ from loom.nebius_pool_task_image import PoolTaskImagePrepareV1
 from loom.nebius_pool_workload import PoolExecutionPrepareV1
 from loom_control_plane.execution_placement import PlacementUnavailableError
 from loom_service.pool_management.application_images import (
-    PoolApplicationImageProfile,
     prepare_pool_application_image,
 )
 from loom_service.pool_management.auth import PoolPrincipal, authorize_pool_machine
@@ -42,31 +39,22 @@ from loom_service.pool_management.capacity import (
     resources,
 )
 from loom_service.pool_management.early_cancellation import read_early_cancellation
+from loom_service.pool_management.intake import intake_open
 from loom_service.pool_management.locks import acquire_pool_mutation_lock
 from loom_service.pool_management.origin import qualify_pool_origin, qualify_retained_pool_origin
+from loom_service.pool_management.profile_registry import resolve_profiles
+from loom_service.pool_management.profile_types import PoolProfiles as PoolProfiles
 from loom_service.pool_management.render import (
-    PoolExecutionProfile,
     PreparedPoolExecution,
     prepare_pool_execution,
 )
 from loom_service.pool_management.task_images import (
-    PoolTaskImageProfile,
     PreparedPoolTaskImage,
     prepare_pool_task_image,
 )
 
 PoolPrepareWorkload = PoolExecutionPrepareV1 | PoolTaskImagePrepareV1 | PoolApplicationImagePrepareV1
 _WORKLOAD: TypeAdapter[PoolPrepareWorkload] = TypeAdapter(Annotated[PoolPrepareWorkload, Field(discriminator="schema_version")])
-
-
-@dataclass(frozen=True)
-class PoolProfiles:
-    """Complete protected catalog, including both renderers at the same target."""
-
-    execution: Mapping[UUID, PoolExecutionProfile] = field(default_factory=dict)
-    task_images: Mapping[UUID, PoolTaskImageProfile] = field(default_factory=dict)
-    application_images: Mapping[UUID, PoolApplicationImageProfile] = field(default_factory=dict)
-    catalog_sha256: str | None = None
 
 
 def _render(request: PoolPrepareWorkload, participant: PoolParticipantV1, profiles: PoolProfiles,
@@ -98,28 +86,28 @@ def _receipt(row: NebiusPoolRequest) -> PoolReceiptV1:
 
 
 async def prepare_execution(session: AsyncSession, principal: PoolPrincipal, request: PoolExecutionPrepareV1, *,
-                            profiles: PoolProfiles) -> PoolReceiptV1 | PoolWaitingV1:
+                            profiles: PoolProfiles | None = None) -> PoolReceiptV1 | PoolWaitingV1:
     if not isinstance(request, PoolExecutionPrepareV1):
         raise PoolAdmissionError
     return await _prepare(session, principal, request, profiles)
 
 
 async def prepare_task_image(session: AsyncSession, principal: PoolPrincipal, request: PoolTaskImagePrepareV1, *,
-                             profiles: PoolProfiles) -> PoolReceiptV1 | PoolWaitingV1:
+                             profiles: PoolProfiles | None = None) -> PoolReceiptV1 | PoolWaitingV1:
     if not isinstance(request, PoolTaskImagePrepareV1):
         raise PoolAdmissionError
     return await _prepare(session, principal, request, profiles)
 
 
 async def prepare_application_image(session: AsyncSession, principal: PoolPrincipal, request: PoolApplicationImagePrepareV1, *,
-                                    profiles: PoolProfiles) -> PoolReceiptV1 | PoolWaitingV1:
+                                    profiles: PoolProfiles | None = None) -> PoolReceiptV1 | PoolWaitingV1:
     if not isinstance(request, PoolApplicationImagePrepareV1):
         raise PoolAdmissionError
     return await _prepare(session, principal, request, profiles)
 
 
 async def _prepare(session: AsyncSession, principal: PoolPrincipal, request: PoolPrepareWorkload,
-                   profiles: PoolProfiles) -> PoolReceiptV1 | PoolWaitingV1:
+                   profiles: PoolProfiles | None) -> PoolReceiptV1 | PoolWaitingV1:
     """Serialize quota/pool/identity/request qualification before a first grant."""
     try:
         with session.no_autoflush:
@@ -131,8 +119,40 @@ async def _prepare(session: AsyncSession, principal: PoolPrincipal, request: Poo
         raise PoolAdmissionError from None
 
 
+async def _qualify_verifier_parent(session: AsyncSession, request: PoolExecutionPrepareV1) -> None:
+    """A fresh child grant follows the exact parent's committed output and release.
+
+    Frozen sizing evidence is inherited, not renewed. The normal renderer and
+    current aggregate admission still measure and charge the child's real Pod.
+    """
+    parent_id = request.execution.parent_lease_id
+    parent = await session.scalar(select(NebiusPoolRequest).where(
+        NebiusPoolRequest.pool_id == request.pool_id,
+        NebiusPoolRequest.participant_id == request.key.participant_id,
+        NebiusPoolRequest.workload_kind == "trial",
+        NebiusPoolRequest.local_work_id == parent_id,
+        NebiusPoolRequest.generation == 1,
+    ))
+    if (parent is None or parent.phase != "released" or parent.drain_json is None
+            or parent.drain_json.get("output_state") != "committed"):
+        raise PoolAdmissionError
+    prior = PoolExecutionPrepareV1.model_validate(parent.request_json)
+    runtime, original = request.execution.runtime, prior.execution.runtime
+    if (prior.target_id != request.target_id or prior.origin != request.origin
+            or prior.execution.requirements != request.execution.requirements
+            or original.execution_role != "attempt" or original.verifier_execution != "separate_execution"
+            or runtime.execution_role != "verifier" or runtime.handoff_input is None
+            or (runtime.candidate_sha, runtime.task_revision_sha256, runtime.task_image_ref,
+                runtime.runtime_image_ref, runtime.runtime_binary_sha256) != (
+                original.candidate_sha, original.task_revision_sha256, original.task_image_ref,
+                original.runtime_image_ref, original.runtime_binary_sha256)
+            or request.execution.node_allocation != prior.execution.node_allocation
+            or runtime.node_resource_allocation != original.node_resource_allocation):
+        raise PoolAdmissionError
+
+
 async def _prepare_request(session: AsyncSession, principal: PoolPrincipal, request: PoolPrepareWorkload,
-                           profiles: PoolProfiles) -> PoolReceiptV1 | PoolWaitingV1:
+                           profiles: PoolProfiles | None) -> PoolReceiptV1 | PoolWaitingV1:
     request = _WORKLOAD.validate_json(request.model_dump_json())
     if any(isinstance(row, (NebiusPoolBinding, NebiusPoolParticipant, NebiusPoolRequest, NebiusPoolCancellation,
                            NebiusPoolCapture, NebiusPoolObservation))
@@ -170,15 +190,20 @@ async def _prepare_request(session: AsyncSession, principal: PoolPrincipal, requ
             return _receipt(row)
     if pool is None or pool.mode != "global":
         raise PoolAdmissionError
+    if isinstance(request, PoolExecutionPrepareV1) and request.key.workload_kind == "verifier":
+        await _qualify_verifier_parent(session, request)
     priority = await qualify_pool_origin(session, principal, request.origin,
         target_id=request.target_id, workload_kind=request.key.workload_kind,
-        application_build=request if isinstance(request, PoolApplicationImagePrepareV1) else None)
+        application_build=request if isinstance(request, PoolApplicationImagePrepareV1) else None,
+        retained_revision=request.participant_revision if row is not None else None)
     now = (await session.execute(select(func.clock_timestamp()))).scalar_one()
     capacities = await read_connected_capacity(session, pool.pool_id, now)
     participant = next(value for value in capacities[pool.pool_id].participants
                        if value.participant_id == request.key.participant_id)
     reservation_id = row.request_id if row is not None else uuid4()
-    prepared = _render(request, participant, profiles, reservation_id, now)
+    original, selected_profiles = await resolve_profiles(session, pool, participant, request.participant_revision,
+        retained=row is not None, fallback=profiles)
+    prepared = _render(request, original, selected_profiles, reservation_id, now)
     if prepared.job["spec"]["template"]["spec"]["nodeSelector"] != pool.binding_json["node_selector"]:
         raise PoolAdmissionError
     if row is None:
@@ -210,9 +235,11 @@ async def _prepare_request(session: AsyncSession, principal: PoolPrincipal, requ
         NebiusPoolRequest.pool_id.in_(capacities), NebiusPoolRequest.granted_at >= now - timedelta(minutes=1),
     ).group_by(NebiusPoolRequest.pool_id))).all()}
     participants = {value.participant_id: value for capacity in capacities.values() for value in capacity.participants}
-    active_participants = set((await session.scalars(select(NebiusPoolParticipant.participant_id).where(
+    active_rows = (await session.scalars(select(NebiusPoolParticipant).where(
         NebiusPoolParticipant.pool_id.in_(capacities), NebiusPoolParticipant.phase == "active",
-    ))).all())
+    ))).all()
+    active_participants = {participant.participant_id for participant in active_rows
+        if await intake_open(session, capacities[participant.pool_id].pool, participant)}
     protected_waits: list[NebiusPoolRequest] = []
     for candidate in waiting:
         if candidate.request_id != row.request_id:
@@ -224,11 +251,13 @@ async def _prepare_request(session: AsyncSession, principal: PoolPrincipal, requ
                 if candidate.participant_id not in active_participants or capacities[candidate.pool_id].pool.mode != "global":
                     continue
                 prior = _WORKLOAD.validate_python(candidate.request_json)
+                original_waiter, waiter_profiles = await resolve_profiles(session, capacities[candidate.pool_id].pool,
+                    binding, prior.participant_revision, retained=True, fallback=profiles)
                 if isinstance(prior, PoolApplicationImagePrepareV1):
-                    await qualify_retained_pool_origin(session, prior.origin, participant=binding,
+                    await qualify_retained_pool_origin(session, prior.origin, participant=original_waiter,
                         cluster_id=capacities[candidate.pool_id].pool.cluster_id,
                         workload_kind=prior.key.workload_kind, lock_history=True, application_build=prior)
-                measured = _render(prior, binding, profiles, candidate.request_id, now)
+                measured = _render(prior, original_waiter, waiter_profiles, candidate.request_id, now)
                 if measured.request_sha256 != candidate.request_sha256 or measured.resources != resources(candidate):
                     continue
                 if measured.job["spec"]["template"]["spec"]["nodeSelector"] != capacities[candidate.pool_id].pool.binding_json["node_selector"]:

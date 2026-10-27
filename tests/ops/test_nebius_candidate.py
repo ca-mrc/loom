@@ -15,7 +15,7 @@ import yaml
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from scripts.ops import nebius_candidate as candidate
-from tests.unit.test_nebius_platform_render import platform_inputs  # noqa: F401
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 
 from loom.nebius_platform_render import build_platform
 from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1
@@ -145,7 +145,8 @@ def test_publication_workflow_passes_only_explicit_readiness(ready: str) -> None
         capture_output=True, text=True,
         env={**os.environ, "PUBLICATION_MODE": "platform", "AGENT_VERSION": "",
              "NEBIUS_TASK_WEB_EGRESS_READY": ready, "NEBIUS_SERVICE_LIFECYCLE_READY": ready,
-             "NEBIUS_TASK_IDENTITY_READY": ready, "NEBIUS_REGISTRY_PREFIX": "fixture",
+             "NEBIUS_TASK_IDENTITY_READY": ready, "NEBIUS_TERMINUS2_MULTI_MODEL_READY": ready,
+             "NEBIUS_REGISTRY_PREFIX": "fixture",
              "NEBIUS_GUEST_RUNTIME_READY": "false", "NEBIUS_GUEST_RUNTIME_VOLUME_MIB": "",
              "NEBIUS_GUEST_MAX_ARTIFACT_BYTES": "",
              "NEBIUS_IMAGE_UPLOAD_TIMEOUT_SECONDS": "900", "NEBIUS_SIGNING_KEY_ID": "fixture",
@@ -155,7 +156,10 @@ def test_publication_workflow_passes_only_explicit_readiness(ready: str) -> None
         assert result.returncode != 0
     else:
         assert result.returncode == 0, result.stderr
-        for flag in ("--supports-task-web-egress", "--service-lifecycle-ready", "--supports-task-identity"):
+        for flag in (
+            "--supports-task-web-egress", "--service-lifecycle-ready",
+            "--supports-task-identity", "--supports-terminus2-multi-model",
+        ):
             assert (flag in result.stdout.splitlines()) is (ready == "true")
 
 
@@ -200,6 +204,44 @@ def test_publication_workflow_preserves_explicit_guest_budgets(ready, volume, ar
             assert arguments[arguments.index(flag) + 1] == value
     else:
         assert not any(argument.startswith("--guest-") for argument in arguments)
+
+
+@pytest.mark.parametrize("shared,guest,identity,mode,valid", [
+    (None, "true", "true", "platform", True),
+    ("false", "true", "true", "platform", True),
+    ("true", "true", "true", "platform", True),
+    ("true", "false", "true", "platform", False),
+    ("true", "true", "false", "platform", False),
+    ("invalid", "true", "true", "platform", False),
+    ("true", "false", "false", "harness-only", True),
+])
+def test_publication_workflow_preserves_shared_guest_readiness(shared, guest, identity, mode, valid):
+    workflow = yaml.safe_load((candidate.ROOT / candidate.WORKFLOW).read_text())
+    step = next(step for step in workflow["jobs"]["publish"]["steps"]
+                if step.get("name") == "Build and publish the fixed candidate")
+    assert step["env"]["NEBIUS_SHARED_GUEST_READY"] == "${{ vars.NEBIUS_SHARED_GUEST_READY || 'false' }}"
+    script = step["run"].split('publication_args=(--mode "$PUBLICATION_MODE")', 1)[1]
+    env = {**os.environ, "PUBLICATION_MODE": mode, "AGENT_VERSION": "",
+           "NEBIUS_TASK_WEB_EGRESS_READY": "true", "NEBIUS_SERVICE_LIFECYCLE_READY": "true",
+           "NEBIUS_TASK_IDENTITY_READY": identity, "NEBIUS_REGISTRY_PREFIX": "fixture",
+           "NEBIUS_GUEST_RUNTIME_READY": guest,
+           "NEBIUS_GUEST_RUNTIME_VOLUME_MIB": "1024" if guest == "true" else "",
+           "NEBIUS_GUEST_MAX_ARTIFACT_BYTES": "10737418240" if guest == "true" else "",
+           "NEBIUS_EMULATED_PKCS11_READY": "false",
+           "NEBIUS_IMAGE_UPLOAD_TIMEOUT_SECONDS": "900", "NEBIUS_SIGNING_KEY_ID": "fixture",
+           "work": "/unused", "RUNNER_TEMP": "/unused"}
+    env.pop("NEBIUS_SHARED_GUEST_READY", None)
+    if shared is not None:
+        env["NEBIUS_SHARED_GUEST_READY"] = shared
+    result = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-euo", "pipefail", "-c",
+         'uv() { printf "%s\\n" "$@"; }\npublication_args=(--mode "$PUBLICATION_MODE")' + script],
+        capture_output=True, text=True, env=env,
+    )
+    assert (result.returncode == 0) is valid, result.stderr
+    if valid:
+        assert ("--supports-shared-guest" in result.stdout.splitlines()) is (
+            shared == "true" and mode == "platform")
 
 
 def inputs(tmp_path: Path) -> tuple[dict, Path, str]:
@@ -275,7 +317,8 @@ def test_cli_create_plain_candidate_and_check_shape(
             str(trust),
             "--output",
             str(output),
-            *(["--supports-task-web-egress", "--service-lifecycle-ready", "--supports-task-identity"] if enabled else []),
+            *(["--supports-task-web-egress", "--service-lifecycle-ready",
+               "--supports-task-identity", "--supports-terminus2-multi-model"] if enabled else []),
             *(["--guest-runtime", "qemu-tcg-v1", "--guest-runtime-volume-mib", "1024",
                "--guest-max-artifact-bytes", "6442450944", "--supports-emulated-pkcs11"] if enabled else []),
         ],
@@ -299,6 +342,12 @@ def test_cli_create_plain_candidate_and_check_shape(
             assert profile[capability] is True
         else:
             assert capability not in profile
+    if enabled:
+        assert profile["terminus2_multi_model_policies"] == [
+            "beta_mixture", "student_teacher_student", "student_to_teacher_turns",
+        ]
+    else:
+        assert "terminus2_multi_model_policies" not in profile
     verify = [
         *command,
         "check-shape",
@@ -362,6 +411,30 @@ def test_reject_invalid_build_binding(tmp_path: Path, change: str) -> None:
     with pytest.raises(ValueError):
         candidate.create_candidate(
             document, signing_key=private, signing_key_id="publisher", keyring_json=keyring
+        )
+
+
+def test_profile_records_the_default_image_version(tmp_path: Path) -> None:
+    from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1
+
+    document, private, trust = inputs(tmp_path)
+    _, unlabelled = candidate.create_candidate(
+        document, signing_key=private, signing_key_id="publisher", keyring_json=trust,
+    )
+    assert "agent_image_version" not in unlabelled
+    document["runtime_metadata"] = runtime_metadata("nebius-" + "a" * 40)
+    _, profile = candidate.create_candidate(
+        document, signing_key=private, signing_key_id="publisher", keyring_json=trust,
+    )
+    assert profile["agent_image_version"] == "nebius-" + "a" * 40
+    assert ServiceExecutionRuntimeProfileV1.model_validate(profile).agent_image_version == "nebius-" + "a" * 40
+    without_image = {key: value for key, value in profile.items() if key != "agent_image_ref"}
+    with pytest.raises(ValueError, match="requires the default agent image"):
+        ServiceExecutionRuntimeProfileV1.model_validate(without_image)
+    document["runtime_metadata"]["agent_version"] = "bad label"
+    with pytest.raises(ValueError):
+        candidate.create_candidate(
+            document, signing_key=private, signing_key_id="publisher", keyring_json=trust,
         )
 
 
@@ -568,6 +641,8 @@ def test_publication_builds_selected_images_and_reuses_platform_admission(
         elif args[0] == "scanner":
             Path(args[args.index("--output") + 1]).write_text('{"Trivy":{"Version":"0.74.0"},"Results":[]}')
         elif args[:2] == ("skopeo", "inspect"):
+            # Digest readback reads only the manifest, never the tag list.
+            assert args[2:5] == ("--no-tags", "--format", "{{.Digest}}"), args
             return digest
         return ""
 
@@ -593,7 +668,8 @@ def test_publication_builds_selected_images_and_reuses_platform_admission(
         upload_timeout_seconds=1200, mode=mode, agent_version="test-1" if mode == "harness-only" else None, output=output,
         registry_prefix=document["registry_prefix"], signing_key=private,
         signing_key_id="publisher", trusted_keyring=trust,
-        supports_task_web_egress=enabled, service_lifecycle_ready=enabled, supports_task_identity=enabled,
+        supports_task_web_egress=enabled, service_lifecycle_ready=enabled,
+        supports_task_identity=enabled, supports_terminus2_multi_model=enabled,
     ))
     builds = [call for call in calls if len(call) > 1 and call[1] == "build"]
     expected = 1 if mode == "harness-only" else len(candidate.COMPONENTS)
@@ -628,6 +704,12 @@ def test_publication_builds_selected_images_and_reuses_platform_admission(
                 assert profile[capability] is True
             else:
                 assert capability not in profile
+        if enabled:
+            assert profile["terminus2_multi_model_policies"] == [
+            "beta_mixture", "student_teacher_student", "student_to_teacher_turns",
+        ]
+        else:
+            assert "terminus2_multi_model_policies" not in profile
 
 
 def test_duplicate_input_fields_rejected(tmp_path: Path) -> None:

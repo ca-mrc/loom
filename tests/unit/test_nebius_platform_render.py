@@ -7,8 +7,49 @@ import pytest
 
 from loom.nebius_platform_bootstrap import MigrationError, database_url
 from loom.nebius_platform_render import NebiusPlatformError, build_platform, write_platform
+from tests.support.nebius_platform import platform_inputs as platform_inputs
+from tests.support.nebius_platform import regional_inputs as regional_inputs
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+@pytest.mark.parametrize("disk_type,quota_name", [
+    ("NETWORK_SSD", "compute.disk.size.network-ssd"),
+    ("NETWORK_SSD_NON_REPLICATED", "compute.disk.size.network-ssd-non-replicated"),
+])
+def test_execution_disk_type_selects_matching_provider_quota(
+    platform_inputs: tuple, disk_type: str, quota_name: str,
+) -> None:
+    config, candidate, profile = platform_inputs
+    config["execution_disk_type"] = disk_type
+    files = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    collector = next(doc for group in files.values() for doc in group
+                     if doc["kind"] == "ConfigMap"
+                     and "LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_STORAGE_NAME" in doc.get("data", {}))
+    assert collector["data"]["LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_STORAGE_NAME"] == quota_name
+
+
+def test_execution_disk_type_rejects_unknown_quota_class(platform_inputs: tuple) -> None:
+    config, candidate, profile = platform_inputs
+    config["execution_disk_type"] = "UNKNOWN"
+    with pytest.raises(NebiusPlatformError, match="execution_disk_type"):
+        build_platform(config, candidate, profile, {}, repo_root=ROOT)
+
+
+def test_primary_nrd_disk_does_not_change_regional_storage_quota(regional_inputs: tuple) -> None:
+    config, candidate, profile = regional_inputs
+    config["execution_disk_type"] = "NETWORK_SSD_NON_REPLICATED"
+    files = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    quota_by_group = {
+        doc["data"]["LOOM_EXECUTION_CAPACITY_COLLECTOR_NEBIUS_NODE_GROUP_ID"]:
+        doc["data"]["LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_STORAGE_NAME"]
+        for group in files.values() for doc in group
+        if doc["kind"] == "ConfigMap"
+        and "LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_STORAGE_NAME" in doc.get("data", {})
+    }
+    assert quota_by_group[config["execution_node_group_id"]] == "compute.disk.size.network-ssd-non-replicated"
+    regional = config["regional_execution_targets"][0]
+    assert quota_by_group[regional["execution_node_group_id"]] == "compute.disk.size.network-ssd"
 
 
 def test_private_foundation_does_not_project_absent_recovery_profile(platform_inputs: tuple) -> None:
@@ -177,7 +218,36 @@ def test_scheduler_deadline_requires_positive_integer(platform_inputs: tuple, ma
         build_platform(config, candidate, profile, {}, repo_root=ROOT)
 
 
-@pytest.mark.parametrize("concurrency", [1, 2, 16])
+@pytest.mark.parametrize("explicit_null", [False, True])
+def test_resource_only_native_builds_clear_previous_namespace_cap(platform_inputs: tuple, explicit_null: bool) -> None:
+    config, candidate, profile = platform_inputs
+    config["task_image_builder"] = {
+        "registry_repository": "cr.eu-north1.nebius.cloud/test/task-images", "max_concurrent": 16,
+    }
+    old = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    old_quota = next(doc for doc in old["60-execution.yaml"]
+                     if doc["kind"] == "ResourceQuota" and doc["metadata"]["name"] == "loom-task-image-build-capacity")
+    if explicit_null:
+        config["task_image_builder"]["max_concurrent"] = None
+    else:
+        del config["task_image_builder"]["max_concurrent"]
+    docs = build_platform(config, candidate, profile, {}, repo_root=ROOT)["60-execution.yaml"]
+    quota = next(doc for doc in docs if doc["kind"] == "ResourceQuota"
+                 and doc["metadata"]["name"] == "loom-task-image-build-capacity")
+    # Keep the same apply-owned object and explicitly clear old hard keys.
+    assert quota["metadata"] == old_quota["metadata"]
+    assert old_quota["spec"]["hard"]["pods"] == "16"
+    assert quota["spec"]["hard"] == {}
+    collector = next(doc for doc in docs if doc["kind"] == "ConfigMap"
+                     and "LOOM_EXECUTION_CAPACITY_COLLECTOR_TARGET_ID" in doc["data"])
+    assert "LOOM_EXECUTION_CAPACITY_COLLECTOR_BUILD_CONCURRENCY_LIMIT" not in collector["data"]
+    actuator = next(doc for doc in docs if doc["kind"] == "Deployment")
+    env = {row["name"]: row.get("value")
+           for row in actuator["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert json.loads(env["LOOM_EXECUTION_ACTUATOR_TASK_IMAGE_BUILDER"])["max_concurrent"] is None
+
+
+@pytest.mark.parametrize("concurrency", [1, 2, 16, 17, 64])
 def test_native_builds_share_the_actuator_but_have_an_isolated_namespace(
     platform_inputs: tuple, concurrency: int,
 ) -> None:
@@ -243,7 +313,7 @@ def test_native_builds_share_the_actuator_but_have_an_isolated_namespace(
         {"registry_repository": "docker.io/public/task-images"},
         {
             "registry_repository": "cr.eu-north1.nebius.cloud/test/task-images",
-            "max_concurrent": 17,
+            "max_concurrent": 0,
         },
         {
             "registry_repository": "cr.eu-north1.nebius.cloud/test/task-images",
@@ -292,47 +362,6 @@ def test_native_build_configuration_accepts_phase3_cache_policy(
     assert settings["oci_export_format"] == "directory"
 
 
-@pytest.fixture
-def platform_inputs() -> tuple[dict, dict, dict]:
-    config = json.loads((ROOT / "deploy/nebius/integration.platform.json.example").read_text())
-    for key in (
-        "public_allocation_id",
-        "project_id",
-        "quota_parent_id",
-        "execution_node_group_id",
-        "cluster_id",
-    ):
-        config[key] = "test-" + key.replace("_", "-")
-    config["project_id"] = "project-test"
-    config["quota_parent_id"] = "tenant-test"
-    config["kubernetes_api_server"] = "https://api.cluster.test"
-    config["execution_price"]["vcpu_microusd_per_hour"] = 1000
-    for key in ("postgres_image", "backup_image"):
-        config[key] = "cr.eu-north1.nebius.cloud/test/postgres@sha256:" + "a" * 64
-    config["buckets"] = {key: "loom-integration-" + key for key in config["buckets"]}
-    images = {
-        key: {"image_ref": "cr.eu-north1.nebius.cloud/test/" + key + "@sha256:" + "b" * 64}
-        for key in (
-            "service",
-            "control_plane",
-            "web",
-            "gateway",
-            "execution_runtime",
-            "execution_actuator",
-        )
-    }
-    profile = {
-        "candidate_sha": "c" * 40,
-        "task_image_ref": images["service"]["image_ref"],
-        "runtime_image_ref": images["execution_runtime"]["image_ref"],
-    }
-    candidate = {
-        "candidate_sha": "c" * 40,
-        "source_ref": "refs/heads/codex/nebius-main",
-        "repository": "qianyi-sun/loom",
-        "images": images,
-    }
-    return config, candidate, profile
 
 
 @pytest.mark.parametrize("component", ["worker", "harbor_runtime"])
@@ -887,27 +916,6 @@ def test_execution_policy_rejects_beyond_native_node_ceiling(platform_inputs: tu
         build_platform(config, candidate, profile, {}, repo_root=ROOT)
 
 
-@pytest.fixture
-def regional_inputs(platform_inputs: tuple) -> tuple:
-    from copy import deepcopy
-
-    config, candidate, profile = platform_inputs
-    regional_example = json.loads(
-        (ROOT / "deploy/nebius/regional.platform.json.example").read_text()
-    )
-    regional = deepcopy(regional_example["regional_execution_targets"][0])
-    for key in ("project_id", "quota_parent_id", "cluster_id", "execution_node_group_id"):
-        regional[key] = config[key] + "-west"
-    regional["kubernetes_api_server"] = "https://api.west.test"
-    regional["execution_price"] = dict(
-        config["execution_price"],
-        region="eu-west1",
-        sku=regional["execution_price"]["sku"],
-        source_version="test-west",
-    )
-    config["public_gateway_ipv4"] = "8.8.4.4"
-    config["regional_execution_targets"] = [regional]
-    return config, candidate, profile
 
 
 def test_regional_manifests_separate_native_roles_from_primary_processes(

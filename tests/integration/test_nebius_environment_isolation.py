@@ -19,8 +19,8 @@ from loom.nebius_environment_contract import new_environment_registration
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 from loom_service.session_auth import consume_login_challenge, hash_secret
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_environment_contract import foundation_from
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
 async def test_login_challenge_cannot_be_consumed_twice_under_concurrency(isolated_migration_postgres_url):

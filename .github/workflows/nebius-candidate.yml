@@ -29,8 +29,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # A successful native CI job on this exact commit already owns its selected
-  # coverage. Reconstruct that selection and run only missing complete modules.
+  # Successful native CI on this candidate tree already owns its selected
+  # coverage. Verify its checkout and run only missing complete modules.
+  # Unlaunched shared-pool simulations are manual CI qualification, never
+  # supplementary candidate execution or inferred coverage.
   # Missing/unreadable evidence retains tests; image qualification stays below.
   pool-ops-plan:
     name: Plan missing pool operator tests
@@ -46,6 +48,7 @@ jobs:
       contents: read
       actions: read
       checks: read
+      pull-requests: read
     outputs:
       required: ${{ steps.plan.outputs.required }}
       matrix: ${{ steps.plan.outputs.matrix }}
@@ -57,11 +60,13 @@ jobs:
           # An unavailable base leaves coverage missing and runs the tests.
           fetch-depth: 2
           persist-credentials: false
-      - name: Reuse exact-commit native CI coverage
+      - name: Reuse verified candidate-tree native CI coverage
         id: plan
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 scripts/ops/nebius_pool_test_plan.py --candidate "$GITHUB_SHA" --github-output "$GITHUB_OUTPUT"
+        run: |
+          gh --version
+          python3 scripts/ops/nebius_pool_test_plan.py --candidate "$GITHUB_SHA" --github-output "$GITHUB_OUTPUT"
 
   pool-ops-tests:
     name: pool-ops-tests (${{ matrix.shard_index }})
@@ -70,7 +75,7 @@ jobs:
     runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-24.04' }}
     timeout-minutes: 40
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix: ${{ fromJSON(needs.pool-ops-plan.outputs.matrix) }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
@@ -95,12 +100,13 @@ jobs:
           with open(os.environ["GITHUB_OUTPUT"], "a") as stream:
               stream.write(f"paths_file={paths_file}\nselected=true\n")
           PY
-      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         if: steps.manifest.outputs.selected == 'true'
         with:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
           enable-cache: true
+          prune-cache: true
           save-cache: true
           cache-dependency-glob: uv.lock
       - name: Pytest — pool operator shard
@@ -133,11 +139,12 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
           enable-cache: true
+          prune-cache: true
           save-cache: true
           cache-dependency-glob: uv.lock
       - name: Install locked candidate tooling
@@ -186,7 +193,9 @@ jobs:
           NEBIUS_TASK_WEB_EGRESS_READY: ${{ vars.NEBIUS_TASK_WEB_EGRESS_READY || 'false' }}
           NEBIUS_SERVICE_LIFECYCLE_READY: ${{ vars.NEBIUS_SERVICE_LIFECYCLE_READY || 'false' }}
           NEBIUS_TASK_IDENTITY_READY: ${{ vars.NEBIUS_TASK_IDENTITY_READY || 'false' }}
+          NEBIUS_TERMINUS2_MULTI_MODEL_READY: ${{ vars.NEBIUS_TERMINUS2_MULTI_MODEL_READY || 'false' }}
           NEBIUS_GUEST_RUNTIME_READY: ${{ vars.NEBIUS_GUEST_RUNTIME_READY || 'false' }}
+          NEBIUS_SHARED_GUEST_READY: ${{ vars.NEBIUS_SHARED_GUEST_READY || 'false' }}
           NEBIUS_EMULATED_PKCS11_READY: ${{ vars.NEBIUS_EMULATED_PKCS11_READY || 'false' }}
           NEBIUS_GUEST_RUNTIME_VOLUME_MIB: ${{ vars.NEBIUS_GUEST_RUNTIME_VOLUME_MIB }}
           NEBIUS_GUEST_MAX_ARTIFACT_BYTES: ${{ vars.NEBIUS_GUEST_MAX_ARTIFACT_BYTES }}
@@ -239,7 +248,9 @@ jobs:
           fi
           if [[ "$PUBLICATION_MODE" == platform ]]; then
             : "${NEBIUS_EMULATED_PKCS11_READY:=false}"
-            for setting in NEBIUS_TASK_WEB_EGRESS_READY NEBIUS_SERVICE_LIFECYCLE_READY NEBIUS_TASK_IDENTITY_READY NEBIUS_GUEST_RUNTIME_READY NEBIUS_EMULATED_PKCS11_READY; do
+            : "${NEBIUS_TERMINUS2_MULTI_MODEL_READY:=false}"
+            : "${NEBIUS_SHARED_GUEST_READY:=false}"
+            for setting in NEBIUS_TASK_WEB_EGRESS_READY NEBIUS_SERVICE_LIFECYCLE_READY NEBIUS_TASK_IDENTITY_READY NEBIUS_TERMINUS2_MULTI_MODEL_READY NEBIUS_GUEST_RUNTIME_READY NEBIUS_SHARED_GUEST_READY NEBIUS_EMULATED_PKCS11_READY; do
               case "${!setting}" in
                 true|false) ;;
                 *) echo "Invalid runtime readiness setting: $setting" >&2; exit 1 ;;
@@ -248,6 +259,7 @@ jobs:
             if [[ "$NEBIUS_TASK_WEB_EGRESS_READY" == true ]]; then publication_args+=(--supports-task-web-egress); fi
             if [[ "$NEBIUS_SERVICE_LIFECYCLE_READY" == true ]]; then publication_args+=(--service-lifecycle-ready); fi
             if [[ "$NEBIUS_TASK_IDENTITY_READY" == true ]]; then publication_args+=(--supports-task-identity); fi
+            if [[ "$NEBIUS_TERMINUS2_MULTI_MODEL_READY" == true ]]; then publication_args+=(--supports-terminus2-multi-model); fi
             if [[ "$NEBIUS_GUEST_RUNTIME_READY" == true ]]; then
               test -n "$NEBIUS_GUEST_RUNTIME_VOLUME_MIB"
               test -n "$NEBIUS_GUEST_MAX_ARTIFACT_BYTES"
@@ -257,6 +269,11 @@ jobs:
             elif [[ -n "$NEBIUS_GUEST_RUNTIME_VOLUME_MIB" || -n "$NEBIUS_GUEST_MAX_ARTIFACT_BYTES" ]]; then
               echo "Guest budgets require explicit guest runtime readiness" >&2
               exit 1
+            fi
+            if [[ "$NEBIUS_SHARED_GUEST_READY" == true ]]; then
+              test "$NEBIUS_GUEST_RUNTIME_READY" == true
+              test "$NEBIUS_TASK_IDENTITY_READY" == true
+              publication_args+=(--supports-shared-guest)
             fi
             if [[ "$NEBIUS_EMULATED_PKCS11_READY" == true ]]; then
               test "$NEBIUS_GUEST_RUNTIME_READY" == true

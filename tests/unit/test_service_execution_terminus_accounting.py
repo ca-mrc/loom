@@ -235,6 +235,23 @@ def test_safe_export_preserves_failed_retry_usage_without_provider_logs():
     assert event.thinking_tokens == 2
 
 
+@pytest.mark.parametrize("route,exported", [
+    ("native_responses", True), ("chat_translation", True), ("private-debug", False),
+])
+def test_safe_export_keeps_only_the_bounded_gateway_route(route, exported):
+    # Codex evidence must say which Responses route served each call (#2054).
+    row = LlmCall(
+        id=uuid4(), trial_id=uuid4(), step_id="agent", model="gpt-4.1-mini",
+        dialect="openai_responses", input_tokens=4, output_tokens=2, cost_usd=Decimal("0"),
+        rate_card_hash="rate", captured_at=datetime.now(UTC), attempt=1,
+        provider_extras={"_loom_gateway_route": route},
+    )
+    safe = serialize_execution_accounting_call(row)
+    assert ("_loom_gateway_route" in safe["provider_extras"]) is exported
+    # Typed events keep only numeric counters; the route stays ledger evidence.
+    assert llm_call_row_to_event(safe, trial_id=row.trial_id, seq=0).provider_extras == {}
+
+
 def test_unknown_usage_survives_typed_events_usage_and_atif_without_private_extras():
     trial, trial_id, _native, rows = _case()
     failed = {
@@ -309,18 +326,36 @@ def test_terminus_model_identity_still_rejects_other_provider_model_or_source(id
         reconcile_terminus_ledger(native, rows, trial, trial_id)
 
 
-def test_terminus_sts_accepts_teacher_ledger_identity() -> None:
+@pytest.mark.parametrize("multi_model", [
+    {
+        "enabled": True,
+        "policy": "student_teacher_student",
+        "secondary_model": {"provider": "openai", "name": "teacher", "source": "api"},
+        "switch_episode": 2,
+        "return_switch_episode": 3,
+        "teacher_episodes": 1,
+    },
+    {
+        "enabled": True,
+        "policy": "beta_mixture",
+        "secondary_model": {"provider": "openai", "name": "teacher", "source": "api"},
+        "beta": 0.6,
+        "mix_seed": "seed",
+    },
+    {
+        "enabled": True,
+        "policy": "student_to_teacher_turns",
+        "secondary_model": {"provider": "openai", "name": "teacher", "source": "api"},
+        "step_start": 2,
+        "step_end": 9,
+        "mix_seed": "seed",
+    },
+])
+def test_terminus_mix_accepts_teacher_ledger_identity(multi_model: dict) -> None:
     trial, trial_id, native, rows = _case()
     trial = TrialConfig.model_validate({
         **trial.model_dump(mode="json"),
-        "multi_model": {
-            "enabled": True,
-            "policy": "student_teacher_student",
-            "secondary_model": {"provider": "openai", "name": "teacher", "source": "api"},
-            "switch_episode": 2,
-            "return_switch_episode": 3,
-            "teacher_episodes": 1,
-        },
+        "multi_model": multi_model,
     })
     teacher_row = {
         **rows[1],

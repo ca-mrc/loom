@@ -1023,39 +1023,47 @@ async def test_run_library_rejects_naive_timestamp_cursor(
 
 async def test_run_library_batch_list_does_not_load_trials_without_artifact_filters(
     run_library_setup: dict[str, object],
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app = run_library_setup["app"]
     raw_b = run_library_setup["raw_b"]
     batch_shared = run_library_setup["batch_shared"]
 
-    original_batch_trials = run_library_routes._batch_trials
-    calls: list[UUID] = []
+    statements: list[str] = []
 
-    async def counting_batch_trials(session: object, batch_id: UUID) -> list[Trial]:
-        calls.append(batch_id)
-        return await original_batch_trials(session, batch_id)
+    def capture_statement(
+        _connection: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        statements.append(" ".join(statement.lower().split()))
 
-    monkeypatch.setattr(
-        run_library_routes,
-        "_batch_trials",
-        counting_batch_trials,
-    )
-
+    engine = app.state.session_factory.kw["bind"]
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
         transport=transport,
         base_url="http://svc",
     ) as ac:
-        all_teams = await ac.get(
-            "/api/v1/run-library/batches?scope=all",
-            headers={"Authorization": f"Bearer {raw_b}"},
-        )
+        event.listen(engine.sync_engine, "before_cursor_execute", capture_statement)
+        try:
+            all_teams = await ac.get(
+                "/api/v1/run-library/batches?scope=all",
+                headers={"Authorization": f"Bearer {raw_b}"},
+            )
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", capture_statement)
 
     assert all_teams.status_code == 200, all_teams.text
     ids = {item["id"] for item in all_teams.json()["items"]}
     assert str(batch_shared) in ids
-    assert calls == []
+    # List rollups use compact batch/state/result projections, not full Trial rows.
+    assert not any(
+        statement.startswith("select trials.")
+        and "trials.trajectory_index" in statement.partition(" from ")[0]
+        for statement in statements
+    )
 
 
 async def test_run_library_batch_list_summarizes_only_visible_attributed_artifacts(

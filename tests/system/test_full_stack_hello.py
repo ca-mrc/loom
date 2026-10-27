@@ -29,6 +29,7 @@ def test_hello_world_succeeds(compose_stack: dict[str, str]) -> None:
         r = httpx.get(
             f"{cp}/trials/{trial_id}",
             headers={"Authorization": f"Bearer {raw_token}"},
+            timeout=10,
         )
         assert r.status_code == 200, r.text
         final_state = r.json()["state"]

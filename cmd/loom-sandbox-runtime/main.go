@@ -38,6 +38,7 @@ var (
 	errCleanupProcRead     = errors.New("cannot inspect sandbox processes")
 	errCleanupSignalDenied = errors.New("sandbox cannot signal descendant")
 	errCleanupSignalFailed = errors.New("sandbox signal failed")
+	errInvalidFileTarget   = errors.New("invalid file target")
 )
 
 // Kernel identity for one descendant that cleanup could not reap. Command
@@ -157,9 +158,17 @@ func writeCleanupFailure(w http.ResponseWriter, err error) {
 	http.Error(w, "sandbox process cleanup failed", http.StatusConflict)
 }
 
+type guestTaskIdentity struct {
+	uid, gid uint32
+	groups   []uint32
+	home     string
+}
+
 type runtimeServer struct {
-	maxTransfer int64
-	maxTimeout  time.Duration
+	maxTransfer         int64
+	maxTimeout          time.Duration
+	identity            *guestTaskIdentity
+	maxWorkspaceArchive int64
 }
 
 type execRequest struct {
@@ -211,6 +220,8 @@ func (s runtimeServer) handler() http.Handler {
 	s.registerProcesses(mux, newProcessTable(maxManagedProcesses))
 	mux.HandleFunc("PUT /file", s.upload)
 	mux.HandleFunc("GET /file", s.download)
+	mux.HandleFunc("PUT /workspace-archive", s.upload)
+	mux.HandleFunc("GET /workspace-archive", s.download)
 	mux.HandleFunc("GET /readlink", s.readlink)
 	mux.HandleFunc("POST /restore-directory", s.restoreDirectory)
 	var pauseMu sync.Mutex
@@ -266,8 +277,101 @@ func (r *commandRejection) write(w http.ResponseWriter) {
 
 // validateCommand applies the identity, deadline and environment rules shared
 // by buffered /exec and supervised /processes.
+func (s runtimeServer) userMatches(requested string) bool {
+	if s.identity == nil {
+		return requested == strconv.Itoa(os.Geteuid()) || (requested == "root" && os.Geteuid() == 0)
+	}
+	uid := strconv.FormatUint(uint64(s.identity.uid), 10)
+	gid := strconv.FormatUint(uint64(s.identity.gid), 10)
+	if requested == uid || requested == uid+":"+gid {
+		return true
+	}
+	return requested == "root" && s.identity.uid == 0 && s.identity.gid == 0
+}
+
+func (s runtimeServer) prepareCommand(cmd *exec.Cmd, environment []string) []string {
+	if s.identity == nil {
+		return environment
+	}
+	filtered := make([]string, 0, len(environment)+1)
+	for _, item := range environment {
+		if !strings.HasPrefix(item, "HOME=") {
+			filtered = append(filtered, item)
+		}
+	}
+	applyTaskCredential(cmd, s.identity)
+	return append(filtered, "HOME="+s.identity.home)
+}
+
+func parseBoundedID(raw string) (uint32, error) {
+	if !regexp.MustCompile(`^(?:0|[1-9][0-9]*)$`).MatchString(raw) {
+		return 0, errors.New("invalid guest task identity")
+	}
+	value, err := strconv.ParseUint(raw, 10, 32)
+	if err != nil || value > 2147483647 {
+		return 0, errors.New("invalid guest task identity")
+	}
+	return uint32(value), nil
+}
+
+func parseGuestTaskIdentity(uid, gid, groups, home string) (*guestTaskIdentity, error) {
+	if uid == "" && gid == "" && groups == "" && home == "" {
+		return nil, nil
+	}
+	if uid == "" || gid == "" || groups == "" || home == "" {
+		return nil, errors.New("guest task identity flags must be set together")
+	}
+	parsedUID, err := parseBoundedID(uid)
+	if err != nil {
+		return nil, err
+	}
+	parsedGID, err := parseBoundedID(gid)
+	if err != nil {
+		return nil, err
+	}
+	var parsed []uint32
+	if groups != "-" {
+		if len(groups) > 512 {
+			return nil, errors.New("invalid guest task identity")
+		}
+		parts := strings.Split(groups, ",")
+		if len(parts) > 32 {
+			return nil, errors.New("invalid guest task identity")
+		}
+		var previous uint32
+		for index, part := range parts {
+			value, err := parseBoundedID(part)
+			if err != nil {
+				return nil, err
+			}
+			if index > 0 && value <= previous {
+				return nil, errors.New("invalid guest task identity")
+			}
+			previous = value
+			parsed = append(parsed, value)
+		}
+	}
+	if len(home) > 4096 || !regexp.MustCompile(`^/(?:[-A-Za-z0-9._]+/)*[-A-Za-z0-9._]+$`).MatchString(home) || filepath.Clean(home) != home {
+		return nil, errors.New("invalid guest task identity")
+	}
+	for _, part := range strings.Split(home, "/") {
+		if part == "." || part == ".." {
+			return nil, errors.New("invalid guest task identity")
+		}
+	}
+	for _, protected := range []string{"/proc", "/sys", "/dev", "/run", "/loom", "/tests", "/verifier", "/solution"} {
+		if home == protected || strings.HasPrefix(home, protected+"/") {
+			return nil, errors.New("invalid guest task identity")
+		}
+	}
+	if parsed == nil {
+		parsed = []uint32{}
+	}
+	return &guestTaskIdentity{uid: parsedUID, gid: parsedGID, groups: parsed, home: home}, nil
+}
+
 func (s runtimeServer) validateCommand(req execRequest) (time.Duration, []string, *commandRejection) {
-	if req.User != nil && *req.User != strconv.Itoa(os.Geteuid()) && !(*req.User == "root" && os.Geteuid() == 0) {
+	if req.User != nil && !s.userMatches(*req.User) {
 		return 0, nil, &commandRejection{"exec_user_mismatch", "exec user must match sandbox UID"}
 	}
 	if math.IsNaN(req.Timeout) || math.IsInf(req.Timeout, 0) || req.Timeout < 0 || req.Timeout > s.maxTimeout.Seconds() {
@@ -305,8 +409,8 @@ func (s runtimeServer) execute(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, req.Argv[0], req.Argv[1:]...)
 	cmd.Dir = req.Cwd
-	cmd.Env = environment
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Env = s.prepareCommand(cmd, environment)
 	cmd.Cancel = func() error {
 		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		if errors.Is(err, syscall.ESRCH) {
@@ -342,6 +446,10 @@ func (s runtimeServer) execute(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s runtimeServer) upload(w http.ResponseWriter, r *http.Request) {
+	limit, ok := s.fileTransferLimit(w, r)
+	if !ok {
+		return
+	}
 	mode := uint64(0644)
 	if raw := r.Header.Get("X-File-Mode"); raw != "" {
 		var err error
@@ -351,46 +459,77 @@ func (s runtimeServer) upload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if r.ContentLength > s.maxTransfer {
-		http.Error(w, "file too large", 413)
+	if r.ContentLength > limit {
+		fileTransferError(w, http.StatusRequestEntityTooLarge, "file_too_large", "file upload rejected", r.ContentLength, limit)
 		return
 	}
-	err := writeFile(r.URL.Query().Get("path"), http.MaxBytesReader(w, r.Body, s.maxTransfer), uint32(mode))
+	err := withTaskFS(s.identity, func() error {
+		return writeFile(r.URL.Query().Get("path"), http.MaxBytesReader(w, r.Body, limit), uint32(mode))
+	})
 	if err != nil {
 		var oversized *http.MaxBytesError
 		if errors.As(err, &oversized) {
-			http.Error(w, "file too large", 413)
+			fileTransferError(w, http.StatusRequestEntityTooLarge, "file_too_large", "file upload rejected", r.ContentLength, limit)
 			return
 		}
-		http.Error(w, "file upload rejected", 400)
+		// Publish only fixed reason codes. Filesystem errors may contain private
+		// task paths or data and must never become response bodies or headers.
+		reason := "file_io_error"
+		switch {
+		case errors.Is(err, syscall.EACCES), errors.Is(err, syscall.EPERM):
+			reason = "file_permission_denied"
+		case errors.Is(err, syscall.EROFS):
+			reason = "file_read_only_filesystem"
+		case errors.Is(err, errInvalidFileTarget), errors.Is(err, syscall.ELOOP),
+			errors.Is(err, syscall.ENOTDIR), errors.Is(err, syscall.EISDIR):
+			reason = "file_invalid_target"
+		}
+		fileTransferError(w, http.StatusBadRequest, reason, "file upload rejected", r.ContentLength, limit)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s runtimeServer) download(w http.ResponseWriter, r *http.Request) {
-	f, err := readFile(r.URL.Query().Get("path"))
+	limit, ok := s.fileTransferLimit(w, r)
+	if !ok {
+		return
+	}
+	var f *os.File
+	err := withTaskFS(s.identity, func() error {
+		var openErr error
+		f, openErr = readFile(r.URL.Query().Get("path"))
+		return openErr
+	})
 	if err != nil {
-		http.Error(w, "file download rejected", 400)
+		reason := "file_io_error"
+		switch {
+		case errors.Is(err, syscall.ENOENT):
+			reason = "file_not_found"
+		case errors.Is(err, syscall.EACCES), errors.Is(err, syscall.EPERM):
+			reason = "file_permission_denied"
+		case errors.Is(err, errInvalidFileTarget), errors.Is(err, syscall.ELOOP), errors.Is(err, syscall.ENOTDIR):
+			reason = "file_invalid_target"
+		}
+		fileTransferError(w, http.StatusBadRequest, reason, "file download rejected", -1, limit)
 		return
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil || !info.Mode().IsRegular() {
-		http.Error(w, "not a regular file", 400)
+		fileTransferError(w, http.StatusBadRequest, "file_invalid_target", "file download rejected", -1, limit)
 		return
 	}
-	limit := s.maxTransfer
 	if raw := r.URL.Query().Get("max_bytes"); raw != "" {
 		requested, err := strconv.ParseInt(raw, 10, 64)
 		if err != nil || requested < 0 || requested > limit {
-			http.Error(w, "invalid file budget", 400)
+			fileTransferError(w, http.StatusBadRequest, "file_budget_invalid", "file download rejected", info.Size(), limit)
 			return
 		}
 		limit = requested
 	}
 	if info.Size() > limit {
-		http.Error(w, "file too large", 413)
+		fileTransferError(w, http.StatusRequestEntityTooLarge, "file_too_large", "file download rejected", info.Size(), limit)
 		return
 	}
 	metadata, ok := info.Sys().(*syscall.Stat_t)
@@ -404,11 +543,60 @@ func (s runtimeServer) download(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-File-Unix-Mode", strconv.FormatUint(uint64(metadata.Mode), 8))
 	w.Header().Set("X-File-UID", strconv.FormatUint(uint64(metadata.Uid), 10))
 	w.Header().Set("X-File-GID", strconv.FormatUint(uint64(metadata.Gid), 10))
-	_, _ = io.CopyN(w, f, info.Size())
+	// Hold the last byte until the descriptor has been checked again. A short
+	// read or changed file must terminate an incomplete HTTP body, so clients
+	// never atomically publish a successful-looking partial snapshot.
+	var last [1]byte
+	if info.Size() > 0 {
+		if _, err := io.CopyN(w, f, info.Size()-1); err != nil {
+			panic(http.ErrAbortHandler)
+		}
+		if _, err := io.ReadFull(f, last[:]); err != nil {
+			panic(http.ErrAbortHandler)
+		}
+	}
+	after, err := f.Stat()
+	if err != nil || !sameFileReadVersion(info, after) {
+		panic(http.ErrAbortHandler)
+	}
+	if info.Size() > 0 {
+		_, _ = w.Write(last[:])
+	}
+}
+
+var workspaceArchivePath = regexp.MustCompile(`^/tmp/loom-workspace-[0-9a-f]{32}\.tar$`)
+
+func (s runtimeServer) fileTransferLimit(w http.ResponseWriter, r *http.Request) (int64, bool) {
+	if r.URL.Path != "/workspace-archive" {
+		return s.maxTransfer, true
+	}
+	limit := s.maxWorkspaceArchive
+	if limit == 0 {
+		limit = s.maxTransfer
+	}
+	if !workspaceArchivePath.MatchString(r.URL.Query().Get("path")) {
+		fileTransferError(w, http.StatusBadRequest, "file_invalid_target", "workspace archive rejected", -1, limit)
+		return 0, false
+	}
+	return limit, true
+}
+
+func fileTransferError(w http.ResponseWriter, status int, reason, message string, size, limit int64) {
+	w.Header().Set("X-Loom-Sandbox-Error", reason)
+	if size >= 0 {
+		w.Header().Set("X-Loom-File-Size", strconv.FormatInt(size, 10))
+	}
+	w.Header().Set("X-Loom-File-Limit", strconv.FormatInt(limit, 10))
+	http.Error(w, message, status)
 }
 
 func (s runtimeServer) readlink(w http.ResponseWriter, r *http.Request) {
-	target, err := readSymlink(r.URL.Query().Get("path"))
+	var target string
+	err := withTaskFS(s.identity, func() error {
+		var readErr error
+		target, readErr = readSymlink(r.URL.Query().Get("path"))
+		return readErr
+	})
 	if err != nil {
 		http.Error(w, "symlink inspection rejected", 400)
 		return
@@ -438,7 +626,20 @@ func main() {
 	check := flag.String("check-socket", "", "check an existing Unix socket and exit")
 	guest := flag.Bool("guest-channel", false, "serve the private guest virtio-serial channel")
 	limit := flag.Int64("max-transfer-bytes", 256*1024*1024, "maximum file transfer size")
+	var archiveDefault int64
+	if raw := os.Getenv("LOOM_WORKSPACE_MAX_ARCHIVE_BYTES"); raw != "" {
+		var err error
+		archiveDefault, err = strconv.ParseInt(raw, 10, 64)
+		if err != nil || archiveDefault <= 0 {
+			log.Fatal("workspace archive limit invalid")
+		}
+	}
+	archiveLimit := flag.Int64("max-workspace-archive-bytes", archiveDefault, "workspace archive budget; zero uses ordinary file limit")
 	timeout := flag.Int("exec-timeout-seconds", 900, "maximum and default exec deadline")
+	taskUID := flag.String("task-uid", "", "frozen in-guest uid")
+	taskGID := flag.String("task-gid", "", "frozen in-guest gid")
+	taskGroups := flag.String("task-groups", "", "frozen in-guest supplementary groups")
+	taskHome := flag.String("task-home", "", "frozen in-guest HOME")
 	flag.Parse()
 	if *check != "" {
 		if err := checkSocket(*check); err != nil {
@@ -446,8 +647,15 @@ func main() {
 		}
 		return
 	}
-	if (*socket == "" && !*guest) || (*socket != "" && *guest) || *limit <= 0 || *timeout <= 0 {
+	if (*socket == "" && !*guest) || (*socket != "" && *guest) || *limit <= 0 || *archiveLimit < 0 || *timeout <= 0 {
 		log.Fatal("socket and positive limits required")
+	}
+	identity, err := parseGuestTaskIdentity(*taskUID, *taskGID, *taskGroups, *taskHome)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if identity != nil && !*guest {
+		log.Fatal("task identity requires the guest channel")
 	}
 	var channel io.ReadWriteCloser
 	if *guest {
@@ -468,7 +676,7 @@ func main() {
 	defer listener.Close()
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
-	server := &http.Server{Handler: (runtimeServer{*limit, time.Duration(*timeout) * time.Second}).handler(), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second, BaseContext: func(net.Listener) context.Context { return ctx }}
+	server := &http.Server{Handler: (runtimeServer{maxTransfer: *limit, maxTimeout: time.Duration(*timeout) * time.Second, identity: identity, maxWorkspaceArchive: *archiveLimit}).handler(), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second, BaseContext: func(net.Listener) context.Context { return ctx }}
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)

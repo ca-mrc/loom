@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 import re
 import subprocess
 import tomllib
@@ -163,13 +164,68 @@ def test_workflows_use_checksum_verified_uv_locked_sync_and_safe_caches() -> Non
         checksum = inputs.get("checksum")
         assert checksum in {UV_CHECKSUMS["linux-x86_64"], MATRIX_CHECKSUM_EXPRESSION}, path
         assert inputs.get("enable-cache") is True, path
+        # The dedicated full-wheel cache retains downloaded distributions;
+        # all other caches preserve the setup-uv upgrade's prior pruning policy.
+        expected_pruning = inputs.get("cache-suffix") != CI_WHEEL_CACHE_SUFFIX
+        assert inputs.get("prune-cache") is expected_pruning, path
         triggers = workflows[path].get("on", workflows[path].get(True, {}))
         untrusted_events = {"pull_request", "pull_request_target", "merge_group", "workflow_call"}
         if untrusted_events.intersection(triggers):
-            assert inputs.get("save-cache") == SAFE_SAVE_EXPRESSION, path
+            # Untrusted code never writes a cache: save only on trusted events, or never.
+            assert inputs.get("save-cache") in {SAFE_SAVE_EXPRESSION, False}, path
         else:
             assert inputs.get("save-cache") is True, path
         assert inputs.get("cache-dependency-glob") == "uv.lock", path
+
+
+CI_WHEEL_CACHE_SUFFIX = "ci-wheels-v2"
+CI_WHEEL_CACHE_PATH = "/home/runner/.cache/uv"
+
+
+def _sync_flags(command: str) -> set[str]:
+    words = command.split()
+    flags = {word for word in words if word == "--all-packages"}
+    flags |= {f"{flag}={value}" for flag, value in itertools.pairwise(words)
+              if flag in {"--extra", "--group", "--only-group"}}
+    return {flag.replace("--only-group=", "--group=") for flag in flags}
+
+
+def test_ci_wheel_cache_has_one_trusted_writer_and_complete_contents() -> None:
+    # setup-uv's default pruning saved only locally built packages, so every
+    # job downloaded all wheels again. The full cache must keep one key, be
+    # written only by trusted dev/schedule runs, and cover every reader.
+    readers, writers = [], []
+    for path, workflow in _workflows().items():
+        for job in workflow.get("jobs", {}).values():
+            steps = job.get("steps", [])
+            for step in steps:
+                inputs = step.get("with", {})
+                if not str(step.get("uses", "")).startswith(SETUP_UV_PREFIX):
+                    continue
+                if inputs.get("cache-suffix") != CI_WHEEL_CACHE_SUFFIX:
+                    continue
+                assert inputs.get("prune-cache") is False, path
+                # The cache version hashes the path, and setup-uv's default path
+                # differs between GitHub-hosted and self-hosted runners.
+                assert inputs.get("cache-local-path") == CI_WHEEL_CACHE_PATH, path
+                assert inputs.get("cache-dependency-glob") == "uv.lock", path
+                assert "python-version" not in inputs and not inputs.get("cache-python"), path
+                syncs = {frozenset(_sync_flags(line)) for other in steps
+                         for line in str(other.get("run", "")).replace("\\\n", " ").splitlines()
+                         if "uv sync" in line}
+                (writers if inputs.get("save-cache") is True else readers).append((path, inputs, syncs))
+    assert [path.name for path, *_ in writers] == ["ci-dependency-cache.yml"]
+    assert all(inputs.get("save-cache") is False for _, inputs, _ in readers)
+    assert {path.name for path, *_ in readers} >= {"ci.yml", "cluster-smoke.yml", "staging-smoke.yml"}
+
+    [(writer_path, _, writer_syncs)] = writers
+    [writer_sync] = writer_syncs
+    triggers = _workflows()[writer_path].get("on", _workflows()[writer_path].get(True, {}))
+    assert set(triggers) == {"push", "schedule", "workflow_dispatch"}
+    assert triggers["push"]["branches"] == ["dev"]
+    for path, _, syncs in readers:
+        for flags in syncs:
+            assert flags <= writer_sync, (path, sorted(flags - writer_sync))
 
 
 def test_ci_requires_real_locked_install_on_nebius_server_architecture() -> None:

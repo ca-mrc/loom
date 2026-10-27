@@ -59,11 +59,17 @@ from loom.models.networking import (
     resolve_effective_network_policy,
 )
 from loom.models.task import TaskConfig, normalize_steps
-from loom.models.trial import TrialConfig
+from loom.models.trial import HOSTED_TERMINUS2_MULTI_MODEL_POLICIES, MixPolicy, TrialConfig
+from loom.models.types import AgentVersion
 from loom.mutable_paths import validate_task_workdir
 from loom.pipeline.keys import canonical_digest
 from loom.prebuilt_task_images import resolve_prebuilt_task_image, validate_prebuilt_image_pins
-from loom.sandbox_identity import resolve_sandbox_identity
+from loom.sandbox_identity import (
+    concrete_sandbox_user,
+    guest_shared_identity_compatible,
+    inherited_sandbox_user,
+    resolve_sandbox_identity,
+)
 from loom.task_image_materialization import TaskImageExecutionGrantV1, resolve_prepared_task
 from loom.task_sandbox_planner import (
     TaskSandboxPlanRequest,
@@ -185,6 +191,9 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
     execution_class_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,79}$")
     task_image_ref: str
     agent_image_ref: str | None = None
+    # The Terminus-2 version label built into `agent_image_ref`, which a
+    # Trial without an explicit version runs; exports record it (#2054).
+    agent_image_version: AgentVersion | None = Field(default=None, exclude_if=lambda value: value is None)
     agent_runtime_bindings: tuple[AgentRuntimeBindingV1, ...] = ()
     supports_task_web_egress: bool = False
     supports_task_artifact_inputs: bool = Field(default=False, exclude_if=lambda value: not value)
@@ -210,9 +219,7 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
     max_log_bytes_per_stream: int = Field(default=10 * 1024 * 1024, gt=0)
     max_artifact_bytes: int = Field(default=1024 * 1024 * 1024, gt=0)
     service_lifecycle_ready: bool = False
-    terminus2_multi_model_policies: frozenset[
-        Literal["student_teacher_student"]
-    ] = Field(default_factory=frozenset)
+    terminus2_multi_model_policies: frozenset[MixPolicy] = Field(default_factory=frozenset)
 
     @property
     def supported_guest_capabilities(self) -> frozenset[GuestExecutionCapability]:
@@ -239,6 +246,9 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
             payload.pop("default_task_resource_requests", None)
         if not self.service_lifecycle_ready:
             payload.pop("service_lifecycle_ready", None)
+        policies = payload.get("terminus2_multi_model_policies")
+        if policies:
+            payload["terminus2_multi_model_policies"] = sorted(policies)
         if not self.terminus2_multi_model_policies:
             payload.pop("terminus2_multi_model_policies", None)
         if not self.supports_task_identity:
@@ -273,6 +283,12 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
         return self
 
     @model_validator(mode="after")
+    def default_agent_version_has_image(self) -> ServiceExecutionRuntimeProfileV1:
+        if self.agent_image_version is not None and self.agent_image_ref is None:
+            raise ValueError("a default agent version requires the default agent image")
+        return self
+
+    @model_validator(mode="after")
     def unique_agent_versions(self) -> ServiceExecutionRuntimeProfileV1:
         keys = [(item.agent_name, item.agent_version) for item in self.agent_runtime_bindings]
         if len(set(keys)) != len(keys):
@@ -297,13 +313,12 @@ def build_nebius_runtime_profile(
     runtime_binary_sha256: str,
     image_admission: ExecutionImageAdmissionBundleV1,
     agent_image_ref: str | None = None,
+    agent_image_version: str | None = None,
     controller_resources: ControllerComputeResourcesV1 | None = None,
     supports_task_web_egress: bool = False,
     supports_task_artifact_inputs: bool = False,
     service_lifecycle_ready: bool = False,
-    terminus2_multi_model_policies: frozenset[
-        Literal["student_teacher_student"]
-    ] = frozenset(),
+    terminus2_multi_model_policies: frozenset[MixPolicy] = frozenset(),
     supports_task_identity: bool = False,
     guest_runtime: Literal["qemu-tcg-v1"] | None = None,
     supports_emulated_pkcs11: bool = False,
@@ -329,6 +344,7 @@ def build_nebius_runtime_profile(
         runtime_binary_sha256=runtime_binary_sha256,
         image_admission=image_admission,
         agent_image_ref=agent_image_ref,
+        agent_image_version=agent_image_version,
         controller_resources=controller_resources,
         supports_task_web_egress=supports_task_web_egress,
         service_lifecycle_ready=service_lifecycle_ready,
@@ -440,6 +456,8 @@ def automatic_service_execution_rejections(
     allow_task_image_preparation: bool = False,
     supported_capabilities: frozenset[GuestExecutionCapability] = frozenset(),
     supports_shared_guest: bool = False,
+    agent_uid: int = 65532,
+    agent_gid: int = 65532,
 ) -> tuple[str, ...]:
     """Return stable reasons why the v1 ordinary-TaskSet compiler cannot run a task."""
 
@@ -448,6 +466,11 @@ def automatic_service_execution_rejections(
     task = normalize_steps(task)
     declared_rejections = task_runtime_rejections(task, agent_name=trial.agent_name)
     env = task.environment
+    # A skipped trial never starts the verifier sandbox, so only the agent identity is checked.
+    identity_users = (
+        (env.user,) if trial.skip_verifier
+        else (env.user, inherited_sandbox_user(env.user, task.verifier.user))
+    )
     # The harness spec supplies only harness-owned facts; checks keyed on
     # `controller` belong to the common private-sandbox path (#2288).
     spec = hosted_harness(trial.agent_name)
@@ -456,7 +479,6 @@ def automatic_service_execution_rejections(
     try:
         effective_network_policy = resolve_effective_network_policy(
             baseline=env.baseline_network_policy,
-            supported=env.network_policies_supported,
             override=trial.baseline_network_policy_override,
         )
         network_override_supported = True
@@ -473,6 +495,8 @@ def automatic_service_execution_rejections(
         # A task that needs a guest kernel cannot run safely in a shared kernel.
         reasons.append("isolation_container_unsatisfiable")
     if effective_guest_capabilities(task, trial) is not None:
+        if env.image_entrypoint or env.entrypoint:
+            reasons.append("guest_image_entrypoint_unsupported")
         if not controller:
             reasons.append("isolation_guest_response_only" if trial.isolation == "guest"
                            else "guest_private_sandboxes_required")
@@ -481,20 +505,32 @@ def automatic_service_execution_rejections(
         # The guest path grades in a fresh verifier guest, not the agent's live
         # sandbox. Reject an explicit request for that until it is supported;
         # task-authored shared guest tasks keep their historical topology.
-        if not supports_shared_guest and resolve_verifier_env_mode(task, trial) == "shared" and (
-            trial.isolation == "guest" or trial.verifier_env_mode == "shared"
-            or env.single_service_compose is not None
+        # Skip does not grade, so the task file's shared mode is not a request for it.
+        if (
+            not trial.skip_verifier
+            and not supports_shared_guest
+            and resolve_verifier_env_mode(task, trial) == "shared"
+            and (
+                trial.isolation == "guest" or trial.verifier_env_mode == "shared"
+                or env.single_service_compose is not None
+            )
         ):
             reasons.append("isolation_guest_shared_unsupported")
         if env.sidecars:
             reasons.append("guest_sidecars_unsupported")
-        for user in (env.user, task.verifier.user):
-            try:
-                identity = resolve_sandbox_identity(user, env.environment.get("HOME")) if user is not None else None
-            except ValueError:
-                identity = None
-            if identity is None or identity.run_as_user != 0 or identity.run_as_group != 0:
-                reasons.append("guest_root_identity_required")
+        if (
+            not trial.skip_verifier
+            and resolve_verifier_env_mode(task, trial) == "shared"
+            and task.verifier.user is not None
+        ):
+            # One VM cannot be two users. An unresolved user is recorded once
+            # below as unsupported_task_identity.
+            compatible = guest_shared_identity_compatible(
+                env.user, task.verifier.user, env.environment.get("HOME"), env.supplementary_groups,
+                default_uid=agent_uid, default_gid=agent_gid,
+            )
+            if compatible is False:
+                reasons.append("guest_shared_identity_mismatch")
         admission = evaluate_execution_admission(
             workload_requirements_from_task(task, trial if network_override_supported else trial.model_copy(
                 update={"baseline_network_policy_override": None})),
@@ -535,17 +571,26 @@ def automatic_service_execution_rejections(
         reserve = GUEST_LAUNCHER_STORAGE_MIB if effective_guest_capabilities(task, trial) is not None else 0
         if env.storage_mb - reserve < spec.setup.disk_mib:
             reasons.append("harness_setup_storage_insufficient")
-    if not controller and (env.workdir != PurePosixPath("/workspace") or env.user != "agent"):
+    if not controller and (env.workdir != PurePosixPath("/workspace") or env.user != "agent" or env.image_entrypoint):
         reasons.append("standard_workspace_identity_required")
     if controller:
+        if (env.image_entrypoint or env.image_workdir) and not (
+            allow_task_image_preparation and env.dockerfile is not None
+        ):
+            reasons.append("task_image_runtime_metadata_required")
         try:
             validate_task_workdir(env.workdir)
         except ValueError:
             reasons.append("standard_workspace_identity_required")
         try:
-            resolve_sandbox_identity(env.user, env.environment.get("HOME"))
-            if task.verifier.user is not None:
-                resolve_sandbox_identity(task.verifier.user, env.environment.get("HOME"))
+            if env.user == "image":
+                if not (allow_task_image_preparation and env.dockerfile is not None):
+                    reasons.append("task_image_runtime_metadata_required")
+            for user in identity_users:
+                concrete = concrete_sandbox_user(user)
+                if concrete is None:
+                    continue
+                resolve_sandbox_identity(concrete, env.environment.get("HOME"))
         except ValueError:
             reasons.append("unsupported_task_identity")
     if effective_network_policy.kind not in {"no-network", "gateway-only", "web-allowlist", "public-web"}:
@@ -556,7 +601,7 @@ def automatic_service_execution_rejections(
     ):
         reasons.append("task_network_consumer_unavailable")
     if (
-        (set(env.environment) - ({"HOME"} if controller else set()))
+        (env.environment and not controller)
         or (env.sidecars and (not controller or not all(sidecar.fixture for sidecar in env.sidecars)))
         or env.extra_hosts
         or env.dns
@@ -566,6 +611,11 @@ def automatic_service_execution_rejections(
         or env.mcp_servers
     ):
         reasons.append("extended_environment_unsupported")
+    if controller:
+        try:
+            ProcessPhaseV1._environment_is_nonsecret(env.environment)
+        except ValueError:
+            reasons.append("task_environment_invalid")
     if any(sidecar.fixture for sidecar in env.sidecars):
         if allow_task_image_preparation:
             if env.dockerfile is None or any(sidecar.dockerfile is None for sidecar in env.sidecars):
@@ -596,24 +646,25 @@ def automatic_service_execution_rejections(
         and trial.multi_model.enabled
         and (
             trial.agent_name != "terminus-2"
-            or trial.multi_model.policy != "student_teacher_student"
+            or trial.multi_model.policy not in HOSTED_TERMINUS2_MULTI_MODEL_POLICIES
         )
     ):
         reasons.append("terminus2_multi_model_policy_unsupported")
-    if task.verifier.name != "script" or task.verifier.env_mode not in {"shared", "separate"}:
-        reasons.append("script_verifier_required")
     verifier_path = task.verifier.args.get("script_path")
-    if (
-        not isinstance(verifier_path, str)
-        or not verifier_path
-        or PurePosixPath(verifier_path).is_absolute()
-        or ".." in PurePosixPath(verifier_path).parts
-        or _GLOB_MAGIC.search(verifier_path)
-    ):
-        reasons.append("exact_verifier_path_required")
-    if trial.skip_verifier or trial.verifier_env_mode not in {None, "shared", "separate"}:
+    if not trial.skip_verifier:
+        if task.verifier.name != "script" or task.verifier.env_mode not in {"shared", "separate"}:
+            reasons.append("script_verifier_required")
+        if (
+            not isinstance(verifier_path, str)
+            or not verifier_path
+            or PurePosixPath(verifier_path).is_absolute()
+            or ".." in PurePosixPath(verifier_path).parts
+            or _GLOB_MAGIC.search(verifier_path)
+        ):
+            reasons.append("exact_verifier_path_required")
+    if trial.verifier_env_mode not in {None, "shared", "separate"}:
         reasons.append("verifier_mode_required")
-    if controller:
+    if controller and not trial.skip_verifier:
         if not isinstance(verifier_path, str) or not verifier_path.startswith("verifier/"):
             reasons.append("private_verifier_directory_required")
     if task.steps:
@@ -674,7 +725,7 @@ def compile_service_execution_plan(
             or task != TaskConfig.model_validate(task_image_grant.task_config)
             or source_provenance != task_image_grant.task_source_provenance):
             raise ValueError("prepared task image does not match the frozen task")
-        task = resolve_prepared_task(task, task_image_grant)
+        task = resolve_prepared_task(task, task_image_grant, agent_uid=profile.run_as_user)
     source_task_image = task.environment.docker_image
     if is_workspace_harness(trial.agent_name):
         task = resolve_prebuilt_task_image(task, profile.prebuilt_image_pins)
@@ -687,6 +738,7 @@ def compile_service_execution_plan(
         source_provenance=source_provenance,
         supported_capabilities=profile.supported_guest_capabilities,
         supports_shared_guest=profile.supports_shared_guest,
+        agent_uid=profile.run_as_user, agent_gid=profile.run_as_group,
     )
     if reasons:
         raise ValueError("automatic service execution is incompatible: " + ",".join(reasons))
@@ -694,13 +746,15 @@ def compile_service_execution_plan(
     assert spec is not None  # admission rejected unknown harnesses above
     effective_network_policy = resolve_effective_network_policy(
         baseline=task.environment.baseline_network_policy,
-        supported=task.environment.network_policies_supported,
         override=trial.baseline_network_policy_override,
     )
     if hosted_http_egress(effective_network_policy) is not None and not profile.supports_task_web_egress:
         raise ValueError("task_egress_runtime_unavailable")
     profile_reasons = runtime_profile_rejections(task, trial, profile)
     selected_agent_image = controller_image_for_trial(profile, trial)
+    has_resolved_task_environment = bool(task_image_grant and task_image_grant.image_runtime_metadata)
+    if has_resolved_task_environment and selected_agent_image != profile.agent_image_ref:
+        raise ValueError("resolved_task_environment_controller_unavailable")
     if task_image_grant is not None and selected_agent_image is not None:
         admitted = {item.statement.image_ref for item in profile.image_admission.admissions}
         if selected_agent_image in admitted:
@@ -733,6 +787,7 @@ def compile_service_execution_plan(
             "artifacts": step.artifacts,
             "required_artifacts": step.required_artifacts,
             "verifier": task.verifier.model_dump(mode="json"),
+            **({"skip_verifier": True} if trial.skip_verifier else {}),
         }
     )
     if spec.workspace:
@@ -746,6 +801,7 @@ def compile_service_execution_plan(
                 task_image_grant.materialization_id if task_image_grant else None
             ),
             resource_requests=resource_requests,
+            has_resolved_task_environment=has_resolved_task_environment,
         ))
     assert trial.agent_model is not None
     # The in-Pod runner targets Loom's attributed chat route.  It revalidates
@@ -771,7 +827,7 @@ def compile_service_execution_plan(
         del main_environment["LOOM_TASK_ARTIFACTS_JSON"]
         main_environment["LOOM_TASK_ARTIFACTS_FROM_INPUT"] = "1"
     verifier_path = str(task.verifier.args.get("script_path", ""))
-    verifier = ProcessPhaseV1(
+    verifier = None if trial.skip_verifier else ProcessPhaseV1(
         role="verifier",
         argv=("/bin/sh", verifier_path),
         working_directory="/workspace",
@@ -812,11 +868,15 @@ def compile_service_execution_plan(
             kind="usage",
             required=True,
         ),
-        RuntimeOutputDeclarationV1(
-            source_path=".loom/verifier/output.json",
-            relative_path="verifier/output.json",
-            kind="verifier",
-            required=True,
+        *(
+            () if trial.skip_verifier else (
+                RuntimeOutputDeclarationV1(
+                    source_path=".loom/verifier/output.json",
+                    relative_path="verifier/output.json",
+                    kind="verifier",
+                    required=True,
+                ),
+            )
         ),
     )
     if hosted_http_egress(effective_network_policy) is not None:
@@ -860,7 +920,7 @@ def compile_service_execution_plan(
             ),
             environment=main_environment,
         ),
-        verifier_execution="in_attempt",
+        verifier_execution="skipped" if trial.skip_verifier else "in_attempt",
         verifier=verifier,
         max_log_bytes_per_stream=profile.max_log_bytes_per_stream,
         max_artifact_bytes=profile.max_artifact_bytes,
@@ -937,7 +997,7 @@ def freeze_agent_runtime_releases(
 
 
 def _requires_task_identity(task: TaskConfig) -> bool:
-    return (task.environment.user != "agent" or "HOME" in task.environment.environment
+    return (task.environment.user != "agent" or task.environment.image_entrypoint or bool(task.environment.entrypoint) or "HOME" in task.environment.environment
             or task.verifier.user is not None)
 
 
@@ -956,7 +1016,6 @@ def runtime_profile_rejections(
     try:
         effective_network_policy = resolve_effective_network_policy(
             baseline=task.environment.baseline_network_policy,
-            supported=task.environment.network_policies_supported,
             override=trial.baseline_network_policy_override,
         )
     except UnsupportedNetworkPolicyOverrideError:
@@ -1035,6 +1094,8 @@ def execution_selection_rejections(
         allow_task_image_preparation=allow_task_image_preparation,
         supported_capabilities=profile.supported_guest_capabilities if profile is not None else frozenset(),
         supports_shared_guest=profile.supports_shared_guest if profile is not None else False,
+        agent_uid=profile.run_as_user if profile is not None else 65532,
+        agent_gid=profile.run_as_group if profile is not None else 65532,
     ))
     if profile is None:
         reasons.append("runtime_profile_unavailable")

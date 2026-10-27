@@ -6,7 +6,6 @@ Spec: docs/architecture/cluster-deploy.md §Secrets, SSRF, gateway hot path.
 
 from __future__ import annotations
 
-import base64
 import os
 import subprocess
 import sys
@@ -310,51 +309,3 @@ async def test_rewrap_rejects_wrong_length_new_key(
     ref = await store.put(namespace="ns", value="x")
     with pytest.raises(SecretStoreError, match="new_master_key length"):
         await store.rewrap(ref, new_master_key=b"too-short")
-
-
-# ──────────────────────────────────────────────────────────────────────
-# Master key loader
-# ──────────────────────────────────────────────────────────────────────
-
-
-def test_master_key_loader_decodes_base64(monkeypatch: pytest.MonkeyPatch) -> None:
-    from loom.security.secret_store import _load_master_key_from_env
-
-    monkeypatch.setenv(
-        "LOOM_SECRET_STORE_MASTER_KEY",
-        base64.b64encode(_TEST_KEY).decode(),
-    )
-    assert _load_master_key_from_env() == _TEST_KEY
-
-
-def test_master_key_loader_rejects_missing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from loom.security.secret_store import _load_master_key_from_env
-
-    monkeypatch.delenv("LOOM_SECRET_STORE_MASTER_KEY", raising=False)
-    with pytest.raises(SecretStoreError, match="not set"):
-        _load_master_key_from_env()
-
-
-def test_master_key_loader_rejects_wrong_length(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from loom.security.secret_store import _load_master_key_from_env
-
-    monkeypatch.setenv(
-        "LOOM_SECRET_STORE_MASTER_KEY",
-        base64.b64encode(b"only-sixteen-byt").decode(),  # 16 bytes
-    )
-    with pytest.raises(SecretStoreError, match="expected 32"):
-        _load_master_key_from_env()
-
-
-def test_master_key_loader_rejects_non_base64(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from loom.security.secret_store import _load_master_key_from_env
-
-    monkeypatch.setenv("LOOM_SECRET_STORE_MASTER_KEY", "not-base64!!@@")
-    with pytest.raises(SecretStoreError, match="not valid base64"):
-        _load_master_key_from_env()

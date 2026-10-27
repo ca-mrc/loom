@@ -1,3 +1,4 @@
+import os
 import re
 import shlex
 import shutil
@@ -146,7 +147,16 @@ class PackagedSourceOnly(importlib.abc.MetaPathFinder):
 sys.meta_path.insert(0, PackagedSourceOnly())
 import loom_execution_actuator.__main__
 import loom_execution_capacity_collector.__main__
+from loom_control_plane.execution_capacity_wait import (
+    execution_target_fingerprint,
+    read_execution_capacity_waits,
+)
 """
+    # -I still executes site-package .pth hooks. The image import probe must
+    # not inherit pytest-cov startup and collect this disposable source copy as
+    # current-checkout coverage after pytest removes it.
+    env = {key: value for key, value in os.environ.items()
+        if not key.startswith("COV_CORE_") and key != "COVERAGE_PROCESS_START"}
     result = subprocess.run([sys.executable, "-I", "-c", script, str(tmp_path / "src")],
-                            cwd=tmp_path, capture_output=True, text=True, timeout=30)
+                            cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr

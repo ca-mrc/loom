@@ -9,7 +9,11 @@ from __future__ import annotations
 import json
 from typing import Any, Literal, cast
 
-from scripts.ops.nebius_pool_activation_database import _binding_hex, _header
+from scripts.ops.nebius_pool_activation_database import (
+    _binding_hex,
+    _header,
+    _manager_observation_header,
+)
 from scripts.ops.nebius_pool_recovery_database import _pool_drain_counts_sql
 
 from loom_service.pool_management.capacity import digest
@@ -60,11 +64,14 @@ SELECT CASE WHEN
     END AS state FROM expected"""
 
 
-def pool_machine_retirement_sql(spec: PoolInstallation, *, action: Literal['observe', 'revoke']) -> str:
+def pool_machine_retirement_sql(spec: PoolInstallation, *, action: Literal['observe', 'revoke'],
+        manager_revision: str = '0176') -> str:
     spec = PoolInstallation.model_validate(spec.model_dump())
     if action not in {'observe', 'revoke'}:
         raise ValueError('pool_machine_retirement_action_unqualified')
     write = action == 'revoke'
+    header = (_header(read_only=False, manager_revision=manager_revision) if write
+        else _manager_observation_header(manager_revision))
     locks = f"""DO $pool_machine_locks$
 BEGIN
 PERFORM pg_advisory_xact_lock(hashtextextended('nebius-global-pool-mutation',1915));
@@ -85,7 +92,7 @@ END $pool_machine_locks$;
             WHERE t.token_hash=c.token_hash AND m.pool_id='{spec.pool_id}'::uuid AND t.revoked_at IS NULL;
     END IF;
 """ if write else ''
-    return _header(read_only=not write) + locks + f"""DO $pool_machine_retirement$
+    return header + locks + f"""DO $pool_machine_retirement$
 DECLARE current_state text;
 BEGIN
     SELECT state INTO current_state FROM ({_state_sql(spec)}) authority;
@@ -102,7 +109,7 @@ SELECT json_build_object('schema','loom.pool-machine-retirement.v1',
 """
 
 
-def pool_recovery_machine_state_sql(spec: PoolInstallation) -> str:
+def pool_recovery_machine_state_sql(spec: PoolInstallation, *, manager_revision: str = '0176') -> str:
     """Inspect exact authority before/after fencing while cleanup may proceed.
 
     This is not retirement readiness: it neither requires nor proves drain.
@@ -111,7 +118,7 @@ def pool_recovery_machine_state_sql(spec: PoolInstallation) -> str:
     The anchored parent separately qualifies mode and active/revoked alternatives.
     """
     spec = PoolInstallation.model_validate(spec.model_dump())
-    return _header(read_only=True) + f"""SELECT json_build_object('schema','loom.pool-recovery-machine-state.v1',
+    return _manager_observation_header(manager_revision) + f"""SELECT json_build_object('schema','loom.pool-recovery-machine-state.v1',
     'operation_id','{spec.operation_id}', 'installation_sha256','{digest(spec.model_dump(mode='json'))}',
     'read_only',current_setting('transaction_read_only')='on',
     'state',authority.state) AS report FROM ({_state_sql(spec, recovering=True)}) authority;

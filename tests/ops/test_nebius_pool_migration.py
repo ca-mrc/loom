@@ -8,8 +8,8 @@ from uuid import uuid4
 
 import pytest
 from scripts.ops.nebius_pool_registration import stage_pool_registration
-from tests.ops.test_nebius_management_stage import PhaseAPI
 from tests.ops.test_nebius_pool_registration import request as registration_request
+from tests.support.nebius_phase_api import PhaseAPI as PhaseAPI
 
 
 def migration_request(environments=("production", "staging", "development")):

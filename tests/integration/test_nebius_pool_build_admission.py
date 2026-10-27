@@ -9,7 +9,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import func, select, update
 
-from loom.db.nebius_pool_schema import NebiusPoolRequest
+from loom.db.nebius_pool_schema import NebiusPoolBinding, NebiusPoolObservation, NebiusPoolRequest
 from loom.db.schema import TaskImageMaterializationAttempt
 from loom.nebius_pool_priority import PoolWorkOriginV1
 from loom.nebius_pool_task_image import PoolTaskImagePrepareV1
@@ -23,14 +23,31 @@ from tests.integration.test_nebius_environment_management import (
 from tests.integration.test_nebius_pool_observation_registry import capture_scope
 from tests.integration.test_nebius_pool_registry import prepare, publish_placement, setup
 from tests.integration.test_nebius_pool_registry import sessions as sessions
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_pool_task_image_render import build_inputs
 
 
-async def mixed_setup(sessions, **kwargs):
+async def mixed_setup(sessions, *, build_concurrency_limit=2, **kwargs):
+    from loom_service.pool_management.auth import _resolve_hash
+    from loom_service.pool_management.capacity import _placement
     from loom_service.pool_management.registry import PoolProfiles
 
     participants, principals, requests, execution_profiles, observer = await setup(sessions, **kwargs)
+    if build_concurrency_limit != 2:
+        async with sessions.begin() as session:
+            pool = await session.get(NebiusPoolBinding, participants[0].pool_id)
+            binding = pool.binding_json | {"admission": pool.binding_json["admission"] | {
+                "build_concurrency_limit": build_concurrency_limit}}
+            pool.binding_json = binding
+            pool.binding_sha256 = canonical_digest(binding).removeprefix("sha256:")
+            pool.policy_revision += 1
+            observation = await session.scalar(select(NebiusPoolObservation).where(
+                NebiusPoolObservation.pool_id == pool.pool_id))
+            placement, _, _ = _placement(observation.observation_json)
+        async with sessions() as session:
+            principals = [await _resolve_hash(session, principal.token_hash, locked=False) for principal in principals]
+            observer = await _resolve_hash(session, observer.token_hash, locked=False)
+        await publish_placement(sessions, observer, placement)
     build_profiles = {}
     builds = []
     for participant, execution in zip(participants, requests, strict=True):
@@ -54,8 +71,10 @@ async def prepare_build(sessions, principal, request, profiles):
         return await prepare_task_image(session, principal, request, profiles=profiles)
 
 
-async def test_concurrent_builds_and_execution_cannot_spend_the_same_capacity(sessions):
-    _, principals, executions, builds, profiles, _ = await mixed_setup(sessions)
+@pytest.mark.parametrize("build_concurrency_limit", [2, None])
+async def test_concurrent_builds_and_execution_cannot_spend_the_same_capacity(sessions, build_concurrency_limit):
+    _, principals, executions, builds, profiles, _ = await mixed_setup(
+        sessions, build_concurrency_limit=build_concurrency_limit)
     results = await asyncio.wait_for(asyncio.gather(
         prepare(sessions, principals[0], executions[0], profiles),
         prepare_build(sessions, principals[0], builds[0], profiles),
@@ -68,24 +87,47 @@ async def test_concurrent_builds_and_execution_cannot_spend_the_same_capacity(se
         assert await session.scalar(select(func.count()).select_from(TaskImageMaterializationAttempt)) == 0
 
 
-async def test_build_concurrency_is_pool_wide_and_does_not_reserve_idle_execution_share(sessions):
-    _, principals, executions, builds, profiles, _ = await mixed_setup(sessions, max_nodes=3)
+@pytest.mark.parametrize("build_concurrency_limit", [2, None])
+async def test_build_concurrency_is_pool_wide_and_does_not_reserve_idle_execution_share(sessions, build_concurrency_limit):
+    _, principals, executions, builds, profiles, _ = await mixed_setup(
+        sessions, max_nodes=3, build_concurrency_limit=build_concurrency_limit)
     for index in range(2):
         assert (await prepare_build(sessions, principals[index], builds[index], profiles)).phase == "reserved"
     third = builds[0].model_copy(update={"key": builds[0].key.model_copy(update={"local_work_id": uuid4()})})
-    waiting = await prepare_build(sessions, principals[0], third, profiles)
-    assert waiting.phase == "waiting" and waiting.reason == "pool_build_concurrency_exceeded"
+    result = await prepare_build(sessions, principals[0], third, profiles)
+    if build_concurrency_limit is None:
+        assert result.phase == "reserved"
+    else:
+        assert result.phase == "waiting" and result.reason == "pool_build_concurrency_exceeded"
     assert (await prepare(sessions, principals[0], executions[0], profiles)).phase == "reserved"
 
 
+@pytest.mark.parametrize("first_kind", ["build", "execution"])
+async def test_resource_only_mode_charges_each_workload_reservation_against_the_other(sessions, first_kind):
+    _, principals, executions, builds, profiles, _ = await mixed_setup(
+        sessions, occupied_cpu=1000, max_nodes=2, quota_nodes=1, build_concurrency_limit=None)
+    # One node has 2 CPUs free: either workload fits alone, but their real
+    # 1 CPU build and 1.5 CPU execution requests cannot both be granted.
+    first, second = ((prepare_build, builds[0]), (prepare, executions[1])) if first_kind == "build" else (
+        (prepare, executions[0]), (prepare_build, builds[1]))
+    assert (await first[0](sessions, principals[0], first[1], profiles)).phase == "reserved"
+    waiting = await second[0](sessions, principals[1], second[1], profiles)
+    assert waiting.phase == "waiting" and waiting.reason == "execution_capacity_provider_quota_nodes_exceeded"
+    async with sessions() as session:
+        reserved = (await session.scalars(select(NebiusPoolRequest).where(NebiusPoolRequest.phase == "reserved"))).all()
+        assert len(reserved) == 1
+        assert reserved[0].cpu_millis == (1000 if first_kind == "build" else 1500)
+
+
+@pytest.mark.parametrize("build_concurrency_limit", [2, None])
 @pytest.mark.parametrize("classes,winner", [(("development", "development"), "build"),
                                            (("development", "production"), "execution"),
                                            (("development", "staging"), "execution"),
                                            (("staging", "production"), "execution"),
                                            (("production", "staging"), "build")])
-async def test_mixed_waiting_work_uses_class_then_age_not_workload_kind(sessions, classes, winner):
+async def test_mixed_waiting_work_uses_class_then_age_not_workload_kind(sessions, classes, winner, build_concurrency_limit):
     _, principals, executions, builds, profiles, observer = await mixed_setup(
-        sessions, occupied_cpu=3000, environment_classes=classes)
+        sessions, occupied_cpu=3000, environment_classes=classes, build_concurrency_limit=build_concurrency_limit)
     assert (await prepare_build(sessions, principals[0], builds[0], profiles)).phase == "waiting"
     assert (await prepare(sessions, principals[1], executions[1], profiles)).phase == "waiting"
     await publish_placement(sessions, observer, CapacityPlacement.model_validate(placement_fixture(

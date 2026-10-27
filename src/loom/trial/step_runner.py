@@ -512,13 +512,19 @@ async def _handoff_agent_workspace(
 
     if not isinstance(policy, WorkspaceStagingPolicy):
         raise TypeError("private verifier handoff requires WorkspaceStagingPolicy")
-    await handoff_workspace_snapshot(
+    omissions = await handoff_workspace_snapshot(
         agent_driver=agent_driver,
         verifier_driver=verifier_driver,
         workdir=workdir,
         policy=policy,
         preserve_acls=preserve_acls,
     )
+    if omissions.count:
+        # #2589: the verifier grades without these links; reasons are fixed codes.
+        logger.warning(
+            "verifier workspace handoff omitted %d link(s): %s", omissions.count,
+            ", ".join(f"{item.path} ({item.reason})" for item in omissions.links[:20]),
+        )
 
 
 async def _close_verifier_driver(

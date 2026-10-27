@@ -19,6 +19,7 @@ from loom.db.schema import (
     Artifact,
     ArtifactUploadFile,
     ArtifactUploadSession,
+    Batch,
     ExecutionAdmissionReservation,
     ExecutionCostReservation,
     ExecutionProvisioningAuthorization,
@@ -149,6 +150,22 @@ class ServiceExecutionError(RuntimeError):
 
 class ServiceExecutionConflict(ServiceExecutionError):  # noqa: N818 - contract name
     pass
+
+
+class ServiceExecutionPolicyBlockedError(ServiceExecutionConflict):
+    """A candidate must wait for admission or paid-execution policy to allow it."""
+
+    def __init__(
+        self, reason: str, *, scope_kind: str | None = None, retry_after_seconds: int = 15,
+    ) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.scope_kind = scope_kind
+        self.retry_after_seconds = retry_after_seconds
+
+
+class ServiceExecutionParentTerminalError(ServiceExecutionConflict):
+    """The parent stopped accepting new execution after candidate selection."""
 
 
 class ServiceExecutionFenceError(ServiceExecutionConflict):
@@ -573,6 +590,7 @@ async def reserve_trial_execution(
     routing_reason: ExecutionRoutingReason = ExecutionRoutingReason.ADMIN_TARGET_BINDING,
     parent_lease_id: UUID | None = None,
     verifier_retry: int = 0,
+    capacity_wait_inputs: dict[str, Any] | None = None,
     deadline_at: datetime,
     now: datetime | None = None,
     pool_handoff_id: UUID | None = None,
@@ -780,7 +798,8 @@ async def reserve_trial_execution(
 
         global_identity = await qualify_execution_handoff(session, handoff_id=pool_handoff_id,
             request_id=request_id, trial=trial, target=target, requirements=requirements,
-            runtime=runtime_contract, deadline_at=deadline_at, now=current_time)
+            runtime=runtime_contract, deadline_at=deadline_at, now=current_time,
+            parent=parent_lease, verifier_retry=verifier_retry)
 
     allow_target_reselection = False
     if (
@@ -870,6 +889,10 @@ async def reserve_trial_execution(
             now=current_time,
         )
     except ExecutionAdmissionBlockedError as exc:
+        if exc.scope_kind in {
+            "global", "environment", "region", "team", "batch", "execution_class", "pool",
+        }:
+            raise ServiceExecutionPolicyBlockedError(exc.reason, scope_kind=exc.scope_kind) from exc
         raise ServiceExecutionConflict(exc.reason) from exc
     # The lease row is still uncommitted and cannot become executable without
     # the deferred outbox constraint. Persisting its identity first lets the
@@ -887,12 +910,29 @@ async def reserve_trial_execution(
             now=current_time,
         )
     except ExecutionFinanceBlockedError as exc:
+        policy_scopes = {
+            f"execution_budget_{scope}_{reason}": scope
+            for scope in ("pool", "target")
+            for reason in (
+                "emergency_stop", "duration_exceeded", "attempt_limit_exceeded",
+                "daily_limit_exceeded", "monthly_limit_exceeded",
+            )
+        }
+        policy_scopes.update({
+            "execution_cost_price_binding_unavailable": "target",
+            "execution_cost_price_snapshot_not_effective": "target",
+        })
+        if exc.reason in policy_scopes:
+            raise ServiceExecutionPolicyBlockedError(
+                exc.reason, scope_kind=policy_scopes[exc.reason],
+            ) from exc
         raise ServiceExecutionConflict(exc.reason) from exc
     # Capacity waits remain queued: reservation, budget and admission writes are
     # rolled back together before any outbox command or execution attempt exists.
     # The actuator reuses this authorization when it eventually creates the Job.
     if global_identity is None:
-        await reserve_execution_provisioning(session, lease_id=lease.id, now=current_time)
+        await reserve_execution_provisioning(session, lease_id=lease.id, now=current_time,
+                                             capacity_wait_inputs=capacity_wait_inputs)
     command_payload = {
         "schema_version": "loom.execution-command.v1",
         "lease_id": str(lease_id),
@@ -955,6 +995,16 @@ async def reserve_trial_execution(
         trial.pre_start_heartbeat_at = None
         trial.worker_id = None
     await session.flush()
+    if trial.batch_id is not None:
+        # Trial/image/admission writes precede the parent fence, matching child
+        # publication's lock order. Hold it until commit: cancellation either
+        # follows this existing lease or wins and rolls back this new reservation.
+        # An exact request replay returned above and still owns cleanup authority.
+        parent_state = await session.scalar(
+            select(Batch.state).where(Batch.id == trial.batch_id).with_for_update(key_share=True),
+        )
+        if parent_state not in {"submitted", "running"}:
+            raise ServiceExecutionParentTerminalError("batch no longer accepts execution")
     return lease
 
 
@@ -1017,6 +1067,11 @@ async def enqueue_execution_transition(
             raise ServiceExecutionFenceError("retry lost the trial attempt fence")
         if retry_trial.state in _TERMINAL_TRIAL_STATES:
             raise ServiceExecutionConflict("retry cannot reopen a terminal trial")
+        if lease.execution_role == "verifier" and (
+            lease.output_commit_state == "committed"
+            or retry_trial.cancellation_requested_at is not None
+        ):
+            raise ServiceExecutionConflict("retry cannot reopen committed or cancelled verification")
 
     # Generation and desired state are one atomic intent.  Set desired state
     # before any query can autoflush a generation change.
@@ -1029,11 +1084,21 @@ async def enqueue_execution_transition(
         lease.cleanup_requested_at = revoked_at
         lease.cleanup_deadline_at = revoked_at + _RESOURCE_RELEASE_DEADLINE
         if retry_trial is not None:
-            retry_trial.state = "queued"
-            retry_trial.worker_id = None
-            retry_trial.claimed_at = None
-            retry_trial.pre_start_heartbeat_at = None
-            retry_trial.started_at = None
+            if lease.execution_role == "verifier":
+                # Revoking a child must not rerun its already committed agent.
+                # The pending handoff remains fenced by this child's cleanup;
+                # the next child receives a fresh reservation after deletion.
+                reason = lease.error_code or "execution_lease_revoked"
+                if not _retry_verifier(retry_trial, lease, reason=reason, now=revoked_at):
+                    retry_trial.state = "failed"
+                    retry_trial.finished_at = revoked_at
+                    mark_verifier_unavailable(retry_trial, lease, reason=reason)
+            else:
+                retry_trial.state = "queued"
+                retry_trial.worker_id = None
+                retry_trial.claimed_at = None
+                retry_trial.pre_start_heartbeat_at = None
+                retry_trial.started_at = None
     sequence = (
         await session.execute(
             select(func.coalesce(func.max(ServiceExecutionCommand.sequence), 0)).where(
@@ -2601,9 +2666,18 @@ async def _verifier_finalization_payload(
     return {
         "trial_state": "failed",
         "result": result,
-        "failure_reason": "verifier_error",
+        "failure_reason": deferred_verifier_failure_reason(runtime_result.status),
         "failure_message": f"deferred verifier runtime reported {runtime_result.status}",
     }
+
+
+def deferred_verifier_failure_reason(status: str) -> str:
+    """Only the grading command itself failing is a verifier error (#2613).
+
+    Setup, runtime and evidence-capture failures keep the runtime's status,
+    as an attempt's do, so they are not attributed to the benchmark.
+    """
+    return {"timed_out": "verifier_timeout", "task_error": "verifier_error"}.get(status, status)
 
 
 async def recover_deleted_committed_trial(

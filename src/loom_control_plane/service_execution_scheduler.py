@@ -10,7 +10,7 @@ from typing import Any, Literal, Protocol
 from uuid import UUID
 
 from pydantic import ValidationError
-from sqlalchemy import Integer, Text, exists, func, or_, select, text, update
+from sqlalchemy import Integer, Select, Text, exists, func, or_, select, text, update
 from sqlalchemy import cast as sql_cast
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -40,6 +40,7 @@ from loom.service_execution_materialization import (
     resolve_runner_task_image,
     verifier_handoff_input,
 )
+from loom.task_image_failure import image_preparation_failure
 from loom.task_image_materialization import (
     get_trial_task_image_execution_grant,
     resolve_prepared_task,
@@ -49,6 +50,8 @@ from loom_control_plane.execution_capacity import ExecutionProvisioningBlockedEr
 from loom_control_plane.execution_resource_allocation import allocate_target_resources
 from loom_control_plane.service_execution import (
     ServiceExecutionConflict,
+    ServiceExecutionParentTerminalError,
+    ServiceExecutionPolicyBlockedError,
     committed_handoff_files,
     mark_verifier_unavailable,
     reserve_trial_execution,
@@ -96,6 +99,9 @@ SELECT t.id,
        t.submitted_at,
        t.task_id,
        t.attempt_count,
+       t.execution_route_generation,
+       t.execution_route_pool_name,
+       t.requires_caps,
        task_definition.checksum AS task_checksum,
        task_definition.config AS task_config,
        task_definition.source_provenance AS task_source_provenance,
@@ -112,6 +118,7 @@ SELECT t.id,
    AND (t.next_attempt_at IS NULL OR t.next_attempt_at <= :now)
    AND t.family_key IS NULL
    AND b.backend = 'nebius'
+   AND b.state IN ('submitted', 'running')
    AND t.requires_caps->>'worker_pool' = :pool_id
    AND (
          t.execution_route_pool_name IS NULL
@@ -239,6 +246,10 @@ async def reserve_next_service_execution(
                     maximum_deadline_seconds=maximum_deadline_seconds,
                     current_time=current_time,
                 )
+        except ServiceExecutionParentTerminalError:
+            # The parent changed after selection. Its cancellation/settlement
+            # owns the child state; rollback this candidate and continue scanning.
+            continue
         except ServiceExecutionConfigurationError as exc:
             # The candidate savepoint has rolled back. This queued failure owns
             # no attempt, lease, admission slot or spend; leave transient and
@@ -254,14 +265,39 @@ async def reserve_next_service_execution(
             _LOG.warning("service_execution_configuration_invalid", extra={
                 "trial_id": str(row["id"]), "reason": str(exc),
             })
+        except ServiceExecutionPolicyBlockedError as exc:
+            # Only policy denials are candidate-local waits. The savepoint has
+            # released their route, admission seat and spend; identity and
+            # invariant conflicts must still escape to the scheduler's error path.
+            retry_at = current_time + timedelta(seconds=max(1, min(300, exc.retry_after_seconds)))
+            await session.execute(update(Trial).where(
+                Trial.id == row["id"], Trial.state == "queued",
+                Trial.cancellation_requested_at.is_(None),
+            ).values(
+                next_attempt_at=retry_at,
+                scheduling_observation={"reason": exc.reason, "observed_at": current_time.isoformat()},
+            ))
+            _LOG.info("service_execution_policy_wait", extra={
+                "trial_id": str(row["id"]), "reason": exc.reason,
+            })
         except ExecutionProvisioningBlockedError as exc:
+            from loom_control_plane.execution_capacity_wait import remember_execution_capacity_wait
+            from loom_control_plane.task_image_capacity_wait import WAIT_LEASE_SECONDS
+
             delay = max(1, min(300, exc.retry_after_seconds))
+            if exc.capacity_wait is not None:
+                delay = min(delay, WAIT_LEASE_SECONDS // 2)
+            retry_at = current_time + timedelta(seconds=delay)
+            observation = await remember_execution_capacity_wait(
+                session, row=row, context=exc.capacity_wait, reason=exc.reason,
+                now=current_time, retry_at=retry_at,
+            )
             await session.execute(
                 update(Trial)
                 .where(Trial.id == row["id"], Trial.state == "queued")
                 .values(
-                    next_attempt_at=current_time + timedelta(seconds=delay),
-                    scheduling_observation={"reason": exc.reason, "observed_at": current_time.isoformat()},
+                    next_attempt_at=retry_at,
+                    scheduling_observation=observation,
                 )
             )
             _LOG.info("service_execution_capacity_wait", extra={"reason": exc.reason})
@@ -314,12 +350,15 @@ async def _compile_service_candidate_plan(
             # Nothing was admitted: no attempt, lease, quota or model accounting
             # exists to release. Use the same queued terminal transition as the
             # retry-exhaustion sweeper; batch status derives from Trial state.
+            typed_failure = image_preparation_failure(prerequisites[0].failure_reason)
+            result = ({"task_image_preparation_failure": typed_failure} if typed_failure is not None else None)
             await session.execute(update(Trial).where(
                 Trial.id == row["id"], Trial.state == "queued",
                 Trial.cancellation_requested_at.is_(None),
             ).values(state="failed", failure_reason="task_image_build_failed",
                      failure_message="Task image preparation failed; inspect the build result.",
-                     finished_at=current_time, next_attempt_at=None))
+                     finished_at=current_time, next_attempt_at=None,
+                     **({"result": result} if result is not None else {})))
             return None
         raise ExecutionProvisioningBlockedError("task_image_preparation_pending", retry_after_seconds=15)
     try:
@@ -418,6 +457,7 @@ async def _reserve_service_candidate(
         return None
     runtime_plan, requirements = compiled.runtime_plan, compiled.requirements
     blocked: ExecutionProvisioningBlockedError | None = None
+    policy_blocked: ServiceExecutionPolicyBlockedError | None = None
     for target in compiled.targets:
         if requirements.data_residency and target.data_residency != requirements.data_residency:
             continue
@@ -453,6 +493,9 @@ async def _reserve_service_candidate(
                     routing_reason=ExecutionRoutingReason.PREEXISTING_ASSIGNMENT,
                     deadline_at=compiled.deadline_at,
                     now=current_time,
+                    capacity_wait_inputs={key: row[key] for key in (
+                        "execution_route_generation", "execution_route_pool_name",
+                    )},
                 )
                 await session.execute(update(Trial).where(Trial.id == row["id"]).values(
                     scheduling_observation={
@@ -462,34 +505,31 @@ async def _reserve_service_candidate(
                     },
                 ))
                 return lease
+        except ServiceExecutionPolicyBlockedError as exc:
+            if exc.scope_kind not in {"target", "region"}:
+                raise
+            # A local policy denial does not rule out another target/region.
+            # Its savepoint has released all reservation side effects.
+            if policy_blocked is None:
+                policy_blocked = exc
         except ExecutionProvisioningBlockedError as exc:
-            blocked = exc
+            # One realizable target is one waiting demand, never a reservation
+            # for every alternative region. Preserve its compiled envelope.
+            if blocked is None or (blocked.capacity_wait is None and exc.capacity_wait is not None):
+                blocked = exc
     if blocked is not None:
         raise blocked
+    if policy_blocked is not None:
+        raise policy_blocked
     raise ExecutionProvisioningBlockedError("execution_target_unavailable", retry_after_seconds=15)
 
 
-async def reserve_next_verifier_executions(
-    session: AsyncSession,
-    *,
-    pool_id: str,
-    image_admission_keyring: ImageAdmissionKeyring,
-    maximum_deadline_seconds: int = 7200,
-    now: datetime | None = None,
-    limit: int = 32,
-) -> list[ServiceExecutionLease]:
-    """Reserve the deferred verifier of each attempt whose pod has released capacity.
-
-    Stateless and idempotent: the request id derives from the parent lease, the
-    retry number and the child plan, and one verifier per attempt and retry is a
-    database constraint. A retry waits until the failed verifier's pod is gone.
-    """
-
-    current_time = (now or datetime.now(UTC)).astimezone(UTC)
+def verifier_candidates(pool_id: str) -> Select[tuple[ServiceExecutionLease, Trial]]:
+    """One eligibility predicate for local reservation and global proposal."""
     child = aliased(ServiceExecutionLease)
     retries = sql_cast(func.coalesce(
         Trial.result["verifier_execution"]["retries"].astext, "0"), Integer)
-    candidates = (await session.execute(
+    return (
         select(ServiceExecutionLease, Trial)
         .join(Trial, Trial.id == ServiceExecutionLease.trial_id)
         .where(
@@ -514,9 +554,28 @@ async def reserve_next_verifier_executions(
             ),
         )
         .order_by(ServiceExecutionLease.deleted_at, ServiceExecutionLease.id)
-        .limit(limit)
         .with_for_update(of=Trial, skip_locked=True)
-    )).all()
+    )
+
+
+async def reserve_next_verifier_executions(
+    session: AsyncSession,
+    *,
+    pool_id: str,
+    image_admission_keyring: ImageAdmissionKeyring,
+    maximum_deadline_seconds: int = 7200,
+    now: datetime | None = None,
+    limit: int = 32,
+) -> list[ServiceExecutionLease]:
+    """Reserve the deferred verifier of each attempt whose pod has released capacity.
+
+    Stateless and idempotent: the request id derives from the parent lease, the
+    retry number and the child plan, and one verifier per attempt and retry is a
+    database constraint. A retry waits until the failed verifier's pod is gone.
+    """
+
+    current_time = (now or datetime.now(UTC)).astimezone(UTC)
+    candidates = (await session.execute(verifier_candidates(pool_id).limit(limit))).all()
     reserved: list[ServiceExecutionLease] = []
     for parent, trial in candidates:
         try:
@@ -561,15 +620,11 @@ def _fail_verifier_handoff(trial: Trial, *, reason: str, now: datetime) -> None:
     })
 
 
-async def _reserve_verifier_candidate(
-    session: AsyncSession,
-    *,
-    parent: ServiceExecutionLease,
-    trial: Trial,
-    image_admission_keyring: ImageAdmissionKeyring,
-    maximum_deadline_seconds: int,
-    current_time: datetime,
-) -> ServiceExecutionLease:
+async def compile_verifier_candidate(
+    session: AsyncSession, *, parent: ServiceExecutionLease, trial: Trial,
+    maximum_deadline_seconds: int, current_time: datetime,
+) -> tuple[ExecutionRuntimePlanV1, datetime]:
+    """Compile the retained parent workspace without claiming physical capacity."""
     if parent.target_id is None:
         raise ServiceExecutionConflict("verifier parent has no execution target")
     agent_plan = ExecutionRuntimePlanV1.model_validate(parent.runtime_contract_json)
@@ -587,6 +642,21 @@ async def _reserve_verifier_candidate(
     )
     # The verifier's own budget starts at this reservation, not at the agent's.
     deadline_at = _deadline(plan, now=current_time, maximum_seconds=maximum_deadline_seconds)
+    return plan, deadline_at
+
+
+async def _reserve_verifier_candidate(
+    session: AsyncSession,
+    *,
+    parent: ServiceExecutionLease,
+    trial: Trial,
+    image_admission_keyring: ImageAdmissionKeyring,
+    maximum_deadline_seconds: int,
+    current_time: datetime,
+) -> ServiceExecutionLease:
+    plan, deadline_at = await compile_verifier_candidate(session, parent=parent, trial=trial,
+        maximum_deadline_seconds=maximum_deadline_seconds, current_time=current_time)
+    assert parent.target_id is not None
     retry = verifier_retries(trial)
     request: dict[str, object] = {
         "schema_version": "loom.service-execution-verifier-request.v1",
@@ -633,22 +703,23 @@ async def run_service_execution_scheduler_loop(
 
     while not cancellation_requested():
         try:
-            # Deferred verifiers reuse an existing route and admitted capacity,
-            # so both local and global admission modes reserve them here.
-            async with session_factory() as session:
-                verifiers = await reserve_next_verifier_executions(
-                    session,
-                    pool_id=pool_id,
-                    image_admission_keyring=image_admission_keyring,
-                    maximum_deadline_seconds=maximum_deadline_seconds,
-                )
-                await session.commit()
-            if cancellation_requested():
-                return
-            for verifier in verifiers:
-                _LOG.info("service_execution_verifier_reserved", extra={
-                    "trial_id": str(verifier.trial_id), "parent_lease_id": str(verifier.parent_lease_id),
-                })
+            # Each verifier needs new physical capacity after parent cleanup.
+            # Global selection must never enter the local provisioning writer.
+            if global_selector is None:
+                async with session_factory() as session:
+                    verifiers = await reserve_next_verifier_executions(
+                        session,
+                        pool_id=pool_id,
+                        image_admission_keyring=image_admission_keyring,
+                        maximum_deadline_seconds=maximum_deadline_seconds,
+                    )
+                    await session.commit()
+                if cancellation_requested():
+                    return
+                for verifier in verifiers:
+                    _LOG.info("service_execution_verifier_reserved", extra={
+                        "trial_id": str(verifier.trial_id), "parent_lease_id": str(verifier.parent_lease_id),
+                    })
             if global_selector is not None:
                 # A selection is not a lease. Empty/failed global selection never
                 # falls through to the environment-local capacity writer.

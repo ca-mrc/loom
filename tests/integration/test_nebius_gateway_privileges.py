@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import httpx
 import psycopg
 import pytest
+from fastapi import FastAPI
 from sqlalchemy import create_engine, insert
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -18,6 +20,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from loom import nebius_platform_bootstrap as bootstrap
 from loom.db.schema import (
     RateCard,
+    ServiceExecutionTarget,
     Task,
     TaskImageMaterialization,
     Team,
@@ -32,12 +35,20 @@ from loom.service_execution_materialization import (
     ServiceExecutionInputManifestV1,
 )
 from loom.trajectory.storage import FakeObjectStore
-from loom_control_plane.service_execution_output import resolve_service_execution_input
+from loom_control_plane.service_execution_output import (
+    VerifiedExecutionPod,
+    resolve_service_execution_input,
+)
 from loom_llm_gateway.app import create_app
 from loom_llm_gateway.config import GatewaySettings
 from loom_llm_gateway.rate_card import RateCardCache
+from loom_llm_gateway.routes import service_execution
 from tests.integration.test_nebius_platform_bootstrap import platform_database  # noqa: F401
-from tests.integration.test_service_execution_leases import _runtime_contract
+from tests.integration.test_service_execution_leases import (
+    _reserve,
+    _runtime_contract,
+    _seed_ready_trial,
+)
 
 pytestmark = pytest.mark.docker
 
@@ -306,3 +317,109 @@ async def test_gateway_reads_frozen_task_input_without_materialization_write_pri
                 with pytest.raises(psycopg.errors.InsufficientPrivilege):
                     db.execute(statement)
                 db.rollback()
+
+
+async def test_gateway_role_can_reclaim_and_checkpoint_terminus_execution(
+    gateway_database: tuple[str, str],
+) -> None:
+    """Hosted STS writes these tables through the Gateway, not the control plane."""
+    database_url, password = gateway_database
+    now = datetime.now(UTC)
+    admin = create_async_engine(make_url(database_url).set(drivername="postgresql+psycopg"))
+    admin_sessions = async_sessionmaker(admin, expire_on_commit=False)
+    try:
+        async with admin_sessions() as session:
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            lease = await _reserve(session, trial_id=trial_id, target=target, now=now)
+            lease.pod_uid = "bound-pod"
+            lease.pod_ip = "10.42.0.12"
+            lease.observed_state = "running"
+            target_row = await session.get(ServiceExecutionTarget, target.target_id)
+            assert target_row is not None
+            target_row.spec_json = {
+                **target_row.spec_json,
+                "cluster_scope_id": "primary",
+                "pod_identity_audience": "loom-execution",
+            }
+            trial = await session.get(Trial, trial_id)
+            assert trial is not None
+            trial.state = "running"
+            await session.commit()
+            lease_id = lease.id
+            generation = lease.generation
+            namespace = lease.namespace_name
+            assert lease.resource_generation == generation
+    finally:
+        await admin.dispose()
+
+    gateway_url = make_url(database_url).set(username="loom_gateway", password=password)
+    with psycopg.connect(gateway_url.render_as_string(hide_password=False)) as db:
+        for table in (
+            "terminus_agent_executions",
+            "terminus_agent_run_attempts",
+            "episode_checkpoints",
+        ):
+            assert db.execute(
+                "SELECT has_table_privilege(current_user, %s, 'SELECT'), "
+                "has_table_privilege(current_user, %s, 'INSERT'), "
+                "has_table_privilege(current_user, %s, 'UPDATE'), "
+                "has_table_privilege(current_user, %s, 'DELETE')",
+                (table, table, table, table),
+            ).fetchone() == (True, True, True, True)
+
+    engine = create_async_engine(gateway_url.set(drivername="postgresql+psycopg"))
+    app = FastAPI()
+    app.state.session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    app.include_router(service_execution.router)
+    app.state.execution_pod_reviewer = SimpleNamespace(
+        review=AsyncMock(
+            return_value=VerifiedExecutionPod(
+                cluster_scope_id="primary",
+                namespace=namespace,
+                service_account="loom-execution-attempt",
+                audience="loom-execution",
+                pod_uid="bound-pod",
+            ),
+        ),
+    )
+    identity = {
+        "lease_id": str(lease_id),
+        "generation": generation,
+        "execution_role": "attempt",
+    }
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
+            base_url="http://gateway.test",
+        ) as client:
+            reclaimed = await client.post(
+                "/internal/service-execution/terminus/reclaim",
+                headers={"Authorization": "Bearer pod-token"},
+                json={
+                    **identity,
+                    "schema_version": "loom.service-execution-terminus-reclaim.v1",
+                },
+            )
+            assert reclaimed.status_code == 200, reclaimed.text
+            recovery = reclaimed.json()
+            assert recovery["recovery"] == "fresh"
+            checkpoint = await client.post(
+                "/internal/service-execution/terminus/episode-checkpoints",
+                headers={"Authorization": "Bearer pod-token"},
+                json={
+                    **identity,
+                    "schema_version": "loom.service-execution-terminus-checkpoint.v1",
+                    "execution_id": recovery["agent_execution_id"],
+                    "run_attempt_id": recovery["agent_run_attempt_id"],
+                    "episode": 1,
+                    "active_role": "student",
+                    "last_call_ordinal": 0,
+                    "last_seq": 0,
+                    "tmux_session_id": None,
+                    "attempt_deadline_wall_clock": (now + timedelta(hours=1)).isoformat(),
+                },
+            )
+            assert checkpoint.status_code == 200, checkpoint.text
+            assert checkpoint.json()["version"] == 1
+    finally:
+        await engine.dispose()

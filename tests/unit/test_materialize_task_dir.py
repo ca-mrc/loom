@@ -1,6 +1,5 @@
-"""_materialize_task_dir pulls bundle.source content from MinIO when
-source is an s3:// URL; leaves dir empty for fixture://, git+, None
-(Plan 13 Task 3)."""
+"""Worker task materialization downloads S3 content and resolves configured
+fixtures; absent, unsupported and unconfigured fixture sources remain empty."""
 
 from __future__ import annotations
 
@@ -12,6 +11,12 @@ import pytest
 
 from loom.trajectory.storage import FakeObjectStore
 from loom_worker.main_loop import _materialize_task_dir
+
+
+@pytest.fixture(autouse=True)
+def _own_materialized_directories(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep successful workspaces under pytest's owned temporary directory."""
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
 
 
 async def test_s3_source_pulls_content() -> None:
@@ -166,6 +171,3 @@ async def test_download_failure_cleans_tempdir() -> None:
         if p.name.startswith(f"loom-trial-{trial_id}-")
     ]
     assert survivors == [], f"tempdir leaked: {survivors}"
-
-
-_ = pytest

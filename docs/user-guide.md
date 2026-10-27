@@ -78,12 +78,12 @@ ls /tmp/loom-smoke/<trial-id>/
   atif.json          # ATIF v1.7 projection
 ```
 
-The installed-agent commands below describe the CLI options, but their local
-provider wiring currently needs the repair in
-[#2489](https://github.com/ca-mrc/loom/issues/2489). Local Google SDK calls also
-need the migration in [#2486](https://github.com/ca-mrc/loom/issues/2486).
-Use the hosted submission workflow for supported, deployment-qualified agents;
-these local examples are not successful-run acceptance evidence.
+Local agents connect directly to the selected configured provider. The task
+sandbox receives the selected key for installed agents, so use trusted task
+images and agents. See the [local connection matrix](architecture/cli-mode.md#stateless-agent-factory)
+for compatible providers and endpoint reachability. Direct-completion Google
+calls use `google-genai` with a Gemini Developer API key. These examples describe
+the interface; live provider/agent-version acceptance remains separate.
 
 Installed-agent command shape:
 
@@ -111,11 +111,11 @@ Per-trial outputs land at `./runs/<trial-id>/{events.jsonl,atif.json}`.
 With `--json`, each trial's result also prints as a JSON line on stdout
 for piping (e.g. `loom run ... --json | jq '.state'`).
 
-Local-server command shape (subject to the installed-agent limitation above):
+Local-server command shape using direct completion from the CLI host:
 
 ```bash
 loom run --task humaneval/HumanEval/0 \
-  --agent claude-code \
+  --agent direct-completion \
   --local-server http://localhost:8000/v1 \
   --model meta-llama/Llama-3.1-8B-Instruct \
   --backend docker
@@ -392,8 +392,13 @@ source trial has only provider-log-based execution data.
 Native verifier evidence is delivered under `verifier/`: original output,
 phase stdout/stderr, and `runtime-result.json` containing exit status, timing
 and truncation metadata. Legacy verifier log/metadata pairs remain supported.
-Missing or inconsistent evidence rejects the export. Scored timeouts preserve
-their original failed state; exporting them does not change their outcome.
+Shared and in-attempt verification still pack the parent attempt. When
+`trial.result.verifier_execution` is committed (separate verification), the
+packer reads the `verifier-execution/` child namespace and compares it to that
+committed runtime result (`execution_role=verifier`, one verifier phase). Skip
+still exports with no verifier files. Missing or inconsistent evidence rejects
+the export. Scored timeouts preserve their original failed state; exporting
+them does not change their outcome.
 
 Use `--mode openhands-export` when selected trials ran with the `openhands-sdk`
 agent and the trajectory contains `openhands_sdk_*` typed events plus a
@@ -583,7 +588,10 @@ with `--purpose trajectory_generation`; the CLI stores it as
 is no `--skip-verifier` flag; use `"verification": "skipped"` or
 `--verifier-env-mode skipped`. Delivery export and canonical archive already
 accept a succeeded trial without a numeric reward when that boolean is true.
-Hosted Nebius still rejects skip at admission (`verifier_mode_required`).
+Hosted trajectory generation admits the same boolean and runs the agent sandbox
+without a verifier phase. Missing verifier artifacts are valid for that trial.
+Evaluation still rejects skip, and a graded trial still requires its verifier
+artifacts.
 
 ```bash
 loom eval batch create --purpose evaluation \
@@ -873,7 +881,7 @@ agents need their own adapter-specific support.
 
 In service mode, team-scoped provider connections are the normal path
 for user-hosted OpenAI-compatible endpoints. Register the connection,
-refresh or manually add its model ids, then launch from the SPA. The
+refresh or manually add its model ids, then launch from the SPA.
 The hosted/public platform does not run model servers for users; it only
 stores the team-scoped provider connection and routes calls to the endpoint
 the team provides.
@@ -945,8 +953,11 @@ loom tasksets submit /tmp/ts-2054-ws
 Every model-backed selection needs an explicitly selected, authorized
 OpenAI-compatible Provider Connection (`openai-compatible` or `custom`), owned by
 or shared with your team. There is no fallback to platform credentials, and
-native Anthropic/Google connections are not accepted for agents. The service
-resolves each selection once at submission:
+native Anthropic/Google connections are not accepted for agents. You can still
+create those types for features that call them natively, such as Pipeline judge
+bindings; the connection form, list and `loom providers create` label them as
+not usable for agent runs. The service resolves each selection once at
+submission:
 
 - The model that runs is `agent_model.name`. `provider_model_id` may be omitted;
   when given (on the combination or inherited from the batch) it must name the
@@ -968,18 +979,19 @@ if the source used several connections, submit a new batch instead. Batches
 accepted under older rules stay readable and their accepted work is unaffected.
 
 The hosted `local-server` and HuggingFace sources are retired: register the
-endpoint as an OpenAI-compatible Provider Connection instead. The standalone
-`loom run` paths below are unchanged.
+endpoint as an OpenAI-compatible Provider Connection instead. Work submitted
+on those sources is not migrated; resubmit it on a connection. See the
+[retirement record](historical/hosted-model-source-retirement-2026-10.md). The
+standalone `loom run` paths below are unchanged.
 
 ### Local LLMs (vLLM, ollama, llama.cpp, lm-studio)
 
-The three paths below describe local-server selection for `loom run`.
-Subprocess adapters such as `claude-code` and local `terminus-2` currently
-do not receive working provider wiring; their repair is tracked in
-[#2489](https://github.com/ca-mrc/loom/issues/2489). This limitation applies
-to inline, auto-vLLM, and registered local-server examples below. Starting
-a server or registering its configuration does not establish a working
-agent connection.
+The three paths below configure local-server connections for `loom run`.
+These examples use `direct-completion`, which sends model requests from the
+CLI host. Installed agents need a compatible provider dialect and an endpoint
+reachable from their task sandbox; `127.0.0.1` inside that sandbox refers to the
+sandbox itself. See the [local connection matrix](architecture/cli-mode.md#stateless-agent-factory)
+for supported agents and local Terminus runtime requirements.
 
 #### Path A: inline — your server is already running
 
@@ -987,15 +999,17 @@ Pass the server URL on the command line. No config, no state.
 
 ```bash
 loom run --task humaneval/HumanEval/0 \
-         --agent claude-code \
+         --agent direct-completion \
          --local-server http://localhost:8000/v1 \
          --model meta-llama/Llama-3.1-8B-Instruct \
          --backend docker
 ```
 
-With `--local-server` present, `--model` is the upstream model id
-verbatim — no `provider/` split, no `local/<name>/` dance. Loom
-registers a transient `_inline` provider just for this trial.
+With `--local-server` present, Loom sends the full `--model` value as the
+upstream model ID and registers a transient `_inline` provider for that model
+run. The current parser still requires a slash in this value; slashless IDs
+are rejected before inline setup. Use the registered-server path below for
+those IDs.
 
 Auth flag if the server requires it:
 
@@ -1020,13 +1034,13 @@ uv sync --locked --all-packages --extra vllm --python 3.11  # one-time; vLLM has
 
 # HuggingFace model id
 loom run --task humaneval/HumanEval/0 \
-         --agent claude-code \
+         --agent direct-completion \
          --model hf:meta-llama/Llama-3.1-8B-Instruct \
          --backend docker
 
 # Local weights directory — pass the path directly
 loom run --task humaneval/HumanEval/0 \
-         --agent claude-code \
+         --agent direct-completion \
          --model /data/checkpoints/my-llama-3.1-tune/ \
          --backend docker
 ```
@@ -1035,13 +1049,19 @@ Path detection (no `file:` prefix needed): `--model` starting with
 `/`, `~`, `./`, or `../` is treated as a local weights directory.
 
 Loom:
-1. Finds a free TCP port (starting at 8234).
-2. Starts vLLM as a subprocess (`vllm serve <model> --port ...`).
+
+1. Starts vLLM at the requested port, or 8234 by default
+   (`vllm serve <model> --port ...`).
+2. Retries the next port if the subprocess exits unsuccessfully during its
+   initial settling interval; it does not probe for a free port first.
 3. Polls `/v1/models` until healthy.
 4. Reads the canonical model id vLLM advertises (so HF ids that get
    shortened by vLLM still resolve correctly).
 5. Runs the trial against `local/_auto_vllm/<served-name>`.
-6. Tears down vLLM at end-of-process (or on Ctrl-C / SIGTERM).
+6. Tears down that model's vLLM after its trials. For a single model,
+   `--keep-alive` retains a healthy server after normal completion and prints
+   its PID, endpoint, log path and stop command. Setup failures, cancellation
+   and multiple-model runs still stop their servers.
 
 This path is local `loom run` behavior only. It is not available as hosted
 platform inference; service-mode users should run their own vLLM or
@@ -1051,13 +1071,13 @@ vLLM tuning (passed through to `vllm serve`):
 
 | Flag | Default | Notes |
 |---|---|---|
-| `--vllm-port N` | 0 (auto-pick from 8234) | Pin if you need a predictable port |
+| `--vllm-port N` | 0 (start at 8234) | Starting port; early process failures can advance it |
 | `--vllm-host HOST` | `127.0.0.1` (loopback) | Set to `0.0.0.0` to expose on the LAN |
 | `--tensor-parallel-size N` | 1 | GPUs across which to shard |
 | `--gpu-memory-utilization F` | 0.90 | 0.0–1.0 |
 | `--max-model-len N` | model's max | Cap context window |
 | `--enforce-eager` | off | Disable CUDA graphs (debug only) |
-| `--keep-alive` | off | Leave vLLM running after the trial (handy when iterating against the same model). Only meaningful for single-`--model` runs; multi-model loops always tear down each iteration's server. |
+| `--keep-alive` | off | Retain a healthy single-model server after normal completion, with output in `<output-dir>/vllm.log`. Stop it using the printed `kill <PID>` command. Multi-model runs still stop each server. |
 
 #### Path C: persisted — same server, many runs
 
@@ -1144,8 +1164,9 @@ base_url = "http://localhost:<port>/v1"
 served_model_name = "<canonical>"
 ```
 
-to `~/.config/loom/config.toml`. On shutdown (Ctrl-C, SIGTERM, or
-vLLM crash), the entry is removed.
+to `~/.config/loom/config.toml`. Ctrl-C or SIGTERM removes the entry and stops
+the server. The foreground command currently waits for a shutdown signal;
+a vLLM process exit alone does not remove its registration.
 
 ### Comparing multiple models
 
@@ -1163,7 +1184,7 @@ model. Default behavior:
 Opt into multi-GPU parallel:
 
 ```bash
-loom run ... --model hf:A --model hf:B --parallel-models
+loom run ... --model hf:org/model-a --model hf:org/model-b --parallel-models
 ```
 
 You're responsible for ensuring enough GPU memory for both. Loom
@@ -1924,18 +1945,18 @@ loom run
   --concurrency N         # parallel trials (default 1)
   --output-dir DIR        # default ./runs
   --json                  # JSON-line output instead of text
-  --server-url URL        # unsupported local-result upload; see limitation below
+  --server-url URL        # deprecated; results remain local (see below)
   --tb2-report PATH       # also write a TB2 report with profile provenance
 ```
 
 `--dataset` and `--task` are mutually exclusive (one required).
 
-Local result upload is currently ineffective: `--server-url` or `LOOM_SERVER_URL`
-triggers a best-effort POST to `/api/v1/cli/results`, but the service has no such
-intake route and the CLI ignores HTTP failures. Results remain in the local
-output directory. The compatibility disposition is tracked in
-[#2490](https://github.com/ca-mrc/loom/issues/2490); this does not affect the
-authenticated hosted commands or remote catalog lookup.
+Local result upload is unsupported. The run-only `--server-url` option is
+deprecated and accepted for compatibility. Setting it or `LOOM_SERVER_URL`
+prints one notice on stderr; no results are uploaded. Results remain in
+`--output-dir`, and `--json` continues to emit only result JSON on stdout.
+Authenticated hosted commands and remote catalog lookup retain their server URL
+behavior. Use hosted commands to submit new hosted trials.
 
 `--agent`:
 - `oracle` — runs `solution/solve.sh` from the task bundle (reference
@@ -1950,9 +1971,10 @@ authenticated hosted commands or remote catalog lookup.
   Loom's private sandbox driver. Requires a provider + model; does not use
   `loom-launcher` or per-trial `install_script`. See
   [`architecture/terminus2-runtime.md`](architecture/terminus2-runtime.md).
-  Local `loom run --agent terminus-2` has unresolved provider wiring tracked
-  in [#2489](https://github.com/ca-mrc/loom/issues/2489); this local path is
-  not a supported substitute for hosted execution.
+  Local `loom run --agent terminus-2` requires Python >=3.12 and the pinned Harbor
+  runtime in the CLI environment. It supports a single direct provider/model
+  connection and records usage through a local ledger. Local student/teacher
+  switching is rejected; the options below apply to hosted batch submission.
 
   Optional student/teacher mix (#1380): default remains a **single-model**
   trial. Opt in on `loom eval batch create` with **one** of the two
@@ -2008,11 +2030,12 @@ authenticated hosted commands or remote catalog lookup.
   Not supported with `--combinations-json`. Those combination shapes stay
   independent of this one-session Terminus-2 router.
 
-  Nebius hosted execution currently admits only Path A
-  (`student_teacher_student`), and only after the selected runtime profile
-  advertises `terminus2_multi_model_policies`. Paths B and C stay local-worker
-  policies until a later slice. Ordinary single-model Terminus-2 trials are
-  unchanged.
+  Nebius hosted execution admits Path A, Path B, and Path C when the
+  selected runtime profile lists that policy in
+  `terminus2_multi_model_policies`. A profile that omits a policy still
+  rejects it. Ordinary single-model Terminus-2 trials are unchanged.
+  Path B and Path C freeze `mix_seed` onto the trial before the pod starts,
+  so the hosted draw matches the stored plan.
 
   If a worker dies after the agent has already written episode checkpoints,
   Loom **does not** restart Harbor from episode 1 on the same trial

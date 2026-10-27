@@ -156,6 +156,28 @@ def test_create_happy_path_posts_correct_payload(
     assert req.headers["Authorization"] == "Bearer loom_admin_test123456"
 
 
+@pytest.mark.parametrize(("provider_type", "noted"), [
+    ("openai-compatible", False), ("custom", False), ("anthropic", True), ("google", True),
+])
+def test_create_notes_native_types_are_not_for_agent_runs(
+    monkeypatch: pytest.MonkeyPatch,
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
+    provider_type: str,
+    noted: bool,
+) -> None:
+    monkeypatch.setenv("K", "k123")
+    mock_server.canned[("POST", "/api/v1/provider-connections")] = httpx.Response(
+        201, json=_make_connection(name="n", type_=provider_type),
+    )
+    rc = main([
+        "providers", "create", "--name", "n", "--type", provider_type,
+        "--base-url", "https://api.example.com", "--api-key", "env:K",
+    ])
+    assert rc == 0
+    assert ("agent batches and trials can't use this connection" in capsys.readouterr().err) is noted
+
+
 def test_create_with_operator_pricing_sends_custom_pricing(
     monkeypatch: pytest.MonkeyPatch,
     mock_server: MockServer,

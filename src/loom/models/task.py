@@ -41,6 +41,7 @@ from loom.models.types import (
     RequiredCPUArch,
     VerifierEnvMode,
 )
+from loom.sandbox_identity import canonical_supplementary_groups
 
 if TYPE_CHECKING:
     from loom.execution_runtime_contract import ExecutionRuntimePlanV1
@@ -143,6 +144,15 @@ class EnvironmentConfig(BaseModel):
         default=None, exclude_if=lambda value: value is None,
     )
     user: str | int = "agent"
+    supplementary_groups: tuple[Annotated[int, Field(strict=True, ge=0, le=2_147_483_647)], ...] = Field(
+        default=(), max_length=32, exclude_if=lambda value: not value,
+    )
+    # Opt in to the authored image ENTRYPOINT; argv replaces its CMD.
+    image_entrypoint: bool = Field(default=False, strict=True, exclude_if=lambda value: not value)
+    image_workdir: bool = Field(default=False, strict=True, exclude_if=lambda value: not value)
+    entrypoint: tuple[str, ...] = Field(default=(), max_length=123, exclude_if=lambda value: not value)
+    # Authored / Harbor-projected menu. Override resolution no longer uses
+    # this list; batches may select any hosted kind on ``baseline``.
     network_policies_supported: frozenset[NetworkPolicyKind] = frozenset({"public"})
     baseline_network_policy: NetworkPolicy = Public()
     skills_dir: PurePosixPath | None = None
@@ -162,6 +172,11 @@ class EnvironmentConfig(BaseModel):
     compose_files: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
     single_service_compose: SingleServiceCompose | None = Field(default=None, exclude_if=lambda value: value is None)
     sidecars: list[TaskSidecarConfig] = []
+
+    @field_validator("supplementary_groups")
+    @classmethod
+    def _supplementary_groups(cls, value: tuple[int, ...]) -> tuple[int, ...]:
+        return canonical_supplementary_groups(value)
 
     @model_validator(mode="after")
     def _native_requirements(self) -> EnvironmentConfig:
@@ -396,7 +411,8 @@ class TaskConfig(BaseModel):
     def _service_execution_matches_task(self) -> TaskConfig:
         if self.service_execution is None:
             return self
-        if (self.environment.user != "agent" or self.verifier.user is not None
+        if (self.environment.user != "agent" or self.environment.image_entrypoint or self.environment.image_workdir
+                or self.environment.entrypoint or self.verifier.user is not None
                 or "HOME" in self.environment.environment or self.environment.mutable_paths
                 or self.environment.service_lifecycle is not None
                 or any(sidecar.fixture for sidecar in self.environment.sidecars)

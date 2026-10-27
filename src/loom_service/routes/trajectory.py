@@ -1,35 +1,14 @@
-"""Trajectory paginated read + authenticated download (spec §5.2) +
-seq-cursor event replay + SSE live stream (#5 Slices 1 + 3c + 3e).
+"""Trajectory object pagination, authenticated downloads and event replay.
 
-The legacy events.jsonl object lives in the same `trajectories`
-bucket the worker's TrajectoryWriter writes to, at the key
-`<team_id>/<trial_id>/events.jsonl`. Slice 1's first cut of
-`/trials/{id}/events?after_seq=N` + `/trials/{id}/stream` read
-events from there.
+The legacy line-cursor endpoint reads the stored events.jsonl object. Downloads
+use that object when present and reconstruct JSONL from PostgreSQL otherwise.
+Sequence-cursor replay and SSE read trial_events first, with an object fallback
+when no newer database events are available for a running or terminal trial.
+This preserves retained object-only trajectories.
 
-#5 Slice 3c flipped event reads to the Postgres `trial_events` table
-(populated by Slice 3a's CP endpoint via Slice 3b's worker
-dual-write). MinIO remains the audit-log copy and the first download
-source for legacy object-backed trials; when that object is absent,
-the download endpoint reconstructs JSONL from `trial_events`.
-
-#5 Slice 3e replaces the SSE inner poll loop with a psycopg LISTEN
-consumer that waits on the `trial_events_inserted` channel (added
-by migration 0041). Events become push-bound: when a worker insert
-commits, the trigger NOTIFYs, the consumer wakes, and a focused
-incremental read ships the new rows. The fixed `poll_interval`
-fallback still ticks every ~1.5s as a safety valve for missed
-notifications + terminal-state detection (state transitions don't
-trigger NOTIFY). On LISTEN connection error the route degrades to
-pure-poll mode — no UX regression vs. Slice 3c.
-
-MinIO fallback: a trial whose worker shipped before Slice 3b will
-have 0 rows in `trial_events` but a populated MinIO trajectory. To
-preserve UX for those trials, the route falls back to MinIO when
-Postgres returns no rows AND the trial state suggests events
-should exist. The fallback is removed in a future cleanup pass
-once 3b has been deployed long enough to cover all observable
-trials.
+SSE listens on trial_events_inserted (migration 0041) and drains committed rows
+after notifications. Periodic polling also detects terminal state and missed
+notifications; LISTEN connection failure falls back to polling.
 """
 
 from __future__ import annotations
@@ -74,11 +53,8 @@ router = APIRouter()
 _TERMINAL_TRIAL_STATES = frozenset({"succeeded", "failed", "cancelled"})
 # Migration 0041's NOTIFY channel; payload is `<trial_id>:<seq>`.
 _LISTEN_CHANNEL = "trial_events_inserted"
-# Default SSE polling cadence — the backend reads the MinIO object on
-# this interval to detect new events. Phase 2 (Postgres event table +
-# LISTEN/NOTIFY) makes this push-based; until then this trades a few
-# seconds of latency for zero new infra. Kept small enough that the
-# user-visible "live" feel is preserved.
+# Poll Postgres-first event pages (with the stored-trajectory fallback) and
+# terminal state at this cadence when LISTEN/NOTIFY has not already woken us.
 _DEFAULT_SSE_POLL_INTERVAL_SEC = 1.5
 # Cap any single SSE response at this long to bound resource cost
 # from forgotten browser tabs and to give the client a deterministic
@@ -129,9 +105,8 @@ def _read_events_after_seq(
     greater than `after_seq`, ordered by seq, capped at `limit`.
 
     Mirrors the line-cursor read in `list_events` but pivots on the
-    event payload's own `seq` field. This is what the upcoming
-    Postgres event table indexes on, so consumers built against this
-    endpoint don't change when the storage moves.
+    event payload's own `seq` field, matching PostgreSQL's event index and
+    the replay endpoint's cursor contract.
 
     Events without a numeric `seq` are skipped — they can't be ordered
     or resumed against. The worker's TrajectoryWriter always emits
@@ -172,7 +147,7 @@ def _read_events_after_seq(
 async def _read_events_from_postgres(
     session: Any, *, trial_id: UUID, after_seq: int, limit: int,
 ) -> list[dict[str, Any]]:
-    """Slice 3c primary read path. Pulls payloads from the
+    """Primary replay read path. Pulls payloads from the
     `trial_events` table indexed on (trial_id, seq).
 
     The payload column already carries the full typed event body
@@ -325,18 +300,11 @@ async def _read_events_with_minio_fallback(
     after_seq: int,
     limit: int,
 ) -> list[dict[str, Any]]:
-    """Primary: read from `trial_events` (#5 Slice 3c).
+    """Read the database page first, then try stored events when it is empty.
 
-    Fallback: if the table is empty for this trial AND the trial has
-    reached a state where the worker should have shipped events
-    (running/succeeded/failed/cancelled), read from MinIO. This
-    preserves UX for trials whose worker shipped before Slice 3b
-    (those have a populated MinIO trajectory but no Postgres rows).
-    The fallback path will be removed in a future cleanup pass.
-
-    Trials still in `queued` or `claimed` correctly return [] from
-    both paths — no events have been emitted yet, so 0 is the right
-    answer regardless of source.
+    The fallback applies to running and terminal trials and preserves
+    object-only history. Queued and claimed trials return the database page
+    without an object lookup.
     """
     events = await _read_events_from_postgres(
         session, trial_id=trial.id, after_seq=after_seq, limit=limit,
@@ -344,10 +312,8 @@ async def _read_events_with_minio_fallback(
     if events:
         return events
     if trial.state in _TERMINAL_TRIAL_STATES or trial.state == "running":
-        # Empty Postgres + a state that should have produced events =
-        # legacy trial. Fall through to MinIO to preserve UX. Log so
-        # the fallback rate is observable and a future cleanup can
-        # remove the path once it drops to ~0.
+        # The requested database suffix is empty; retained object-backed
+        # history may still have newer events. Log successful fallback reads.
         legacy = await asyncio.to_thread(
             _read_events_after_seq,
             minio_client,
@@ -375,8 +341,8 @@ async def list_events_by_seq(
 ) -> dict[str, Any]:
     """Return events with `seq > after_seq`, capped at `limit`.
 
-    Slice 3c reads from the Postgres `trial_events` table. MinIO is
-    the fallback for legacy trials (worker shipped before Slice 3b).
+    Reads from the Postgres `trial_events` table, with MinIO fallback for
+    retained object-backed events.
 
     Use `after_seq=-1` (the default) to start from the beginning;
     `after_seq=N` to resume after event seq `N`. `next_after_seq` in
@@ -511,14 +477,14 @@ async def stream_events(
 ) -> StreamingResponse:
     """SSE live event stream for `trial_id`, starting at `after_seq + 1`.
 
-    The connection drains all available event pages, then
-    polls MinIO every `_DEFAULT_SSE_POLL_INTERVAL_SEC` for new events,
-    and completes only after a terminal trial has no remaining events. It also
-    stops if the client disconnects or the connection has been open for longer
+    The connection drains Postgres-first event pages with the stored MinIO
+    trajectory as a fallback, then waits for notifications or the polling
+    interval. It completes only after a terminal trial has no remaining events.
+    It also stops if the client disconnects or the connection has been open for longer
     than `_DEFAULT_SSE_MAX_CONNECTION_SEC` (clients reconnect with
     the last seen seq as `after_seq`).
 
-    Slice 3e: when a worker insert commits, migration 0041's trigger
+    When an event insert commits, migration 0041's trigger
     fires NOTIFY on `trial_events_inserted` and the inner loop wakes
     immediately to read+ship the new rows. The fixed `poll_interval`
     fallback still ticks as a safety valve for missed notifications

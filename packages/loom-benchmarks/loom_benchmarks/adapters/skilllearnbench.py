@@ -291,22 +291,6 @@ class SkillLearnBenchAdapter(SkillFlowAdapter):
 # seed permutation.
 
 
-_BASELINE_MODELS = (
-    "claude-haiku-4-5",
-    "claude-opus-4-6",
-    "claude-sonnet-4-6",
-    "gemini-3-flash-preview",
-    "gemini-3.1-flash-lite-preview",
-    "gemini-3.1-pro-preview",
-)
-_BASELINE_PREFIXES = (
-    "b1-one-shot",
-    "b2-self-feedback",
-    "b3-teacher-feedback",
-    "b4-skill-creator",
-)
-
-
 class SkillLearnBenchHumanAuthoredAdapter(SkillLearnBenchAdapter):
     name = "skilllearnbench-human-authored"
 

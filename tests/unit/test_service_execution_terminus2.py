@@ -130,7 +130,56 @@ async def test_hosted_control_fails_closed_without_reclaim_identity() -> None:
 
 
 @pytest.mark.asyncio
-async def test_hosted_terminus_rejects_deferred_multi_model_policies(tmp_path: Path) -> None:
+@pytest.mark.parametrize(("policy", "extra", "expected"), [
+    (
+        "beta_mixture",
+        {"beta": 0.5, "mix_seed": "seed"},
+        {"mix_mode": "beta_mixture", "beta": 0.5, "seed": "seed"},
+    ),
+    (
+        "student_to_teacher_turns",
+        {"step_start": 2, "step_end": 9, "mix_seed": "seed"},
+        {"mix_mode": "student_to_teacher_turns", "k1": 2, "k2": 9, "seed": "seed"},
+    ),
+])
+async def test_hosted_terminus_freezes_beta_and_turn_plans(
+    tmp_path: Path, monkeypatch: Any, policy: str, extra: dict[str, Any], expected: dict[str, Any],
+) -> None:
+    task, trial = _config()
+    trial = TrialConfig.model_validate({
+        **trial.model_dump(mode="json"),
+        "multi_model": {
+            "enabled": True,
+            "policy": policy,
+            "secondary_model": {"provider": "openai", "name": "teacher", "source": "api"},
+            **extra,
+        },
+    })
+    captured: dict[str, Any] = {}
+
+    class Runtime:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+        def begin_attempt(self, deadline: AttemptDeadline) -> None:
+            return None
+
+        async def run(self, **kwargs: Any) -> None:
+            return None
+
+    monkeypatch.setattr("loom.service_execution_terminus2.LoomTerminus2Runtime", Runtime)
+    driver = FakeDriver()
+    await driver.start()
+    await run_terminus2(
+        driver=driver, workspace=tmp_path, task_config=task, trial_config=trial,
+        trial_id=uuid4(), team_id=uuid4(), gateway_url="http://127.0.0.1:9000",
+        instruction="Inspect /app and write the manifest.",
+    )
+    assert captured["model_switch_plan"] == expected
+
+
+@pytest.mark.asyncio
+async def test_hosted_terminus_rejects_an_unseeded_beta_plan(tmp_path: Path) -> None:
     task, trial = _config()
     trial = TrialConfig.model_validate({
         **trial.model_dump(mode="json"),
@@ -139,12 +188,11 @@ async def test_hosted_terminus_rejects_deferred_multi_model_policies(tmp_path: P
             "policy": "beta_mixture",
             "secondary_model": {"provider": "openai", "name": "teacher", "source": "api"},
             "beta": 0.5,
-            "mix_seed": "seed",
         },
     })
     driver = FakeDriver()
     await driver.start()
-    with pytest.raises(AgentError, match="student_teacher_student"):
+    with pytest.raises(AgentError, match="mix seed"):
         await run_terminus2(
             driver=driver, workspace=tmp_path, task_config=task, trial_config=trial,
             trial_id=uuid4(), team_id=uuid4(), gateway_url="http://127.0.0.1:9000",
@@ -265,6 +313,72 @@ async def test_real_runtime_bridge_preserves_typed_turns_and_private_native_arti
     assert (tmp_path / "harbor/recording.cast").is_file()
     assert driver.filesystem == {}  # Native artifacts never enter the untrusted sidecar.
     assert not any("apt-get" in command or "apk add" in command for command in commands)
+
+
+@pytest.mark.asyncio
+async def test_failed_dispatch_retains_current_commands_in_trusted_native_trajectory(tmp_path, monkeypatch):
+    from loom.agent.terminus2 import runtime as module
+
+    _patch_harbor(monkeypatch)
+    harbor, context = module._import_terminus2()
+    ledger = [{"id": str(uuid4()), "step_id": "agent", "input_tokens": 10,
+               "output_tokens": 5, "model": "glm-5.2", "dialect": "openai_chat",
+               "cost_usd": 0.01, "rate_card_hash": "rate"}]
+
+    async def calls(self, trial_id):
+        return ledger
+
+    async def no_keys(*args, **kwargs):
+        pass
+
+    async def alive():
+        return True
+
+    async def exec(command, **kwargs):
+        return SimpleNamespace(return_code=0, stdout="0\n", stderr="")
+
+    class FailedHarbor(harbor):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._session = SimpleNamespace(environment=SimpleNamespace(exec=exec),
+                send_keys=no_keys, is_session_alive=alive)
+            self._n_episodes = 1
+            self._trajectory_steps = []
+
+        async def _handle_llm_interaction(self, chat):
+            chat.total_input_tokens, chat.total_output_tokens = 10, 5
+            return ([SimpleNamespace(keystrokes="exit 7\n", duration_sec=0.1)], False,
+                    "", "inspect", "fail locally", SimpleNamespace(reasoning_content=""))
+
+        async def _execute_commands(self, *args):
+            persisted = (tmp_path / "trajectory.jsonl").read_text()
+            assert '"recorded_before_dispatch":true' in persisted
+            assert "exit 7\\n" in persisted
+            raise AgentError("Terminus2 tmux session/server lost mid-dispatch.")
+
+        async def run(self, *args):
+            # Harbor omitted the failing current step: only the native adapter's
+            # real _LocalTrajectory append boundary can preserve its commands.
+            (self.path / "trajectory.json").write_text(json.dumps({"steps": []}))
+            chat = SimpleNamespace(total_input_tokens=0, total_output_tokens=0, total_cache_tokens=0)
+            result = await self._handle_llm_interaction(chat)
+            await self._execute_commands(result[0], self._session)
+
+    monkeypatch.setattr(module, "_import_terminus2", lambda: (FailedHarbor, context))
+    monkeypatch.setattr(LeaseGatewayClient, "get_trial_llm_calls", calls)
+    task, trial = _config()
+    driver = FakeDriver()
+    await driver.start()
+    with pytest.raises(AgentError, match="lost mid-dispatch"):
+        await run_terminus2(driver=driver, workspace=tmp_path, task_config=task,
+            trial_config=trial, trial_id=uuid4(), team_id=uuid4(), gateway_url="http://127.0.0.1:9000",
+            instruction="Inspect /app and write the manifest.")
+    events = [json.loads(line) for line in (tmp_path / "trajectory.jsonl").read_text().splitlines()]
+    command = next(e for e in events if e["kind"] == "terminus2_command")
+    assert command["keystrokes"] == "exit 7\n" and command["recorded_before_dispatch"] is True
+    assert [e["seq"] for e in events] == list(range(len(events)))
+    assert json.loads((tmp_path / "harbor/trajectory.json").read_text())["steps"] == []
+    assert driver.filesystem == {}
 
 
 @pytest.mark.asyncio

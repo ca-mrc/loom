@@ -9,9 +9,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from scripts.ops.nebius_ingress_stage import _uid
 from scripts.ops.nebius_management_prerequisites import inventory_resources
-from scripts.ops.nebius_management_switch import _matches, _stable
+from scripts.ops.nebius_management_switch import _stable
 from scripts.ops.nebius_pool_activation_live import HTTPSPoolActivationAPI
 from scripts.ops.nebius_pool_cutover_live import HTTPSPoolCutoverAPI
 from scripts.ops.nebius_pool_gateway_authority import (
@@ -50,7 +49,7 @@ class HTTPSPoolRefreshAPI:
         observed = {}
         for key, choices in options.items():
             current = self.retained.read_workload(key)
-            if not any(_matches(current, wanted, _uid(self.pool.completion.workloads[key])) for wanted in choices):
+            if not any(self.refresh.matches_workload(current, wanted, self.pool.completion.workloads[key]) for wanted in choices):
                 raise ValueError
             observed[key] = _stable(current)
         return observed
@@ -78,16 +77,20 @@ class HTTPSPoolRefreshAPI:
 
     def _admission(self) -> None:
         history = self.parent.history
+        options = self.refresh.manager_revision_options()
+        revision = history.management_schema_revision(options)
         if self.pool.completion.outcome == 'global':
-            history.qualify_active_pool()
+            history.qualify_active_pool(manager_revision=revision)
         else:
-            if (history.activation_pool('observe') != 'fenced'
-                    or history.machine_retirement('observe') != 'revoked'
-                    or history.recovery_pool_drained() is not True):
+            if (history.activation_pool('observe', manager_revision=revision) != 'fenced'
+                    or history.machine_retirement('observe', manager_revision=revision) != 'revoked'
+                    or history.recovery_pool_drained(manager_revision=revision) is not True):
                 raise ValueError
         for guard in self.parent.request.fencing.retirement.migration.guards:
             if self.parent.guards.activation_guard(guard, 'observe') != 'open':
                 raise ValueError
+        if self.refresh.manager_revision_options() != options:
+            raise ValueError
 
     def _outcome(self) -> None:
         self._admission()

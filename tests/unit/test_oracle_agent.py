@@ -191,3 +191,102 @@ def test_oracle_mode_and_metadata():
     assert agent.name == "oracle"
     assert agent.model is None
     assert "linux" in agent.supports_os
+
+
+class _LocalShellDriver:
+    """Exercise the Oracle shell command on disposable files, without a sandbox."""
+
+    async def exec(self, cmd: str, *, cwd: PurePosixPath, **_: object) -> ExecResult:
+        import asyncio
+
+        process = await asyncio.create_subprocess_exec(
+            "/bin/sh", "-c", cmd, cwd=str(cwd),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate()
+        return ExecResult(return_code=process.returncode, stdout=stdout, stderr=stderr,
+                          duration_sec=0.0)
+
+
+@pytest.mark.parametrize("relative_operation", ["git-pathspec", "executable-target"])
+async def test_explicit_root_cwd_restores_image_relative_operations(
+    writer: TrajectoryWriter, tmp_path: Path, relative_operation: str,
+) -> None:
+    import shlex
+    import subprocess
+
+    from loom.errors import AgentError
+    from loom.trajectory.reader import TrajectoryReader
+
+    root = tmp_path / "app"
+    solution = root / "solution"
+    solution.mkdir(parents=True)
+    if relative_operation == "git-pathspec":
+        # Like Poetry: Git repo discovery succeeds in a subdirectory, while
+        # the relative pathspec silently misses a root-level deletion.
+        def git(*args: str) -> None:
+            subprocess.run(["git", "-C", str(root), *args], check=True,
+                           capture_output=True)
+
+        git("init")
+        git("config", "user.name", "Oracle Test")
+        git("config", "user.email", "oracle@example.test")
+        (root / "config.example.toml").write_text("setting = true\n")
+        git("add", "config.example.toml")
+        git("commit", "-m", "add config")
+        git("rm", "config.example.toml")
+        git("commit", "-m", "remove config")
+        body = 'test -n "$(git log --diff-filter=D -1 --format=%H -- config.example.toml)"\n'
+    else:
+        # Isolate Email's path resolution without requiring Node on the host.
+        target = root / "email.js"
+        target.write_text("#!/bin/sh\nprintf 'email target reached\\n'\n")
+        target.chmod(0o755)
+        body = "./email.js > result.txt\n"
+    solve = solution / "solve.sh"
+    solve.write_text("#!/bin/sh\nset -eu\n" + body)
+    driver = _LocalShellDriver()
+    kwargs = dict(instruction="", env=driver, trajectory=writer, mcp=[],
+                  skills_dir=None, step_id="main")
+    with pytest.raises(AgentError, match="exited rc="):
+        await OracleAgent(task_dir=root, trial_id=uuid4(), workdir=PurePosixPath(root)).run(
+            **kwargs,
+        )
+
+    # Harbor stages trusted solutions outside the business tree. Quoting must
+    # work even for paths containing whitespace and shell metacharacters.
+    trusted = tmp_path / "trusted 'solution;$(touch injected)"
+    import shutil
+
+    authored = tmp_path / "authored"
+    shutil.copytree(root, authored)
+    solution.rename(trusted)
+    await OracleAgent(
+        task_dir=tmp_path / "authored", trial_id=uuid4(),
+        workdir=PurePosixPath(root), solution_dir=PurePosixPath(trusted),
+        execution_cwd=PurePosixPath(root),
+    ).run(**kwargs)
+    events = list(TrajectoryReader(writer.local_path).iter_all())
+    assert events[-1].cwd == root.as_posix()
+    assert events[-1].return_code == 0
+    assert shlex.quote(str(trusted / "solve.sh")) in events[-1].cmd
+    assert not (root / "injected").exists()
+    if relative_operation == "executable-target":
+        assert (root / "result.txt").read_text() == "email target reached\n"
+
+
+async def test_default_solution_cwd_keeps_sibling_assets_working(
+    writer: TrajectoryWriter, task_dir: Path,
+) -> None:
+    solution = task_dir / "solution"
+    (solution / "payload.txt").write_text("sibling asset\n")
+    (solution / "solve.sh").write_text(
+        "#!/bin/sh\nset -eu\ncat payload.txt > ../result.txt\n",
+    )
+    await OracleAgent(
+        task_dir=task_dir, trial_id=uuid4(), workdir=PurePosixPath(task_dir),
+    ).run(
+        instruction="", env=_LocalShellDriver(), trajectory=writer,
+        mcp=[], skills_dir=None, step_id="main",
+    )
+    assert (task_dir / "result.txt").read_text() == "sibling asset\n"

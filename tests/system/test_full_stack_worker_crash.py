@@ -41,6 +41,7 @@ def test_worker_crash_then_retry(compose_stack: dict[str, str]) -> None:
         r = httpx.get(
             f"{cp}/trials/{trial_id}",
             headers={"Authorization": f"Bearer {raw_token}"},
+            timeout=10,
         )
         if r.json()["state"] in ("claimed", "running", "succeeded"):
             break
@@ -57,6 +58,7 @@ def test_worker_crash_then_retry(compose_stack: dict[str, str]) -> None:
         r = httpx.get(
             f"{cp}/trials/{trial_id}",
             headers={"Authorization": f"Bearer {raw_token}"},
+            timeout=10,
         )
         final_state = r.json()["state"]
         if final_state in ("succeeded", "failed", "cancelled"):

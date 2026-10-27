@@ -21,6 +21,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 from loom_service.pool_submission import submission_origin
+from loom_service.task_image_admission import image_preparation_reader
 
 if TYPE_CHECKING:
     from loom.family_run.spec import FamilyRunSpec
@@ -48,7 +49,7 @@ from loom.db.schema import (
     Worker,
 )
 from loom.execution_diagnosis_store import execution_failure_groups
-from loom.execution_selection import execution_selection_readback
+from loom.execution_selection import execution_selection_readback, reported_verification
 from loom.hosted_harness import harnesses_supporting, hosted_harness
 from loom.models.batch import Combination
 from loom.models.cancellation import CancellationRequest
@@ -217,16 +218,6 @@ def _build_service_state_backend(request: Request) -> Any:
     return S3ArtifactsStateBackend(store=store, bucket=settings.artifacts_bucket)
 
 
-_RERUNNABLE_FAILURE_REASONS: frozenset[str] = frozenset(
-    {
-        "gateway_error",
-        "provider_transport_disconnect",
-        "retry_exhausted",
-        "exhausted_retries",
-    }
-)
-
-
 @dataclass(frozen=True)
 class _BatchTrialProjection:
     id: UUID
@@ -389,7 +380,6 @@ async def _batch_network_policy_evidence(
         try:
             effective = resolve_effective_network_policy(
                 baseline=task.environment.baseline_network_policy,
-                supported=task.environment.network_policies_supported,
                 override=requested,
             )
         except UnsupportedNetworkPolicyOverrideError:
@@ -413,20 +403,21 @@ async def _batch_execution_selection(
     contract = ServiceExecutionLease.runtime_contract_json
     class_id = contract["execution_class_id"].astext
     verifier = contract["verifier_execution"].astext
+    # Canonical plans omit this flag unless the grader runs inside the task sandbox.
+    in_place = contract["in_place_verifier"].astext
     guest = func.jsonb_path_exists(contract, literal_column("'$.sidecars[*].guest_execution'::jsonpath"))
     rows = (
         await session.execute(
-            select(class_id, verifier, guest, func.count(func.distinct(ServiceExecutionLease.trial_id)))
+            select(class_id, verifier, in_place, guest, func.count(func.distinct(ServiceExecutionLease.trial_id)))
             .join(Trial, Trial.id == ServiceExecutionLease.trial_id)
             .where(
                 Trial.batch_id == batch.id,
                 ServiceExecutionLease.execution_role == "attempt",
                 contract.is_not(None),
             )
-            .group_by(class_id, verifier, guest)
+            .group_by(class_id, verifier, in_place, guest)
         )
     ).all()
-    verification = {"in_attempt": "shared", "separate_execution": "separate", "skipped": "skipped"}
     requested = execution_selection_readback(batch.trial_config, None)["requested"]
     harnesses = [
         {"name": combo.get("agent_name"), "version": combo.get("agent_version")}
@@ -435,21 +426,21 @@ async def _batch_execution_selection(
     ]
     if harnesses:
         requested = {**requested, "harness": None, "harnesses": harnesses}
-    return {
-        "requested": requested,
-        "effective": [
-            {
-                "execution_class_id": row_class,
-                "verification": verification.get(row_verifier, row_verifier),
-                "fresh_sandbox_grading": row_verifier == "separate_execution",
-                "isolation": "guest" if row_guest else "container",
-                "trial_count": int(count),
-            }
-            for row_class, row_verifier, row_guest, count in sorted(
-                rows, key=lambda row: (str(row[0]), str(row[1]), bool(row[2])),
-            )
-        ],
-    }
+    effective = []
+    for row_class, row_verifier, row_in_place, row_guest, count in sorted(
+        rows, key=lambda row: (str(row[0]), str(row[1]), str(row[2]), bool(row[3])),
+    ):
+        verification, fresh_sandbox = reported_verification(
+            row_verifier, in_place_verifier=row_in_place == "true",
+        )
+        effective.append({
+            "execution_class_id": row_class,
+            "verification": verification,
+            "fresh_sandbox_grading": fresh_sandbox,
+            "isolation": "guest" if row_guest else "container",
+            "trial_count": int(count),
+        })
+    return {"requested": requested, "effective": effective}
 
 
 class _RerunFailedBatch(BaseModel):
@@ -1453,6 +1444,7 @@ async def _create_batch_record(
         trial_config=trial_config,
         combinations=payload.combinations,
         runtime_profile_json=request.app.state.settings.service_execution_runtime_profile_json,
+        image_preparation_reader=image_preparation_reader(request.app.state.settings),
     )
     service_execution_runtime_profile = await freeze_task_resource_requests(
         s, backend=payload.backend, task_ids=valid_task_ids,
@@ -1762,13 +1754,8 @@ async def preview_batch_network_policy(
 
     choices: list[_NetworkPolicyPreviewChoice] = []
     for kind in ("gateway-only", "web-allowlist", "public-web"):
-        incompatible = [
-            task_id for task_id in task_ids
-            if kind not in tasks[task_id].environment.network_policies_supported
-        ]
+        incompatible: list[str] = []
         reasons: list[str] = []
-        if incompatible:
-            reasons.append("network_policy_override_not_supported")
         if kind in {"web-allowlist", "public-web"}:
             if profile is None or not profile.supports_task_web_egress:
                 reasons.append("task_egress_runtime_unavailable")
@@ -1791,7 +1778,6 @@ async def preview_batch_network_policy(
         try:
             effective = resolve_effective_network_policy(
                 baseline=task.environment.baseline_network_policy,
-                supported=task.environment.network_policies_supported,
                 override=payload.baseline_network_policy_override,
             )
         except ValueError:
@@ -2290,7 +2276,6 @@ async def _trial_projections_for_batch(
     batch_id: UUID,
 ) -> list[_BatchTrialProjection]:
     return await _trial_projections_for_batch_ids(session, [batch_id])
-
 
 
 def _empty_trial_summary() -> dict[str, int]:
@@ -3061,6 +3046,7 @@ async def rerun_failed_batch(
         runtime_profile_json=runtime_profile_json,
         resolve_versions=request_payload.use_current_runtime,
         automatic_only=request_payload.use_current_runtime,
+        image_preparation_reader=image_preparation_reader(request.app.state.settings),
     )
     inherited_requests = (b.service_execution_runtime_profile or {}).get("task_resource_requests", {})
     service_execution_runtime_profile = await freeze_task_resource_requests(
@@ -3221,7 +3207,7 @@ async def cancel_batch(
     require_scope(ctx, "submit")
     b = (
         await s.execute(
-            select(Batch).where(Batch.id == batch_id),
+            select(Batch).where(Batch.id == batch_id).with_for_update(),
         )
     ).scalar_one_or_none()
     if b is None:
@@ -3242,12 +3228,26 @@ async def cancel_batch(
             )
         )
     ).scalars().all()
+    # Fence fanout before HTTP. CP child admission holds this same parent lock,
+    # so every previously admitted child is in the snapshot above. The runner
+    # retries active children of cancelled batches after partial delivery failure.
+    await s.execute(
+        update(Batch).where(Batch.id == batch_id).values(
+            state="cancelled", result_status="cancelled", finished_at=b.finished_at or now,
+        ),
+    )
+    if actor is not None:
+        await write_admin_audit_event(
+            s, actor=actor, action="batch.cancel", target_type="batch",
+            target_id=str(batch_id), request=request,
+            metadata={"reason": redact_text(payload.reason) if payload and payload.reason else None,
+                      "team_id": str(b.team_id)},
+        )
+    # Also releases session-auth locks before CP independently revalidates them.
+    await s.commit()
     # The Control Plane owns the trial cancellation transition for every
     # backend. In protected staging this is also the only path that can move a
     # live claim to cancel-pending without releasing its concurrency lease.
-    if ctx.auth_kind == "session":
-        # CP session revalidation must not wait on this request's auth-row lock.
-        await s.commit()
     for trial_id in active_trial_ids:
         response = await forward(
             request.app.state.http_client,
@@ -3260,15 +3260,4 @@ async def cancel_batch(
         if response.status_code not in {200, 409}:
             return propagate(response)
 
-    await s.execute(
-        update(Batch).where(Batch.id == batch_id).values(state="cancelled", finished_at=now),
-    )
-    if actor is not None:
-        await write_admin_audit_event(
-            s, actor=actor, action="batch.cancel", target_type="batch",
-            target_id=str(batch_id), request=request,
-            metadata={"reason": redact_text(payload.reason) if payload and payload.reason else None,
-                      "team_id": str(b.team_id)},
-        )
-    await s.commit()
     return {"batch_id": str(batch_id), "state": "cancelled"}

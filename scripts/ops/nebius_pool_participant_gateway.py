@@ -23,12 +23,12 @@ from scripts.ops.nebius_shared_pool_delivery_gateway import SOURCES as SHARED_SO
 
 SOURCES = SHARED_SOURCES + tuple('scripts/ops/' + name + '.py' for name in (
     'nebius_idle_rollout', 'nebius_rollout_reporting',
-    'nebius_pool_participant_adapter', 'nebius_pool_participant_catalog',
+    'nebius_pool_participant_adapter',
     'nebius_pool_participant_completion', 'nebius_pool_participant_creation',
     'nebius_pool_participant_dispatch', 'nebius_pool_participant_entry',
     'nebius_pool_participant_gateway', 'nebius_pool_participant_job',
     'nebius_pool_participant_observation', 'nebius_pool_participant_operation',
-    'nebius_pool_participant_prepare', 'nebius_pool_participant_release', 'nebius_pool_participant_resource',
+    'nebius_pool_participant_prepare', 'nebius_pool_participant_resource',
 ))
 LIMITS = {**dict.fromkeys(SOURCES, 262144), 'uv': 80 * 1024**2,
     'requirements.txt': 262144, 'participant-tooling.json': 4096, 'manifest.json': 65536}

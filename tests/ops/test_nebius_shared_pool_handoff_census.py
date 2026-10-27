@@ -148,11 +148,15 @@ from tests.ops.test_nebius_shared_pool_handoff import (
 
 
 @pytest.mark.timeout(1200)
-@pytest.mark.parametrize('forward_census', [False, True, 'participant', 'preparation', 'personal'],
-    ids=['initial', 'forward', 'participant', 'preparation', 'personal'])
+@pytest.mark.parametrize('forward_census,staging_observation', [
+    (False, None), (True, None), ('participant', None), ('preparation', None), ('personal', None),
+    ('preactivation-preparation', 'independent')],
+    indirect=['staging_observation'],
+    ids=['initial', 'forward', 'participant', 'preparation', 'personal',
+        'preactivation-preparation'])
 def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writers(
         shared_runtime, staging_history, staging_observation, completed_pool, handoff, shared_operation, forward_census,
-        publisher_cloud):
+        publisher_cloud, tmp_path):
     """A historical template or a stopped clone must not hide a live writer."""
     import json
     import ssl
@@ -163,7 +167,64 @@ def test_shared_workload_census_binds_current_roots_and_rejects_unaccounted_writ
     from tests.ops.test_nebius_pool_cutover import writer_descendant
 
     request, parent = shared_runtime
-    _, documents, _ = runtime_http_inventory(request, parent, completed_pool[3].server, handoff[2])
+    _, documents, handle = runtime_http_inventory(request, parent, completed_pool[3].server, handoff[2])
+    if forward_census in {'participant', 'preactivation-preparation', 'preactivation-recovery'}:
+        from scripts.ops import nebius_pool_preactivation_operation as preactivation
+        from scripts.ops import nebius_pool_storage_operation as storage
+        from scripts.ops.nebius_development_runtime_live import runtime_resource_path
+        from scripts.ops.nebius_development_runtime_observation import (
+            HTTPSDevelopmentRuntimeObserver,
+        )
+        from scripts.ops.nebius_shared_pool_entry import RetainedRuntimeReference
+        from scripts.ops.nebius_shared_pool_handoff_live import observe_shared_pool_guard_bindings
+        from tests.ops.test_nebius_shared_pool_handoff import (
+            ClosedStorageAPI,
+            PreactivationAPI,
+            _advanced_staging_source,
+            _shared_entry_inputs,
+        )
+
+        args, bindings = shared_operation
+        _, _, inputs, _, _ = _shared_entry_inputs(args, bindings)
+        runtime = RetainedRuntimeReference.model_validate(inputs['runtime'])
+        physical = storage.retain_closed_storage(runtime=runtime, operation_id=uuid4(),
+            target_disk_type='NETWORK_SSD_NON_REPLICATED')
+        storage_api = ClosedStorageAPI(physical)
+        storage_api.collector.ready = storage_api.publication_ready = True
+        assert storage.run_closed_storage(retained=physical, api=storage_api)
+        corrected = storage.load_completed_storage(runtime=runtime, reference=physical.reference)
+        for row in (corrected.resources.collector, corrected.resources.configuration):
+            documents[runtime_resource_path(row) + '/' + row['metadata']['name']] = copy.deepcopy(row)
+        source, selected = args['observation'], None
+        if forward_census != 'participant':
+            source = _advanced_staging_source(args, tmp_path)
+            retained = preactivation.retain_preactivation_catalog(runtime=runtime, source=source,
+                operation_id=uuid4(), repo_root=ROOT, storage=physical.reference)
+            api = PreactivationAPI(retained)
+            api.manager.ready = True
+            assert preactivation.run_preactivation_catalog(retained=retained, api=api, repo_root=ROOT)
+            selected = preactivation.load_completed_preactivation(runtime=runtime, reference=retained.reference, repo_root=ROOT)
+            namespace = retained.registration.binding.namespace
+            documents['/apis/apps/v1/namespaces/' + namespace + '/deployments/loom-service'] = copy.deepcopy(
+                api.manager.rows[_key(selected.resources.manager)])
+            documents['/api/v1/namespaces/' + namespace + '/configmaps/'
+                + selected.resources.catalog['metadata']['name']] = copy.deepcopy(selected.resources.catalog)
+        for row in documents.values():
+            if row['kind'] == 'Secret':
+                row['metadata'].setdefault('resourceVersion', '501')
+        args = {**args, 'observation': source}
+        with HTTPSDevelopmentRuntimeObserver(request=request, preactivation=selected, storage=corrected,
+                api_server=request.database.foundation.inputs.config['kubernetes_api_server'],
+                ssl_context=ssl.create_default_context()) as observer:
+            for connection in (observer, observer.manager, observer.foundation):
+                connection.client.close()
+                connection.client = type(completed_pool[3].api.client)(base_url=connection.api_server,
+                    transport=httpx.MockTransport(handle))
+            bindings = observe_shared_pool_guard_bindings(**args, development=observer, preactivation=selected, storage=corrected)
+        shared_operation = args, bindings
+        if forward_census != 'participant':
+            staging_observation = source['observation']
+            forward_census = 'preparation' if forward_census == 'preactivation-preparation' else 'recovery'
     kinds = {'Deployment': 'deployments', 'StatefulSet': 'statefulsets', 'CronJob': 'cronjobs',
         'DaemonSet': 'daemonsets', 'ReplicaSet': 'replicasets', 'ReplicationController': 'replicationcontrollers',
         'Job': 'jobs', 'Pod': 'pods'}

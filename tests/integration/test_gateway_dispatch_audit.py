@@ -567,3 +567,177 @@ async def test_database_enforces_request_dispatch_uniqueness(audit_setup: tuple)
         with pytest.raises(IntegrityError, match="gateway_receipt_request_uidx"):
             await session.execute(insert(GatewayDispatchReceipt).values(**values))
         await session.rollback()
+
+
+@pytest.mark.parametrize("observation", ["provider", "gateway"])
+@pytest.mark.parametrize("phase", ["session", "execute", "commit", "session_exit"])
+@pytest.mark.parametrize("category", ["timeout", "database", "other"])
+async def test_observation_failure_identifies_boundary_without_private_details(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    observation: str,
+    phase: str,
+    category: str,
+) -> None:
+    audit = DispatchAudit(
+        dispatch_audit._RequestAudit(),
+        AuthContext(token_hash=b"", type="step", scopes=["llm:call"],
+                    team_id=uuid4(), expires_at=None, trial_id=uuid4(),
+                    step_id="main", step_jwt_id=uuid4()),
+        "openai", None, "model_call",
+    )
+    receipt_id = uuid4()
+    audit.state.receipt_ids.append(receipt_id)
+    secret = "private-observation-driver-bind-value"
+
+    async def maybe_fail(current: str) -> None:
+        if current != phase:
+            return
+        if category == "timeout":
+            await asyncio.Event().wait()
+        if category == "database":
+            raise IntegrityError("private observation SQL", {"token": secret}, RuntimeError(secret))
+        raise RuntimeError(secret)
+
+    async def execute(statement):
+        await maybe_fail("execute")
+
+    async def commit():
+        await maybe_fail("commit")
+
+    @asynccontextmanager
+    async def session():
+        await maybe_fail("session")
+        yield SimpleNamespace(execute=execute, commit=commit)
+        await maybe_fail("session_exit")
+
+    audit.state.session_factory = session
+    monkeypatch.setattr(dispatch_audit, "_AUDIT_TIMEOUT_SECONDS", 0.02)
+    if observation == "provider":
+        await audit._finish(receipt_id, "deadline")
+    else:
+        async def app(scope, receive, send):
+            await send({"type": "http.response.start", "status": 504, "headers": []})
+            await send({"type": "http.response.body", "body": b""})
+
+        async def noop(*args):
+            pass
+
+        await DispatchAuditMiddleware(app)(
+            {"type": "http", "_loom_dispatch_audit": audit.state}, noop, noop,
+        )
+    records = [record for record in caplog.records
+               if "gateway_dispatch_observation_failed" in record.getMessage()]
+    assert len(records) == 1
+    message = records[0].getMessage()
+    assert f"request_id={audit.state.request_id}" in message
+    assert f"observation={observation}" in message
+    assert f"phase={phase}" in message
+    assert f"error_category={category}" in message
+    assert records[0].exc_info is None
+    assert secret not in caplog.text
+    assert "private observation SQL" not in caplog.text
+
+
+async def test_terminal_receipt_reader_does_not_starve_gateway_finalization(
+    audit_setup: tuple, postgres_url: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.integration import test_gateway_dispatch_deadline_http as http_tests
+
+    audit, request = audit_setup
+    await audit._admit(1)
+    original_factory = audit.state.session_factory
+    original_receipts = http_tests._receipts
+    assert original_factory is not None
+    observing = asyncio.Event()
+    reading = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    @asynccontextmanager
+    async def session_factory():
+        async with original_factory() as session:
+            execute = session.execute
+
+            async def wait_for_reader(statement):
+                # Place the real gateway update inside its existing budget
+                # before the reader starts. No production deadline is changed.
+                observing.set()
+                await reading.wait()
+                return await execute(statement)
+
+            monkeypatch.setattr(session, "execute", wait_for_reader)
+            yield session
+
+    def slow_receipts(*args):
+        loop.call_soon_threadsafe(reading.set)
+        time.sleep(1.1)
+        return original_receipts(*args)
+
+    audit.state.session_factory = session_factory
+    monkeypatch.setattr(http_tests, "_receipts", slow_receipts)
+
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    async def noop(*args):
+        pass
+
+    finalizing = asyncio.create_task(DispatchAuditMiddleware(app)(request.scope, noop, noop))
+    try:
+        await asyncio.wait_for(observing.wait(), timeout=5)
+        # Stop the old 100-read loop promptly after a starvation failure.
+        rows = await asyncio.wait_for(
+            http_tests._terminal_receipts(postgres_url, audit.ctx.trial_id), timeout=3,
+        )
+        assert len(rows) == 1
+        assert rows[0]["gateway_outcome"] == "completed"
+        assert rows[0]["gateway_http_status"] == 200
+    finally:
+        finalizing.cancel()
+        await asyncio.gather(finalizing, return_exceptions=True)
+        audit.state.session_factory = original_factory
+
+
+@pytest.mark.parametrize("reader_fails", [False, True])
+async def test_terminal_receipt_cancellation_drains_reader(
+    monkeypatch: pytest.MonkeyPatch, reader_fails: bool,
+) -> None:
+    import threading
+
+    from tests.integration import test_gateway_dispatch_deadline_http as http_tests
+
+    loop = asyncio.get_running_loop()
+    started = asyncio.Event()
+    release = threading.Event()
+    exited = threading.Event()
+
+    def read(*args):
+        loop.call_soon_threadsafe(started.set)
+        try:
+            assert release.wait(timeout=5), "test did not release receipt reader"
+            if reader_fails:
+                raise RuntimeError("reader failed while cancellation was draining")
+            return [{"gateway_outcome": "completed"}]
+        finally:
+            exited.set()
+
+    monkeypatch.setattr(http_tests, "_receipts", read)
+    polling = asyncio.create_task(http_tests._terminal_receipts("unused", uuid4()))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        polling.cancel()
+        await asyncio.sleep(0)
+        assert not polling.done(), "cancellation abandoned the active database reader"
+        assert not exited.is_set()
+        polling.cancel()
+        await asyncio.sleep(0)
+        assert not polling.done(), "repeated cancellation abandoned the active database reader"
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await polling
+        assert exited.is_set()
+    finally:
+        release.set()
+        await asyncio.gather(polling, return_exceptions=True)
+        await asyncio.to_thread(exited.wait, 5)

@@ -29,6 +29,7 @@ from scripts.ops.nebius_management_refresh_predecessor import (
 from scripts.ops.nebius_management_stage import _comparison_snapshot
 from scripts.ops.nebius_management_switch import _stable
 from scripts.ops.nebius_pool_activation_database import (
+    _manager_observation_header,
     fence_pool_activation_sql,
     pool_activation_state_sql,
     qualify_pool_activation_report,
@@ -84,15 +85,16 @@ def _origins(origins: tuple[PoolWorkOriginV1, ...]) -> tuple[PoolWorkOriginV1, .
     return tuple(PoolWorkOriginV1.model_validate(row.model_dump()) for row in origins)
 
 
-def pool_management_history_sql(origins: tuple[PoolWorkOriginV1, ...]) -> str:
+def pool_management_history_sql(origins: tuple[PoolWorkOriginV1, ...], *, manager_revision: str = '0176') -> str:
     """Project only relevant history from one real READ ONLY database snapshot."""
+    _manager_observation_header(manager_revision)
     rows = [row.model_dump(mode="json") for row in _origins(origins)]
     encoded = json.dumps(rows, sort_keys=True, separators=(",", ":")).encode().hex()
     return f"""BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
 SET LOCAL statement_timeout='10s'; SET LOCAL lock_timeout='2s'; SET LOCAL search_path=pg_catalog,public,pg_temp;
 DO $pool_management_history$
 BEGIN
-    IF (SELECT version_num FROM public.alembic_version) IS DISTINCT FROM '0176'
+    IF (SELECT version_num FROM public.alembic_version) IS DISTINCT FROM '{manager_revision}'
     THEN RAISE EXCEPTION 'pool management history schema unqualified'; END IF;
 END $pool_management_history$;
 WITH origins AS (
@@ -115,7 +117,7 @@ WITH origins AS (
       LEFT JOIN public.nebius_application_operations o ON o.application_id=a.application_id
         AND o.deployment_generation=(origin->'application'->>'deployment_generation')::bigint
 )
-SELECT json_build_object('schema','loom.pool-management-history.v1','schema_revision','0176',
+SELECT json_build_object('schema','loom.pool-management-history.v1','schema_revision','{manager_revision}',
     'read_only',current_setting('transaction_read_only')='on',
     'rows',COALESCE(json_agg(history ORDER BY ordinal),'[]'::json)) FROM history;
 ROLLBACK;
@@ -123,11 +125,12 @@ ROLLBACK;
 
 
 def qualify_management_history_page(report: Any, *, origins: tuple[PoolWorkOriginV1, ...],
-                                    participant: PoolParticipantV1, cluster_id: str) -> tuple[int, ...]:
+                                    participant: PoolParticipantV1, cluster_id: str, manager_revision: str = '0176') -> tuple[int, ...]:
     """Reject incomplete/reordered/foreign projections; never manufacture origins."""
+    _manager_observation_header(manager_revision)
     origins = _origins(origins)
     if (not isinstance(report, dict) or set(report) != {"schema", "schema_revision", "read_only", "rows"}
-            or report["schema"] != "loom.pool-management-history.v1" or report["schema_revision"] != "0176"
+            or report["schema"] != "loom.pool-management-history.v1" or report["schema_revision"] != manager_revision
             or report["read_only"] is not True or not isinstance(report["rows"], list)
             or len(report["rows"]) != len(origins)):
         raise ValueError("pool_management_history_report_unqualified")
@@ -149,6 +152,7 @@ class PoolManagementHistoryTarget:
     namespace_uid: UUID
     controller: dict[str, Any]
     database: PoolGuardDatabase
+    manager_revision: str = '0176'
 
 
 def derive_management_history_target(*, original: CompletedUpgrade, predecessor: CompletedUpgrade | CompletedRefresh,
@@ -214,7 +218,8 @@ def derive_management_history_target(*, original: CompletedUpgrade, predecessor:
 
 
 def _target_contract(target: PoolManagementHistoryTarget) -> dict[str, Any]:
-    return {"namespace": target.namespace, "namespace_uid": str(target.namespace_uid), "controller": target.controller,
+    _manager_observation_header(target.manager_revision)
+    return {**({'manager_revision': target.manager_revision} if target.manager_revision != '0176' else {}), "namespace": target.namespace, "namespace_uid": str(target.namespace_uid), "controller": target.controller,
         "database": {"statefulset": target.database.statefulset, "service": target.database.service,
             "credential_uid": str(target.database.credential_uid),
             "credential_resource_version": target.database.credential_resource_version}}
@@ -256,11 +261,12 @@ class KubectlPoolHistoryAPI(KubectlPoolGuardAPI):
             origins = _origins(origins)
             for origin in origins:
                 pool_request_priority(participant, origin, workload_kind="trial")
-            query = pool_management_history_sql(origins)
+            query = pool_management_history_sql(origins, manager_revision=self.target.manager_revision)
             before = self._database(self.target, url_variable="LOOM_SVC_DB_URL")
             report = self._run(["exec", "-n", self.target.namespace, "pod/" + before["metadata"]["name"], "-c", "loom-postgres", "--",
                 "psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "loom", "-c", query])
-            qualify_management_history_page(report, origins=origins, participant=participant, cluster_id=self.request.registration.spec.cluster_id)
+            qualify_management_history_page(report, origins=origins, participant=participant, cluster_id=self.request.registration.spec.cluster_id,
+                manager_revision=self.target.manager_revision)
             if _uid(self._database(self.target, url_variable="LOOM_SVC_DB_URL")) != _uid(before):
                 raise ValueError
         except Exception:
@@ -279,7 +285,7 @@ class KubectlPoolHistoryAPI(KubectlPoolGuardAPI):
                     or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
                 raise ValueError
             spec = self.request.registration.spec
-            query = pool_startup_closed_sql(spec)
+            query = pool_startup_closed_sql(spec, manager_revision=self.target.manager_revision)
             before = self._database(self.target, url_variable="LOOM_SVC_DB_URL")
             report = self._run(["exec", "-n", self.target.namespace, "pod/" + before["metadata"]["name"], "-c", "loom-postgres", "--",
                 "psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "loom", "-c", query])
@@ -289,15 +295,43 @@ class KubectlPoolHistoryAPI(KubectlPoolGuardAPI):
         except Exception:
             raise PoolMigrationError("startup_closed_registration") from None
 
-    def qualify_active_pool(self) -> None:
+    def management_schema_revision(self, expected: tuple[str, ...]) -> str:
+        """Read the exact retained backend, without accepting an unbound revision."""
+        try:
+            if (not expected or len(expected) > 2 or len(set(expected)) != len(expected)
+                    or digest(migration_contract(self.request)) != self.contract_sha256
+                    or digest(_target_contract(self.target)) != self.history_sha256
+                    or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
+                raise ValueError
+            before = self._database(self.target, url_variable='LOOM_SVC_DB_URL')
+            query = """BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
+SET LOCAL statement_timeout='10s'; SET LOCAL lock_timeout='2s';
+SELECT json_build_object('revision', version_num) FROM public.alembic_version;
+ROLLBACK;
+"""
+            report = self._run(['exec', '-n', self.target.namespace, 'pod/' + before['metadata']['name'], '-c', 'loom-postgres', '--',
+                'psql', '-X', '-qAt', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', 'loom', '-c', query])
+            revision = report.get('revision')
+            if (set(report) != {'revision'} or not isinstance(revision, str) or revision not in expected
+                    or _uid(self._database(self.target, url_variable='LOOM_SVC_DB_URL')) != _uid(before)
+                    or digest(migration_contract(self.request)) != self.contract_sha256
+                    or digest(_target_contract(self.target)) != self.history_sha256
+                    or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
+                raise ValueError
+            return revision
+        except Exception:
+            raise PoolMigrationError('management_schema_revision') from None
+
+    def qualify_active_pool(self, *, manager_revision: str | None = None) -> None:
         """Read exact open-pool authority without draining or changing any work."""
+        manager_revision = self.target.manager_revision if manager_revision is None else manager_revision
         try:
             if (digest(migration_contract(self.request)) != self.contract_sha256
                     or digest(_target_contract(self.target)) != self.history_sha256
                     or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
                 raise ValueError
             spec = self.request.registration.spec
-            query = pool_active_authority_sql(spec)
+            query = pool_active_authority_sql(spec, manager_revision=manager_revision)
             before = self._database(self.target, url_variable="LOOM_SVC_DB_URL")
             report = self._run(["exec", "-n", self.target.namespace, "pod/" + before["metadata"]["name"], "-c", "loom-postgres", "--",
                 "psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "loom", "-c", query])
@@ -325,16 +359,18 @@ class KubectlPoolHistoryAPI(KubectlPoolGuardAPI):
         except Exception:
             raise PoolMigrationError("management_runtime_database") from None
 
-    def activation_pool(self, action: Literal["observe", "fence"]) -> str:
+    def activation_pool(self, action: Literal["observe", "fence"], *, manager_revision: str | None = None) -> str:
         """Observe/fence the retained installation without a healthy gateway."""
+        manager_revision = self.target.manager_revision if manager_revision is None else manager_revision
         try:
-            if (action not in {"observe", "fence"}
+            if (action not in {"observe", "fence"} or (action == 'fence' and manager_revision != self.target.manager_revision)
                     or digest(migration_contract(self.request)) != self.contract_sha256
                     or digest(_target_contract(self.target)) != self.history_sha256
                     or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
                 raise ValueError
             spec = self.request.registration.spec
-            query = pool_activation_state_sql(spec) if action == "observe" else fence_pool_activation_sql(spec)
+            query = (pool_activation_state_sql(spec, manager_revision=manager_revision)
+                if action == "observe" else fence_pool_activation_sql(spec, manager_revision=manager_revision))
             before = self._database(self.target, url_variable="LOOM_SVC_DB_URL")
             report = self._run(["exec", "-n", self.target.namespace, "pod/" + before["metadata"]["name"], "-c", "loom-postgres", "--",
                 "psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "loom", "-c", query])
@@ -349,8 +385,9 @@ class KubectlPoolHistoryAPI(KubectlPoolGuardAPI):
         except Exception:
             raise PoolMigrationError("activation_pool") from None
 
-    def recovery_pool_drained(self) -> bool:
+    def recovery_pool_drained(self, *, manager_revision: str | None = None) -> bool:
         """Read current journal drain, never trust gateway health or a saved zero."""
+        manager_revision = self.target.manager_revision if manager_revision is None else manager_revision
         try:
             def scope() -> None:
                 if (digest(migration_contract(self.request)) != self.contract_sha256
@@ -361,7 +398,8 @@ class KubectlPoolHistoryAPI(KubectlPoolGuardAPI):
             spec = self.request.registration.spec
             before = self._database(self.target, url_variable="LOOM_SVC_DB_URL")
             report = self._run(["exec", "-n", self.target.namespace, "pod/" + before["metadata"]["name"], "-c", "loom-postgres", "--",
-                "psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "loom", "-c", pool_recovery_drain_sql(spec)])
+                "psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "loom", "-c",
+                pool_recovery_drain_sql(spec, manager_revision=manager_revision)])
             drained = qualify_pool_recovery_drain(spec, report)
             if _uid(self._database(self.target, url_variable="LOOM_SVC_DB_URL")) != _uid(before):
                 raise ValueError
@@ -382,7 +420,7 @@ class KubectlPoolHistoryAPI(KubectlPoolGuardAPI):
             spec = self.request.registration.spec
             before = self._database(self.target, url_variable='LOOM_SVC_DB_URL')
             report = self._run(['exec', '-n', self.target.namespace, 'pod/' + before['metadata']['name'], '-c', 'loom-postgres', '--',
-                'psql', '-X', '-qAt', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', 'loom', '-c', pool_recovery_machine_state_sql(spec)])
+                'psql', '-X', '-qAt', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', 'loom', '-c', pool_recovery_machine_state_sql(spec, manager_revision=self.target.manager_revision)])
             result = qualify_recovery_machine_state_report(spec, report)
             if _uid(self._database(self.target, url_variable='LOOM_SVC_DB_URL')) != _uid(before):
                 raise ValueError
@@ -391,9 +429,12 @@ class KubectlPoolHistoryAPI(KubectlPoolGuardAPI):
         except Exception:
             raise PoolMigrationError('recovery_machine_state') from None
 
-    def machine_retirement(self, action: Literal['observe', 'revoke']) -> MachineRetirementState:
+    def machine_retirement(self, action: Literal['observe', 'revoke'], *, manager_revision: str | None = None) -> MachineRetirementState:
         """Fixed exact-scope revocation/readback; the parent owns durable intent."""
+        manager_revision = self.target.manager_revision if manager_revision is None else manager_revision
         try:
+            if action == 'revoke' and manager_revision != self.target.manager_revision:
+                raise ValueError
             def scope() -> None:
                 if (digest(migration_contract(self.request)) != self.contract_sha256
                         or digest(_target_contract(self.target)) != self.history_sha256
@@ -401,7 +442,7 @@ class KubectlPoolHistoryAPI(KubectlPoolGuardAPI):
                     raise ValueError
             scope()
             spec = self.request.registration.spec
-            query = pool_machine_retirement_sql(spec, action=action)
+            query = pool_machine_retirement_sql(spec, action=action, manager_revision=manager_revision)
             before = self._database(self.target, url_variable='LOOM_SVC_DB_URL')
             report = self._run(['exec', '-n', self.target.namespace, 'pod/' + before['metadata']['name'], '-c', 'loom-postgres', '--',
                 'psql', '-X', '-qAt', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', 'loom', '-c', query])
@@ -414,15 +455,14 @@ class KubectlPoolHistoryAPI(KubectlPoolGuardAPI):
         except Exception:
             raise PoolMigrationError('machine_retirement') from None
 
-    def qualify_manager_pool_settings(self, *, expected: dict[str, Any]) -> None:
+    def qualify_manager_pool_settings(self, *, expected: dict[str, Any], catalog_sha256: str) -> None:
         """The exact manager catalog must be readable by its real runtime loader."""
         try:
             if (digest(migration_contract(self.request)) != self.contract_sha256
                     or digest(_target_contract(self.target)) != self.history_sha256
                     or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
                 raise ValueError
-            checksum = hashlib.sha256(self.request.registration.spec.profiles.model_dump_json().encode()).hexdigest()
-            wanted = expected_pool_runtime_settings('manager', expected, catalog_sha256=checksum)
+            wanted = expected_pool_runtime_settings('manager', expected, catalog_sha256=catalog_sha256)
             self._qualify_runtime_settings(self.target, original=self.target.controller, expected=expected,
                 component='manager', wanted=wanted)
             if (digest(migration_contract(self.request)) != self.contract_sha256

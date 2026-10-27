@@ -9,13 +9,13 @@ from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
+from scripts.ops.nebius_pool_migration import PoolMigrationError
 from tests.ops.test_nebius_pool_database_guard import database_guard as database_guard
 from tests.ops.test_nebius_pool_gateway_probe import projected_gateway as projected_gateway
 from tests.ops.test_nebius_pool_runtime import runtime_inputs as runtime_inputs
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_management_render import management_inputs as management_inputs
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
-from loom.db.schema_startup import service_schema_head
 from loom.nebius_pool_priority import PoolWorkOriginV1
 
 
@@ -44,7 +44,7 @@ def management_history(database_guard, monkeypatch):
         database=replace(previous.target.database, statefulset=copy.deepcopy(database), service=copy.deepcopy(service)))
     origin = PoolWorkOriginV1(data_environment_id=request.registration.spec.participants[0].environment_id,
         submission_id=uuid4(), kind='environment', application=None)
-    report = {'schema': 'loom.pool-management-history.v1', 'schema_revision': service_schema_head(), 'read_only': True,
+    report = {'schema': 'loom.pool-management-history.v1', 'schema_revision': '0176', 'read_only': True,
         'rows': [{'ordinal': 1, 'origin': origin.model_dump(mode='json'), 'application': None, 'operation': None}]}
     state = SimpleNamespace(request=request, target=target, participant=previous.target, origin=origin, report=report,
         database=database, service=service, pod=pod, secret=secret, calls=[], executed=False, after_drift=False)
@@ -165,6 +165,7 @@ def test_active_pool_rechecks_authority_after_the_database_read(management_histo
 @pytest.mark.parametrize('successor', [False, True, 'legacy'])
 def test_manager_runtime_uses_the_retained_management_database(management_history, monkeypatch, damage, successor):
     """A template Secret alone cannot qualify the manager's effective settings."""
+    import hashlib
     import json
     import os
     import subprocess
@@ -181,7 +182,15 @@ def test_manager_runtime_uses_the_retained_management_database(management_histor
         manager['spec']['template']['spec']['containers'][0]['env'].append({'name': 'LOOM_SVC_SERVICE_MODE', 'value': 'management'})
     state.target = replace(state.target, controller=copy.deepcopy(manager))
     # Reconstruct the real reader so its immutable history hash binds this input.
-    selected = type(api)(request=api.request, target=state.target, kubeconfig=api.kubeconfig, executable=Path('/usr/bin/kubectl'))
+    request = api.request
+    if successor:
+        registration = request.registration
+        # Retaining a rollout sorts nested maps without rewriting the mounted catalog.
+        spec = type(registration.spec).model_validate_json(json.dumps(registration.spec.model_dump(mode='json'), sort_keys=True))
+        assert spec == registration.spec
+        assert spec.profiles.model_dump_json() != registration.spec.profiles.model_dump_json()
+        request = replace(request, registration=replace(registration, spec=spec))
+    selected = type(api)(request=request, target=state.target, kubeconfig=api.kubeconfig, executable=Path('/usr/bin/kubectl'))
     options = {}
     if successor:
         manager['metadata'].setdefault('annotations', {})['loom.nebius/pool-cutover'] = 'fixture'
@@ -252,8 +261,13 @@ def test_manager_runtime_uses_the_retained_management_database(management_histor
         selected.qualify_manager_database(**options)
         assert len(processes) == 1 and json.loads(processes[0].stdout) == {'status': 'qualified'}
         if successor:
-            selected.qualify_manager_pool_settings(expected=options['expected'])
+            catalog_sha256 = hashlib.sha256(catalog.read_bytes()).hexdigest()
+            selected.qualify_manager_pool_settings(expected=options['expected'], catalog_sha256=catalog_sha256)
             assert len(processes) == 2 and json.loads(processes[-1].stdout) == {'status': 'qualified'}
+            catalog.write_bytes(catalog.read_bytes() + b'\n')
+            with pytest.raises(PoolMigrationError) as error:
+                selected.qualify_manager_pool_settings(expected=options['expected'], catalog_sha256=catalog_sha256)
+            assert error.value.stage == 'management_pool_settings'
         elif legacy:
             selected.qualify_manager_legacy_settings(expected=manager)
             assert len(processes) == 2 and json.loads(processes[-1].stdout) == {'status': 'qualified'}
@@ -550,3 +564,71 @@ def test_management_history_rejects_identity_drift_or_unqualified_pages(manageme
         api.qualify_pending_origins(participant, (origin,))
     assert 'private-marker' not in str(error.value)
     assert sum(row[0] == 'exec' for row in state.calls) == (1 if damage in {'after_drift', 'report', 'origin', 'missing'} else 0)
+
+
+@pytest.mark.parametrize('revision', ['0174', '0177'])
+def test_refresh_schema_observation_is_read_only_and_exact(management_history, revision):
+    api, state = management_history
+    state.report = {'revision': revision}
+    assert api.management_schema_revision((revision,)) == revision
+    query = next(call[-1] for call in state.calls if call[0] == 'exec')
+    assert 'REPEATABLE READ READ ONLY' in query and 'ROLLBACK;' in query
+    assert 'public.alembic_version' in query
+    with pytest.raises(PoolMigrationError):
+        api.management_schema_revision(('0176',))
+
+
+@pytest.mark.parametrize('damage', ['pod', 'multiple', 'missing'])
+def test_refresh_schema_readback_rejects_replacement_or_unqualified_result(management_history, damage):
+    api, state = management_history
+    state.report = {'revision': '0174'}
+    if damage == 'pod':
+        state.after_drift = True
+    elif damage == 'multiple':
+        state.report['other'] = '0177'
+    else:
+        state.report = {}
+    with pytest.raises(PoolMigrationError):
+        api.management_schema_revision(('0174',))
+
+
+def test_schema_successor_target_pins_read_and_recovery_queries(management_history, monkeypatch):
+    from scripts.ops.nebius_pool_origin_history import KubectlPoolHistoryAPI
+
+    from loom_service.pool_management.capacity import digest
+
+    original, state = management_history
+    target = replace(state.target, manager_revision='0178')
+    api = KubectlPoolHistoryAPI(request=original.request, target=target,
+        kubeconfig=original.kubeconfig, executable=Path('/usr/bin/kubectl'))
+    monkeypatch.setattr(api, '_run', original._run)
+    spec = state.request.registration.spec
+    identity = {'operation_id': str(spec.operation_id), 'installation_sha256': digest(spec.model_dump(mode='json'))}
+    state.report = {**identity, 'schema': 'loom.pool-startup-closed.v1', 'read_only': True, 'qualified': True}
+    api.qualify_closed_pool()
+    state.report = {**identity, 'schema': 'loom.pool-active-authority.v1', 'read_only': True, 'qualified': True}
+    api.qualify_active_pool()
+    state.report = {'schema': 'loom.pool-management-history.v1', 'schema_revision': '0178', 'read_only': True,
+        'rows': [{'ordinal': 1, 'origin': state.origin.model_dump(mode='json'), 'application': None, 'operation': None}]}
+    api.qualify_pending_origins(state.participant, (state.origin,))
+    state.report = {**identity, 'schema': 'loom.pool-activation-state.v1', 'state': 'fenced'}
+    assert api.activation_pool('fence') == 'fenced'
+    state.report = {**identity, 'schema': 'loom.pool-recovery-machine-state.v1', 'read_only': True, 'state': 'active'}
+    assert api.recovery_machine_state() == 'active'
+    state.report = {**identity, 'schema': 'loom.pool-machine-retirement.v1', 'state': 'revoked'}
+    assert api.machine_retirement('revoke') == 'revoked'
+    commands = [row for row in state.calls if row[0] == 'exec']
+    assert len(commands) == 6
+    assert all("IS DISTINCT FROM '0178'" in row[-1] and "IS DISTINCT FROM '0176'" not in row[-1] for row in commands)
+    state.calls.clear()
+    state.report = {**identity, 'schema': 'loom.pool-activation-state.v1', 'state': 'fenced'}
+    with pytest.raises(PoolMigrationError):
+        api.activation_pool('fence', manager_revision='0177')
+    state.report = {**identity, 'schema': 'loom.pool-machine-retirement.v1', 'state': 'revoked'}
+    with pytest.raises(PoolMigrationError):
+        api.machine_retirement('revoke', manager_revision='0177')
+    assert not state.calls
+    object.__setattr__(target, 'manager_revision', '0176')
+    with pytest.raises(PoolMigrationError):
+        api.qualify_closed_pool()
+    assert not state.calls

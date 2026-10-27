@@ -6,6 +6,72 @@ from scripts.plan_ci_validations import GO_CROSSLANGUAGE_CONTRACTS, HEAVY_CHECKS
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+@pytest.mark.parametrize(("path", "regression"), [
+    ("scripts/ops/nebius_pool_test_plan.py", "tests/ops/test_nebius_candidate_test_plan.py"),
+    ("scripts/ops/ci_reliability_metrics.py", "tests/ops/test_ci_reliability_metrics.py"),
+    ("scripts/check_github_cli_logs.py", "tests/ops/test_github_cli_logs_probe.py"),
+])
+def test_ci_metadata_tools_keep_their_regressions_without_restarting_pool(path, regression):
+    from scripts.component_ownership import (
+        _tracked_paths,
+        load_manifest,
+        selected_test_paths,
+        test_shard_matrix,
+    )
+
+    manifest = load_manifest(REPO_ROOT / "config/component-ownership.toml")
+    tracked = _tracked_paths(REPO_ROOT)
+    plan = plan_validations(changed_paths=[path], labels=set(), event_name="pull_request")
+    selection = dict(manifest=manifest, tracked_paths=tracked, repo_root=REPO_ROOT,
+                     changed_paths=plan.test_changes, test_scope="nebius")
+    pool = selected_test_paths(lane="nebius-pool", **selection)
+    assert pool == (), f"metadata-only change unnecessarily selected {len(pool)} pool modules"
+    assert test_shard_matrix(lane="nebius-pool", **selection) == ()
+    assert regression in selected_test_paths(lane="tests-root", **selection)
+    assert plan.lint_and_static and plan.tests_root
+    assert not plan.unowned_runtime and not plan.selected_heavy_checks()
+    assert not any((plan.tests_packages, plan.go_checks, plan.runtime_payload,
+                    plan.nebius_iac, plan.locked_environments))
+
+
+@pytest.mark.parametrize("path", [
+    ".github/workflows/ci.yml", ".github/workflows/nebius-candidate.yml",
+    "scripts/ci_fast_feedback.py", "scripts/plan_ci_validations.py",
+    "config/component-ownership.toml", "scripts/component_ownership.py",
+    "scripts/new_unreviewed_ci_tool.py",
+    "tests/ops/conftest.py", "uv.lock",
+])
+def test_ci_metadata_tool_exception_does_not_suppress_shared_or_unknown_pool_inputs(path):
+    from scripts.component_ownership import _tracked_paths, load_manifest, selected_test_paths
+
+    manifest = load_manifest(REPO_ROOT / "config/component-ownership.toml")
+    tracked = _tracked_paths(REPO_ROOT)
+    common = dict(manifest=manifest, tracked_paths=tracked, repo_root=REPO_ROOT,
+                  lane="nebius-pool", test_scope="nebius")
+    full = selected_test_paths(**common)
+    plan = plan_validations(changed_paths=["scripts/ops/nebius_pool_test_plan.py", path],
+                            labels=set(), event_name="pull_request")
+    assert full and selected_test_paths(changed_paths=plan.test_changes, **common) == full
+
+
+@pytest.mark.parametrize("path", ["scripts/ops/nebius_pool_new_operator.py",
+                                 "scripts/ops/nebius_shared_pool_new_operator.py"])
+@pytest.mark.parametrize("include_shared_pool", [False, True])
+def test_ci_metadata_tool_mixed_with_pool_operator_retains_that_operators_coverage(path, include_shared_pool):
+    from scripts.component_ownership import _tracked_paths, load_manifest, selected_test_paths
+
+    manifest = load_manifest(REPO_ROOT / "config/component-ownership.toml")
+    common = dict(manifest=manifest, tracked_paths=_tracked_paths(REPO_ROOT),
+                  repo_root=REPO_ROOT, lane="nebius-pool", test_scope="nebius",
+                  include_shared_pool=include_shared_pool)
+    operator = plan_validations(changed_paths=[path], labels=set(), event_name="pull_request")
+    mixed = plan_validations(changed_paths=["scripts/ops/nebius_pool_test_plan.py", path],
+                             labels=set(), event_name="pull_request")
+    expected = selected_test_paths(changed_paths=operator.test_changes, **common)
+    assert bool(expected) == (include_shared_pool or "nebius_shared_pool_" not in path)
+    assert selected_test_paths(changed_paths=mixed.test_changes, **common) == expected
+
+
 @pytest.mark.parametrize("path", [
     "scripts/check_ci_action_pins.py", "scripts/check_ci_upgrade_policy.py",
     "scripts/check_repository_paths.py",
@@ -231,6 +297,24 @@ def test_converting_to_draft_filters_gate_until_ready_again() -> None:
     assert plan.event_relevant is False
     assert plan.full_gate is False
     assert plan.gate_mode == "filtered"
+
+
+@pytest.mark.parametrize(
+    ("action", "draft"), [("synchronize", True), ("converted_to_draft", False)],
+)
+def test_stale_draft_payload_for_a_ready_head_runs_the_full_gate(action: str, draft: bool) -> None:
+    plan = plan_validations(
+        changed_paths=["src/loom/config.py"],
+        labels=set(),
+        event_name="pull_request",
+        pull_request_action=action,
+        pull_request_draft=draft,
+        pull_request_stale_draft=True,
+    )
+
+    assert plan.event_relevant is True
+    assert plan.full_gate is True
+    assert plan.gate_mode == "full"
 
 
 def test_docs_only_selects_no_heavy_validation() -> None:
@@ -798,3 +882,120 @@ def test_nebius_scoped_routing_cannot_remove_mixed_path_or_label_requirements():
 def test_api_contract_changes_select_frontend_codegen_check(path):
     plan = plan_validations(changed_paths=[path], labels=set(), event_name="pull_request")
     assert plan.web_checks
+
+
+# Registering a file the same change adds is not an ownership-authority change.
+BASE_MANIFEST = {
+    "ci_lanes": ["tests-root", "integration"],
+    "test_suites": [
+        {"id": "unit", "lane": "tests-root", "include_paths": ["tests/unit/**"], "exclude_paths": []},
+        {"id": "integration", "lane": "integration", "include_paths": ["tests/integration/test_a.py"]},
+    ],
+    "test_sharding": [{"lane": "integration", "shard_count": 6, "salt": "s", "pins": [
+        {"path": "tests/integration/test_a.py", "shard_index": 1}]}],
+}
+NEW = "tests/integration/test_new.py"
+
+
+def _registered(base: dict, mutate) -> dict:
+    import copy
+
+    head = copy.deepcopy(base)
+    mutate(head)
+    return head
+
+
+@pytest.mark.parametrize(("mutate", "added", "registration"), [
+    # The #2537 shape: a new test joins one suite, leaves another and gets a pin.
+    (lambda m: (m["test_suites"][1]["include_paths"].append(NEW),
+                m["test_suites"][0]["exclude_paths"].append(NEW),
+                m["test_sharding"][0]["pins"].append({"path": NEW, "shard_index": 1})), {NEW}, True),
+    (lambda m: m["test_suites"][1]["include_paths"].insert(0, NEW), {NEW}, True),
+    (lambda m: None, set(), True),
+    # A path that already existed changes the ownership of existing work.
+    (lambda m: m["test_suites"][1]["include_paths"].append(NEW), set(), False),
+    (lambda m: m["test_suites"][1]["include_paths"].append("tests/integration/test_*.py"),
+     {"tests/integration/test_*.py"}, False),
+    (lambda m: m["test_suites"][1]["include_paths"].remove("tests/integration/test_a.py"), set(), False),
+    # Reordering existing entries is not an addition.
+    (lambda m: m["test_suites"][1]["include_paths"].insert(0, m["test_suites"][1]["include_paths"].pop())
+     or m["test_suites"][1]["include_paths"].insert(0, NEW) or m["ci_lanes"].reverse(), {NEW}, False),
+    (lambda m: m["test_sharding"][0].update(shard_count=8), set(), False),
+    (lambda m: m["test_sharding"][0]["pins"][0].update(shard_index=2), set(), False),
+    (lambda m: m["test_sharding"][0]["pins"].append({"path": NEW, "shard_index": 1, "x": 1}), {NEW}, False),
+    # Selection rules, ignore lists and new lanes or suites keep full regression.
+    (lambda m: m["test_suites"][1].update(affected_paths=[NEW]), {NEW}, False),
+    (lambda m: m["test_suites"][1].setdefault("unaffected_paths", []).append(NEW), {NEW}, False),
+    (lambda m: m["ci_lanes"].append(NEW), {NEW}, False),
+    (lambda m: m["test_suites"].append({"id": "new", "lane": "integration", "include_paths": [NEW]}),
+     {NEW}, False),
+])
+def test_manifest_registration_accepts_only_new_file_registration(mutate, added, registration) -> None:
+    from scripts.plan_ci_validations import manifest_change_is_registration
+
+    head = _registered(BASE_MANIFEST, mutate)
+    assert manifest_change_is_registration(BASE_MANIFEST, head, frozenset(added)) is registration
+
+
+def test_manifest_registration_reads_merge_base_and_added_files(tmp_path: Path) -> None:
+    import subprocess
+    import tomllib
+
+    from scripts import plan_ci_validations as planner
+
+    manifest = tmp_path / "config/component-ownership.toml"
+    manifest.parent.mkdir()
+
+    def git(*args: str) -> str:
+        return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args], cwd=tmp_path,
+                              check=True, capture_output=True, text=True).stdout.strip()
+
+    git("init", "-q")
+    manifest.write_text('[[test_suites]]\nid = "i"\ninclude_paths = ["tests/a.py"]\n')
+    git("add", "-A")
+    git("commit", "-qm", "base")
+    base = git("rev-parse", "HEAD")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests/b.py").write_text("")
+    manifest.write_text('[[test_suites]]\nid = "i"\ninclude_paths = ["tests/a.py", "tests/b.py"]\n')
+    git("add", "-A")
+    git("commit", "-qm", "register")
+    changed = ["config/component-ownership.toml", "tests/b.py"]
+    assert tomllib.loads(manifest.read_text())
+    assert planner.manifest_registration_only(tmp_path, base, changed) is True
+    # Unknown evidence keeps the stronger ownership-authority fallback.
+    assert planner.manifest_registration_only(tmp_path, "", changed) is False
+    assert planner.manifest_registration_only(tmp_path, "0" * 40, changed) is False
+    assert planner.manifest_registration_only(tmp_path, "f" * 40, changed) is False
+    assert planner.manifest_registration_only(tmp_path, base, ["tests/b.py"]) is False
+    (tmp_path / "tests/b.py").unlink()
+    manifest.write_text('[[test_suites]]\nid = "i"\ninclude_paths = ["tests/a.py", "tests/c.py"]\n')
+    git("add", "-A")
+    git("commit", "-qm", "register an existing-or-missing file")
+    assert planner.manifest_registration_only(tmp_path, base, changed) is False
+
+
+def test_registration_only_manifest_runs_its_validation_instead_of_every_gate() -> None:
+    from scripts.plan_ci_validations import COMPONENT_OWNERSHIP_PATH, MANIFEST_VALIDATION_TEST
+
+    changed = [COMPONENT_OWNERSHIP_PATH, "tests/unit/test_immutable_object.py"]
+    authority = plan_validations(changed_paths=changed, labels=set(), event_name="pull_request")
+    registration = plan_validations(changed_paths=changed, labels=set(), event_name="pull_request",
+                                    manifest_registration_only=True)
+    assert authority.selected_heavy_checks() == set(HEAVY_CHECKS) and not authority.test_changes
+    assert not any("ownership-authority-change" in reason
+                   for reasons in registration.reasons.values() for reason in reasons)
+    assert registration.tests_root and not registration.go_checks and not registration.locked_environments
+    assert set(registration.test_changes) == {MANIFEST_VALIDATION_TEST, "tests/unit/test_immutable_object.py"}
+    # Editing the manifest's own validation keeps the authority fallback.
+    direct = plan_validations(changed_paths=[*changed, MANIFEST_VALIDATION_TEST], labels=set(),
+                              event_name="pull_request", manifest_registration_only=True)
+    assert direct.selected_heavy_checks() == set(HEAVY_CHECKS) and not direct.test_changes
+
+
+def test_workflow_plan_passes_the_change_base_for_registration_checks() -> None:
+    import yaml
+
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/ci.yml").read_text())
+    step = next(s for s in workflow["jobs"]["workflow-plan"]["steps"] if s.get("id") == "plan")
+    assert '--base-sha "${BASE_SHA:-}"' in step["run"]

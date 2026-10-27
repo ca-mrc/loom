@@ -45,7 +45,17 @@ from loom.hosted_harness import (
 from loom.models.networking import NetworkPolicy, WebAllowlist, WebDestination, hosted_http_egress
 from loom.models.task import TaskConfig
 from loom.models.trial import TrialConfig
-from loom.sandbox_identity import resolve_sandbox_identity
+from loom.sandbox_identity import (
+    groups_for_guest_user,
+    inherited_sandbox_user,
+    resolve_guest_task_identity,
+    resolve_sandbox_identity,
+)
+from loom.task_environment_handoff import (
+    RESOLVED_TASK_ENVIRONMENT,
+    decode_resolved_task_environment,
+    encode_resolved_task_environment,
+)
 from loom.verifier_runtime import resolve_verifier_env_mode
 
 if TYPE_CHECKING:
@@ -65,6 +75,7 @@ _MIN_SANDBOX_EXEC_LIMIT_SECONDS = 900
 # Outputs a deferred verifier produces; everything else belongs to the attempt.
 _VERIFIER_OWNED_OUTPUTS = frozenset({
     "diagnostics/verifier-exception.json", "verifier/output.json", "artifacts/verifier/ctrf.json",
+    "diagnostics/workspace-handoff.json",
 })
 
 
@@ -108,6 +119,7 @@ class TaskSandboxPlanRequest:
     controller_image: str
     task_image_materialization_id: UUID | None = None
     resource_requests: ExecutionResourceRequestsV1 | None = None
+    has_resolved_task_environment: bool = False
 
 
 @dataclass(frozen=True)
@@ -116,37 +128,48 @@ class _Topology:
     shared: bool
     retained_services: bool
     shared_guest: bool = False
+    skipped: bool = False
 
     @property
     def colocated_verifier(self) -> bool:
         # Guest launch keeps both sandboxes in this pod. Retained services
         # cannot survive the agent pod, so their verifier also grades beside
         # them. Separate grading otherwise defers the verifier until the agent
-        # pod is gone (#2212).
+        # pod is gone (#2212). Skip launches neither verifier.
+        if self.skipped:
+            return False
         return self.shared or self.guest_execution is not None or self.retained_services
 
     @property
     def in_place_verifier(self) -> bool:
+        if self.skipped:
+            return False
         return self.shared and (self.guest_execution is None or self.shared_guest)
 
     @property
     def sandbox_roles(self) -> tuple[str, ...]:
+        if self.skipped:
+            return (TASK_SANDBOX,)
         fresh_verifier = (self.guest_execution is not None and not self.in_place_verifier) or (self.colocated_verifier and not self.shared)
         return (TASK_SANDBOX, VERIFIER_SANDBOX) if fresh_verifier else (TASK_SANDBOX,)
 
     @property
     def verifier_output_required(self) -> bool:
+        if self.skipped:
+            return False
         return self.shared or (self.colocated_verifier and self.guest_execution is None)
 
 
 def _topology(task: TaskConfig, trial: TrialConfig, *, shared_guest: bool = False) -> _Topology:
     capabilities = effective_guest_capabilities(task, trial)
+    skipped = trial.skip_verifier
     return _Topology(
         guest_execution=(GuestExecutionV1(capabilities=tuple(sorted(capabilities)))
                          if capabilities is not None else None),
-        shared=resolve_verifier_env_mode(task, trial) == "shared",
+        shared=False if skipped else resolve_verifier_env_mode(task, trial) == "shared",
         retained_services=task.environment.service_lifecycle is not None,
         shared_guest=shared_guest,
+        skipped=skipped,
     )
 
 
@@ -166,6 +189,8 @@ def _sandbox_sidecars(
     env = task.environment
     assert env.docker_image
     agent_timeout, verifier_timeout = _timeouts(task, request.trial)
+    if topology.skipped:
+        verifier_timeout = 0
     setup_timeout = request.spec.setup.timeout_seconds if request.spec.setup is not None else 0
     exec_limit = str(math.ceil(max(_MIN_SANDBOX_EXEC_LIMIT_SECONDS, agent_timeout, verifier_timeout, setup_timeout)))
     sidecars = list(fixture_sidecars(task))
@@ -174,16 +199,32 @@ def _sandbox_sidecars(
         probe = ProbeV1(kind="exec", argv=(SANDBOX_RUNTIME_BINARY, "--check-socket", socket))
         startup_probe = (probe.model_copy(update={"failure_threshold": _GUEST_STARTUP_FAILURE_THRESHOLD})
                          if topology.guest_execution is not None else probe)
-        user = (task.verifier.user if role == VERIFIER_SANDBOX and task.verifier.user is not None
-                else env.user)
+        user = (
+            inherited_sandbox_user(env.user, task.verifier.user)
+            if role == VERIFIER_SANDBOX
+            else env.user
+        )
+        home = env.environment.get("HOME")
+        guest_identity = None
+        if topology.guest_execution is not None:
+            identity = resolve_sandbox_identity("root")
+            guest_identity = resolve_guest_task_identity(
+                user, home, default_uid=profile.run_as_user, default_gid=profile.run_as_group,
+                supplementary_groups=groups_for_guest_user(
+                    user, env.user, home, env.supplementary_groups,
+                    default_uid=profile.run_as_user, default_gid=profile.run_as_group,
+                ),
+            )
+        else:
+            identity = resolve_sandbox_identity(
+                user, home, default_uid=profile.run_as_user, default_gid=profile.run_as_group,
+            )
         sidecars.append(SidecarContainerV1(
             role_name=role, image_ref=env.docker_image,
-            argv=(SANDBOX_RUNTIME_BINARY, "--socket", socket, "--exec-timeout-seconds", exec_limit),
+            argv=(*env.entrypoint, SANDBOX_RUNTIME_BINARY, "--socket", socket, "--exec-timeout-seconds", exec_limit),
+            environment={key: value for key, value in env.environment.items() if key != "HOME"},
             resources=resources, startup_probe=startup_probe, readiness_probe=probe, private_sandbox=True,
-            identity=resolve_sandbox_identity(
-                user, env.environment.get("HOME"),
-                default_uid=profile.run_as_user, default_gid=profile.run_as_group,
-            ),
+            identity=identity, guest_task_identity=guest_identity,
             guest_execution=topology.guest_execution,
         ))
     return sidecars
@@ -203,14 +244,32 @@ def _output_declarations(request: TaskSandboxPlanRequest, topology: _Topology) -
         ("agent/trajectory.jsonl", "trajectory/events.jsonl", "trajectory", True),
         ("agent/usage.json", "accounting/usage.json", "usage", True),
         ("agent/exception.json", "diagnostics/agent-exception.json", "agent_native", False),
-        ("verifier/exception.json", "diagnostics/verifier-exception.json", "verifier", False),
+        *(
+            () if topology.skipped else (
+                ("verifier/exception.json", "diagnostics/verifier-exception.json", "verifier", False),
+            )
+        ),
         *((("setup/exception.json", "diagnostics/setup-exception.json", "agent_native", False),)
           if request.spec.setup is not None else ()),
         *((("harness-cache/outcome.json", "diagnostics/harness-cache.json", "agent_native", False),)
           if request.spec.setup is not None and request.spec.setup.cacheable else ()),
         *native,
-        ("workspace.tar", "artifacts/workspace.tar", "task_artifact", True),
-        ("verifier/output.json", "verifier/output.json", "verifier", topology.verifier_output_required),
+        # An in-place verifier grades the live workdir; the archive is only
+        # debugging evidence there, and its capture failure is recorded (#2589).
+        ("workspace.tar", "artifacts/workspace.tar", "task_artifact", not topology.in_place_verifier),
+        *((("workspace-archive.json", "diagnostics/workspace-archive.json", "diagnostic", False),)
+          if topology.in_place_verifier else ()),
+        # A fresh verifier restores the archive against this manifest and
+        # reports the links it omitted beside its result.
+        *((("workspace-references.json", "artifacts/workspace-references.json", "task_artifact", True),)
+          if not topology.in_place_verifier else ()),
+        *((("verifier/workspace-handoff.json", "diagnostics/workspace-handoff.json", "diagnostic", False),)
+          if not topology.in_place_verifier and not topology.skipped else ()),
+        *(
+            () if topology.skipped else (
+                ("verifier/output.json", "verifier/output.json", "verifier", topology.verifier_output_required),
+            )
+        ),
         ("verifier/ctrf.json", "artifacts/verifier/ctrf.json", "task_artifact", False),
     ):
         outputs.append(RuntimeOutputDeclarationV1(
@@ -221,12 +280,7 @@ def _output_declarations(request: TaskSandboxPlanRequest, topology: _Topology) -
             source_path=".loom/service-startup.json", relative_path="diagnostics/service-startup.json",
             kind="task_artifact", required=bool(env.service_lifecycle.startup_command),
         ))
-    if env.workspace_reference_files:
-        outputs.append(RuntimeOutputDeclarationV1(
-            source_path=".loom/workspace-references.json",
-            relative_path="artifacts/workspace-references.json", kind="task_artifact", required=True,
-        ))
-    if env.mutable_paths:
+    if env.mutable_paths and not topology.in_place_verifier:
         for name in ("manifest.json", *(f"{index}.tar" for index in range(len(env.mutable_paths)))):
             outputs.append(RuntimeOutputDeclarationV1(
                 source_path=f".loom/mutable-paths/{name}",
@@ -304,6 +358,10 @@ def compile_task_sandbox_plan(request: TaskSandboxPlanRequest) -> ExecutionRunti
             request.effective_network_policy.model_dump(mode="json"), sort_keys=True, separators=(",", ":"),
         ),
     }
+    if request.has_resolved_task_environment:
+        if request.controller_image != profile.agent_image_ref:
+            raise ValueError("resolved_task_environment_controller_unavailable")
+        phase_env[RESOLVED_TASK_ENVIRONMENT] = encode_resolved_task_environment(env)
     # A frozen agent release may select an older controller than the candidate
     # qualified by the profile. Do not send that image a new input contract.
     if (profile.supports_task_artifact_inputs and request.controller_image == profile.agent_image_ref
@@ -353,7 +411,11 @@ def compile_task_sandbox_plan(request: TaskSandboxPlanRequest) -> ExecutionRunti
         setup_egress=_setup_egress(spec),
         setup_cache=_setup_cache(spec),
         main=phase("agent", spec.controller_phase, agent_timeout),
-        verifier_execution="in_attempt" if topology.colocated_verifier else "separate_execution",
+        verifier_execution=(
+            "skipped" if topology.skipped
+            else "in_attempt" if topology.colocated_verifier
+            else "separate_execution"
+        ),
         verifier_after_agent_timeout=topology.in_place_verifier,
         in_place_verifier=topology.in_place_verifier,
         verifier=(phase("verifier", VERIFY_SANDBOX_PHASE, verifier_timeout)
@@ -376,12 +438,27 @@ def compile_deferred_verifier_plan(
     """
     if agent_plan.execution_role != "attempt" or agent_plan.verifier_execution != "separate_execution":
         raise ValueError("only a separate-execution attempt defers its verifier")
+    if RESOLVED_TASK_ENVIRONMENT in agent_plan.main.environment:
+        task = task.model_copy(update={"environment": decode_resolved_task_environment(
+            agent_plan.main.environment[RESOLVED_TASK_ENVIRONMENT],
+        )})
     task_sandbox = next(sidecar for sidecar in agent_plan.sidecars if sidecar.role_name == TASK_SANDBOX)
-    user = task.verifier.user if task.verifier.user is not None else task.environment.user
-    identity = resolve_sandbox_identity(
-        user, task.environment.environment.get("HOME"),
-        default_uid=agent_plan.run_as_user, default_gid=agent_plan.run_as_group,
-    )
+    user = inherited_sandbox_user(task.environment.user, task.verifier.user)
+    home = task.environment.environment.get("HOME")
+    guest_identity = None
+    if task_sandbox.guest_execution is not None:
+        identity = resolve_sandbox_identity("root")
+        guest_identity = resolve_guest_task_identity(
+            user, home, default_uid=agent_plan.run_as_user, default_gid=agent_plan.run_as_group,
+            supplementary_groups=groups_for_guest_user(
+                user, task.environment.user, home, task.environment.supplementary_groups,
+                default_uid=agent_plan.run_as_user, default_gid=agent_plan.run_as_group,
+            ),
+        )
+    else:
+        identity = resolve_sandbox_identity(
+            user, home, default_uid=agent_plan.run_as_user, default_gid=agent_plan.run_as_group,
+        )
     def verifier_argv(argv: tuple[str, ...]) -> tuple[str, ...]:
         return tuple(
             f"/loom/sandboxes/{VERIFIER_SANDBOX}/sandbox.sock"
@@ -392,7 +469,7 @@ def compile_deferred_verifier_plan(
     # The renderer derives the mounted socket from role_name. Retarget the
     # runtime and both probes together while preserving the frozen attempt.
     verifier_sandbox = task_sandbox.model_copy(update={
-        "role_name": VERIFIER_SANDBOX, "identity": identity,
+        "role_name": VERIFIER_SANDBOX, "identity": identity, "guest_task_identity": guest_identity,
         "argv": verifier_argv(task_sandbox.argv),
         "startup_probe": task_sandbox.startup_probe.model_copy(update={
             "argv": verifier_argv(task_sandbox.startup_probe.argv),
@@ -401,11 +478,14 @@ def compile_deferred_verifier_plan(
             "argv": verifier_argv(task_sandbox.readiness_probe.argv),
         }),
     })
+    # Without setup egress the runtime starts its proxy, and writes the egress
+    # log, only for task egress. A gateway-only task's verifier has neither.
     outputs = [
         item if item == TASK_EGRESS_OUTPUT
         else item.model_copy(update={"required": item.relative_path == "verifier/output.json"})
         for item in agent_plan.output_declarations
-        if item.relative_path in _VERIFIER_OWNED_OUTPUTS or item == TASK_EGRESS_OUTPUT
+        if item.relative_path in _VERIFIER_OWNED_OUTPUTS
+        or (item == TASK_EGRESS_OUTPUT and agent_plan.task_egress is not None)
     ]
     requests = agent_plan.resource_requests
     if requests is not None:
@@ -417,6 +497,12 @@ def compile_deferred_verifier_plan(
     module = argv[3] if argv[:3] == ("python", "-I", "-m") and len(argv) > 3 else SANDBOX_CONTROLLER_MODULE
     deferred = agent_plan.model_copy(update={
         "execution_role": "verifier",
+        # Harness installation belongs to the agent's task-sandbox. This pod
+        # grades the committed workspace in verifier-sandbox; it neither runs
+        # the agent CLI nor owns the task-sandbox socket used by its setup.
+        "setup": (),
+        "setup_egress": None,
+        "setup_cache": None,
         "verifier_execution": "skipped",
         "verifier": None,
         "verifier_after_agent_timeout": False,

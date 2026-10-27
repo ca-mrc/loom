@@ -11,7 +11,9 @@ services:
       POSTGRES_PASSWORD: loom
       POSTGRES_DB: loom
     ports:
-      - "55432:5432"
+      # The pytest harness requests port 0 and reads Docker's assigned port.
+      # Manual compose use keeps the familiar loopback-only default.
+      - "127.0.0.1:${LOOM_SYSTEM_POSTGRES_PORT:-55432}:5432"
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "loom"]
       interval: 2s
@@ -26,7 +28,7 @@ services:
       MINIO_ROOT_USER: loomtest
       MINIO_ROOT_PASSWORD: loomtest
     ports:
-      - "59000:9000"
+      - "127.0.0.1:${LOOM_SYSTEM_MINIO_PORT:-59000}:9000"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 2s
@@ -36,10 +38,9 @@ services:
   registry:
     image: registry:2
     ports:
-      - "55000:5000"
+      - "127.0.0.1:${LOOM_SYSTEM_REGISTRY_PORT:-55000}:5000"
 
   llm-gateway:
-    image: loom-llm-gateway:dev
     build:
       context: ..
       dockerfile: deploy/Dockerfile.gateway
@@ -57,10 +58,9 @@ services:
       minio:
         condition: service_healthy
     ports:
-      - "59100:9100"
+      - "127.0.0.1:${LOOM_SYSTEM_GATEWAY_PORT:-59100}:9100"
 
   control-plane:
-    image: loom-control-plane:dev
     build:
       context: ..
       dockerfile: deploy/Dockerfile.control-plane
@@ -80,10 +80,9 @@ services:
       minio:
         condition: service_healthy
     ports:
-      - "58080:8080"
+      - "127.0.0.1:${LOOM_SYSTEM_CONTROL_PLANE_PORT:-58080}:8080"
 
   worker:
-    image: loom-worker:dev
     build:
       context: ..
       dockerfile: deploy/Dockerfile.worker
@@ -92,6 +91,9 @@ services:
       LOOM_LOCAL_EXECUTION: "1"
       LOOM_WORKER_CONTROL_PLANE_URL: http://control-plane:8080
       LOOM_WORKER_GATEWAY_URL: http://llm-gateway:9100
+      # Trial containers outlive the worker and are outside Compose's own
+      # labels. Keep crash recovery inside this stack's ownership boundary.
+      LOOM_WORKER_SANDBOX_IDENTITY: ${COMPOSE_PROJECT_NAME}
       # MUST be set in the caller's environment before docker compose up.
       # tests/system/docker_compose.py runs the seed script first to mint
       # a real worker token, exports LOOM_WORKER_TOKEN, then brings this
@@ -124,12 +126,14 @@ services:
       - task_image_builder_storage_probe:/run/loom/docker-storage-probe:ro
 
   task-image-builder:
-    image: loom-worker:dev
     build:
       context: ..
       dockerfile: deploy/Dockerfile.worker
     command: ["python", "-m", "loom_worker.task_image_builder"]
     environment:
+      # Shared image caches have no exclusive project owner; this identity
+      # also prevents builder storage cleanup from evicting shared images.
+      LOOM_WORKER_SANDBOX_IDENTITY: ${COMPOSE_PROJECT_NAME}
       LOOM_ENV: development
       LOOM_LOCAL_EXECUTION: "1"
       LOOM_WORKER_CONTROL_PLANE_URL: http://control-plane:8080
@@ -141,7 +145,7 @@ services:
       # Docker runs on the host through the mounted socket, so loopback reaches
       # the registry's published host port and yields real RepoDigests for the
       # subsequent pull-only trial worker.
-      LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO: localhost:55000/loom-task-images
+      LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO: ${LOOM_SYSTEM_REGISTRY_REPO:-localhost:55000/loom-task-images}
       LOOM_WORKER_TASK_IMAGE_BUILDER_IDLE_EXIT_SECONDS: "120"
       LOOM_WORKER_TASK_IMAGE_STORAGE_PROBE_PATH: /run/loom/docker-storage-probe
     profiles: ["task-image-builder"]

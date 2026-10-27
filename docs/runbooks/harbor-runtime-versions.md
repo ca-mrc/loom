@@ -81,3 +81,34 @@ The controller reports its installed Harbor package version and image-baked
 source/bridge metadata. Task environment variables and uploaded inputs do not
 choose those values. Canonical ATIF output and accounting repair preserve the
 Trial's selected release label; older Trials retain their previous fallback.
+
+A Trial that selects no version (`terminus-2@default`) runs the platform
+candidate's default controller image. The candidate's runtime profile records
+that image's label as `agent_image_version` (`nebius-<candidate>` unless the
+publication set `agent_version`). ATIF and accounting repair record that label
+when the attempt ran on the Batch's frozen candidate. Profiles published before
+this field, and attempts whose candidate differs, keep `service-execution-v1`.
+
+## Refresh an upstream upgrade candidate
+
+The `Harbor upstream candidate` workflow maintains one Draft on
+`bot/harbor-upstream`. A clean refresh merges current `dev` into the existing
+candidate, preserving human amendments, before updating explicit Harbor pins.
+A Ready candidate is left unchanged. Offline conformance and continuation
+qualification runs only after preparation publishes the candidate successfully.
+
+Substantive merge conflicts require a maintainer to reconcile the existing
+Draft. The workflow aborts its local merge, reports `refresh_status=action_required`
+with both commit IDs and the conflicting paths, and fails. It does not push,
+rewrite the Draft, or run offline qualification. The Draft remains unaccepted;
+the reported conflict is an outstanding upgrade task. A Git/tooling failure
+without content conflicts reports `refresh_status=failed` separately.
+
+Resolve each conflict on the existing candidate branch while retaining its
+reviewed compatibility changes. Frozen worker dependency evidence and provenance
+tests need deliberate reconciliation and regeneration through
+`scripts/ops/update_worker_image_lock.sh`; choosing an entire side of those files
+cannot establish compatibility. Push the reviewed resolution normally, then
+rerun candidate preparation and inspect offline qualification before completing
+the remaining developer verification and marking the Draft Ready. Updater
+diagnostics alone do not accept a Harbor upgrade or publish a runtime release.

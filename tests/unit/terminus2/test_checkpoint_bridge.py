@@ -133,6 +133,8 @@ async def test_bridge_syncs_agent_steps(tmp_path: Path) -> None:
     assert turn.analysis == "done"
     assert turn.plan == "finish"
     assert turn.reasoning_content == "think hard"
+    legacy_command = next(e for e in events if e.kind == EventKind.TERMINUS2_COMMAND)
+    assert legacy_command.recorded_before_dispatch is None
     assert turn.harbor_step_id == 2
     assert user.is_initial is True
     assert user.message.startswith("Analysis: ignore")

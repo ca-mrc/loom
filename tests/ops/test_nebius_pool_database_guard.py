@@ -11,11 +11,9 @@ from uuid import UUID, uuid4
 import pytest
 from tests.ops.test_nebius_pool_runtime import guest_runtime_inputs as guest_runtime_inputs
 from tests.ops.test_nebius_pool_runtime import runtime_inputs as runtime_inputs
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_application_image_renderer import build_inputs as build_inputs
 from tests.unit.test_nebius_management_render import management_inputs as management_inputs
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
-
-from loom.db.schema_startup import service_schema_head
 
 
 @pytest.fixture
@@ -281,7 +279,7 @@ def test_cutover_database_pages_bind_identity_and_reject_unsafe_receipts(databas
     participant = next(row for row in state.request.registration.spec.participants
         if row.participant_id == state.target.participant_id)
     identity = str(uuid4())
-    report = {'status': 'observed', 'schema_revision': service_schema_head(), 'rows': [{
+    report = {'status': 'observed', 'schema_revision': '0176', 'rows': [{
         'key': 'batch:' + identity, 'source_matches': True, 'origin': {
             'schema_version': 'loom.pool-work-origin.v1', 'data_environment_id': str(participant.environment_id),
             'submission_id': identity, 'kind': 'environment', 'application': None}}]}
@@ -888,6 +886,7 @@ def test_fixed_telemetry_probe_runs_real_settings_and_direct_reader_without_cred
     import os
     import ssl
     import sys
+    from contextlib import contextmanager
 
     import httpx
     from kubernetes import client, config
@@ -1019,8 +1018,21 @@ def test_fixed_telemetry_probe_runs_real_settings_and_direct_reader_without_cred
         if damage == 'unreadable_ca':
             raise PermissionError('private-unreadable-ca.crt')
         return ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    @contextmanager
+    def stream(self, method, url, **kwargs):
+        assert method == 'GET'
+        response = summary(self, url, **kwargs)
+        try:
+            yield response
+        finally:
+            response.close()
+
+    def forbidden_transport(*args, **kwargs):
+        pytest.fail('telemetry fixture reached real HTTP transport')
+
     monkeypatch.setattr(client.ApiClient, 'request', node_read)
-    monkeypatch.setattr(httpx.Client, 'get', summary)
+    monkeypatch.setattr(httpx.Client, 'stream', stream)
+    monkeypatch.setattr(httpx.HTTPTransport, 'handle_request', forbidden_transport)
     if damage == 'http_close':
         actual_exit = httpx.Client.__exit__
         def failed_exit(self, *args):

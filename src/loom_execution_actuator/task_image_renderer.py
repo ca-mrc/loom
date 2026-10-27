@@ -49,7 +49,10 @@ class TaskImageJobConfig:
     ephemeral_storage_mib: int = MIN_TASK_IMAGE_EPHEMERAL_STORAGE_MIB
     max_processes: int = 512
     active_deadline_seconds: int = 1800
-    snapshotter: Literal["overlayfs", "native"] = "overlayfs"
+    # Authored builds may hardlink files from earlier layers (for example a
+    # local git clone). Rootless OverlayFS copy-up can change their inode
+    # identity and trip Git's hardlink safety check. Native preserves it.
+    snapshotter: Literal["overlayfs", "native"] = "native"
     export_cache_mode: Literal["max", "min"] = "max"
     oci_export_format: Literal["archive", "directory"] = "archive"
 

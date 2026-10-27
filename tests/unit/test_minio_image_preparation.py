@@ -228,13 +228,54 @@ def test_unreadable_selection_fails_toward_both_releases(tmp_path):
     )
 
 
-def test_cache_key_changes_with_consumer_release_and_recipe(monkeypatch):
-    old = (minio_images.MINIO_TESTCONTAINERS_IMAGE,)
-    first = minio_images.fixture_cache_key(old)
-    assert first != minio_images.fixture_cache_key((minio_images.MINIO_TLS_IMAGE,))
+@pytest.mark.parametrize("changed", range(len(minio_images.SOURCE_FIXTURES)))
+def test_cache_key_is_shared_by_selections_and_changes_with_any_recipe(monkeypatch, changed):
+    # The trusted writer saves every fixture under one key, so any non-empty
+    # selection must restore that same archive set.
+    selections = [(spec.image,) for spec in minio_images.SOURCE_FIXTURES]
+    selections.append(tuple(spec.image for spec in minio_images.SOURCE_FIXTURES))
+    first = minio_images.fixture_cache_key(selections[0])
+    assert {minio_images.fixture_cache_key(images) for images in selections} == {first}
     original = minio_images._dockerfile
-    monkeypatch.setattr(minio_images, "_dockerfile", lambda spec: original(spec) + "\n# recipe update\n")
-    assert first != minio_images.fixture_cache_key(old)
+    target = minio_images.SOURCE_FIXTURES[changed]
+    monkeypatch.setattr(minio_images, "_dockerfile",
+        lambda spec: original(spec) + ("\n# recipe update\n" if spec == target else ""))
+    assert first != minio_images.fixture_cache_key(selections[0])
+
+
+def test_minio_fixture_cache_has_one_trusted_writer_at_one_path():
+    # The cache version hashes the path, and RUNNER_TEMP differs per hosted
+    # worker, so per-job saves under RUNNER_TEMP were never restored elsewhere.
+    # The archive also stores the path relative to the workspace: a hosted
+    # writer's /home/runner/.cache path unpacked outside self-hosted runners'
+    # expected directory, so every job rebuilt MinIO after a cache hit.
+    from pathlib import Path
+
+    import yaml
+
+    workflows = Path(__file__).resolve().parents[2] / ".github/workflows"
+    restores, saves = [], []
+    for path in sorted(workflows.glob("*.yml")):
+        for job in yaml.safe_load(path.read_text()).get("jobs", {}).values():
+            for step in job.get("steps", []):
+                inputs = step.get("with", {})
+                if "minio" not in str(inputs.get("key", "")) and "minio" not in str(inputs.get("path", "")):
+                    continue
+                uses = str(step.get("uses", ""))
+                assert inputs["path"] == ".ci-cache/loom-minio-fixtures", (path.name, step["name"])
+                (saves if uses.startswith("actions/cache/save@") else restores).append(path.name)
+                assert uses.startswith(("actions/cache/save@", "actions/cache/restore@")), uses
+            for step in job.get("steps", []):
+                run = str(step.get("run", ""))
+                if "tests.support.minio_images" in run and "--cache-dir" in run:
+                    assert "--cache-dir .ci-cache/loom-minio-fixtures" in run, (path.name, step["name"])
+                if "tests.support.minio_images" in run and "--save-cache true" in run:
+                    saves.append(path.name + ":prepare")
+    assert sorted(set(saves)) == ["ci-dependency-cache.yml", "ci-dependency-cache.yml:prepare"]
+    assert restores.count("ci.yml") == 2
+    writer = yaml.safe_load((workflows / "ci-dependency-cache.yml").read_text())
+    triggers = writer.get("on", writer.get(True, {}))
+    assert "tests/support/minio_images.py" in triggers["push"]["paths"]
 
 
 def test_restored_source_cache_avoids_pull_and_rebuild(monkeypatch, tmp_path):

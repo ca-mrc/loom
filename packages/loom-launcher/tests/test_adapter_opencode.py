@@ -30,7 +30,9 @@ def test_build_invocation_argv() -> None:
     assert '"npm":"@ai-sdk/openai-compatible"' in argv[2]
     assert '"name":"Loom OpenAI-compatible Gateway"' in argv[2]
     assert '"baseURL":"http://gateway.local"' in argv[2]
-    assert '"apiKey":"step-token"' in argv[2]
+    assert '"apiKey":"{env:OPENAI_API_KEY}"' in argv[2]
+    assert "step-token" not in str(argv)
+    assert env["OPENAI_API_KEY"] == "step-token"
     assert '"models":{"gpt-5"' in argv[2]
     assert env["HOME"] == "/tmp/loom-opencode-home"
 

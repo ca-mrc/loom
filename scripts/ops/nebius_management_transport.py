@@ -14,6 +14,10 @@ from urllib.parse import urlsplit
 import httpx
 
 
+class ManagementNotDispatchedError(ValueError):
+    """Trusted adapters may signal only a failure before invoking write transport."""
+
+
 class ManagementKubernetesTransport:
     error_type: type[RuntimeError] = RuntimeError
 

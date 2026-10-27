@@ -10,6 +10,7 @@ pgbouncer integration tests (#609).
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -56,6 +57,7 @@ from tests.integration.minio_test_images import MINIO_TEST_IMAGE
 from tests.integration.pipeline_orchestrator_fixtures import orchestrator_seed  # noqa: F401
 from tests.integration.taskset_fixtures import tasksets_minio, tasksets_setup  # noqa: F401
 from tests.support.minio_images import prepare_test_image
+from tests.support.postgres_cleanup_diagnostics import observe_database_cleanup
 
 
 @pytest.fixture(autouse=True)
@@ -694,6 +696,33 @@ def isolated_migration_postgres_url(migration_template_postgres_url: str) -> Ite
     )
 
 
+def retain_pool_schema(postgres_url: str, revision: str = "0176") -> None:
+    """Prepare an owned test database for an explicitly audited pool revision.
+
+    Run the real downgrade rather than relabeling a current-head database. This
+    must only be used by historical pool tests on their isolated databases.
+    """
+    if revision not in {"0175", "0176", "0177", "0178", "0179"}:
+        raise ValueError("unsupported retained pool test revision")
+    repo_root = Path(__file__).resolve().parents[2]
+    cfg = AlembicConfig(str(repo_root / "database" / "migrations" / "alembic.ini"))
+    cfg.set_main_option("script_location", str(repo_root / "database" / "migrations"))
+    url = make_url(postgres_url).set(drivername="postgresql+psycopg").render_as_string(hide_password=False)
+    cfg.set_main_option("sqlalchemy.url", url.replace("%", "%%"))
+    command.downgrade(cfg, revision)
+
+
+@pytest.fixture
+async def retained_pool_sessions(isolated_migration_postgres_url: str):
+    """Retained installation guards keep their explicit schema boundary."""
+    await asyncio.to_thread(retain_pool_schema, isolated_migration_postgres_url)
+    engine = create_async_engine(isolated_migration_postgres_url)
+    try:
+        yield async_sessionmaker(engine, expire_on_commit=False)
+    finally:
+        await engine.dispose()
+
+
 def _isolated_migration_database(
     postgres_url: str, *, template_name: str, prepare_template: bool
 ) -> Iterator[str]:
@@ -732,18 +761,22 @@ def _isolated_migration_database(
         try:
             if created:
                 with admin_engine.connect() as conn:
-                    conn.exec_driver_sql(
-                        f"ALTER DATABASE {quoted_database} ALLOW_CONNECTIONS false"
-                    )
-                    conn.execute(
-                        text(
-                            "SELECT pg_terminate_backend(pid) "
-                            "FROM pg_stat_activity "
-                            "WHERE datname = :database_name AND pid <> pg_backend_pid()",
-                        ),
-                        {"database_name": database_name},
-                    )
-                    conn.exec_driver_sql(f"DROP DATABASE IF EXISTS {quoted_database}")
+                    with observe_database_cleanup(conn) as phase:
+                        phase("prevent_connections")
+                        conn.exec_driver_sql(
+                            f"ALTER DATABASE {quoted_database} ALLOW_CONNECTIONS false"
+                        )
+                        phase("terminate_backends")
+                        conn.execute(
+                            text(
+                                "SELECT pg_terminate_backend(pid) "
+                                "FROM pg_stat_activity "
+                                "WHERE datname = :database_name AND pid <> pg_backend_pid()",
+                            ),
+                            {"database_name": database_name},
+                        )
+                        phase("drop_database")
+                        conn.exec_driver_sql(f"DROP DATABASE IF EXISTS {quoted_database}")
         finally:
             admin_engine.dispose()
 

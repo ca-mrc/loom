@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
+import tomllib
 from collections.abc import Collection, Sequence
 from dataclasses import asdict, dataclass, replace
 from functools import lru_cache
@@ -11,6 +13,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING or __package__:
     from scripts.component_ownership import (
+        AFFECTED_ONLY_LANES,
         Manifest,
         _tracked_paths,
         load_manifest,
@@ -20,6 +23,7 @@ if TYPE_CHECKING or __package__:
     )
 else:
     from component_ownership import (
+        AFFECTED_ONLY_LANES,
         Manifest,
         _tracked_paths,
         load_manifest,
@@ -76,9 +80,16 @@ DOCS_STATIC_SUFFIXES = {
 
 PLANNER_PATHS = {
     "scripts/plan_ci_validations.py",
-    "scripts/ops/nebius_pool_test_plan.py",
     "tests/ops/test_plan_ci_validations.py",
 }
+
+COMPONENT_OWNERSHIP_PATH = "config/component-ownership.toml"
+MANIFEST_VALIDATION_TEST = "tests/ops/test_component_ownership_manifest.py"
+# Path lists that may grow by registering files the same change adds, without
+# counting as an ownership-authority change. Ignore lists, affected/unaffected
+# paths and every other field keep the full regression.
+REGISTRATION_FIELDS = frozenset({"include_paths", "exclude_paths", "pins"})
+_GLOB_CHARACTERS = frozenset("*?[]{}")
 
 OWNERSHIP_AUTHORITY_PATHS = {
     "config/component-ownership.toml",
@@ -86,13 +97,19 @@ OWNERSHIP_AUTHORITY_PATHS = {
     "tests/ops/test_component_ownership_manifest.py",
 }
 
-# These tools validate repository policy, not an application runtime. Their
+# These tools validate repository policy or read CI evidence. Their
 # focused root tests and lint execute the changed tool; unknown tools still
 # retain the stronger fallback below.
 REPOSITORY_POLICY_TOOLS = {
     "scripts/check_ci_action_pins.py",
     "scripts/check_ci_upgrade_policy.py",
     "scripts/check_repository_paths.py",
+    "scripts/check_github_cli_logs.py",
+    # Read-only Actions evidence/reporting tools have dedicated root
+    # regressions. They do not change the pool lifecycle exercised by the
+    # expensive operator lane; unknown CI tools still retain full coverage.
+    "scripts/ops/nebius_pool_test_plan.py",
+    "scripts/ops/ci_reliability_metrics.py",
 }
 GO_INPUT_PREFIXES = (
     "cmd/loom-build-deadline/", "cmd/loom-llm-gateway-sandbox/",
@@ -139,7 +156,11 @@ OPERATOR_COMPONENT_PREFIXES = (
     "scripts/ops/nebius_development_", "scripts/ops/nebius_management_",
     "scripts/ops/install_nebius",
 )
-OPERATOR_COMPONENT_EXACT = {
+# This live controller provisions CI workers. Its root contracts and native
+# specialist pickups own its behavior; it is not a read-only metadata tool or
+# an input to the platform's historical pool transition state machine.
+CI_RUNNER_COMPONENTS = {"scripts/ops/ci_runner_supply.py"}
+OPERATOR_COMPONENT_EXACT = CI_RUNNER_COMPONENTS | {
     "scripts/ops/nebius_archive_recovery.py",
     "scripts/ops/nebius_terminal_archive_recovery.py",
     "scripts/ops/nebius_terminal_cleanup_recovery.py",
@@ -212,6 +233,66 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 COMPONENT_OWNERSHIP_MANIFEST = REPO_ROOT / "config/component-ownership.toml"
 
 
+def manifest_change_is_registration(base: object, head: object, added: frozenset[str],
+                                    field: str = "") -> bool:
+    """Return whether ``head`` only registers files that this change adds.
+
+    New literal paths may join include/exclude lists, and new pins may place
+    them. Any removal, reordering, changed value, new key, table or rule, glob
+    or pre-existing file is an ownership-authority change.
+    """
+    def new_file(value: object) -> bool:
+        return isinstance(value, str) and not _GLOB_CHARACTERS & set(value) and value in added
+
+    if type(base) is not type(head):
+        return False
+    if isinstance(base, dict):
+        assert isinstance(head, dict)
+        return base.keys() == head.keys() and all(
+            manifest_change_is_registration(base[key], head[key], added, key) for key in base)
+    if not isinstance(base, list):
+        return base == head
+    assert isinstance(head, list)
+    if len(base) == len(head) and all(isinstance(item, dict) for item in (*base, *head)):
+        # Tables keep their positions; compare each one field by field.
+        return all(manifest_change_is_registration(old, new, added, field)
+                   for old, new in zip(base, head, strict=True))
+    remaining, extra = iter(head), []
+    for item in base:
+        for candidate in remaining:
+            if candidate == item:
+                break
+            extra.append(candidate)
+        else:
+            return False
+    extra.extend(remaining)
+    return not extra or (field in REGISTRATION_FIELDS and all(
+        new_file(item) or (isinstance(item, dict) and set(item) == {"path", "shard_index"}
+                           and new_file(item["path"]) and isinstance(item["shard_index"], int))
+        for item in extra))
+
+
+def manifest_registration_only(repo_root: Path, base_sha: str, changed_paths: Collection[str]) -> bool:
+    """Compare the manifest with its merge base; unknown evidence keeps full regression."""
+    if COMPONENT_OWNERSHIP_PATH not in changed_paths or not base_sha.strip("0"):
+        return False
+
+    def git(*args: str) -> str:
+        return subprocess.run(["git", *args], cwd=repo_root, check=True, capture_output=True,
+                              text=True, timeout=30).stdout
+
+    try:
+        base = git("merge-base", base_sha, "HEAD").strip()
+        added = frozenset(git("diff", "--name-only", "--no-renames", "--diff-filter=A", base, "HEAD").splitlines())
+        return manifest_change_is_registration(
+            tomllib.loads(git("show", f"{base}:{COMPONENT_OWNERSHIP_PATH}")),
+            tomllib.loads((repo_root / COMPONENT_OWNERSHIP_PATH).read_text(encoding="utf-8")),
+            added,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
+
+
 @dataclass(frozen=True)
 class ValidationPlan:
     event_relevant: bool
@@ -228,6 +309,10 @@ class ValidationPlan:
     web_checks: bool
     reasons: dict[str, tuple[str, ...]]
     test_changes: tuple[str, ...] = ()
+    # The PR's actual diff, kept even when test_changes forces full regression,
+    # so affected_only suites still run only when that diff affects them.
+    test_diff: tuple[str, ...] = ()
+    shared_pool_simulations: bool = False
     lint_and_static: bool = True
     tests_root: bool = True
     # Pool operator lane: eligible with tests-root; its own matrix decides the final selection.
@@ -253,6 +338,7 @@ class ValidationPlan:
                 "full_gate",
                 "docs_only",
                 "unowned_runtime",
+                "shared_pool_simulations",
                 *HEAVY_CHECKS,
                 *BASELINE_CHECKS,
                 "nebius_pool",
@@ -269,6 +355,9 @@ class ValidationPlan:
         # Stay below Linux's per-string exec limit; an empty hint retains the
         # complete selected lanes, including historical schema reconstruction.
         outputs["test_changes"] = test_changes if len(test_changes.encode()) <= 65536 else "[]"
+        # Same limit; an empty diff runs affected_only suites in full.
+        test_diff = json.dumps(self.test_diff, separators=(",", ":"))
+        outputs["test_diff"] = test_diff if len(test_diff.encode()) <= 65536 else "[]"
         outputs["reasons_json"] = json.dumps(self.reasons, sort_keys=True, separators=(",", ":"))
         return outputs
 
@@ -279,6 +368,7 @@ def _pull_request_gate_mode(
     action_label: str,
     draft: bool,
     base_changed: bool,
+    stale_draft: bool = False,
 ) -> tuple[bool, bool, str]:
     """Return event relevance, full-gate eligibility, and the gate context mode.
 
@@ -286,9 +376,11 @@ def _pull_request_gate_mode(
     metadata suite can leave native auto-merge blocked despite older successful
     checks on the same head. Only drafts are filtered before checkout; changed
     paths and the current labels still select the actual validation work.
+    A draft payload the workflow confirmed stale against a Ready PR on the same
+    head is not filtered: its suite is newer than that PR's full suite.
     """
 
-    if draft or action == "converted_to_draft":
+    if (draft or action == "converted_to_draft") and not stale_draft:
         return False, False, "filtered"
     return True, True, "full"
 
@@ -341,9 +433,15 @@ def plan_validations(
     pull_request_action_label: str = "",
     pull_request_draft: bool = False,
     pull_request_base_changed: bool = False,
+    pull_request_stale_draft: bool = False,
+    manifest_registration_only: bool = False,
+    shared_pool_simulations: bool = False,
 ) -> ValidationPlan:
     if event_name not in SUPPORTED_EVENTS:
         raise ValueError(f"unsupported event_name: {event_name}")
+
+    if shared_pool_simulations and event_name != "workflow_dispatch":
+        raise ValueError("shared-pool simulations require an explicit manual workflow_dispatch")
 
     event_relevant = True
     full_gate = True
@@ -354,9 +452,18 @@ def plan_validations(
             action_label=pull_request_action_label,
             draft=pull_request_draft,
             base_changed=pull_request_base_changed,
+            stale_draft=pull_request_stale_draft,
         )
 
     paths = tuple(dict.fromkeys(path.strip() for path in changed_paths if path.strip()))
+    authority_paths = OWNERSHIP_AUTHORITY_PATHS
+    if manifest_registration_only and COMPONENT_OWNERSHIP_PATH in paths:
+        # Only registers files this change adds: the manifest tests validate the
+        # registration and the new files select their own owners.
+        if MANIFEST_VALIDATION_TEST not in paths:
+            authority_paths = OWNERSHIP_AUTHORITY_PATHS - {MANIFEST_VALIDATION_TEST}
+        paths = tuple(dict.fromkeys(
+            MANIFEST_VALIDATION_TEST if path == COMPONENT_OWNERSHIP_PATH else path for path in paths))
     docs_only = bool(paths) and all(_is_documentation_path(path) for path in paths)
     unowned_runtime = False
     selected = {name: False for name in (*HEAVY_CHECKS, "coverage_summary", "web_checks")}
@@ -378,7 +485,7 @@ def plan_validations(
         for name in HEAVY_CHECKS:
             select(name, "planner-change")
 
-    if any(path in OWNERSHIP_AUTHORITY_PATHS for path in paths):
+    if any(path in authority_paths for path in paths):
         for name in HEAVY_CHECKS:
             select(name, "ownership-authority-change")
 
@@ -522,6 +629,9 @@ def plan_validations(
             or bool(test_owner_lanes)
             or policy_tool or go_input or operator_tool
         )
+        if path in CI_RUNNER_COMPONENTS:
+            for name in ("images", "cluster_smoke", "staging_smoke"):
+                select(name, "ci-runner-controller")
         for lane in test_owner_lanes:
             reason = f"test-owner:{lane}:{path}"
             if lane == "integration":
@@ -547,11 +657,11 @@ def plan_validations(
             if select_release_image_matrix(_component_ownership_manifest(), changed_paths=(path,),
                                            force_all=False, image_set="nebius"):
                 select("images", f"go-runtime:{path}")
-        if not (policy_tool or go_input) and (path.startswith("tests/contract/") or (not test_owner_lanes and _matches(path, exact=integration_exact, prefixes=integration_prefixes))):
+        if not (policy_tool or go_input or path in CI_RUNNER_COMPONENTS) and (path.startswith("tests/contract/") or (not test_owner_lanes and _matches(path, exact=integration_exact, prefixes=integration_prefixes))):
             select("integration", f"path:{path}")
             matched_owner = True
         elif (not test_owner_lanes and not _is_frontend_input(path)
-              and not (policy_tool or go_input)
+              and not (policy_tool or go_input or path in CI_RUNNER_COMPONENTS)
               and not path.startswith(NEBIUS_IAC_PREFIXES)):
             # Frontend inputs already select browser and image contracts below.
             # They do not change the Python runtime exercised by this lane.
@@ -615,7 +725,7 @@ def plan_validations(
     force_baseline = (
         not paths or event_name in {"workflow_dispatch", "schedule"} or unowned_runtime
         or selected["coverage_summary"]
-        or any(path in PLANNER_PATHS | OWNERSHIP_AUTHORITY_PATHS
+        or any(path in PLANNER_PATHS | authority_paths
                or path == ".github/workflows/ci.yml"
                or _is_dependency_authority_path(path) for path in paths)
     )
@@ -687,6 +797,9 @@ def plan_validations(
         # Explicit selector labels and manual runs retain full regression.
         test_changes=paths if event_name in {"pull_request", "merge_group"}
         and not force_baseline and not set(labels) & LABEL_TO_CHECK.keys() else (),
+        test_diff=paths if event_name in {"pull_request", "merge_group"}
+        and not set(labels) & LABEL_TO_CHECK.keys() else (),
+        shared_pool_simulations=shared_pool_simulations,
         nebius_pool=baseline["tests_root"],
         web_runtime=web_runtime,
         go_packages=go_packages_for_changes(paths, full=force_baseline),
@@ -699,6 +812,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--changed-files", type=Path, required=True)
     parser.add_argument("--labels-json", default="[]")
+    parser.add_argument("--shared-pool-simulations", choices=("true", "false"), default="false")
     parser.add_argument("--event-name", required=True)
     parser.add_argument("--pull-request-action", default="")
     parser.add_argument("--pull-request-action-label", default="")
@@ -712,23 +826,34 @@ def main() -> int:
         choices=("true", "false"),
         default="false",
     )
+    parser.add_argument(
+        "--pull-request-stale-draft",
+        choices=("true", "false"),
+        default="false",
+    )
+    parser.add_argument("--base-sha", default="")
     parser.add_argument("--github-output", type=Path, required=True)
     parser.add_argument("--test-scope", choices=("all", "nebius"), default=os.environ.get("CI_TEST_SCOPE", "all"))
     args = parser.parse_args()
     labels = json.loads(args.labels_json or "[]")
     if not isinstance(labels, list) or not all(isinstance(label, str) for label in labels):
         raise SystemExit("--labels-json must be a JSON array of strings")
+    changed_paths = args.changed_files.read_text(encoding="utf-8").splitlines()
     plan = plan_validations(
-        changed_paths=args.changed_files.read_text(encoding="utf-8").splitlines(),
+        changed_paths=changed_paths,
         labels=set(labels),
         event_name=args.event_name,
         pull_request_action=args.pull_request_action,
         pull_request_action_label=args.pull_request_action_label,
         pull_request_draft=args.pull_request_draft == "true",
         pull_request_base_changed=args.pull_request_base_changed == "true",
+        pull_request_stale_draft=args.pull_request_stale_draft == "true",
+        manifest_registration_only=manifest_registration_only(REPO_ROOT, args.base_sha, changed_paths),
+        shared_pool_simulations=args.shared_pool_simulations == "true",
     )
     outputs = plan.github_outputs()
     effective_changes = tuple(json.loads(outputs["test_changes"]))
+    effective_diff = tuple(json.loads(outputs["test_diff"]))
     tracked_paths = _tracked_paths(REPO_ROOT)
     for lane, selected_name, matrix_name in (
         ("tests-root", "tests_root", "tests_root_matrix"),
@@ -742,6 +867,9 @@ def main() -> int:
         matrix = test_shard_matrix(
             _component_ownership_manifest(), tracked_paths=tracked_paths, lane=lane,
             repo_root=REPO_ROOT, changed_paths=effective_changes, test_scope=args.test_scope,
+            # Only lanes whose jobs receive TEST_DIFF_PATHS may plan with it.
+            diff_paths=effective_diff if lane in AFFECTED_ONLY_LANES else (),
+            include_shared_pool=plan.shared_pool_simulations,
         ) if getattr(plan, selected_name) and plan.gate_mode == "full" else ()
         outputs[matrix_name] = json.dumps(matrix, separators=(",", ":"))
         # A compatibility-only edit has no tests in the daily Nebius scope.

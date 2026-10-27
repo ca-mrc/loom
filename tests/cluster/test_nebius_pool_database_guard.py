@@ -13,7 +13,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from tests.cluster.test_nebius_ingress_operation import POSTGRES
-from tests.cluster.test_nebius_shared_ingress import _run
+from tests.cluster.test_nebius_shared_ingress import _add_failure_diagnostics, _run
 from tests.integration.test_execution_actuator_k3s import (
     _docker,
     _import_image,
@@ -21,8 +21,8 @@ from tests.integration.test_execution_actuator_k3s import (
     _start_k3s,
 )
 from tests.ops.test_nebius_pool_runtime import runtime_inputs as runtime_inputs
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_management_render import management_inputs as management_inputs
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 pytestmark = pytest.mark.skipif(os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1",
     reason="requires explicitly disposable Kubernetes")
@@ -187,6 +187,11 @@ def test_actual_database_observer_works_without_control_plane(runtime_inputs, pl
         assert sql("SELECT owner FROM public.nebius_rollout_guard").strip() == "other"
         discovery.delete_namespaced_endpoint_slice("loom-postgres-foreign-backend", namespace)
         assert api.guard(target, "observe") == {"status": "skipped_locked"}
+    except (Exception, pytest.fail.Exception) as error:
+        # Startup can fail before a PostgreSQL container exists. Preserve node,
+        # sandbox, image-pull and PVC events before the disposable node is gone.
+        _add_failure_diagnostics(cluster, namespace, error)
+        raise
     finally:
         cluster.stop()
         subprocess.run(["docker", "image", "rm", tag], capture_output=True, check=False)

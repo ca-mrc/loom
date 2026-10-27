@@ -32,7 +32,12 @@ from loom.attempt_deadline import AttemptDeadline
 from loom.driver.service_sandbox import SandboxRPCError, ServiceSandboxDriver
 from loom.errors import AgentError, DriverError, exception_info
 from loom.execution_contract import effective_guest_capabilities
-from loom.harbor_verifier_script import VERIFIER_SCRIPT_PATH, offline_verifier_run_sh_bytes
+from loom.harbor_verifier_script import (
+    VERIFIER_SCRIPT_PATH,
+    native_verifier_run_sh_bytes,
+    native_verifier_workdir_run_sh_bytes,
+    offline_verifier_run_sh_bytes,
+)
 from loom.hosted_harness import (
     HARNESS_SETUP_PHASE,
     MAX_SETUP_CACHE_BYTES,
@@ -46,6 +51,7 @@ from loom.models.networking import NetworkPolicy, hosted_http_egress
 from loom.models.task import TaskConfig, normalize_steps
 from loom.models.trial import TrialConfig
 from loom.models.verifier import VerifierResult
+from loom.mutable_paths import validate_task_workdir
 from loom.service_execution_oracle import (
     ORACLE_SOLUTION_PATHS,
     oracle_usage,
@@ -60,6 +66,10 @@ from loom.service_execution_task import (
 )
 from loom.service_execution_terminus2 import TASK_IMAGE_TOOLS_REQUIRED, run_terminus2
 from loom.service_execution_terminus_trace import parse_terminus_events, terminus_usage
+from loom.task_environment_handoff import (
+    RESOLVED_TASK_ENVIRONMENT,
+    decode_resolved_task_environment,
+)
 from loom.trial.mutable_snapshot import export_mutable_paths, import_mutable_paths
 from loom.trial.workspace import (
     WorkspaceStagingPolicy,
@@ -67,29 +77,41 @@ from loom.trial.workspace import (
     refuse_planted_private_paths,
 )
 from loom.trial.workspace_references import (
+    HandoffOmissions,
     export_workspace_references,
     import_workspace_with_references,
+    manifest_path,
 )
 from loom.trial.workspace_snapshot import (
+    WorkspaceSnapshotError,
     _export_workspace_archive,
     _import_workspace_archive,
     _strip_private_entries,
-    _validate_workspace_archive,
 )
 from loom.verifier_runtime import resolve_verifier_env_mode
 
 _PRIVATE_PATHS = ("tests/**", "verifier/**", "solution/**", "upstream-task.toml", ".loom/**")
 _POLICY = WorkspaceStagingPolicy(_PRIVATE_PATHS, _PRIVATE_PATHS, ())
 _PRIVATE_VERIFIER_INPUT_ROOT = PurePosixPath("/loom/verifier/task")
+# Image preparation creates /loom/verifier for the resolved sandbox identity.
+# Keep trusted Oracle assets there, never in the business/Git working tree.
+_PRIVATE_ORACLE_SOLUTION_DIR = PurePosixPath("/loom/verifier/oracle/solution")
+
+
+def _harbor_verifier_kind(workspace: Path, task: TaskConfig) -> str | None:
+    """Recognize complete platform templates; custom/modified scripts stay native."""
+    if task.verifier.args.get("script_path") != VERIFIER_SCRIPT_PATH:
+        return None
+    wrapper = _safe_workspace_path(workspace, VERIFIER_SCRIPT_PATH)
+    templates = {"native": native_verifier_run_sh_bytes(), "offline": offline_verifier_run_sh_bytes()}
+    if not wrapper.is_file() or wrapper.stat().st_size not in {len(body) for body in templates.values()}:
+        return None
+    body = wrapper.read_bytes()
+    return next((kind for kind, expected in templates.items() if body == expected), None)
 
 
 def _uses_harbor_private_inputs(workspace: Path, task: TaskConfig) -> bool:
-    """Recognize only our complete immutable wrapper, never custom scripts."""
-    if task.verifier.args.get("script_path") != VERIFIER_SCRIPT_PATH:
-        return False
-    wrapper = _safe_workspace_path(workspace, VERIFIER_SCRIPT_PATH)
-    expected = offline_verifier_run_sh_bytes()
-    return wrapper.is_file() and wrapper.stat().st_size == len(expected) and wrapper.read_bytes() == expected
+    return _harbor_verifier_kind(workspace, task) is not None
 
 
 def _agent_input_exclusions(task: TaskConfig) -> tuple[str, ...]:
@@ -168,6 +190,15 @@ def sandbox_driver(role: str, task: TaskConfig, trial: TrialConfig) -> ServiceSa
             raise ServiceExecutionTaskError("guest_transfer_limit_invalid") from None
         if not 0 < max_transfer <= 10 * 1024**3:
             raise ServiceExecutionTaskError("guest_transfer_limit_invalid")
+    raw_archive_budget = os.environ.get("LOOM_WORKSPACE_MAX_ARCHIVE_BYTES")
+    try:
+        archive_budget = int(raw_archive_budget) if raw_archive_budget is not None else max_transfer
+    except ValueError:
+        raise ServiceExecutionTaskError("workspace_archive_limit_invalid") from None
+    if not 0 < archive_budget <= 10 * 1024**3:
+        raise ServiceExecutionTaskError("workspace_archive_limit_invalid")
+    if task.environment.storage_mb is not None:
+        archive_budget = min(archive_budget, task.environment.storage_mb * 1024**2)
     if hosted_http_egress(network_policy) is not None:
         url = urlsplit(os.environ.get("LOOM_TASK_EGRESS_PROXY", ""))
         if url.scheme != "http" or url.hostname != "127.0.0.1" or not url.port:
@@ -183,6 +214,7 @@ def sandbox_driver(role: str, task: TaskConfig, trial: TrialConfig) -> ServiceSa
         network_policy=network_policy,
         command_environment=command_environment,
         max_transfer_bytes=max_transfer,
+        max_workspace_archive_bytes=archive_budget,
     )
 
 
@@ -464,7 +496,19 @@ class AgentTimeoutFinalizedError(TimeoutError):
     """Agent deadline reached; quiescence and verifier handoff completed safely."""
 
 
-async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> None:
+async def run_agent(
+    workspace: Path, task: TaskConfig, trial: TrialConfig, *, original_task: TaskConfig | None = None,
+) -> None:
+    # Build hints belong to the immutable submitted source, while identity and
+    # workdir belong to the resolved runtime environment. Freeze exclusions
+    # before the sandbox can return a task-controlled replacement task.toml.
+    input_exclusions = _agent_input_exclusions(original_task if original_task is not None else task)
+    harbor_inputs = _uses_harbor_private_inputs(workspace, task)
+    if harbor_inputs:
+        # The existing image/workdir contract forbids /, /tmp and overlap with
+        # protected verifier roots. Do not invent a privileged fallback path.
+        validate_task_workdir(task.environment.workdir)
+        input_exclusions += tuple(escape(str(step.instruction_file)) for step in task.steps)
     raw_deadline = os.environ.get("LOOM_EXECUTION_PHASE_DEADLINE")
     deadline = AttemptDeadline.from_wall_deadline(float(raw_deadline)) if raw_deadline else None
     grace = float(os.environ.get("LOOM_EXECUTION_TERMINATION_GRACE_SECONDS", "30"))
@@ -482,6 +526,7 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
     lifecycle = task.environment.service_lifecycle
     spec = _workspace_spec(trial)
     solution_staged = False
+    solution_dir = _PRIVATE_ORACLE_SOLUTION_DIR if harbor_inputs else None
     timed_out = False
     finalizing = False
     termination_signals = 0
@@ -510,9 +555,15 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
                 solution_staged = spec.stages_solution
                 await materialize_workspace(
                     driver=driver, task_dir=workspace, dst=task.environment.workdir, policy=_POLICY,
-                    excluded_paths=_agent_input_exclusions(task),
-                    trusted_private_paths=ORACLE_SOLUTION_PATHS if spec.stages_solution else (),
+                    excluded_paths=input_exclusions,
+                    trusted_private_paths=(
+                        ORACLE_SOLUTION_PATHS if spec.stages_solution and not harbor_inputs else ()
+                    ),
                 )
+                if spec.stages_solution and solution_dir is not None:
+                    await materialize_workspace(
+                        driver=driver, task_dir=workspace / "solution", dst=solution_dir,
+                    )
                 if task.environment.preserve_acls:
                     from loom.trial.workspace_acls import require_acl_support
 
@@ -542,6 +593,8 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
                     await run_oracle(
                         driver=driver, task_dir=workspace, workspace=output, task_config=task,
                         trial_config=trial, trial_id=trial_id, deadline=deadline,
+                        solution_dir=solution_dir,
+                        execution_cwd=task.environment.workdir if harbor_inputs else None,
                     )
                 elif spec.controller_phase == "terminus-2":
                     await run_terminus2(
@@ -612,19 +665,28 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
                     if solution_staged and driver_started:
                         # Before the snapshot, and before an in-place verifier
                         # refuses planted private paths.
-                        await remove_oracle_solution(driver, task.environment.workdir)
-                    if agent_entered:
+                        await remove_oracle_solution(
+                            driver, task.environment.workdir, solution_dir=solution_dir,
+                        )
+                    # Matches the plan's in-place verifier, whose archive is optional.
+                    if agent_entered and in_place and not trial.skip_verifier:
+                        await capture_debug_workspace_archive(driver, workspace, task)
+                    elif agent_entered:
                         archive = workspace / ".loom/workspace.tar"
                         await _export_workspace_archive(
                             driver, task.environment.workdir, archive,
                             preserve_acls=task.environment.preserve_acls,
                         )
                         await asyncio.to_thread(_strip_private_entries, archive, _POLICY)
-                        await asyncio.to_thread(
-                            _validate_workspace_archive, archive, _POLICY,
-                            root=task.environment.workdir,
-                            external_reference_files=frozenset(task.environment.workspace_reference_files),
+                        # Validates the archive for a fresh verifier. Links to
+                        # unverifiable targets are omitted and reported (#2589).
+                        omissions = await export_workspace_references(
+                            driver, archive, root=task.environment.workdir, policy=_POLICY,
+                            reference_files=task.environment.workspace_reference_files,
+                            reference_symlinks=task.environment.reference_file_symlinks,
                         )
+                        if omissions.count:
+                            print(f"workspace handoff omitted {omissions.count} link(s)", file=sys.stderr)
                         if task.environment.mutable_paths:
                             await export_mutable_paths(
                                 driver, task.environment.mutable_paths, workspace / ".loom/mutable-paths",
@@ -633,12 +695,7 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
                                 reference_files=task.environment.mutable_path_reference_files,
                                 reference_symlinks=task.environment.reference_file_symlinks,
                             )
-                        if task.environment.workspace_reference_files:
-                            await export_workspace_references(
-                                driver, archive, root=task.environment.workdir, policy=_POLICY,
-                                reference_files=task.environment.workspace_reference_files,
-                                reference_symlinks=task.environment.reference_file_symlinks,
-                            )
+                    if agent_entered:
                         for path in task_artifact_paths(workspace, task):
                             destination = _safe_workspace_path(workspace / ".loom/collected", path)
                             try:
@@ -711,13 +768,47 @@ def stage_committed_workspace_archive(workspace: Path) -> Path:
     return target
 
 
+WORKSPACE_ARCHIVE_OUTCOME = PurePosixPath(".loom/workspace-archive.json")
+WORKSPACE_HANDOFF_REPORT = PurePosixPath(".loom/verifier/workspace-handoff.json")
+# Debug evidence must not hold up grading; the phase deadline still applies.
+DEBUG_ARCHIVE_TIMEOUT_SECONDS = 300.0
+
+
+async def capture_debug_workspace_archive(driver: ServiceSandboxDriver, workspace: Path, task: TaskConfig) -> None:
+    """Keep the agent's workdir as debugging evidence for an in-place verifier (#2589).
+
+    Nothing restores it, so it is not validated for handoff and a failure is
+    recorded instead of failing the Trial. Private paths never leave the sandbox.
+    """
+    archive = workspace / ".loom/workspace.tar"
+    try:
+        async with asyncio.timeout(DEBUG_ARCHIVE_TIMEOUT_SECONDS):
+            await _export_workspace_archive(
+                driver, task.environment.workdir, archive, preserve_acls=task.environment.preserve_acls,
+            )
+            await asyncio.to_thread(_strip_private_entries, archive, _POLICY)
+    except (WorkspaceSnapshotError, DriverError, OSError, TimeoutError) as exc:
+        archive.unlink(missing_ok=True)
+        # Snapshot and RPC errors carry only Loom-authored text and fixed codes.
+        detail = str(exc) if isinstance(exc, (WorkspaceSnapshotError, SandboxRPCError)) else ""
+        _write_json_atomic(workspace / WORKSPACE_ARCHIVE_OUTCOME, {
+            "schema_version": "loom.workspace-archive-outcome.v1",
+            "state": "failed",
+            "error_type": type(exc).__name__,
+            "detail": detail[:512],
+        })
+
+
 async def _run_verifier(
     workspace: Path, task: TaskConfig, trial: TrialConfig, *, deadline: AttemptDeadline | None, grace: float,
     begin_cleanup: Callable[[], None],
 ) -> None:
     in_place = resolve_verifier_env_mode(task, trial) == "shared"
-    separate_private_inputs = (not in_place) and _uses_harbor_private_inputs(workspace, task)
-    input_root = _PRIVATE_VERIFIER_INPUT_ROOT if separate_private_inputs else task.environment.workdir
+    harbor_kind = _harbor_verifier_kind(workspace, task)
+    if harbor_kind is not None:
+        validate_task_workdir(task.environment.workdir)
+    private_inputs = harbor_kind is not None
+    input_root = _PRIVATE_VERIFIER_INPUT_ROOT if private_inputs else task.environment.workdir
     driver = sandbox_driver("task-sandbox" if in_place else "verifier-sandbox", task, trial)
     driver_started = False
     failure: BaseException | None = None
@@ -753,18 +844,21 @@ async def _run_verifier(
             archive = stage_committed_workspace_archive(workspace)
             # The archive was validated by the agent phase before durable capture;
             # it stays in the private controller workspace between phases.
-            if task.environment.workspace_reference_files:
-                await import_workspace_with_references(
+            if manifest_path(archive).is_file() or task.environment.workspace_reference_files:
+                omissions = await import_workspace_with_references(
                     driver, archive, task.environment.workdir, policy=_POLICY,
                     preserve_acls=task.environment.preserve_acls,
                     reference_files=task.environment.workspace_reference_files,
                     reference_symlinks=task.environment.reference_file_symlinks,
                 )
             else:
+                # An agent phase exported before #2589 wrote no manifest.
                 await _import_workspace_archive(
                     driver, archive, task.environment.workdir, policy=_POLICY,
                     preserve_acls=task.environment.preserve_acls,
                 )
+                omissions = HandoffOmissions()
+            _write_json_atomic(workspace / WORKSPACE_HANDOFF_REPORT, omissions.report())
             if task.environment.mutable_paths:
                 await import_mutable_paths(
                     driver, task.environment.mutable_paths, workspace / ".loom/mutable-paths",
@@ -774,7 +868,7 @@ async def _run_verifier(
                     reference_symlinks=task.environment.reference_file_symlinks,
                 )
         remote_output = (
-            _PRIVATE_VERIFIER_INPUT_ROOT.parent / "output.json" if separate_private_inputs
+            _PRIVATE_VERIFIER_INPUT_ROOT.parent / "output.json" if private_inputs
             else task.environment.workdir / ".loom/verifier/output.json"
         )
         # The trusted file RPC creates parents under the runtime identity and
@@ -783,13 +877,22 @@ async def _run_verifier(
         with tempfile.NamedTemporaryFile() as empty_report:
             await driver.upload(Path(empty_report.name), remote_output)
         script_path = str(task.verifier.args["script_path"])
-        if separate_private_inputs:
+        if private_inputs:
             script_path = str(input_root / script_path)
+            if harbor_kind == "native":
+                # Keep the imported wrapper immutable. The trusted runtime
+                # bridge runs original test.sh against the business cwd.
+                bridge_path = input_root.parent / "run.sh"
+                with tempfile.NamedTemporaryFile() as bridge:
+                    Path(bridge.name).write_bytes(native_verifier_workdir_run_sh_bytes())
+                    await driver.upload(Path(bridge.name), bridge_path)
+                script_path = str(bridge_path)
         result = await driver.exec(
             "/bin/sh " + shlex.quote(script_path),
             cwd=task.environment.workdir,
             env={"LOOM_TASK_DIR": str(input_root),
-                 "LOOM_VERIFIER_OUTPUT": str(remote_output)},
+                 "LOOM_VERIFIER_OUTPUT": str(remote_output),
+                 **({"LOOM_HARBOR_WORKDIR": str(task.environment.workdir)} if private_inputs else {})},
             timeout_sec=(trial.override_verifier_timeout_sec or task.verifier.timeout_sec)
             * trial.verifier_timeout_multiplier,
         )
@@ -872,6 +975,13 @@ def main() -> None:
     # add cwd to their import path or load .env; never chdir into task inputs.
     with (workspace / "task.toml").open("rb") as stream:
         task = normalize_steps(TaskConfig.model_validate(tomllib.load(stream)))
+    original_task = task
+    if RESOLVED_TASK_ENVIRONMENT in os.environ:
+        # The source bundle remains immutable. Only the controller's runtime
+        # view adopts the environment frozen beside the prepared image grant.
+        task = task.model_copy(update={"environment": decode_resolved_task_environment(
+            os.environ[RESOLVED_TASK_ENVIRONMENT],
+        )})
     trial = TrialConfig.model_validate_json(os.environ["LOOM_TASK_TRIAL_JSON"])
     setup_phase = args.phase == HARNESS_SETUP_PHASE
     agent_phase = args.phase not in {HARNESS_SETUP_PHASE, "verify-sandbox"}
@@ -879,7 +989,10 @@ def main() -> None:
         raise ServiceExecutionTaskError("execution phase does not match the selected agent")
     phase = run_setup if setup_phase else run_agent if agent_phase else run_verifier
     try:
-        asyncio.run(phase(workspace, task, trial))
+        if agent_phase and RESOLVED_TASK_ENVIRONMENT in os.environ:
+            asyncio.run(run_agent(workspace, task, trial, original_task=original_task))
+        else:
+            asyncio.run(phase(workspace, task, trial))
     except AgentTimeoutFinalizedError:
         raise
     except Exception as exc:
@@ -890,6 +1003,34 @@ def main() -> None:
         if not path.exists():
             _write_json_atomic(path, exception_info(exc).model_dump(mode="json"))
         raise
+
+
+_VALIDATION_SUMMARY_ERRORS = 8
+_VALIDATION_LOC_LIMIT = 80
+_VALIDATION_TYPE_LIMIT = 64
+
+
+def _bounded_schema_token(value: object, limit: int) -> str:
+    """Keep a schema path printable and single-line. Never the error input."""
+    text: list[str] = []
+    for char in str(value):
+        text.append(char if char.isprintable() and char not in "\r\n\t " else "_")
+        if len(text) >= limit:
+            break
+    return "".join(text)
+
+
+def _validation_error_summary(exc: ValidationError) -> str:
+    """Location and type only. ``input``, ``msg``, and ``ctx`` can carry secrets."""
+    parts: list[str] = []
+    for error in exc.errors()[:_VALIDATION_SUMMARY_ERRORS]:
+        loc = ".".join(
+            _bounded_schema_token(part, _VALIDATION_LOC_LIMIT) for part in error.get("loc", ())
+        )[:_VALIDATION_LOC_LIMIT]
+        kind = _bounded_schema_token(error.get("type", ""), _VALIDATION_TYPE_LIMIT)
+        if loc or kind:
+            parts.append(f"{loc}:{kind}" if loc else kind)
+    return "; ".join(parts)
 
 
 if __name__ == "__main__":
@@ -905,5 +1046,9 @@ if __name__ == "__main__":
             message += f": {exc}"
         elif isinstance(exc, AgentError) and exc.args == (TASK_IMAGE_TOOLS_REQUIRED,):
             message += f": {TASK_IMAGE_TOOLS_REQUIRED}"
+        elif isinstance(exc, ValidationError):
+            summary = _validation_error_summary(exc)
+            if summary:
+                message += f": {summary}"
         print(message, file=sys.stderr)
         raise SystemExit(1) from None

@@ -21,9 +21,9 @@ from tests.ops.test_nebius_staging_pool_attachment import (
     staging_attachment_inputs as staging_attachment_inputs,
 )
 from tests.support.execution_image_admission import signed_image_admission_bundle
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_management_render import management_inputs as management_inputs
 from tests.unit.test_nebius_management_render import render as render_manager
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 from loom.nebius_platform_render import build_platform
 from loom.nebius_pool_contract import PoolParticipantV1
@@ -103,6 +103,90 @@ def release_inputs(staging_attachment_inputs):
     return dict(previous=previous, current=tuple(current.values()), config=config, candidate=candidate,
         runtime_profile=ServiceExecutionRuntimeProfileV1.model_validate(profile), operation_id=uuid4(),
         management_origin='https://manage.example.test', repo_root=ROOT)
+
+
+@pytest.fixture
+def preactivation_inputs(release_inputs, staging_attachment_inputs):
+    """Registration predates a newer, still-standalone staging publication."""
+    previous = release_inputs['previous'].registration
+    observation = copy.deepcopy(staging_attachment_inputs[0]['observation'])
+    observed = {_key(row): row for row in observation['resources']}
+    files = build_platform(release_inputs['config'], release_inputs['candidate'],
+        release_inputs['runtime_profile'].model_dump(mode='json'),
+        previous.spec.profiles.image_admission_keyring, repo_root=ROOT)
+    rows = []
+    for documents in files.values():
+        for document in documents:
+            key = _key(document)
+            if key in observed:
+                row = copy.deepcopy(document)
+                row['metadata'].update(uid=observed[key]['metadata']['uid'], resourceVersion='29')
+                rows.append(row)
+    observation.update(candidate_sha=release_inputs['candidate']['candidate_sha'], resources=rows)
+    return dict(registration=previous, observation=observation, candidate=release_inputs['candidate'],
+        operation_id=release_inputs['operation_id'], repo_root=ROOT)
+
+
+def test_preactivation_refresh_qualifies_staging_advancement_after_registration(preactivation_inputs):
+    options = preactivation_inputs
+    frozen = copy.deepcopy(options)
+    refresh = module().prepare_staging_preactivation_refresh(**options)
+    assert options == frozen
+    assert module().prepare_staging_preactivation_refresh(**options) == refresh
+    before = options['registration'].spec
+    assert refresh.before == before and refresh.after.operation_id == options['operation_id']
+    assert refresh.after.policy_revision == before.policy_revision + 1
+    assert refresh.after.participants[1] == before.participants[1]
+    assert refresh.after.machines == before.machines
+    selected = refresh.after.participants[0]
+    assert selected.binding_revision == before.participants[0].binding_revision + 1
+    old_ids = {row.profile_id for row in before.participants[0].targets}
+    new_ids = {row.profile_id for row in selected.targets}
+    assert old_ids.isdisjoint(new_ids) and len(old_ids) == len(new_ids)
+    for profile in refresh.after.profiles.execution:
+        if profile.profile_id in new_ids:
+            assert profile.candidate_sha == 'd' * 40
+            assert profile.runtime_image_ref.endswith('@sha256:' + 'e' * 64)
+            assert profile.runtime_binary_sha256 == 'sha256:' + 'f' * 64
+        else:
+            assert profile in before.profiles.execution
+    for profile in refresh.after.profiles.task_images:
+        if profile.profile_id in new_ids:
+            assert profile.settings.service_image.endswith('@sha256:' + 'e' * 64)
+        else:
+            assert profile in before.profiles.task_images
+
+
+@pytest.mark.parametrize('damage', ['operation', 'source', 'namespace-uid', 'runtime', 'builder', 'keyring'])
+def test_preactivation_refresh_rejects_scope_and_contract_drift(preactivation_inputs, damage):
+    options = copy.deepcopy(preactivation_inputs)
+    if damage == 'operation':
+        options['operation_id'] = options['registration'].spec.operation_id
+    elif damage == 'source':
+        options['candidate']['source_ref'] = 'refs/heads/unapproved'
+    else:
+        rows = options['observation']['resources']
+        participant = options['registration'].spec.participants[0]
+        if damage == 'namespace-uid':
+            row, = (row for row in rows if row['kind'] == 'Namespace'
+                and row['metadata']['name'] == participant.execution_namespace.name)
+            row['metadata']['uid'] = str(uuid4())
+        elif damage == 'keyring':
+            row, = (row for row in rows if row['kind'] == 'ConfigMap'
+                and row['metadata']['name'] == 'loom-platform-config')
+            row['data']['keyring.json'] = '{}'
+        else:
+            row, = (row for row in rows if row['kind'] == 'Deployment'
+                and row['metadata']['name'] == 'loom-execution-actuator')
+            settings = env(row)
+            if damage == 'runtime':
+                settings['LOOM_EXECUTION_ACTUATOR_CREDENTIAL_BROKER_URL']['value'] = 'https://foreign.invalid'
+            else:
+                value = json.loads(settings['LOOM_EXECUTION_ACTUATOR_TASK_IMAGE_BUILDER']['value'])
+                value['cpu_millis'] = 9999
+                settings['LOOM_EXECUTION_ACTUATOR_TASK_IMAGE_BUILDER']['value'] = json.dumps(value)
+    with pytest.raises(ValueError, match='staging preactivation refresh unqualified'):
+        module().prepare_staging_preactivation_refresh(**options)
 
 
 def test_normal_release_keeps_shared_wiring_and_preserves_retired_and_other_owner_authority(release_inputs):
@@ -403,8 +487,11 @@ def test_refresh_mutation_identity_cannot_be_rotated_to_retry(catalog_inputs, ac
             action=action, observation_id=identity)
 
 
-@pytest.mark.parametrize('retained_writes', [False, True])
-@pytest.mark.parametrize('failure', [None, 'migrate', 'configure', 'actuator', 'https', 'readback'])
+@pytest.mark.parametrize('staging_attachment_inputs,retained_writes,failure', [
+    (0, True, None), (1, True, None),
+    *[(2, writes, fault) for writes in (False, True)
+      for fault in (None, 'migrate', 'configure', 'actuator', 'https', 'readback')],
+], indirect=['staging_attachment_inputs'])
 def test_shared_candidate_uses_full_normal_rollout_without_restoring_local_writers(release_inputs, tmp_path, monkeypatch, failure, retained_writes):
     """Missing schema/config phases or restoring the collector must break this path.
 

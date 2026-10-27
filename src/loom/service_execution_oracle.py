@@ -60,11 +60,15 @@ async def run_oracle(
     trial_id: UUID,
     deadline: AttemptDeadline | None = None,
     max_trajectory_bytes: int = 1024 * 1024,
+    solution_dir: PurePosixPath | None = None,
+    execution_cwd: PurePosixPath | None = None,
 ) -> None:
     """Run `solution/solve.sh` in the already-staged sandbox and record it.
 
     `task_dir` is the controller's immutable task input; the caller has
-    already materialized `solution/` into the sandbox workdir.
+    already staged `solution/` in the sandbox. Explicit paths let native Harbor
+    keep trusted assets outside the business tree and execute from image workdir;
+    defaults preserve the Loom sibling-file contract.
     """
     if trial_config.agent_name != "oracle" or trial_config.agent_model is not None:
         raise AgentError("Oracle execution requires the oracle agent and no model")
@@ -78,16 +82,22 @@ async def run_oracle(
         pass
     events_path.chmod(0o600)
     trajectory = _LocalTrajectory(events_path, deadline, max_trajectory_bytes)
-    agent = OracleAgent(task_dir=task_dir, trial_id=trial_id, workdir=task_config.environment.workdir)
+    agent = OracleAgent(
+        task_dir=task_dir, trial_id=trial_id, workdir=task_config.environment.workdir,
+        solution_dir=solution_dir, execution_cwd=execution_cwd,
+    )
     await agent.run(
         instruction="", env=driver, trajectory=cast(Any, trajectory), mcp=(), skills_dir=None,
         step_id="agent",
     )
 
 
-async def remove_oracle_solution(driver: Driver, workdir: PurePosixPath) -> None:
+async def remove_oracle_solution(
+    driver: Driver, workdir: PurePosixPath, *, solution_dir: PurePosixPath | None = None,
+) -> None:
     """The snapshot and an in-place verifier must not see the reference solution."""
-    result = await driver.exec("rm -rf -- " + shlex.quote((workdir / "solution").as_posix()), cwd=workdir)
+    target = solution_dir or workdir / "solution"
+    result = await driver.exec("rm -rf -- " + shlex.quote(target.as_posix()), cwd=workdir)
     if result.return_code:
         raise AgentError("Oracle solution could not be removed from the task sandbox")
 

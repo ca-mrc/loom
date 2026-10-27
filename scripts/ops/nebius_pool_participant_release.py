@@ -16,13 +16,19 @@ from uuid import UUID, uuid5
 
 from scripts.ops.deploy_nebius_platform import validate_render
 from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
+from scripts.ops.nebius_management_material import ManagementBinding
 from scripts.ops.nebius_pool_migration import PoolMigrationRequest, migration_contract
+from scripts.ops.nebius_pool_registration import PoolRegistrationRequest
 from scripts.ops.nebius_pool_runtime import (
     _environment,
     participant_readonly_roles,
     wire_participant,
 )
-from scripts.ops.nebius_staging_pool_attachment import _exact_pod, derive_staging_profiles
+from scripts.ops.nebius_staging_pool_attachment import (
+    _exact_pod,
+    derive_staging_profiles,
+    prepare_staging_pool_attachment,
+)
 
 from loom.nebius_platform_render import _obj, build_platform
 from loom.nebius_pool_contract import PoolParticipantV1
@@ -48,8 +54,81 @@ class PreparedParticipantRelease:
     preserved: dict[str, dict[str, Any]]
 
 
+@dataclass(frozen=True, repr=False)
+class PoolCatalogRefresh:
+    """Catalog-only selection; no participant workload or dispatch authority."""
+
+    refresh: PoolParticipantRefresh
+    binding: ManagementBinding
+
+
+def catalog_binding(release: PreparedParticipantRelease | PoolCatalogRefresh) -> ManagementBinding:
+    refresh = PoolParticipantRefresh.model_validate(release.refresh.model_dump())
+    if isinstance(release, PreparedParticipantRelease):
+        if release.migration.registration.spec != refresh.after:
+            raise ValueError('catalog refresh installation differs')
+        binding = release.migration.registration.binding
+    elif isinstance(release, PoolCatalogRefresh):
+        binding = release.binding
+    else:
+        raise ValueError('catalog refresh selection differs')
+    if binding.installation_id != str(refresh.before.installation_id):
+        raise ValueError('catalog refresh binding differs')
+    return binding
+
+
 def _body(document: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in document.items() if key not in {'metadata', 'status'}}
+
+
+def _release_participant(selected: PoolParticipantV1, operation_id: UUID) -> PoolParticipantV1:
+    successor = selected.model_dump(mode='json')
+    successor['binding_revision'] += 1
+    for target in successor['targets']:
+        target['profile_id'] = str(uuid5(operation_id, target['profile_id']))
+    return PoolParticipantV1.model_validate(successor)
+
+
+def _catalog_refresh(spec: PoolInstallation, participant: PoolParticipantV1,
+        profiles: PoolProfileCatalog, operation_id: UUID) -> PoolParticipantRefresh:
+    selected, = (row for row in spec.participants if row.participant_id == participant.participant_id)
+    if profiles.image_admission_keyring != spec.profiles.image_admission_keyring or profiles.application_images:
+        raise ValueError
+    after = spec.model_dump(mode='json')
+    after.update(operation_id=str(operation_id), policy_revision=spec.policy_revision + 1)
+    after['participants'] = [participant.model_dump(mode='json')
+        if row['participant_id'] == str(selected.participant_id) else row for row in after['participants']]
+    replacements = {old.profile_id: new.profile_id for old, new in zip(selected.targets, participant.targets, strict=True)}
+    for kind in ('execution', 'task_images'):
+        fresh = {row['profile_id']: row for row in profiles.model_dump(mode='json')[kind]}
+        after['profiles'][kind] = [fresh[str(replacements[UUID(row['profile_id'])])]
+            if UUID(row['profile_id']) in replacements else row for row in after['profiles'][kind]]
+    return PoolParticipantRefresh(schema_version='loom.pool-participant-refresh.v1', participant_id=selected.participant_id,
+        before=spec, after=PoolInstallation.model_validate(after))
+
+
+def prepare_staging_preactivation_refresh(*, registration: PoolRegistrationRequest,
+        observation: dict[str, Any], candidate: dict[str, Any], operation_id: UUID,
+        repo_root: Path) -> PoolParticipantRefresh:
+    """Project a release-only successor from current standalone staging.
+
+    This does not qualify publication, CLOSED state or completed ancestry and
+    grants no mutation authority. The protected preactivation parent owns those
+    barriers. Registration remains immutable; the ordinary global refresh entry
+    point must not be used to apply this projection to a closed pool.
+    """
+    try:
+        spec = PoolInstallation.model_validate(registration.spec.model_dump())
+        if (not isinstance(operation_id, UUID) or not operation_id.int
+                or registration.binding.installation_id != str(spec.installation_id)):
+            raise ValueError
+        selected, = (row for row in spec.participants if row.environment_class == 'staging')
+        participant = _release_participant(selected, operation_id)
+        attachment = prepare_staging_pool_attachment(participant=participant, observation=observation,
+            candidate=candidate, cluster_id=spec.cluster_id, node_group_id=spec.node_group_id, repo_root=repo_root)
+        return _catalog_refresh(spec, participant, attachment.profiles, operation_id)
+    except Exception:
+        raise ValueError('staging preactivation refresh unqualified') from None
 
 
 def _prepare(*, previous: PoolMigrationRequest, current: tuple[dict[str, Any], ...],
@@ -111,11 +190,7 @@ def _prepare(*, previous: PoolMigrationRequest, current: tuple[dict[str, Any], .
         if runtime.participant != selected or runtime.management_origin != management_origin:
             raise ValueError
 
-    successor = selected.model_dump(mode='json')
-    successor['binding_revision'] += 1
-    for target in successor['targets']:
-        target['profile_id'] = str(uuid5(operation_id, target['profile_id']))
-    participant = PoolParticipantV1.model_validate(successor)
+    participant = _release_participant(selected, operation_id)
     files = (build_platform(copy.deepcopy(config), candidate, runtime_profile.model_dump(mode='json'),
         spec.profiles.image_admission_keyring, repo_root=repo_root)
         if rendered_files is None else copy.deepcopy(rendered_files))
@@ -130,17 +205,7 @@ def _prepare(*, previous: PoolMigrationRequest, current: tuple[dict[str, Any], .
         runtime_profile=runtime_profile, node_group_id=spec.node_group_id,
         deployments={row['metadata']['name']: row for row in desired.values()
             if row['kind'] == 'Deployment' and row['metadata']['namespace'] == selected.execution_namespace.name})
-    after = spec.model_dump(mode='json')
-    after.update(operation_id=str(operation_id), policy_revision=spec.policy_revision + 1)
-    after['participants'] = [successor if row['participant_id'] == str(selected.participant_id) else row
-        for row in after['participants']]
-    replacements = {old.profile_id: new.profile_id for old, new in zip(selected.targets, participant.targets, strict=True)}
-    for kind in ('execution', 'task_images'):
-        fresh = {row['profile_id']: row for row in profiles.model_dump(mode='json')[kind]}
-        after['profiles'][kind] = [fresh[str(replacements[UUID(row['profile_id'])])]
-            if UUID(row['profile_id']) in replacements else row for row in after['profiles'][kind]]
-    refresh = PoolParticipantRefresh(schema_version='loom.pool-participant-refresh.v1', participant_id=selected.participant_id,
-        before=spec, after=PoolInstallation.model_validate(after))
+    refresh = _catalog_refresh(spec, participant, profiles, operation_id)
 
     def retained_identity(document: dict[str, Any]) -> dict[str, Any]:
         """Attach the retained identity to a desired template, never call it observed."""
@@ -208,13 +273,13 @@ def prepare_staging_pool_release(*, previous: PoolMigrationRequest, current: tup
         raise ValueError('pool participant release unqualified') from None
 
 
-def _manager(release: PreparedParticipantRelease, manager: dict[str, Any]) -> tuple[PoolParticipantRefresh, dict[str, Any]]:
+def _manager(release: PreparedParticipantRelease | PoolCatalogRefresh,
+        manager: dict[str, Any]) -> tuple[PoolParticipantRefresh, dict[str, Any]]:
     refresh = PoolParticipantRefresh.model_validate(release.refresh.model_dump())
-    binding = release.migration.registration.binding
+    binding = catalog_binding(release)
     _uid(manager)
     _snapshot(manager)
-    if (release.migration.registration.spec != refresh.after or binding.installation_id != str(refresh.before.installation_id)
-            or manager.get('apiVersion') != 'apps/v1' or manager.get('kind') != 'Deployment'
+    if (manager.get('apiVersion') != 'apps/v1' or manager.get('kind') != 'Deployment'
             or manager['metadata'].get('name') != 'loom-service' or manager['metadata'].get('namespace') != binding.namespace
             or manager['metadata'].get('labels', {}).get('loom.nebius/management-installation') != binding.installation_id
             or type(manager['spec'].get('replicas')) is not int or manager['spec']['replicas'] != 1
@@ -240,14 +305,14 @@ def _manager(release: PreparedParticipantRelease, manager: dict[str, Any]) -> tu
     return refresh, container
 
 
-def prepare_manager_catalog_refresh(*, release: PreparedParticipantRelease, manager: dict[str, Any],
+def prepare_manager_catalog_refresh(*, release: PreparedParticipantRelease | PoolCatalogRefresh, manager: dict[str, Any],
         catalog: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Catalog-only desired resources; parent must qualify and retain the restart."""
     try:
         refresh, _ = _manager(release, manager)
         _uid(catalog)
         _snapshot(catalog)
-        namespace = release.migration.registration.binding.namespace
+        namespace = catalog_binding(release).namespace
         if (catalog.get('apiVersion') != 'v1' or catalog.get('kind') != 'ConfigMap'
                 or catalog['metadata'].get('namespace') != namespace
                 or catalog['metadata'].get('name') != 'loom-pool-profiles-' + refresh.before.operation_id.hex

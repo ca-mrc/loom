@@ -44,7 +44,7 @@ def identity_namespace_labels() -> dict[str, str]:
 def _guest_private_expression() -> str:
     return (
         "has(c.restartPolicy) && c.restartPolicy == 'Always' && "
-        "size(c.command) in [19,20] && "
+        "size(c.command) in [19,20,27,28] && "
         "c.command[0] == '/loom/runtime/guest/bin/loom-guest-runtime' && "
         "c.command[1] == '--payload' && c.command[2] == '/loom/runtime/guest' && "
         "c.command[3] == '--root' && c.command[4] == '/' && "
@@ -58,7 +58,18 @@ def _guest_private_expression() -> str:
         "int(c.command[12]) >= 128 && int(c.command[12]) <= 1048576 && "
         "int(c.command[14]) >= 1000 && int(c.command[14]) <= 128000 && "
         "int(c.command[16]) <= 10737418240 && int(c.command[18]) <= 86400 && "
-        "(size(c.command) == 19 || c.command[19] == '--nested-docker') && "
+        "(size(c.command) == 19 || (size(c.command) == 20 && c.command[19] == '--nested-docker') || ("
+        "c.command[19] == '--task-uid' && c.command[21] == '--task-gid' && "
+        "c.command[23] == '--task-groups' && c.command[25] == '--task-home' && "
+        "c.command[20].matches('^(?:0|[1-9][0-9]*)$') && int(c.command[20]) <= 2147483647 && "
+        "c.command[22].matches('^(?:0|[1-9][0-9]*)$') && int(c.command[22]) <= 2147483647 && "
+        "(c.command[24] == '-' || (size(c.command[24]) <= 512 && "
+        "c.command[24].split(',').all(g, g.matches('^(?:0|[1-9][0-9]*)$') && int(g) <= 2147483647))) && "
+        "size(c.command[26]) <= 4096 && "
+        "c.command[26].matches('^/(?:[-A-Za-z0-9._]+/)*[-A-Za-z0-9._]+$') && "
+        "!c.command[26].matches('(?:^|/)\\\\.\\\\.?(?:/|$)') && "
+        "!c.command[26].matches('^/(?:proc|sys|dev|run|loom|tests|verifier|solution)(?:/|$)') && "
+        "(size(c.command) == 27 || c.command[27] == '--nested-docker'))) && "
         "(!has(c.args) || size(c.args) == 0) && !has(c.lifecycle) && "
         "(!has(c.envFrom) || size(c.envFrom) == 0) && (!has(c.env) || c.env.all(e, !has(e.valueFrom))) && "
         "has(c.startupProbe) && has(c.startupProbe.exec) && has(c.readinessProbe) && has(c.readinessProbe.exec) && "
@@ -79,6 +90,16 @@ def _guest_private_expression() -> str:
         "(m.name == c.name + '-socket' && has(m.subPath) && "
         "((m.mountPath == '/etc/hosts' && m.subPath == 'network/hosts') || "
         "(m.mountPath == '/etc/resolv.conf' && m.subPath == 'network/resolv.conf')))))"
+    )
+
+
+def _bounded_guest_disk(volume_name: str) -> str:
+    """CEL check that one guest state volume exists and is a bounded emptyDir."""
+    return (
+        "object.spec.volumes.exists(v, v.name == "
+        + json.dumps(volume_name)
+        + " && has(v.emptyDir) && has(dyn(v.emptyDir).sizeLimit) && "
+        "(!has(v.emptyDir.medium) || v.emptyDir.medium == ''))"
     )
 
 
@@ -116,12 +137,22 @@ def identity_policy_documents(
     )
     private = (
         "has(c.restartPolicy) && c.restartPolicy == 'Always' && "
-        "size(c.command) == 5 && c.command[0] == '/loom/bin/loom-sandbox-runtime' && "
-        "c.command[1] == '--socket' && c.command[2] == '/loom/sandboxes/' + c.name + '/sandbox.sock' && "
-        "c.command[3] == '--exec-timeout-seconds' && c.command[4].matches('^[0-9]+$') && "
+        # Frozen image ENTRYPOINT arguments may precede the runtime. The
+        # controller still supplies the complete canonical runtime suffix.
+        "size(c.command) >= 5 && size(c.command) <= 128 && "
+        "c.command.all(a, size(a) > 0 && size(bytes(a)) <= 4096) && "
+        "c.command[size(c.command)-5] == '/loom/bin/loom-sandbox-runtime' && "
+        "c.command[size(c.command)-4] == '--socket' && "
+        "c.command[size(c.command)-3] == '/loom/sandboxes/' + c.name + '/sandbox.sock' && "
+        "c.command[size(c.command)-2] == '--exec-timeout-seconds' && "
+        "c.command[size(c.command)-1].matches('^[0-9]+$') && "
         "(!has(c.args) || size(c.args) == 0) && !has(c.lifecycle) && "
         "(!has(c.envFrom) || size(c.envFrom) == 0) && "
         "(!has(c.env) || c.env.all(e, !has(e.valueFrom))) && "
+        "has(c.startupProbe) && has(c.startupProbe.exec) && "
+        "has(c.readinessProbe) && has(c.readinessProbe.exec) && "
+        "c.startupProbe.exec.command == ['/loom/bin/loom-sandbox-runtime','--check-socket','/loom/sandboxes/' + c.name + '/sandbox.sock'] && "
+        "c.readinessProbe.exec.command == c.startupProbe.exec.command && "
         "size(c.volumeMounts) == 4 && c.volumeMounts.all(m, "
         "!has(m.subPathExpr) && !has(m.mountPropagation) && "
         "((m.name == c.name + '-socket' && m.mountPath == '/loom/sandboxes/' + c.name && !has(m.subPath)) || "
@@ -225,10 +256,21 @@ def identity_policy_documents(
             # The built-in OpenAPI quantity reference is absent from CEL's
             # inferred EmptyDir type. Dynamic selection preserves the runtime
             # presence check without a static undefined-field warning.
-            "expression": "!variables.isGuest || (size(variables.private) == 2 && size(variables.fixtures) == 0 && "
-            "object.spec.volumes.filter(v, v.name in ['task-sandbox-guest-state','verifier-sandbox-guest-state']).all(v, "
-            "has(v.emptyDir) && has(dyn(v.emptyDir).sizeLimit) && (!has(v.emptyDir.medium) || v.emptyDir.medium == '')))",
-            "message": "Guest targets require two private guests with bounded disk state.",
+            # `.all` on a name filter is true when that volume is absent, so
+            # each required disk is checked with `.exists`.
+            "expression": (
+                "!variables.isGuest || (size(variables.fixtures) == 0 && ("
+                "(size(variables.private) == 2 && "
+                f"{_bounded_guest_disk('task-sandbox-guest-state')} && "
+                f"{_bounded_guest_disk('verifier-sandbox-guest-state')}) || "
+                "(size(variables.private) == 1 && variables.private.all(c, c.name == 'task-sandbox') && "
+                f"{_bounded_guest_disk('task-sandbox-guest-state')} && "
+                "!object.spec.volumes.exists(v, v.name == 'verifier-sandbox-guest-state'))))"
+            ),
+            "message": (
+                "Guest targets require one resident task guest or two private guests, "
+                "each with bounded disk state."
+            ),
         })
     binding = {
         "apiVersion": "admissionregistration.k8s.io/v1", "kind": "ValidatingAdmissionPolicyBinding",

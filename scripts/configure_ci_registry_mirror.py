@@ -26,7 +26,7 @@ def disposable_runner() -> bool:
             return False
         if stat.st_size > 1024:
             return False
-        marker = json.loads(EPHEMERAL_MARKER.read_text())
+        marker: object = json.loads(EPHEMERAL_MARKER.read_text())
         return marker == {"schema_version": 1, "provider": "oldlab"} or marker == {
             "schema_version": 1,
             "provider": "github",

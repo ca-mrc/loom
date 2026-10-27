@@ -47,6 +47,11 @@ func (p plan) validateGuestExecution() error {
 		if s.Identity == nil || s.Identity.RunAsUser == nil || *s.Identity.RunAsUser != 0 || s.Identity.RunAsGroup == nil || *s.Identity.RunAsGroup != 0 {
 			return fmt.Errorf("guest runtime requires explicit root task identity")
 		}
+		if s.GuestTaskIdentity != nil {
+			if err := s.GuestTaskIdentity.concrete(); err != nil {
+				return fmt.Errorf("invalid guest task identity")
+			}
+		}
 		if s.Resources != p.TaskResources || s.ImageRef != p.TaskImageRef {
 			return fmt.Errorf("guest sandbox resources and image must match task")
 		}
@@ -72,7 +77,15 @@ func (p plan) validateGuestExecution() error {
 	if p.InPlaceVerifier {
 		expectedGuests = 1
 	}
-	if guestClass && (guests != expectedGuests || len(p.Sidecars) != expectedGuests || p.RuntimeVolumeMiB < 1024 || p.ControllerResources == nil || p.AgentImageRef == nil || p.ExecutionRole != "attempt" || p.Composition != "init_payload" || p.VerifierExecution != "in_attempt" || p.Verifier == nil) {
+	skippedGuest := p.VerifierExecution == "skipped" && p.Verifier == nil && !p.InPlaceVerifier && !p.VerifierAfterAgentTimeout
+	if skippedGuest {
+		expectedGuests = 1
+	}
+	verifierOK := p.VerifierExecution == "in_attempt" && p.Verifier != nil
+	if skippedGuest {
+		verifierOK = true
+	}
+	if guestClass && (guests != expectedGuests || len(p.Sidecars) != expectedGuests || p.RuntimeVolumeMiB < 1024 || p.ControllerResources == nil || p.AgentImageRef == nil || p.ExecutionRole != "attempt" || p.Composition != "init_payload" || !verifierOK) {
 		return fmt.Errorf("guest class requires matching private guests and bounded runtime payload storage")
 	}
 	if guestClass {

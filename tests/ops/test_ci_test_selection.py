@@ -168,6 +168,7 @@ def test_empty_selection_is_safe_and_selector_failure_still_fails_the_job(
         env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}",
              "RUNNER_TEMP": str(tmp_path), "SHARD_INDEX": "0", "SHARD_COUNT": "2",
              "COVERAGE_ENABLED": "false", "TEST_CHANGED_PATHS": "[]",
+               "SHARED_POOL_SIMULATIONS": "false",
              "GITHUB_OUTPUT": str(tmp_path / "output"), "SELECT_EXIT": str(selection_exit)},
     )
     # A dynamic matrix promises a nonempty shard; a stale/empty selector must
@@ -177,9 +178,12 @@ def test_empty_selection_is_safe_and_selector_failure_still_fails_the_job(
 
 
 @pytest.mark.timeout(120)
-@pytest.mark.parametrize("lane", ["tests-root", "nebius-pool"])
-@pytest.mark.parametrize("scope", ["all", "nebius"])
-def test_shard_workflows_run_complete_disjoint_fail_fast_shards(tmp_path: Path, scope: str, lane: str) -> None:
+@pytest.mark.parametrize(("scope", "lane", "include_shared_pool"), [
+    ("all", "tests-root", False), ("nebius", "tests-root", False),
+    ("nebius", "nebius-pool", False), ("nebius", "nebius-pool", True),
+])
+def test_shard_workflows_run_complete_disjoint_fail_fast_shards(
+        tmp_path: Path, scope: str, lane: str, include_shared_pool: bool) -> None:
     """Exercise the workflow/selector boundary, not a second shard algorithm."""
     root = Path(__file__).resolve().parents[2]
     workflow = yaml.safe_load((root / ".github/workflows/ci.yml").read_text())
@@ -187,14 +191,26 @@ def test_shard_workflows_run_complete_disjoint_fail_fast_shards(tmp_path: Path, 
     from scripts import component_ownership as ownership
     manifest = ownership.load_manifest(root / "config/component-ownership.toml")
     matrix = ownership.test_shard_matrix(manifest, tracked_paths=ownership._tracked_paths(root),
-                                        lane=lane, repo_root=root, test_scope=scope)
+                                        lane=lane, repo_root=root, test_scope=scope,
+                                        include_shared_pool=include_shared_pool)
     step = next(row for row in job["steps"] if row.get("name", "").startswith("Pytest"))
     selector_step = next(row for row in job["steps"] if row.get("id") == "manifest")
+    if lane == "nebius-pool":
+        # This lane contains only Nebius modules. Prove scope equivalence once
+        # instead of spawning the same 20 selector/workflow processes twice.
+        # A future scope difference must restore distinct execution coverage.
+        all_paths = ownership.test_paths_for_lane(
+            manifest, tracked_paths=ownership._tracked_paths(root), lane=lane,
+        )
+        assert ownership.select_test_scope(manifest, all_paths, scope="all") == (
+            ownership.select_test_scope(manifest, all_paths, scope="nebius")
+        )
     count = manifest.test_shard_policy(lane).shard_count
     assert sorted(row["shard_index"] for row in matrix) == list(range(count))
     complete = subprocess.run(
         [sys.executable, "scripts/component_ownership.py", "test-paths", "--lane", lane,
-         "--test-scope", scope], cwd=root, text=True, capture_output=True, check=True,
+         "--test-scope", scope, "--include-shared-pool", str(include_shared_pool).lower()],
+        cwd=root, text=True, capture_output=True, check=True,
     ).stdout.splitlines()
     uv = tmp_path / "uv"
     uv.write_text(
@@ -215,6 +231,7 @@ def test_shard_workflows_run_complete_disjoint_fail_fast_shards(tmp_path: Path, 
         env = {**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}",
                "RUNNER_TEMP": str(tmp_path), "SHARD_INDEX": str(row["shard_index"]),
                "SHARD_COUNT": str(count), "COVERAGE_ENABLED": "false", "TEST_CHANGED_PATHS": "[]",
+               "SHARED_POOL_SIMULATIONS": str(include_shared_pool).lower(),
                "CI_TEST_SCOPE": scope, "SELECTED_TEST_ARGS": str(recorded), "PYTEST_EXIT": str(pytest_exit),
                "GITHUB_OUTPUT": str(tmp_path / "output")}
         selected = subprocess.run(["bash", "-c", selector_step["run"]], cwd=root,

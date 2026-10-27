@@ -66,6 +66,8 @@ def prepare_pool_execution(request: PoolExecutionPrepareV1, *, participant: Pool
         raise ValueError("pool_execution_binding_mismatch")
     target = participant.target(request.target_id, request.key.workload_kind)
     runtime = request.execution.runtime
+    if runtime.verifier_execution == "separate_execution":
+        participant.target(request.target_id, "verifier")
     if ((profile.profile_id, profile.runtime.target_id, profile.runtime.namespace) != (
             target.profile_id, request.target_id, participant.execution_namespace.name)
             or (runtime.candidate_sha, runtime.execution_class_id, runtime.runtime_image_ref, runtime.runtime_binary_sha256) != (

@@ -320,6 +320,68 @@ def test_existing_docker_plugin_layout_does_not_block_guest(layout: str) -> None
         assert execute(client, "echo $DOCKER_CONFIG").strip() == "/loom/docker-client"
 
 
+def _add_container_guest_failure_diagnostics(name: str, error: BaseException) -> None:
+    """Read this fixture's evidence before teardown, preserving the failure."""
+    if isinstance(error, httpx.HTTPStatusError):
+        error.add_note(f"guest HTTP {error.response.status_code}: {error.response.text[:1024]}")
+    commands = [
+        ["docker", "inspect", "--format", "{{json .State}}", name],
+        ["docker", "exec", name, "/bin/busybox", "cat",
+         "/sys/fs/cgroup/memory.events", "/sys/fs/cgroup/memory.current",
+         "/sys/fs/cgroup/memory.peak", "/sys/fs/cgroup/cpu.stat"],
+        ["docker", "logs", "--tail", "80", name],
+    ]
+    for command in commands:
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=5)
+            detail = f"exit={result.returncode}\n{(result.stdout + result.stderr)[-16300:]}"
+        except Exception as diagnostic_error:
+            detail = type(diagnostic_error).__name__
+        error.add_note(" ".join(command) + "\n" + detail)
+
+
+def test_container_guest_failure_diagnostics_retain_bounded_evidence(monkeypatch) -> None:
+    commands = []
+
+    def run(command, **kwargs):
+        assert 0 < kwargs["timeout"] <= 5
+        commands.append(command)
+        output = {
+            "inspect": '{"OOMKilled":true}',
+            "exec": "oom_kill 1\n",
+            "logs": "old console output\n" * 2000 + "guest channel lost\n",
+        }[command[1]]
+        return subprocess.CompletedProcess(command, 0, output, "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    response = httpx.Response(502, text="guest unavailable", request=httpx.Request("POST", "http://sandbox/exec"))
+    error = httpx.HTTPStatusError("archive failed", request=response.request, response=response)
+    _add_container_guest_failure_diagnostics("owned-guest", error)
+    notes = "\n".join(error.__notes__)
+    assert '"OOMKilled":true' in notes and "oom_kill 1" in notes
+    assert "guest channel lost" in notes and "502" in notes and "guest unavailable" in notes
+    assert len(notes) < 52000
+    assert all("owned-guest" in command for command in commands)
+
+
+@pytest.mark.parametrize("original", [AssertionError("archive failed"), pytest.fail.Exception("test deadline")])
+def test_container_guest_diagnostics_do_not_replace_failure(monkeypatch, original) -> None:
+    def unavailable(command, **kwargs):
+        assert 0 < kwargs["timeout"] <= 5
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr(subprocess, "run", unavailable)
+    with pytest.raises(type(original)) as caught:
+        try:
+            raise original
+        except BaseException as error:
+            _add_container_guest_failure_diagnostics("owned-guest", error)
+            raise
+    assert caught.value is original
+    assert len(original.__notes__) == 3
+    assert all("TimeoutExpired" in note for note in original.__notes__)
+
+
 @contextlib.contextmanager
 def container_guest(*, memory_mib: int = 1024, storage_mib: int = 160,
                     disk_state: bool = False, cpus: int = 1) -> Iterator[tuple[httpx.Client, str]]:
@@ -382,6 +444,9 @@ def container_guest(*, memory_mib: int = 1024, storage_mib: int = 160,
                         assert time.monotonic() < deadline, (directory / "console.log").read_text()
                         time.sleep(0.05)
                     yield client, name
+            except BaseException as error:
+                _add_container_guest_failure_diagnostics(name, error)
+                raise
             finally:
                 subprocess.run(["docker", "stop", "--time=5", name], capture_output=True, check=False)
                 process.wait(timeout=10)
@@ -602,16 +667,40 @@ def test_installed_agent_reaches_the_pod_loopback_broker_from_a_guest(monkeypatc
 
 
 def test_shared_guest_verification_observes_system_changes_after_client_reconnect() -> None:
-    """Shared grading must retain agent changes outside the workspace and kernel state."""
-    with guest() as (client, _, directory):
+    """Shared grading retains the private guest's files, kernel and live processes."""
+    with guest() as (client, _, directory), guest() as (other, _, _):
+        host_pattern = Path("/proc/sys/kernel/core_pattern").read_bytes()
         boot = execute(client, "cat /proc/sys/kernel/random/boot_id")
-        execute(client, "echo repaired > /etc/repair-result; echo guest-repaired > /proc/sys/kernel/core_pattern")
+        assert execute(other, "cat /proc/sys/kernel/random/boot_id") != boot
+        other_pattern = execute(other, "cat /proc/sys/kernel/core_pattern")
+        assert execute(client, "/bin/busybox id -u; /bin/busybox id -g") == "0\n0\n"
+        execute(client, "set -eu; echo repaired > /etc/repair-result; "
+                "echo guest-repaired > /proc/sys/kernel/core_pattern")
+        started = client.post("http://sandbox/processes", json={
+            "argv": ["/bin/busybox", "sleep", "300"], "cwd": "/", "timeout_sec": 60,
+        })
+        assert started.status_code == 201, started.text
+        agent_process = started.json()
+        assert agent_process["running"] and agent_process["pid"] > 0
+        agent_pid = str(agent_process["pid"])
+        client.close()
         # The agent and verifier controllers are independent clients of the
         # same resident sandbox, not separate guest incarnations.
         with httpx.Client(transport=httpx.HTTPTransport(uds=str(directory / "sandbox.sock")), timeout=40) as verifier:
             assert execute(verifier, "cat /etc/repair-result /proc/sys/kernel/core_pattern") == "repaired\nguest-repaired\n"
             assert execute(verifier, "cat /proc/sys/kernel/random/boot_id") == boot
+            status = verifier.get(f"http://sandbox/processes/{agent_process['id']}")
+            status.raise_for_status()
+            assert status.json()["running"] and status.json()["pid"] == agent_process["pid"]
+            process_stat = execute(verifier, f"kill -0 {agent_pid} && cat /proc/{agent_pid}/stat").split()
+            assert process_stat[0] == agent_pid
+            assert process_stat[2] != "Z", "agent process exited before shared grading"
+            assert execute(verifier, "/bin/busybox id -u; /bin/busybox id -g") == "0\n0\n"
+        assert execute(other, "cat /proc/sys/kernel/core_pattern") == other_pattern
+        execute(other, "test ! -e /etc/repair-result")
         assert not (directory / "root/etc/repair-result").exists()
+        assert Path("/proc/sys/kernel/core_pattern").read_bytes() == host_pattern
+    assert Path("/proc/sys/kernel/core_pattern").read_bytes() == host_pattern
 
 
 def test_guest_preserves_image_authored_tools() -> None:

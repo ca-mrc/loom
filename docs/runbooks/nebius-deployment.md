@@ -1,5 +1,11 @@
 # Independent Nebius deployment
 
+For full environments on a platform-owned shared pool, use the
+[independent lifecycle procedure](nebius-environment-lifecycle.md). It covers
+protected target installation, provision/import, enrollment, activation,
+release/rollback and recovery. The procedures below also retain historical
+deployment and shared-handoff paths.
+
 Nebius is the image publication path for both development and production.
 `nebius-candidate` publishes the seven manifest-owned AMD64 images from an exact
 `dev` commit. Production promotes those same immutable digest references through
@@ -721,6 +727,15 @@ incompatible image to bypass this check. The source-bound protected bundle still
 pins the installer independently. Existing v1 inputs keep their single-source
 contract and cannot contain either v2 selection field.
 
+After that exact-schema installation is complete, an unactivated shared-dev
+runtime with a configured application builder can use the protected
+[closed-development schema successor](nebius-environment-lifecycle.md#upgrade-an-unactivated-shared-development-runtime).
+It upgrades the shared and independent manager databases under separate candidate
+selections, and advances the runtime, personal releases, build recipe and catalog
+together. Its retained successor feeds later activation/handoff while preserving
+these original installation receipts. Image-only release still rejects a schema
+change.
+
 Preflight performs read-only qualification and writes no installation state.
 Installation stages the fixed SQL setup, material, read-only authority and build
 isolation, then records each stopped/replaced/started workload transition. It may
@@ -752,18 +767,161 @@ composition must be connected and qualified first.
 
 ### Shared-pool handoff delivery
 
-The separate `shared-pool-preflight`, `shared-pool-install` and
-`shared-pool-recover` actions use the protected `nebius-rollout` workflow,
+The separate `shared-pool-preflight`, `shared-pool-install`,
+`shared-pool-recover`, `shared-pool-refresh-catalog` and
+`shared-pool-refresh-storage` actions use the protected `nebius-rollout` workflow,
 `NEBIUS_SHARED_POOL_SSH_KEY` and `NEBIUS_SHARED_POOL_OPERATION_JSON`. They do not
 extend the CLOSED-runtime key. They are source-implemented delivery routes, not
 evidence that a grant or multi-owner environment is installed. Complete ordinary
 rollout continuity and qualify all installation prerequisites before invoking a
 live handoff; do not acquire a staging guard while waiting for these prerequisites.
 
-The fixed operation schema is `loom.nebius-shared-pool-operation.v1`. It selects
+The original operation schema is `loom.nebius-shared-pool-operation.v1`. It selects
 the exact integrated `source_sha`, management `installation_id`, registered pool
 `operation_id`, namespace `loom-nebius-management-dev`, and the SHA-256 of
 `OPERATOR_HOME/.loom/nebius-shared-pool/INSTALLATION_UUID/POOL_OPERATION_UUID/inputs.json`.
+
+If staging advances before the handoff starts, preserve that preparation and use
+`loom.nebius-shared-pool-operation.v2`. It has the same fields plus a nonzero,
+canonical UUID `preparation_id`, with inputs at
+`OPERATOR_HOME/.loom/nebius-shared-pool/INSTALLATION_UUID/POOL_OPERATION_UUID/preparations/PREPARATION_UUID/inputs.json`.
+Capture and qualify the current staging publication into this new immutable
+preparation, then build its exact-source bundle and separate digest-bound grant.
+Do not overwrite older inputs, grants, releases or receipts, and do not reinstall
+the runtime or roll staging back to match an old preparation. Both versions use
+the same registered pool and manager-owned handoff lock, journal and recovery
+anchors. Once a handoff has anchored its intent, an incompatible preparation is
+rejected: resume or recover the anchored operation rather than selecting new
+inputs. A new directory does not bypass live preflight, writer, drain, publication
+or recovery qualification, and is not a second independent handoff.
+
+If the existing native node group's boot-disk type has changed independently of
+the original CLOSED dev registration, correct that binding before refreshing the
+application catalog. Do not patch the immutable collector ConfigMap, replay the
+installation, change the worker group, or weaken quota matching:
+
+1. From the exact integrated tooling, call `retain_closed_storage` in
+   `scripts.ops.nebius_pool_storage_operation`, selecting the original
+   `RetainedRuntimeReference`, a new correction operation UUID and the supported
+   `target_disk_type`. This retains local inputs only. The correction preserves
+   the original pool/installation operation identity, credentials, participants,
+   admission settings and profiles. Only the policy revision and storage quota
+   name may advance. For example, `NETWORK_SSD_NON_REPLICATED` requires
+   `compute.disk.size.network-ssd-non-replicated`; it does not buy or resize disks.
+2. Create a new immutable handoff preparation using private input schema
+   `loom.nebius-shared-pool-inputs.v4` and its `storage` reference
+   (`operation_id`, `inputs_sha256`). Do not select `preactivation` for this
+   pending correction. Keep the original runtime and registered operation
+   identity, and deliver the exact-source, digest-bound shared tooling grant.
+3. Dispatch protected `shared-pool-refresh-storage`. The authenticated provider
+   read must match the selected group and exact disk type. The operation requires
+   the exact never-used CLOSED registry, a stopped gateway and no anchored
+   handoff/recovery. Under the common lock, it journals collector suspension and
+   descendant drain, creates the immutable corrected ConfigMap, updates the
+   suspended collector, commits the exact registry delta, restores the original
+   schedule, and waits for a fresh matching manager-side aggregate observation.
+   It changes no staging workloads, guards, cloud resources or credentials.
+4. `storage_pending` means completion is still awaiting a qualified observation;
+   preserve the same operation and receipts. `shared_pool_storage_refreshed`
+   means correction only: admission and writer-migration flags remain false.
+   Lost write replies resolve through exact readback, never blind retries. Do
+   not delete dispatched history or roll accounting back to a quota inconsistent
+   with the real disks. A used/active pool is outside this operation's authority.
+5. Carry the completed `storage` reference into handoff, or pass it explicitly to
+   `retain_preactivation_catalog` if a catalog refresh is also needed. Every later
+   catalog predecessor must retain the same storage ancestry. Use v4 private
+   inputs with both references for that catalog/handoff path. A catalog's pinned
+   storage reference is authoritative; an unrelated selected head is rejected.
+   Ordinary releases preserve this physical binding and cannot change it.
+
+If development also requires a schema upgrade, complete the storage correction
+first. Pin its completed `storage` reference in the schema upgrade's private
+inputs. The upgrade consumes the corrected registry and collector, then later
+catalog and handoff operations follow that single storage → schema → catalog
+chain. Independently selected, conflicting successors are rejected. Shared-pool
+input v3 retains its schema-only meaning; v4 selects storage explicitly, with
+the matching schema successor when applicable.
+
+If the captured staging release also differs from the catalog frozen at dev
+registration, a new input directory alone is insufficient. Before handoff:
+
+1. Retain the original completed runtime and registration. From the integrated
+   tooling, call `retain_preactivation_catalog` in
+   `scripts.ops.nebius_pool_preactivation_operation` with that runtime reference,
+   the exact current staging-source envelope and a new operation UUID. This
+   creates private immutable inputs only; it does not contact Kubernetes or SQL.
+   For a subsequent refresh, explicitly select the previous completed
+   `PreactivationReference` as `predecessor`. If a storage correction was required,
+   also select its completed `storage` reference as described above. If a schema
+   upgrade was required, select its completed `schema_successor` reference; that
+   successor must retain the same storage ancestry.
+2. In the new handoff preparation, use private input schema
+   `loom.nebius-shared-pool-inputs.v2` (v3 with a schema successor, v4 when selecting
+   storage) and its `preactivation` reference
+   (`operation_id`, `inputs_sha256`). Keep `runtime` and the shared operation's
+   registered `operation_id` unchanged. The staging envelope must be exactly the
+   one retained by preactivation. Build and install the exact integrated-source,
+   digest-bound shared tooling grant as above.
+3. Dispatch protected `shared-pool-refresh-catalog`. Its separate intake accepts
+   the prepared selector; ordinary handoff intake still requires a completed
+   selector. The operation requalifies publication and, before the first durable
+   catalog intent, current staging; it proves
+   the pool is never-used and CLOSED, and proves the gateway has no live Pods.
+   Under the common handoff lock it creates the immutable catalog, changes only
+   the manager's catalog mount, proves actual manager readiness/settings, and
+   commits the fixed CLOSED registry successor. It does not stop staging,
+   acquire an execution guard, change credentials, open admission or migrate
+   the installed database schema.
+4. `catalog_pending` means the exact manager rollout is not yet ready.
+   `shared_pool_catalog_refreshed` means the catalog transition completed, not
+   activation: both admission and writer-migration flags remain false. Preserve
+   all child receipts and the dispatch anchor. If staging advances after durable
+   catalog intent, finish that exact CLOSED successor, then capture staging again
+   and prepare a new refresh from the completed predecessor. Finishing the old
+   refresh does not qualify its stale catalog for handoff. A proven local failure
+   before the SQL write transport restores only its intact intent to prepared;
+   a later invocation must requalify everything. Once the write transport has
+   been invoked, an uncertain SQL result is read back, never blindly retried.
+   Missing or damaged dispatched history blocks
+   further effects; do not delete it or create another operation to bypass it.
+5. Run fresh protected `shared-pool-preflight`, then the existing bounded handoff
+   and acceptance procedure. Handoff, recovery and the first ordinary participant
+   release consume the same completed effective catalog without rewriting the
+   original installation. If staging advances again, retain another qualified
+   successor while still CLOSED; never weaken catalog equality or roll staging
+   backward to make an earlier preparation pass.
+
+Schema compatibility is separate from release/catalog identity. Without an
+explicit completed development schema successor, the new active management
+database must still be exactly `0176`. Selecting that successor instead requires
+its exact upgraded manager revision from the protected publication. Participant
+readiness, guard/role handoff and recovery accept the audited `0175`, `0176`,
+`0177` and `0178` layouts; readiness reports the actual revision. The `0177`
+publication journal and `0178` catalog/lifecycle tables remain inaccessible to
+the actuator. An unknown revision, missing required journal or excessive role
+grants blocks qualification. No handoff command migrates a database or changes
+its version marker. Protected read-only lease census supports these participant
+layouts; a successful census is not handoff authority.
+
+The retained dev participant may remain on its qualified `0175` runtime: `0176`
+adds Harbor sessions without changing the shared-pool journals or guard layout.
+This compatibility does not upgrade its application or permit a newer image
+against an unsupported database. The runtime's own exact schema check remains
+in force. `0177` publication retention, when present, remains inaccessible to
+the actuator; older layouts do not manufacture that journal.
+
+The historical manager is a separate read-only check. Its completed refresh
+receipt selects the exact `target_manager_revision` for retirement observation
+through preflight, forward handoff and recovery. Initial-upgrade history keeps
+the existing exact-`0176` contract. A live schema that differs from the selected
+completion fails; do not migrate history or broaden the new manager's schema
+contract to bypass that failure.
+
+If current workloads differ from the captured configuration's rendered revision,
+check for configuration updates made after the last completed rollout. Preserve
+the mismatch and reconcile through the protected rollout before capturing new
+inputs; do not erase annotations or substitute old configuration to pass preflight.
+
 The `loom.nebius-shared-pool-inputs.v1` private document contains:
 
 - `runtime`: the completed runtime operation path and SHA-256. Its archived source
@@ -2506,10 +2664,75 @@ schema is `loom.nebius-management-refresh-private-inputs.v1`, with:
   Receipt qualification compares Kubernetes resource quantities numerically
   (for example, `100m` and `0.1`) without rewriting frozen receipt bytes or
   accepting changed resource amounts or other runtime configuration.
-- `pool_baseline`, when inherited from a completed cutover: the exact qualified
-  pool selector. Keep it through subsequent refreshes; omitting it cannot restore
-  legacy writer authority. The separately scoped pool reader requalifies workloads,
+- The operation derives `pool_baseline` from the completed pool predecessor or
+  preceding refresh and records it in the refresh contract. It is not a separate
+  private-input field. Subsequent refreshes retain that exact qualified pool
+  selector; omitting it cannot restore legacy writer authority. The separately
+  scoped pool reader requalifies workloads,
   credentials, mode and effective permissions around refresh writes and completion.
+- Optional `platform_rollout`, for a **legacy** pool baseline whose application
+  workloads advanced through an ordinary completed platform rollout: an object
+  with `deployment_id` (the numeric GitHub deployment ID) and `publication` (the
+  existing exact `ProtectedPublication` selector for that platform candidate).
+  This publication may differ from the target manager publication. Qualification
+  requires a successful protected `nebius-rollout` run and its complete native
+  deployment artifact, including pre-upgrade backup, HTTPS smoke and candidate
+  readback. The selected candidate's pinned source renders the expected current
+  workloads using the validated target foundation configuration. Existing UID,
+  namespace, DB/credential, writer inventory, role and runtime checks still apply.
+  Unrelated image, environment, template or credential changes remain blockers.
+  This does not synthesize a shared-pool participant completion. Prepare a new
+  refresh operation and retain this selector through later refreshes while the
+  frozen pool baseline still predates that rollout; never edit the old baseline,
+  refresh inputs, or completed receipts. `management-refresh-preflight` performs
+  these checks without persisting Kubernetes or database changes.
+  A change of `execution_disk_type` requires this same protected ordinary-rollout
+  reference and a legacy baseline. An absent value means `NETWORK_SSD`;
+  `NETWORK_SSD_NON_REPLICATED` selects the source-rendered NRD storage quota.
+  A change of `task_image_builder.max_concurrent` requires the same reference
+  and legacy baseline. A positive integer is an optional operator limit; null
+  (or an omitted limit in an existing builder) follows capacity. Builder
+  existence, registry, resource limits, cache and all other settings remain
+  fixed. The primary collector's observed ConfigMap may differ from the frozen
+  baseline only in that exact storage quota name and the source-rendered
+  `LOOM_EXECUTION_CAPACITY_COLLECTOR_BUILD_CONCURRENCY_LIMIT` key (including its
+  removal for capacity-following builds). Its UID, other data, fixed cloud
+  credentials, tenant/region/node-group/cluster identities and CPU/memory quota identities
+  remain pinned; the native disk and capacity reader still qualify current
+  provider observations before and after the read. The stopped pool-created
+  observer and historical receipts remain unchanged. For this source-qualified
+  primary collector, comparison copies omit only the root kubectl
+  `last-applied-configuration` bookkeeping annotation. Labels, other annotations
+  and configuration remain exact; readers without the ordinary-successor proof
+  retain the strict comparison. A canonical-config-only
+  edit is insufficient workload proof: finish a genuine backed-up ordinary
+  rollout using the current configuration before selecting its deployment here.
+  The builder ResourceQuota belongs to the ordinary rollout; management refresh
+  does not apply that quota or change build budgets. This reference neither
+  applies cloud resources nor proves disk size, placement or deletion of an
+  earlier node generation.
+  The same proof may qualify the primary control-plane's addition of the
+  `recovery-platform-config` volume when the retained snapshot predates it.
+  Only `loom-platform-config`'s `profile.json` and `environment.json` items and
+  the single read-only mount at `/var/run/loom-platform` are accepted. The
+  existing ConfigMap identity and current configuration still qualify through
+  the shared prerequisites. Other volume sources and `imagePullSecrets` remain
+  pinned; arbitrary ConfigMaps, Secret/projected credentials, PVC additions,
+  writable or alternate mounts and other workload scopes remain rejected.
+  When the selected source omits `kubectl.kubernetes.io/restartedAt`, a
+  Deployment retains that existing Pod-template value from the completed pool workload.
+  The exact template-metadata comparison still rejects a newly added, changed
+  or removed restart marker and unrelated annotations. Other historical
+  annotations are not inherited merely because that restart marker is retained.
+  For the primary PostgreSQL StatefulSet, this same ordinary proof may select
+  only the source-rendered Pod-template `loom.nebius/configuration-revision`
+  rollout identifier. Comparison copies omit the root kubectl `last-applied`
+  bookkeeping annotation; refresh does not modify the database resources.
+  All other retained StatefulSet fields and annotations, the complete Service,
+  UIDs, credentials, PVC binding, ready Pod and actual Service backend still
+  qualify before and after the read. The selected source must retain those
+  database settings. Other participants, manager history and readers without
+  this refresh proof retain their existing strict database comparison.
 - `deployment`, `candidate` and `profile`: the target manager configuration and
   protected publication. The tooling source and candidate SHA must be identical.
 - `manager_revision` and `target_manager_revision`: the expected management DB
@@ -2530,6 +2753,12 @@ installation, namespace, private-input digest and path fields, plus `operation_i
 The workflow has no fallback to bootstrap, diagnostic or recovery credentials.
 Authority installation preserves other grants and does not create private inputs
 or reset operation state. Private credentials never pass through Actions.
+
+A shared-guest-capable publication does not give the manager execution authority.
+Rendering retains the approved profile and its revision inputs, while projecting
+guest-runtime and enabled shared-guest fields out of the non-execution templates.
+Previously valid templates with absent or false shared-guest readiness retain
+their existing representation and immutable migration Pod identities.
 
 Preflight qualifies the completed predecessor, retained resource identities,
 publication and live shared prerequisites. Installation serializes on the original

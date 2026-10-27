@@ -12,7 +12,7 @@ on:
       operation:
         description: Idle rollout, lease census, inventory, certificates, ingress, or protected management installation
         type: choice
-        options: [rollout, recover, inspect, lease-census, certificate, development-management-certificate, ingress, ingress-rollback, ingress-dns, management-preflight, management-install, management-diagnostic-preflight, management-diagnostic-install, management-recovery-preflight, management-recovery-install, management-refresh-preflight, management-refresh-install, management-pool-preflight, management-pool-install, management-pool-rollback, management-pool-repair-preflight, management-pool-repair-install, management-pool-repair-rollback, development-preflight, development-install, development-management-preflight, development-management-install, development-management-renewal-preflight, development-management-renewal-renew, development-pool-preflight, development-pool-install, development-runtime-preflight, development-runtime-install, shared-pool-preflight, shared-pool-install, shared-pool-recover]
+        options: [rollout, recover, inspect, lease-census, certificate, development-management-certificate, ingress, ingress-rollback, ingress-dns, management-preflight, management-install, management-diagnostic-preflight, management-diagnostic-install, management-recovery-preflight, management-recovery-install, management-refresh-preflight, management-refresh-install, management-pool-preflight, management-pool-install, management-pool-rollback, management-pool-repair-preflight, management-pool-repair-install, management-pool-repair-rollback, development-preflight, development-install, development-management-preflight, development-management-install, development-management-renewal-preflight, development-management-renewal-renew, development-pool-preflight, development-pool-install, development-runtime-preflight, development-runtime-install, shared-pool-preflight, shared-pool-install, shared-pool-recover, shared-pool-refresh-catalog, shared-pool-refresh-storage]
         default: rollout
       recovery_run_id:
         description: With recover only, terminal failed rollout whose immutable candidate and guard are resumed
@@ -86,11 +86,12 @@ jobs:
           ref: dev
           fetch-depth: 0
           persist-credentials: false
-      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
           enable-cache: true
+          prune-cache: true
           save-cache: true
           cache-dependency-glob: uv.lock
       - name: Install deployment tooling
@@ -186,11 +187,12 @@ jobs:
           ref: dev
           fetch-depth: 0
           persist-credentials: false
-      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
           enable-cache: true
+          prune-cache: true
           save-cache: true
           cache-dependency-glob: uv.lock
       - name: Install deployment tooling
@@ -308,11 +310,12 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
           enable-cache: true
+          prune-cache: true
           save-cache: true
           cache-dependency-glob: uv.lock
       - name: Install isolated locked certificate tooling
@@ -369,11 +372,12 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
           enable-cache: true
+          prune-cache: true
           save-cache: true
           cache-dependency-glob: uv.lock
       - name: Install isolated locked certificate tooling
@@ -452,11 +456,12 @@ jobs:
           ref: ${{ steps.tooling.outputs.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
           enable-cache: true
+          prune-cache: true
           save-cache: true
           cache-dependency-glob: uv.lock
       - name: Prepare locked ingress tooling
@@ -588,11 +593,12 @@ jobs:
           ref: ${{ steps.tooling.outputs.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
           enable-cache: true
+          prune-cache: true
           save-cache: true
           cache-dependency-glob: uv.lock
       - name: Prepare locked management tooling
@@ -718,11 +724,12 @@ jobs:
           ref: ${{ steps.tooling.outputs.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
           enable-cache: true
+          prune-cache: true
           save-cache: true
           cache-dependency-glob: uv.lock
       - name: Prepare locked development tooling
@@ -812,11 +819,12 @@ jobs:
           ref: ${{ steps.tooling.outputs.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
           enable-cache: true
+          prune-cache: true
           save-cache: true
           cache-dependency-glob: uv.lock
       - name: Prepare locked development management tooling
@@ -906,11 +914,12 @@ jobs:
           ref: ${{ steps.tooling.outputs.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
           enable-cache: true
+          prune-cache: true
           save-cache: true
           cache-dependency-glob: uv.lock
       - name: Prepare locked development management renewal tooling
@@ -1000,11 +1009,12 @@ jobs:
           ref: ${{ steps.tooling.outputs.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
           enable-cache: true
+          prune-cache: true
           save-cache: true
           cache-dependency-glob: uv.lock
       - name: Prepare locked development pool tooling
@@ -1094,11 +1104,12 @@ jobs:
           ref: ${{ steps.tooling.outputs.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
           enable-cache: true
+          prune-cache: true
           save-cache: true
           cache-dependency-glob: uv.lock
       - name: Prepare locked development runtime tooling
@@ -1149,7 +1160,7 @@ jobs:
       github.repository_id == '1281629473' &&
       github.ref == 'refs/heads/dev' &&
       github.event_name == 'workflow_dispatch' &&
-      (inputs.operation == 'shared-pool-preflight' || inputs.operation == 'shared-pool-install' || inputs.operation == 'shared-pool-recover')
+      (inputs.operation == 'shared-pool-preflight' || inputs.operation == 'shared-pool-install' || inputs.operation == 'shared-pool-recover' || inputs.operation == 'shared-pool-refresh-catalog' || inputs.operation == 'shared-pool-refresh-storage')
     runs-on: ubuntu-24.04
     timeout-minutes: 55
     permissions:
@@ -1171,11 +1182,12 @@ jobs:
         run: |
           python3 - <<'PY'
           import json, os, re, subprocess
-          if os.environ['SHARED_POOL_OPERATION'] not in {'shared-pool-preflight', 'shared-pool-install', 'shared-pool-recover'}:
+          if os.environ['SHARED_POOL_OPERATION'] not in {'shared-pool-preflight', 'shared-pool-install', 'shared-pool-recover', 'shared-pool-refresh-catalog', 'shared-pool-refresh-storage'}:
               raise SystemExit('Fixed shared pool operation required')
           value = json.loads(os.environ['NEBIUS_SHARED_POOL_OPERATION_JSON'])
           sha = value['source_sha']
-          if (value['schema'] != 'loom.nebius-shared-pool-operation.v1' or value['namespace'] != 'loom-nebius-management-dev' or
+          if (value['schema'] not in {'loom.nebius-shared-pool-operation.v1', 'loom.nebius-shared-pool-operation.v2'} or
+              value['namespace'] != 'loom-nebius-management-dev' or
               not isinstance(sha, str) or not re.fullmatch(r'[0-9a-f]{40}', sha)):
               raise SystemExit('Exact shared pool source and namespace required')
           subprocess.run(['git', 'merge-base', '--is-ancestor', sha, 'refs/remotes/origin/dev'], check=True)
@@ -1187,11 +1199,12 @@ jobs:
           ref: ${{ steps.tooling.outputs.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
           enable-cache: true
+          prune-cache: true
           save-cache: true
           cache-dependency-glob: uv.lock
       - name: Prepare locked shared pool tooling
@@ -1216,6 +1229,8 @@ jobs:
             shared-pool-preflight) operation=preflight ;;
             shared-pool-install) operation=install ;;
             shared-pool-recover) operation=recover ;;
+            shared-pool-refresh-catalog) operation=refresh-catalog ;;
+            shared-pool-refresh-storage) operation=refresh-storage ;;
             *) exit 1 ;;
           esac
           export LOOM_DEPLOY_SSH_KEY_FILE="$RUNNER_TEMP/nebius-shared-pool-key"
@@ -1255,11 +1270,12 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
           enable-cache: true
+          prune-cache: true
           save-cache: true
           cache-dependency-glob: uv.lock
       - run: uv sync --locked --no-dev --extra cluster
@@ -1322,11 +1338,12 @@ jobs:
         with:
           ref: dev
           persist-credentials: false
-      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
           enable-cache: true
+          prune-cache: true
           save-cache: true
           cache-dependency-glob: uv.lock
       - run: uv sync --locked --no-dev --extra cluster

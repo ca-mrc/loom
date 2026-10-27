@@ -12,7 +12,7 @@ from loom_service.environment_management.registry import ManagementError
 from tests.integration.test_nebius_environment_management import (
     environment_registry as environment_registry,
 )
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 
 
 async def test_destroy_fences_inflight_create_and_keeps_data_names_and_charges(environment_registry):

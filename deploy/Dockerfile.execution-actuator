@@ -3,18 +3,18 @@ RUN apt-get update -qq && \
     apt-get install -y --only-upgrade --no-install-recommends perl-base=5.40.1-6+deb13u1 && \
     rm -rf /var/lib/apt/lists/*
 ENV PIP_RETRIES=10 PIP_DEFAULT_TIMEOUT=60
-RUN apt-get update -qq && \
-    apt-get install -y --only-upgrade --no-install-recommends perl-base && \
-    rm -rf /var/lib/apt/lists/*
 ENV PYTHONPATH=/app/src
 WORKDIR /app
 COPY deploy/execution-actuator-requirements.txt ./deploy/execution-actuator-requirements.txt
 RUN pip install --no-cache-dir --requirement deploy/execution-actuator-requirements.txt
-COPY src/loom/__init__.py src/loom/execution_contract.py src/loom/execution_architecture.py \
+COPY src/loom/__init__.py src/loom/dockerfile_instructions.py src/loom/nebius_terminus_image.py \
+    src/loom/execution_contract.py src/loom/execution_architecture.py \
     src/loom/execution_image_admission.py src/loom/execution_runtime_contract.py \
     src/loom/execution_diagnosis_store.py src/loom/execution_failure_diagnosis.py \
     src/loom/execution_requirements.py src/loom/mutable_paths.py src/loom/sandbox_identity.py src/loom/task_fixtures.py \
     src/loom/task_image_materialization.py src/loom/task_image_build_plan.py \
+    src/loom/task_image_compatibility.py src/loom/task_image_errors.py src/loom/task_image_failure.py \
+    src/loom/task_image_metadata.py src/loom/task_environment_handoff.py src/loom/runtime_environment.py \
     src/loom/nebius_rollout_guard.py src/loom/nebius_kubernetes.py src/loom/startup_retry.py src/loom/terminal_result_semantics.py src/loom/resource_usage_store.py ./src/loom/
 COPY src/loom/agent_runtime.py src/loom/request_params.py src/loom/service_execution_materialization.py \
     src/loom/prebuilt_task_images.py \
@@ -46,10 +46,10 @@ COPY src/loom/models/__init__.py src/loom/models/healthcheck.py src/loom/models/
 COPY src/loom/pipeline/__init__.py src/loom/pipeline/keys.py ./src/loom/pipeline/
 COPY src/loom_control_plane/__init__.py src/loom_control_plane/execution_admission.py \
     src/loom_control_plane/execution_capacity.py src/loom_control_plane/execution_finance.py \
-    src/loom_control_plane/execution_capacity_targets.py \
+    src/loom_control_plane/execution_capacity_targets.py src/loom_control_plane/execution_capacity_wait.py \
     src/loom_control_plane/execution_placement.py \
     src/loom_control_plane/task_image_materializations.py src/loom_control_plane/task_image_capacity.py \
-    src/loom_control_plane/task_image_capacity_wait.py \
+    src/loom_control_plane/task_image_capacity_wait.py src/loom_control_plane/task_image_io_capacity.py \
     src/loom_control_plane/metrics.py src/loom_control_plane/service_execution.py \
     src/loom_control_plane/service_execution_scheduler.py \
     src/loom_control_plane/service_execution_task_snapshot.py \
@@ -69,6 +69,7 @@ import loom.execution_diagnosis_store
 from loom.models.task import EnvironmentConfig, TaskSidecarConfig, TaskConfig
 from loom.harbor_task_import import project_harbor_task
 from loom.task_runtime_compatibility import task_runtime_rejections
+from loom_control_plane.execution_capacity_wait import execution_target_fingerprint, read_execution_capacity_waits
 
 EnvironmentConfig(os="linux", docker_image="registry.example/task@sha256:" + "a" * 64)
 fixture = TaskSidecarConfig(

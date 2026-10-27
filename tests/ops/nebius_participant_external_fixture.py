@@ -39,6 +39,9 @@ def external_connection(*, observer, bindings, shared_state, resources, publishe
     manager = request.database.manager.retained.request.retained
     for key in completed.plan.fixed['material']:
         resources.setdefault(key, copy.deepcopy(completed.resources[key]))
+    if bindings.plan.storage is not None:
+        configuration = bindings.plan.storage.resources.configuration
+        resources[_key(configuration)] = copy.deepcopy(configuration)
     record = json.loads(manager.files[Path(manager.operation['state_dir']) / 'supplied/stage.json'])
     key = 'Secret:' + manager.binding.namespace + ':loom-management-publications'
     item = record['resources'][key]
@@ -47,6 +50,8 @@ def external_connection(*, observer, bindings, shared_state, resources, publishe
     resources[key] = credential
     operator, sessions, reads, closed, cloud_mode = runtime_cloud_transport(
         request, publisher_cloud, patch, shared_state.parent)
+    if bindings.plan.storage is not None:
+        cloud_mode['storage_quota'] = 'compute.disk.size.network-ssd-non-replicated'
     mode, calls = {}, []
     reference = retained.inputs.publication
     original_config, = (row for row in retained.inputs.current

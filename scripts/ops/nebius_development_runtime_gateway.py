@@ -89,6 +89,8 @@ SOURCES += tuple("scripts/ops/" + name + ".py" for name in (
     "nebius_pool_predecessor",
     "nebius_pool_refresh",
     "nebius_pool_refresh_live",
+    "nebius_platform_rollout_successor",
+    "nebius_candidate_render",
     "nebius_pool_repair_entry",
     "nebius_pool_retirement_live",
     "nebius_pool_role_fencing",

@@ -283,7 +283,7 @@ async def publish_if_current(
         await session.rollback()
         raise LeaseLost()
 
-    # Preserve Task 2's job-then-TaskSet lock order.
+    # Publication, failure and deletion share the job-then-TaskSet lock order.
     task_set = (await session.execute(
         select(TaskSet)
         .where(
@@ -296,6 +296,9 @@ async def publish_if_current(
         await session.rollback()
         raise LeaseLost()
 
+    has_previous_publication = (await session.execute(
+        select(Task.id).where(Task.task_set_id == task_set_id).limit(1),
+    )).scalar_one_or_none() is not None
     attempt_count = job.attempt_count
     max_attempts = job.max_attempts
     if output.retry_source and attempt_count < max_attempts:
@@ -315,22 +318,10 @@ async def publish_if_current(
                 "updated_at": now,
             },
         )
-        result = await session.execute(
-            update(TaskSet)
-            .where(
-                TaskSet.id == task_set_id,
-                TaskSet.soft_deleted_at.is_(None),
-            )
-            .values(
-                status="materializing",
-                status_reason=output.status_reason,
-                updated_at=now,
-            )
-            .returning(TaskSet.id),
-        )
-        if len(result.scalars().all()) != 1:
-            await session.rollback()
-            raise LeaseLost()
+        if not has_previous_publication:
+            task_set.status = "materializing"
+            task_set.status_reason = output.status_reason
+            task_set.updated_at = now
         await session.commit()
         return
 
@@ -344,6 +335,7 @@ async def publish_if_current(
         )
 
     has_publishable_rows = bool(output.task_rows)
+    published_ids = {row.id for row in output.task_rows}
     state = "succeeded" if has_publishable_rows else "failed"
     if output.job_failure_reason and not has_publishable_rows:
         state = "failed"
@@ -367,27 +359,27 @@ async def publish_if_current(
         values=job_values,
     )
     if has_publishable_rows:
-        # A rebuild replaces catalog rows and relocates legacy source objects.
-        # Keep the repaired default only for the exact same task revision; it
-        # must not leak into changed configs/checksums or manifest-backed input.
-        previous_legacy = {
+        # Retained IDs must stay in place: Trials reference these catalog rows.
+        # Keep the job -> TaskSet -> sorted Task lock order within publication.
+        previous_tasks = {
             row.id: row
-            for row in (await session.execute(
-                select(
-                    Task.id, Task.checksum, Task.config, Task.source_provenance,
-                    Task.legacy_separate_verifier_checksum,
-                )
-                .where(
-                    Task.task_set_id == task_set_id,
-                    Task.legacy_separate_verifier_checksum.is_not(None),
-                )
+            for row in (await session.scalars(
+                select(Task)
+                .where(Task.task_set_id == task_set_id)
                 .order_by(Task.id)
                 .with_for_update(),
             )).all()
         }
+        # Keep the repaired default only for the exact same legacy revision.
         legacy_defaults: dict[str, str] = {}
+        seen_ids: set[str] = set()
         for draft in output.task_rows:
-            previous = previous_legacy.get(draft.id)
+            previous = previous_tasks.get(draft.id)
+            if previous is not None and draft.id in seen_ids:
+                # New duplicates still hit the primary key; reused rows need
+                # the same rejection instead of a last-write-wins update.
+                raise ValueError("TaskSet publication contains duplicate task IDs")
+            seen_ids.add(draft.id)
             if (
                 previous is not None
                 and previous.legacy_separate_verifier_checksum
@@ -398,35 +390,34 @@ async def publish_if_current(
                 and "bundle_content_manifest_sha256" not in draft.source_provenance
             ):
                 legacy_defaults[draft.id] = previous.legacy_separate_verifier_checksum
-        await session.execute(delete(Task).where(Task.task_set_id == task_set_id))
-        published_tasks = [
-            Task(
-                id=row.id,
-                checksum=row.checksum,
-                legacy_separate_verifier_checksum=legacy_defaults.get(row.id),
-                config=row.config,
-                source=row.source,
-                source_provenance=row.source_provenance,
-                tags=row.tags,
-                task_set_id=task_set_id,
-                benchmark_id=None,
-            )
-            for row in sorted(output.task_rows, key=lambda row: row.id)
-        ]
+        removed_ids = previous_tasks.keys() - published_ids
+        if removed_ids:
+            # Referenced removals still fail atomically under the existing FKs.
+            await session.execute(delete(Task).where(
+                Task.task_set_id == task_set_id,
+                Task.id.in_(removed_ids),
+            ))
+        published_tasks = []
+        for row in sorted(output.task_rows, key=lambda row: row.id):
+            task_row = previous_tasks.get(row.id)
+            if task_row is None:
+                task_row = Task(id=row.id, task_set_id=task_set_id)
+            task_row.checksum = row.checksum
+            task_row.legacy_separate_verifier_checksum = legacy_defaults.get(row.id)
+            task_row.config = row.config
+            task_row.source = row.source
+            task_row.source_provenance = row.source_provenance
+            task_row.tags = row.tags
+            task_row.benchmark_id = None
+            published_tasks.append(task_row)
         session.add_all(published_tasks)
         await session.flush()
         for task_row in published_tasks:
             if task_row.config:
                 await ensure_task_image_materializations(session, task_row=task_row)
-    else:
-        has_previous_publication = (await session.execute(
-            select(Task.id)
-            .where(Task.task_set_id == task_set_id)
-            .limit(1),
-        )).scalar_one_or_none() is not None
-        if has_previous_publication:
-            await session.commit()
-            return
+    elif has_previous_publication:
+        await session.commit()
+        return
     result = await session.execute(
         update(TaskSet)
         .where(
@@ -472,6 +463,14 @@ async def _fail_lease(
     if task_set_id is None:
         await session.rollback()
         raise LeaseLost()
+    task_set = (await session.execute(
+        select(TaskSet)
+        .where(TaskSet.id == task_set_id, TaskSet.soft_deleted_at.is_(None))
+        .with_for_update(),
+    )).scalar_one_or_none()
+    if task_set is None:
+        await session.rollback()
+        raise LeaseLost()
     await _update_job_for_lease(
         session,
         lease=lease,
@@ -484,19 +483,13 @@ async def _fail_lease(
             "updated_at": now,
         },
     )
-    result = await session.execute(
-        update(TaskSet)
-        .where(TaskSet.id == task_set_id)
-        .values(
-            status="failed",
-            status_reason=failure_reason,
-            updated_at=now,
-        )
-        .returning(TaskSet.id),
-    )
-    if len(result.scalars().all()) != 1:
-        await session.rollback()
-        raise LeaseLost()
+    has_previous_publication = (await session.execute(
+        select(Task.id).where(Task.task_set_id == task_set_id).limit(1),
+    )).scalar_one_or_none() is not None
+    if not has_previous_publication:
+        task_set.status = "failed"
+        task_set.status_reason = failure_reason
+        task_set.updated_at = now
     await session.commit()
 
 

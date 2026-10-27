@@ -44,18 +44,6 @@ from loom.family_run.spec import (
 logger = logging.getLogger(__name__)
 
 
-class _AdapterLike(Protocol):
-    async def evolve(
-        self,
-        *,
-        trial: Any,
-        family: Any,
-        state_uri: str,
-        backend: Any,
-        params: dict[str, Any],
-    ) -> str: ...
-
-
 class _TrialCancellationClient(Protocol):
     async def cancel_trial(self, trial_id: str) -> None: ...
 

@@ -13,6 +13,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.db.schema import (
+    ExecutionCapacityObservation,
     ExecutionCapacityPolicy,
     ServiceExecutionLease,
     TaskImageMaterialization,
@@ -24,6 +25,11 @@ from loom_control_plane.execution_capacity import (
     create_execution_capacity_observation,
 )
 from loom_control_plane.task_image_capacity import reserve_native_task_image_capacity
+from loom_execution_actuator.renderer import ExecutionTargetRuntime
+from loom_execution_actuator.task_image_controller import (
+    NativeTaskImageController,
+    NativeTaskImageSettings,
+)
 from tests.execution_placement_fixtures import placement_fixture
 from tests.integration.test_execution_capacity_placement import _record
 from tests.integration.test_service_execution_leases import (
@@ -49,10 +55,10 @@ async def native_setup(postgres_url):
         await engine.dispose()
 
 
-async def _native(session, owned, pair, now, *, cpu=64000):
+async def _native(session, owned, pair, now, *, cpu=64000, checksum="2" * 64):
     trial = await session.get(Trial, pair[0])
     row = TaskImageMaterialization(
-        id=uuid4(), materialization_key=uuid4().hex * 2, task_id=trial.task_id, task_checksum="2" * 64,
+        id=uuid4(), materialization_key=uuid4().hex * 2, task_id=trial.task_id, task_checksum=checksum,
         cpu_arch="x86_64", task_config={}, state="claimed", claimed_by="native", lease_epoch=1,
         attempt_count=1, lease_expires_at=now + timedelta(minutes=5),
     )
@@ -69,6 +75,305 @@ async def _native(session, owned, pair, now, *, cpu=64000):
     session.add(attempt)
     await session.flush()
     return attempt.id, row.id
+
+
+def _io_placement(pair, now, *, pressure=0.0, quota_nodes=1, requested_cpu=0):
+    placement = placement_fixture(target_id=pair[1].target_id, nodes=1, used_nodes=1,
+                                  quota_nodes=quota_nodes, requested_cpu=requested_cpu)
+    node = placement["nodes"][0]
+    node.update(name="worker-1", draining=False,
+                io_pressure={"sampled_at": now.isoformat(), "full_avg10": pressure})
+    return placement
+
+
+async def _io_native(session, owned, pair, now, *, cpu=1000):
+    attempt_id, materialization_id = await _native(session, owned, pair, now, cpu=cpu, checksum=uuid4().hex * 2)
+    attempt = await session.get(TaskImageMaterializationAttempt, attempt_id)
+    attempt.native_build = {
+        **attempt.native_build, "io_full_avg10_max": 50.0,
+        "job": {"metadata": {"name": "test-build"}, "spec": {"template": {"spec": {
+            "nodeSelector": {"pool": "shared"}, "tolerations": [],
+        }}}},
+    }
+    return attempt_id, materialization_id
+
+
+def _monitoring_placement(pair, at, *, pressure=0.0):
+    placement = _io_placement(pair, at)
+    node = placement["nodes"][0]
+    node.pop("io_pressure")
+    node.update(created_at=(at - timedelta(hours=1)).isoformat(), io_stall_window={
+        "source": "nebius_io_stalled_counter",
+        "window_started_at": (at - timedelta(seconds=30)).isoformat(),
+        "sampled_at": at.isoformat(), "full_window_percent": pressure,
+    })
+    return placement
+
+
+async def test_monitoring_window_jsonb_binding_requires_complete_post_heavy_feedback(native_setup):
+    sessions, owned = native_setup
+    now = datetime.now(UTC)
+    at = now + timedelta(seconds=1)
+    async with sessions() as session, session.begin():
+        pair = await _seed_ready_trial(session, now=now)
+        placement = _monitoring_placement(pair, at)
+        observation, _ = await _record(session, pair[1].target_id, at, placement)
+        observation_id = observation.id
+        first, _ = await _io_native(session, owned, pair, now)
+        original = await reserve_native_task_image_capacity(session, attempt_id=first, now=at)
+        second, _ = await _io_native(session, owned, pair, now)
+    async with sessions() as session:
+        # Read a new session's persisted JSONB, not the in-memory typed input.
+        stored = (await session.get(ExecutionCapacityObservation, observation_id)).observation_json
+        node = stored["placement"]["nodes"][0]
+        window = node["io_stall_window"]
+        assert window["source"] == "nebius_io_stalled_counter"
+        assert datetime.fromisoformat(window["window_started_at"]) == at - timedelta(seconds=30)
+        assert datetime.fromisoformat(window["sampled_at"]) == at
+        assert datetime.fromisoformat(node["created_at"]) == at - timedelta(hours=1)
+        binding = (await session.get(TaskImageMaterializationAttempt, first)).native_build["io_binding"]
+        assert binding == original["io_binding"]
+        assert binding["provider_id"] == node["provider_id"] and binding["node_uid"] == node["uid"]
+        assert binding["source"] == window["source"] and binding["full_window_percent"] == 0.0
+        assert "full_avg10" not in binding
+        pod = original["job"]["spec"]["template"]["spec"]
+        terms = pod["affinity"]["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]["nodeSelectorTerms"]
+        assert terms[0]["matchFields"] == [{"key": "metadata.name", "operator": "In", "values": ["worker-1"]}]
+        assert pod["nodeSelector"] == {"pool": "shared"}
+    async with sessions() as session, session.begin():
+        attempt = await session.get(TaskImageMaterializationAttempt, first)
+        attempt.native_build = {
+            **attempt.native_build, "state": "running", "pod_uid": "observed-window-pod",
+            "node_name": "worker-1", "phases": [{"name": "build", "state": {
+                "running": {"startedAt": (now + timedelta(seconds=3)).isoformat()},
+            }}],
+        }
+        # The endpoint is 17s after heavy start, but this window includes idle
+        # time before it. It cannot inherit the old avg10 endpoint-only rule.
+        diluted_at = now + timedelta(seconds=20)
+        await _record(session, pair[1].target_id, diluted_at, _monitoring_placement(pair, diluted_at))
+    with pytest.raises(ExecutionProvisioningBlockedError, match="feedback_pending"):
+        async with sessions() as session, session.begin():
+            await reserve_native_task_image_capacity(session, attempt_id=second, now=diluted_at)
+    async with sessions() as session, session.begin():
+        fresh_at = now + timedelta(seconds=40)
+        await _record(session, pair[1].target_id, fresh_at, _monitoring_placement(pair, fresh_at))
+        result = await reserve_native_task_image_capacity(session, attempt_id=second, now=fresh_at)
+        assert result["io_binding"]["node_uid"] == binding["node_uid"]
+        assert datetime.fromisoformat(result["io_binding"]["window_started_at"]) >= now + timedelta(seconds=3)
+        retained = (await session.get(TaskImageMaterializationAttempt, first)).native_build
+        assert retained["io_binding"] == binding and retained.get("capacity_released_at") is None
+        assert result.get("capacity_released_at") is None
+
+
+@pytest.mark.parametrize("damage", ["hot", "missing", "before_node_creation"])
+async def test_monitoring_window_unqualified_input_never_reserves(native_setup, damage):
+    sessions, owned = native_setup
+    now = datetime.now(UTC)
+    at = now + timedelta(seconds=1)
+    async with sessions() as session, session.begin():
+        pair = await _seed_ready_trial(session, now=now)
+        placement = _monitoring_placement(pair, at, pressure=65.0 if damage == "hot" else 0.0)
+        node = placement["nodes"][0]
+        if damage == "hot":
+            node["io_pressure"] = {"sampled_at": at.isoformat(), "full_avg10": 0.0}
+        elif damage == "missing":
+            node.pop("io_stall_window")
+        else:
+            node["created_at"] = (at - timedelta(seconds=29)).isoformat()
+        await _record(session, pair[1].target_id, at, placement)
+        attempt_id, _ = await _io_native(session, owned, pair, now)
+    reason = "provider_quota_nodes_exceeded" if damage == "hot" else "observation_unavailable"
+    with pytest.raises(ExecutionProvisioningBlockedError, match=reason):
+        async with sessions() as session, session.begin():
+            await reserve_native_task_image_capacity(session, attempt_id=attempt_id, now=at)
+    async with sessions() as session:
+        native = (await session.get(TaskImageMaterializationAttempt, attempt_id)).native_build
+        assert "capacity_reserved_at" not in native and "io_binding" not in native
+
+
+@pytest.mark.parametrize("field", ["uid", "provider_id"])
+async def test_monitoring_window_frozen_binding_rejects_node_or_provider_replacement(native_setup, field):
+    sessions, owned = native_setup
+    now = datetime.now(UTC)
+    at = now + timedelta(seconds=1)
+    async with sessions() as session, session.begin():
+        pair = await _seed_ready_trial(session, now=now)
+        placement = _monitoring_placement(pair, at)
+        await _record(session, pair[1].target_id, at, placement)
+        attempt_id, _ = await _io_native(session, owned, pair, now)
+        original = await reserve_native_task_image_capacity(session, attempt_id=attempt_id, now=at)
+    async with sessions() as session, session.begin():
+        placement["nodes"][0][field] = "replaced-" + field
+        await _record(session, pair[1].target_id, at + timedelta(seconds=1), placement)
+    with pytest.raises(ExecutionProvisioningBlockedError, match="node_identity_changed"):
+        async with sessions() as session, session.begin():
+            await reserve_native_task_image_capacity(session, attempt_id=attempt_id,
+                now=at + timedelta(seconds=2), revalidate_existing=True)
+    async with sessions() as session:
+        assert (await session.get(TaskImageMaterializationAttempt, attempt_id)).native_build == original
+
+
+async def test_io_hot_node_cannot_authorize_native_build_without_spare_quota(native_setup):
+    sessions, owned = native_setup
+    now = datetime.now(UTC)
+    async with sessions() as session, session.begin():
+        pair = await _seed_ready_trial(session, now=now)
+        at = now + timedelta(seconds=1)
+        await _record(session, pair[1].target_id, at, _io_placement(pair, at, pressure=65.0))
+        attempt_id, _ = await _native(session, owned, pair, now, cpu=1000)
+        attempt = await session.get(TaskImageMaterializationAttempt, attempt_id)
+        attempt.native_build = {**attempt.native_build, "io_full_avg10_max": 50.0}
+    with pytest.raises(ExecutionProvisioningBlockedError):
+        async with sessions() as session, session.begin():
+            await reserve_native_task_image_capacity(session, attempt_id=attempt_id, now=now + timedelta(seconds=2))
+    async with sessions() as session:
+        attempt = await session.get(TaskImageMaterializationAttempt, attempt_id)
+        assert "capacity_reserved_at" not in attempt.native_build
+
+
+async def test_io_feedback_permits_second_active_build_after_actual_ten_second_window(native_setup):
+    sessions, owned = native_setup
+    now = datetime.now(UTC)
+    async with sessions() as session, session.begin():
+        pair = await _seed_ready_trial(session, now=now)
+        at = now + timedelta(seconds=1)
+        placement = _io_placement(pair, at)
+        await _record(session, pair[1].target_id, at, placement)
+        first, _ = await _io_native(session, owned, pair, now)
+        original = await reserve_native_task_image_capacity(session, attempt_id=first, now=at)
+        second, _ = await _io_native(session, owned, pair, now)
+        assert original["io_binding"]["mode"] == "node"
+        pod = original["job"]["spec"]["template"]["spec"]
+        assert pod["nodeSelector"] == {"pool": "shared"}
+        fields = pod["affinity"]["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]["nodeSelectorTerms"][0]["matchFields"]
+        assert fields == [{"key": "metadata.name", "operator": "In", "values": ["worker-1"]}]
+    with pytest.raises(ExecutionProvisioningBlockedError, match="feedback_pending"):
+        async with sessions() as session, session.begin():
+            await reserve_native_task_image_capacity(session, attempt_id=second, now=now + timedelta(seconds=2))
+    async with sessions() as session, session.begin():
+        first_attempt = await session.get(TaskImageMaterializationAttempt, first)
+        first_attempt.native_build = {
+            **first_attempt.native_build, "state": "running", "pod_uid": "observed-first-pod",
+            "node_name": "worker-1", "phases": [{"name": "build", "state": {
+                "running": {"startedAt": (now + timedelta(seconds=3)).isoformat()},
+            }}],
+        }
+        at = now + timedelta(seconds=12)
+        await _record(session, pair[1].target_id, at, _io_placement(pair, at))
+    with pytest.raises(ExecutionProvisioningBlockedError, match="feedback_pending"):
+        async with sessions() as session, session.begin():
+            await reserve_native_task_image_capacity(session, attempt_id=second, now=now + timedelta(seconds=12))
+    async with sessions() as session, session.begin():
+        at = now + timedelta(seconds=14)
+        await _record(session, pair[1].target_id, at, _io_placement(pair, at))
+        result = await reserve_native_task_image_capacity(session, attempt_id=second, now=at)
+        assert result["io_binding"]["node_uid"] == original["io_binding"]["node_uid"]
+        assert (await session.get(TaskImageMaterializationAttempt, first)).native_build.get("capacity_released_at") is None
+        assert result.get("capacity_released_at") is None
+
+
+@pytest.mark.parametrize("damage", ["missing", "stale", "future", "61s"])
+async def test_io_unknown_metric_does_not_authorize_or_consume_a_reservation(native_setup, damage):
+    sessions, owned = native_setup
+    now = datetime.now(UTC)
+    at = now + timedelta(seconds=1)
+    async with sessions() as session, session.begin():
+        pair = await _seed_ready_trial(session, now=now)
+        policy = await session.get(ExecutionCapacityPolicy, pair[1].target_id)
+        policy.observation_max_age_seconds = 300
+        placement = _io_placement(pair, at, quota_nodes=10)
+        if damage == "missing":
+            placement["nodes"][0].pop("io_pressure")
+        else:
+            delta = (timedelta(seconds=-61) if damage == "61s" else
+                     timedelta(minutes=-30 if damage == "stale" else 10))
+            placement["nodes"][0]["io_pressure"]["sampled_at"] = (at + delta).isoformat()
+        await _record(session, pair[1].target_id, at, placement)
+        attempt_id, _ = await _io_native(session, owned, pair, now)
+    with pytest.raises(ExecutionProvisioningBlockedError, match="observation_unavailable"):
+        async with sessions() as session, session.begin():
+            await reserve_native_task_image_capacity(session, attempt_id=attempt_id, now=at)
+    async with sessions() as session:
+        assert "capacity_reserved_at" not in (await session.get(TaskImageMaterializationAttempt, attempt_id)).native_build
+
+
+@pytest.mark.parametrize("existing_nodes", [0, 1])
+async def test_io_healthy_but_resource_full_node_uses_one_unobserved_cold_bootstrap(native_setup, existing_nodes):
+    sessions, owned = native_setup
+    now = datetime.now(UTC)
+    at = now + timedelta(seconds=1)
+    async with sessions() as session, session.begin():
+        pair = await _seed_ready_trial(session, now=now)
+        placement = (_io_placement(pair, at, quota_nodes=2, requested_cpu=64000) if existing_nodes else
+                     placement_fixture(target_id=pair[1].target_id, nodes=0, used_nodes=0, quota_nodes=2))
+        await _record(session, pair[1].target_id, at, placement)
+        first, _ = await _io_native(session, owned, pair, now)
+        result = await reserve_native_task_image_capacity(session, attempt_id=first, now=at)
+        assert result["io_binding"] == {"mode": "bootstrap", "excluded_node_names": ["worker-1"] if existing_nodes else []}
+        second, _ = await _io_native(session, owned, pair, now)
+    with pytest.raises(ExecutionProvisioningBlockedError, match="feedback_pending"):
+        async with sessions() as session, session.begin():
+            await reserve_native_task_image_capacity(session, attempt_id=second, now=at)
+
+
+async def test_io_frozen_node_revalidation_cannot_move_to_new_healthy_node(native_setup):
+    sessions, owned = native_setup
+    now = datetime.now(UTC)
+    at = now + timedelta(seconds=1)
+    async with sessions() as session, session.begin():
+        pair = await _seed_ready_trial(session, now=now)
+        placement = _io_placement(pair, at, quota_nodes=2)
+        await _record(session, pair[1].target_id, at, placement)
+        attempt_id, _ = await _io_native(session, owned, pair, now)
+        original = await reserve_native_task_image_capacity(session, attempt_id=attempt_id, now=at)
+    async with sessions() as session, session.begin():
+        placement["nodes"][0]["uid"] = "replaced-node-uid"
+        await _record(session, pair[1].target_id, at + timedelta(seconds=1), placement)
+    with pytest.raises(ExecutionProvisioningBlockedError, match="node_identity_changed"):
+        async with sessions() as session, session.begin():
+            await reserve_native_task_image_capacity(session, attempt_id=attempt_id, now=at + timedelta(seconds=2), revalidate_existing=True)
+    async with sessions() as session:
+        assert (await session.get(TaskImageMaterializationAttempt, attempt_id)).native_build == original
+
+
+async def test_io_revalidation_cannot_create_a_missing_frozen_binding(native_setup):
+    sessions, owned = native_setup
+    now = datetime.now(UTC)
+    at = now + timedelta(seconds=1)
+    async with sessions() as session, session.begin():
+        pair = await _seed_ready_trial(session, now=now)
+        await _record(session, pair[1].target_id, at, _io_placement(pair, at))
+        attempt_id, _ = await _io_native(session, owned, pair, now)
+        await reserve_native_task_image_capacity(session, attempt_id=attempt_id, now=at)
+        attempt = await session.get(TaskImageMaterializationAttempt, attempt_id)
+        damaged = dict(attempt.native_build)
+        damaged.pop("io_binding")
+        attempt.native_build = damaged
+    with pytest.raises(ExecutionProvisioningBlockedError, match="binding_invalid"):
+        async with sessions() as session, session.begin():
+            await reserve_native_task_image_capacity(session, attempt_id=attempt_id, now=at, revalidate_existing=True)
+
+
+async def test_io_bootstrap_binding_remains_charged_in_shared_peer_quota_projection(native_setup):
+    sessions, owned = native_setup
+    now = datetime.now(UTC)
+    at = now + timedelta(seconds=1)
+    async with sessions() as session, session.begin():
+        a, b = await _seed_ready_trial(session, now=now), await _seed_ready_trial(session, now=now)
+        first = placement_fixture(target_id=a[1].target_id, nodes=0, used_nodes=0,
+                                  quota_nodes=2, parent_id="shared-io-tenant")
+        second = _io_placement(b, at, pressure=65.0, quota_nodes=2)
+        for quota in second["quota_resources"].values():
+            quota["parent_id"] = "shared-io-tenant"
+        await _record(session, a[1].target_id, at, first)
+        await _record(session, b[1].target_id, at, second)
+        attempt_id, _ = await _io_native(session, owned, b, now)
+        reserved = await reserve_native_task_image_capacity(session, attempt_id=attempt_id, now=at)
+        assert reserved["io_binding"]["mode"] == "bootstrap"
+    with pytest.raises(ExecutionProvisioningBlockedError, match="provider_quota_nodes_exceeded"):
+        async with sessions() as session, session.begin():
+            await _reserve(session, trial_id=a[0], target=a[1], now=at + timedelta(seconds=1))
 
 
 @pytest.mark.parametrize("competitor", ["execution", "native"])
@@ -281,3 +586,58 @@ async def test_native_cold_admission_reuses_history_only_for_unused_added_labels
         async with sessions() as session:
             attempt = await session.get(TaskImageMaterializationAttempt, attempt_id)
             assert attempt.native_build["capacity_reserved_at"] == decision["capacity_reserved_at"]
+
+
+async def test_retired_build_binding_unblocks_unrelated_trial_only_after_confirmed_cleanup(native_setup):
+    sessions, owned = native_setup
+    now = datetime.now(UTC)
+    at = now + timedelta(seconds=1)
+    async with sessions() as session, session.begin():
+        pair = await _seed_ready_trial(session, now=now)
+        placement = _io_placement(pair, at)
+        await _record(session, pair[1].target_id, at, placement)
+        attempt_id, materialization_id = await _io_native(session, owned, pair, now)
+        original = await reserve_native_task_image_capacity(session, attempt_id=attempt_id, now=at)
+        attempt = await session.get(TaskImageMaterializationAttempt, attempt_id)
+        attempt.native_build = {**original, "job_uid": "old-job-uid", "configmap": {"metadata": {"name": "test-build"}}}
+        # Replacement capacity is ample, but cannot satisfy the frozen UID.
+        placement["nodes"][0].update(uid="replacement-uid", name="worker-2", provider_id="test://replacement")
+        await _record(session, pair[1].target_id, at + timedelta(seconds=1), placement)
+        row = await session.get(TaskImageMaterialization, materialization_id)
+        row.state = "failed"
+        row.lease_expires_at = now - timedelta(seconds=1)
+
+    class CleanupApi:
+        allow_delete = False
+
+        async def delete(self, namespace, name, uid, *, configmap):
+            assert (namespace, name, uid) == ("builds", "test-build", "old-job-uid")
+            assert configmap["metadata"]["name"] == "test-build"
+            return self.allow_delete
+
+    kube = CleanupApi()
+    controller = NativeTaskImageController(
+        sessions=sessions, kubernetes=kube,
+        target=ExecutionTargetRuntime(target_id=pair[1].target_id, namespace="executions"),
+        settings=NativeTaskImageSettings(
+            namespace="builds", service_image="registry.example/service@sha256:" + "b" * 64,
+            storage_endpoint="https://storage.example", storage_region="eu-north1", source_bucket="tasks",
+            registry_repository="registry.example/tasks", registry_auth_kind="docker-config",
+        ),
+    )
+    for confirmed in (False, True):
+        with pytest.raises(ExecutionProvisioningBlockedError, match="bound_node_unavailable"):
+            async with sessions() as session, session.begin():
+                await _reserve(session, trial_id=pair[0], target=pair[1], now=at + timedelta(seconds=2))
+        async with sessions() as session:
+            native = dict((await session.get(TaskImageMaterializationAttempt, attempt_id)).native_build)
+            assert not native.get("capacity_released_at")
+        kube.allow_delete = confirmed
+        await controller._cleanup(attempt_id, native)
+    async with sessions() as session, session.begin():
+        released = (await session.get(TaskImageMaterializationAttempt, attempt_id)).native_build
+        assert released["capacity_released_at"]
+        assert released["io_binding"] == original["io_binding"]
+        lease = await _reserve(session, trial_id=pair[0], target=pair[1], now=at + timedelta(seconds=3))
+        assert isinstance(lease, ServiceExecutionLease)
+        assert lease.attempt == 1

@@ -6,9 +6,15 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 IMAGE="${LOOM_WORKER_IMAGE:-loom-worker:gate1-regen}"
 DOCKERFILE="${ROOT}/deploy/Dockerfile.worker"
+REFRESH_DEPENDENCIES="${LOOM_WORKER_REFRESH_DEPENDENCIES-false}"
+case "${REFRESH_DEPENDENCIES}" in
+  true|false) ;;
+  *) echo 'LOOM_WORKER_REFRESH_DEPENDENCIES must be true or false' >&2; exit 2 ;;
+esac
 
 cd "${ROOT}"
-docker build -f "${DOCKERFILE}" -t "${IMAGE}" .
+docker build -f "${DOCKERFILE}" -t "${IMAGE}" \
+  --build-arg "WORKER_REFRESH_DEPENDENCIES=${REFRESH_DEPENDENCIES}" .
 
 LOCK="${ROOT}/deploy/worker-image.lock"
 WHEELS="${ROOT}/deploy/worker-image.wheels.json"

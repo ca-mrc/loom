@@ -10,10 +10,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -31,7 +33,7 @@ func testClient(t *testing.T) *http.Client {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := &http.Server{Handler: (runtimeServer{1024, 3 * time.Second}).handler()}
+	server := &http.Server{Handler: (runtimeServer{maxTransfer: 1024, maxTimeout: 3 * time.Second}).handler()}
 	go server.Serve(listener)
 	t.Cleanup(func() { server.Close() })
 	client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -195,6 +197,33 @@ func TestTransferBoundaries(t *testing.T) {
 	}
 }
 
+func TestUploadPermissionFailureIsDiagnosableWithoutPrivatePaths(t *testing.T) {
+	if runtime.GOOS != "linux" || os.Geteuid() == 0 {
+		t.Skip("requires unprivileged Linux file permissions")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0755) })
+	req, _ := http.NewRequest("PUT", "http://sandbox/file", strings.NewReader("private-payload"))
+	q := req.URL.Query()
+	q.Set("path", filepath.Join(dir, "private-filename"))
+	req.URL.RawQuery = q.Encode()
+	response, err := testClient(t).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, _ := io.ReadAll(response.Body)
+	if response.StatusCode != 400 || response.Header.Get("X-Loom-Sandbox-Error") != "file_permission_denied" {
+		t.Fatalf("permission failure lost: status=%d headers=%v", response.StatusCode, response.Header)
+	}
+	if string(body) != "file upload rejected\n" || strings.Contains(fmt.Sprint(response.Header), "private-") {
+		t.Fatal("upload failure exposed private path or content")
+	}
+}
+
 func TestStopProcessesPreservesRPCAndRejectsHostProcess(t *testing.T) {
 	c := testClient(t)
 	if runtime.GOOS != "linux" || os.Getpid() != 1 {
@@ -235,7 +264,7 @@ func TestStopProcessesFinishesAfterRequestCancellation(t *testing.T) {
 	if runtime.GOOS != "linux" || os.Getpid() != 1 {
 		t.Skip("cleanup requires an isolated Linux PID namespace with the runtime as PID 1")
 	}
-	handler := (runtimeServer{1024, 3 * time.Second}).handler()
+	handler := (runtimeServer{maxTransfer: 1024, maxTimeout: 3 * time.Second}).handler()
 	execute := func(command string) execResult {
 		t.Helper()
 		data, _ := json.Marshal(execRequest{Argv: []string{"/bin/sh", "-c", command}})
@@ -402,5 +431,28 @@ func TestReadlinkRejectsRegularAndUnsafePaths(t *testing.T) {
 		if err != nil || response.StatusCode != 400 || strings.Contains(string(data), "secret") {
 			t.Fatalf("unsafe alias accepted: path=%q status=%d", path, response.StatusCode)
 		}
+	}
+}
+
+func TestGuestTaskIdentityRejectsADifferentRequestedUser(t *testing.T) {
+	server := runtimeServer{maxTransfer: 1024, maxTimeout: time.Second, identity: &guestTaskIdentity{
+		uid: 1001, gid: 1002, home: "/home/oci-user",
+	}}
+	root := "root"
+	_, _, rejection := server.validateCommand(execRequest{User: &root, Timeout: 1})
+	if rejection == nil || rejection.code != "exec_user_mismatch" {
+		t.Fatalf("%v", rejection)
+	}
+	matched := "1001:1002"
+	_, environment, rejection := server.validateCommand(execRequest{User: &matched, Timeout: 1, Env: map[string]string{"HOME": "/tmp"}})
+	if rejection != nil {
+		t.Fatal(rejection)
+	}
+	cmd := exec.Command("/bin/true")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	prepared := server.prepareCommand(cmd, environment)
+	joined := strings.Join(prepared, "\n")
+	if !strings.Contains(joined, "HOME=/home/oci-user") || strings.Contains(joined, "HOME=/tmp") || strings.Contains(joined, "HOME=/root") {
+		t.Fatalf("%q", prepared)
 	}
 }

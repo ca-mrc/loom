@@ -14,7 +14,7 @@ from scripts.ops.nebius_ingress_stage import _snapshot, _uid
 from scripts.ops.nebius_management_gateway import REFRESH_RETAINED_PREFLIGHT_STAGES
 from scripts.ops.nebius_management_live import backup_client
 from scripts.ops.nebius_management_proofs import ManagementPublicProbe
-from scripts.ops.nebius_management_refresh import render_refresh
+from scripts.ops.nebius_management_refresh import platform_references_changed, render_refresh
 from scripts.ops.nebius_management_refresh_backup import HTTPSManagementRefreshBackupAPI
 from scripts.ops.nebius_management_refresh_evidence import HTTPSManagementRefreshEvidenceAPI
 from scripts.ops.nebius_management_refresh_install import (
@@ -89,10 +89,13 @@ class HTTPSManagementRefreshInstaller(HTTPSApplicationSetupAPI):
         pooled = (request.pool_baseline is not None or isinstance(self.predecessor, CompletedPoolCutover)
                 or render.before.pool_catalog_operation_id is not None
                 or (isinstance(self.predecessor, CompletedRefresh) and self.predecessor.pool_baseline is not None))
+        if (platform_references_changed(render.before, render.after)
+                and (not pooled or request.platform_rollout is None)):
+            raise ManagementStageError('execution reference requires qualified ordinary pool rollout')
         if pooled:
             if (self.pool is None or not isinstance(self.predecessor, (CompletedPoolCutover, CompletedRefresh))
                     or self.pool.refresh != PoolManagerRefresh(self.original, self.predecessor, request,
-                        self.state_dir, self.superseded)):
+                        self.state_dir, self.superseded, self.pool.refresh.successor)):
                 raise ManagementStageError('pool-aware refresh authority qualification is not connected')
             self.pool.refresh.qualify()
         elif self.pool is not None:

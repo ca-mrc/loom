@@ -7,8 +7,7 @@ Flow:
   4. Bound by `--concurrency` asyncio.Semaphore, run each task through
      LocalRunner.run() in `asyncio.gather`
   5. Print result line per task (text or JSON)
-  6. If `--server-url` (or `LOOM_SERVER_URL`) is set, POST each result
-     to `<url>/api/v1/cli/results` (best-effort; never fails the CLI)
+  6. Retain results locally; warn about the deprecated upload option
   7. Exit 0 if every trial state == succeeded, else 1
 """
 
@@ -19,11 +18,10 @@ import asyncio
 import json
 import os
 import sys
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from uuid import uuid4
-
-import httpx
 
 from loom.driver.base import Driver
 from loom.driver.docker import DockerDriver
@@ -41,8 +39,10 @@ from loom_cli.vllm_runner import (
     _LIVE_PROCESSES,
     MissingVLLMDependencyError,
     VLLMLaunchSpec,
+    VLLMServerInfo,
     launch_vllm,
     model_slug,
+    retain_one,
     stop_one,
 )
 
@@ -56,6 +56,14 @@ async def _run_async(args: argparse.Namespace) -> int:
     Multiple --model: sequential or parallel based on the flag."""
     model_specs: list[str] = args.model or []
 
+    if args.server_url or os.environ.get("LOOM_SERVER_URL"):
+        sys.stderr.write(
+            "warning: local result upload via --server-url or LOOM_SERVER_URL "
+            "is deprecated and unsupported; results are not uploaded. "
+            "Keep the files in --output-dir or use authenticated hosted commands "
+            "to submit new trials.\n",
+        )
+
     if args.parallel_models and len(model_specs) < 2:
         sys.stderr.write(
             "warning: --parallel-models has no effect with a single "
@@ -63,23 +71,42 @@ async def _run_async(args: argparse.Namespace) -> int:
             "are passed).\n",
         )
 
-    if len(model_specs) == 0:
-        return await _run_one_model(args, model=None, output_dir=None)
-    if len(model_specs) == 1:
-        return await _run_one_model(
-            args,
-            model=parse_model(model_specs[0]),
-            output_dir=None,
+    completed: list[TrialResult] = []
+    try:
+        if len(model_specs) == 0:
+            return await _run_one_model(args, model=None, output_dir=None, completed=completed)
+        if len(model_specs) == 1:
+            return await _run_one_model(
+                args, model=_run_model_spec(args, model_specs[0]),
+                output_dir=None, completed=completed,
+            )
+        if args.parallel_models:
+            return await _run_parallel(args, model_specs, completed=completed)
+        return await _run_sequential(args, model_specs, completed=completed)
+    finally:
+        _maybe_write_tb2_report(args, completed)
+
+
+def _run_model_spec(args: argparse.Namespace, spec: str) -> ModelSpec:
+    if not getattr(args, "local_server", None):
+        return parse_model(spec)
+    if not spec.strip():
+        raise SystemExit("--local-server requires --model with a nonempty upstream model ID")
+    if spec.startswith(("hf:", "/", "~", "./", "../")):
+        raise SystemExit(
+            "--local-server is mutually exclusive with --model hf:<id> or a weights path; "
+            "it targets a server you already started.",
         )
-    if args.parallel_models:
-        return await _run_parallel(args, model_specs)
-    return await _run_sequential(args, model_specs)
+    # This is an upstream model identifier, not Loom's provider/name syntax.
+    return ModelSpec(provider="local", name=f"_inline/{spec}")
 
 
 async def _run_one_model(
     args: argparse.Namespace,
     model: ModelSpec | None,
     output_dir: Path | None,
+    *,
+    completed: list[TrialResult] | None = None,
 ) -> int:
     """Run all selected tasks for one model.
 
@@ -155,130 +182,140 @@ async def _run_one_model(
                 or os.environ.get("LOOM_LOCAL_API_KEY")
             ),
         )
-        # The whole `--model` value is the upstream model id; rewrite
-        # to local/_inline/<full-id> so dispatch hits _call_local.
-        # Reassemble from the already-parsed `model` so each iteration
-        # in a multi-model loop uses its own spec (not args.model[0]).
-        raw_id = f"{model.provider}/{model.name}"
-        model = ModelSpec(
-            provider="local",
-            name=f"{inline_local_name}/{raw_id}",
-        )
+        # _run_model_spec already preserved this iteration's complete upstream
+        # identifier under the inline provider, including bare model names.
 
     # If the user passed `--model hf:<id>` or a path, we launch a
     # vLLM subprocess on those weights, register it as a transient
     # local provider, and rewrite `model` to point at it. The
     # trial(s) then dispatch through the existing local-provider
-    # path; vLLM is torn down at end-of-process via atexit.
+    # path. Cleanup owns the process until a single-model --keep-alive
+    # run completes normally and explicitly transfers that ownership.
     auto_local_name: str | None = None
     _maybe_warn_unused_vllm_flags(args, model)
-    if model is not None and model.provider in ("hf", "file"):
-        try:
-            info = launch_vllm(VLLMLaunchSpec(
-                model=model.name,
-                port=getattr(args, "vllm_port", 0),
-                host=getattr(args, "vllm_host", "127.0.0.1"),
-                gpu_memory_utilization=getattr(args, "gpu_memory_utilization", 0.90),
-                tensor_parallel_size=getattr(args, "tensor_parallel_size", 1),
-                max_model_len=getattr(args, "max_model_len", None),
-                enforce_eager=getattr(args, "enforce_eager", False),
-                keep_alive=getattr(args, "keep_alive", False),
-            ))
-        except MissingVLLMDependencyError as exc:
-            print(str(exc), file=sys.stderr)
-            return 2
-        except RuntimeError as exc:
-            # Launch failure: missing path, no free port, vLLM startup
-            # crash, or 300s health-check timeout. Surface it as a clean
-            # CLI error rather than a stacktrace.
-            print(f"vLLM launch failed: {exc}", file=sys.stderr)
-            return 2
-        # Register under a fixed name so `loom config show` doesn't pick
-        # this up. The dispatch contract reads `cfg.local_providers`;
-        # we mutate cfg in-process only.
-        auto_local_name = "_auto_vllm"
-        cfg.local_providers[auto_local_name] = LocalProvider(
-            base_url=info.base_url, api_key=None,
-        )
-        # Rewrite the spec so `_call_local` resolves the right server +
-        # the right model id (vLLM may have shortened HF org/name into
-        # something different in served_model_name).
-        model = ModelSpec(
-            provider="local",
-            name=f"{auto_local_name}/{info.served_model_name}",
-        )
-    store = LocalDiskObjectStore(root=output_dir / "_store")
-
-    a_client, o_client, g_client = _build_sdk_clients(tokens)
-
-    sem = asyncio.Semaphore(max(1, int(args.concurrency)))
-    completed: list[TrialResult] = []
-
-    async def _one(loaded: LoadedTask) -> int:
-        async with sem:
-            patched = _patch_agent(loaded.task_config, args.agent, model)
-            driver_factory = await _driver_factory(
-                args.backend,
-                patched,
-                task_dir=loaded.task_dir,
-                task_checksum=loaded.checksum,
-                gpu=getattr(args, "gpu", None),
-            )
-            runner = LocalRunner(
-                trial_id=uuid4(),
-                team_id=uuid4(),
-                task_config=patched,
-                task_checksum=loaded.checksum,
-                task_dir=loaded.task_dir,
-                driver_factory=driver_factory,
-                output_dir=output_dir,
-                object_store=store,
-                upstream_gateway_tokens=tokens,
-                anthropic_client=a_client,
-                openai_client=o_client,
-                google_client=g_client,
-                local_providers=cfg.local_providers,
-            )
-            try:
-                result = await runner.run()
-            except Exception as exc:
-                print(
-                    f"{loaded.task_config.task.id} [ERROR] "
-                    f"{type(exc).__name__}: {exc}",
-                    file=sys.stderr,
-                )
-                return 1
-            line = (
-                format_json_line(result) if args.json_output
-                else format_text_line(result)
-            )
-            completed.append(result)
-            print(line, flush=True)
-            await _maybe_post_result(args.server_url, result)
-            return 0 if result.state == TrialState.SUCCEEDED else 1
-
+    info: VLLMServerInfo | None = None
+    keep_alive = bool(getattr(args, "keep_alive", False)) and len(args.model or []) == 1
+    completed_normally = False
     try:
-        exit_codes = await asyncio.gather(*[_one(t) for t in tasks])
-        _maybe_write_tb2_report(args, completed)
-    finally:
-        # vLLM teardown happens on EVERY exit path (happy or exception)
-        # to close the GPU-orphan window. atexit catches Python exit
-        # but not OOM / SIGKILL — explicit cleanup is the safer default.
-        # Use stop_one (not stop_all) so --parallel-models doesn't kill
-        # sibling vLLMs that are still running in concurrent iterations.
-        if auto_local_name is not None and not getattr(args, "keep_alive", False):
-            proc = next(
-                (p for p in _LIVE_PROCESSES if p.pid == info.pid),
-                None,
+        if model is not None and model.provider in ("hf", "file"):
+            try:
+                info = launch_vllm(VLLMLaunchSpec(
+                    model=model.name,
+                    port=getattr(args, "vllm_port", 0),
+                    host=getattr(args, "vllm_host", "127.0.0.1"),
+                    gpu_memory_utilization=getattr(args, "gpu_memory_utilization", 0.90),
+                    tensor_parallel_size=getattr(args, "tensor_parallel_size", 1),
+                    max_model_len=getattr(args, "max_model_len", None),
+                    enforce_eager=getattr(args, "enforce_eager", False),
+                    keep_alive=keep_alive,
+                    log_path=output_dir / "vllm.log" if keep_alive else None,
+                ))
+            except MissingVLLMDependencyError as exc:
+                print(str(exc), file=sys.stderr)
+                return 2
+            except RuntimeError as exc:
+                # Launch failure: missing path, no free port, vLLM startup
+                # crash, or 300s health-check timeout. Surface it as a clean
+                # CLI error rather than a stacktrace.
+                print(f"vLLM launch failed: {exc}", file=sys.stderr)
+                return 2
+            # Register under a fixed name so `loom config show` doesn't pick
+            # this up. The dispatch contract reads `cfg.local_providers`;
+            # we mutate cfg in-process only.
+            auto_local_name = "_auto_vllm"
+            cfg.local_providers[auto_local_name] = LocalProvider(
+                base_url=info.base_url, api_key=None,
             )
+            # Rewrite the spec so `_call_local` resolves the right server +
+            # the right model id (vLLM may have shortened HF org/name into
+            # something different in served_model_name).
+            model = ModelSpec(
+                provider="local",
+                name=f"{auto_local_name}/{info.served_model_name}",
+            )
+        store = LocalDiskObjectStore(root=output_dir / "_store")
+
+        sem = asyncio.Semaphore(max(1, int(args.concurrency)))
+        completed_trials = completed if completed is not None else []
+
+        incomplete_trial = False
+
+        async def _one(loaded: LoadedTask) -> int:
+            nonlocal incomplete_trial
+            async with sem:
+                patched = _patch_agent(loaded.task_config, args.agent, model)
+                driver_factory = await _driver_factory(
+                    args.backend,
+                    patched,
+                    task_dir=loaded.task_dir,
+                    task_checksum=loaded.checksum,
+                    gpu=getattr(args, "gpu", None),
+                )
+                runner = LocalRunner(
+                    trial_id=uuid4(),
+                    team_id=uuid4(),
+                    task_config=patched,
+                    task_checksum=loaded.checksum,
+                    task_dir=loaded.task_dir,
+                    driver_factory=driver_factory,
+                    output_dir=output_dir,
+                    object_store=store,
+                    upstream_gateway_tokens=tokens,
+                    anthropic_client=a_client,
+                    openai_client=o_client,
+                    google_client=g_client,
+                    local_providers=cfg.local_providers,
+                )
+                try:
+                    result = await runner.run()
+                except Exception as exc:
+                    incomplete_trial = True
+                    print(
+                        f"{loaded.task_config.task.id} [ERROR] "
+                        f"{type(exc).__name__}: {exc}",
+                        file=sys.stderr,
+                    )
+                    return 1
+                line = (
+                    format_json_line(result) if args.json_output
+                    else format_text_line(result)
+                )
+                completed_trials.append(result)
+                print(line, flush=True)
+                return 0 if result.state == TrialState.SUCCEEDED else 1
+
+        async with _build_sdk_clients(tokens) as (a_client, o_client, g_client):
+            running = [asyncio.create_task(_one(t)) for t in tasks]
+            try:
+                exit_codes = await asyncio.gather(*running)
+            finally:
+                # gather propagates setup failures without joining siblings.
+                # Their cleanup must finish before shared SDK clients close.
+                for task in running:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*running, return_exceptions=True)
+        completed_normally = not incomplete_trial
+    finally:
+        if info is not None:
+            proc = next((p for p in _LIVE_PROCESSES if p.pid == info.pid), None)
             if proc is not None:
-                stop_one(proc)
+                if keep_alive and completed_normally and proc.poll() is None:
+                    retain_one(proc)
+                    print(
+                        f"vLLM retained: PID {info.pid}; endpoint {info.base_url}; "
+                        f"log {output_dir / 'vllm.log'}. Stop it with kill {info.pid}.",
+                        file=sys.stderr,
+                    )
+                else:
+                    stop_one(proc)
 
     return 0 if all(c == 0 for c in exit_codes) else 1
 
 
 async def _run_sequential(
     args: argparse.Namespace, model_specs: list[str],
+    *, completed: list[TrialResult] | None = None,
 ) -> int:
     """Run each model against the full dataset in turn. Outputs
     bucket under <output-dir>/<slug>/<trial-id>/. Exit code is
@@ -294,8 +331,8 @@ async def _run_sequential(
             f"\n→ [{slug}] starting trials for --model {spec_str}\n",
         )
         try:
-            model = parse_model(spec_str)
-            code = await _run_one_model(args, model=model, output_dir=sub_output)
+            model = _run_model_spec(args, spec_str)
+            code = await _run_one_model(args, model=model, output_dir=sub_output, completed=completed)
         except SystemExit:
             raise  # let argparse / explicit user-error exits propagate
         except Exception as exc:
@@ -310,6 +347,7 @@ async def _run_sequential(
 
 async def _run_parallel(
     args: argparse.Namespace, model_specs: list[str],
+    *, completed: list[TrialResult] | None = None,
 ) -> int:
     """Run all models concurrently; outputs still bucket by slug.
 
@@ -319,16 +357,15 @@ async def _run_parallel(
     base_output = Path(args.output_dir)
     base_output.mkdir(parents=True, exist_ok=True)
 
-    async def _one_model(spec_str: str) -> int:
+    async def _one_model(spec_str: str, model: ModelSpec) -> int:
         slug = model_slug(spec_str)
         sub_output = base_output / slug
         sys.stderr.write(
             f"→ [{slug}] starting (parallel) for --model {spec_str}\n",
         )
         try:
-            model = parse_model(spec_str)
             return await _run_one_model(
-                args, model=model, output_dir=sub_output,
+                args, model=model, output_dir=sub_output, completed=completed,
             )
         except SystemExit:
             raise
@@ -336,9 +373,19 @@ async def _run_parallel(
             sys.stderr.write(f"→ [{slug}] failed: {exc}\n")
             return 2
 
-    codes = await asyncio.gather(
-        *[_one_model(s) for s in model_specs], return_exceptions=False,
-    )
+    # Validate before creating tasks: SystemExit inside an asyncio Task stops
+    # the loop before sibling cleanup can finish.
+    models = [(spec, _run_model_spec(args, spec)) for spec in model_specs]
+    running = [asyncio.create_task(_one_model(spec, model)) for spec, model in models]
+    try:
+        codes = await asyncio.gather(*running)
+    finally:
+        # Report publication and process cleanup must wait for every model,
+        # including siblings interrupted by a launch/configuration failure.
+        for task in running:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*running, return_exceptions=True)
     return max(codes) if codes else 0
 
 
@@ -478,53 +525,38 @@ async def _driver_factory(
     return lambda: ModalDriver(image=image, gpu=gpu, config=modal_cfg)
 
 
-def _build_sdk_clients(
+@asynccontextmanager
+async def _build_sdk_clients(
     tokens: dict[str, str],
-) -> tuple[object, object, object]:
-    """Construct provider SDK clients lazily. Each may be None if no
-    token for that provider is set — UpstreamDirectGatewayClient raises
-    a clear ValueError when the call tries to use a missing client."""
-    a_client: object = None
-    o_client: object = None
-    g_client: object = None
-    if tokens.get("anthropic"):
-        try:
+) -> AsyncIterator[tuple[object, object, object]]:
+    """Own configured SDK clients for one run, including partial startup failure."""
+    async with AsyncExitStack() as stack:
+        a_client: object = None
+        o_client: object = None
+        g_client: object = None
+        if tokens.get("anthropic"):
             import anthropic
-            a_client = anthropic.AsyncAnthropic(api_key=tokens["anthropic"])
-        except ImportError:
-            pass
-    if tokens.get("openai"):
-        try:
-            import openai
-            o_client = openai.AsyncOpenAI(api_key=tokens["openai"])
-        except ImportError:
-            pass
-    if tokens.get("google"):
-        try:
-            import google.generativeai as genai
-            genai.configure(api_key=tokens["google"])  # type: ignore[attr-defined]
-            g_client = genai
-        except ImportError:
-            pass
-    return a_client, o_client, g_client
 
-
-async def _maybe_post_result(
-    server_url: str | None, result: TrialResult,
-) -> None:
-    url = server_url or os.environ.get("LOOM_SERVER_URL")
-    if not url:
-        return
-    payload = format_json_line(result)
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            await client.post(
-                f"{url.rstrip('/')}/api/v1/cli/results",
-                content=payload,
-                headers={"content-type": "application/json"},
+            a_client = await stack.enter_async_context(
+                anthropic.AsyncAnthropic(api_key=tokens["anthropic"]),
             )
-    except Exception:
-        pass
+        if tokens.get("openai"):
+            import openai
+
+            o_client = await stack.enter_async_context(
+                openai.AsyncOpenAI(api_key=tokens["openai"]),
+            )
+        if tokens.get("google"):
+            from google import genai
+
+            # Local token.google is a Gemini Developer API credential. Do not
+            # let ambient Vertex/Enterprise settings change that contract.
+            google_client = stack.enter_context(genai.Client(
+                api_key=tokens["google"], vertexai=False, enterprise=False,
+            ))
+            await stack.enter_async_context(google_client.aio)
+            g_client = google_client
+        yield a_client, o_client, g_client
 
 
 def _maybe_warn_unused_vllm_flags(

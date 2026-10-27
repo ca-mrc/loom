@@ -411,8 +411,9 @@ def test_job_renderer_maps_ordered_native_sidecar_and_bounded_volumes(audience: 
 
 
 @pytest.mark.parametrize("independent_controller", [False, True])
+@pytest.mark.parametrize("archive_budget", [1024, 8 * 1024**3])
 def test_private_sandboxes_have_disjoint_filesystems_and_full_resource_request(
-    independent_controller: bool,
+    independent_controller: bool, archive_budget: int,
 ) -> None:
     from loom.execution_runtime_contract import runtime_pod_resources
 
@@ -440,6 +441,7 @@ def test_private_sandboxes_have_disjoint_filesystems_and_full_resource_request(
                     f"/loom/sandboxes/{role}/sandbox.sock",
                 ),
                 resources=plan.task_resources,
+                environment={"LOOM_WORKSPACE_MAX_ARCHIVE_BYTES": str(64 * 1024**3)},
                 startup_probe=probe,
                 readiness_probe=probe,
             )
@@ -448,6 +450,7 @@ def test_private_sandboxes_have_disjoint_filesystems_and_full_resource_request(
         {
             **plan.canonical_payload(),
             "agent_image_ref": agent_image,
+            "max_artifact_bytes": archive_budget,
             "sidecars": [s.model_dump(mode="json") for s in sidecars],
             "image_admission": signed_image_admission_bundle(
                 (plan.task_image_ref, plan.runtime_image_ref, agent_image)
@@ -477,6 +480,9 @@ def test_private_sandboxes_have_disjoint_filesystems_and_full_resource_request(
     execution = pod["containers"][0]
     assert execution["image"] == agent_image
     for sidecar in pod["initContainers"][1:]:
+        archive_limits = [item["value"] for item in sidecar["env"]
+                          if item["name"] == "LOOM_WORKSPACE_MAX_ARCHIVE_BYTES"]
+        assert archive_limits == [str(min(archive_budget, plan.task_resources.ephemeral_storage_mib * 1024**2))]
         mounts = sidecar["volumeMounts"]
         assert {m["name"] for m in mounts} == {"runtime", f"{sidecar['name']}-socket"}
         binary = next(m for m in mounts if m["name"] == "runtime")

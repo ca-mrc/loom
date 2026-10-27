@@ -11,7 +11,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from scripts.ops.nebius_development_runtime_probes import HTTPSDevelopmentRuntimeProbes
 from scripts.ops.nebius_ingress_stage import _key, _uid
@@ -19,6 +19,10 @@ from scripts.ops.nebius_management_switch import _matches
 from scripts.ops.nebius_shared_pool_activation import shared_forward_activation_view
 from scripts.ops.nebius_shared_pool_handoff_live import SharedPoolGuardBindings
 from scripts.ops.nebius_shared_pool_operation import _files, _history
+
+if TYPE_CHECKING:
+    from scripts.ops.nebius_pool_preactivation_operation import RetainedPreactivationCatalog
+    from scripts.ops.nebius_pool_storage_operation import RetainedClosedStorage
 
 
 def shared_forward_runtime_view(*, bindings: SharedPoolGuardBindings, state_dir: Path
@@ -99,7 +103,9 @@ class HTTPSSharedPoolRuntimeProbes(HTTPSDevelopmentRuntimeProbes):
         self.shared_bindings = copy.deepcopy(bindings)
         self._process_observation: _ProcessObservation | None = None
         super().__init__(request=self.shared_bindings.plan.development.runtime.request,
-            api_server=api_server, ssl_context=ssl_context, token=token, private_files=private_files)
+            api_server=api_server, ssl_context=ssl_context, token=token, private_files=private_files,
+            preactivation=self.shared_bindings.plan.preactivation,
+            schema_successor=self.shared_bindings.plan.development.schema_successor, storage=self.shared_bindings.plan.storage)
 
     def _process_receipts(self, bindings: SharedPoolGuardBindings, state: Path) -> dict[str, dict[str, str]]:
         completed = bindings.plan.development.runtime
@@ -160,7 +166,11 @@ class HTTPSSharedPoolRuntimeProbes(HTTPSDevelopmentRuntimeProbes):
 
     def inspect(self, *, state_dir: Path, _prechild_phase: str | None = None,
             _expected_record: dict[str, Any] | None = None,
-            _shared_handoff: SharedPoolGuardBindings | None = None) -> dict[str, dict[str, Any]]:
+            _shared_handoff: SharedPoolGuardBindings | None = None,
+            _preactivation_catalog: RetainedPreactivationCatalog | None = None,
+            _storage_correction: RetainedClosedStorage | None = None) -> dict[str, dict[str, Any]]:
+        if _preactivation_catalog is not None or _storage_correction is not None:
+            raise ValueError('shared runtime observation cannot select an in-progress successor')
         if _shared_handoff is not None and _shared_handoff != self.shared_bindings:
             raise ValueError('shared runtime observation binding differs')
         return super().inspect(state_dir=state_dir, _prechild_phase=_prechild_phase,

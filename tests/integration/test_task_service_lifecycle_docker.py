@@ -10,7 +10,7 @@ import docker
 import httpx
 import pytest
 
-from loom.driver.service_sandbox import ServiceSandboxDriver
+from loom.driver.service_sandbox import SandboxRPCError, ServiceSandboxDriver
 from loom.models.capabilities import Capabilities
 from loom.models.networking import NoNetwork
 from loom.trial.mutable_snapshot import export_mutable_paths, import_mutable_paths
@@ -84,7 +84,7 @@ async def service_sandboxes(native_binary, tmp_path):  # noqa: F811
                 try:
                     await driver.start()
                     break
-                except (OSError, RuntimeError, httpx.TransportError):
+                except (OSError, RuntimeError, httpx.TransportError, SandboxRPCError):
                     if attempt == 99:
                         raise
                     await asyncio.sleep(0.05)
@@ -117,6 +117,31 @@ async def test_native_workspace_handoff_keeps_deletions_and_private_inputs(servi
     checked = await verifier.exec(
         "test ! -L /app/foo && test ! -e /app/foo && "
         'test "$(cat /app/data/file)" = keep && test "$(cat /app/tests/secret)" = private',
+    )
+    assert checked.return_code == 0, checked.stderr
+
+
+async def test_real_venv_survives_a_same_image_handoff(service_sandboxes):
+    # #2589: separate/guest grading receives the full workdir. The venv's link
+    # to the image interpreter is kept and checked; an agent-only target is
+    # omitted and reported instead of failing the handoff.
+    from loom.trial.workspace import WorkspaceStagingPolicy
+    from loom.trial.workspace_snapshot import handoff_workspace_snapshot
+
+    agent, verifier = service_sandboxes
+    created = await agent.exec(
+        "python3 -m venv --without-pip /app/venv && printf '#!/bin/sh\\n' > /tmp/agent-only "
+        "&& chmod 755 /tmp/agent-only && ln -s /tmp/agent-only /app/scratch",
+    )
+    assert created.return_code == 0, created.stderr
+    omissions = await handoff_workspace_snapshot(
+        agent_driver=agent, verifier_driver=verifier, workdir=PurePosixPath("/app"),
+        policy=WorkspaceStagingPolicy(("tests/**",), ("tests/**",), ()),
+    )
+    assert [(item.path, item.reason) for item in omissions.links] == [("scratch", "target_differs")]
+    checked = await verifier.exec(
+        "test -L /app/venv/bin/python && test ! -e /app/scratch && "
+        "/app/venv/bin/python -c \"import sys; assert sys.prefix == '/app/venv', sys.prefix\"",
     )
     assert checked.return_code == 0, checked.stderr
 

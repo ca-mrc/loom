@@ -477,3 +477,48 @@ def test_active_work_is_not_a_failure_or_supplemental_target(state: str) -> None
         SimpleNamespace(id=uuid4()), [active], supplemental_trials=[replacement],
     )
     assert plan["final_trial_selection"][0]["selected_trial_id"] == str(active.id)
+
+
+@pytest.mark.parametrize("reason,attribution,retryable", [
+    ("image_preparation_base_unsupported", "platform", False),
+    ("image_preparation_source_unavailable", "platform", True),
+    ("image_preparation_input_invalid", "unknown", False),
+])
+def test_typed_preparation_failure_is_unscored_without_invented_task_fault(reason, attribution, retryable):
+    trial = _trial(task_id="synthetic/preparation", state="failed", failure_reason="task_image_build_failed",
+        result={"task_image_preparation_failure": {"reason": reason, "message": "private raw detail"}})
+    result = classify_trial_outcome(trial)
+    assert result["attribution"] == attribution
+    assert result["score_outcome"] == "unscored"
+    assert result["requires_task_change"] is False
+    assert result["rerunnable"] is retryable
+    assert "private raw detail" not in str(result)
+
+
+@pytest.mark.parametrize(
+    ("runtime_status", "failure_reason", "attribution"),
+    [
+        ("verifier_error", "verifier_error", "benchmark"),
+        ("timed_out", "verifier_timeout", "benchmark"),
+        ("setup_error", "setup_error", "platform"),
+        ("runtime_error", "runtime_error", "platform"),
+        ("missing_required_artifacts", "missing_required_artifacts", "platform"),
+        ("artifact_upload_failed", "artifact_upload_failed", "platform"),
+        ("trajectory_flush_failed", "trajectory_flush_failed", "platform"),
+    ],
+)
+def test_deferred_verifier_platform_failures_are_not_benchmark_errors(
+    runtime_status: str, failure_reason: str, attribution: str,
+) -> None:
+    # #2538: a verifier pod that could not reach its sandbox (setup_error) or
+    # lacked a plan-declared output was reported as a benchmark verifier error.
+    from loom_control_plane.service_execution import deferred_verifier_failure_reason
+    from loom_service.diagnosis import build_trial_diagnosis
+
+    assert deferred_verifier_failure_reason(runtime_status) == failure_reason
+    classification = classify_trial_outcome(
+        _trial(task_id="tb2/bn-fit-modify", state="failed", failure_reason=failure_reason)
+    )
+    diagnosis = build_trial_diagnosis({"entity": {"type": "trial"}, "failure": classification})
+    assert classification["attribution"] == attribution
+    assert diagnosis["primary_cause"]["attribution"] == attribution

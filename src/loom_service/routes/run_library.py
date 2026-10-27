@@ -63,6 +63,7 @@ from loom_service.routes.object_downloads import stream_object_response
 from loom_service.submission_compat import validate_submission_agent_task_compatibility
 from loom_service.task_config_validation import expected_trial_count
 from loom_service.task_filter import resolve_task_filter_with_diagnostics
+from loom_service.task_image_admission import image_preparation_reader
 from loom_service.trial_bundles import CanonicalTrialBundleFile, canonical_bundle_from_artifact
 from loom_service.usage_accounting import empty_usage_projection, usage_by_batch_ids
 
@@ -1280,18 +1281,6 @@ def _batch_artifact_filter_predicate(
     return or_(typed_match, legacy_match)
 
 
-async def _batch_trials(session: Any, batch_id: UUID) -> list[Trial]:
-    return list(
-        (
-            await session.execute(
-                select(Trial).where(Trial.batch_id == batch_id),
-            )
-        )
-        .scalars()
-        .all()
-    )
-
-
 async def _batch_trial_projections(
     session: Any,
     batch_id: UUID,
@@ -2285,6 +2274,7 @@ async def _freeze_derived_runtime_profile(
         session, backend=backend, task_ids=task_ids,
         trial_config=trial_config, combinations=combinations,
         runtime_profile_json=request.app.state.settings.service_execution_runtime_profile_json,
+        image_preparation_reader=image_preparation_reader(request.app.state.settings),
     )
     profile = await freeze_task_resource_requests(
         session, backend=backend, task_ids=task_ids,

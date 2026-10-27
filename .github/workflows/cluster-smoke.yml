@@ -59,11 +59,23 @@ run-name: >-
 #
 # Trigger model:
 #   - workflow_dispatch (manual)
-#   - PRs selected by changed paths or the additive `cluster-smoke` label
+#   - CI calls selected PR/merge-group lanes after fast feedback succeeds
 # Native merge groups validate the exact commit that becomes dev; do not repeat
 # those contracts on the following dev push.
 
 on:
+  workflow_call:
+    inputs:
+      legacy_compatibility:
+        description: "Include historical platform contracts (manual only)"
+        required: false
+        type: boolean
+        default: false
+      stale_draft:
+        description: "CI confirmed this draft payload is stale for a Ready PR on the same head"
+        required: false
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       legacy_compatibility:
@@ -71,27 +83,11 @@ on:
         required: false
         type: boolean
         default: false
-  pull_request:
-    # Every non-draft PR event reports the protected gate name. The planner
-    # selects smoke from changed paths or labels; drafts remain filtered.
-    types: [labeled, unlabeled, opened, synchronize, reopened, ready_for_review, converted_to_draft]
-  merge_group:
-    types: [checks_requested]
 
 permissions:
   contents: read
 
-concurrency:
-  group: >-
-    cluster-smoke-${{ github.event.pull_request.number || github.ref }}-${{
-      github.event_name == 'pull_request' &&
-      (github.event.pull_request.draft ||
-       github.event.action == 'converted_to_draft') &&
-      format('filtered-{0}', github.run_id) || 'authoritative' }}
-  cancel-in-progress: >-
-    ${{ github.event_name == 'pull_request' &&
-        !(github.event.pull_request.draft ||
-          github.event.action == 'converted_to_draft') }}
+# CI owns cancellation for called runs; manual diagnostics run independently.
 
 env:
   CI_TEST_SCOPE: ${{ ((github.event_name == 'workflow_dispatch' && inputs.legacy_compatibility) || github.ref == 'refs/heads/main' || github.base_ref == 'main') && 'all' || 'nebius' }}
@@ -99,8 +95,12 @@ env:
 
 jobs:
   plan:
+    if: '!cancelled()'
     name: cluster smoke plan
-    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-latest' }}
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && (github.event_name == 'workflow_dispatch' || vars.LOOM_CI_REUSABLE_SUPPLY_READY == 'true') && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+    timeout-minutes: 10
     outputs:
       required: ${{ steps.plan.outputs.cluster_smoke || steps.event.outputs.required }}
       gate_mode: ${{ steps.plan.outputs.gate_mode || steps.event.outputs.gate_mode }}
@@ -112,7 +112,7 @@ jobs:
         shell: bash
         env:
           FILTERED_EVENT: >-
-            ${{ github.event_name == 'pull_request' &&
+            ${{ github.event_name == 'pull_request' && !inputs.stale_draft &&
                 (github.event.pull_request.draft ||
                  github.event.action == 'converted_to_draft') }}
         run: |
@@ -144,6 +144,7 @@ jobs:
           PR_ACTION: ${{ github.event.action }}
           PR_ACTION_LABEL: ${{ github.event.label.name }}
           PR_DRAFT: ${{ github.event.pull_request.draft || false }}
+          PR_STALE_DRAFT: ${{ inputs.stale_draft == true }}
           PR_BASE_CHANGED: ${{ github.event.changes.base != null }}
         run: |
           set -euo pipefail
@@ -186,21 +187,24 @@ jobs:
             --pull-request-action "$PR_ACTION" \
             --pull-request-action-label "$PR_ACTION_LABEL" \
             --pull-request-draft "$PR_DRAFT" \
+            --pull-request-stale-draft "${PR_STALE_DRAFT:-false}" \
             --pull-request-base-changed "$PR_BASE_CHANGED" \
             --github-output "$GITHUB_OUTPUT"
+
 
   cluster-contract:
     name: cluster contract (${{ matrix.shard }}, live k3s topology)
     needs: [plan]
     if: >-
+      !cancelled() && needs.plan.result == 'success' &&
       needs.plan.outputs.gate_mode == 'full' &&
       needs.plan.outputs.required == 'true'
-    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-24.04' }}
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && (github.event_name == 'workflow_dispatch' || vars.LOOM_CI_REUSABLE_SUPPLY_READY == 'true') && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-24.04' }}
     # The expanded serial suite reached only 61% before its 35-minute limit.
     # Independent runners retain complete coverage and every per-test deadline.
     timeout-minutes: 35
     strategy:
-      fail-fast: false
+      fail-fast: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
       matrix:
         include: ${{ fromJSON(needs.plan.outputs.cluster_smoke_matrix) }}
     env:
@@ -229,12 +233,18 @@ jobs:
           echo "paths_file=$manifest_paths_file" >> "$GITHUB_OUTPUT"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
           enable-cache: true
-          save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+          # Read-only full wheel cache; only ci-dependency-cache.yml saves it.
+          save-cache: false
+          prune-cache: false
+          cache-suffix: ci-wheels-v2
+          # Same path on GitHub-hosted and self-hosted runners; setup-uv's
+          # defaults differ and the cache version hashes the path.
+          cache-local-path: /home/runner/.cache/uv
           cache-dependency-glob: uv.lock
 
       - name: Sync cluster-contract dependencies
@@ -262,15 +272,35 @@ jobs:
           set -euo pipefail
           mapfile -t test_paths < "${{ steps.manifest.outputs.paths_file }}"
           [[ ${#test_paths[@]} -gt 0 ]]
-          uv run --no-sync pytest -m "${CI_PYTEST_MARKERS:-not legacy_pool}" "${test_paths[@]}" --durations=15
+          uv run --no-sync pytest -m "${CI_PYTEST_MARKERS:-not legacy_pool}" "${test_paths[@]}" --maxfail=1 --durations=15
+
+      - name: Report disposable image build timings
+        if: always()
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          path = Path(os.environ["RUNNER_TEMP"]) / "loom-k3s-image-build-timings.jsonl"
+          if path.exists():
+              try:
+                  with path.open() as stream:
+                      lines = stream.read(65536).splitlines()
+              except (OSError, UnicodeError):
+                  lines = []
+                  print("Disposable image timings unavailable")
+              for line in lines:
+                  try:
+                      record = json.loads(line)
+                  except ValueError:
+                      print("Disposable image timing record unavailable")
+                      continue
+                  print(json.dumps(record, sort_keys=True))
+          PY
 
   cluster-smoke-gate:
-    name: >-
-      ${{ github.event_name == 'workflow_dispatch' && 'cluster-smoke-gate-manual' ||
-          github.event_name == 'push' && 'cluster-smoke-gate-push' ||
-          needs.plan.outputs.gate_mode == 'full' && 'cluster-smoke-gate' ||
-          'cluster-smoke-gate-filtered' }}
-    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-latest' }}
+    name: cluster-smoke result
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && (github.event_name == 'workflow_dispatch' || vars.LOOM_CI_REUSABLE_SUPPLY_READY == 'true') && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-latest' }}
     if: always() && needs.plan.outputs.gate_mode != 'filtered'
     needs: [plan, cluster-contract]
     steps:

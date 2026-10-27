@@ -20,7 +20,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import UUID
 
+from loom.agent.subprocess import SubprocessAgent
+from loom.agent.terminus2.runtime import LoomTerminus2Runtime
 from loom.driver.base import Driver
+from loom.errors import AgentError
 from loom.models.result import TrialResult
 from loom.models.task import TaskConfig
 from loom.models.trial import TrialConfig
@@ -64,6 +67,8 @@ class LocalRunner:
             agent_name=self.task_config.agent.name,
             agent_model=self.task_config.agent.model,
         )
+        if cfg.multi_model is not None and cfg.multi_model.enabled:
+            raise AgentError("local execution does not support multi_model sessions")
         gateway = UpstreamDirectGatewayClient(
             anthropic_client=self.anthropic_client,
             openai_client=self.openai_client,
@@ -79,6 +84,10 @@ class LocalRunner:
             self.task_config.agent.model,
             self.task_config.agent.name,
         )
+        if isinstance(agent, SubprocessAgent) and cfg.request_params:
+            raise AgentError("local subprocess request_params require an agent-native configuration; gateway controls are unsupported")
+        if isinstance(agent, LoomTerminus2Runtime):
+            agent.request_params = dict(cfg.request_params)
         verifier = task_verifier_factory(self.task_config)()
         driver = self.driver_factory()
 

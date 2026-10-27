@@ -73,6 +73,21 @@ func TestPlainGuestWithoutDeclaredCapabilitiesIsAccepted(t *testing.T) {
 	}
 }
 
+func TestSkippedGuestPlanAcceptsTheAgentSandboxOnly(t *testing.T) {
+	p := guestPlanPayload(t)
+	sides := p["sidecars"].([]any)
+	p["sidecars"] = sides[:1]
+	p["verifier_execution"] = "skipped"
+	p["verifier"] = nil
+	raw, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decodePlan(raw); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGuestPlanRejectsPartialOrUnsafeAuthority(t *testing.T) {
 	for _, damage := range []string{"ordinary_class", "missing_guest", "one_guest", "empty_caps", "missing_caps", "unknown_cap", "different_caps", "duplicate_caps", "unsorted_caps", "nonroot", "short_volume", "wrong_socket", "wrong_probe", "small_memory", "small_storage", "small_cpu", "bad_timeout", "foreign_sidecar", "wrong_schema", "wrong_runtime", "missing_controller", "storage_unreserved", "small_request", "wrong_image", "skipped_verifier", "separate_verifier"} {
 		t.Run(damage, func(t *testing.T) {
@@ -172,6 +187,39 @@ func TestEmulatedAuthenticationRequiresExactGuestClass(t *testing.T) {
 				t.Fatalf("allowed=%v, error=%v", tc.allowed, err)
 			}
 		})
+	}
+}
+
+func TestGuestTaskIdentityIsConcreteAndOptional(t *testing.T) {
+	p := guestPlanPayload(t)
+	for _, sidecar := range p["sidecars"].([]any) {
+		sidecar.(map[string]any)["guest_task_identity"] = map[string]any{
+			"run_as_user": 1001, "run_as_group": 1002, "home": "/home/oci-user",
+			"supplementary_groups": []any{1004, 1005},
+		}
+	}
+	raw, _ := json.Marshal(p)
+	if _, err := decodePlan(raw); err != nil {
+		t.Fatal(err)
+	}
+	for _, damage := range []func(map[string]any){
+		func(identity map[string]any) { identity["home"] = "/proc/secret" },
+		func(identity map[string]any) { identity["supplementary_groups"] = []any{1005, 1004} },
+		func(identity map[string]any) { identity["run_as_user"] = -1 },
+	} {
+		p := guestPlanPayload(t)
+		for _, sidecar := range p["sidecars"].([]any) {
+			identity := map[string]any{
+				"run_as_user": 1001, "run_as_group": 1002, "home": "/home/oci-user",
+				"supplementary_groups": []any{1004, 1005},
+			}
+			damage(identity)
+			sidecar.(map[string]any)["guest_task_identity"] = identity
+		}
+		raw, _ := json.Marshal(p)
+		if _, err := decodePlan(raw); err == nil {
+			t.Fatal("unsafe guest task identity accepted")
+		}
 	}
 }
 

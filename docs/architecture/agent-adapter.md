@@ -242,11 +242,13 @@ For the service-mode `direct-completion` worker path, callers can also set
 prompt/message payloads, headers, credentials, and unknown extras
 before forwarding the request through `GatewayCallRequest`.
 
-In CLI mode the JWT-minting path is no-op'd — `loom_cli/agent_factory.py`
-substitutes a `_NoopCPClient` for the SubprocessAgent's CP-client
-dependency since there's no Control Plane to record llm_calls to.
-The launched CLI talks to the upstream provider directly using the
-env-var API key the CLI puts in the sandbox.
+In CLI mode `loom_cli/agent_factory.py` supplies an explicit direct provider
+connection. It bypasses JWT minting and hosted facade URL rewriting and places
+only the selected upstream key in the sandbox environment. The sandbox and
+agent must therefore be trusted with that key. Provider/dialect compatibility
+is checked before execution; see the [local connection matrix](cli-mode.md#stateless-agent-factory).
+Native subprocess output is retained, but this path has no authoritative local
+rate-card billing. Hosted agents continue to receive scoped Gateway tokens.
 
 ## Per-trial agent installation
 
@@ -335,6 +337,14 @@ age determined by Docker's native image-creation timestamp, plus a
 capacity backstop (`trial_cache_min_free_gb`, default 20 GB) that
 evicts oldest-by-creation entries until disk frees up. Eviction is
 local only — registry retention is the registry operator's concern.
+
+On a shared Docker daemon, configure `LOOM_WORKER_SANDBOX_IDENTITY` for each
+independent environment. Container cleanup then requires that exact identity.
+Task, sidecar and adapter images are shared by content, so sandbox-scoped
+workers do not prune or evict them. Disk-space admission still uses measured
+free space and can reject builds when the daemon is full; the daemon owner
+manages shared image retention. Leaving the identity empty retains legacy
+unlabelled-container and managed-image cleanup and requires a dedicated daemon.
 
 
 

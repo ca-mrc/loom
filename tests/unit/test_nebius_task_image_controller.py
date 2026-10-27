@@ -18,6 +18,37 @@ from loom_execution_actuator.task_image_renderer import render_task_image_job
 from tests.unit.test_nebius_task_image_renderer import inputs  # noqa: F401
 
 
+def _builder_settings(**updates):
+    from loom_execution_actuator.task_image_settings import NativeTaskImageSettings
+
+    return NativeTaskImageSettings(namespace="builds", service_image="registry.example/service",
+        storage_endpoint="https://storage.example", storage_region="eu-north1", source_bucket="source",
+        registry_repository="registry.example/tasks", **updates)
+
+
+def test_optional_build_count_has_no_default_or_sixteen_ceiling_and_preserves_old_json():
+    assert _builder_settings().max_concurrent is None
+    for limit in (None, 1, 16, 17, 64):
+        settings = _builder_settings(max_concurrent=limit)
+        assert settings.max_concurrent == limit
+        assert type(settings).model_validate_json(settings.model_dump_json()) == settings
+
+
+def test_native_io_policy_is_finite_configurable_pressure_not_a_build_count():
+    assert _builder_settings().io_full_avg10_max == 50.0
+    for value in (0, 25.0, 100):
+        assert _builder_settings(io_full_avg10_max=value).io_full_avg10_max == value
+    for value in (True, None, "50", -1, 101, float("nan"), float("inf")):
+        with pytest.raises(ValueError):
+            _builder_settings(io_full_avg10_max=value)
+
+
+@pytest.mark.parametrize("value", [0, -1, True, 1.5, "17"])
+def test_optional_operator_build_limit_rejects_nonpositive_or_noninteger(value):
+    with pytest.raises(ValueError):
+        _builder_settings(max_concurrent=value)
+
+
 def receipt_job(*, message=None):
     image_id = uuid4()
     message = message if message is not None else json.dumps({
@@ -46,10 +77,87 @@ def test_receipt_requires_owned_pod_successful_publisher_and_exact_identity():
         publication_receipt(job, materialization_id=image_id, lease_epoch=2)
 
 
+@pytest.mark.parametrize('code,retryable', [
+    ('image_preparation_base_unsupported', False),
+    ('image_preparation_input_invalid', False),
+    ('image_preparation_source_unavailable', True),
+])
+def test_preparation_retry_authority_survives_native_observation(code, retryable):
+    from loom.task_image_errors import TaskImagePreparationError
+    from loom_execution_actuator.task_image_controller import _native_failure
+
+    _, job = receipt_job()
+    receipt = TaskImagePreparationError(code, 'Preparation failed').receipt()
+    job['pods'][0]['status']['initContainerStatuses'] = [{
+        'name': 'prepare', 'state': {'terminated': {
+            'exitCode': 1, 'reason': 'Error', 'message': json.dumps(receipt),
+        }},
+    }]
+    assert _native_failure(build_observation(job)) == (code, 'Preparation failed', retryable)
+
+
+@pytest.mark.parametrize('message', ['unsupported base connection timeout',
+                                  '{"error":"temporary connection failure","retryable":true}',
+                                  '{"error_schema":"loom.task-image-preparation-error.v1","error_code":"foreign","retryable":true}'])
+def test_unstructured_prepare_failure_does_not_gain_retry_from_prose(message):
+    from loom_execution_actuator.task_image_controller import _native_failure
+
+    _, job = receipt_job()
+    job['pods'][0]['status']['initContainerStatuses'] = [{
+        'name': 'prepare', 'state': {'terminated': {'exitCode': 1, 'reason': 'Error', 'message': message}},
+    }]
+    assert _native_failure(build_observation(job))[2] is False
+
+
+def test_prepare_interrupted_by_job_deadline_keeps_infrastructure_retry_policy():
+    from loom_execution_actuator.task_image_controller import _native_failure
+
+    assert _native_failure({
+        'phases': [{'name': 'prepare', 'state': {'terminated': {'exitCode': 137}}}],
+        'job_conditions': [{'status': 'True', 'reason': 'DeadlineExceeded'}],
+    })[0::2] == ('build_deadline_exceeded', True)
+
+
+def test_package_preservation_guard_survives_failed_build_observation():
+    from loom.task_image_errors import (
+        PACKAGE_GUARD_MESSAGE,
+        PACKAGE_GUARD_PREFIX,
+        TaskImagePreparationError,
+    )
+    from loom_execution_actuator.task_image_controller import _native_failure
+
+    _, job = receipt_job()
+    job['status'] = {'failed': 1}
+    job['pods'][0]['status']['initContainerStatuses'] = [{
+        'name': 'build', 'state': {'terminated': {'exitCode': 1, 'reason': 'Error'}},
+    }]
+    frame = TaskImagePreparationError('image_preparation_package_change_required', PACKAGE_GUARD_MESSAGE).receipt()
+    job['builder_log'] = '#7 1.25 ' + PACKAGE_GUARD_PREFIX + json.dumps(frame)
+    assert _native_failure(build_observation(job)) == (
+        'image_preparation_package_change_required', PACKAGE_GUARD_MESSAGE, False,
+    )
+
+
 @pytest.mark.parametrize("message", ["[]", "{}", "x" * 4097, "invalid json"])
 def test_bad_receipt_is_bounded_validation_error(message):
     image_id, job = receipt_job(message=message)
     with pytest.raises(ValueError):
+        publication_receipt(job, materialization_id=image_id, lease_epoch=2)
+
+
+def test_oci_runtime_metadata_is_bound_to_the_published_component():
+    image_id, job = receipt_job()
+    status = job["pods"][0]["status"]["containerStatuses"][0]["state"]["terminated"]
+    document = json.loads(status["message"])
+    document["image_runtime_metadata"] = {"task": {
+        "image_ref": document["registry_images"]["task"], "user": "root", "uid": 0, "gid": 0,
+        "home": "/root", "workdir": "/app", "entrypoint": ["/entrypoint.sh"], "environment": {},
+    }}
+    status["message"] = json.dumps(document)
+    assert publication_receipt(job, materialization_id=image_id, lease_epoch=2) == document["registry_images"]
+    document["image_runtime_metadata"]["task"]["image_ref"] = "other.example/task@sha256:" + "b" * 64
+    status["message"] = json.dumps(document)
+    with pytest.raises(ValueError, match="differs from the published image"):
         publication_receipt(job, materialization_id=image_id, lease_epoch=2)
 
 
@@ -238,6 +346,48 @@ async def test_create_conflict_recovers_same_objects_but_rejects_changed_configu
         await api.ensure(cm, job)
 
 
+async def test_bound_build_rejects_replaced_node_before_any_create(monkeypatch):
+    from loom_control_plane.execution_capacity import ExecutionProvisioningBlockedError
+
+    api, clients = fake_api()
+    cm, job = copy.deepcopy(clients.cm), copy.deepcopy(clients.job)
+    job["metadata"]["annotations"] = {
+        "loom.openai.com/build-node-name": "compute-1",
+        "loom.openai.com/build-node-uid": "original-uid",
+    }
+    creates = []
+    monkeypatch.setattr(clients, "read_node", lambda *a, **kw: {
+        "metadata": {"name": "compute-1", "uid": "replacement-uid"},
+    }, raising=False)
+    monkeypatch.setattr(clients, "create_namespaced_config_map", lambda *a, **kw: creates.append("cm"))
+    def create(*args, **kwargs):
+        creates.append("job")
+        return copy.deepcopy(job)
+
+    monkeypatch.setattr(clients, "create_namespaced_job", create)
+    with pytest.raises(ExecutionProvisioningBlockedError, match="node_identity_changed"):
+        await api.ensure(cm, job)
+    assert creates == []
+
+
+async def test_bound_build_checks_current_node_uid_and_keeps_frozen_job(monkeypatch):
+    api, clients = fake_api()
+    job = clients.job
+    job["metadata"]["annotations"] = {
+        "loom.openai.com/build-node-name": "compute-1",
+        "loom.openai.com/build-node-uid": "original-uid",
+    }
+    reads = []
+
+    def node(name, **kwargs):
+        reads.append(name)
+        return {"metadata": {"name": name, "uid": "original-uid"}}
+
+    monkeypatch.setattr(clients, "read_node", node, raising=False)
+    assert (await api.ensure(copy.deepcopy(clients.cm), copy.deepcopy(job)))["metadata"]["uid"] == "job-uid"
+    assert reads == ["compute-1"]
+
+
 async def test_create_conflict_recovers_api_normalized_native_job(request):
     api, clients = fake_api()
     cm, job = render_task_image_job(**request.getfixturevalue("inputs"))
@@ -281,3 +431,54 @@ def test_native_diagnostic_redacts_quoted_keys_urls_and_multiline_credentials():
     encoded = json.dumps(build_observation(job))
     for secret in ("quoted-private", "token-private", "private with spaces", "user:pass", "signed-private", "bearer-private"):
         assert secret not in encoded
+
+
+@pytest.mark.parametrize(("change", "expected"), [
+    ("missing", "missing"),
+    ("replaced", "identity_changed"),
+    ("deleting", "deleting"),
+    ("autoscaler_draining", "autoscaler_draining"),
+    ("healthy", None),
+    ("cordoned", None),
+    ("not_ready", None),
+    ("transient_error", None),
+    ("forbidden", None),
+])
+async def test_bound_node_recovery_requires_definitive_current_evidence(monkeypatch, change, expected):
+    api, clients = fake_api()
+    job = clients.job
+    job["metadata"]["annotations"] = {
+        "loom.openai.com/build-node-name": "compute-1",
+        "loom.openai.com/build-node-uid": "original-uid",
+    }
+    node = {"metadata": {"name": "compute-1", "uid": "original-uid"}, "spec": {}}
+    if change == "replaced":
+        node["metadata"]["uid"] = "replacement-uid"
+    elif change == "deleting":
+        node["metadata"]["deletionTimestamp"] = "2026-10-26T22:28:00Z"
+    elif change == "autoscaler_draining":
+        node["spec"]["taints"] = [{"key": "ToBeDeletedByClusterAutoscaler", "effect": "NoSchedule"}]
+    elif change == "cordoned":
+        node["spec"]["unschedulable"] = True
+    elif change == "not_ready":
+        node["status"] = {"conditions": [{"type": "Ready", "status": "False"}]}
+
+    def read_node(name, **kwargs):
+        assert name == "compute-1" and kwargs == {"_request_timeout": 20}
+        if change in {"missing", "transient_error", "forbidden"}:
+            raise ApiException(status={"missing": 404, "transient_error": 503, "forbidden": 403}[change])
+        return node
+
+    monkeypatch.setattr(clients, "read_node", read_node, raising=False)
+    assert await api.bound_node_unavailable(job) == expected
+    assert not clients.deleted
+
+
+async def test_bootstrap_build_does_not_query_or_rebind_a_node(monkeypatch):
+    api, clients = fake_api()
+
+    def forbidden_read(*args, **kwargs):
+        pytest.fail("a bootstrap build has no frozen node to recover")
+
+    monkeypatch.setattr(clients, "read_node", forbidden_read, raising=False)
+    assert await api.bound_node_unavailable(clients.job) is None

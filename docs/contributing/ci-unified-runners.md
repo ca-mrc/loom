@@ -14,8 +14,9 @@ checkout, retaining the existing hosted paths and coverage checks.
 The flag defaults off, retaining original hosted placements. Main promotion,
 fork PRs, macOS, ARM, rollout/deployment jobs and optional six-hour TB2.1 image
 qualification retain existing routing. Missing pool tests and normal
-platform/harness publication share the common queue; candidate planning keeps
-the hosted image with its GitHub CLI; the protected
+platform/harness publication share the common queue; candidate planning and
+the small `fast-feedback` CLI/base preflight keep the same `ubuntu-24.04`
+hosted image with its GitHub CLI; the protected
 publication environment and credential scope are unchanged.
 Existing queued jobs do not migrate or restart when the flag changes. Plan and
 final gate jobs also use the common queue, avoiding a deadlock when hosted donor
@@ -30,6 +31,14 @@ to the currently confirmed Free-organization ceiling of 20; other hosted
 workflows share that limit. Only runnable queued jobs whose native `needs`
 dependencies have completed contribute to demand, including candidate missing-test
 matrix rows and publication after its prerequisite jobs finish.
+
+Demand inventory uses GitHub's official paginated
+`/actions/runs/{run_id}/attempts/{run_attempt}/jobs` endpoint, bound to the
+positive integer `run_attempt` returned with each source run. This keeps rerun
+demand separate from earlier attempts. On 2026-10-19, the ordinary latest-jobs
+endpoint repeatedly returned HTTP 502 for a run whose exact-attempt inventory
+succeeded. Missing or invalid attempts and API errors still stop reconciliation;
+they never become zero demand or permission to retire an unused worker.
 
 GitHub has no atomic provider preference between matching runners. Hosted
 capacity is supplied while OLDLAB contributes overflow, but simultaneous ready
@@ -50,6 +59,53 @@ On the existing management host install distro `python3-yaml` and `python3-nacl`
 `deploy/ci-runners/`. Create `/var/lib/loom-ci-runner-supply` mode 0700. The existing
 management token stays root-only at `/etc/loom-ci-runner-pool/github-token`; it
 never enters Actions secrets or job environments.
+
+### Reusable-workflow compatibility
+
+CI calls image, cluster and staging validation after fast feedback. GitHub names
+those jobs with the caller prefix, for example `images-validation / image plan`.
+The hosted-supply controller must understand both nested dependencies and the
+runner-free call nodes. The version-3 graph reader resolves only local workflow
+files at the same source-run SHA and invalidates old graph/count caches. It does
+not execute workflow contents or read a moving branch. It retains matrix metadata
+so static job names with GitHub's appended or truncated matrix values still
+contribute to demand and unblock their dependent result jobs.
+
+A source PR does not update the installed controller. Until the reviewed
+`ci_runner_supply.py` has been installed through the existing management-host
+procedure and its read-only demand preview has been checked against actual
+queued nested jobs, leave `LOOM_CI_REUSABLE_SUPPLY_READY` unset/false. New called
+jobs and their three caller gates then use their existing GitHub-hosted fallback;
+other CI jobs and independent manual diagnostics keep their previous routing.
+After that deployment/readback, setting this capability variable to `true`
+allows the new jobs to use the opt-in common queue as well. Keep
+`LOOM_CI_UNIFIED_RUNNERS=true` for the common queue to apply. Clearing the new
+capability variable restores hosted fallback for future nested jobs; it does not
+cancel or migrate jobs already queued/running.
+
+No controller install, timer restart, token/state migration or capability-variable
+activation is performed by a validation workflow or source merge. Preserve the
+installed script for rollback, keep the token and slot state in place, and use a
+separate temporary state root for the non-`--execute` demand preview. Preview
+reads GitHub metadata and writes only its local graph cache; it does not register,
+dispatch, deregister or cancel runners. Activation remains an operator action.
+
+Verify activation with a fresh current-base PR that selects image, cluster and
+staging validation together. A manual CI dispatch does not call these reusable
+workflows, and rerunning an old PR event can correctly fail the strict-base
+preflight. Record the native nested jobs' requested labels, runner IDs and runner
+names, including image builds, cluster tests and the system smoke; an online
+runner inventory alone does not prove pickup. Confirm their start times follow
+successful fast feedback and that the same head has all four successful bare
+gate names from Actions app `15368`.
+
+Before enabling the capability variable, nested jobs still request hosted
+labels, so zero nested demand in a read-only preview is expected. A replay of
+actual native job names with projected common labels can check graph matching,
+but record it as a simulation and follow it with real pickup after activation.
+To roll back only reusable routing, clear `LOOM_CI_REUSABLE_SUPPLY_READY`, leave
+the existing common queue enabled, and let already queued/running nested jobs
+drain before retiring any idle capacity.
 
 For each slot the controller registers a fresh one-job JIT runner, encrypts the
 JIT config with the repository public key, sets `LOOM_CI_HOSTED_JIT_00` through
@@ -76,6 +132,13 @@ is involved. Only this controller's own unused donor runs may be cancelled,
 after fresh busy-state readback and successful deregistration. API/deletion
 failure preserves execution. Source CI is never cancelled or retried here.
 Inspect root-owned `status.json` and per-slot `worker.json`; never print JIT files.
+
+An HTTP 409 conflict when cancelling an exactly owned, already deregistered
+donor defers that slot's retirement while other supply work continues. GitHub
+run status can lag a terminal worker job. The controller keeps the slot record
+and any remaining JIT file, writes no retirement receipt, and waits for terminal
+run readback before ordinary finalization. Busy-runner and exact-title checks
+still precede cancellation; other API or transport errors still stop reconciliation.
 
 On each OLDLAB host, install `scripts/ops/ci_runner_unified_host.py` and run it
 with `--install-runtime /usr/local/lib/loom-ci-runner-expansion

@@ -1,9 +1,11 @@
 # Standalone Nebius platform
 
 This lane publishes from `dev`; that Git branch does not determine the deployed
-environment class. CI and candidate publication use GitHub-hosted runners; the
-platform needs no ARC controller or Nebius CI runner pool. The existing Nebius
-installation at `https://nebius.yylx.world`, in `loom-nebius-platform` with execution
+environment class. Development CI and normal candidate publication can use the
+[unified native runner queue](../contributing/ci-unified-runners.md), with
+GitHub-hosted fallback and exclusions. The platform needs no ARC controller or
+Nebius CI runner pool. The existing Nebius installation at
+`https://nebius.yylx.world`, in `loom-nebius-platform` with execution
 in `loom-nebius-platform-execution`, serves **staging**. Its historical input says
 `environment: development`; the old "integration" name is not evidence of a
 separate development environment or permission to attach personal APIs to it.
@@ -135,7 +137,7 @@ publication does not build or admit the Terminal-Bench task image. Task images
 use the ordinary Dockerfile preparation path; the single-task source and local
 regression fixture remain in `deploy/catalog/nebius-terminal-bench/`.
 
-The existing GitHub-hosted `nebius-candidate` workflow also supports manual
+The existing `nebius-candidate` workflow also supports manual
 `mode=harness-only`, with an explicit `agent_version` label. This builds, scans
 and publishes only the Harbor controller through the same native digest and
 image-admission path. Its `nebius-agent-runtime-*` artifact contains
@@ -162,7 +164,7 @@ the candidate publisher's Python calls. The ordinary image matrix and the
 independent Harbor job share these strict scan steps. Omitting the flag retains
 the legacy CLI policy; selecting it only on the writer or only on the validator is invalid.
 
-The GitHub-hosted native image CI selects from the same seven published platform
+The native image CI selects from the same seven published platform
 and Harbor image names. `plan-images --image-set nebius` uses their manifest-owned
 source paths; explicit full/fallback coverage builds those seven AMD64 images.
 The reusable build lane validates each row with `validate-image --image-set nebius`.
@@ -333,6 +335,11 @@ disabled; a repeated bootstrap preserves its operator intent.
 Configure the protected `nebius-candidate` workflow explicitly:
 
 - `NEBIUS_GUEST_RUNTIME_READY=true` selects `qemu-tcg-v1`.
+- `NEBIUS_SHARED_GUEST_READY=true` enables agent and verifier controllers to use
+  the same resident guest, retaining files, processes and private kernel state.
+  It requires guest and task-identity readiness. Qualify state continuity and
+  verifier output collection before enabling it; leave it unset or false until
+  then. Private verifier inputs are staged only after the agent finishes.
 - `NEBIUS_EMULATED_PKCS11_READY=true` additionally enables the emulated-auth
   profile capability. It requires guest and task-identity readiness plus a
   distinct `emulated_auth_execution_target: {"target_id": "<auth guest target>"}`
@@ -554,8 +561,8 @@ This implementation is the single-region slice of #1884. Cross-region target
 selection, connectivity and provider-fault acceptance remain subsequent work.
 #1538 must use fresh quota and a separately bounded resource/Trial plan to verify
 actual overlap, recovery and native scale-to-zero; passing local tests or raising
-the technical maximum is not live capacity acceptance. CI and publication remain
-GitHub-hosted.
+the technical maximum is not live capacity acceptance. CI and publication use
+the independently configured native Actions runners.
 
 ## Secret prerequisites
 
@@ -1134,7 +1141,7 @@ rerender the same published candidate and runtime profile without rebuilding ima
 
 ### Native task-image preparation
 
-Platform and harness images continue to build and publish on GitHub-hosted CI.
+Platform and harness images build and publish through GitHub Actions.
 Task Dockerfiles are product workloads: the existing execution actuator claims
 `task_image_materializations` and runs one native Kubernetes Job per fenced
 attempt. No additional queue, worker service or autoscaler is required.
@@ -1158,7 +1165,7 @@ configuration; omission leaves native building disabled:
   "ephemeral_storage_mib": 16384,
   "max_processes": 512,
   "active_deadline_seconds": 1800,
-  "snapshotter": "overlayfs",
+  "snapshotter": "native",
   "compatible_revision_cache": "off",
   "export_cache_mode": "max",
   "cache_transfer": "blobs",
@@ -1167,10 +1174,22 @@ configuration; omission leaves native building disabled:
 ```
 
 `snapshotter` selects the BuildKit OCI worker snapshotter (`overlayfs` or
-`native`). It defaults to `overlayfs` (the measured Nebius improvement over the
-historical forced-native setting). Set `"snapshotter": "native"` to roll back
-without redeploying a prior actuator image. Omission uses the same OverlayFS
-default.
+`native`). It defaults to `native` so unchanged Dockerfiles can hardlink files
+from earlier layers. Rootless OverlayFS copy-up can change inode identity during
+`git clone --bare`, causing Git's `hardlink different from source` rejection.
+Do not disable that Git check or rewrite the task's Dockerfile. `overlayfs`
+remains an explicit performance opt-in for qualified workloads. Existing
+deployments that explicitly selected `overlayfs` must change that setting to
+`native`; upgrading the actuator alone does not override explicit configuration.
+
+After changing the builder configuration, requeue an exhausted failed image with
+the existing Control Plane admin endpoint
+`POST /admin/task-image-materializations/{materialization_id}/retry`. It retains
+the source and materialization key, resets the attempt budget, and advances the
+lease epoch. Then use the ordinary failed-case batch rerun. A batch rerun alone
+does not reset an exhausted image build. Leave ready images reusable unless
+their contents are independently suspect. BuildKit layer cache import/export
+and the existing bounded build deadline still apply to the native snapshotter.
 
 `compatible_revision_cache` controls whether prepare may import BuildKit layer
 cache from a **prior ready revision of the same `task_id` + `cpu_arch`**. Values
@@ -1252,22 +1271,43 @@ overlapping durations or present reservation estimates as measured peak disk.
 
 `cache_bucket` is optional. When absent, cache credentials and import/export are
 omitted. Source, backup and trajectory buckets cannot be used as build cache.
-`max_concurrent` accepts 1–16, defaults to 1, bounds unfinished builds including
-cleanup, and renders the matching build-namespace quota. Set it to 16 in the
-operator configuration to prepare up to 16 uncached task environments at once.
-With the per-build resources above, that allows 16 CPU, 32 GiB memory and 256 GiB
-temporary storage across the build namespace. It does not reserve that capacity
-up front or force 16 builds to run: node capacity, provider quota and shared
-capacity admission still determine how many can start. On the shared execution
-pool, account for the 16 GiB storage request per build alongside Trial requests;
-builds can need several nodes even when their total CPU would fit on one.
+`max_concurrent` defaults to `null`: builds and Trials use the existing shared
+capacity admission without an additional build-count ceiling. Admission accounts
+for both workloads' CPU, memory, temporary storage, Pod slots, node limits and
+shared regional cloud quotas. Pending tasks remain queued until granted capacity;
+a bundle containing thousands of tasks does not create that many Pods at once.
+On the native shared-capacity path, contention protects the oldest valid build
+and ordinary queued Trial waiting heads, using their first actual capacity wait
+rather than bundle submission time. Only the current eligible head for each target is
+protected; queued task counts are not resource reservations. The scheduler's
+existing team fair-share and submit priority remain unchanged. The separate
+registered-pool path retains its workload-class/age ordering. There is no fixed
+split between build and execution capacity. Cleanup-pending resources remain
+charged until their release is acknowledged.
 
-The renderer also supplies this same limit to the existing capacity collector.
+Queued execution heads are read in bounded pages per target. Expired hints are
+skipped in PostgreSQL; invalid heads advance to the next page without treating
+their cached inputs as authority. Once a valid oldest head is found, younger
+pages are not transferred. Actual timestamp ordering and the claimant's own
+waiting age are retained, including when it is not the target's oldest head.
+
+An optional positive integer adds an operator ceiling on unfinished builds,
+including cleanup. There is no built-in maximum of 16. An explicit integer also
+renders a matching build-namespace quota; `null` renders the same owned quota with
+an empty `hard` map to remove an older count-derived limit. This does not remove
+physical capacity or cloud-quota checks. On shared nodes, account for the 16 GiB
+storage request per build alongside Trial requests; builds can need several nodes
+even when their total CPU would fit on one. This resource admission does not
+measure or reserve disk IOPS or bandwidth.
+
+The renderer also supplies an explicit integer limit to the existing capacity collector.
 Monitor's shared-node panel displays the configured build concurrency from that
 target's capacity observation, including when no builds or execution nodes remain.
 Observation freshness still applies; historical observations without the field
 show unavailable. This is a configured ceiling, not a count of currently available
-build slots, and does not change admission or node scaling.
+build slots, and does not change admission or node scaling. With `null`, the
+collector omits the optional count limit. Existing installations with an explicit
+integer retain it until their operator configuration is updated.
 Apply the operator configuration through the
 normal renderer/deployer; changing only the actuator environment or namespace
 quota leaves the two limits inconsistent. Builds still compete with executions
@@ -1499,9 +1539,9 @@ the deployment job and do not contact the cluster. A publication failure is
 different from **skipped_busy**, which follows a successful publication and a
 live idle check. A green skip report records a decision, not a deployment.
 
-CI and publication remain on GitHub-hosted runners, with independent concurrency
-from rollout. The runner invokes `kubectl` over the existing Nebius SSH gateway;
-no Nebius runner, new gateway, public Kubernetes API exposure, or old environment
+CI and publication retain independent concurrency from rollout. The rollout
+runner remains GitHub-hosted and invokes `kubectl` over the existing Nebius SSH
+gateway; no Nebius runner, new gateway, public Kubernetes API exposure, or old environment
 integration is needed. A pinned SSH host key is required; do not use live
 `ssh-keyscan` output as trust. Kubernetes credentials stay on the gateway.
 
@@ -1580,6 +1620,18 @@ released its guard. Scheduled checks never clear guards, retry failed migrations
 or repeat a failed backup automatically. Diagnose and fix the failure before an
 explicit operator attempt or the recovery operation below; a later successful
 deployment clears the automatic failure block.
+
+Failed kubectl commands retain a safe `reason_code` in the deployment receipt,
+alongside the existing phase and message. SSH exit 255 is classified from known
+client diagnostics as `SSHConnectTimeout`, `SSHConnectionClosed`,
+`SSHAuthenticationFailed`, or `SSHHostKeyFailed`; an unrecognized SSH failure is
+`SSHCommandFailed`. Exit 255 alone does not prove a transport failure because a
+remote command can return that status too. A process deadline is `CommandTimeout`.
+Kubernetes API reason codes and task-identity admission denials keep their existing
+precedence. Raw stderr, connection arguments and manifest content are not retained.
+These classifications do not retry commands, change deadlines or release a held
+guard. An older `CommandFailed` receipt cannot recover discarded diagnostics;
+inspect the available connection and phase evidence before an explicit recovery.
 
 For recovery, inspect the recorded phase, migration and workload state first.
 Fix the diagnosed cause, confirm the original workflow is terminal, and use the

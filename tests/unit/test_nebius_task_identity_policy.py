@@ -6,19 +6,28 @@ from pathlib import Path
 import pytest
 
 from loom.nebius_platform_render import NebiusPlatformError, build_platform
-from tests.unit.test_nebius_platform_render import platform_inputs  # noqa: F401
+from loom.nebius_task_identity_policy import _guest_private_expression
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_identity_profile_cannot_claim_readiness_in_restricted_namespace(platform_inputs):  # noqa: F811
+def test_guest_home_reject_is_a_valid_cel_string():
+    expression = _guest_private_expression()
+    # CEL treats one backslash as a string escape. RE2 needs \. for a dot, so
+    # the policy text must contain the two-character escape \\.
+    assert "(?:^|/)\\\\.\\\\.?(?:/|$)" in expression
+    assert "\\." not in expression.replace("\\\\", "")
+
+
+def test_identity_profile_cannot_claim_readiness_in_restricted_namespace(platform_inputs):
     config, candidate, profile = platform_inputs
     profile["supports_task_identity"] = True
     with pytest.raises(NebiusPlatformError, match=r"identity.*policy"):
         build_platform(config, candidate, profile, {}, repo_root=ROOT)
 
 
-def test_identity_policy_is_target_bound_and_can_prepare_without_enabling_execution(platform_inputs):  # noqa: F811
+def test_identity_policy_is_target_bound_and_can_prepare_without_enabling_execution(platform_inputs):
     config, candidate, profile = platform_inputs
     config["task_identity_policy"] = {
         "mode": "private-root-v1", "target_id": config["target_id"],
@@ -41,7 +50,33 @@ def test_identity_policy_is_target_bound_and_can_prepare_without_enabling_execut
         build_platform(different, candidate, profile, {}, repo_root=ROOT)
 
 
-def test_deployment_requires_exact_policy_artifact_before_namespace_exception(platform_inputs, tmp_path):  # noqa: F811
+def test_guest_admission_allows_one_task_guest_or_two_private_guests():
+    from loom.nebius_task_identity_policy import identity_policy_documents
+
+    policy, _binding = identity_policy_documents(
+        "loom-exec", "owner", guest_target_id="guest",
+    )
+    guest_rules = [
+        rule for rule in policy["spec"]["validations"]
+        if rule["message"].startswith("Guest targets require")
+    ]
+    assert len(guest_rules) == 1
+    expression = guest_rules[0]["expression"]
+    assert "size(variables.private) == 2" in expression
+    assert "size(variables.private) == 1" in expression
+    assert "c.name == 'task-sandbox'" in expression
+    assert expression.count("object.spec.volumes.exists") == 4
+    assert "task-sandbox-guest-state" in expression
+    assert "verifier-sandbox-guest-state" in expression
+    assert guest_rules[0]["message"] == (
+        "Guest targets require one resident task guest or two private guests, "
+        "each with bounded disk state."
+    )
+    ordinary, _binding = identity_policy_documents("loom-exec", "owner")
+    assert all("variables.isGuest" not in rule["expression"] for rule in ordinary["spec"]["validations"])
+
+
+def test_deployment_requires_exact_policy_artifact_before_namespace_exception(platform_inputs, tmp_path):
     from scripts.ops.deploy_nebius_platform import DeploymentError, load_render
 
     from loom.nebius_platform_render import write_platform

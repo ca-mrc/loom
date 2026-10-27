@@ -100,7 +100,7 @@ def test_docker_test_edit_keeps_its_owner_without_fast_integration(tmp_path, mon
 def test_unknown_and_selection_authority_keep_all_lanes_and_full_manifests():
     for path in (
         "unknown/runtime.bin",
-        "scripts/ops/nebius_pool_test_plan.py",
+        "scripts/plan_ci_validations.py",
         "config/component-ownership.toml",
         "uv.lock",
     ):
@@ -136,6 +136,85 @@ def test_component_scope_follows_indirect_and_string_consumers(tmp_path):
     assert select(("scripts/ops/component.py", "uv.lock")) == frozenset(tests)
 
 
+def test_shared_pool_scope_follows_operator_dependencies_and_preserves_unknown_entrypoints(tmp_path):
+    files = {
+        "scripts/ops/component.py": "VALUE=1\n",
+        "scripts/ops/adapter.py": "from scripts.ops.component import VALUE\n",
+        "scripts/ops/unrelated.py": "VALUE=2\n",
+        "scripts/ops/nebius_shared_pool_new.py": "VALUE=3\n",
+        "tests/support/fixture.py": "SCRIPT='scripts/ops/adapter.py'\n",
+        "tests/ops/test_nebius_shared_pool_alpha.py": "from tests.support.fixture import SCRIPT\n",
+        "tests/ops/test_nebius_shared_pool_beta.py": "def test_other(): pass\n",
+    }
+    for name, source in files.items():
+        target = tmp_path / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(source)
+    tests = tuple(name for name in files if Path(name).name.startswith("test_"))
+    manifest = ownership.load_manifest(ROOT / "config/component-ownership.toml")
+
+    def select(*changes):
+        return ownership.select_affected_test_suites(manifest, tests,
+            changed_paths=changes, repo_root=tmp_path)
+
+    assert select("scripts/ops/component.py") == tests[:1]
+    assert select("scripts/ops/unrelated.py") == ()
+    assert select("scripts/ops/nebius_shared_pool_new.py") == tests
+    assert select("scripts/ops/component.py", "uv.lock") == tests
+    # Deleting a referenced operator is not evidence of no dependency.
+    (tmp_path / "scripts/ops/component.py").unlink()
+    assert select("scripts/ops/component.py") == tests
+    (tmp_path / "tests/support/fixture.py").unlink()
+    assert select("tests/support/fixture.py") == tests
+    # Unavailable dependency evidence must not classify an edit as unrelated.
+    (tmp_path / "tests/support/fixture.py").write_text("not python !")
+    assert select("scripts/ops/unrelated.py") == tests
+
+
+def test_helper_import_discovery_is_statement_bounded_and_fresh(tmp_path, monkeypatch):
+    # Large literal fixtures are not imports. Traversal work must depend on
+    # statements, while retaining imports inside every nested statement container.
+    source = """PAYLOAD = PAYLOAD_VALUE
+if True:
+    import tests.support.alpha as alpha
+class Nested:
+    async def load(self):
+        try:
+            from tests.support import beta
+        except Exception:
+            import tests.support.gamma
+        finally:
+            match value:
+                case _:
+                    from tests.support.delta import VALUE
+"""
+    target = tmp_path / "tests/sample.py"
+    target.parent.mkdir()
+    (tmp_path / "tests/support").mkdir()
+    for name in ("alpha", "beta", "gamma", "delta", "later"):
+        (tmp_path / f"tests/support/{name}.py").write_text("import tests.sample\n")
+    target.write_text(source.replace("PAYLOAD_VALUE", "[0]"))
+    visited = 0
+    children = ownership.ast.iter_child_nodes
+
+    def count(node):
+        nonlocal visited
+        visited += 1
+        return children(node)
+
+    monkeypatch.setattr(ownership.ast, "iter_child_nodes", count)
+    expected = frozenset({"tests/sample.py", "tests/support/alpha.py", "tests/support/beta.py",
+                          "tests/support/gamma.py", "tests/support/delta.py"})
+    assert ownership._imported_test_modules(("tests/sample.py",), repo_root=tmp_path) == expected
+    small = visited
+    visited = 0
+    target.write_text(source.replace("PAYLOAD_VALUE", "[" + "0," * 5000 + "]")
+                      + "from tests.support import later\n")
+    assert ownership._imported_test_modules(("tests/sample.py",), repo_root=tmp_path) == (
+        expected | {"tests/support/later.py"})
+    assert visited <= 2 * small + 40, "fixture expressions multiplied import-discovery traversal work"
+
+
 def test_staging_workflow_passes_the_same_changed_paths_to_its_owner():
     workflow = yaml.safe_load((ROOT / ".github/workflows/staging-smoke.yml").read_text())
     job = workflow["jobs"]["system-smoke"]
@@ -160,6 +239,7 @@ def test_frontend_contract_only_retains_codegen_and_full_ui_for_frontend_inputs(
     workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
     steps = workflow["jobs"]["web-checks"]["steps"]
     assert "if" not in next(row for row in steps if row.get("name") == "Verify generated API types")
+    runtime = workflow["jobs"]["web-runtime"]["steps"]
     for name in (
         "Vitest coverage gate",
         "Production build",
@@ -167,7 +247,7 @@ def test_frontend_contract_only_retains_codegen_and_full_ui_for_frontend_inputs(
         "Prefix-route browser, axe, console, and network gate",
     ):
         assert (
-            next(row for row in steps if row.get("name") == name)["if"]
+            next(row for row in (steps if name == "Vitest coverage gate" else runtime) if row.get("name") == name)["if"]
             == "needs.workflow-plan.outputs.web_runtime == 'true'"
         )
 

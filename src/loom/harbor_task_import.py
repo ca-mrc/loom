@@ -120,6 +120,7 @@ def project_harbor_task(payload: dict[str, Any]) -> dict[str, Any]:
         # explicit projection Loom defaults to /workspace while the normalized
         # script verifier still points at /app/verifier/run.sh.
         "workdir": source_environment.get("workdir", "/app"),
+        "image_workdir": "workdir" not in source_environment,
     }
     for field in EnvironmentConfig.model_fields:
         if field in source_environment:

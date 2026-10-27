@@ -14,6 +14,8 @@ from collections.abc import Iterable, Mapping, Sequence
 from decimal import Decimal
 from typing import Any, cast
 
+from loom.task_image_failure import image_preparation_failure
+
 _ACTIVE_TRIAL_STATES = {
     "queued",
     "protected-pending",
@@ -73,6 +75,9 @@ _PLATFORM_SETUP_REASONS: frozenset[str] = frozenset(
         "internal_error",
         "node_setup_health",
         "setup_failure",
+        # Hosted runtime statuses: a setup phase or the runtime itself failed.
+        "runtime_error",
+        "setup_error",
     }
 )
 
@@ -209,6 +214,19 @@ def classify_trial_outcome(trial: Any) -> dict[str, Any]:
             category="active",
             attribution="pending",
         )
+
+    if reason == "task_image_build_failed" and isinstance(result, dict):
+        snapshot = result.get("task_image_preparation_failure")
+        typed = image_preparation_failure(snapshot.get("reason")) if isinstance(snapshot, dict) else None
+        if typed is not None:
+            return _common(
+                reason_code="trial." + typed["reason"], reason=typed["reason"],
+                failure_class="platform_failure" if typed["attribution"] == "platform" else "unknown_failure",
+                root_cause="image_preparation", platform_outcome="failed", score_outcome="unscored",
+                rerun_recommendation="operator_approval" if typed["retryable"] else "not_rerunnable",
+                message=typed["message"], category="image_preparation", attribution=typed["attribution"],
+                rerunnable=typed["retryable"], requires_operator_approval=typed["retryable"],
+            )
 
     if reason is not None and reason in _TASK_FAILURE_REASONS:
         return _common(

@@ -132,13 +132,22 @@ strategy = "stable-hash"
 # predecessors, moving two off their nearly full shards. No scenario is removed.
 # Separation contracts in test_ci_test_selection.py remain enforced. Hash the
 # remaining files; subsequent file additions do not move existing files.
-# Every selected file still runs once; the 40m job limit stays unchanged.
+# Every selected file still runs once; the current 50m job limit stays unchanged.
 # Censored CI tails are not duration evidence. Verify the new balance in CI.
 salt = "tests-root-v2-8275"
 # Candidate 38793279887: shards 1/5/6 took 1825/1607/1635s,
 # while 13/12/14 took 41/35/58s. The slow-25 log entries alone
 # account for >=642/354/489s in the three complete modules moved below.
 # Keep every scenario and the existing time budgets; balance whole modules.
+# Keep the measured scenario-boundary splits. After removing repeated target
+# topology products, compare complete 20-shard costs rather than retaining
+# placements chosen for the old counts. See pytest-efficiency-verification.md.
+# Run 39471175183 exhausted shard 8's 50m budget: handoff alone took 2445s,
+# before recovery release could finish. Keep that module apart from activation,
+# cutover, gateway retirement and recovery release. Shards 6/7 took 288/280s
+# in the same run and have room for those companions. Shard 19 took 2706s;
+# move its ~11m installation module to shard 3 (an 8m job), leaving census room.
+# These are whole-module moves within the same 20 shards, not extra selection.
 pins = [
   { path = "tests/ops/test_nebius_pool_application_connected.py", shard_index = 0 },
   { path = "tests/ops/test_nebius_pool_image_transport.py", shard_index = 0 },
@@ -148,33 +157,33 @@ pins = [
   { path = "tests/ops/test_nebius_pool_startup_repair.py", shard_index = 1 },
   { path = "tests/ops/test_nebius_pool_template_restoration.py", shard_index = 1 },
   { path = "tests/ops/test_nebius_pool_database_guard.py", shard_index = 2 },
-  { path = "tests/ops/test_nebius_pool_manager_image_history.py", shard_index = 3 },
+  { path = "tests/ops/test_nebius_pool_manager_image_history.py", shard_index = 16 },
   { path = "tests/ops/test_nebius_pool_restart_qualification_live.py", shard_index = 2 },
   { path = "tests/ops/test_nebius_pool_cutover_entry.py", shard_index = 3 },
   { path = "tests/ops/test_nebius_pool_gateway_retirement.py", shard_index = 3 },
   { path = "tests/ops/test_nebius_pool_legacy_restart_live.py", shard_index = 3 },
   { path = "tests/ops/test_nebius_pool_template_restoration_live.py", shard_index = 3 },
-  { path = "tests/ops/test_nebius_pool_origin_history.py", shard_index = 4 },
+  { path = "tests/ops/test_nebius_pool_origin_history.py", shard_index = 9 },
   { path = "tests/ops/test_nebius_pool_predecessor_live.py", shard_index = 4 },
-  { path = "tests/ops/test_nebius_pool_shutdown_live.py", shard_index = 4 },
+  { path = "tests/ops/test_nebius_pool_shutdown_live.py", shard_index = 19 },
   { path = "tests/ops/test_nebius_pool_startup_fence_live.py", shard_index = 4 },
   { path = "tests/ops/test_nebius_pool_predecessor.py", shard_index = 5 },
-  { path = "tests/ops/test_nebius_pool_recovery_qualification_live.py", shard_index = 5 },
+  { path = "tests/ops/test_nebius_pool_recovery_qualification_live.py", shard_index = 10 },
   { path = "tests/ops/test_nebius_pool_shutdown.py", shard_index = 5 },
   { path = "tests/ops/test_nebius_pool_startup_live.py", shard_index = 5 },
   { path = "tests/ops/test_nebius_pool_startup_repair_rollback.py", shard_index = 12 },
   { path = "tests/ops/test_nebius_pool_legacy_reopening.py", shard_index = 6 },
   { path = "tests/ops/test_nebius_pool_operation.py", shard_index = 6 },
   { path = "tests/ops/test_nebius_pool_refresh_connected.py", shard_index = 14 },
-  { path = "tests/ops/test_nebius_pool_role_restoration.py", shard_index = 6 },
-  { path = "tests/ops/test_nebius_pool_activation_live.py", shard_index = 7 },
-  { path = "tests/ops/test_nebius_pool_cutover.py", shard_index = 7 },
-  { path = "tests/ops/test_nebius_pool_gateway_retirement_live.py", shard_index = 7 },
+  { path = "tests/ops/test_nebius_pool_role_restoration.py", shard_index = 15 },
+  { path = "tests/ops/test_nebius_pool_activation_live.py", shard_index = 5 },
+  { path = "tests/ops/test_nebius_pool_cutover.py", shard_index = 5 },
+  { path = "tests/ops/test_nebius_pool_gateway_retirement_live.py", shard_index = 5 },
   { path = "tests/ops/test_nebius_pool_participant_observation.py", shard_index = 10 },
   { path = "tests/ops/test_nebius_pool_participant_resource.py", shard_index = 1 },
   { path = "tests/ops/test_nebius_pool_participant_processes.py", shard_index = 1 },
   { path = "tests/ops/test_nebius_development_pool_retained.py", shard_index = 2 },
-  { path = "tests/ops/test_nebius_development_pool_install.py", shard_index = 5 },
+  { path = "tests/ops/test_nebius_development_pool_install.py", shard_index = 2 },
   { path = "tests/ops/test_nebius_development_pool_registration.py", shard_index = 5 },
   { path = "tests/ops/test_nebius_pool_participant_release.py", shard_index = 5 },
   { path = "tests/ops/test_nebius_pool_machine_retirement.py", shard_index = 5 },
@@ -189,10 +198,13 @@ pins = [
   { path = "tests/ops/test_nebius_shared_pool_handoff_processes_recovery.py", shard_index = 17 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_processes_observation.py", shard_index = 10 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_census.py", shard_index = 18 },
+  # Each recovery scenario retains its 1500s bound. Keep them in different
+  # existing jobs so their allowed budgets do not consume one 50m job together.
   { path = "tests/ops/test_nebius_shared_pool_handoff_census_recovery.py", shard_index = 19 },
+  { path = "tests/ops/test_nebius_shared_pool_handoff_census_preactivation_recovery.py", shard_index = 3 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_fences.py", shard_index = 4 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_authority.py", shard_index = 11 },
-  { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_release.py", shard_index = 7 },
+  { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_release.py", shard_index = 6 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_stop.py", shard_index = 12 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_stop_committed.py", shard_index = 14 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_gateway.py", shard_index = 13 },
@@ -200,6 +212,9 @@ pins = [
   { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_roles.py", shard_index = 15 },
   { path = "tests/ops/test_nebius_shared_pool_handoff_recovery_reopening.py", shard_index = 16 },
   { path = "tests/ops/test_nebius_pool_participant_delivery_transport.py", shard_index = 17 },
+  { path = "tests/ops/test_nebius_pool_participant_delivery_job_failures.py", shard_index = 13 },
+  { path = "tests/ops/test_nebius_pool_participant_delivery_completion.py", shard_index = 3 },
+  { path = "tests/ops/test_nebius_development_pool_retained_runtime_stages.py", shard_index = 11 },
 ]
 
 [[test_sharding]]
@@ -230,11 +245,13 @@ pins = [
   { path = "tests/integration/test_guest_emulated_auth.py", shard_index = 0 },
   { path = "tests/integration/test_task_bundle_source_storage.py", shard_index = 1 },
   { path = "tests/integration/test_task_bundle_source_publisher.py", shard_index = 1 },
+  { path = "tests/integration/test_task_source_publication_journal.py", shard_index = 1 },
   { path = "tests/integration/test_harbor_native_publish.py", shard_index = 1 },
   { path = "tests/integration/test_nebius_public_tls.py", shard_index = 1 },
   { path = "tests/integration/test_nebius_restore.py", shard_index = 1 },
   { path = "tests/integration/test_nebius_terminus_compat.py", shard_index = 1 },
   { path = "tests/integration/test_terminus2_continuation_docker.py", shard_index = 1 },
+  { path = "tests/integration/test_terminus2_direct_provider_docker.py", shard_index = 1 },
 ]
 
 [[test_sharding]]
@@ -244,6 +261,15 @@ strategy = "stable-hash"
 # PR2304 run36949210207 reached 61% of 77 tests before the serial 35m limit.
 # Keep whole files and their fixture ordering together on independent runners.
 salt = "cluster-smoke-v1-4"
+# Eight PR runs on Oct 19-20 measured 8.7 / 15.0 / 13.6 / 7.7 median pytest
+# minutes on shards 1-4, so the lane waited 15-18m for its slowest runner.
+# Moving four whole files projects 11.1 / 11.7 / 10.7 / 11.5.
+pins = [
+  { path = "tests/cluster/test_nebius_k3s_addon_readiness.py", shard_index = 0 },
+  { path = "tests/cluster/test_nebius_pool_cutover.py", shard_index = 0 },
+  { path = "tests/cluster/test_nebius_application_kubernetes.py", shard_index = 3 },
+  { path = "tests/integration/test_execution_maintenance_k3s.py", shard_index = 3 },
+]
 
 [[execution_policies]]
 id = "virtual-app-v1"
@@ -382,6 +408,7 @@ source_paths = [
   "src/loom/application_source_archive.py",
   "src/loom/application_source_upload.py",
   "src/loom/db/**",
+  "src/loom/dockerfile_instructions.py",
   "src/loom/driver/__init__.py",
   "src/loom/driver/task_image.py",
   "src/loom/execution_architecture.py",
@@ -422,11 +449,13 @@ source_paths = [
   "src/loom/nebius_pool_task_image.py",
   "src/loom/nebius_pool_workload.py",
   "src/loom/nebius_rollout_guard.py",
+  "src/loom/nebius_terminus_image.py",
   "src/loom/pipeline/__init__.py",
   "src/loom/pipeline/keys.py",
   "src/loom/request_params.py",
   "src/loom/execution_resource_allocation.py",
   "src/loom/resource_usage_store.py",
+  "src/loom/runtime_environment.py",
   "src/loom/sandbox_identity.py",
   "src/loom/security/**",
   "src/loom/service_execution_materialization.py",
@@ -439,9 +468,14 @@ source_paths = [
   "src/loom/task_bundle_source.py",
   "src/loom/task_bundle_source_journal.py",
   "src/loom/task_bundle_source_storage.py",
+  "src/loom/task_environment_handoff.py",
   "src/loom/task_image_build_plan.py",
   "src/loom/task_image_bundle_manifest.py",
+  "src/loom/task_image_compatibility.py",
+  "src/loom/task_image_errors.py",
+  "src/loom/task_image_failure.py",
   "src/loom/task_image_materialization.py",
+  "src/loom/task_image_metadata.py",
   "src/loom/task_fixtures.py",
   "src/loom/terminal_bench_normalize.py",
   "src/loom/terminal_result_semantics.py",
@@ -454,6 +488,7 @@ source_paths = [
   "src/loom_control_plane/execution_admission.py",
   "src/loom_control_plane/execution_capacity.py",
   "src/loom_control_plane/execution_capacity_targets.py",
+  "src/loom_control_plane/execution_capacity_wait.py",
   "src/loom_control_plane/execution_finance.py",
   "src/loom_control_plane/execution_placement.py",
   "src/loom_control_plane/execution_resource_allocation.py",
@@ -464,6 +499,7 @@ source_paths = [
   "src/loom_control_plane/service_execution_task_snapshot.py",
   "src/loom_control_plane/task_image_capacity.py",
   "src/loom_control_plane/task_image_capacity_wait.py",
+  "src/loom_control_plane/task_image_io_capacity.py",
   "src/loom_control_plane/task_image_materializations.py",
   "src/loom_execution_actuator/**",
   "src/loom_execution_capacity_collector/**",
@@ -724,6 +760,7 @@ source_paths = [
   "scripts/ops/harbor_upstream.py",
   "tests/support/terminus_conformance_probe.py",
   "tests/support/terminus_continuation_probe.py",
+  "tests/support/terminus_dispatch_diagnostics_probe.py",
   "src/loom/**",
 ]
 smoke_owner = "worker-runtime-conformance"
@@ -972,6 +1009,20 @@ exclude_paths = [
   "tests/unit/test_nebius_runtime_render.py",
   "tests/unit/pipeline/test_behavior_input_import.py",
   "tests/ops/test_nebius*pool*.py",
+  "tests/ops/test_ci_runner_*.py",
+  "tests/ops/test_ci_unified_runner_supply.py",
+]
+# This standalone controller is not imported by application/runtime modules.
+# Mixed application, fixture and unknown inputs retain their ordinary coverage.
+unaffected_paths = ["scripts/ops/ci_runner_supply.py"]
+
+[[test_suites]]
+id = "ci-runner-controller"
+language = "python"
+lane = "tests-root"
+include_paths = [
+  "tests/ops/test_ci_runner_*.py",
+  "tests/ops/test_ci_unified_runner_supply.py",
 ]
 
 [[test_suites]]
@@ -983,25 +1034,57 @@ id = "nebius-pool-ops"
 language = "python"
 lane = "nebius-pool"
 include_paths = ["tests/ops/test_nebius*pool*.py"]
+exclude_paths = ["tests/ops/test_nebius_shared_pool_*.py"]
 # These recovery CLIs have dedicated lifecycle/archive/idle-protection tests in
 # tests-root; they do not operate the legacy pool transition state machine.
 unaffected_paths = [
+  # This read-only coverage reader has its own candidate-plan regressions;
+  # sharing the nebius_pool_ filename prefix does not make it a pool operator.
+  "scripts/ops/nebius_pool_test_plan.py",
   "scripts/ops/nebius_archive_recovery.py",
   "scripts/ops/nebius_terminal_archive_recovery.py",
   "scripts/ops/nebius_terminal_cleanup_recovery.py",
+  # Read-only retired-feature inventory has dedicated integration coverage.
+  "scripts/ops/inventory_legacy_structures.py",
 ]
-component_sources = [
-  "scripts/ops/nebius_pool_activation_*.py",
-  "scripts/ops/nebius_pool_cutover*.py",
-  "scripts/ops/nebius_pool_startup*.py",
-  "scripts/ops/nebius_pool_participant_*.py",
-  "scripts/ops/nebius_pool_*retirement*.py",
-  "scripts/ops/nebius_pool_*restoration*.py",
-  "scripts/ops/nebius_pool_role_fencing*.py",
-  "scripts/ops/install_nebius*pool*.py",
-]
+component_sources = ["scripts/ops/**/*.py", "scripts/ops/**/*.sh"]
 affected_paths = [
-  "scripts/ops/**",
+  "scripts/ops/nebius_pool_*.py",
+  "scripts/ops/nebius_development_pool_*.py",
+  "scripts/ops/install_nebius*pool*.py",
+  "deploy/k8s/**",
+  "deploy/nebius/**",
+  "tests/__init__.py",
+  "tests/conftest.py",
+  "tests/ops/conftest.py",
+  "config/component-ownership.toml",
+  "scripts/component_ownership.py",
+  "scripts/plan_ci_validations.py",
+  ".github/workflows/ci.yml",
+  ".github/workflows/nebius-candidate.yml",
+  "pyproject.toml",
+  "uv.lock",
+]
+
+[[test_suites]]
+# Handoff/recovery is expensive and is not a dependency of every pool operator.
+# Discover referenced operators through these tests and their fixture imports;
+# direct shared-pool entrypoints without known consumers keep the whole suite.
+# Keep the same lane/shards and candidate coverage-reuse contract.
+# Manual qualification keeps every scenario before shared feature launch.
+# affected_only still narrows explicitly requested local selections by diff;
+# manual_only excludes this suite from all automatic and candidate execution.
+id = "nebius-shared-pool-ops"
+language = "python"
+lane = "nebius-pool"
+include_paths = ["tests/ops/test_nebius_shared_pool_*.py"]
+affected_only = true
+manual_only = true
+unaffected_paths = ["scripts/ops/nebius_pool_test_plan.py"]
+component_sources = ["scripts/ops/**/*.py", "scripts/ops/**/*.sh"]
+affected_paths = [
+  "scripts/ops/nebius_shared_pool_*.py",
+  "scripts/ops/install_nebius_shared_pool_entrypoint.py",
   "deploy/k8s/**",
   "deploy/nebius/**",
   "tests/__init__.py",
@@ -1047,6 +1130,7 @@ exclude_paths = [
   "tests/integration/test_nebius_restore.py",
   "tests/integration/test_nebius_terminus_compat.py",
   "tests/integration/test_terminus2_continuation_docker.py",
+  "tests/integration/test_terminus2_direct_provider_docker.py",
   "tests/integration/test_packaged_agent_runtime_docker.py",
   "tests/integration/test_pipeline_multipart_minio.py",
   "tests/integration/test_pipeline_core_fixture_image.py",
@@ -1057,6 +1141,7 @@ exclude_paths = [
   "tests/integration/test_worker_process_death.py",
   "tests/integration/test_task_bundle_source_storage.py",
   "tests/integration/test_task_bundle_source_publisher.py",
+  "tests/integration/test_task_source_publication_journal.py",
   "tests/integration/test_harbor_native_publish.py",
   "tests/integration/test_trial_e2e_docker.py",
   "tests/integration/test_trial_inprocess_e2e.py",
@@ -1118,6 +1203,7 @@ include_paths = [
   "tests/integration/test_nebius_restore.py",
   "tests/integration/test_nebius_terminus_compat.py",
   "tests/integration/test_terminus2_continuation_docker.py",
+  "tests/integration/test_terminus2_direct_provider_docker.py",
   "tests/integration/test_packaged_agent_runtime_docker.py",
   "tests/integration/test_pipeline_multipart_minio.py",
   "tests/integration/test_pipeline_core_fixture_image.py",
@@ -1128,6 +1214,7 @@ include_paths = [
   "tests/integration/test_worker_process_death.py",
   "tests/integration/test_task_bundle_source_storage.py",
   "tests/integration/test_task_bundle_source_publisher.py",
+  "tests/integration/test_task_source_publication_journal.py",
   "tests/integration/test_harbor_native_publish.py",
   "tests/integration/test_trial_e2e_docker.py",
   "tests/integration/test_trial_inprocess_e2e.py",

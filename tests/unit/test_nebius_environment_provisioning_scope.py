@@ -11,11 +11,11 @@ from loom.nebius_environment_render import render_environment
 from loom_service.environment_management.cloud_provider import NebiusEnvironmentCloudProvider
 from loom_service.environment_management.installation import ManagementInstallation
 from loom_service.environment_management.steps import ProvisioningStep
+from tests.support.nebius_platform import ROOT
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_environment_cloud_provider import CloudApi, cloud_context
 from tests.unit.test_nebius_environment_contract import foundation_from, registration_for
 from tests.unit.test_nebius_management_render import management_inputs as management_inputs
-from tests.unit.test_nebius_platform_render import ROOT
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
 def test_scoped_render_keeps_cluster_and_quota_configuration(platform_inputs):

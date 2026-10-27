@@ -13,11 +13,57 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from loom.dockerfile_instructions import DockerfileParseError, dockerfile_instructions
+from loom.dockerfile_instructions import dockerfile_instructions
 from loom.mutable_paths import validate_task_workdir
 from loom.sandbox_identity import SandboxIdentityV1, resolve_sandbox_identity
+from loom.task_image_compatibility import classify_terminus_image
+from loom.task_image_errors import (
+    PACKAGE_GUARD_MESSAGE,
+    PACKAGE_GUARD_PREFIX,
+    TaskImagePreparationError,
+)
 
 OFFLINE_SCRIPT = "verifier/harbor-offline.sh"
+# Shared with Harbor image prep. Task-image builds install this set and then
+# refuse an image whose sandbox user cannot see bash, tmux, and asciinema.
+_TERMINUS_APT_PACKAGES = frozenset({
+    "asciinema",
+    "bash",
+    "ca-certificates",
+    "curl",
+    "passwd",
+    "python3",
+    "tmux",
+})
+_TERMINUS_APK_PACKAGES = frozenset({
+    "asciinema",
+    "bash",
+    "ca-certificates",
+    "curl",
+    "python3",
+    "shadow",
+    "tar",
+    "tmux",
+})
+_TERMINUS_TOOL_PROBE = (
+    "if ! command -v bash >/dev/null || ! command -v tmux >/dev/null || "
+    "! command -v asciinema >/dev/null; then "
+    "echo 'task image must preinstall bash, tmux and asciinema' >&2; exit 1; fi"
+)
+# Leap's tmux package normally relies on systemd-tmpfiles at boot. Task
+# containers do not run that service. Preserve authored paths and socket env.
+_SUSE_TMUX_RUNTIME_SETUP = (
+    "if [ ! -e /run/tmux ] && [ ! -L /run/tmux ]; then "
+    "install -d -m 1777 -o 0 -g 0 /run/tmux; fi"
+)
+# Run after restoring the task USER. A version/binary probe misses an unusable
+# default socket directory. -L isolates our server without overriding its root;
+# -f avoids executing an authored tmux config during image preparation.
+_SUSE_TMUX_STARTUP_PROBE = r'''loom_tmux_probe="loom-preparation-$$" && \
+    trap 'timeout 5 tmux -L "$loom_tmux_probe" kill-server >/dev/null 2>&1 || true' EXIT && \
+    timeout 10 tmux -f /dev/null -L "$loom_tmux_probe" new-session -d -s loom-preparation 'exec sleep 30' && \
+    timeout 5 tmux -L "$loom_tmux_probe" has-session -t =loom-preparation && \
+    timeout 5 tmux -L "$loom_tmux_probe" kill-server && trap - EXIT'''
 _DOCKERFILE_SUFFIX = ".loom-nebius"
 _PACKAGE = re.compile(r"[a-z0-9][a-z0-9+.-]*(?:=[A-Za-z0-9.+:~_-]+)?\Z")
 _REQUIREMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*(?:==[A-Za-z0-9][A-Za-z0-9_.+!-]*)?\Z")
@@ -496,54 +542,64 @@ def _alpine_package_install(packages: tuple[str, ...]) -> str:
     rm -rf "$loom_prep_cache" && trap - EXIT"""
 
 
-def _preparation_dockerfile(
-    original: str, bootstrap: HarborOfflineBootstrap, workdir: str, identity: SandboxIdentityV1,
-) -> str:
-    try:
-        original = _without_packaged_openhands_runtime(original)
-        instructions = dockerfile_instructions(original)
-    except DockerfileParseError as exc:
-        raise ValueError(f"nebius-terminus: {exc}") from exc
-    stages: dict[str, str] = {}
-    final_base = ""
-    for instruction in instructions:
-        if instruction.keyword != "FROM":
-            continue
-        words = instruction.arguments.split()
-        if words and words[0].startswith("--platform="):
-            words.pop(0)
-        if not (len(words) == 1 or (len(words) == 3 and words[1].upper() == "AS")):
-            raise ValueError(
-                f"nebius-terminus: unsupported FROM instruction at line {instruction.line}"
-            )
-        final_base = stages.get(words[0].lower(), words[0])
-        if len(words) == 3:
-            alias = words[2].lower()
-            if alias in stages:
-                raise ValueError("nebius-terminus: duplicate Dockerfile stage alias")
-            stages[alias] = final_base
-    arch = final_base in {"archlinux:latest", "archlinux:base", "archlinux:base-devel"}
-    alpine = re.fullmatch(r"alpine:3\.[0-9]+(?:\.[0-9]+)?", final_base) is not None
-    if not (arch or alpine) and not re.fullmatch(
-        r"(?:ubuntu:[A-Za-z0-9_.-]+|debian:[A-Za-z0-9_.-]+"
-        r"|python:(?:[A-Za-z0-9_.-]*slim(?:-(?:bookworm|bullseye|trixie))?"
-        r"|[0-9]+\.[0-9]+(?:\.[0-9]+)?(?:-(?:bookworm|bullseye|trixie))?)"
-        r"|node:[0-9]+(?:\.[0-9]+){0,2}(?:-(?:bookworm|bullseye|trixie)(?:-slim)?|-slim)?"
-        r"|php:[0-9]+\.[0-9]+(?:\.[0-9]+)?-cli(?:-(?:stretch|buster|bullseye|bookworm|trixie))?"
-        r"|rootproject/root:[0-9]+\.[0-9]+\.[0-9]+-ubuntu(?:20\.04|22\.04|24\.04))",
-        final_base,
-    ):
-        raise ValueError(
-            "nebius-terminus: image preparation supports Debian/Ubuntu final base images "
-            "and official versioned Alpine or Arch Linux latest/base/base-devel images only"
-        )
-    if (arch or alpine) and (bootstrap.apt_packages or bootstrap.uses_apt):
-        raise ValueError(
-            f"nebius-terminus: {'Arch Linux' if arch else 'Alpine'} images cannot use a Debian package bootstrap; "
-            "provide an explicitly reviewed verifier dependency preparation"
-        )
-    if not alpine and bootstrap.apk_packages:
-        raise ValueError("nebius-terminus: APK bootstrap requires an official Alpine final image")
+def _classify_terminus_base(original: str) -> tuple[str, bool, bool, tuple[Any, ...]]:
+    classified = classify_terminus_image(original)
+    return classified.base_image, classified.package_manager == "pacman", classified.package_manager == "apk", classified.instructions
+
+
+def _suse_package_install() -> str:
+    """Use Leap's existing repositories; reject solver changes before installing.
+
+    Zypper XML transaction elements, not translated prose, identify removals and
+    version changes. A second inventory check covers drift during installation.
+    Repository metadata is refreshed once into our private disposable cache.
+    """
+    command = r'''loom_prep_cache=$(mktemp -d /tmp/loom-suse-preparation.XXXXXX) && \
+    trap 'rm -rf "$loom_prep_cache"' EXIT && \
+    rpm -qa --qf '%{NAME} %{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}\n' > "$loom_prep_cache/all-installed" && \
+    awk '$1 != "gpg-pubkey"' "$loom_prep_cache/all-installed" > "$loom_prep_cache/installed" && \
+    awk '{print $1}' "$loom_prep_cache/installed" > "$loom_prep_cache/names" && \
+    loom_missing='' && \
+    for loom_package in asciinema bash ca-certificates curl shadow python3 tar tmux; do \
+        if ! rpm -q "$loom_package" >/dev/null 2>&1; then loom_missing="$loom_missing $loom_package"; fi; \
+    done && \
+    if [ -n "$loom_missing" ]; then \
+        timeout 300 zypper --non-interactive --cache-dir "$loom_prep_cache/cache" refresh && \
+        timeout 60 zypper --xmlout --non-interactive --no-refresh --cache-dir "$loom_prep_cache/cache" install --dry-run --no-recommends --no-allow-downgrade --no-allow-vendor-change $loom_missing > "$loom_prep_cache/transaction" && \
+        if ! grep -q '<install-summary' "$loom_prep_cache/transaction"; then \
+            echo 'nebius-terminus: openSUSE solver returned no transaction summary' >&2; exit 1; \
+        fi && \
+        if grep -Eq '<to-(upgrade|downgrade|remove|reinstall|change)[[:space:]>\/]' "$loom_prep_cache/transaction"; then \
+            echo 'nebius-terminus: openSUSE solver would change authored packages' >&2; exit 1; \
+        fi && \
+        awk 'BEGIN {RS="<"; FS=">"} $1 ~ /^solvable[[:space:]]/ && $1 ~ /type="package"/ {entry=$1; sub(/^.*[[:space:]]name="/, "", entry); sub(/".*$/, "", entry); print entry}' "$loom_prep_cache/transaction" > "$loom_prep_cache/planned" && \
+        while IFS= read -r loom_package; do \
+            if grep -Fxq "$loom_package" "$loom_prep_cache/names"; then \
+                echo 'nebius-terminus: openSUSE solver would replace an authored package' >&2; exit 1; \
+            fi; \
+        done < "$loom_prep_cache/planned" && \
+        timeout 180 zypper --non-interactive --no-refresh --cache-dir "$loom_prep_cache/cache" install --no-recommends --no-allow-downgrade --no-allow-vendor-change $loom_missing; \
+    fi && \
+    rpm -qa --qf '%{NAME} %{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}\n' > "$loom_prep_cache/all-prepared" && \
+    awk '$1 != "gpg-pubkey"' "$loom_prep_cache/all-prepared" > "$loom_prep_cache/prepared" && \
+    while IFS= read -r loom_package; do \
+        if ! grep -Fxq "$loom_package" "$loom_prep_cache/prepared"; then \
+            echo 'nebius-terminus: openSUSE preparation changed an authored package' >&2; printf '%s\n' "$loom_package" >&2; exit 1; \
+        fi; \
+    done < "$loom_prep_cache/installed" && \
+    rm -rf "$loom_prep_cache" && trap - EXIT'''
+    frame = PACKAGE_GUARD_PREFIX + json.dumps(TaskImagePreparationError(
+        'image_preparation_package_change_required', PACKAGE_GUARD_MESSAGE,
+    ).receipt(), separators=(',', ':'))
+    for message in ('openSUSE solver would change authored packages',
+                    'openSUSE solver would replace an authored package',
+                    'openSUSE preparation changed an authored package'):
+        old = "echo 'nebius-terminus: " + message + "'"
+        command = command.replace(old, 'echo ' + shlex.quote(frame) + ' >&2; ' + old)
+    return command
+
+
+def _dockerfile_custom_shell(instructions: tuple[Any, ...]) -> bool:
     custom_shell = False
     for instruction in instructions:
         if instruction.keyword != "SHELL":
@@ -557,25 +613,91 @@ def _preparation_dockerfile(
         ):
             raise ValueError("nebius-terminus: Dockerfile SHELL must contain command strings")
         custom_shell = True
+    return custom_shell
+
+
+def _run_instruction(command: str, *, custom_shell: bool) -> str:
+    if custom_shell:
+        # Override only our build-time command, leaving the authored
+        # image's SHELL configuration and preceding RUN behavior intact.
+        return "RUN " + json.dumps(["/bin/sh", "-c", command.replace("\\\n", "\n")]) + "\n"
+    return "RUN " + command + "\n"
+
+
+def _terminus_package_install(
+    *, arch: bool, alpine: bool, apt_packages: set[str], apk_packages: set[str], suse: bool = False,
+) -> str:
+    if suse:
+        return f"{_suse_package_install()} && {_SUSE_TMUX_RUNTIME_SETUP}"
+    if arch:
+        return _arch_package_install()
+    if alpine:
+        return _alpine_package_install(tuple(sorted(apk_packages)))
+    return (
+        "apt-get update -qq && apt-get install -y --no-install-recommends "
+        + " ".join(sorted(apt_packages))
+    )
+
+
+def append_terminus_runtime_tools(dockerfile: str) -> str:
+    """Install the Harbor terminus package set onto an authored task Dockerfile.
+
+    The appended ``RUN`` fails the image build when bash, tmux, or asciinema
+    is still missing. Unsupported final bases fail before a build starts.
+    """
+    final_base, arch, alpine, instructions = _classify_terminus_base(dockerfile)
+    suse = final_base == "opensuse/leap:15.5"
+    custom_shell = _dockerfile_custom_shell(instructions)
+    install = _terminus_package_install(
+        arch=arch,
+        alpine=alpine,
+        apt_packages=set(_TERMINUS_APT_PACKAGES),
+        apk_packages=set(_TERMINUS_APK_PACKAGES),
+        suse=suse,
+    )
+    cleanup = "true" if arch or alpine or suse else "rm -rf /var/lib/apt/lists/*"
+    prepared = (
+        dockerfile.rstrip()
+        + "\n\n# Loom: terminus runtime tools; original task above.\n"
+        + "USER root\n"
+        + _run_instruction(
+            f"{install} && {cleanup} && {_TERMINUS_TOOL_PROBE}",
+            custom_shell=custom_shell,
+        )
+    )
+    last_user = next(
+        (
+            instruction.arguments.strip()
+            for instruction in reversed(instructions)
+            if instruction.keyword == "USER"
+        ),
+        "",
+    )
+    if last_user and last_user not in {"root", "0"}:
+        prepared += f"USER {last_user}\n"
+    if suse:
+        prepared += _run_instruction(_SUSE_TMUX_STARTUP_PROBE, custom_shell=custom_shell)
+    return prepared
+
+
+def _preparation_dockerfile(
+    original: str, bootstrap: HarborOfflineBootstrap, workdir: str, identity: SandboxIdentityV1,
+) -> str:
+    original = _without_packaged_openhands_runtime(original)
+    final_base, arch, alpine, instructions = _classify_terminus_base(original)
+    suse = final_base == "opensuse/leap:15.5"
+    if (arch or alpine or suse) and (bootstrap.apt_packages or bootstrap.uses_apt):
+        raise ValueError(
+            f"nebius-terminus: {'Arch Linux' if arch else 'openSUSE' if suse else 'Alpine'} images cannot use a Debian package bootstrap; "
+            "provide an explicitly reviewed verifier dependency preparation"
+        )
+    if not alpine and bootstrap.apk_packages:
+        raise ValueError("nebius-terminus: APK bootstrap requires an official Alpine final image")
+    custom_shell = _dockerfile_custom_shell(instructions)
 
     def run(command: str) -> str:
-        if custom_shell:
-            # Override only our build-time command, leaving the authored
-            # image's SHELL configuration and preceding RUN behavior intact.
-            return "RUN " + json.dumps(["/bin/sh", "-c", command.replace("\\\n", "\n")]) + "\n"
-        return "RUN " + command + "\n"
-    packages = sorted(
-        {
-            "ca-certificates",
-            "curl",
-            "bash",
-            "tmux",
-            "asciinema",
-            "passwd",
-            "python3",
-            *bootstrap.apt_packages,
-        }
-    )
+        return _run_instruction(command, custom_shell=custom_shell)
+    packages = sorted(_TERMINUS_APT_PACKAGES.union(bootstrap.apt_packages))
     requirements = shlex.join((*bootstrap.index_args, *bootstrap.requirements))
     unpinned_tool = bootstrap.python_version is None and not bootstrap.system_site_packages
     if unpinned_tool:
@@ -630,12 +752,15 @@ def _preparation_dockerfile(
         )
     # Authored caches may be offline task inputs (for example Poetry wheels).
     # Disable only our uv download cache; never delete the image's HOME cache.
-    alpine_packages = tuple(sorted({"bash", "ca-certificates", "curl", "tmux", "asciinema",
-                                    "shadow", "python3", "tar", *bootstrap.apk_packages}))
-    package_install = (_arch_package_install() if arch else
-                       _alpine_package_install(alpine_packages) if alpine else
-                       f"apt-get update -qq && apt-get install -y --no-install-recommends {' '.join(packages)}")
-    package_cleanup = "true" if arch or alpine else "rm -rf /var/lib/apt/lists/*"
+    alpine_packages = _TERMINUS_APK_PACKAGES.union(bootstrap.apk_packages)
+    package_install = _terminus_package_install(
+        arch=arch,
+        alpine=alpine,
+        apt_packages=set(packages),
+        apk_packages=set(alpine_packages),
+        suse=suse,
+    )
+    package_cleanup = "true" if arch or alpine or suse else "rm -rf /var/lib/apt/lists/*"
     preparation = run(f"""export UV_NO_CACHE=1 && {package_install} && \\
     {python_setup} && \\
     loom-nebius-uv pip freeze --python /opt/verifier/bin/python > /opt/verifier/resolved-requirements.txt && \\
@@ -654,6 +779,7 @@ def _preparation_dockerfile(
 USER {uid}:{gid}
 WORKDIR {workdir}
 """
+        + (run(_SUSE_TMUX_STARTUP_PROBE) if suse else "")
     )
 
 
@@ -679,6 +805,11 @@ def prepare_nebius_terminus_image(staged: Path, environment: dict[str, Any]) -> 
     if not source.is_file() or not test_script.is_file():
         raise ValueError("nebius-terminus: original Dockerfile and tests/test.sh are required")
     bootstrap = adapt_harbor_test_script(test_script.read_text())
+    if environment.get("user") == "image":
+        raise ValueError(
+            "nebius-terminus: legacy offline preparation requires an explicit numeric or root task identity; "
+            "image-default USER requires native task-image execution"
+        )
     identity = resolve_sandbox_identity(
         environment.get("user", "agent"), (environment.get("environment") or {}).get("HOME"),
     ) or SandboxIdentityV1(run_as_user=65532, run_as_group=65532, home="/home/agent")

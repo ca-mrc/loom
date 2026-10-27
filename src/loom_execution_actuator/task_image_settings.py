@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer
 
 if TYPE_CHECKING:
     from loom_execution_actuator.task_image_renderer import TaskImageJobConfig
@@ -32,9 +32,14 @@ class NativeTaskImageSettings(BaseModel):
     ephemeral_storage_mib: int = Field(default=16384, ge=16384, le=524288)
     max_processes: int = Field(default=512, ge=64, le=4096)
     active_deadline_seconds: int = Field(default=1800, ge=60, le=7200)
-    max_concurrent: int = Field(default=1, ge=1, le=16)
-    # OverlayFS is the measured Nebius default; set "native" to roll back.
-    snapshotter: Literal["overlayfs", "native"] = "overlayfs"
+    # Optional operator guard; physical resource/quota admission always applies.
+    max_concurrent: int | None = Field(default=None, ge=1, strict=True)
+    # Preserve filesystem semantics for unchanged authored Dockerfiles. The
+    # faster OverlayFS backend is opt-in after qualifying the task workload.
+    snapshotter: Literal["overlayfs", "native"] = "native"
+    # A pressure policy, not a build-count limit. Qualify for the installed
+    # node/storage shape; actual resource and shared-cloud quota admission apply.
+    io_full_avg10_max: float = Field(default=50.0, ge=0, le=100, allow_inf_nan=False, strict=True)
     # When "same_task", prepare may import BuildKit cache from a prior ready
     # revision of the same task_id+cpu_arch. Results still use this mat key.
     compatible_revision_cache: Literal["off", "same_task"] = "off"
@@ -44,6 +49,15 @@ class NativeTaskImageSettings(BaseModel):
     cache_transfer: Literal["tar", "blobs"] = "blobs"
     # BuildKit OCI export shape; archive is today's path, directory is measure-gated.
     oci_export_format: Literal["archive", "directory"] = "archive"
+
+    @model_serializer(mode="wrap")
+    def serialize_settings(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        settings: dict[str, Any] = handler(self)
+        # Old pool contracts predate this field. Keep their omission while the
+        # actuator still uses the runtime default; explicit policies stay frozen.
+        if "io_full_avg10_max" not in self.model_fields_set:
+            settings.pop("io_full_avg10_max", None)
+        return settings
 
     def job_config(self) -> TaskImageJobConfig:
         from loom_execution_actuator.task_image_renderer import TaskImageJobConfig

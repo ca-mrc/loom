@@ -7,7 +7,7 @@ boundary while retaining the four protected admission contexts.
 
 ## Workflow inventory
 
-The repository retains twelve workflows. Low run frequency or no recorded runs
+The repository retains the workflows below. Low run frequency or no recorded runs
 does not make an operator entry point obsolete: promotion, retry, and catalog
 publication run when needed. In particular, `main-promotion-gate` remains the
 required check protecting promotion into `main`. The GitHub-managed Dependency
@@ -16,20 +16,24 @@ Graph entry has no workflow YAML in this repository and is maintained separately
 | Category | Workflow file | Purpose and triggers |
 | --- | --- | --- |
 | Required CI | `ci.yml` | Repository checks on PRs, merge groups, and `main` pushes; full daily regression at 08:23 UTC; manual validation and compatibility checks. |
-| Required CI | `images.yml` | Read-only Nebius AMD64 image builds and scans on PRs, merge groups, and manual dispatch. |
-| Required CI | `cluster-smoke.yml` | Credential-free Kubernetes and pinned-Skopeo disposable TLS-registry contracts on PRs, merge groups and manual dispatch. The merged SHA does not repeat on a dev push. |
-| Required CI | `staging-smoke.yml` | Credential-free Compose system checks on PRs, merge groups, and manual dispatch. |
+| Required CI | `images.yml` | Read-only Nebius AMD64 image builds and scans, called by CI after fast feedback on PRs/merge groups, or dispatched manually. |
+| Required CI | `cluster-smoke.yml` | Credential-free Kubernetes and pinned-Skopeo disposable TLS-registry contracts, called by CI after fast feedback or dispatched manually. No repeat on a dev push. |
+| Required CI | `staging-smoke.yml` | Credential-free Compose system checks, called by CI after fast feedback or dispatched manually. |
 | Contributor compatibility | `macos-locked-environment.yml` | macOS ARM64 locked workspace installation, daily at 09:17 UTC or manually. |
 | CI operations | `ci-retry.yml` | Manual bounded, classified retry by default; an explicit read-only capacity branch supplies disposable single-job hosted workers. |
-| Maintenance | `nebius-image-retention.yml` | Scheduled/manual bounded image maintenance with separate concurrency and idle protection. |
+| CI operations | `ci-dependency-cache.yml` | Writes the full uv wheel cache and the source-built MinIO fixture archives on relevant `dev` pushes, daily at 07:41 UTC, or manually; PR and merge-group jobs only read them. |
+| Dependency maintenance | `harbor-upstream.yml` | Discovers Harbor drift daily at 09:41 UTC or manually. Draft candidate creation requires repository activation and is skipped by manual `check_only=true`; see [Harbor upgrades](terminus2-upgrades.md). |
 | Production promotion | `release-promotion-gate.yml` | Manual validation of release evidence for an exact candidate SHA and image. |
 | Production promotion | `main-promotion-gate.yml` | Manual verification that the open `dev` to `main` PR, current candidate SHA, and successful release evidence agree. |
+| Independent environments | `nebius-environment-lifecycle.yml` | Manual identity-only dispatch of installed provisioning, adoption, enrollment, activation, suspension, resume, retirement and image release/rollback operations. Exact target allowlists, pinned tooling and participant concurrency select separate development, staging or production authority; production also requires authenticated promotion evidence. See the [lifecycle runbook](../runbooks/nebius-environment-lifecycle.md). |
 | Nebius publication | `nebius-candidate.yml` | Automatic `dev` push publication or manual platform/Harbor runtime publication, controlled by `NEBIUS_RELEASE_ENABLED`. |
 | Nebius deployment | `nebius-rollout.yml` | Application rollout after successful candidate publication or manual dispatch, controlled by `NEBIUS_AUTO_ROLLOUT_ENABLED` and the active-task guard. Separate protected manual operations provide read-only inventory, private certificate qualification, owned ingress installation/paused recovery, fixed wildcard/management DNS publication, and private dev foundation preflight/installation under the same concurrency. Development uses its own operation and digest-bound SSH key; it cannot invoke staging/management commands. Certificate and ingress operations each use dedicated forced-command SSH identities bound to exact tooling, not the Kubernetes-only deployment key. Only ingress installation scans/publishes the pinned image and receives registry credentials; recovery and DNS skip publication. DNS credentials remain on the gateway. |
 | Nebius maintenance | `nebius-image-retention.yml` | Daily retention at 07:23 UTC or manual preview/apply; enabled by `NEBIUS_RELEASE_ENABLED`, with scheduled deletion separately controlled by `NEBIUS_IMAGE_RETENTION_APPLY`. |
 
-The four CI workflows report protected gate contexts for eligible PR and merge
-group runs; manual validation reports separate `*-manual` contexts. Their
+`CI` reports all four protected gate contexts for eligible PR and merge-group
+runs. It calls the image, cluster and staging workflows through native job
+dependencies; those workflows also retain independent manual diagnostics, whose
+internal result names cannot substitute for the four required checks. The
 changed-path planner controls which expensive jobs run. Candidate publication,
 live rollout, and release promotion each retain their own authorization and
 evidence checks.
@@ -81,6 +85,22 @@ work; selected failures, cancellations and unexpected skips still block merging.
 Draft filtering, current-head/base requirements, and native squash auto-merge
 retain the [repository contract](../../CONTRIBUTING.md).
 
+GitHub evaluates required checks from a workflow's newest run on a head, and
+does not order runs by event time. A Draft `synchronize` delivered in the same
+second as `ready_for_review` can get the newer run (#2635). Filtered, it hides
+the Ready run's four contexts, and re-running that older run does not restore
+them. `workflow-plan` therefore checks out every PR event, and
+`scripts/ci_stale_draft_event.py` reads the live PR and this head's CI runs
+with read-only `pull-requests`/`actions` tokens. A Draft payload runs the full
+gate only when the live PR is open, Ready, on the same head, and its newest
+`gate=full` run is older. It passes `stale_draft` to the image, cluster and
+staging workflows so they plan instead of filtering. A genuine Draft, a newer
+head, a newer full run, no full run within about 30 seconds, or an unreadable
+API keeps the event filtered. The upgraded run keeps its `gate=filtered` run
+name and Draft concurrency slot. Candidate reuse therefore ignores it, and a
+later push does not cancel it. The older Ready run also completes, so each
+occurrence costs one extra full run (seven heads Oct 15–26).
+
 The manifest retains ownership of both historical and Nebius tests. Daily dev CI
 selects Nebius and common contracts; historical compatibility is manual. PR image CI uses the same seven-image Nebius set as candidate publication,
 builds only affected AMD64 images and scans the resulting artifacts. Disposable
@@ -88,19 +108,134 @@ Kubernetes checks include the Nebius platform and execution contracts. Candidate
 publication uses the protected `nebius-integration` Environment from `dev`;
 PR checks do not receive its credentials. CI does not deploy the live platform.
 
+## Early feedback and heavy-job ordering
+
+Inside `CI`, selected lint/type/codegen, locked-environment, package, Go and
+Terraform checks run first. Selected root tests and the non-Docker integration
+tier follow those checks. Frontend API/type/lint/unit checks also contribute to
+`fast-feedback`, an internal aggregation job, not a required merge context.
+It rejects every selected failure, cancellation or unexpected skip. Unselected
+lanes may skip. Existing changed-path selection, test manifests and coverage
+requests remain in force; full-regression requests still use full manifests.
+Ordinary documentation-only PRs skip feedback when no dependent work is selected.
+Additive image/cluster/staging labels and manual baseline requests still run
+feedback before their selected dependents, even when only documents changed.
+
+For PRs selecting heavy work, successful quick checks are followed by a bounded
+base-freshness preflight inside `fast-feedback`. It reads the active branch rules
+and, only under strict status checks without a native merge queue, compares the
+event's base SHA with the current base ref. An already-advanced base fails before
+heavy fan-out. Native queue admission skips this comparison because GitHub
+regenerates merge groups. This uses at most two read-only metadata requests with
+20-second timeouts and adds no gate or permission. It does not lock the base or
+cancel work if the base advances after the preflight.
+
+Pool, Docker integration, runtime payload and frontend production/browser work
+start only after `fast-feedback` succeeds. Frontend runtime work has its own
+job and is still enforced by `repository-checks`; no test is omitted or repeated.
+Heavy-job guards explicitly require successful planning and feedback and reject
+cancellation. They do not inherit GitHub's implicit `success()` across skipped
+ancestors: an unselected quick lane may skip without suppressing selected heavy
+work after feedback accepts it. Selected heavy jobs that skip still fail the gate.
+Images, cluster and staging are reusable workflows called by CI only when their
+lane is selected and feedback succeeds. GitHub waits on `needs` before any of
+those workflows' runners are allocated. There is no cross-workflow polling,
+Actions read permission, title matching or separate PR/merge-group run. A single
+CI concurrency group cancels obsolete PR attempts, including their called jobs;
+manual specialist diagnostics remain independent. New nested jobs and their three
+caller gates use GitHub-hosted fallback until the installed supply controller
+passes reusable-graph readback and `LOOM_CI_REUSABLE_SUPPLY_READY=true`; see
+[runner supply](ci-unified-runners.md#reusable-workflow-compatibility).
+
+The four bare gate names are native jobs in the caller CI run. The specialist
+gates reject selected work that failed, was cancelled or unexpectedly skipped,
+and require successful feedback. An unselected lane must be skipped. Each called
+workflow still validates its actual image/shard/smoke results before its caller
+can succeed. The same dependency graph applies to PR heads and merge groups;
+manual/scheduled/push validation cannot emit these three bare specialist names.
+There is no custom check publisher, fifth required context or ruleset change.
+
+PR and merge-group root, integration, pool, Docker, image and cluster matrices
+stop sibling shards on failure. Candidate supplementary pool tests also stop
+sibling shards; a failed or cancelled shard prevents publication. Docker,
+cluster and staging pytest stop at the first failure and retain diagnostics and
+fixture cleanup. Manual/scheduled source diagnostics retain all selected shards.
+
+`fast-feedback` uses the same `ubuntu-24.04` hosted image as candidate planning
+and executes its installed `gh` against a loopback HTTP response containing
+colored checkout logs. The stdlib-only probe calls the real candidate reader,
+keeps its flags and old-client fallback, isolates authentication/configuration,
+and never calls GitHub. Missing or incompatible `gh` fails feedback before heavy
+work. This requires no tool download or workspace installation. Root regressions
+also exercise the probe where `gh` is installed; OLDLAB guests without that tool
+skip only the duplicate CLI smoke, whose mandatory execution belongs to feedback.
+
+Read-only candidate log readers and CI metrics tools run their owning root
+regressions and static checks without selecting pool lifecycle tests, images,
+Docker or cluster/staging work. A reader filename beginning `nebius_pool_` does
+not make it a runtime operator. Shared selection/workflow authority, lifecycle
+sources, dependencies and unknown paths retain their owning full coverage.
+
+Before publishing a CI repair, reproduce the reported failure through the real
+changed interface using the failing runner's tool version and representative
+input, then verify the repair through the same path. Consolidate diagnostics
+and the fix locally before one Ready publication; a large passing unit suite
+alone does not demonstrate CLI/API compatibility. Preserve strict admission,
+coordinate integration order when the native queue is disabled, and retry only
+the affected failed jobs when evidence supports a transient failure. Adding
+logging alone is not a reason to repeat an entire native test/publication round.
+
+The one-time audit measured 149,605 runner-seconds across five superseded or
+diagnostic iterations. Of that, 15,598 seconds were occupied feedback waiting
+and 15,487 were duplicate candidate pool tests. Those are historical costs,
+not a saving claimed for every future PR. Compare actual execution, retries,
+queue and wall time separately; the final qualification and publication still
+need their normal checks.
+
 ## Public image pulls in validation
 
 The protected Docker consumers (root tests, runtime payloads, both integration
 tiers, cluster and staging smoke, and ordinary/Harbor image builds) configure
-`https://mirror.gcr.io` on their disposable GitHub-hosted Linux Docker daemons
+`https://mirror.gcr.io` on their disposable Linux Docker daemons
 before pulling or building. `scripts/configure_ci_registry_mirror.py` preserves
 existing daemon settings and mirror priority, validates the merged configuration
 before installation, restarts the runner daemon, and checks the active mirrors.
-It refuses local, self-hosted, non-Linux, or remote-Docker execution.
+It accepts GitHub-hosted Linux runners or disposable self-hosted Linux guests
+with the root-owned ephemeral-runner marker. It refuses unmarked hosts,
+non-Linux runners, and remote-Docker execution.
+
+The shared disposable K3s fixture preloads its pinned system images through
+the host Docker daemon: pause, CoreDNS, local-path provisioner and its busybox
+volume helper, and metrics-server. It saves a reusable archive and mounts that
+file read-only in K3s's startup import directory. Volume setup and teardown use
+the same preloaded helper image; provisioner readiness alone does not exercise
+that dependency. Test-specific images retain their existing import/pull paths.
 
 The separate image BuildKit containers use `config/ci-buildkit.toml` by default;
 an existing readable `/etc/buildkit/loom-ci.toml` retains precedence and is not
 modified. Both pull paths retain every original image reference and digest.
+
+The connected ingress fixture prepares its pinned application images on the host
+with Skopeo before starting disposable K3s, then imports OCI archives and verifies
+the original references and digests. Public fixture sources use explicit anonymous
+authentication (`--src-no-creds`) without discovering runner credentials; TLS
+verification remains enabled. Multi-architecture pins retain the original
+index plus the AMD64 payload, not a replacement child-manifest identity. Only a
+mirror's `toomanyrequests` response permits the same digest from its upstream;
+other acquisition errors fail setup. Deterministic helper coverage exercises that
+fallback; the connected test does not deliberately force a live upstream pull.
+This removes its nested application-image registry dependency, not native K3s
+addon pulls or other test dependencies. Archives are removed after use or failure.
+
+The pinned `setup-uv` action uses v10.0.1, which handles transient manifest
+transport failures with at most three attempts and stops reading the version
+list after the selected version. This addresses the observed single five-second
+manifest lookup failure before Python or pytest starts. uv remains 0.11.26 with
+the existing platform checksums; locked installs and PR/merge-group cache-write
+restrictions are unchanged. Test jobs use the full, unpruned wheel cache
+described below. A persistent manifest error still fails setup; this is
+not a workflow or failed-test rerun policy.
+
 The public Google mirror serves cached Docker Hub images over TLS, without
 credentials, publication authority, or shared cache writes. Digest-pinned pulls
 still verify the requested content; existing tag-only fixtures remain tag-only.
@@ -145,6 +280,18 @@ The actual tests are selected from `config/component-ownership.toml`.
 ## Coverage collection
 
 Python root/package/integration tests normally run without coverage instrumentation.
+Coverage excludes only archived `loom-candidate-manifests-*/src/loom` source
+roots. Historical renderers still execute in their owning tests, and their
+coverage never counts as the current checkout's source. Other missing source
+errors remain fatal during combine, XML and text reporting.
+Instrumented root, package and integration jobs explicitly select the current
+`pyproject.toml`; pytest-cov propagates its resolved path to Python children,
+including historical renderers with a different working directory and config.
+The slim-image copied-source import probe removes pytest-cov child-startup
+variables from its isolated interpreter. That probe exercises the Dockerfile's
+packaged imports without the checkout's test plugins; its disposable copy is
+not current-checkout coverage. Current source measurement and unrelated
+missing-source failures remain active.
 Request `ci:coverage-summary` or dispatch CI with `coverage_summary=true` for
 full selection within the active scope and combined accounting. Nebius coverage
 is reported without applying the historical all-platform **70%** floor to a
@@ -191,13 +338,21 @@ Dependency Graph has no repository YAML.
 | Unknown or shared authority | Complete applicable regression, with a full file-selection hint. |
 
 All selected source results still feed the same four app-bound required gates.
-Nightly/manual and explicit full requests preserve stronger coverage. Global
+Nightly/manual and explicit full requests preserve stronger coverage within
+the default suite scope; the unlaunched shared simulations require their own
+explicit manual input below. Global
 Python type checks, frontend coverage populations and broad Docker COPY inputs
 are real dependencies; ownership globs cannot make those inputs disappear.
 Selection failures propagate before pytest or toolchain execution. The audit's
 native CI sample took 41m06s (109.47 runner-minutes, longest job 12m20s), with a
 30m08s ready-to-start delay for one root shard. These are baseline measurements,
 not a claimed post-change hosted speedup.
+
+`scripts/ops/ci_runner_supply.py` has a dedicated `ci-runner-controller` test
+owner. A change confined to that controller selects its root contracts and
+native image, cluster and staging validation. Mixed application, shared-fixture,
+dependency and unknown inputs retain their applicable regression coverage;
+shared simulations still require the explicit manual input.
 
 ## Pool operator tests run before deployment
 
@@ -211,43 +366,121 @@ import. Selection is made once for the whole lane and then sharded, so planned
 shards and job manifests always run the same set. Other changes skip it before
 merge. Component-local pool scripts use `component_sources` to follow their
 operator and test-helper consumers. Common operator mechanisms, generators,
-dependencies and selection authority retain the full suite. The three standalone
-archive/terminal-recovery CLIs use their dedicated lifecycle, archive and idle
-regressions without the legacy pool transition suite.
+dependencies and selection authority retain the full suite. The standalone
+archive/terminal-recovery CLIs and read-only retired-structure inventory use their dedicated lifecycle/archive/idle or database-inventory
+regressions without the unrelated pool transition suite. Shared platform fixtures
+and the external phase API double live in `tests/support/`, so importing a
+fixture no longer imports unrelated renderer or management-stage test cases.
 Every platform candidate selects affected modules against its immutable first
-parent; an unavailable boundary retains the whole suite. Shared-pool simulations
-stay skipped, below.
+parent; an unavailable boundary retains the default pool suite. Shared-pool simulations
+have their own, narrower rule, below.
 `nebius-candidate.yml` reuses successful native `CI` pool jobs on that exact
-commit, with GitHub Actions app 15368 and the same manifest, scope and marker
-selection. The planner reconstructs the native group's changed-path selection;
-a passing narrowed shard covers only its complete selected test modules.
+merge-group commit, or the native squash PR whose tested merge has the same Git
+tree as the published candidate. For squash reuse, the planner verifies the
+candidate's merged PR and parent, GitHub Actions app 15368, and each successful
+job's actual merge checkout from the pinned checkout action's initial log. The
+tested merge must have exactly the candidate parent and PR head as its parents.
+The same tree preserves the manifest and selection code; the initial job scope,
+markers and changed paths reconstruct only that job's complete selected modules.
 Only missing modules run before publication, grouped by the existing shard
 policy; covered siblings are omitted and empty jobs are not allocated. Wrong
-heads/workflows and failed or missing jobs cannot supply coverage. A partial job
+heads/workflows, different trees, unavailable checkout logs and failed or missing
+jobs cannot supply coverage. A partial job
 listing retains proven successful modules and schedules the unseen modules;
 without usable evidence every required affected module runs.
-There is no cross-commit reuse or per-test-case cache. This is test scheduling,
+When a read or binding check fails, the plan also reports up to 25
+`evidence_errors`: the owning stage, a fixed error category, the HTTP status when
+available, and applicable numeric run/job IDs. Known rate-limit and permission
+errors, PR association counts and recognized binding reasons are distinguished;
+raw CLI stderr, response bodies, exception text and credentials are
+never emitted. Use the native candidate plan's diagnostics to distinguish API
+access from unavailable PR associations, checkout logs and checkout bindings;
+a later successful local read does not establish why the native read failed.
+The machine-only job-log reader explicitly allows terminal escape sequences:
+gh 2.102's raw-response guard otherwise rejects normal colored Actions logs.
+The captured log is never printed or stripped; the existing 4 MiB limit and
+exact pinned-checkout proof still apply. Older clients that reject the flag
+locally use their original raw reader; permission, HTTP and transport failures
+do not trigger that compatibility fallback. Remove the old-client fallback
+when the supported developer CLI minimum includes the flag (tracked in #2416).
+Candidate plans print the CLI version alongside their bounded diagnostics.
+There is no reuse across different Git trees or per-test-case cache. This is test scheduling,
 not an additional branch-admission gate. Image building, scanning and artifact
 qualification remain required, as do rollout idle protection, backup and rollback.
-Scheduled and manual full runs still include the pool suite. Selector labels
+Scheduled and manual full runs still include the ordinary pool suite. Selector labels
 retain full file selection in the validation lanes they request.
 
-The October 15 rebalance moves three complete modules off measured 26-30 minute
-shards onto 35-58 second shards (candidate run 38793279887). The participant
-delivery module keeps its existing lifecycle-isolation placement. All test paths,
-legacy/shared-pool selection and time budgets stay unchanged. The slow-25 logs
-give lower bounds for moved costs, not a measured speedup; compare subsequent
-hosted execution and queue time before claiming an end-to-end improvement.
+Participant attachment tests own the three supported target rosters: ordinary,
+ordinary + guest, and ordinary + guest + auth. Downstream recovery, corruption,
+and transport matrices use a fresh complete roster by default instead of
+multiplying every fault by all three subsets. Connected release success also
+runs with the two smaller rosters. Every original recovery fault, both candidate
+write implementations, current/private-material refusal, immutable history and
+exact-absence assertions remain before merge. No test is moved to candidate
+publication, nightly validation or deployment, and no mutable fixture is shared
+between cases.
+
+The recovery and preactivation-recovery census scenarios run as separate whole
+modules on two existing pool shards. Each keeps its 1500-second case limit,
+fixtures and fault assertions. Their combined allowed budgets plus the other
+modules exceeded one job's 50-minute budget; the separation retains all 20
+shards and the existing job deadline without dropping either scenario.
+
+The October 16 rebalance keeps the measured scenario boundaries: deploy-job
+failures and completion faults run the same delivery lifecycle from
+`test_nebius_pool_participant_delivery_{job_failures,completion}.py`.
+The retained module's runtime probe, HTTPS, database/catalog stage and network
+checks live in `test_nebius_development_pool_retained_runtime_stages.py`.
+All 63 retained test functions and 182 parameter cases remain across the two
+files (79 and 103). After removing repeated topology products, module placements
+are recomputed across all 20 shards; placements chosen for the old counts are
+not a performance contract. The local comparison and its hosted-model limits
+are recorded in [pytest efficiency verification](pytest-efficiency-verification.md).
 
 The dev-only candidate test job saves uv caches under the same checksum-pinned,
 locked-workspace policy as candidate publication. PR and merge-group jobs retain
 their existing cache-write restrictions.
 
-The shared worker pool is not in use (dev deploys with `NEBIUS_ROLLOUT_MODE`
-unset, i.e. standalone), so `tests/ops/test_nebius_shared_pool_*.py` are skipped
-by `tests/ops/conftest.py` unless `LOOM_RUN_SHARED_POOL_TESTS=1`. Participant,
-legacy-completion and standalone rollout tests still run: normal rollout uses that
-code. Remove the skip before enabling `NEBIUS_ROLLOUT_MODE=shared`.
+CI test jobs restore a full, unpruned uv wheel cache (`cache-suffix:
+ci-wheels-v2`, ~200 MB compressed) and never save it. Every writer and reader sets
+`cache-local-path: /home/runner/.cache/uv`: GitHub's cache version hashes the
+cached path, and setup-uv defaults to `RUNNER_TEMP` on GitHub-hosted runners but
+`~/.cache/uv` on self-hosted ones, so `ci-wheels-v1` was written but never hit. setup-uv's default pruning
+kept only locally built packages (~180 KB), so every job downloaded about 150
+wheels from PyPI again: ~5 seconds on GitHub VMs, but 4-5 minutes with timeouts
+on OLDLAB guests, whose GitHub cache downloads are fast. The only writer is
+`ci-dependency-cache.yml`, which runs on protected dev when `uv.lock` or the
+writer workflow changes (including its first introduction), and daily. It syncs the superset of every reader's extras and groups, and saves once
+per lock. `test_ci_wheel_cache_has_one_trusted_writer_and_complete_contents`
+keeps readers read-only and covered by that superset.
+
+Shared-pool handoff, migration, recovery and census simulations belong to the
+`nebius-shared-pool-ops` suite. The combined shared system has not launched, so
+this suite is `manual_only`: ordinary PRs, merge groups, pushes, schedules and
+candidate supplementary tests exclude it, including changes to the shared code,
+common fixtures and dependencies. Fast activation rules and all independent
+environment/operator suites keep their existing validation positions. The
+`nebius-pool` lane remains enabled; only this ownership group is excluded.
+
+For explicit qualification, dispatch `CI` with `shared_pool_simulations=true`.
+The planner accepts the flag only for `workflow_dispatch`, emits it to the
+pool matrix and each executing job, and preserves the complete manual scenario
+set. Local selection uses `scripts/component_ownership.py test-paths --lane
+nebius-pool --include-shared-pool true --suite nebius-shared-pool-ops`. This
+prints the manifest; passing its paths to pytest runs the complete scenarios.
+The existing `affected_only` / `test_diff` rules remain available inside explicit
+selection. Empty-diff manual qualification runs the whole shared suite.
+
+Candidate supplementary execution uses the default selection. Squash coverage
+reuse reads `SHARED_POOL_SIMULATIONS` alongside the job's actual changed-path
+and diff hints; a skipped simulation is never counted as covered. Logs without
+that switch cannot prove optional simulation coverage. Excluded files cannot
+contribute to the candidate's required/reused counts. Merge-group reuse covers
+only default modules. Before shared feature launch, complete installed qualification under
+#1915, review the measured long-scenario budgets and remove `manual_only` in a
+reviewed change that restores automatic coverage. A successful manual simulation
+alone neither establishes installed readiness nor authorizes shared activation.
+See [shared-pool validation layers](shared-pool-test-layers.md).
 
 Go checks validate the retained execution runtime, gateway sandbox, and sandbox
 runtime. JWT and execution-materialization producer contracts also retain Go
@@ -257,47 +490,65 @@ manual compatibility selection.
 
 ## Test shard balance
 
-The root Python lane uses twenty complete, non-overlapping file shards with the
-existing manifest-owned stable hash salt. Explicit pins distribute the slow
-connected recovery modules using the October 2026 duration sample. The expanded
-shared-pool handoff and participant-delivery suites have dedicated placements;
-the eight- and twelve-shard layouts exhausted multiple jobs' 40-minute limits.
-Recovery stop, gateway, template, role, restart and reopening scenarios are
-separate files, as are participant host/dispatch/runner and completed-release
-history matrices. These files
-retain every parameterized scenario and independent fixture. Connected
-parent and process-preflight matrices also use separate shards after their
-combined duration exhausted a job's budget. Recovery census, recovery-process
-preflight and forward process-observation scenarios have separate wrappers that
-invoke their unchanged assertion bodies and complete independent fixtures. These
-long scenarios remain in the original collected coverage, without being stacked
-with every variant of their lifecycle matrix. Participant resource observation
-runs beside the measured lighter forward shard, separate from the image
-cancellation and transport matrices that previously crowded its job. Recovery
-census and completed recovery release also run on separate shards to retain
-headroom below the job deadline. Connected
-transport tests retain independent fixtures and share only immutable
-inputs; full roster tests retain all environments. Duplicate mode-independent
-qualification cases run once, while mode-specific grants and failure cases remain.
-The root job limit is 50 minutes. A full shard passed all 1,144 tests in 39m38s
-but exhausted the former 40-minute deadline once setup and process shutdown were
-included. The extra bounded headroom changes neither coverage nor shard count;
-individual test deadlines remain enforced. Connected participant lifecycle tests have
-explicit 120-second budgets (180 seconds for two successive releases). The
-participant pool-to-observer catalog/Job lifecycle also has a 180-second budget.
-The complete workflow-selector integration also has a 120-second budget. Exhaustive
-shared census uses 1200 seconds, with 1500 seconds for the independently scheduled
-recovery matrix; process-preflight matrices use 1200 seconds. Recovery reopening
-uses 900 seconds. Delayed-stop commit outcomes use 1800 seconds each and run in separate file
-shards. These test-only limits include retained-chain setup and fault/replay
-validation; production deadlines and fresh authority checks are unchanged.
-Each shard stops on its first failing test to
-retain the underlying failure report before its deadline; successful shards run
-every selected test. Other shards are not cancelled, and `repository-checks`
-still requires the aggregate result. This repartitions the expanded lane without
-excluding tests; its new duration balance requires measurement on CI runners.
+The root Python lane has four complete, non-overlapping file shards; pool
+operators have twenty. Both use manifest-owned stable hashing. Explicit pool
+pins distribute complete modules according to completed source run 38921887321
+and merge-group run 38922178538 (October 16): retained image history, shutdown,
+origin history, recovery qualification, development installation and role
+restoration no longer crowd the same long shards. The retained development
+runtime module separates runtime stages from parent/publication/input checks
+into two independently scheduled files, preserving all 63 sets of assertions
+and all 182 parameter cases. Probe tests reuse a scoped trusted-tool
+fixture instead of requiring a host kubectl installation; real executable lookup
+and missing/untrusted-tool refusal remain covered. The shard count and runner
+capacity are unchanged. The selector/workflow tests enforce disjointness, full
+selected-file coverage, fail-fast failures and empty-selection refusal. Old tests
+that asserted exact historical placement of skipped handoff matrices were removed;
+a previous placement is not itself an operator behavior contract. The workflow
+execution test also proves that the pool lane has identical `all` and `nebius`
+module sets before exercising its 20 shards once, instead of repeating identical
+selector/subprocess coverage. Root scopes still execute independently.
 
-The fast integration lane uses four complete, non-overlapping file shards.
+Run 39471175183 (October 20) exhausted shard 8's budget after its handoff module
+alone took 2445 seconds. Activation, cutover, gateway retirement and recovery
+release now use two existing lightly loaded shards (288 and 280 seconds in that
+run). The development installation module also moves off the 2706-second census
+shard to an existing eight-minute shard. These five whole-file pin changes
+preserve test selection and all scenarios; they add no jobs or runner capacity.
+Their hosted timing must be verified on the new head, not inferred from a local
+pass or a censored timeout.
+
+Run 39677158201 exceeded the general census's 1200-second test limit in its
+preactivation-recovery variant (27.68 seconds setup and 1172.32 seconds call).
+That existing scenario now lives with ordinary recovery in the recovery census
+module on shard 20, using its existing 1500-second whole-test budget. All eight
+census scenarios and their assertions remain. Shard 20 took 552.05 seconds in
+that run; placing the recovery variant there avoids concentrating both the
+participant and recovery matrices on shard 19. Hosted completion and balance
+were verified in follow-up run 39689189236: shard 19 completed 30 tests in
+1728.44 seconds and shard 20 completed 31 in 2484.07 seconds, including the
+1238.96-second preactivation-recovery call. These measurements describe that
+cycle; the cause of the run-to-run timing variation is not established.
+
+Run 39694426363 completed the schema-only successor scenario in 221.36 seconds
+including setup, but the combined storage/schema variant reached its
+300-second whole-test limit during retained private-input loading. Only that
+combined variant now uses the connected-storage suite's 600-second budget;
+schema-only retains 300 seconds. Both scenarios and all assertions are unchanged.
+This is a scoped test-budget adjustment, not a repair of the unexplained hosted
+timing variation. Completion on the updated head still needs hosted verification.
+
+The pool job limit remains 50 minutes; other lifecycle and transport limits
+remain unchanged. Every selected successful shard runs all its tests. PR and
+merge-group matrices cancel remaining siblings after a failure; manual,
+scheduled and push diagnostics retain all selected shards. `repository-checks`
+still rejects selected failed, cancelled or skipped work.
+Measure execution, allocation wait and serialized merge-group time separately;
+local reductions are not a measured PR-to-deployment hosted speedup. Candidate
+publication continues reusing only successful native coverage on its exact candidate tree,
+so a shorter PR wave does not create a delayed duplicate pool wave after merge.
+
+The fast integration lane uses six complete, non-overlapping file shards.
 `config/component-ownership.toml` owns the stable hash salt and the paired
 username/password fixture ordering. New files do not reshuffle existing files.
 Docker integration uses two non-overlapping file shards, with duration-based
@@ -308,19 +559,38 @@ all selected shards. Required platform tests are retained.
 MinIO preparation follows selected fixture imports and parent conftests. Fast
 integration normally needs only the testcontainers release; TLS storage tests
 also need the newer release. Source-built fallback images retain their pinned
-commit, compiler and recipe and are cached as Docker archives. PR and merge-group
-runs only restore caches; trusted pushes, dispatches and scheduled runs may save
-them. Recipe or release changes get a new cache key, and invalid archives fall
-back to normal pinned-image preparation. The lazy per-fixture resolver remains
-available for local tests.
+commit, compiler and recipe and are cached as Docker archives. `quay.io/minio/minio`
+no longer serves anonymous pulls, so without the cache every job builds from
+source (about 2 minutes, failing when the Go module proxy resets). CI jobs only
+restore the archives, from `.ci-cache/loom-minio-fixtures` inside the checkout: the
+cache version hashes the path, `RUNNER_TEMP` differs per hosted worker, and the
+archive stores the path relative to the workspace, which differs between the
+hosted writer and self-hosted jobs. The only
+writer is `ci-dependency-cache.yml`, which builds every fixture under one key per
+recipe set when `tests/support/minio_images.py` changes on dev, and daily. Each job
+still prepares only the images it selected. Recipe or release changes get a new
+key, and invalid archives fall back to normal pinned-image preparation. The lazy
+per-fixture resolver remains available for local tests.
 
-Both integration lanes also prepare selected `postgres:16` and
+The disposable MinIO runtime keeps a minimum curl version instead of requiring
+an old APK revision that Alpine has replaced. Its curl and CA security floors
+accept newer published revisions; the MinIO commit, compiler and base-image
+digest stay fixed.
+
+System smoke uses a Compose project per run/attempt and Docker-assigned loopback
+ports; it discovers actual service endpoints once and passes the registry endpoint
+to the image builder without changing the original port mappings.
+Failed Compose commands print a bounded, redacted tail of their captured output,
+so image-build errors remain visible even before service containers exist.
+
+Both integration lanes also prepare selected `postgres:16`, `postgres:17` and
 `python:3.11-slim` fixtures before pytest, following literal references through
 fixture imports and parent conftests. Cached images are reused. Cold pulls use
 the configured Docker Hub mirror, have a 180-second preparation deadline and
 fail the job visibly without a retry loop or alternate image. This keeps network
 downloads outside the existing 60-second test setup budget; individual test
-deadlines, fixture references and coverage remain unchanged.
+deadlines, fixture references and coverage remain unchanged. Parameterized image
+matrices declare literal references so every selected version is prepared.
 
 The final repository gate checks individual lane results directly. Coverage
 aggregation runners are allocated only when optional Python coverage is requested.
@@ -335,19 +605,89 @@ the 35-minute job limit and existing per-test deadlines. Independent cluster-tes
 edits allocate only their nonempty shards, and select the manifest before
 dependency and Skopeo preparation. Selector failure stops
 the shard even if it emitted partial paths; test failure remains a failed job.
-`cluster-smoke-gate` waits for the aggregate result of all selected shards, with
-fail-fast cancellation disabled. This replaces a serial run that exhausted its
+`cluster-smoke-gate` waits for the aggregate result of all selected shards. PR
+and merge-group matrices cancel unfinished siblings after a failure; manual
+diagnostic runs retain independent outcomes. This replaces a serial run that exhausted its
 35-minute limit after completing only 61% of 77 tests; it removes no test paths
 or protected checks. Per-shard duration reporting supports later balance review.
+
+The shared disposable K3s fixture requests normal Docker stop before removing
+the stopped container and its volumes. Its 30-second shutdown allowance does not
+change test deadlines. Stop and removal errors still fail the job. K3s remains
+PID 1; adding an init wrapper would interfere with its cgroup startup sequence.
+
+The actuator module prepares each image when its first consumer needs it, once
+per role per module. The network-policy case builds only its small fixture
+image within its existing 180-second whole-test limit. The production runtime
+is built by its first actual runtime case, within that case's existing
+360-second limit; later cases reuse it. A failed build is retained as a failure,
+and every attempted image tag is cleaned up. Full-module coverage still builds
+and exercises both roles. This corrects an eager runtime build charged to a
+network-only case; it does not claim that the two builds' total work disappeared.
+The cluster job reports stage/cache and wall-time records within a 64 KiB read
+limit even on failure. It reads past earlier shared helper builds so the target
+module's later records are retained. Python and reaped-child CPU counters
+describe the test driver/client, not the build daemon; parallel BuildKit stage
+durations are not additive.
+
+Pod readiness retains its 60-second budget and Running/Ready predicate. Its
+read-only transport copies the original configuration, scoped headers and
+cookie, disables SDK retries on that private client, and bounds each request by
+the remaining budget. Fractional timeout tuples are required by the pinned
+SDK, which ignores scalar floats. Only observed startup TLS EOF and read
+timeouts are polled within the same deadline; authorization, certificate and
+other failures still propagate. The caller's shared/write client stays intact,
+private connections are closed, and late responses cannot establish readiness.
+
+Disposable K3s API discovery does not imply that native DNS or dynamic storage
+is ready. Tests that require these addons opt into `_load_client` readiness:
+`required_addons=('dns',)` checks the current CoreDNS Deployment and a ready
+`kube-dns` endpoint; `('dns', 'storage')` also checks local-path provisioner
+readiness. These reads share the original 90-second startup budget. API-only
+callers keep their existing boundary, and traffic/PVC assertions remain required.
+Addon failures include bounded Pod IPs, readiness conditions, container IDs,
+waiting reasons, and normal/warning events with timestamps. Normal image-pull
+and container-start events help distinguish startup stages after a sandbox
+network error. The shared network failure helper also retains a bounded
+containerd log tail and CRI sandbox/container listings from its disposable node;
+each command has a five-second deadline and a 16-KiB output tail. Diagnostic
+failures preserve the original error. The retirement fixture also records PVC
+status without logging Secrets or Pod specs.
+The database guard fixture collects the same node/runtime/event evidence before
+teardown when PostgreSQL startup or its subsequent assertions fail. This is
+diagnostic coverage, not a timeout extension or a claimed startup-stall repair.
+The repeat-refresh test also requires this native DNS readiness as an existing
+Deployment/ReplicaSet/Pod reconciliation startup witness before its functional
+30-second window; it adds no startup budget or storage prerequisite.
+
+The native repeat-refresh test retains its iteration and bounded Deployment,
+ReplicaSet, Pod and warning-event status before deleting its disposable node on
+failure. Diagnostic reads have individual request bounds and cannot replace the
+original error. They include no resource specs, Secret data or arbitrary error
+messages; the existing Pod-creation and overall test deadlines remain unchanged.
 
 The 75-minute integration budget retains room for optional coverage and runner
 variation. File counts alone do not measure shard balance; use the per-shard
 duration reports from the current head.
 
-All four source workflows use GitHub-hosted runners directly. The OLDLAB route
-action, lease broker, controller, custom CheckRun publisher and dedicated KVM
-runner assets have been removed. This does not stop existing host services or
-cancel in-flight jobs. See [runner placement](../architecture/ci-runner-acceleration.md).
+The three complete independent-environment installation cases retain a real
+administration status CLI invocation, followed by connected observations through
+the complete `run_administration` entry in their worker thread. Each observation
+reads the current files, verifies authorization/hash/schema, opens a fresh real
+read-only PostgreSQL transaction, commits and disposes its engine. No receipt is
+cached. The reusable enrollment fixture defaults to the CLI, and its dedicated
+CLI apply/status/invalid-hash checks remain. The real CLI keeps its 30-second
+subprocess bound; connected observations use a 30-second cooperative async
+deadline, within the unchanged 180-second complete-case cap. The platform grant
+fixture samples the PostgreSQL clock before opening its mutation transaction,
+matching the audit clock while retaining the original five-minute validity.
+Immediate readiness inspection grants use the same database timebase.
+
+All four development validation workflows support the opt-in unified native
+runner queue, with GitHub-hosted fallback and exclusions as described in
+[runner supply](ci-unified-runners.md). GitHub owns job assignment and CheckRuns;
+the retired route action, lease broker and custom CheckRun publisher are not
+part of this interface. See [runner placement](../architecture/ci-runner-acceleration.md).
 
 Harbor runtime builds follow manifest-owned inputs rather than every image change.
 

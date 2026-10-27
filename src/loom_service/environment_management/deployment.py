@@ -179,6 +179,10 @@ def render_management(
     template_profile = {key: value for key, value in profile.items() if key not in {
         "guest_runtime", "guest_runtime_volume_mib", "guest_max_artifact_bytes", "supports_emulated_pkcs11",
     }}
+    # Shared-guest readiness requires the excluded guest runtime. Drop only
+    # the previously invalid true combination; preserve valid false templates.
+    if template_profile.get("supports_shared_guest") is True:
+        template_profile.pop("supports_shared_guest")
     # Management emits no task-egress configuration or execution workloads.
     # Normalize only previously rejected mismatches: changing valid template
     # inputs would rename fields inside existing immutable migration Job Pods.

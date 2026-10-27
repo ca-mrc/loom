@@ -9,7 +9,7 @@ import base64
 import copy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml  # type: ignore[import-untyped]
 from scripts.ops.nebius_development_collector_cloud import (
@@ -22,6 +22,9 @@ from scripts.ops.nebius_development_shared_runtime import prepare_shared_runtime
 from scripts.ops.nebius_pool_runtime import _RetainedPoolCollectorSettings
 
 from loom.nebius_platform_render import _obj, _replace_tree
+
+if TYPE_CHECKING:
+    from scripts.ops.nebius_pool_storage_binding import ClosedPoolStorageRefresh
 
 _ROOT = Path(__file__).resolve().parents[2]
 _PREFIX = 'LOOM_EXECUTION_CAPACITY_COLLECTOR_'
@@ -54,11 +57,19 @@ def prepare_collector_material(request: DevelopmentDatabaseRuntime, *, scope: De
         raise ValueError('development collector material unqualified') from None
 
 
-def prepare_collector_runtime(request: DevelopmentDatabaseRuntime) -> DevelopmentCollectorRuntime:
+def prepare_collector_runtime(request: DevelopmentDatabaseRuntime, *,
+        storage: ClosedPoolStorageRefresh | None = None) -> DevelopmentCollectorRuntime:
     """Derive observer-only configuration from the immutable physical pool scope."""
     try:
         prepare_shared_runtime(request)
         spec = request.manager.retained.request.registration.spec
+        if storage is not None:
+            from scripts.ops.nebius_pool_storage_binding import ClosedPoolStorageRefresh
+
+            storage = ClosedPoolStorageRefresh.model_validate(storage.model_dump())
+            if storage.before != spec:
+                raise ValueError('collector storage predecessor differs')
+            spec = storage.after
         config = request.foundation.inputs.config
         participant = retained_development_participant(request.manager.retained.request)
         observer, = (row for row in spec.machines if row.role == 'observer')

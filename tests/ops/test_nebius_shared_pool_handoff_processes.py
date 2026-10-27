@@ -1,6 +1,9 @@
 """Shared handoff processes lifecycle regressions."""
 from __future__ import annotations
 
+from contextlib import nullcontext
+
+from tests.ops.test_nebius_development_pool_retained import system_kubectl as system_kubectl
 from tests.ops.test_nebius_shared_pool_handoff import (
     ROOT as ROOT,
 )
@@ -148,18 +151,23 @@ from tests.ops.test_nebius_shared_pool_handoff import (
 from tests.ops.test_nebius_shared_pool_handoff import (
     uuid4 as uuid4,
 )
+from tests.support.nebius_shared_pool_history import captured_predecessor_history
+
+pytestmark = [*pytestmark, pytest.mark.usefixtures('system_kubectl')]
 
 
 # Hosted-runner activation took 587s including its independent fixture.
 @pytest.mark.timeout(1200)
+@pytest.mark.parametrize('staging_history', ['0174'], indirect=True)
 @pytest.mark.parametrize('forward_processes', [False, True, 'activation', 'recovery-databases'],
     ids=['initial', 'forward', 'activation', 'recovery-databases'])
 def test_shared_process_preflight_reads_current_databases_and_retired_authority(
         shared_runtime, staging_history, staging_observation, completed_pool, handoff, monkeypatch, forward_processes):
     """Reject active old authority, failed real challenges and changed bindings.
 
-    Only Kubernetes transport and remote process output are doubled. Omitting a
-    required probe or using old staging templates must fail this connected test.
+    Initial binding and concrete activation connect real predecessor files.
+    Forward/recovery contracts capture those fixed disk inputs per case; current
+    child journals, process probes and every fault selector remain exercised.
     """
     import base64
     import hmac
@@ -221,14 +229,34 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
     assert hasattr(module, 'observe_shared_pool_processes'), 'connected SQL/process preflight is missing'
     request, parent = shared_runtime
     calls, documents, fallback = runtime_http_inventory(request, parent, completed_pool[3].server, handoff[2])
+    physical = None
+    if forward_processes in {'forward', 'recovery-processes'}:
+        from scripts.ops import nebius_pool_storage_operation as storage
+        from scripts.ops.nebius_development_runtime_live import runtime_resource_path
+        from scripts.ops.nebius_shared_pool_entry import RetainedRuntimeReference
+        from tests.ops.test_nebius_shared_pool_handoff import ClosedStorageAPI, _shared_entry_inputs
+
+        original_args, original_bindings = shared_operation.__wrapped__(
+            shared_runtime, staging_history, staging_observation, completed_pool, handoff)
+        _, _, inputs, _, _ = _shared_entry_inputs(original_args, original_bindings)
+        runtime = RetainedRuntimeReference.model_validate(inputs['runtime'])
+        retained = storage.retain_closed_storage(runtime=runtime, operation_id=uuid4(),
+            target_disk_type='NETWORK_SSD_NON_REPLICATED')
+        storage_api = ClosedStorageAPI(retained)
+        storage_api.collector.ready = storage_api.publication_ready = True
+        assert storage.run_closed_storage(retained=retained, api=storage_api)
+        physical = storage.load_completed_storage(runtime=runtime, reference=retained.reference)
+        for row in (physical.resources.collector, physical.resources.configuration):
+            documents[runtime_resource_path(row) + '/' + row['metadata']['name']] = copy.deepcopy(row)
     plan = module.prepare_shared_pool_handoff(runtime=request, observation=staging_observation,
-        legacy=staging_history, repo_root=ROOT)
+        legacy=staging_history, repo_root=ROOT, storage=physical)
     attachment = plan.staging.attachment
     staging, dev = attachment.guard, next(row for row in plan.migration.guards if row.namespace == 'loom-dev')
     spec = plan.migration.registration.spec
     old = staging_history.context
     old_spec = old.inputs.installation
     old_namespace = old.original.upgrade.setup.binding.namespace
+    old_revision = getattr(getattr(old.predecessor, 'resources', None), 'target_manager_revision', '0176')
     manager_namespace = request.database.manager.retained.request.retained.binding.namespace
 
     def add(row):
@@ -357,7 +385,7 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
                 assert args[3] == 'pod/loom-postgres-0' and args[5] == 'loom-postgres'
                 sql = args[-1]
                 if namespace == old_namespace:
-                    assert sql == pool_machine_retirement_sql(old_spec, action='observe')
+                    assert sql == pool_machine_retirement_sql(old_spec, action='observe', manager_revision=old_revision)
                     value = {'schema': 'loom.pool-machine-retirement.v1', 'operation_id': str(old_spec.operation_id),
                         'installation_sha256': digest(old_spec.model_dump(mode='json')),
                         'state': 'active' if mode['damage'] == 'old-active' else 'revoked'}
@@ -532,7 +560,12 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
                             else row.participant_id == participant_id and row.workload_scope == 'environment'))
                         settings = expected_pool_runtime_settings(component, workload,
                             token_sha256=machine.token_sha256 if component in {'controller', 'actuator', 'gateway'} else None,
-                            catalog_sha256=hashlib.sha256(spec.profiles.model_dump_json().encode()).hexdigest() if component == 'manager' else None)
+                            # Physical correction leaves the mounted catalog
+                            # bytes unchanged; round-tripping the registration
+                            # can reorder maps without changing its meaning.
+                            catalog_sha256=hashlib.sha256(documents['/api/v1/namespaces/' + manager_namespace
+                                + '/configmaps/loom-pool-profiles-' + spec.operation_id.hex]['data']['profiles.json']
+                                .encode()).hexdigest() if component == 'manager' else None)
                     payload = json.dumps(settings, sort_keys=True, separators=(',', ':')).encode()
                     check = 'settings'
                 assert hmac.new(bytes.fromhex(nonce), payload, 'sha256').hexdigest() == response
@@ -552,7 +585,7 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
 
     monkeypatch.setattr(subprocess, 'run', execute_with_hook)
     history = {path: path.read_bytes() for path in plan.history}
-    with HTTPSDevelopmentRuntimeProbes(request=request,
+    with HTTPSDevelopmentRuntimeProbes(request=request, storage=physical,
             api_server=request.database.foundation.inputs.config['kubernetes_api_server'],
             ssl_context=ssl.create_default_context(cadata=request.database.foundation.bootstrap['material']['loom-platform-db']['ca.crt']),
             token='operator-test') as probes:
@@ -562,7 +595,7 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
 
         def observe():
             return module.observe_shared_pool_processes(runtime=request, observation=staging_observation,
-                legacy=staging_history, repo_root=ROOT, development=probes,
+                legacy=staging_history, repo_root=ROOT, development=probes, storage=physical,
                 kubeconfig=Path(probes.prefix[probes.prefix.index('--kubeconfig') + 1]), executable=Path(probes.prefix[0]))
 
         try:
@@ -584,10 +617,14 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
         assert checked == {'old-revoked', 'new-closed', 'telemetry', ('guard', 'loom-dev'), ('guard', staging.namespace),
             *((check, namespace, name) for namespace, name in roles for check in ('settings', 'database'))}
         assert 'private-test-only' not in repr(result)
+        history_io = (captured_predecessor_history(bindings=result.bindings, monkeypatch=monkeypatch,
+            arguments=dict(runtime=request, observation=staging_observation, legacy=staging_history, repo_root=ROOT))
+            if forward_processes in (True, 'recovery-databases') else nullcontext())
         if forward_processes in {'recovery-databases', 'recovery-processes'}:
-            _exercise_recovery_databases(bindings=result.bindings, documents=documents, mode=mode, checked=checked,
-                commands=commands, probes=probes, process_observation=forward_processes == 'recovery-processes',
-                args=dict(runtime=request, observation=staging_observation, legacy=staging_history, repo_root=ROOT))
+            with history_io:
+                _exercise_recovery_databases(bindings=result.bindings, documents=documents, mode=mode, checked=checked,
+                    commands=commands, probes=probes, process_observation=forward_processes == 'recovery-processes',
+                    args=dict(runtime=request, observation=staging_observation, legacy=staging_history, repo_root=ROOT))
             return
         if forward_processes:
             with HTTPSSharedPoolRuntimeProbes(bindings=result.bindings,
@@ -597,11 +634,12 @@ def test_shared_process_preflight_reads_current_databases_and_retired_authority(
                 for connection in (shared_probes, shared_probes.manager, shared_probes.foundation):
                     connection.client.close()
                     connection.client = type(completed_pool[3].api.client)(base_url=connection.api_server, transport=httpx.MockTransport(handle))
-                _exercise_forward_processes(bindings=result.bindings, development=shared_probes, documents=documents,
-                    mode=mode, checked=checked, commands=commands, add=add, calls=calls,
-                    activation_transport=forward_processes == 'activation',
-                    observation_only=forward_processes == 'process-observation',
-                    args=dict(runtime=request, observation=staging_observation, legacy=staging_history, repo_root=ROOT))
+                with history_io:
+                    _exercise_forward_processes(bindings=result.bindings, development=shared_probes, documents=documents,
+                        mode=mode, checked=checked, commands=commands, add=add, calls=calls,
+                        activation_transport=forward_processes == 'activation',
+                        observation_only=forward_processes == 'process-observation',
+                        args=dict(runtime=request, observation=staging_observation, legacy=staging_history, repo_root=ROOT))
             return
         baseline = copy.deepcopy(documents)
         for damage in ('old-active', 'new-not-closed', 'guard-held', 'settings:' + staging.namespace,

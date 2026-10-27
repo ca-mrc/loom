@@ -16,6 +16,7 @@ from loom.execution_runtime_contract import (
     runtime_pod_resources,
     validate_runtime_plan_requirements,
 )
+from loom.execution_selection import execution_selection_readback
 from loom.models.networking import WebAllowlist, WebDestination
 from loom.models.task import TaskConfig
 from loom.pipeline.keys import canonical_digest
@@ -198,10 +199,76 @@ def test_profile_readiness_cannot_be_granted_by_task_or_prepared_image(change, r
         _compile(task, trial, profile, task_image_grant=grant)
 
 
+def test_guest_inherits_omitted_verifier_user_from_root_task():
+    task, trial, profile = _guest_inputs()
+    raw = task.model_dump(mode="json")
+    raw["verifier"]["user"] = None
+    task = TaskConfig.model_validate(raw)
+    assert task.environment.user == "root" and task.verifier.user is None
+    reasons = automatic_service_execution_rejections(
+        task, trial, source_provenance=_provenance(),
+        supported_capabilities=GUEST_EXECUTION_CAPABILITIES,
+    )
+    assert "guest_root_identity_required" not in reasons
+    for sidecar in _compile(task, trial, profile).sidecars:
+        assert sidecar.identity is not None and sidecar.guest_task_identity is not None
+        assert (sidecar.identity.run_as_user, sidecar.identity.run_as_group, sidecar.identity.home) == (0, 0, "/root")
+        assert (sidecar.guest_task_identity.run_as_user, sidecar.guest_task_identity.run_as_group) == (0, 0)
+
+
+def test_guest_keeps_the_launcher_root_and_runs_the_task_user_inside():
+    task, trial, profile = _guest_inputs()
+    raw = task.model_dump(mode="json")
+    raw["environment"].update(user="agent")
+    raw["verifier"]["user"] = None
+    task = TaskConfig.model_validate(raw)
+    assert "guest_root_identity_required" not in automatic_service_execution_rejections(
+        task, trial, source_provenance=_provenance(), supported_capabilities=GUEST_EXECUTION_CAPABILITIES,
+    )
+    for sidecar in _compile(task, trial, profile).sidecars:
+        assert (sidecar.identity.run_as_user, sidecar.identity.run_as_group) == (0, 0)
+        assert sidecar.guest_task_identity is not None
+        assert (sidecar.guest_task_identity.run_as_user, sidecar.guest_task_identity.run_as_group,
+                sidecar.guest_task_identity.home) == (65532, 65532, "/home/agent")
+
+
+def test_guest_verifier_can_differ_when_each_guest_is_private():
+    task, trial, profile = _guest_inputs()
+    raw = task.model_dump(mode="json")
+    raw["environment"]["environment"]["HOME"] = "/home/task"
+    raw["verifier"].update(user="1001:1001")
+    task = TaskConfig.model_validate(raw)
+    reasons = automatic_service_execution_rejections(
+        task, trial, source_provenance=_provenance(), supported_capabilities=GUEST_EXECUTION_CAPABILITIES,
+    )
+    assert "guest_root_identity_required" not in reasons and "unsupported_task_identity" not in reasons
+    plan = _compile(task, trial, profile)
+    task_sandbox = next(sidecar for sidecar in plan.sidecars if sidecar.role_name == "task-sandbox")
+    verifier_sandbox = next(sidecar for sidecar in plan.sidecars if sidecar.role_name == "verifier-sandbox")
+    assert task_sandbox.guest_task_identity.home == "/home/task"
+    assert (task_sandbox.guest_task_identity.run_as_user, verifier_sandbox.guest_task_identity.run_as_user) == (0, 1001)
+    assert verifier_sandbox.identity.run_as_user == task_sandbox.identity.run_as_user == 0
+
+
+def test_shared_guest_rejects_a_different_verifier_identity():
+    task, trial, profile = _guest_inputs()
+    raw = task.model_dump(mode="json")
+    raw["environment"]["environment"]["HOME"] = "/home/task"
+    raw["verifier"].update(user="1001:1001", env_mode="shared")
+    task = TaskConfig.model_validate(raw)
+    trial = trial.model_copy(update={"verifier_env_mode": "shared"})
+    profile = profile.model_copy(update={"supports_shared_guest": True})
+    reasons = automatic_service_execution_rejections(
+        task, trial, source_provenance=_provenance(), supported_capabilities=GUEST_EXECUTION_CAPABILITIES,
+        supports_shared_guest=True,
+    )
+    assert reasons.count("guest_shared_identity_mismatch") == 1
+    assert "unsupported_task_identity" not in reasons
+    with pytest.raises(ValueError, match="guest_shared_identity_mismatch"):
+        _compile(task, trial, profile)
+
+
 @pytest.mark.parametrize("section,change,reason", [
-    ("environment", {"user": "agent"}, "guest_root_identity_required"),
-    ("verifier", {"user": None}, "guest_root_identity_required"),
-    ("verifier", {"user": "1001:1001"}, "guest_root_identity_required"),
     ("environment", {"cpus": 0.5}, "guest_cpu_limit_too_small"),
     ("environment", {"memory_mb": 511}, "guest_memory_limit_too_small"),
     ("environment", {"storage_mb": 159}, "guest_ephemeral_storage_limit_too_small"),
@@ -213,6 +280,31 @@ def test_guest_prerequisites_are_checked_before_admission(section, change, reaso
     reasons = automatic_service_execution_rejections(TaskConfig.model_validate(raw), trial,
         source_provenance=_provenance(), supported_capabilities=GUEST_EXECUTION_CAPABILITIES)
     assert reason in reasons
+
+
+@pytest.mark.parametrize("guest", [True, False], ids=["guest-rejected", "container-supported"])
+def test_resolved_image_entrypoint_is_rejected_only_for_guest_before_compilation(guest):
+    task, trial, profile = _guest_inputs("nested_docker")
+    task = task.model_copy(update={"environment": task.environment.model_copy(update={
+        "image_entrypoint": False, "entrypoint": ("/entrypoint.sh",),
+        **({"execution_requirements": None} if not guest else {}),
+    })})
+    if not guest:
+        trial = trial.model_copy(update={"isolation": "container"})
+    reasons = automatic_service_execution_rejections(
+        task, trial, source_provenance=_provenance(),
+        supported_capabilities=profile.supported_guest_capabilities,
+    )
+    if guest:
+        assert reasons == ("guest_image_entrypoint_unsupported",)
+        with pytest.raises(ValueError, match="guest_image_entrypoint_unsupported"):
+            _compile(task, trial, profile)
+    else:
+        assert not reasons
+        plan = _compile(task, trial, profile)
+        sandbox = next(sidecar for sidecar in plan.sidecars if sidecar.private_sandbox)
+        assert sandbox.argv[:2] == ("/entrypoint.sh", "/loom/bin/loom-sandbox-runtime")
+        assert sandbox.guest_execution is None
 
 
 def test_guest_requires_terminus_and_external_requirements_remain_rejected():
@@ -356,6 +448,7 @@ def test_renderer_keeps_guest_state_private_bounded_and_host_unprivileged(capabi
             "--cpu-millis", str(plan.task_resources.cpu_millis),
             "--max-transfer-bytes", str(plan.max_artifact_bytes),
             "--exec-timeout-seconds", plan.sidecars[0].argv[-1],
+            "--task-uid", "0", "--task-gid", "0", "--task-groups", "-", "--task-home", "/root",
             *(["--nested-docker"] if capability == "nested_docker" else []),
         ]
         assert container["image"] == plan.task_image_ref
@@ -386,7 +479,7 @@ async def test_service_admission_uses_deployment_opt_in(monkeypatch, ready):
     if not ready:
         profile = profile.model_copy(update={"guest_runtime": None})
     result = Mock()
-    result.all.return_value = [("guest", task.model_dump(mode="json"), _provenance(), "a" * 64, None)]
+    result.all.return_value = [("guest", task.model_dump(mode="json"), _provenance(), "a" * 64, None, None)]
     session = SimpleNamespace(execute=AsyncMock(return_value=result))
     monkeypatch.setattr("loom_service.execution_admission.get_service_execution_backend_pools",
         AsyncMock(return_value=[SimpleNamespace(pool_name="nebius-cpu")]))
@@ -418,8 +511,43 @@ def test_shared_guest_keeps_one_live_sandbox_and_requires_deployment_readiness()
     assert plan.verifier is not None
     assert plan.verifier_execution == "in_attempt"
     assert ExecutionRuntimePlanV1.model_validate(plan.canonical_payload()) == plan
+    shared_readback = execution_selection_readback(trial.model_dump(mode="json"), plan)["effective"]
+    assert shared_readback["verification"] == "shared"
+    assert shared_readback["fresh_sandbox_grading"] is False
+    assert shared_readback["isolation"] == "guest"
     validate_runtime_plan_requirements(plan, workload_requirements_from_task(task, trial))
     raw = plan.canonical_payload()
     raw["sidecars"][0]["role_name"] = "verifier-sandbox"
     with pytest.raises(ValueError):
         ExecutionRuntimePlanV1.model_validate(raw)
+
+
+def test_skipped_guest_keeps_the_agent_sandbox_only():
+    task, trial, profile = _guest_inputs()
+    shared_task = task.model_copy(update={
+        "verifier": task.verifier.model_copy(update={"env_mode": "shared"}),
+    })
+    skipped = trial.model_copy(update={"skip_verifier": True})
+    reasons = automatic_service_execution_rejections(
+        shared_task, skipped, source_provenance=_provenance(),
+    )
+    assert "isolation_guest_shared_unsupported" not in reasons
+    assert "verifier_mode_required" not in reasons
+    assert "guest_root_identity_required" not in reasons
+    plan = _compile(shared_task, skipped, profile)
+    assert plan.verifier_execution == "skipped"
+    assert plan.verifier is None
+    assert plan.in_place_verifier is False
+    assert [sidecar.role_name for sidecar in plan.sidecars] == ["task-sandbox"]
+    assert plan.sidecars[0].guest_execution is not None
+    assert not any(item.kind == "verifier" for item in plan.output_declarations)
+    assert any(
+        item.relative_path == "artifacts/workspace.tar" and item.required
+        for item in plan.output_declarations
+    )
+    validate_runtime_plan_requirements(plan, workload_requirements_from_task(shared_task, skipped))
+    assert ExecutionRuntimePlanV1.model_validate(plan.canonical_payload()) == plan
+    effective = execution_selection_readback(skipped.model_dump(mode="json"), plan)["effective"]
+    assert effective["verification"] == "skipped"
+    assert effective["isolation"] == "guest"
+    assert effective["fresh_sandbox_grading"] is False

@@ -12,8 +12,10 @@ from uuid import UUID
 
 import pytest
 
-from loom.db.schema_startup import service_schema_head
-from tests.cluster.pool_cutover_diagnostics import observe_cutover_stage
+from tests.cluster.pool_cutover_diagnostics import (
+    add_bootstrap_rbac_diagnostics,
+    observe_cutover_stage,
+)
 from tests.integration.test_execution_actuator_k3s import _load_client, _start_k3s
 from tests.ops.test_nebius_pool_cutover import collector_inputs as collector_inputs
 from tests.ops.test_nebius_pool_cutover import cutover_inputs as cutover_inputs
@@ -86,7 +88,13 @@ async def test_real_connected_cutover_stages_closed_workloads_and_replays_withou
             missing = ({row.role_ref.name for row in bootstrap_bindings.items} | late_bootstrap_roles) - available
             if not missing:
                 break
-            assert time.monotonic() < bootstrap_deadline, f"disposable bootstrap role references unresolved: {sorted(missing)}"
+            try:
+                assert time.monotonic() < bootstrap_deadline, f"disposable bootstrap role references unresolved: {sorted(missing)}"
+            except AssertionError as error:
+                await asyncio.to_thread(
+                    add_bootstrap_rbac_diagnostics, container, bootstrap_roles, bootstrap_bindings, error
+                )
+                raise
             await asyncio.sleep(0.1)
         platform_authority = PoolPlatformAuthority(schema_version="loom.pool-platform-authority.v1",
             kube_system_uid=kube_system.metadata.uid, resources=tuple(platform_resources))
@@ -153,7 +161,7 @@ async def test_real_connected_cutover_stages_closed_workloads_and_replays_withou
 
             def cutover_readiness_page(self, target, *, after):
                 assert target in self.request.guards and after is None
-                return {"status": "observed", "schema_revision": service_schema_head(), "rows": []}
+                return {"status": "observed", "schema_revision": "0176", "rows": []}
 
         class Checks:
             def qualify_binding(self, actual, manager):
@@ -256,7 +264,9 @@ async def test_real_connected_cutover_stages_closed_workloads_and_replays_withou
             foreign["spec"]["template"]["metadata"]["labels"] = labels
             foreign_namespace = foreign["metadata"]["namespace"]
             await asyncio.to_thread(apps.create_namespaced_deployment, foreign_namespace, foreign)
-            with pytest.raises(ValueError, match="pool_retained_writer_workload_inventory_unqualified"):
+            # Unexpected earlier inventory rejection needs its actual hidden
+            # frame; the expected rejection remains silent and unchanged.
+            with observe_cutover_stage(0), pytest.raises(ValueError, match="pool_retained_writer_workload_inventory_unqualified"):
                 await asyncio.to_thread(api.preflight, request)
             assert not (tmp_path / "cutover").exists()
             assert methods and all(method == "GET" for method, _path, _query in methods)
@@ -268,7 +278,16 @@ async def test_real_connected_cutover_stages_closed_workloads_and_replays_withou
                     await asyncio.to_thread(apps.read_namespaced_deployment, "unregistered-writer-consumer", foreign_namespace)
                 except client.ApiException as error:
                     assert error.status == 404
-                    break
+                    # A point-read 404 can precede the RoleList snapshot used
+                    # by cutover's complete census. Wait for this fixture's
+                    # removal at that revision too; never retry a failed stage.
+                    snapshot = await asyncio.to_thread(api._request, "GET",
+                        "/apis/rbac.authorization.k8s.io/v1/roles?limit=100")
+                    remaining = await asyncio.to_thread(apps.list_namespaced_deployment, foreign_namespace,
+                        field_selector="metadata.name=unregistered-writer-consumer",
+                        resource_version=snapshot["metadata"]["resourceVersion"], resource_version_match="Exact")
+                    if not remaining.items:
+                        break
                 assert time.monotonic() < deadline, "test-only foreign controller did not drain"
                 await asyncio.sleep(0.1)
             methods.clear()

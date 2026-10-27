@@ -19,10 +19,10 @@ from tests.ops.test_nebius_candidate import inputs
 from tests.ops.test_nebius_candidate import source_checkout as source_checkout
 from tests.ops.test_nebius_ingress_operation import inventory as inventory
 from tests.ops.test_nebius_management_capacity import workload
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_candidate_catalog import github_transport
 from tests.unit.test_nebius_candidate_catalog import publication as publication
 from tests.unit.test_nebius_development_foundation import development_inputs as development_inputs
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
 def module():

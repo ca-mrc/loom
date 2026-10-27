@@ -93,6 +93,7 @@ def test_controller_binding_and_gateway_protocol_are_declared() -> None:
     ({"model": "forbidden"}, "Gateway protocol"),
     ({"required_driver_capabilities": frozenset()}, "driver operations"),
     ({"stages_solution": True}, "model-free"),
+    ({"version": "1.0.0"}, "integrity-pinned"),
 ])
 def test_invalid_specs_are_refused(kwargs: dict, message: str) -> None:
     with pytest.raises(ValueError, match=message):
@@ -246,3 +247,46 @@ def test_materializer_trace_format_comes_from_the_spec() -> None:
     assert _trace_format("oracle") == "oracle"
     assert _trace_format("litellm") == "completion-calls"
     assert _trace_format("unknown") == "completion-calls"
+
+
+def test_canonical_agent_version_records_the_pinned_install() -> None:
+    # A Codex Trial selects no version; its ATIF records what was installed (#2054).
+    from types import SimpleNamespace
+
+    from loom_control_plane.service_execution_materializer import canonical_agent_version
+
+    task = SimpleNamespace(agent=SimpleNamespace(version=None))
+    assert CODEX.version == hosted.CODEX_VERSION
+    assert canonical_agent_version(TrialConfig(agent_name="codex", agent_model=_MODEL), task) == hosted.CODEX_VERSION
+    assert canonical_agent_version(TrialConfig(agent_name="codex", agent_model=_MODEL, agent_version="9"), task) == "9"
+    assert TERMINUS_2.version is None
+    assert canonical_agent_version(TrialConfig(agent_name="terminus-2", agent_model=_MODEL), task) == "service-execution-v1"
+
+
+def test_terminus_default_records_the_deployed_image_version() -> None:
+    # terminus-2@default runs the profile's default image; ATIF records its label (#2054).
+    from types import SimpleNamespace
+
+    from loom_control_plane.service_execution_materializer import (
+        canonical_agent_version,
+        default_image_version,
+    )
+
+    task = SimpleNamespace(agent=SimpleNamespace(version=None))
+    terminus = TrialConfig(agent_name="terminus-2", agent_model=_MODEL)
+    runtime = SimpleNamespace(candidate_sha="a" * 40)
+    profile = {"candidate_sha": "a" * 40, "agent_image_version": "nebius-" + "a" * 40}
+    version = default_image_version(profile, runtime)
+    assert version == "nebius-" + "a" * 40
+    assert canonical_agent_version(terminus, task, default_image_version=version) == version
+    pinned = TrialConfig(agent_name="terminus-2", agent_model=_MODEL, agent_version="tb2-v2")
+    assert canonical_agent_version(pinned, task, default_image_version=version) == "tb2-v2"
+    # The image is Terminus-2's runtime; Codex and Oracle never take its label.
+    codex = TrialConfig(agent_name="codex", agent_model=_MODEL)
+    assert canonical_agent_version(codex, task, default_image_version=version) == hosted.CODEX_VERSION
+    assert canonical_agent_version(TrialConfig(agent_name="oracle", agent_model=None), task,
+                                   default_image_version=version) == "service-execution-v1"
+    # Older profiles, or an attempt on a different candidate, keep the placeholder.
+    assert default_image_version({"candidate_sha": "a" * 40}, runtime) is None
+    assert default_image_version({**profile, "candidate_sha": "b" * 40}, runtime) is None
+    assert default_image_version(None, runtime) is None

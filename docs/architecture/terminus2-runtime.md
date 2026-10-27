@@ -2,9 +2,12 @@
 
 Loom runs pinned Harbor `Terminus2` in-process through two orchestration paths:
 
-- Local and worker-owned trials route `agent.name == "terminus-2"` to
-  `LoomTerminus2Runtime` in the worker image. They do not use a
-  `loom-launcher` subprocess adapter.
+- Worker-owned trials route `agent.name == "terminus-2"` to
+  `LoomTerminus2Runtime` in the worker image. Local `loom run` uses the same
+  runtime in its Python >=3.12 CLI environment with pinned Harbor installed.
+  Neither path uses a `loom-launcher` subprocess adapter. Local execution uses
+  a direct provider connection and a trial-local usage ledger; see the
+  [local connection contract](cli-mode.md#stateless-agent-factory).
 - Automatic Nebius trials freeze a Terminus controller image and phase command
   into the execution plan. The per-trial `execution` container invokes
   `service_execution_sandbox_task terminus-2`; that hosted bridge reuses
@@ -107,10 +110,11 @@ Trial.run()
   └─ LoomTerminus2Runtime
        ├─ LoomHarborEnvironment  (Harbor BaseEnvironment → Loom Driver exec/tmux)
        ├─ harbor.agents.terminus_2.Terminus2  (pinned in-process)
-       ├─ LLM via Gateway step JWT (openai/{model_id})
+       ├─ worker: LLM via Gateway step JWT (openai/{model_id})
+       │  local: native provider API key and provider/model identity
        └─ HarborCheckpointBridge
             ├─ reads Harbor trajectory.json + recording.cast under .loom/agent/
-            ├─ GatewayCallLedger joins episodes to CP llm_calls
+            ├─ GatewayCallLedger joins episodes to CP or local ledger rows
             │    (correlated client_call_id / episode+ordinal; legacy token join)
             └─ appends typed terminus2_* events to Loom trajectory JSONL
 ```
@@ -148,6 +152,48 @@ Harbor artifacts copied into the trial sandbox:
 The local step runner always includes `.loom/agent/**` in artifact patterns for
 `terminus-2` trials. The hosted compiler instead declares each canonical and
 native output path in the frozen runtime plan.
+
+### Failed command dispatch and shell-exit evidence
+
+Harbor normally writes each agent step after its command batch completes. Loom
+also persists the parsed turn and commands through the existing trajectory writer
+before dispatch, joined to the actual Gateway call. A failed write, cancellation,
+or expired attempt prevents keystrokes from being sent. The checkpoint poller and
+this dispatch boundary share one bridge lock; a later Harbor checkpoint supplies
+the terminal observation without duplicating the turn, commands or call.
+For the hosted adapter, this boundary closes the trusted local JSONL append
+before dispatch. The existing output archival path owns remote durability;
+dispatch does not wait for a remote object-store commit.
+
+New command events carry `recorded_before_dispatch=true`; this records parsed
+intent and does not prove that a command executed. Historical checkpoint-only
+events leave that field null. A shell-loss diagnostic explicitly records the
+no-replay policy and suppression of remaining commands in the current batch;
+commands already sent may have partially changed the task filesystem.
+
+The trial's tmux window retains a dead pane with `remain-on-exit`. Liveness checks
+inspect `pane_dead`, including shell exits that occur between model turns. Before
+recovery or terminal failure, Loom captures that session's pane exit status,
+signal and last 80 terminal lines. It redacts credentials before bounding the
+diagnostic to 16 KiB and appends a partial `terminus2_terminal_observation` with
+`capture_source=error_feedback` to the current command batch. These events use
+the ordinary canonical archive path. If diagnostics cannot be persisted, Loom
+does not destroy the dead pane or send replacement commands.
+
+Recovery remains limited to once per attempt and never replays failed or
+remaining in-flight keystrokes. It recreates only the trial's fixed session;
+server-wide options and other tmux sessions are not changed. A second loss fails
+closed. A command-caused shell exit is evidence of agent behavior; session loss
+alone is insufficient to claim an infrastructure failure.
+
+After setup, the pinned Harbor session binds its operational target to
+`=canonical-session-name:` permanently for that instance. This applies exact
+session matching to send-keys, oversized-command paste-buffer, captures and
+liveness checks, including a session exit between the check and actual send.
+The cached creation command retains the literal canonical name and uses an exact
+target for pipe-pane; recovery never creates a session named with `=` or `:`.
+Harbor upgrades must preserve this creation/target distinction and pass the real
+same-prefix collision/race acceptance test.
 
 ## Exception identity
 
@@ -356,7 +402,7 @@ The Harbor-embedded runtime emits these events for operators and debuggers:
 | `terminus2_episode_checkpoint` | Multi-model **progress marker** for reclaim (not a Harbor resume save; distinct from `HarborCheckpointBridge`) |
 | `terminus2_recovery_failed` | Retry refused rather than merging two Harbor runs |
 
-Gateway join failures (missing `cp_client`, ambiguous token match, command
+Ledger join failures (missing hosted `cp_client` or local ledger, ambiguous token match, command
 without observation on a full episode) fail closed via `CheckpointBridgeError`
 → trial `agent` phase error.
 
@@ -674,17 +720,19 @@ Constraints:
 
 ### Nebius hosted slice (#2396)
 
-Hosted Terminus-2 admits only `student_teacher_student`. The same two LiteLLM
-delegates share one Harbor session; `--combinations-json` and combination
-fan-out stay independent. The selected runtime profile must list
-`student_teacher_student` in `terminus2_multi_model_policies` (default empty,
-so merged code stays inert until the broker and controller images are
-published). Frozen K1/K2 remain inside `LOOM_TASK_TRIAL_JSON`. The trusted
-broker derives trial identity from the active attempt lease, reclaims the
-Terminus execution/run attempt, and accepts bounded episode checkpoints.
-Missing reclaim identity fails closed instead of emitting uncorrelated
-multi-model calls. `beta_mixture` and `student_to_teacher_turns` remain
-rejected on Nebius in this slice.
+Hosted Terminus-2 admits `student_teacher_student`, `beta_mixture`, and
+`student_to_teacher_turns`. The same two LiteLLM delegates share one Harbor
+session; `--combinations-json` and combination fan-out stay independent. The
+selected runtime profile must list the requested policy in
+`terminus2_multi_model_policies` (default empty, so merged code stays inert
+until publication sets `NEBIUS_TERMINUS2_MULTI_MODEL_READY=true` on the same
+candidate that publishes the broker and Terminus controller images). That
+flag publishes all three policies. Frozen K1/K2, or the beta and the mix
+seed, or the turn window and the mix seed, remain inside
+`LOOM_TASK_TRIAL_JSON`. The trusted broker derives trial identity from the
+active attempt lease, reclaims the Terminus execution/run attempt, and
+accepts bounded episode checkpoints. Missing reclaim identity fails closed
+instead of emitting uncorrelated multi-model calls.
 
 ### Worker retry: fail closed (no merged Harbor rerun)
 

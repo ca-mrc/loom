@@ -106,7 +106,9 @@ def _files(state: Path, *, allow_empty: bool = False) -> dict[str, str]:
 
 def _qualify_bindings(*, runtime: DevelopmentRuntimeInstallRequest, observation: dict[str, Any],
         legacy: CompletedPoolCutover, repo_root: Path, bindings: SharedPoolGuardBindings) -> None:
-    plan = prepare_shared_pool_handoff(runtime=runtime, observation=observation, legacy=legacy, repo_root=repo_root)
+    plan = prepare_shared_pool_handoff(runtime=runtime, observation=observation, legacy=legacy, repo_root=repo_root,
+        preactivation=bindings.plan.preactivation, schema_successor=bindings.plan.development.schema_successor,
+        storage=bindings.plan.storage)
     migration = bindings.migration
     if (bindings.plan != plan or migration.registration != plan.migration.registration
             or bindings.input_digest != digest({'handoff': plan.input_digest, 'migration': migration_contract(migration)})):

@@ -75,7 +75,6 @@ class PublicationDescriptor(_ClosedPublicationModel):
 _OCI = "application/vnd.oci.image."
 _DOCKER = "application/vnd.docker.distribution."
 _MANIFESTS = {_OCI + "manifest.v1+json", _DOCKER + "manifest.v2+json"}
-_INDEXES = {_OCI + "index.v1+json", _DOCKER + "manifest.list.v2+json"}
 
 
 class PublicationUnsignedInput(_ClosedPublicationModel):

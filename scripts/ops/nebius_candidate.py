@@ -43,6 +43,7 @@ from loom.execution_image_admission import (
     ImageAdmissionStatementV1,
     SignedImageAdmissionV1,
 )
+from loom.models.trial import HOSTED_TERMINUS2_MULTI_MODEL_POLICIES
 from loom.pipeline.keys import canonical_document
 from loom.repository_identity import REPOSITORY_ID, REPOSITORY_NAMES, is_repository_name
 from loom.service_execution_materialization import (
@@ -226,6 +227,15 @@ def validate_runtime_metadata(metadata: dict[str, str]) -> None:
         raise ValueError("runtime image metadata is invalid")
 
 
+def _default_agent_version(document: dict[str, Any]) -> str | None:
+    """The version label built into the default Terminus image, for exports (#2054)."""
+    metadata = document.get("runtime_metadata")
+    if metadata is None:
+        return None
+    validate_runtime_metadata(metadata)
+    return str(metadata["agent_version"])
+
+
 def _runtime_release_payload(document: dict[str, Any]) -> dict[str, Any]:
     """Prepare runtime metadata without creating a partial platform candidate."""
     validate_source_identity(document)
@@ -274,6 +284,7 @@ def create_candidate(
     supports_task_web_egress: bool = False,
     service_lifecycle_ready: bool = False,
     supports_task_identity: bool = False,
+    supports_terminus2_multi_model: bool = False,
     guest_runtime: Literal["qemu-tcg-v1"] | None = None,
     supports_emulated_pkcs11: bool = False,
     supports_shared_guest: bool = False,
@@ -319,11 +330,15 @@ def create_candidate(
         task_image_ref=document["images"]["service"]["image_ref"],
         runtime_image_ref=document["images"]["execution_runtime"]["image_ref"],
         agent_image_ref=document["images"]["harbor_runtime"]["image_ref"],
+        agent_image_version=_default_agent_version(document),
         runtime_binary_sha256=document["runtime_binary_sha256"],
         supports_task_web_egress=supports_task_web_egress,
         service_lifecycle_ready=service_lifecycle_ready,
         supports_task_artifact_inputs=True,
         supports_task_identity=supports_task_identity,
+        terminus2_multi_model_policies=(
+            HOSTED_TERMINUS2_MULTI_MODEL_POLICIES if supports_terminus2_multi_model else frozenset()
+        ),
         guest_runtime=guest_runtime,
         supports_emulated_pkcs11=supports_emulated_pkcs11,
         supports_shared_guest=supports_shared_guest,
@@ -715,8 +730,10 @@ def build(args: argparse.Namespace) -> None:
                 Path(os.environ["REGISTRY_AUTH_FILE"]),
             )
             _copy_image(archive, tag, timeout_seconds=args.upload_timeout_seconds)
+            # --no-tags: the digest needs only the manifest; listing every tag
+            # in the repository adds latency that grows with its history.
             published_digest = _run(
-                "skopeo", "inspect", "--format", "{{.Digest}}", f"docker://{tag}"
+                "skopeo", "inspect", "--no-tags", "--format", "{{.Digest}}", f"docker://{tag}"
             )
             if published_digest != scanned_digest:
                 raise ValueError("published manifest differs from the scanned OCI bytes")
@@ -747,6 +764,7 @@ def build(args: argparse.Namespace) -> None:
                 supports_task_web_egress=getattr(args, "supports_task_web_egress", False),
                 service_lifecycle_ready=getattr(args, "service_lifecycle_ready", False),
                 supports_task_identity=getattr(args, "supports_task_identity", False),
+                supports_terminus2_multi_model=getattr(args, "supports_terminus2_multi_model", False),
                 guest_runtime=getattr(args, "guest_runtime", None),
                 supports_emulated_pkcs11=getattr(args, "supports_emulated_pkcs11", False),
                 supports_shared_guest=getattr(args, "supports_shared_guest", False),
@@ -794,6 +812,7 @@ def main() -> int:
         command.add_argument("--supports-task-web-egress", action="store_true")
         command.add_argument("--service-lifecycle-ready", action="store_true")
         command.add_argument("--supports-task-identity", action="store_true")
+        command.add_argument("--supports-terminus2-multi-model", action="store_true")
         command.add_argument("--guest-runtime", choices=("qemu-tcg-v1",))
         command.add_argument("--supports-emulated-pkcs11", action="store_true")
         command.add_argument("--supports-shared-guest", action="store_true")
@@ -821,6 +840,7 @@ def main() -> int:
                 supports_task_web_egress=args.supports_task_web_egress,
                 service_lifecycle_ready=args.service_lifecycle_ready,
                 supports_task_identity=args.supports_task_identity,
+                supports_terminus2_multi_model=args.supports_terminus2_multi_model,
                 guest_runtime=args.guest_runtime,
                 supports_emulated_pkcs11=args.supports_emulated_pkcs11,
                 supports_shared_guest=args.supports_shared_guest,

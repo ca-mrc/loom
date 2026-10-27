@@ -34,6 +34,11 @@ def private_database(platform_database):
             patch.setenv('LOOM_DB_' + name + '_PASSWORD', 'private-test-' + name + 'x' * 30)
         bootstrap.bootstrap_development_database({'schema_version': 'loom.nebius-development-bootstrap.v1',
             'namespace': 'loom-dev', 'environment': 'development'})
+    from tests.integration.conftest import retain_pool_schema
+
+    # Runtime installation extends the retained 0176 foundation, without a
+    # migration. Current-head bootstrap is tested independently in its module.
+    retain_pool_schema(platform_database)
     return platform_database
 
 

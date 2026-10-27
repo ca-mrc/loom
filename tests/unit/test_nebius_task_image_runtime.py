@@ -27,11 +27,12 @@ from loom.trajectory.storage import (
 from loom_execution_actuator import task_image_runtime as runtime
 
 
-def _write_native_oci(path: Path, *, platform: str = "linux/amd64") -> None:
+def _write_native_oci(path: Path, *, platform: str = "linux/amd64", runtime_config=None) -> None:
     """Valid minimal local image, while subprocess tests retain a fake registry."""
     image_os, _, architecture = platform.partition("/")
     config = json.dumps(
-        {"architecture": architecture, "os": image_os, "rootfs": {"type": "layers", "diff_ids": []}}
+        {"architecture": architecture, "os": image_os, "rootfs": {"type": "layers", "diff_ids": []},
+         "config": runtime_config or {}}
     ).encode()
     manifest = json.dumps(
         {
@@ -142,7 +143,7 @@ class FakeS3:
 def source_bundle(tmp_path):
     original = tmp_path / "original"
     (original / "environment").mkdir(parents=True)
-    (original / "environment/Dockerfile").write_text("FROM scratch\n")
+    (original / "environment/Dockerfile").write_text("FROM debian:bookworm-slim\n")
     (original / "instruction.md").write_text("Run the task.\n")
     (original / "run.sh").write_text("#!/bin/sh\nexit 0\n")
     (original / "run.sh").chmod(0o755)
@@ -159,6 +160,7 @@ def source_bundle(tmp_path):
             "bundle_file_metadata_sha256": bundle_file_metadata_sha256(original)
         },
         "registry_repository": "registry.example/tasks",
+        "cpu_arch": "x86_64",
         "lease_epoch": 3,
         "task_config": {
             "schema_version": "1",
@@ -449,6 +451,122 @@ def test_prepare_without_cache_secret_never_creates_cache_client(
     assert (tmp_path / "work/oci").is_dir()
 
 
+@pytest.mark.parametrize("with_cache", [False, True])
+def test_prepare_waits_for_io_health_after_closing_clients(
+    source_bundle, tmp_path, monkeypatch, capsys, with_cache
+) -> None:
+    claim, source = source_bundle
+    claim["io_full_avg10_max"] = 10
+    cache = FakeS3({})
+    secrets = tmp_path / "secrets"
+    if with_cache:
+        (secrets / "cache").mkdir(parents=True)
+    monkeypatch.setattr(
+        runtime, "_client", lambda _claim, secret: source if secret.name == "source" else cache
+    )
+    observations = iter([
+        "full avg10=35.00 avg60=0.00 avg300=0.00 total=1\n",
+        "full avg10=nan avg60=0.00 avg300=0.00 total=2\n",
+        "full avg10=10.00 avg60=0.00 avg300=0.00 total=3\n",
+    ])
+    trace = []
+    original_read = Path.read_text
+
+    def read(path, *args, **kwargs):
+        if path == Path("/proc/pressure/io"):
+            assert source.closed and (cache.closed or not with_cache)
+            trace.append("read")
+            return next(observations)
+        return original_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read)
+    monkeypatch.setattr(runtime.time, "sleep", lambda seconds: trace.append(seconds))
+    runtime.prepare(claim, tmp_path / "work", secrets)
+    trace.append("build_start")  # The next init container can start only after prepare returns.
+    assert trace == ["read", 5, "read", 5, "read", "build_start"]
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    health = [row for row in events if row["loom_task_image_stage"] == "io_pressure"
+              and row["event"] in {"wait", "healthy"}]
+    assert [(row["event"], row["full_avg10"]) for row in health] == [
+        ("wait", 35.0), ("wait", None), ("healthy", 10.0),
+    ]
+    assert all(row["full_avg10_max"] == 10 for row in health)
+
+
+@pytest.mark.parametrize("value", [True, False, None, "10", -1, 101, 10**1000,
+                                   float("nan"), float("inf"), float("-inf")])
+def test_load_claim_rejects_invalid_io_pressure_policy(source_bundle, tmp_path, value):
+    claim, _ = source_bundle
+    claim["io_full_avg10_max"] = value
+    path = tmp_path / "claim.json"
+    path.write_text(json.dumps(claim))
+    with pytest.raises(runtime.BuildPreparationError, match="I/O pressure threshold"):
+        runtime.load_claim(path)
+
+
+@pytest.mark.parametrize("value", [0, 10.5, 100])
+def test_load_claim_accepts_io_pressure_policy_boundaries(source_bundle, tmp_path, value):
+    claim, _ = source_bundle
+    claim["io_full_avg10_max"] = value
+    path = tmp_path / "claim.json"
+    path.write_text(json.dumps(claim))
+    assert runtime.load_claim(path)["io_full_avg10_max"] == value
+
+
+@pytest.mark.parametrize("body, expected", [
+    ("full avg10=0.00 avg60=0.00 avg300=0.00 total=0\n", 0.0),
+    ("some avg10=99.00 avg60=0.00 avg300=0.00 total=0\n"
+     "full avg10=12.34 avg60=0.00 avg300=0.00 total=123\n", 12.34),
+    ("full avg10=100.00 avg60=0.00 avg300=0.00 total=1\n", 100.0),
+    ("", None),
+    ("some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n", None),
+    ("full avg10=nan avg60=0.00 avg300=0.00 total=0", None),
+    ("full avg10=inf avg60=0.00 avg300=0.00 total=0", None),
+    ("full avg10=-1 avg60=0.00 avg300=0.00 total=0", None),
+    ("full avg10=100.01 avg60=0.00 avg300=0.00 total=0", None),
+    ("full avg10=true avg60=0.00 avg300=0.00 total=0", None),
+    ("full avg10=1_0 avg60=0.00 avg300=0.00 total=0", None),
+    ("full avg10=1e1 avg60=0.00 avg300=0.00 total=0", None),
+    ("full avg60=0.00 avg300=0.00 total=0", None),
+    ("full avg10=0.00 avg10=0.00 avg60=0.00 avg300=0.00 total=0", None),
+    ("full avg10=0.00 avg60=0.00 avg300=0.00 total=0\n" * 2, None),
+])
+def test_io_pressure_parser_requires_known_finite_full_avg10(body, expected):
+    assert runtime._parse_io_full_avg10(body) == expected
+
+
+def test_io_pressure_unreadable_waits_without_logging_raw_error(monkeypatch, capsys):
+    readings = iter([PermissionError("private detail"),
+                     UnicodeDecodeError("utf8", b"\xff", 0, 1, "private detail"),
+                     "full avg10=0.00 avg60=0.00 avg300=0.00 total=0"])
+    sleeps = []
+
+    def read(path):
+        assert path == Path("/proc/pressure/io")
+        result = next(readings)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(Path, "read_text", read)
+    monkeypatch.setattr(runtime.time, "sleep", sleeps.append)
+    runtime._wait_for_io_health({"io_full_avg10_max": 0})
+    assert sleeps == [5, 5]
+    output = capsys.readouterr().out
+    assert "private detail" not in output
+    rows = [json.loads(line) for line in output.splitlines()]
+    assert [row["full_avg10"] for row in rows if row["event"] == "wait"] == [None, None]
+
+
+def test_historical_claim_does_not_read_or_wait_for_pressure(monkeypatch):
+    def unexpected(*_args, **_kwargs):
+        pytest.fail("historical claims must retain their existing preparation behavior")
+
+    monkeypatch.setattr(Path, "read_text", unexpected)
+    monkeypatch.setattr(runtime.time, "sleep", unexpected)
+    runtime._wait_for_io_health({})
+
+
 def test_invalid_disposable_cache_becomes_a_cold_build(
     source_bundle, tmp_path, monkeypatch, capsys
 ) -> None:
@@ -731,6 +849,40 @@ def test_publisher_records_registry_digest_with_optional_cache(
     digest = manifest["files"][0]["sha256"]
     assert cache.objects[f"task-build-cache/v2/blobs/{digest}"] == b"cached layer"
     assert any(key.endswith(f"/blobs/{digest}") for _, key, _ in cache.uploads)
+
+
+@pytest.mark.parametrize("failure", [None, "secret", "workdir", "budget"])
+def test_publisher_binds_final_oci_defaults_and_rejects_unusable_metadata_before_push(
+    source_bundle, tmp_path, publisher, failure,
+):
+    claim, _ = source_bundle
+    _, calls = publisher
+    claim["task_config"]["environment"].update(user="image", image_entrypoint=True, image_workdir=True)
+    config = {"User": "0:0", "WorkingDir": "/app/database", "Entrypoint": ["/entrypoint.sh"],
+              "Env": ["HOME=/root", "PATH=/usr/bin"]}
+    if failure == "secret":
+        config["Env"].append("PROVIDER_API_KEY=private-value")
+    elif failure == "workdir":
+        config["WorkingDir"] = "/"
+    elif failure == "budget":
+        config["Env"].append("PUBLIC_DATA=" + "x" * 3980)
+    work = tmp_path / "work"
+    (work / "oci").mkdir(parents=True)
+    _write_native_oci(work / "oci/0000.tar", runtime_config=config)
+    receipt_file = tmp_path / "receipt.json"
+    if failure:
+        with pytest.raises(ValueError) as rejected:
+            runtime.publish(claim, work, tmp_path / "secrets", receipt_path=receipt_file)
+        assert "private-value" not in str(rejected.value)
+        assert calls == [] and not receipt_file.exists()
+        return
+    receipt = runtime.publish(claim, work, tmp_path / "secrets", receipt_path=receipt_file)
+    assert receipt == json.loads(receipt_file.read_text())
+    metadata = receipt["image_runtime_metadata"]["task"]
+    assert metadata["image_ref"] == receipt["registry_images"]["task"]
+    assert (metadata["uid"], metadata["gid"], metadata["home"]) == (0, 0, "/root")
+    assert metadata["workdir"] == "/app/database" and metadata["entrypoint"] == ["/entrypoint.sh"]
+    assert metadata["environment"] == {"HOME": "/root", "PATH": "/usr/bin"}
 
 
 @pytest.mark.parametrize("linked_directory", ["oci", "cache-out"])
@@ -1509,3 +1661,60 @@ def test_publish_directory_oci_uses_skopeo_oci_transport(
     source = next(arg for arg in calls[0] if arg.startswith("oci:"))
     assert source == f"oci:{layout_dir}"
     assert cache.uploads == []
+
+
+def test_prepare_installs_terminus_tools_into_the_task_dockerfile(
+    source_bundle, tmp_path, monkeypatch
+) -> None:
+    claim, source = source_bundle
+    monkeypatch.setattr(runtime, "_client", lambda _claim, _secret: source)
+    work = tmp_path / "prepared"
+    runtime.prepare(claim, work, tmp_path / "secrets")
+    dockerfile = (work / "context/environment/Dockerfile").read_text()
+    assert dockerfile.startswith("FROM debian:bookworm-slim\n")
+    for package in ("bash", "tmux", "asciinema", "ca-certificates", "curl"):
+        assert package in dockerfile
+    assert "command -v bash" in dockerfile
+    assert "task image must preinstall bash, tmux and asciinema" in dockerfile
+
+
+def test_prepare_fails_closed_when_the_base_cannot_be_prepared(tmp_path, monkeypatch) -> None:
+    original = tmp_path / "original"
+    (original / "environment").mkdir(parents=True)
+    (original / "environment/Dockerfile").write_text("FROM scratch\n")
+    (original / "instruction.md").write_text("Run the task.\n")
+    (original / "environment/Dockerfile").chmod(0o644)
+    (original / "instruction.md").chmod(0o644)
+    claim = {
+        "id": str(uuid4()),
+        "task_checksum": sha256_of_dir(original),
+        "materialization_key": "b" * 64,
+        "task_source": "s3://source/tasks/revision/",
+        "source_bucket": "source",
+        "cache_bucket": "cache",
+        "task_source_provenance": {
+            "bundle_file_metadata_sha256": bundle_file_metadata_sha256(original)
+        },
+        "registry_repository": "registry.example/tasks",
+        "lease_epoch": 3,
+        "task_config": {
+            "schema_version": "1",
+            "task": {"id": "test", "name": "test"},
+            "environment": {
+                "os": "linux",
+                "cpu_arch": "x86_64",
+                "dockerfile": "environment/Dockerfile",
+            },
+            "agent": {"name": "oracle"},
+            "verifier": {"name": "pytest"},
+        },
+    }
+    objects = {
+        "tasks/revision/" + path.relative_to(original).as_posix(): path.read_bytes()
+        for path in original.rglob("*")
+        if path.is_file()
+    }
+    objects["tasks/revision/" + BUNDLE_FILE_METADATA_NAME] = bundle_file_metadata_body(original)
+    monkeypatch.setattr(runtime, "_client", lambda _claim, _secret: FakeS3(objects))
+    with pytest.raises(runtime.BuildPreparationError, match="image preparation supports"):
+        runtime.prepare(claim, tmp_path / "work", tmp_path / "secrets")

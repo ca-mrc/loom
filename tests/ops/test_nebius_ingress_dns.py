@@ -14,7 +14,7 @@ from tests.ops.test_nebius_dns_publication import target as target
 from tests.ops.test_nebius_ingress_gateway import inputs as inputs
 from tests.ops.test_nebius_ingress_install import installation as installation
 from tests.ops.test_nebius_ingress_operation import inventory as inventory
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 
 
 @pytest.fixture

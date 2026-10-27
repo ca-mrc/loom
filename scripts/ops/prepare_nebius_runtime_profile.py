@@ -30,6 +30,7 @@ from loom.execution_image_admission import (
     SignedImageAdmissionV1,
     verify_execution_image_admission,
 )
+from loom.models.trial import HOSTED_TERMINUS2_MULTI_MODEL_POLICIES
 from loom.pipeline.keys import canonical_document
 from loom.service_execution_materialization import build_nebius_runtime_profile
 
@@ -313,6 +314,10 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
         supports_task_web_egress=getattr(args, "supports_task_web_egress", False),
         service_lifecycle_ready=getattr(args, "service_lifecycle_ready", False),
         supports_task_identity=getattr(args, "supports_task_identity", False),
+        terminus2_multi_model_policies=(
+            HOSTED_TERMINUS2_MULTI_MODEL_POLICIES
+            if getattr(args, "supports_terminus2_multi_model", False) else frozenset()
+        ),
         guest_runtime=getattr(args, "guest_runtime", None),
         supports_emulated_pkcs11=getattr(args, "supports_emulated_pkcs11", False),
         supports_shared_guest=getattr(args, "supports_shared_guest", False),
@@ -367,6 +372,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--supports-task-web-egress", action="store_true")
     parser.add_argument("--service-lifecycle-ready", action="store_true")
     parser.add_argument("--supports-task-identity", action="store_true")
+    parser.add_argument("--supports-terminus2-multi-model", action="store_true")
     parser.add_argument("--guest-runtime", choices=("qemu-tcg-v1",))
     parser.add_argument("--supports-emulated-pkcs11", action="store_true")
     parser.add_argument("--supports-shared-guest", action="store_true")

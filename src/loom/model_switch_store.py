@@ -100,7 +100,12 @@ async def persist_model_switch_plan(
     inherited_from: UUID | None = None
     seed = secrets.token_hex(16)
     mode = trial_config.get("model_switch_plan_mode") or "inherit"
-    if inherit_from_trial_id is not None and mode != "resample":
+    if mode == "resample":
+        # apply_plan_mode already replaced a frozen beta/turn seed. Keep that
+        # redraw so the plan row matches the hosted trial config.
+        if spec.mix_seed:
+            seed = spec.mix_seed
+    elif inherit_from_trial_id is not None:
         source = (
             await session.execute(
                 select(ModelSwitchPlan).where(

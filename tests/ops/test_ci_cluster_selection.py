@@ -125,6 +125,20 @@ def test_explicit_or_shared_cluster_inputs_keep_full_matrix(tmp_path, cluster_in
         assert json.loads(plan["test_changes"]) == []
 
 
+def test_build_report_retains_target_after_shared_image_builds(tmp_path):
+    step = next(step for step in _jobs()["cluster-contract"]["steps"]
+                if step.get("name") == "Report disposable image build timings")
+    rows = [dict(event=event, role="runtime" if index == 5 else "fixture")
+            for index in range(6) for event in ("start", "end")]
+    (tmp_path / "loom-k3s-image-build-timings.jsonl").write_text(
+        "interrupted-record\n" + "".join(json.dumps(row) + "\n" for row in rows))
+    result = subprocess.run(["bash"], input=step["run"], text=True, capture_output=True,
+        env={**os.environ, "RUNNER_TEMP": str(tmp_path)}, check=True)
+    records = [json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")]
+    assert records == rows
+    assert "record unavailable" in result.stdout
+
+
 def test_manifest_is_selected_before_dependency_or_registry_installation():
     jobs = _jobs()
     contract = jobs["cluster-contract"]
@@ -140,7 +154,7 @@ def test_manifest_is_selected_before_dependency_or_registry_installation():
     assert contract["strategy"]["matrix"]["include"] == "${{ fromJSON(needs.plan.outputs.cluster_smoke_matrix) }}"
     assert contract["env"]["TEST_CHANGED_PATHS"] == "${{ needs.plan.outputs.test_changes }}"
     assert selector["env"]["SHARD_COUNT"] == "${{ matrix.shard_count }}"
-    assert contract["strategy"]["fail-fast"] is False
+    assert "pull_request" in contract["strategy"]["fail-fast"] and "merge_group" in contract["strategy"]["fail-fast"]
     assert not contract.get("continue-on-error", False)
     assert all("validate_environment_isolation.py" not in step.get("run", "")
                and "loom cluster render" not in step.get("run", "") for step in steps)

@@ -20,6 +20,10 @@ from loom.task_bundle_source_storage import (
     S3TaskBundleVersionInventory,
     write_task_bundle_source_object,
 )
+from loom.task_source_publication_journal import (
+    prepare_task_source_publication,
+    release_task_source_publication,
+)
 from tests.integration.test_task_bundle_source_journal import NOW
 from tests.integration.test_task_bundle_source_journal import journal as journal
 from tests.integration.test_task_bundle_source_storage import _store
@@ -342,6 +346,74 @@ async def test_shared_global_manifest_keeps_separately_owned_versions(journal, t
     assert await _publish(journal, second, owner="still-readable") == second_spec
     for intent in second.intents:
         assert len(S3TaskBundleVersionInventory(admin).scan_batch(intent).versions) == 1
+
+
+async def test_source_publication_reuses_exact_versions_and_existing_deletion_path(
+    journal, tmp_path, minio_tls, monkeypatch,
+):
+    task_dir, spec, store = _prepare(tmp_path, minio_tls)
+    ticket = await TaskBundleSourcePublisher(journal, store, clock=lambda: NOW).prepare(
+        spec, task_dir,
+    )
+    await _publish(journal, ticket)
+    admin = minio_tls[3]
+    inventory = S3TaskBundleVersionInventory(admin)
+    before = {
+        (intent.bucket, intent.object_key, item.version_id)
+        for intent in ticket.intents
+        for item in inventory.scan_batch(intent).versions
+    }
+
+    async def forbidden_put(**_kwargs):
+        raise AssertionError("publication preparation must not write object bytes")
+
+    monkeypatch.setattr(store, "put_object_with_metadata", forbidden_put)
+    identity = {
+        "publication_id": uuid4(),
+        "source_id": spec.id,
+        "destination_installation_id": uuid4(),
+        "destination_import_id": uuid4(),
+    }
+    async with journal.begin() as session:
+        publication = await prepare_task_source_publication(session, **identity, now=NOW)
+    after = {
+        (intent.bucket, intent.object_key, item.version_id)
+        for intent in ticket.intents
+        for item in inventory.scan_batch(intent).versions
+    }
+    assert after == before
+    assert {
+        (item.version.bucket, item.version.object_key, item.version.version_id)
+        for item in publication.descriptor.objects
+    } == before
+
+    async with journal.begin() as session:
+        await release_task_bundle_reference(
+            session, source_id=spec.id, reference_kind="catalog", owner_id="catalog",
+        )
+        assert not await retire_task_bundle_source(
+            session, incarnation_id=ticket.incarnation_id, now=NOW,
+        )
+        await release_task_source_publication(
+            session,
+            publication_id=publication.publication_id,
+            expected_digest=publication.descriptor_sha256,
+            destination_installation_id=identity["destination_installation_id"],
+            destination_import_id=identity["destination_import_id"],
+            now=NOW,
+        )
+        assert await retire_task_bundle_source(
+            session, incarnation_id=ticket.incarnation_id, now=NOW,
+        )
+    deleter = S3ExactObjectDeleter(admin)
+    recovery = TaskBundleSourceRecovery(
+        journal, inventory, deleter, clock=lambda: NOW,
+    )
+    assert await recovery.delete_batch(ticket.incarnation_id) == len(ticket.intents)
+    assert all(
+        not inventory.scan_batch(intent).versions
+        for intent in ticket.intents
+    )
 
 
 async def test_unversioned_publication_leaves_only_unreachable_recovery_intents(

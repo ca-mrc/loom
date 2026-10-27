@@ -9,6 +9,8 @@ import json
 from typing import Any, Literal, cast
 from uuid import UUID
 
+from scripts.ops.nebius_pool_activation_database import _manager_observation_header
+
 from loom_service.pool_management.capacity import digest
 from loom_service.pool_management.installation import PoolInstallation
 from loom_service.pool_management.participant_refresh import PoolParticipantRefresh
@@ -25,14 +27,15 @@ END $pool_startup_schema$;
 """
 
 
-def pool_startup_closed_sql(spec: PoolInstallation) -> str:
+def pool_startup_closed_sql(spec: PoolInstallation, *, manager_revision: str = '0176') -> str:
     """Require exact closed registration; this remains a startup-only proof."""
-    return _pool_authority_sql(spec, mode="closed")
+    prefix = _READ_ONLY_PREFIX if manager_revision == '0176' else _manager_observation_header(manager_revision)
+    return _pool_authority_sql(spec, mode="closed", prefix=prefix)
 
 
-def pool_active_authority_sql(spec: PoolInstallation) -> str:
+def pool_active_authority_sql(spec: PoolInstallation, *, manager_revision: str = '0176') -> str:
     """Require global registration and credentials, allowing unfinished work."""
-    return _pool_authority_sql(spec, mode="global")
+    return _pool_authority_sql(spec, mode="global", prefix=_manager_observation_header(manager_revision))
 
 
 def _expected_authority(spec: PoolInstallation, *, mode: Literal['closed', 'global'],
@@ -86,13 +89,14 @@ def _authority_condition(pool_id: UUID) -> str:
         ),FALSE)"""
 
 
-def _pool_authority_sql(spec: PoolInstallation, *, mode: Literal["closed", "global"]) -> str:
+def _pool_authority_sql(spec: PoolInstallation, *, mode: Literal["closed", "global"],
+        prefix: str = _READ_ONLY_PREFIX) -> str:
     spec = PoolInstallation.model_validate(spec.model_dump())
     schema = {"closed": "loom.pool-startup-closed.v1", "global": "loom.pool-active-authority.v1"}[mode]
     expected = _expected_authority(spec, mode=mode)
     encoded = json.dumps(expected, sort_keys=True, separators=(",", ":")).encode().hex()
     # All variable values are validated UUID/integer values or hex-encoded JSON.
-    return _READ_ONLY_PREFIX + f"""WITH expected AS (SELECT convert_from(decode('{encoded}','hex'),'UTF8')::jsonb AS value)
+    return prefix + f"""WITH expected AS (SELECT convert_from(decode('{encoded}','hex'),'UTF8')::jsonb AS value)
 SELECT json_build_object('schema','{schema}',
     'operation_id','{spec.operation_id}','installation_sha256','{digest(spec.model_dump(mode="json"))}',
     'read_only',current_setting('transaction_read_only')='on',

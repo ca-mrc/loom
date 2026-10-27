@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-DIAGNOSTIC_STAGES = frozenset({'operation', 'inputs', 'connection', 'handoff'})
+DIAGNOSTIC_STAGES = frozenset({'operation', 'inputs', 'connection', 'catalog', 'storage', 'handoff'})
 
 
 FORWARD_PHASES = (
@@ -22,20 +22,28 @@ RECOVERY_PHASES = (
 
 def validate_operation(value: dict[str, Any]) -> None:
     try:
-        if (not isinstance(value, dict) or set(value) != {'schema', 'source_sha', 'installation_id', 'namespace',
-                'operation_id', 'inputs_path', 'inputs_sha256'}
+        fields = {'schema', 'source_sha', 'installation_id', 'namespace',
+            'operation_id', 'inputs_path', 'inputs_sha256'}
+        prepared = value.get('schema') == 'loom.nebius-shared-pool-operation.v2'
+        if prepared:
+            fields.add('preparation_id')
+        if (not isinstance(value, dict) or set(value) != fields
                 or any(not isinstance(item, str) or not 0 < len(item) <= 1024 for item in value.values())
-                or value['schema'] != 'loom.nebius-shared-pool-operation.v1'
+                or value['schema'] not in {'loom.nebius-shared-pool-operation.v1', 'loom.nebius-shared-pool-operation.v2'}
                 or value['namespace'] != 'loom-nebius-management-dev'
                 or not re.fullmatch(r'[0-9a-f]{40}', value['source_sha'])
                 or not re.fullmatch(r'[0-9a-f]{64}', value['inputs_sha256'])):
             raise ValueError()
-        for key in ('installation_id', 'operation_id'):
+        for key in ('installation_id', 'operation_id', *(['preparation_id'] if prepared else [])):
             identity = UUID(value[key])
             if not identity.int or str(identity) != value[key]:
                 raise ValueError()
         path = Path(value['inputs_path'])
         root = path.parent
+        if prepared:
+            if root.name != value['preparation_id'] or root.parent.name != 'preparations':
+                raise ValueError()
+            root = root.parent.parent
         if (not path.is_absolute() or str(path) != value['inputs_path'] or path != path.resolve()
                 or not re.fullmatch(r'/[A-Za-z0-9_./-]+', str(path)) or path.name != 'inputs.json'
                 or root.name != value['operation_id'] or root.parent.name != value['installation_id']
@@ -52,4 +60,10 @@ def operation_root(value: dict[str, Any]) -> Path:
 
 
 def operator_home(value: dict[str, Any]) -> Path:
-    return operation_root(value).parent.parent.parent.parent
+    return pool_root(value).parent.parent.parent.parent
+
+
+def pool_root(value: dict[str, Any]) -> Path:
+    """The registered operation's stable directory, not an input preparation."""
+    root = operation_root(value)
+    return root.parent.parent if value['schema'] == 'loom.nebius-shared-pool-operation.v2' else root

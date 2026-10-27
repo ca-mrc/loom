@@ -65,6 +65,9 @@ ACTUATOR_TABLES = (
     "artifacts",
     *COMMON_EXECUTION_TABLES,
     "batches",
+    # Generic native claims must observe retained global-build ownership even
+    # before the separate global-pool participant grants are installed.
+    "nebius_pool_build_outbox",
     "trial_task_image_materializations",
     *ACTUATOR_TASK_IMAGE_WRITES,
 )
@@ -97,6 +100,11 @@ GATEWAY_TABLES = (
     "gateway_dispatch_receipts",
     "llm_call_intents",
     "model_switch_plans",
+    # Hosted student-teacher-student reclaim and episode checkpoints run inside
+    # the Gateway. The broker returns 502 when these writes are denied (#2565).
+    "terminus_agent_executions",
+    "terminus_agent_run_attempts",
+    "episode_checkpoints",
     "rate_cards",
     "price_catalogs",
     "provider_connections",
@@ -253,6 +261,7 @@ def _bootstrap_database(
                     read_only = {
                         "nebius_rollout_guard",
                         "nebius_pool_execution_outbox",
+                        "nebius_pool_build_outbox",
                         "trial_resource_usage",
                         "alembic_version",
                         "users",
@@ -494,7 +503,7 @@ def configure_platform(
                 for key, value in _HISTORICAL_CAPACITY_POLICY.items()
             )
         )
-        managed = config.get("schema_version") == "loom.nebius-managed-environment.v1"
+        managed = config.get("schema_version") in {"loom.nebius-managed-environment.v1", "loom.nebius-environment-platform.v2"}
         if managed and retained_operator_policy and existing_policy is not None:
             # Preserve operator resource limits without preserving standalone
             # execution authority during a managed import/reconfigure. The

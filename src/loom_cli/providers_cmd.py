@@ -178,6 +178,14 @@ def _optional_admin_actor_headers(
     return {"X-Loom-Admin-Actor": admin_actor}, None
 
 
+# Agent batches and trials accept only OpenAI-shaped connections (#2054).
+_AGENT_RUN_TYPES = frozenset({"openai-compatible", "custom"})
+_NATIVE_TYPE_NOTICE = (
+    "note: agent batches and trials can't use this connection; they accept "
+    "only openai-compatible and custom connections."
+)
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Handlers
 # ──────────────────────────────────────────────────────────────────────
@@ -208,6 +216,8 @@ def _create(args: argparse.Namespace) -> int:
         )
         print(f"Created provider connection {body['name']!r}:")
         _print_connection_summary(body)
+        if args.type not in _AGENT_RUN_TYPES:
+            print(_NATIVE_TYPE_NOTICE, file=sys.stderr)
         _print_create_next_steps(body["name"])
         return 0
 
@@ -700,7 +710,11 @@ def dispatch(argv: list[str]) -> int:
     p_create.add_argument(
         "--type", required=True,
         choices=["openai-compatible", "anthropic", "google", "custom"],
-        help="Provider type. Does not determine supplier pricing.",
+        help=(
+            "Provider type. Does not determine supplier pricing. Agent "
+            "batches and trials accept only openai-compatible and custom; "
+            "anthropic and google are for features that call them natively."
+        ),
     )
     p_create.add_argument("--base-url", required=True,
                           help="Provider HTTPS endpoint (e.g. https://api.openai.com/v1)")

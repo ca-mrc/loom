@@ -245,10 +245,12 @@ resp = await client.call(GatewayCallRequest(
 Dispatches on `request.model.provider`:
 - `anthropic` → `messages.create(...)`
 - `openai` → `chat.completions.create(...)`
-- `google` → currently broken: the CLI supplies the deprecated
-  `google.generativeai` module but calls a method absent from that module.
-  Supported SDK migration and interface qualification are tracked in
-  [#2486](https://github.com/ca-mrc/loom/issues/2486).
+- `google` → supported `google-genai` client through
+  `client.aio.models.generate_content(...)`. Local Google keys select the Gemini
+  Developer API, independently of ambient Vertex/Enterprise settings. System
+  instructions use the generation config; assistant turns use the `model` role.
+  Blocked or empty responses retain their finish status without assuming a text
+  candidate exists. SDK clients close when the run ends, including failures.
 - `local` → OpenAI-compatible HTTP against
   `cfg.local_providers[server].base_url` (used for user-registered
   servers AND for the transient `_auto_vllm` provider the launcher
@@ -265,13 +267,43 @@ with a hint to add one.
 `loom_worker.main_loop._default_agent_factory` but:
 
 - Takes no Control Plane client
-- For `SubprocessAgent`, substitutes a `_NoopCPClient`. Its placeholder token
-  and empty Gateway URL do not wire the configured direct provider credentials
-  into the launched adapter. Local Terminus also has a hardcoded localhost
-  Gateway URL. These local paths require the repair in
-  [#2489](https://github.com/ca-mrc/loom/issues/2489); constructing an adapter
-  does not establish a working provider connection.
+- Resolves an explicit direct connection for installed agents and Terminus.
+  Only the selected provider key is supplied; no step-token placeholder or
+  hosted facade URL is used. Missing credentials and incompatible dialects fail
+  before agent execution. Original model identity remains in trial metadata;
+  `local/<server>/<model>` sends only `<model>` to the registered endpoint.
 - Routes `oracle` → `OracleAgent(task_dir, trial_id)` directly
+
+| Local runtime | Provider connection |
+| --- | --- |
+| Claude Code | Anthropic Messages, using `ANTHROPIC_API_KEY` |
+| Gemini CLI | Google Gemini, using `GEMINI_API_KEY` |
+| Codex | OpenAI or a registered local endpoint that supports Responses |
+| Other installed chat adapters | OpenAI or registered local Chat Completions |
+| Terminus-2 | OpenAI, Anthropic, Google or registered local Chat Completions |
+
+Installed agents run inside the task sandbox, which therefore receives the
+selected upstream key. Use this local mode only with trusted task images and
+agents. Captured output redacts that exact key; it does not make arbitrary task
+files safe to share. Qwen receives its key through the environment; OpenCode's
+configuration references the environment rather than embedding the key in argv.
+Hosted execution continues to use scoped Gateway tokens.
+
+Terminus uses pinned Harbor in the CLI process (Python >=3.12). Its native
+provider calls feed a trial-local ledger, retaining usage/cost and checkpoint
+joins without a hosted Control Plane. Local multi-model switching is rejected;
+hosted switching retains its existing contract. Installed subprocess agents
+retain native output, but do not provide authoritative local rate-card billing;
+their reported zero cost must not be interpreted as free inference.
+Terminus forwards configured request parameters to its native provider client.
+Installed local agents reject nonempty `request_params`; those controls require
+an agent-native configuration rather than Gateway query parameters.
+
+The endpoint must be reachable from the process making the call: `127.0.0.1`
+means the sandbox for installed agents and the CLI host for Terminus and direct
+completion. An OpenAI-compatible chat server does not necessarily support
+Responses. Credential-free interface tests do not establish live provider or
+agent-version acceptance.
 
 ## Concurrency
 
@@ -281,16 +313,18 @@ runs it, releases the permit. Trials are run via `asyncio.gather`.
 
 Per-trial state isolation: each trial has its own `Driver` instance
 (via `driver_factory()`), its own `TrajectoryWriter`, its own
-working dir under `<output_dir>/<trial_id>/`. They share the
-`UpstreamDirectGatewayClient` (provider SDK clients are themselves
-safe for concurrent use).
+working dir under `<output_dir>/<trial_id>/`, and gateway wrapper. Trials for
+one model share provider SDK clients, which close after all sibling trials
+have finished or completed cancellation cleanup.
 
 ## TB-2 report integration
 
 `--tb2-report PATH` collects every `TrialResult` across all completed
-trials and writes
+trials across every selected model, sequential or parallel, and writes
 `loom_benchmark_terminal_bench_2.report.to_tb2_report(trials)` to the
-given path after `asyncio.gather` resolves. Lazy import — the TB-2
+given path once after all model runs have finished or completed cancellation
+cleanup. Completed results remain available in the report when a later model
+fails. Lazy import — the TB-2
 sibling package is optional unless the flag is actually used. Missing
 package logs a warning, doesn't crash.
 
@@ -387,11 +421,11 @@ Internals:
   invocations, run them inside one `loom run --concurrency N`
   (single-process Semaphore-bounded), not as many separate
   processes.
-- **Local result upload is unsupported**. `--server-url` attempts a
-  best-effort POST to `/api/v1/cli/results`, but the service has no such
-  intake route and HTTP failures do not affect CLI exit. Keep the local
-  output files; repair is tracked in
-  [#2490](https://github.com/ca-mrc/loom/issues/2490). Use service mode
+- **Local result upload is unsupported**. The run-only `--server-url` option
+  is accepted for compatibility but deprecated. It and `LOOM_SERVER_URL` emit
+  one notice on stderr per invocation; no result upload is attempted. Keep the
+  local output files. Other authenticated commands and remote catalog lookup
+  retain their server URL behavior. Use service mode
   (`POST /api/v1/trials` with `idempotency_key`) to submit a hosted trial.
 
 ## See also

@@ -16,6 +16,10 @@ func stopProcesses(context.Context) error {
 func readFile(string) (*os.File, error) {
 	return nil, errors.New("secure file transfers require Linux")
 }
+
+func sameFileReadVersion(before, after os.FileInfo) bool {
+	return os.SameFile(before, after) && before.Size() == after.Size() && before.ModTime() == after.ModTime()
+}
 func readSymlink(string) (string, error) {
 	return "", errors.New("secure symlink inspection requires Linux")
 }

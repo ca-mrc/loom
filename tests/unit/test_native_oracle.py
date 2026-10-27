@@ -384,6 +384,21 @@ def test_workspace_fixture_is_admitted_with_a_prepared_image(tmp_path: Path, age
     ) == ()
 
 
+def test_workspace_fixture_runs_as_the_agent_identity(tmp_path: Path) -> None:
+    # A root-owned workdir fails staging (`file_permission_denied`) for every
+    # harness; a root image user fails Terminus' exec (`exec_user_mismatch`) (#2054).
+    from loom.sandbox_identity import resolve_sandbox_identity
+
+    root, task = _workspace_fixture(tmp_path)
+    identity = resolve_sandbox_identity(task.environment.user, "/home/agent")
+    assert identity is not None
+    owner = f"{identity.run_as_user}:{identity.run_as_group}"
+    dockerfile = (root / "environment" / "Dockerfile").read_text()
+    assert f"chown {owner} {task.environment.workdir}\n" in dockerfile
+    # Terminus execs as the agent identity; the image user must match it.
+    assert dockerfile.endswith(f"USER {owner}\nWORKDIR {task.environment.workdir}\n")
+
+
 def test_workspace_fixture_hides_solution_and_verifier_from_model_agents(tmp_path: Path) -> None:
     from fnmatch import fnmatchcase
 
@@ -401,14 +416,17 @@ def test_workspace_fixture_hides_solution_and_verifier_from_model_agents(tmp_pat
 
 
 def test_workspace_reference_solution_passes_its_verifier(tmp_path: Path) -> None:
+    import os
     import subprocess
+    import sys
 
     root, _ = _workspace_fixture(tmp_path)
 
     def verify(name: str) -> dict[str, float]:
         out = tmp_path / f"{name}.json"
         subprocess.run(["/bin/sh", "verifier/check.sh"], cwd=root, check=True,
-                       env={"LOOM_VERIFIER_OUTPUT": str(out), "PATH": "/usr/bin:/bin"})
+                       env={"LOOM_VERIFIER_OUTPUT": str(out),
+                            "PATH": str(Path(sys.executable).parent) + os.pathsep + "/usr/bin:/bin"})
         return json.loads(out.read_text())["rewards"]
 
     assert verify("before") == {"report": 0.0, "reproduced": 0.0}
@@ -421,3 +439,27 @@ def test_workspace_reference_solution_passes_its_verifier(tmp_path: Path) -> Non
 _HANDOFF = RuntimeHandoffInputV1(
     manifest_sha256="sha256:" + "d" * 64, file_count=1, total_bytes=10,
 )
+
+
+async def test_native_oracle_accepts_staged_solution_and_business_cwd(tmp_path: Path) -> None:
+    driver, trial_id = _Driver(), uuid4()
+    task, _, _ = _inputs()
+    solution_dir = PurePosixPath("/loom/oracle/task's solution")
+    await run_oracle(
+        driver=driver,  # type: ignore[arg-type]
+        task_dir=_task_dir(tmp_path), workspace=tmp_path / "out", task_config=task,
+        trial_config=_oracle(), trial_id=trial_id,
+        solution_dir=solution_dir, execution_cwd=task.environment.workdir,
+    )
+    import shlex
+
+    script = shlex.quote(str(solution_dir / "solve.sh"))
+    assert driver.commands == [(f"chmod +x {script} && {script}", task.environment.workdir)]
+    events = parse_oracle_events((tmp_path / "out" / "trajectory.jsonl").read_bytes())
+    assert events[0].cwd == str(task.environment.workdir)
+    await remove_oracle_solution(
+        driver, task.environment.workdir, solution_dir=solution_dir,  # type: ignore[arg-type]
+    )
+    assert driver.commands[-1] == (
+        "rm -rf -- " + shlex.quote(str(solution_dir)), task.environment.workdir,
+    )

@@ -220,6 +220,18 @@ failures commit under the same Trial/task/profile locks used to compile the
 candidate, after partial compilation writes roll back. Temporary
 capacity and image-readiness waits retain their existing retry behavior.
 
+The environment-local scheduler also isolates admission ceilings and paid-execution
+policy denials. Region admission limits and target-specific budget or price waits
+roll back that target's route, lease, admission and spend writes before trying an
+eligible alternative. Broader policies retain their scope. If no target can admit
+the candidate, the Trial remains queued with a diagnostic and bounded retry time;
+the scheduler continues its scan of at most 32 candidates. Reservation identity
+conflicts and price-snapshot mismatches still propagate as errors. A parent that
+became terminal after selection rejects the new reservation under the parent row
+lock, without preventing admission of an unrelated candidate.
+Capacity-wait projections also exclude terminal parents, so undelivered child
+cancellation cannot retain their former place ahead of eligible work.
+
 Shared and separate verification are properties of the private-sandbox plan,
 not of the Terminus harness. Shared grading injects private inputs and verifies
 in the existing task sandbox. Separate grading commits a validated public
@@ -244,13 +256,17 @@ of those harnesses have native execution acceptance. The current admission
 rules live in
 [`automatic_service_execution_rejections`](../../src/loom/service_execution_materialization.py).
 
-Terminus-2 `student_teacher_student` is the only hosted multi-model policy
-([#2396](https://github.com/ca-mrc/loom/issues/2396)). Admission stays inert
-until the selected runtime profile advertises
-`terminus2_multi_model_policies: ["student_teacher_student"]`. Deferred
-policies (`beta_mixture`, `student_to_teacher_turns`), non-Terminus agents,
-extra MCP/skills, and `--combinations-json` stay rejected or independent. The
-frozen K1/K2 schedule travels in `LOOM_TASK_TRIAL_JSON`;
+Hosted Terminus-2 admits `student_teacher_student`, `beta_mixture`, and
+`student_to_teacher_turns` ([#2396](https://github.com/ca-mrc/loom/issues/2396)).
+Admission stays inert until the selected runtime profile lists the requested
+policy. Publication flag `--supports-terminus2-multi-model` /
+`NEBIUS_TERMINUS2_MULTI_MODEL_READY` writes all three into
+`terminus2_multi_model_policies`. `student_teacher_student` is the fixed
+K1/K2 block. `beta_mixture` is a constant per-episode teacher coin.
+`student_to_teacher_turns` is the rising teacher probability: student until
+`step_start`, β = progress^1.65 until `step_end`, then a one-way teacher
+latch. Non-Terminus agents, extra MCP/skills, and `--combinations-json` stay
+rejected or independent. The frozen schedule travels in `LOOM_TASK_TRIAL_JSON`;
 `ExecutionRuntimePlanV1` is unchanged. The workload broker exposes
 lease-bound reclaim and episode-checkpoint routes so the existing role router
 can stamp correlated `loom_*` fields instead of falling back to
@@ -1267,12 +1283,29 @@ timing, redaction, byte-accounting and installed qualification contracts.
 A separate-mode attempt commits its outputs without rewards and leaves the
 trial `running` with `result.verifier_execution.state = "pending"`. Its pod is
 then deleted, so no capacity is held while grading waits. The control-plane
-scheduler pass reserves one verifier lease per attempt after parent cleanup
-completes. Its request id is derived from the parent lease and child plan, so
-repeated or concurrent passes are no-ops. The child keeps the parent's target
+scheduler pass reserves one verifier lease per attempt and retry after parent
+cleanup completes. Local reservation derives its request id from the parent
+lease and child plan; global selection retains one immutable outbox proposal.
+Repeated or concurrent passes cannot reserve a second child. The child keeps the parent's target
 and requirements and receives the parent's committed `workspace.tar`,
 workspace references and mutable paths through the plan's `handoff_input`. The
 runtime places them under `.loom/` outside the task-bundle digest.
+
+In global-pool mode, the scheduler proposes the child only after the exact
+parent's manager release is retained. The manager independently requires that
+parent's committed output and release before granting fresh physical capacity.
+Before retaining or admitting a separate-mode parent, both selection and the
+manager require verifier support on that parent's registered target. A trial-only
+target remains eligible for work that does not require a separate verifier;
+an incompatible selection leaves the trial queued without consuming an attempt.
+The child uses the existing grant, local image/cost/admission, activation,
+stop/drain and qualified release path. It does not consume an agent attempt or
+enter the local capacity writer. Node-share sizing and its original observation
+are inherited unchanged from the parent; that historical sizing is not renewed
+or treated as current free capacity. Admission measures the rendered child's
+Pod against current pool observations and quota. Migration `0179` extends the
+outbox identity guard for this parent-bound lifecycle and retains all previous
+attachment and release checks.
 
 The verifier lease's finalize sets the reward and moves the trial on; the
 materializer archives both bundles, with verifier files under
@@ -1291,11 +1324,16 @@ canonical publication completes. Failure paths:
   returns to `pending` with `retries`, `last_retry_reason` and
   `pending_since`, and the trial stays `running`. Each lease row carries its
   `verifier_retry` number. One verifier per attempt and retry is a database
-  constraint, and so is the per-retry job name (`-vr{n}`) and request id. The
+  constraint. Local reservation derives the per-retry job name (`-vr{n}`)
+  and request id; global reservation supplies a new grant-qualified Job name. The
   next lease is reserved only after the failed verifier's pod is deleted, so
   retries never hold two verifier pods at once. The failed lease's output is
   already fenced, so a late upload cannot commit. A verifier that committed a
   graded result, including reward 0, is never retried.
+- Loss of a global verifier claim uses the same bounded child retry. Exact
+  never-started cancellation or qualified release must finish before another
+  child is eligible. The original agent remains committed and the Trial stays
+  running until grading succeeds or the verifier retry budget is exhausted.
 - If a child cannot be reserved within 30 minutes of the handoff becoming
   pending (the parent's `deleted_at`, or the retry's `pending_since`), or hits
   a permanent error, the trial fails with `verifier_unavailable`. So does a
@@ -1505,9 +1543,11 @@ existing cleanup path without treating an active create as deleted.
 
 Kubernetes observation event keys and ordinals are allocated under the same
 lease lock, so concurrent command/watch/reconcile deliveries reuse the same
-event without weakening payload validation. Full reconciliation retries
-`delete_pending` through the normal UID and output-window checks even when its
-command became dead-letter. The command history remains intact and cleanup
+event without weakening payload validation. Full reconciliation retries `cancel`,
+`timeout`, `retry` and `delete_pending` through the normal UID and output-window
+checks even when their commands became dead-letter. Cancellation still signals
+termination immediately while preserving the bounded output drain. The command
+history remains intact and cleanup
 completes only after resource absence. A bounded published-code recovery before
 an idle-gated actuator upgrade is described in the
 [terminal recovery runbook](../runbooks/terminal-archive-recovery.md).

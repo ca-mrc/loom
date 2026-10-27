@@ -25,10 +25,17 @@ SOURCE_WORKFLOWS = frozenset(
 )
 SOURCE_REPOSITORY = "ca-mrc/loom"
 SECRET_PREFIX = "LOOM_CI_HOSTED_JIT_"
+GRAPH_CACHE_VERSION = 3
 
 
 class SupplyError(RuntimeError):
     pass
+
+
+class SupplyHTTPError(SupplyError):
+    def __init__(self, method: str, path: str, status: int) -> None:
+        self.status = status
+        super().__init__(f"GitHub {method} {path.split('?')[0]} returned HTTP {status}")
 
 
 def atomic_json(path: Path, value: Any) -> None:
@@ -51,24 +58,43 @@ def labels(runner: dict[str, Any]) -> set[str]:
 
 def name_pattern(job_id: str, job: dict[str, Any]) -> re.Pattern[str]:
     name = str(job.get("name", job_id)).strip()
+    prefix = re.escape(job.get("name_prefix", ""))
+    source_id = job_id.rsplit("/", 1)[-1]
     parts = re.split(r"\$\{\{.*?\}\}", name, flags=re.S)
-    if not any(parts) and (job_id.endswith("-gate") or job_id == "repository-checks"):
-        return re.compile(r"^" + re.escape(job_id) + r"(?:-filtered)?$")
+    if not any(parts) and (source_id.endswith("-gate") or source_id == "repository-checks"):
+        return re.compile(r"^" + prefix + re.escape(source_id) + r"(?:-filtered)?$")
     if not any(parts):
         raise SupplyError("unsupported expression-only job name")
-    return re.compile("^" + ".+?".join(re.escape(part) for part in parts) + "$")
+    # GitHub appends matrix values when a matrix job has a static name; long
+    # values may be truncated before the closing parenthesis. Non-matrix and
+    # expression-named jobs retain their exact existing matching rules.
+    suffix = r"(?: \(.+)?" if job.get("matrix") and len(parts) == 1 else ""
+    return re.compile("^" + prefix + ".+?".join(re.escape(part) for part in parts) + suffix + "$")
 
 
 def ready_jobs(jobs: list[dict[str, Any]], workflow: dict[str, Any]) -> list[dict[str, Any]]:
     """Do not mistake dependency-blocked checks for runnable queue demand."""
     definitions = workflow["jobs"]
     patterns = {key: name_pattern(key, value) for key, value in definitions.items()}
-    matched = {
-        key: [job for job in jobs if pattern.fullmatch(job["name"])]
-        for key, pattern in patterns.items()
-    }
-    result = []
+    matched: dict[str, list[dict[str, Any]]] = {key: [] for key in definitions}
+    for job in jobs:
+        keys = [key for key, pattern in patterns.items() if pattern.fullmatch(job["name"])]
+        # A known static name can also fit a sibling's expression wildcard.
+        # Keep that row with its owning definition, without duplicate demand
+        # or unrelated rows contaminating the sibling's dependency state.
+        static = [key for key in keys if "${{" not in str(definitions[key].get("name", key))]
+        for key in static or keys:
+            matched[key].append(job)
+    # A reusable call has no runner. GitHub reports its nested jobs with the
+    # caller's display-name prefix, or a single completed row when skipped.
+    for key, definition in reversed(list(definitions.items())):
+        children = definition.get("called_jobs", [])
+        if children and not matched[key] and all(matched[child] for child in children):
+            matched[key] = [item for child in children for item in matched[child]]
+    result: list[dict[str, Any]] = []
     for key, definition in definitions.items():
+        if "called_jobs" in definition:
+            continue
         needs = definition.get("needs", [])
         if isinstance(needs, str):
             needs = [needs]
@@ -88,6 +114,51 @@ def ready_jobs(jobs: list[dict[str, Any]], workflow: dict[str, Any]) -> list[dic
             if job["status"] == "queued" and SHARED_LABEL in job.get("labels", [])
         )
     return result
+
+
+def source_graph(api: API, path: str, sha: str) -> dict[str, Any]:
+    """Read metadata only; local reusable workflows resolve at the same run SHA."""
+    import yaml
+
+    documents: dict[str, Any] = {}
+    definitions: dict[str, Any] = {}
+
+    def expand(location: str, key_prefix: str, name_prefix: str,
+               inherited: list[str], parents: tuple[str, ...]) -> list[str]:
+        if location in parents or len(parents) >= 10:
+            raise SupplyError("unsupported recursive local reusable workflow")
+        if location not in documents:
+            content = api.request("GET", "/contents/" + location + "?ref=" + sha)
+            documents[location] = yaml.safe_load(base64.b64decode(content["content"]))
+        jobs = documents[location]["jobs"]
+        added = []
+        for job_id, value in jobs.items():
+            key = key_prefix + job_id
+            needs = value.get("needs", [])
+            if isinstance(needs, str):
+                needs = [needs]
+            if not isinstance(needs, list) or any(item not in jobs for item in needs):
+                raise SupplyError("unsupported job dependency graph")
+            definition = {"name": value.get("name", job_id), "name_prefix": name_prefix,
+                          "needs": inherited + [key_prefix + item for item in needs]}
+            if isinstance(value.get("strategy"), dict) and "matrix" in value["strategy"]:
+                definition["matrix"] = True
+            definitions[key] = definition
+            added.append(key)
+            if "uses" in value:
+                uses = value["uses"]
+                if not isinstance(uses, str) or not re.fullmatch(
+                    r"\./\.github/workflows/[A-Za-z0-9_-][A-Za-z0-9_.-]*\.ya?ml", uses
+                ) or "${{" in definition["name"] or "strategy" in value:
+                    raise SupplyError("unsupported local reusable workflow reference or call matrix")
+                children = expand(uses[2:], key + "/", name_prefix + definition["name"] + " / ",
+                                  definition["needs"], (*parents, location))
+                definition["called_jobs"] = children
+                added.extend(children)
+        return added
+
+    expand(path, "", "", [], ())
+    return {"jobs": definitions}
 
 
 def supply_plan(
@@ -145,9 +216,7 @@ class API:
         except urllib.error.HTTPError as exc:
             if missing_ok and exc.code == 404:
                 return None
-            raise SupplyError(
-                f"GitHub {method} {path.split('?')[0]} returned HTTP {exc.code}"
-            ) from None
+            raise SupplyHTTPError(method, path, exc.code) from None
         except (OSError, TimeoutError):
             raise SupplyError(f"GitHub {method} {path.split('?')[0]} transport failed") from None
         return json.loads(raw) if raw else None
@@ -181,10 +250,8 @@ class API:
 
 
 def source_demand(api: API, root: Path, now: float) -> int:
-    import yaml
-
     cache = load_json(root / "demand-cache.json", {})
-    if now - cache.get("observed_at", 0) < 15:
+    if cache.get("graph_version") == GRAPH_CACHE_VERSION and now - cache.get("observed_at", 0) < 15:
         return int(cache["ready_jobs"])
     runs = []
     for status in ("queued", "in_progress", "waiting"):
@@ -194,7 +261,10 @@ def source_demand(api: API, root: Path, now: float) -> int:
         path = str(run["path"]).split("@", 1)[0]
         if path.rsplit("/", 1)[-1] not in SOURCE_WORKFLOWS:
             continue
-        jobs = api.pages(f"/actions/runs/{run['id']}/jobs?filter=latest", "jobs")
+        attempt = run.get("run_attempt")
+        if type(attempt) is not int or attempt < 1:
+            raise SupplyError("source run has an invalid attempt")
+        jobs = api.pages(f"/actions/runs/{run['id']}/attempts/{attempt}/jobs", "jobs")
         if not any(
             SHARED_LABEL in job.get("labels", []) and job["status"] == "queued" for job in jobs
         ):
@@ -202,20 +272,14 @@ def source_demand(api: API, root: Path, now: float) -> int:
         sha = run["head_sha"]
         if not re.fullmatch(r"[0-9a-f]{40}", sha):
             raise SupplyError("source run has an invalid head")
-        workflow_path = root / (sha + "-" + path.rsplit("/", 1)[-1] + ".json")
+        workflow_path = root / (sha + f"-graph-v{GRAPH_CACHE_VERSION}-" + path.rsplit("/", 1)[-1] + ".json")
         workflow = load_json(workflow_path, None)
         if workflow is None:
-            content = api.request("GET", "/contents/" + path + "?ref=" + sha)
-            parsed = yaml.safe_load(base64.b64decode(content["content"]))
-            workflow = {
-                "jobs": {
-                    key: {field: value[field] for field in ("name", "needs") if field in value}
-                    for key, value in parsed["jobs"].items()
-                }
-            }
+            workflow = source_graph(api, path, sha)
             atomic_json(workflow_path, workflow)
         demand += len(ready_jobs(jobs, workflow))
-    atomic_json(root / "demand-cache.json", {"observed_at": now, "ready_jobs": demand})
+    atomic_json(root / "demand-cache.json", {"observed_at": now, "ready_jobs": demand,
+                                           "graph_version": GRAPH_CACHE_VERSION})
     return demand
 
 
@@ -305,7 +369,15 @@ def retired_worker(api: API, root: Path, record: dict[str, Any], inventory: dict
         if run["display_title"] != run_title(record["slot"], record["nonce"]):
             raise SupplyError("refusing cancellation of an unrelated workflow")
         if run["status"] != "completed":
-            api.request("POST", f"/actions/runs/{record['run_id']}/cancel")
+            try:
+                api.request("POST", f"/actions/runs/{record['run_id']}/cancel")
+            except SupplyHTTPError as exc:
+                if exc.status != 409:
+                    raise
+                # Cancellation can race completion while run status still lags.
+                # Keep this slot's record until terminal readback; other supply
+                # work may continue without fabricating a retirement receipt.
+                return False
     folder = root / f"slot-{record['slot']:02d}"
     (folder / "jitconfig").unlink(missing_ok=True)
     atomic_json(folder / "retired.json", {**record, "phase": "retired", "retired_at": time.time()})

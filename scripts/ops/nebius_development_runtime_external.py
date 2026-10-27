@@ -28,7 +28,9 @@ from loom_service.environment_management.candidates import (
 )
 
 if TYPE_CHECKING:
-    from scripts.ops.nebius_shared_pool_handoff import StagingForwardPlan
+    from scripts.ops.nebius_development_schema_upgrade import CompletedDevelopmentSchemaSuccessor
+    from scripts.ops.nebius_pool_storage_binding import ClosedPoolStorageRefresh
+    from scripts.ops.nebius_shared_pool_handoff import StagingForwardPlan, StagingPoolSource
 
 # #2443 introduced the protected shared handoff and its participant protocol.
 # This is an ancestry floor, not approval; exact publication is still resolved.
@@ -49,7 +51,7 @@ def _publication_catalog(*, request: DevelopmentRuntimeInstallRequest, http: htt
 
 
 async def qualify_runtime_publication(*, request: DevelopmentRuntimeInstallRequest,
-                                      http: httpx.AsyncClient) -> None:
+                                      http: httpx.AsyncClient, schema_successor: CompletedDevelopmentSchemaSuccessor | None = None) -> None:
     """Resolve the exact protected artifact, using the retained reader identity."""
     try:
         manager = request.database.manager
@@ -57,12 +59,20 @@ async def qualify_runtime_publication(*, request: DevelopmentRuntimeInstallReque
         publications = [manager.publication]
         if request.database.data_publication is not None:
             publications.append(request.database.data_publication)
+        if schema_successor is not None:
+            from scripts.ops.nebius_development_runtime_selection import select_development_runtime
+
+            selected_runtime = select_development_runtime(schema_successor.runtime, schema_successor)
+            if selected_runtime.runtime.request != request:
+                raise ValueError
+            installation = selected_runtime.deployment.installation
+            publications = [selected_runtime.manager_publication, selected_runtime.data_publication]
         for publication in publications:
             selected = publication.validate(installation.registry_prefix)
             catalog = _publication_catalog(request=request, http=http, publications=[selected.publication])
             if await catalog.resolve(selected.publication.candidate_id) != selected.bundle:
                 raise ValueError
-            if (request.database.data_publication is not None
+            if ((request.database.data_publication is not None or schema_successor is not None)
                     and not await catalog.candidate_follows(candidate_id=selected.publication.candidate_id,
                         current_sha=_SHARED_PROTOCOL_BASELINE)):
                 raise ValueError
@@ -79,12 +89,19 @@ async def qualify_staging_publication(*, request: DevelopmentRuntimeInstallReque
     """
     if staging.source is None:
         return
+    await qualify_staging_source_publication(request=request, source=staging.source,
+        runtime_profile=staging.attachment.runtime_profile, http=http)
+
+
+async def qualify_staging_source_publication(*, request: DevelopmentRuntimeInstallRequest,
+        source: StagingPoolSource, runtime_profile: ServiceExecutionRuntimeProfileV1, http: httpx.AsyncClient) -> None:
+    """The same exact publication proof before catalog refresh and before handoff."""
     try:
-        selected = staging.source
+        selected = source
         catalog = _publication_catalog(request=request, http=http, publications=[selected.publication])
         bundle = await catalog.resolve(selected.publication.candidate_id)
         if (bundle.candidate != selected.candidate
-                or ServiceExecutionRuntimeProfileV1.model_validate(bundle.profile) != staging.attachment.runtime_profile
+                or ServiceExecutionRuntimeProfileV1.model_validate(bundle.profile) != runtime_profile
                 or not await catalog.candidate_follows(candidate_id=selected.publication.candidate_id,
                     current_sha=_SHARED_PROTOCOL_BASELINE)):
             raise ValueError
@@ -93,7 +110,9 @@ async def qualify_staging_publication(*, request: DevelopmentRuntimeInstallReque
 
 
 async def qualify_runtime_cloud(*, request: DevelopmentRuntimeInstallRequest,
-                                operator_credentials: Path) -> ProviderCapacitySnapshot:
+                                operator_credentials: Path,
+                                schema_successor: CompletedDevelopmentSchemaSuccessor | None = None,
+                                storage: ClosedPoolStorageRefresh | None = None) -> ProviderCapacitySnapshot:
     """Read IAM with the operator, then read the pool with its observer key.
 
     No observation is published, image pushed, permit changed or capacity
@@ -103,9 +122,17 @@ async def qualify_runtime_cloud(*, request: DevelopmentRuntimeInstallRequest,
     from nebius.sdk import SDK
 
     try:
+        runtime = prepare_collector_runtime(request.database, storage=storage)
         original = private_state._private_read(operator_credentials, limit=1024**2)
         config = request.database.foundation.inputs.config
         profiles = development_profile_catalog(request.database.manager.retained.request)
+        if schema_successor is not None:
+            from scripts.ops.nebius_development_runtime_selection import select_development_runtime
+
+            selected_runtime = select_development_runtime(schema_successor.runtime, schema_successor)
+            if selected_runtime.runtime.request != request:
+                raise ValueError
+            profiles = selected_runtime.profiles
         repositories = tuple(sorted({row.settings.registry_repository for row in profiles.task_images}
             | {row.settings.registry_repository for row in profiles.application_images}))
         async with asyncio.timeout(180):
@@ -120,7 +147,6 @@ async def qualify_runtime_cloud(*, request: DevelopmentRuntimeInstallRequest,
             with tempfile.TemporaryDirectory(prefix='loom-dev-runtime-cloud-') as scratch:
                 credential = Path(scratch) / 'observer.json'
                 private_state._write_private(credential, request.collector_credential)
-                runtime = prepare_collector_runtime(request.database)
                 prefix = 'LOOM_EXECUTION_CAPACITY_COLLECTOR_'
                 values = {key.removeprefix(prefix).lower(): value for key, value in runtime.configuration['data'].items()
                     if key != prefix + 'COLLECTION_MODE'}
@@ -132,6 +158,10 @@ async def qualify_runtime_cloud(*, request: DevelopmentRuntimeInstallRequest,
                     snapshot = await reader.capture_pool(expected_cluster_id=config['cluster_id'])
                 finally:
                     await reader.close()
+                if storage is not None and (snapshot.node_group is None
+                        or snapshot.node_group.id != storage.after.node_group_id
+                        or snapshot.node_group.template.get('boot_disk_type') != storage.target_disk_type):
+                    raise ValueError('selected native storage type differs')
                 if private_state._private_read(credential, limit=1024**2) != request.collector_credential:
                     raise ValueError
         if private_state._private_read(operator_credentials, limit=1024**2) != original:

@@ -10,7 +10,7 @@ from loom.nebius_platform_render import build_platform
 from loom.nebius_task_identity_policy import identity_namespace_labels, identity_policy_documents
 from loom_execution_actuator.renderer import ExecutionTargetRuntime, _sidecar, render_execution_job
 from tests.integration.test_execution_actuator_k3s import _lease, _load_client, _start_k3s
-from tests.unit.test_nebius_platform_render import platform_inputs  # noqa: F401
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_service_execution_materialization import _provenance
 from tests.unit.test_task_sandbox_identity import _identity_task
 
@@ -45,7 +45,7 @@ def _pod(namespace: str, *, user: str = "root", home: str | None = None, deferre
 
 
 @pytest.mark.timeout(240)
-def test_private_root_policy_accepts_only_the_constrained_pod_shape(tmp_path: Path, platform_inputs):  # noqa: F811
+def test_private_root_policy_accepts_only_the_constrained_pod_shape(tmp_path: Path, platform_inputs):
     import json
     import os
     import subprocess
@@ -151,6 +151,19 @@ def test_private_root_policy_accepts_only_the_constrained_pod_shape(tmp_path: Pa
             *platform_pods, _pod(namespace, user="0:1001", home="/root"),
             _pod(namespace, deferred=True), _pod(namespace, user="1001:1002", home="/home/miles", deferred=True),
         ]
+        for user in ("root", "1001:1002"):
+            entrypoint_pod = _pod(namespace, user=user, home="/root" if user == "root" else "/home/miles")
+            for sandbox in entrypoint_pod["spec"]["initContainers"][1:]:
+                sandbox["command"] = ["/entrypoint.sh", *sandbox["command"]]
+            admitted_shapes.append(entrypoint_pod)
+        maximum_prefix = deepcopy(pod)
+        for sandbox in maximum_prefix["spec"]["initContainers"][1:]:
+            sandbox["command"] = ["/entrypoint.sh", *(["argument"] * 122), *sandbox["command"]]
+        admitted_shapes.append(maximum_prefix)
+        unicode_prefix = deepcopy(pod)
+        for sandbox in unicode_prefix["spec"]["initContainers"][1:]:
+            sandbox["command"] = ["/entrypoint.sh", "é" * 2048, *sandbox["command"]]
+        admitted_shapes.append(unicode_prefix)
         failures = []
         for admitted in admitted_shapes:
             result = apply([admitted], dry_run=True)
@@ -215,6 +228,24 @@ def test_private_root_policy_accepts_only_the_constrained_pod_shape(tmp_path: Pa
             lambda p: p["spec"]["initContainers"][1]["volumeMounts"][2].update(subPath="sandbox.sock"),
             lambda p: p["spec"]["initContainers"][1]["volumeMounts"][2].update(mountPath="/etc/shadow"),
             lambda p: p["spec"]["initContainers"][1]["volumeMounts"].pop(),
+            lambda p: p["spec"].update(automountServiceAccountToken=True),
+            lambda p: p["spec"]["securityContext"].pop("runAsUser"),
+            lambda p: p["spec"]["securityContext"].pop("runAsGroup"),
+            lambda p: p["spec"]["initContainers"][1].update(command=[
+                "/entrypoint.sh", *(["argument"] * 123), *p["spec"]["initContainers"][1]["command"],
+            ]),
+            lambda p: p["spec"]["initContainers"][1].update(command=[
+                "", *p["spec"]["initContainers"][1]["command"],
+            ]),
+            lambda p: p["spec"]["initContainers"][1].update(command=[
+                "x" * 4097, *p["spec"]["initContainers"][1]["command"],
+            ]),
+            lambda p: p["spec"]["initContainers"][1].update(command=[
+                "/entrypoint.sh", "é" * 2049, *p["spec"]["initContainers"][1]["command"],
+            ]),
+            lambda p: p["spec"]["initContainers"][1]["command"].append("unexpected"),
+            lambda p: p["spec"]["initContainers"][1]["startupProbe"]["exec"].update(command=["/bin/true"]),
+            lambda p: p["spec"]["initContainers"][1]["readinessProbe"]["exec"].update(command=["/bin/true"]),
         ]
         for mutate in mutations:
             bad = deepcopy(pod)
@@ -261,12 +292,16 @@ def test_private_root_policy_accepts_only_the_constrained_pod_shape(tmp_path: Pa
         container.stop()
 
 
-def _guest_pod(namespace: str, *, emulated_auth: bool = False) -> dict:
+def _guest_pod(namespace: str, *, emulated_auth: bool = False, shared: bool = False) -> dict:
     from loom.execution_contract import workload_requirements_from_task
     from loom.pipeline.keys import canonical_digest
     from tests.unit.test_guest_execution_materialization import _compile, _guest_inputs
 
     task, trial, profile = _guest_inputs(*(["emulated_pkcs11_authentication"] if emulated_auth else []))
+    if shared:
+        task = task.model_copy(update={"verifier": task.verifier.model_copy(update={"env_mode": "shared"})})
+        trial = trial.model_copy(update={"verifier_env_mode": "shared"})
+        profile = profile.model_copy(update={"supports_shared_guest": True})
     if emulated_auth:
         profile = profile.model_copy(update={"supports_emulated_pkcs11": True})
     plan = _compile(task, trial, profile)
@@ -346,6 +381,17 @@ def test_single_policy_allows_bound_guest_and_native_shapes_only(tmp_path: Path,
             time.sleep(0.2)
         assert result.exit_code == 0, result.output.decode()
         assert apply([_pod(namespace)], dry_run=True).exit_code == 0
+        if not emulated_auth:
+            shared = _guest_pod(namespace, shared=True)
+            admitted = apply([shared], dry_run=True)
+            assert admitted.exit_code == 0, admitted.output.decode()
+            assert [c["name"] for c in shared["spec"]["initContainers"] if c["name"] in {"task-sandbox", "verifier-sandbox"}] == ["task-sandbox"]
+            missing_disk = deepcopy(shared)
+            missing_disk["spec"]["volumes"] = [
+                volume for volume in missing_disk["spec"]["volumes"]
+                if volume["name"] != "task-sandbox-guest-state"
+            ]
+            assert apply([missing_disk], dry_run=True).exit_code != 0
         for damage in ("owner-target", "foreign-target", "host-cap", "writable-root", "foreign-state", "host-volume", "unbounded-state", "memory-state", "shell", "probe", "host-sysctl"):
             changed = deepcopy(guest)
             sidecar = next(c for c in changed["spec"]["initContainers"] if c["name"] == "task-sandbox")

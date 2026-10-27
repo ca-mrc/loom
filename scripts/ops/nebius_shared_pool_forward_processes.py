@@ -30,6 +30,7 @@ from scripts.ops.nebius_shared_pool_activation import shared_forward_activation_
 from scripts.ops.nebius_shared_pool_database import validate_shared_staging_database
 from scripts.ops.nebius_shared_pool_gateway import shared_forward_gateway_view
 from scripts.ops.nebius_shared_pool_guards import validate_shared_pool_guards
+from scripts.ops.nebius_shared_pool_handoff import retired_manager_revision
 from scripts.ops.nebius_shared_pool_handoff_live import SharedPoolGuardBindings
 from scripts.ops.nebius_shared_pool_operation import _files
 from scripts.ops.nebius_shared_pool_runtime_observation import HTTPSSharedPoolRuntimeProbes
@@ -133,7 +134,8 @@ def _gateway_history_target(bindings: SharedPoolGuardBindings, credential: dict[
         _uid(document)
         resources[document['kind']] = document
     return PoolManagementHistoryTarget(namespace=binding.namespace, namespace_uid=UUID(binding.namespace_uid),
-        controller=copy.deepcopy(completed.resources['Deployment:' + binding.namespace + ':loom-service']),
+        manager_revision=bindings.plan.development.selection.manager_revision,
+        controller=bindings.plan.effective_runtime_resources['Deployment:' + binding.namespace + ':loom-service'],
         database=PoolGuardDatabase(statefulset=resources['StatefulSet'], service=resources['Service'],
             credential_uid=UUID(uid), credential_resource_version=version))
 
@@ -185,7 +187,7 @@ def observe_shared_pool_forward_processes(*, bindings: SharedPoolGuardBindings, 
         manager_database = development._process_identity(gateway_history._database(gateway_target, url_variable='LOOM_SVC_DB_URL'))
 
         def ledgers() -> str:
-            if history.machine_retirement('observe') != 'revoked':
+            if history.machine_retirement('observe', manager_revision=retired_manager_revision(legacy)) != 'revoked':
                 raise ValueError
             mode = gateway_history.activation_pool('observe')
             if mode not in before_scope.pool_states:

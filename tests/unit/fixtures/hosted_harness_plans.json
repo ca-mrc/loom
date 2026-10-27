@@ -415,6 +415,18 @@
         "source_path": ".loom/workspace.tar"
       },
       {
+        "kind": "task_artifact",
+        "relative_path": "artifacts/workspace-references.json",
+        "required": true,
+        "source_path": ".loom/workspace-references.json"
+      },
+      {
+        "kind": "diagnostic",
+        "relative_path": "diagnostics/workspace-handoff.json",
+        "required": false,
+        "source_path": ".loom/verifier/workspace-handoff.json"
+      },
+      {
         "kind": "verifier",
         "relative_path": "verifier/output.json",
         "required": false,
@@ -454,6 +466,11 @@
           ],
           "runtime": "qemu-tcg-v1",
           "schema_version": "loom.guest-execution.v1"
+        },
+        "guest_task_identity": {
+          "home": "/root",
+          "run_as_group": 0,
+          "run_as_user": 0
         },
         "identity": {
           "home": "/root",
@@ -511,6 +528,11 @@
           ],
           "runtime": "qemu-tcg-v1",
           "schema_version": "loom.guest-execution.v1"
+        },
+        "guest_task_identity": {
+          "home": "/root",
+          "run_as_group": 0,
+          "run_as_user": 0
         },
         "identity": {
           "home": "/root",
@@ -669,6 +691,18 @@
         "relative_path": "artifacts/workspace.tar",
         "required": true,
         "source_path": ".loom/workspace.tar"
+      },
+      {
+        "kind": "task_artifact",
+        "relative_path": "artifacts/workspace-references.json",
+        "required": true,
+        "source_path": ".loom/workspace-references.json"
+      },
+      {
+        "kind": "diagnostic",
+        "relative_path": "diagnostics/workspace-handoff.json",
+        "required": false,
+        "source_path": ".loom/verifier/workspace-handoff.json"
       },
       {
         "kind": "verifier",
@@ -837,8 +871,14 @@
       {
         "kind": "task_artifact",
         "relative_path": "artifacts/workspace.tar",
-        "required": true,
+        "required": false,
         "source_path": ".loom/workspace.tar"
+      },
+      {
+        "kind": "diagnostic",
+        "relative_path": "diagnostics/workspace-archive.json",
+        "required": false,
+        "source_path": ".loom/workspace-archive.json"
       },
       {
         "kind": "verifier",
@@ -1045,6 +1085,18 @@
         "source_path": ".loom/workspace.tar"
       },
       {
+        "kind": "task_artifact",
+        "relative_path": "artifacts/workspace-references.json",
+        "required": true,
+        "source_path": ".loom/workspace-references.json"
+      },
+      {
+        "kind": "diagnostic",
+        "relative_path": "diagnostics/workspace-handoff.json",
+        "required": false,
+        "source_path": ".loom/verifier/workspace-handoff.json"
+      },
+      {
         "kind": "verifier",
         "relative_path": "verifier/output.json",
         "required": false,
@@ -1084,6 +1136,11 @@
           ],
           "runtime": "qemu-tcg-v1",
           "schema_version": "loom.guest-execution.v1"
+        },
+        "guest_task_identity": {
+          "home": "/root",
+          "run_as_group": 0,
+          "run_as_user": 0
         },
         "identity": {
           "home": "/root",
@@ -1141,6 +1198,11 @@
           ],
           "runtime": "qemu-tcg-v1",
           "schema_version": "loom.guest-execution.v1"
+        },
+        "guest_task_identity": {
+          "home": "/root",
+          "run_as_group": 0,
+          "run_as_user": 0
         },
         "identity": {
           "home": "/root",
@@ -1311,6 +1373,18 @@
         "relative_path": "artifacts/workspace.tar",
         "required": true,
         "source_path": ".loom/workspace.tar"
+      },
+      {
+        "kind": "task_artifact",
+        "relative_path": "artifacts/workspace-references.json",
+        "required": true,
+        "source_path": ".loom/workspace-references.json"
+      },
+      {
+        "kind": "diagnostic",
+        "relative_path": "diagnostics/workspace-handoff.json",
+        "required": false,
+        "source_path": ".loom/verifier/workspace-handoff.json"
       },
       {
         "kind": "verifier",
@@ -1491,8 +1565,14 @@
       {
         "kind": "task_artifact",
         "relative_path": "artifacts/workspace.tar",
-        "required": true,
+        "required": false,
         "source_path": ".loom/workspace.tar"
+      },
+      {
+        "kind": "diagnostic",
+        "relative_path": "diagnostics/workspace-archive.json",
+        "required": false,
+        "source_path": ".loom/workspace-archive.json"
       },
       {
         "kind": "verifier",

@@ -26,8 +26,8 @@
       "version": "v7.0.1"
     },
     "astral-sh/setup-uv": {
-      "sha": "fac544c07dec837d0ccb6301d7b5580bf5edae39",
-      "version": "v8.2.0"
+      "sha": "20cfd1bf945f4377ade1205e4dbc17946fc9a30d",
+      "version": "v10.0.1"
     }
   }
 }

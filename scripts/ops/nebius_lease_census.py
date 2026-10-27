@@ -194,7 +194,7 @@ asyncio.run(_run())
 def _validate_remote(value: object) -> dict[str, Any]:
     if not isinstance(value, dict) or value.get("read_only") is not True:
         raise DeploymentError("lease census did not prove read-only execution")
-    if value.get("schema_head") not in {"0175", "0176"}:
+    if value.get("schema_head") not in {"0175", "0176", "0177", "0178", "0179"}:
         raise DeploymentError("unsupported installed schema")
     count = value.get("active_count")
     leases = value.get("leases")

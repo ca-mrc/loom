@@ -18,6 +18,7 @@ from loom.execution_selection import (
     ExecutionSelectionV1,
     apply_verification_selection,
     execution_selection_readback,
+    reported_verification,
     requested_verification,
     resolved_execution_selection,
 )
@@ -78,20 +79,37 @@ def test_resolver_follows_the_selection_but_never_drops_declared_capabilities():
 
 def test_forced_guest_on_an_ordinary_task_compiles_a_plain_guest_plan():
     task, trial, profile = _inputs()
-    task, profile = _root(task), _guest_ready(profile)
+    raw = _root(task).model_dump(mode="json")
+    raw["verifier"]["user"] = None
+    task, profile = TaskConfig.model_validate(raw), _guest_ready(profile)
     trial = trial.model_copy(update={"isolation": "guest"})
+    assert task.environment.user == "root" and task.verifier.user is None
     assert _reasons(task, trial, profile) == ()
     plan = _compile(task, trial, profile)
     assert plan.execution_class_id == "linux-amd64-cpu-guest-v1"
     assert plan.verifier_execution == "in_attempt"
     for sidecar in plan.canonical_payload()["sidecars"]:
         assert sidecar["guest_execution"]["capabilities"] == []
+        assert sidecar["identity"]["run_as_user"] == sidecar["identity"]["run_as_group"] == 0
     requirements = workload_requirements_from_task(task, trial)
     assert requirements.isolation_level == IsolationLevel.DEDICATED_GUEST_KERNEL
     validate_runtime_plan_requirements(plan, requirements)
     with pytest.raises(ValueError, match="guest plan does not match"):
         validate_runtime_plan_requirements(plan, workload_requirements_from_task(task))
     assert ExecutionRuntimePlanV1.model_validate(plan.canonical_payload()) == plan
+
+
+def test_forced_guest_runs_an_ordinary_agent_inside_a_root_launcher():
+    task, trial, profile = _inputs()
+    profile = _guest_ready(profile)
+    trial = trial.model_copy(update={"isolation": "guest"})
+    assert task.environment.user == "agent" and task.verifier.user is None
+    assert "guest_root_identity_required" not in _reasons(task, trial, profile)
+    plan = _compile(task, trial, profile)
+    for sidecar in plan.canonical_payload()["sidecars"]:
+        assert sidecar["identity"]["run_as_user"] == 0
+        assert sidecar["guest_task_identity"]["run_as_user"] == 65532
+        assert sidecar["guest_task_identity"]["home"] == "/home/agent"
 
 
 def test_forced_guest_is_admitted_and_accounted_only_on_the_guest_class():
@@ -152,8 +170,8 @@ def test_combined_validator_returns_every_reason_across_axes():
     })
     reasons = _reasons(task, trial, profile)
     for expected in (
-        "isolation_guest_shared_unsupported", "guest_root_identity_required",
-        "network_policy_override_not_supported", "guest_runtime_unavailable",
+        "isolation_guest_shared_unsupported",
+        "guest_runtime_unavailable",
         "agent_version_not_in_runtime_profile",
     ):
         assert expected in reasons
@@ -181,11 +199,23 @@ def test_readback_reports_requested_axes_beside_the_frozen_plan():
     effective = execution_selection_readback(config, _compile(task, forced, profile))["effective"]
     assert effective["isolation"] == "guest"
     assert effective["execution_class_id"] == "linux-amd64-cpu-guest-v1"
-    assert effective["verification"] == "shared" and effective["fresh_sandbox_grading"] is False
+    assert effective["verification"] == "separate" and effective["fresh_sandbox_grading"] is True
     ordinary = execution_selection_readback(
         trial.model_dump(mode="json", exclude_defaults=True), _compile(*_inputs()))
     assert ordinary["requested"]["isolation"] == "auto"
     assert ordinary["effective"]["isolation"] == "container"
+
+
+@pytest.mark.parametrize(("verifier_execution", "in_place", "verification", "fresh"), [
+    ("skipped", False, "skipped", False),
+    ("separate_execution", False, "separate", True),
+    ("in_attempt", True, "shared", False),
+    ("in_attempt", False, "separate", True),
+])
+def test_reported_verification_distinguishes_in_place_grading_from_a_fresh_sandbox(
+    verifier_execution: str, in_place: bool, verification: str, fresh: bool,
+) -> None:
+    assert reported_verification(verifier_execution, in_place_verifier=in_place) == (verification, fresh)
 
 
 def test_skipped_is_a_verification_axis_and_maps_to_skip_verifier():

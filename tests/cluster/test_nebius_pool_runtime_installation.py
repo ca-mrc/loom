@@ -20,8 +20,8 @@ from tests.integration.test_execution_actuator_k3s import _load_client, _start_k
 from tests.ops.test_nebius_pool_collector_runtime import collector_inputs as collector_inputs
 from tests.ops.test_nebius_pool_runtime import desired_profile
 from tests.ops.test_nebius_pool_runtime import runtime_inputs as runtime_inputs
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_management_render import management_inputs as management_inputs
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 pytestmark = pytest.mark.skipif(os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1",
     reason="requires explicitly disposable Kubernetes")
@@ -118,13 +118,18 @@ def test_manager_source_initializer_starts_on_actual_fsgroup_emptydir(tmp_path, 
         namespace = 'source-spool'
         core.create_namespace({'metadata': {'name': namespace,
             'labels': {'pod-security.kubernetes.io/enforce': 'restricted'}}})
+        # Pod admission still requires an account when token mounting is off.
+        # Own this prerequisite instead of racing the default-account controller.
+        core.create_namespaced_service_account(namespace, {'metadata': {'name': 'source-spool'},
+            'automountServiceAccountToken': False})
         image = _import_image(cluster, tag=tag, root=tmp_path, ordinal=0)
         core.create_namespaced_secret(namespace, {'metadata': {'name': 'source-credentials'},
             'stringData': {'credentials.json': '{}'}})
         # Execute the actual emitted initializer in the actual service image;
         # the main process proves the private spool and builder SDK transport
         # work without the developer environment's optional dependencies.
-        pod = {'restartPolicy': 'Never', 'automountServiceAccountToken': False,
+        pod = {'restartPolicy': 'Never', 'serviceAccountName': 'source-spool',
+            'automountServiceAccountToken': False,
             'securityContext': {'seccompProfile': {'type': 'RuntimeDefault'}},
             'containers': [{'name': 'spool-user', 'image': image,
                 'securityContext': {'allowPrivilegeEscalation': False, 'readOnlyRootFilesystem': True,

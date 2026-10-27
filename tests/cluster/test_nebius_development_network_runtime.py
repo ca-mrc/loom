@@ -86,7 +86,7 @@ async def test_dev_runtime_network_allows_required_peers_and_denies_cross_scope(
         await asyncio.to_thread(_build_image, tag=tag,
             dockerfile='tests/fixtures/execution_runtime_fixture/Dockerfile', platform=platform)
         cluster = await asyncio.to_thread(_start_k3s, ephemeral_storage_floor='1Gi')
-        _, core, _ = await asyncio.to_thread(_load_client, cluster)
+        _, core, _ = await asyncio.to_thread(_load_client, cluster, required_addons=('dns',))
         api = client.ApiClient()
         image = await asyncio.to_thread(_import_image, cluster, tag=tag, root=tmp_path, ordinal=1)
         for namespace in (shared, ex, build, 'foreign-runtime'):

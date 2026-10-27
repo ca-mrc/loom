@@ -69,6 +69,28 @@ def test_execution_prepare_uses_registered_namespace_and_real_renderer_envelope(
     assert pod["automountServiceAccountToken"] is False
 
 
+@pytest.mark.parametrize("verifier_execution", ["in_attempt", "separate_execution"])
+@pytest.mark.parametrize("supports_verifier", [False, True])
+def test_execution_prepare_requires_child_capability_on_the_parent_target(
+    verifier_execution, supports_verifier,
+):
+    participant, body = inputs()
+    target = participant.targets[0]
+    participant = participant.model_copy(update={"targets": (
+        target.model_copy(update={"workload_kinds": ("trial", "verifier") if supports_verifier else ("trial",)}),
+        target.model_copy(update={"target_id": "other", "workload_kinds": ("verifier",)}),
+    )})
+    body["execution"]["requirements"]["verifier_topology"] = verifier_execution
+    body["execution"]["runtime"]["verifier_execution"] = verifier_execution
+    if verifier_execution == "separate_execution":
+        body["execution"]["runtime"]["verifier"] = None
+    if verifier_execution == "separate_execution" and not supports_verifier:
+        with pytest.raises(ValueError, match="target_workload_unavailable"):
+            render(participant, body)
+    else:
+        assert render(participant, body).pod_slots == 1
+
+
 @pytest.mark.parametrize("field,value", [("resources", {"cpu_millis": 1}), ("namespace", "foreign"),
                                        ("job", {}), ("priority", 0), ("service_account", "admin")])
 def test_execution_prepare_does_not_accept_caller_kubernetes_or_capacity_authority(field, value):

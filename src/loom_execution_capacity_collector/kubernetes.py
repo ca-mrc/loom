@@ -13,6 +13,7 @@ from loom.nebius_kubernetes import (
     NebiusKubernetesConnection,
     NebiusKubernetesCredentials,
     create_api_client,
+    read_sdk_before_close,
 )
 from loom_execution_capacity_collector.contracts import (
     CapacityTargetScopeV1,
@@ -31,7 +32,6 @@ _MIB = Decimal(1024 * 1024)
 _TARGET_ANNOTATION = "loom.openai.com/target-id"
 _MANAGED_BY = "loom-execution-actuator"
 _IMAGE_PULL_REASONS = {"ErrImagePull", "ImagePullBackOff"}
-
 
 class KubernetesObservationError(RuntimeError):
     """Kubernetes did not return a complete, safely scoped inventory."""
@@ -513,10 +513,13 @@ class InClusterKubernetesCapacityReader:
         self._apps = apps_api
         self._request_timeout = request_timeout_seconds
 
+    def _close_sync(self) -> None:
+        if self._api_client is not None:
+            self._api_client.close()
+
     async def close(self) -> None:
         try:
-            if self._api_client is not None:
-                await asyncio.to_thread(self._api_client.close)
+            await read_sdk_before_close(self._close_sync)
         finally:
             if self._credentials is not None:
                 await self._credentials.close()
@@ -679,6 +682,8 @@ class InClusterKubernetesCapacityReader:
             assigned = by_node[node.metadata.name]
             placement = NodePlacement(
                 uid=_identity(getattr(node.metadata, "uid", None), name="Node UID"),
+                name=_identity(node.metadata.name, name="Node name"),
+                created_at=getattr(node.metadata, "creation_timestamp", None),
                 provider_id=_identity(
                     getattr(node.spec, "provider_id", None), name="Node provider ID"
                 ),
@@ -756,13 +761,12 @@ class InClusterKubernetesCapacityReader:
         node_label_selector: str,
         target_scope: CapacityTargetScopeV1 | None = None,
     ) -> KubernetesCapacitySnapshot:
-        return await asyncio.to_thread(
-            self._capture_sync,
+        return await read_sdk_before_close(lambda: self._capture_sync(
             namespace=namespace,
             target_id=target_id,
             node_label_selector=node_label_selector,
             target_scope=target_scope,
-        )
+        ))
 
     async def capture_pool(self, *, scope: PoolObservationScope) -> KubernetesCapacitySnapshot:
         """One physical inventory; never combine per-environment snapshots.

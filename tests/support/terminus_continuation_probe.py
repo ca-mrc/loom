@@ -7,6 +7,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
@@ -44,6 +45,12 @@ class ScriptedLLM:
 
 
 class Session:
+    def __init__(self):
+        self.environment = self
+
+    async def exec(self, command, **kwargs):
+        return SimpleNamespace(return_code=0, stdout="0\n", stderr="")
+
     async def is_session_alive(self):
         return True
 
@@ -183,7 +190,7 @@ class RealHarborCompletionTests(unittest.IsolatedAsyncioTestCase):
         agent, = self.instances
         self.assertEqual(len(agent._llm.prompts), 3)
 
-    async def test_trajectory_cap_cancels_active_model_before_deadline(self):
+    async def test_trajectory_cap_stops_before_next_model_dispatch(self):
         from loom.errors import AgentError
 
         deadline = AttemptDeadline.after(4)
@@ -191,8 +198,11 @@ class RealHarborCompletionTests(unittest.IsolatedAsyncioTestCase):
             await self.execute(True, deadline=deadline, max_trajectory_bytes=2500)
         agent, = self.instances
         self.assertGreater(deadline.remaining(), 2, "resource cap was deferred until timeout")
-        self.assertTrue(agent._llm.cancelled)
-        self.assertEqual(len(agent._llm.prompts), 4)
+        # The parsed-turn checkpoint now rejects the write before dispatch;
+        # waiting for the poller to cancel a fourth model call would be too late.
+        self.assertFalse(agent._llm.blocked.is_set())
+        self.assertFalse(agent._llm.cancelled)
+        self.assertLessEqual(len(agent._llm.prompts), 3)
         self.assertLessEqual((Path(self.directory.name) / "trial/trajectory.jsonl").stat().st_size, 2500)
 
 

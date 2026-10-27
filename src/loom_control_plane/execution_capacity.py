@@ -23,12 +23,14 @@ from loom.db.schema import (
 from loom.pipeline.keys import canonical_digest
 from loom_control_plane.execution_capacity_targets import resolve_capacity_targets
 from loom_control_plane.execution_placement import (
+    PlacementConstraint,
     PlacementUnavailableError,
     cold_sample,
     plan_placement,
     quota_identity,
     require_provider_quota_headroom,
 )
+from loom_control_plane.task_image_io_capacity import NativeIOUnavailable, native_io_candidates
 from loom_execution_capacity_collector.contracts import (
     CapacityPlacement,
     NodeTemplateSample,
@@ -58,6 +60,7 @@ _PENDING_AUTHORIZATION_STATES = (
 class ExecutionProvisioningBlockedError(Exception):
     reason: str
     retry_after_seconds: int = 15
+    capacity_wait: dict[str, Any] | None = None
 
 
 def _utc(value: datetime, *, name: str) -> datetime:
@@ -431,6 +434,7 @@ class _NativeCapacityReservation:
     state: str
     reserved_at: datetime
     released: bool
+    native: dict[str, Any]
 
 
 def native_build_resources(native: dict[str, Any]) -> ResourceTotals:
@@ -465,6 +469,7 @@ async def _native_capacity_reservations(
                 resources=native_build_resources(native), state=str(native.get("state", "reserved")),
                 reserved_at=_utc(datetime.fromisoformat(native["capacity_reserved_at"]), name="native reservation time"),
                 released=native.get("capacity_released_at") is not None,
+                native=dict(native),
             ))
         except (KeyError, TypeError, ValueError) as exc:
             raise ExecutionProvisioningBlockedError("execution_capacity_native_reservation_invalid") from exc
@@ -477,6 +482,7 @@ async def reserve_execution_provisioning(
     lease_id: UUID,
     now: datetime | None = None,
     revalidate_existing: bool = False,
+    capacity_wait_inputs: dict[str, Any] | None = None,
 ) -> ExecutionProvisioningAuthorization | None:
     """Authorize one Nebius create against fresh provider and cluster evidence."""
 
@@ -509,12 +515,29 @@ async def reserve_execution_provisioning(
     ).scalar_one_or_none()
     if cost is None:
         raise ExecutionProvisioningBlockedError("execution_capacity_resource_envelope_unavailable")
-    decision = await admit_capacity_resources(
-        session, target=target, demand_id=f"{lease_id}:{lease.resource_generation}",
-        resources=ResourceTotals(cpu_millis=cost.requested_cpu_millis, memory_mib=cost.requested_memory_mib,
-                                 storage_mib=cost.requested_ephemeral_storage_mib),
-        current_time=current_time, already_reserved=existing is not None, exclude_lease_id=lease_id,
-    )
+    resources = ResourceTotals(cpu_millis=cost.requested_cpu_millis, memory_mib=cost.requested_memory_mib,
+                               storage_mib=cost.requested_ephemeral_storage_mib)
+    try:
+        decision = await admit_capacity_resources(
+            session, target=target, demand_id=f"{lease_id}:{lease.resource_generation}",
+            resources=resources, current_time=current_time,
+            already_reserved=existing is not None, exclude_lease_id=lease_id,
+            capacity_wait_inputs=capacity_wait_inputs,
+        )
+    except ExecutionProvisioningBlockedError as exc:
+        # Carry only the already validated Pod envelope across the scheduler's
+        # savepoint rollback. It is not a lease or a cost reservation.
+        context = None
+        if existing is None and lease.execution_role == "attempt":
+            from loom_control_plane.execution_capacity_wait import execution_target_fingerprint
+
+            context = {"target_id": target.id, "pool_id": target.logical_pool_id,
+                       "resources": resources.model_dump(),
+                       "target_fingerprint": execution_target_fingerprint(target),
+                       "runtime_contract_sha256": lease.runtime_contract_sha256,
+                       "image_materialization_id": (lease.runtime_contract_json or {}).get("task_image_materialization_id"),
+                       "task_revision_sha256": (lease.runtime_contract_json or {}).get("task_revision_sha256")}
+        raise ExecutionProvisioningBlockedError(exc.reason, exc.retry_after_seconds, context) from exc
     if existing is not None:
         return existing
     payload = {"schema_version": "loom.execution-provisioning-authorization.v1", "lease_id": str(lease_id), **decision}
@@ -552,6 +575,7 @@ async def admit_capacity_resources(
     already_reserved: bool = False,
     exclude_lease_id: UUID | None = None,
     exclude_native_attempt_id: UUID | None = None,
+    capacity_wait_inputs: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Shared admission arithmetic under the caller's capacity transaction lock.
 
@@ -613,16 +637,30 @@ async def admit_capacity_resources(
         claiming = await session.get(TaskImageMaterializationAttempt, exclude_native_attempt_id)
     # Previously committed authority precedes later waiting work. Revalidation
     # remains subject to genuine reservations and provider/cleanup evidence.
-    waiting = [] if already_reserved else await read_capacity_waits(
+    from loom_control_plane.execution_capacity_wait import read_execution_capacity_waits
+
+    waiting, build_order = ([], None) if already_reserved else await read_capacity_waits(
         session, now=current_time, claiming_attempt=claiming,
         claiming_target=target, claiming_resources=resources,
     )
+    execution_waiting, execution_order = ([], None) if already_reserved else await read_execution_capacity_waits(
+        session, now=current_time, claiming_lease_id=exclude_lease_id,
+        claiming_inputs=capacity_wait_inputs,
+    )
+    # Both kinds of incoming demand yield only to older renewable waiting
+    # heads. A new claim has no inherited queue age. Real authority stays first.
+    order = build_order or execution_order or (current_time, demand_id)
+    waiting = [row for row in waiting
+               if (row.first_waited_at, f"task-image-wait:{row.materialization_id}:{row.lease_epoch}") < order]
+    execution_waiting = [row for row in execution_waiting if row.order < order]
 
     def native_demands(target_ids: frozenset[str], *, include_waits: bool = True) -> list[tuple[str, ResourceTotals]]:
         return [
             *((row.demand_id, row.resources) for row in native_active if row.target_id in target_ids),
             *((f"task-image-wait:{row.materialization_id}:{row.lease_epoch}", wait_resources(row))
               for row in waiting if include_waits and row.target_id in target_ids),
+            *((row.demand_id, row.resources) for row in execution_waiting
+              if include_waits and row.target_id in target_ids),
         ]
 
     same_target = [row for row in authorizations if row.target_id in group.target_ids]
@@ -656,7 +694,8 @@ async def admit_capacity_resources(
         row.target_id in group.target_ids and row.reserved_at >= current_time - timedelta(minutes=1)
         for row in native
     )
-    waiting_here = sum(row.target_id in group.target_ids for row in waiting)
+    waiting_here = sum(row.target_id in group.target_ids for row in waiting) + sum(
+        row.target_id in group.target_ids for row in execution_waiting)
     if not already_reserved and int(recent_creates or 0) + waiting_here >= policy.max_create_per_minute:
         raise ExecutionProvisioningBlockedError("execution_capacity_create_rate_exceeded", 30)
     recent_pending = sum(
@@ -700,30 +739,72 @@ async def admit_capacity_resources(
             for row in rows
         ]
 
+    def binding_constraint(binding: Any, inventory: CapacityPlacement) -> PlacementConstraint:
+        if isinstance(binding, dict) and binding.get("mode") == "node":
+            uid = binding.get("node_uid")
+            name = binding.get("node_name")
+            if isinstance(uid, str) and uid and isinstance(name, str) and name:
+                if any(node.uid == uid and node.name != name for node in inventory.nodes):
+                    raise ExecutionProvisioningBlockedError("execution_capacity_native_io_binding_invalid")
+                return PlacementConstraint(frozenset({uid}))
+        if isinstance(binding, dict) and binding.get("mode") == "bootstrap":
+            names = binding.get("excluded_node_names")
+            if (isinstance(names, list) and all(isinstance(name, str) and name for name in names)
+                    and names == sorted(set(names))):
+                return PlacementConstraint(frozenset(
+                    node.uid for node in inventory.nodes if node.name and node.name not in names
+                ), allow_cold=True)
+        raise ExecutionProvisioningBlockedError("execution_capacity_native_io_binding_invalid")
+
+    def frozen_constraints(inventory: CapacityPlacement, target_ids: frozenset[str]) -> dict[str, PlacementConstraint]:
+        return {row.demand_id: binding_constraint(row.native["io_binding"], inventory)
+                for row in native_active if row.target_id in target_ids and row.native.get("io_binding") is not None}
+
+    io_binding = None
     try:
         sample = await native_allocatable_sample(session, group.owner.id, placement)
         actual_demands = [*demands(same_target), *native_demands(group.target_ids, include_waits=False)]
-        prior = plan_placement(placement, actual_demands, sample=sample)
-        actual_projected = plan_placement(
-            placement, [*actual_demands, (demand_id, resources)], sample=sample,
-        )
-        projected = plan_placement(
-            placement,
-            [
-                *demands(same_target),
-                *native_demands(group.target_ids),
-                (
-                    demand_id,
-                    ResourceTotals(
-                        cpu_millis=requested_cpu,
-                        memory_mib=requested_memory,
-                        storage_mib=requested_storage,
-                    ),
-                ),
-            ],
-            sample=sample,
-        )
-    except PlacementUnavailableError as exc:
+        protected_demands = [*demands(same_target), *native_demands(group.target_ids), (demand_id, resources)]
+        constraints = frozen_constraints(placement, group.target_ids)
+        incoming = claiming.native_build if claiming is not None else None
+        candidates: list[dict[str, Any] | None] = [None]
+        if incoming is not None and "io_full_avg10_max" in incoming:
+            if already_reserved and incoming.get("io_binding") is None:
+                raise ExecutionProvisioningBlockedError("execution_capacity_native_io_binding_invalid")
+            eligible_uids = set()
+            for node in placement.nodes:
+                pinned = {**constraints, demand_id: PlacementConstraint(frozenset({node.uid}))}
+                try:
+                    plan_placement(placement, protected_demands, sample=sample, constraints=pinned)
+                except PlacementUnavailableError:
+                    continue
+                eligible_uids.add(node.uid)
+            candidates = list(native_io_candidates(
+                placement, [(row.demand_id, row.native) for row in native_active if row.target_id in group.target_ids],
+                now=current_time, max_age_seconds=min(60, policy.observation_max_age_seconds),
+                max_full_avg10=incoming["io_full_avg10_max"],
+                existing_binding=incoming.get("io_binding") if already_reserved else None,
+                eligible_node_uids=eligible_uids,
+            ))
+        plans = []
+        last_error = None
+        for index, candidate in enumerate(candidates):
+            bound = dict(constraints)
+            if candidate is not None:
+                bound[demand_id] = binding_constraint(candidate, placement)
+            try:
+                prior = plan_placement(placement, actual_demands, sample=sample, constraints=bound)
+                actual = plan_placement(placement, [*actual_demands, (demand_id, resources)],
+                                        sample=sample, constraints=bound)
+                protected = plan_placement(placement, protected_demands, sample=sample, constraints=bound)
+            except PlacementUnavailableError as exc:
+                last_error = exc
+                continue
+            plans.append((protected.additional_nodes, actual.additional_nodes, index, prior, actual, protected, candidate))
+        if not plans:
+            raise last_error or PlacementUnavailableError("execution_capacity_bound_node_unavailable")
+        _, _, _, prior, actual_projected, projected, io_binding = min(plans, key=lambda row: row[:3])
+    except (PlacementUnavailableError, NativeIOUnavailable) as exc:
         raise ExecutionProvisioningBlockedError(str(exc)) from exc
     total_nodes = projected.additional_nodes
     # Waiting protects headroom but is not an acquired create or cost event.
@@ -784,7 +865,8 @@ async def admit_capacity_resources(
         other_observation = await _latest_observation(session, other_group.owner.id)
         has_active = (any(row.target_id in other_group.target_ids for row in authorizations)
                       or any(row.target_id in other_group.target_ids for row in native_active)
-                      or any(row.target_id in other_group.target_ids for row in waiting))
+                      or any(row.target_id in other_group.target_ids for row in waiting)
+                      or any(row.target_id in other_group.target_ids for row in execution_waiting))
         if other_observation is None and not has_active:
             continue
         if other_observation is None:
@@ -831,6 +913,7 @@ async def admit_capacity_resources(
                 [*demands([row for row in authorizations if row.target_id in other_group.target_ids]),
                  *native_demands(other_group.target_ids)],
                 sample=await native_allocatable_sample(session, other_group.owner.id, other),
+                constraints=frozen_constraints(other, other_group.target_ids),
             )
         except PlacementUnavailableError as exc:
             raise ExecutionProvisioningBlockedError(
@@ -856,6 +939,8 @@ async def admit_capacity_resources(
         "decision_reason": decision_reason,
         "authorized_at": current_time.isoformat(),
     }
+    if io_binding is not None:
+        payload["io_binding"] = io_binding
     return payload
 
 

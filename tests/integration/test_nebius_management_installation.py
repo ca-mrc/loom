@@ -15,10 +15,10 @@ from loom.db.schema import Team, TeamMembership, User
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 from loom_service.password_auth import hash_password
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_environment_contract import foundation_from
 from tests.unit.test_nebius_kubernetes import FakeSDK
 from tests.unit.test_nebius_kubernetes import connection as connection
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
 @pytest.fixture

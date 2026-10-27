@@ -117,6 +117,40 @@ Provider/API contracts: [access-key resource at the pinned provider version](htt
 [Object Storage action/role matrix](https://docs.nebius.com/object-storage/supported-actions),
 and [bucket-scoped policies](https://docs.nebius.com/object-storage/buckets/bucket-policy).
 
+## Integration catalog storage permissions
+
+The integration canonical storage group has a `storage.viewer` IAM access permit
+scoped to the artifacts bucket. Native catalog publication checks
+`GetBucketVersioning` before uploading each task and requires `Enabled` plus a
+non-null object version ID. Nebius's
+[Object Storage action/role matrix](https://docs.nebius.com/object-storage/supported-actions)
+excludes this bucket-settings read from `storage.object-editor`. The additional
+read permission must be an IAM permit on that bucket; adding `storage.viewer`
+to its object-access policy alone does not authorize the S3 versioning call.
+
+The permit does not grant bucket configuration or policy mutation privileges.
+Source, backups and trajectories keep their existing access, and all bucket
+object policies, including native-builder read/cache rules, remain unchanged.
+After reconciliation, verify `GetBucketVersioning` with the deployed canonical
+credential; a successful operator IAM read does not prove that the publisher can
+use the S3 API. Preserve versioning and require a real version ID on a bounded
+publication-storage probe.
+
+When adopting an existing operator-created permit, import its verified ID into
+the platform root before applying, using the existing protected backend and
+variable file:
+
+```sh
+terraform -chdir=deploy/terraform/nebius/platform import \
+  -var-file=/protected/platform.tfvars.json \
+  'module.platform.nebius_iam_v1_access_permit.integration_catalog_metadata["integration"]' \
+  '<verified-permit-id>'
+```
+
+Read back its parent group, artifacts bucket resource ID and `storage.viewer`
+role before import. Review the subsequent plan; importing this permit must not
+recreate it or change other cloud resources.
+
 ## Plan shape
 
 The deployment gateway now has a separately reserved private `/32` allocation

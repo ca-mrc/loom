@@ -30,14 +30,13 @@ from loom.execution_contract import (
 from loom.execution_image_admission import ExecutionImageAdmissionBundleV1
 from loom.execution_requirements import ALL_GUEST_EXECUTION_CAPABILITIES, GuestExecutionCapability
 from loom.models.networking import NetworkPolicy, TaskHttpEgress, WebAllowlist, hosted_http_egress
+from loom.runtime_environment import MAX_ENV_VALUE_BYTES, validate_runtime_environment
 from loom.sandbox_identity import SandboxIdentityV1
 
 _DIGEST_REF = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _CANDIDATE = re.compile(r"^[0-9a-f]{40}$")
-_ENV_NAME = re.compile(r"^[A-Z_][A-Z0-9_]{0,127}$")
 _ROLE_NAME = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
-_SECRET_ENV = re.compile(r"(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|KUBECONFIG)")
 _NETWORK_POLICY_ADAPTER: TypeAdapter[NetworkPolicy] = TypeAdapter(NetworkPolicy)
 
 
@@ -131,7 +130,7 @@ class NodeResourceAllocationV1(_Strict):
 
 class ProcessPhaseV1(_Strict):
     # Shared by plan validation and compiler transport selection.
-    MAX_ENV_VALUE_BYTES: ClassVar[int] = 4096
+    MAX_ENV_VALUE_BYTES: ClassVar[int] = MAX_ENV_VALUE_BYTES
     role: Literal["setup", "agent", "verifier"]
     argv: tuple[str, ...] = Field(min_length=1, max_length=128)
     working_directory: str = Field(pattern=r"^(?:/app|/workspace(?:/[-A-Za-z0-9._]+)*)$")
@@ -157,14 +156,7 @@ class ProcessPhaseV1(_Strict):
     @field_validator("environment")
     @classmethod
     def _environment_is_nonsecret(cls, value: dict[str, str]) -> dict[str, str]:
-        if len(value) > 64:
-            raise ValueError("process environment exceeds 64 entries")
-        for name, item in value.items():
-            if _ENV_NAME.fullmatch(name) is None or _SECRET_ENV.search(name):
-                raise ValueError("process environment contains a forbidden name")
-            if "\x00" in item or len(item.encode("utf-8")) > cls.MAX_ENV_VALUE_BYTES:
-                raise ValueError("process environment value is invalid")
-        return value
+        return validate_runtime_environment(value)
 
 
 class ProbeV1(_Strict):
@@ -224,6 +216,7 @@ class SidecarContainerV1(_Strict):
     depends_on: tuple[str, ...] = Field(default=(), max_length=32)
     private_sandbox: bool = False
     identity: SandboxIdentityV1 | None = None
+    guest_task_identity: SandboxIdentityV1 | None = Field(default=None, exclude_if=lambda value: value is None)
     guest_execution: GuestExecutionV1 | None = Field(default=None, exclude_if=lambda value: value is None)
     task_fixture: bool = Field(default=False, strict=True, exclude_if=lambda value: not value)
     task_image_component: str | None = Field(default=None, exclude_if=lambda value: value is None)
@@ -236,7 +229,8 @@ class SidecarContainerV1(_Strict):
 
             validate_fixture_component(self.role_name, self.task_image_component)
             validate_fixture_hostname(self.hostname)
-            if self.private_sandbox or self.identity is not None or self.depends_on or self.environment:
+            if (self.private_sandbox or self.identity is not None or self.guest_task_identity is not None
+                    or self.depends_on or self.environment):
                 raise ValueError("fixture cannot share a sandbox identity or trusted sidecar contract")
         elif self.task_image_component is not None or self.hostname is not None or self.role_name.startswith("fixture-"):
             raise ValueError("fixture metadata and roles require explicit fixture isolation")
@@ -261,6 +255,8 @@ class SidecarContainerV1(_Strict):
             if (self.resources.cpu_millis < 1000 or self.resources.memory_mib < 512
                     or self.resources.ephemeral_storage_mib < 160):
                 raise ValueError("guest execution resources are below the admitted minimum")
+        if self.guest_task_identity is not None and self.guest_execution is None:
+            raise ValueError("guest task identity requires guest execution")
         return self
 
     @field_validator("image_ref")
@@ -435,6 +431,7 @@ class ExecutionRuntimePlanV1(_Strict):
         if (
             self.in_place_verifier
             or self.verifier_execution == VerifierExecution.SEPARATE_EXECUTION
+            or self.verifier_execution == VerifierExecution.SKIPPED
         ):
             return {"task-sandbox"}
         return {"task-sandbox", "verifier-sandbox"}
@@ -456,13 +453,24 @@ class ExecutionRuntimePlanV1(_Strict):
                     raise ValueError("guest capabilities do not match the immutable class")
         if guest_class != bool(guests):
             raise ValueError("guest execution class and guest plan must be selected together")
+        skipped_guest = (
+            self.verifier_execution == VerifierExecution.SKIPPED
+            and self.verifier is None
+            and not self.in_place_verifier
+            and not self.verifier_after_agent_timeout
+        )
+        single_guest = self.in_place_verifier or skipped_guest
         if guests and (
             {sidecar.role_name for sidecar in guests} != (
-                {"task-sandbox"} if self.in_place_verifier else {"task-sandbox", "verifier-sandbox"}
+                {"task-sandbox"} if single_guest else {"task-sandbox", "verifier-sandbox"}
             )
-            or len(self.sidecars) != (1 if self.in_place_verifier else 2)
+            or len(self.sidecars) != (1 if single_guest else 2)
             or self.execution_role != "attempt" or self.composition != RuntimeComposition.INIT_PAYLOAD
-            or self.verifier_execution != VerifierExecution.IN_ATTEMPT
+            or (
+                self.verifier_execution != VerifierExecution.SKIPPED
+                if skipped_guest
+                else self.verifier_execution != VerifierExecution.IN_ATTEMPT
+            )
             or self.runtime_volume_mib < 1024
             or self.controller_resources is None
             or any(sidecar.guest_execution != guests[0].guest_execution
@@ -870,6 +878,7 @@ def validate_runtime_plan_requirements(
         expected_verifier = {
             VerifierTopology.IN_ATTEMPT: VerifierExecution.IN_ATTEMPT,
             VerifierTopology.SEPARATE_EXECUTION: VerifierExecution.SEPARATE_EXECUTION,
+            VerifierTopology.SKIPPED: VerifierExecution.SKIPPED,
         }[requirements.verifier_topology]
         if plan.verifier_execution != expected_verifier:
             raise ValueError("runtime plan verifier topology does not match workload requirements")

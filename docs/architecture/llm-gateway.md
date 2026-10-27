@@ -49,6 +49,46 @@ contract against provider SDKs in-process. See [`cli-mode.md`](cli-mode.md).
    Gateway denies a request if its `model` field isn't in the team's
    allowlist.
 
+## Retained Pipeline dispatch accounting
+
+Pipeline execution-attempt calls retain a separate durable dispatch ledger.
+Before any upstream call, the Gateway reserves the Attempt's remaining provider
+cost bound and a request slot, then commits `dispatched` before opening the
+network request. Settlement correlates one `LLMCall` with the dispatch and updates
+both the Attempt budget and run ledger in the same transaction.
+
+Every 15 seconds, the Gateway sweeps up to 100 old dispatches, using the configured
+upstream timeout (at least one second) plus a five-second grace period. Age starts
+at creation for `reserved` rows and at send marking for `dispatched` rows. A
+reserved row proves no upstream send: recovery releases its allowance and cost
+as `not_dispatched` without creating an `LLMCall`. A dispatched row has an uncertain
+provider outcome: recovery charges its full reserved cost as `uncertain` and
+creates one correlated `LLMCall`. Replays cannot send or settle a recovered row
+again. Recovery and send marking serialize on database row locks; recovery skips
+Attempts and dispatches currently locked by live senders or worker cleanup.
+It also skips a busy run ledger inside the candidate's savepoint. Ordinary
+settlement acquires the ledger without waiting while it holds an Attempt lock;
+on contention, it rolls back first, waits for the ledger alone for at most one
+second, and retries the whole transaction. It makes at most three attempts. A
+wait timeout or exhausted retries raises `provider_dispatch_accounting_busy`
+with accounting unchanged for later settlement or recovery. The existing Responses
+HTTP boundary returns `502` when an upstream result cannot be durably accounted;
+replaying its dispatch does not authorize another upstream send. These boundaries
+accommodate both worker cleanup's Attempt-before-ledger order and terminal-cause
+cancellation's ledger-before-Attempt order; they do not change either authority.
+
+Cancellation and worker-loss cleanup preserve dispatch-owned reservations for
+ordinary Gateway settlement or this sweep. Accounting can therefore converge
+after worker cleanup, and run terminal projection continues to wait for active
+reservations. The sweep isolates recognized accounting drift in a per-candidate
+savepoint, logs the dispatch ID and stable error category, and lets healthy
+candidates in the same bounded batch progress. It leaves corrupt accounting
+unchanged for investigation; unrelated failures still roll back the sweep.
+
+These retained ledger guarantees are tested against disposable PostgreSQL. They
+do not enable the retired hosted Pipeline execution path or establish live
+provider or deployment acceptance.
+
 ## Deadline dispatch audit
 
 Ordinary Trial requests have a non-billing `gateway_dispatch_receipts` audit
@@ -60,6 +100,11 @@ and before transport. Audit admission failure returns a secret-free
 Admission failure logs contain the opaque request ID and only a fixed error
 category (`timeout`, `database`, or `other`), never driver messages, SQL binds,
 or exception tracebacks. The category diagnoses failure without relaxing admission.
+Observation failure logs use the same fixed categories and identify the
+`provider` or `gateway` write and its unfinished phase (`session`, `execute`,
+`commit`, or `session_exit`). The execute phase includes connection checkout;
+these fields locate the failed boundary without establishing a physical cause.
+The existing one-second audit budget and durable unknown outcomes still apply.
 
 The internal join is `trial_id / step_id / agent_attempt_id / step_jwt_id`.
 The worker supervisor creates a new opaque attempt UUID for each real agent
@@ -315,6 +360,7 @@ OpenAI-compatible dispatch bypass LiteLLM so:
 | Upstream timeout (>200s)               | 504, failed-attempt `llm_calls` row inserted with zero tokens and `provider_extras._loom_failure_category=upstream_timeout` |
 | Upstream non-2xx                       | Forwarded or surfaced with a redacted excerpt; failed-attempt `llm_calls` row inserted with zero tokens and `provider_extras._loom_failure_category=upstream_http_4xx` or `upstream_http_5xx` |
 | LiteLLM adapter exception or malformed upstream response | 502 with sanitized diagnostic text; failed-attempt `llm_calls` row inserted with `provider_extras._loom_failure_category=upstream_transport`; provider API keys and `Authorization: Bearer` values are redacted before logs or responses |
+| Ordinary OpenAI Chat facade or Responses HTTP-success body fails JSON decoding or required-shape validation | 502; failed-attempt `llm_calls` row with `upstream_invalid_response`, the upstream HTTP status, and missing usage |
 | BYO `/responses` endpoint is actually chat-only | One fallback POST to `/chat/completions`; success returns synthetic Responses JSON/SSE and records normal `openai_responses` usage from chat `usage` tokens |
 | Rate-card missing                      | 422 `RateCardNotFoundError`; no row inserted |
 | Bearer invalid / over RPM              | 401 / 429; no upstream call          |

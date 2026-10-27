@@ -756,10 +756,6 @@ def _json_has_provenance(response: HttpResponse, *, batch_id: str | None = None)
     return True
 
 
-def _json_models_nonempty(response: HttpResponse) -> bool:
-    return bool(_json_model_items(response))
-
-
 def _json_model_items(response: HttpResponse) -> list[dict[str, Any]]:
     try:
         body = response.json()
@@ -1499,14 +1495,6 @@ def _append_object_store_write_probe(
             f"sample={bucket}/{keys[0]}."
         ),
     ))
-
-
-def _append_service_pod_restart_check(
-    args: argparse.Namespace,
-    results: list[CheckResult],
-) -> None:
-    snapshot = _service_pod_restart_snapshot(args)
-    results.append(_service_pod_restart_result(args, initial=snapshot, final=snapshot))
 
 
 def _service_pod_restart_snapshot(args: argparse.Namespace) -> ServicePodRestartSnapshot:

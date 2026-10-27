@@ -127,3 +127,16 @@ def test_supported_auth_kinds_exposed() -> None:
     """Downstream code (the CLI, tests, future docs) needs to
     introspect the supported set."""
     assert SUPPORTED_AUTH_KINDS == frozenset({"static_keys", "irsa"})
+
+
+@pytest.mark.parametrize("kind", ["irsa", "static_keys"])
+def test_admission_can_bound_storage_requests_without_changing_authority(kind):
+    from botocore.config import Config
+    with patch("loom.storage_credentials.boto3.client") as mock_client:
+        build_s3_client(endpoint_url="http://minio:9000", auth_kind=kind,
+            access_key="test-access", secret_key="test-secret", config=Config(
+                connect_timeout=3, read_timeout=5, retries={"total_max_attempts": 1}))
+    config = mock_client.call_args.kwargs["config"]
+    assert config.signature_version == "s3v4"
+    assert config.connect_timeout == 3 and config.read_timeout == 5
+    assert config.retries == {"total_max_attempts": 1}

@@ -27,25 +27,35 @@ without executing package installation hooks. An unavailable pinned archive
 fails the build. Updating dependencies requires updating the lock and running
 the full payload verification and guest capability tests.
 
-For HTTP 502, 503 or 504, the downloader makes at most three attempts, waiting
+For HTTP 500, 502, 503 or 504, or a connection/TLS-handshake or response-body
+timeout, the downloader shares one budget of at most three attempts, waiting
 one and then two seconds between attempts. Each attempt retains the 120-second
-network timeout. Diagnostics identify the locked archive by SHA256, HTTP status
-and attempt count, without logging URLs or response bodies. Other HTTP errors,
-transport failures, local filesystem failures and size/hash mismatches fail
-without retries. Failed downloads remove their partial files; only complete,
+network timeout; an interrupted body restarts from byte zero. Diagnostics
+identify the locked archive by SHA256, HTTP status or connection/body-timeout
+category, and attempt count, without logging URLs or response bodies.
+Certificate-validation errors, other HTTP errors, other transport failures,
+local filesystem failures and size/hash mismatches fail without
+retries. Failed downloads remove their partial files; only complete,
 verified archives enter the cache. These are build-time archive retries, not
 task execution retries.
 
 `archive.ubuntu.com` removes a package file from `pool/` once Ubuntu publishes
-a newer version, so a pinned URL there can start returning 404. The `libssl3t64`
-and `libpng16-16t64` entries use direct historical files in Ubuntu's Launchpad
-Librarian archive. Their numeric file URLs were resolved through Launchpad's
-official `+files` endpoint and verified against the existing sizes and SHA256
-hashes. Direct file URLs avoid the lookup redirect, which previously timed out
-or returned 502 in CI. The previously pinned Ubuntu snapshot URLs also returned
-500/502/503 during builds. Package versions, sizes, hashes and extracted files
-are unchanged; the retained source lock and its checksum record the new URLs.
-The same download and integrity checks apply to these historical archives.
+a newer version, so a pinned URL there starts returning 404. Launchpad's
+Librarian keeps every published file permanently but serves the payload's
+packages several times more slowly, enough to push in-test image builds past
+their timeouts. Each package entry therefore has two sources for the same
+bytes: `url`, its `archive.ubuntu.com` pool file, and `fallback_url`, its
+permanent Librarian file. The downloader uses the fallback only when the mirror
+returns 404; other errors keep their behaviour above, and both sources pass the
+same size and SHA256 checks. Each Librarian URL was resolved through
+Launchpad's official `+files` endpoint
+(`https://launchpad.net/ubuntu/+archive/primary/+files/<file>.deb`) and its
+downloaded bytes were verified against the locked size and SHA256; the direct
+file URL avoids that endpoint's redirect, which previously timed out or returned
+502 in CI. Ubuntu snapshot URLs also returned 500/502/503 during builds. When
+adding or updating a package, record both URLs:
+`tests/ops/test_guest_payload_download.py` requires the pair and that both name
+the entry's exact name, version and architecture.
 
 The output is relocatable and contains regular files rather than absolute
 distro symlinks. `SHA256SUMS` covers all other payload files; `sources.lock.json`

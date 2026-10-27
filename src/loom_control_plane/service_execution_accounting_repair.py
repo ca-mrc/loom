@@ -29,6 +29,9 @@ from loom_control_plane.config import ControlPlaneSettings
 from loom_control_plane.service_execution_materializer import (
     build_canonical_atif,
     build_canonical_events,
+    canonical_agent_version,
+    default_image_version,
+    load_batch_runtime_profile,
     read_exception_info,
 )
 from loom_control_plane.service_execution_task_snapshot import (
@@ -102,6 +105,7 @@ async def repair_accounting(
         if trial_config.agent_name != "terminus-2":
             raise ValueError("accounting repair only supports Terminus-2")
         task_config = TaskConfig.model_validate(task.config)
+        runtime_profile = await load_batch_runtime_profile(session, trial)
         storage = copy.deepcopy(artifact.storage)
         old_index = copy.deepcopy(trial.trajectory_index)
         outcome = copy.deepcopy((trial.state, trial.finished_at, trial.result, trial.config))
@@ -159,7 +163,10 @@ async def repair_accounting(
     usage = terminus_usage(list(events), trial_config)
     atif_body = build_canonical_atif(
         events, task_id=task_id, agent_name=trial_config.agent_name,
-        agent_version=trial_config.agent_version or task_config.agent.version or "service-execution-v1",
+        agent_version=canonical_agent_version(
+            trial_config, task_config,
+            default_image_version=default_image_version(runtime_profile, runtime_result),
+        ),
     )
     ledger = {"schema_version": "loom.gateway-lease-ledger.v1", "calls": rows}
     event_rows = [(event.seq, event.kind.value, event.model_dump(mode="json"),

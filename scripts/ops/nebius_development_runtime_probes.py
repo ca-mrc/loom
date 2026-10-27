@@ -19,7 +19,7 @@ import ssl
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import PostgresDsn
 from scripts.ops import nebius_certificates as private_state
@@ -39,6 +39,7 @@ from scripts.ops.nebius_pool_migration_guard import (
     _BOUND_DATABASE_COMMAND,
     qualify_database_destination,
 )
+from scripts.ops.nebius_pool_registration import PoolRegistrationRequest
 from scripts.ops.nebius_pool_runtime_settings import (
     BOUND_POOL_SETTINGS_COMMAND,
     PoolSettingsComponent,
@@ -51,14 +52,23 @@ from scripts.ops.nebius_pool_startup_database import (
 
 from loom_service.environment_management.candidates import _json
 
+if TYPE_CHECKING:
+    from scripts.ops.nebius_development_schema_upgrade import CompletedDevelopmentSchemaSuccessor
+    from scripts.ops.nebius_pool_preactivation_operation import CompletedPreactivationCatalog
+    from scripts.ops.nebius_pool_storage_operation import CompletedClosedStorage
+
 
 class HTTPSDevelopmentRuntimeProbes(HTTPSDevelopmentRuntimeObserver):
     def __init__(self, *, request: DevelopmentRuntimeInstallRequest, api_server: str,
-                 ssl_context: ssl.SSLContext, token: str, private_files: dict[Path, bytes] | None = None):
+                 ssl_context: ssl.SSLContext, token: str, private_files: dict[Path, bytes] | None = None,
+                 preactivation: CompletedPreactivationCatalog | None = None,
+                 schema_successor: CompletedDevelopmentSchemaSuccessor | None = None,
+                 storage: CompletedClosedStorage | None = None):
         if not token:
             raise ValueError('development runtime probe credential missing')
         super().__init__(request=request, api_server=api_server, ssl_context=ssl_context,
-            token=token, private_files=private_files)
+            token=token, private_files=private_files, preactivation=preactivation,
+            schema_successor=schema_successor, storage=storage)
         try:
             # The protected gateway strips PATH to os.defpath. Include the
             # standard operator installation directory without trusting ambient
@@ -153,13 +163,33 @@ class HTTPSDevelopmentRuntimeProbes(HTTPSDevelopmentRuntimeObserver):
         self._private_inputs()
         return pod
 
+    @property
+    def effective_registration(self) -> PoolRegistrationRequest:
+        if self.preactivation is not None:
+            return self.preactivation.retained.registration
+        if self.schema_successor is not None:
+            from scripts.ops.nebius_development_runtime_selection import DevelopmentRuntimeSelection
+
+            return DevelopmentRuntimeSelection(self.schema_successor.runtime, self.schema_successor).registration
+        if self.storage is not None:
+            return self.storage.retained.registration
+        return self.request.database.manager.retained.request.registration
+
+    @property
+    def manager_revision(self) -> str:
+        if self.schema_successor is None:
+            return '0176'
+        from loom.nebius_candidate_contract import candidate_service_schema_head
+
+        return candidate_service_schema_head(self.schema_successor.projection.manager_publication.bundle.candidate)
+
     def qualify_closed_pool(self) -> None:
         """One fixed READ ONLY query, bracketed by retained database qualification."""
         try:
-            spec = self.request.database.manager.retained.request.registration.spec
+            spec = self.effective_registration.spec
             before = self._database(self.manager.binding.namespace)
             report = self._exec(before, 'loom-postgres', ['psql', '-X', '-qAt', '-v', 'ON_ERROR_STOP=1',
-                '-U', 'postgres', '-d', 'loom', '-c', pool_startup_closed_sql(spec)])
+                '-U', 'postgres', '-d', 'loom', '-c', pool_startup_closed_sql(spec, manager_revision=self.manager_revision)])
             qualify_startup_closed_report(spec, report)
             if _uid(self._database(self.manager.binding.namespace)) != _uid(before):
                 raise ValueError
@@ -172,6 +202,10 @@ class HTTPSDevelopmentRuntimeProbes(HTTPSDevelopmentRuntimeObserver):
     def _running(self, key: str, state_dir: Path) -> tuple[PoolSettingsComponent, dict[str, Any], dict[str, Any]]:
         """Resolve only a regenerated started target through anchored live history."""
         desired = copy.deepcopy({**self.plan.targets, **self.plan.fixed['workloads']}[key])
+        if self.schema_successor is not None:
+            desired = copy.deepcopy(self.schema_successor.resources[key])
+        if self.preactivation is not None and key == _key(self.preactivation.resources.manager):
+            desired = copy.deepcopy(self.preactivation.resources.manager)
         if desired['kind'] != 'Deployment':
             raise ValueError
         namespace, name = desired['metadata']['namespace'], desired['metadata']['name']
@@ -206,17 +240,33 @@ class HTTPSDevelopmentRuntimeProbes(HTTPSDevelopmentRuntimeObserver):
     def _process_identity(pod: dict[str, Any]) -> tuple[Any, ...]:
         return (_uid(pod), pod['status']['containerStatuses'], pod['status'].get('initContainerStatuses', []))
 
+    def _manager_catalog(self) -> dict[str, Any]:
+        """Select the retained document mounted by the qualified manager."""
+        if self.preactivation is not None:
+            return self.preactivation.resources.catalog
+        resources = (self.schema_successor.resources if self.schema_successor is not None
+            else self.request.database.manager.retained.resources)
+        return resources['ConfigMap:' + self.manager.binding.namespace
+            + ':loom-pool-profiles-' + self.effective_registration.spec.operation_id.hex]
+
     def qualify_runtime_settings(self, *, key: str, state_dir: Path) -> None:
         """Challenge real typed settings/catalog/token readers; never return secrets."""
         try:
             component, workload, before = self._running(key, state_dir)
-            spec = self.request.database.manager.retained.request.registration.spec
+            spec = self.effective_registration.spec
             participant = retained_development_participant(self.request.database.manager.retained.request)
             machine, = (row for row in spec.machines
                 if row.participant_id == participant.participant_id and row.workload_scope == 'environment')
+            catalog_sha256 = None
+            if component == 'manager':
+                # The process reads the retained mounted bytes. Re-serializing
+                # an equivalent catalog after storage/history round-trips can
+                # reorder maps and produce a different byte identity.
+                catalog = self._manager_catalog()
+                catalog_sha256 = hashlib.sha256(catalog['data']['profiles.json'].encode()).hexdigest()
             wanted = expected_pool_runtime_settings(component, workload,
                 token_sha256=machine.token_sha256 if component in {'controller', 'actuator'} else None,
-                catalog_sha256=hashlib.sha256(spec.profiles.model_dump_json().encode()).hexdigest() if component == 'manager' else None)
+                catalog_sha256=catalog_sha256)
             nonce = secrets.token_hex(32)
             response = hmac.new(bytes.fromhex(nonce), json.dumps(wanted, sort_keys=True,
                 separators=(',', ':')).encode(), 'sha256').hexdigest()

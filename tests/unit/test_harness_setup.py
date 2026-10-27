@@ -11,7 +11,7 @@ import pytest
 import loom.hosted_harness as hosted
 import loom.service_execution_sandbox_task as controller
 from loom.driver.base import ExecHandle
-from loom.execution_runtime_contract import TASK_EGRESS_OUTPUT
+from loom.execution_runtime_contract import TASK_EGRESS_OUTPUT, RuntimeHandoffInputV1
 from loom.hosted_harness import (
     HARNESS_SETUP_PHASE,
     SANDBOX_CONTROLLER_MODULE,
@@ -23,6 +23,7 @@ from loom.models.trial import TrialConfig
 from loom.models.types import ModelSpec
 from loom.service_execution_materialization import (
     automatic_service_execution_rejections,
+    compile_deferred_verifier_plan,
     compile_service_execution_plan,
 )
 from loom.service_execution_task import ServiceExecutionTaskError
@@ -103,6 +104,45 @@ def test_plan_freezes_a_setup_phase_and_its_install_sources() -> None:
     task_sandbox = next(s for s in plan.sidecars if s.role_name == "task-sandbox")
     assert int(task_sandbox.argv[task_sandbox.argv.index("--exec-timeout-seconds") + 1]) >= 1200
     assert "setup_egress" in plan.canonical_payload()
+
+
+@pytest.mark.usefixtures("_registered")
+@pytest.mark.parametrize("agent", ["installed-agent", "codex"])
+def test_deferred_verifier_does_not_install_the_agent_harness(agent: str) -> None:
+    task, _, profile = _inputs()
+    trial = _trial().model_copy(update={"agent_name": agent})
+    plan = compile_service_execution_plan(
+        task=task, trial=trial, profile=profile, source_provenance=_provenance(),
+        task_revision_sha256=_REVISION,
+    )
+    assert plan.verifier_execution == "separate_execution"
+    assert plan.setup and plan.setup_egress is not None
+    if agent == "codex":
+        assert plan.setup_cache is not None
+    handoff = RuntimeHandoffInputV1(
+        manifest_sha256="sha256:" + "5" * 64, file_count=1, total_bytes=1,
+    )
+
+    verifier = compile_deferred_verifier_plan(
+        plan, task, verifier_timeout_seconds=60, handoff_input=handoff,
+    )
+
+    # Harness installation connects to task-sandbox, which exists only in the
+    # agent pod. Grading owns a fresh verifier-sandbox and needs no agent CLI.
+    assert [s.role_name for s in verifier.sidecars if s.private_sandbox] == ["verifier-sandbox"]
+    assert verifier.setup == ()
+    assert verifier.setup_egress is None
+    assert verifier.setup_cache is None
+    assert verifier.main.argv[4] == "verify-sandbox"
+    assert verifier.handoff_input == handoff
+    assert verifier.effective_network_policy == plan.effective_network_policy
+    assert verifier.task_egress == plan.task_egress
+    # A gateway-only verifier runs no egress proxy, so it cannot require its
+    # log; the agent pod still records install egress.
+    assert TASK_EGRESS_OUTPUT not in verifier.output_declarations
+    assert TASK_EGRESS_OUTPUT in plan.output_declarations
+    # Compiling the verifier must leave the agent's install contract intact.
+    assert plan.setup and plan.setup_egress is not None
 
 
 @pytest.mark.usefixtures("_registered")

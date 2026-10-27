@@ -80,10 +80,31 @@ def apply_verification_selection(
     return None
 
 
+def reported_verification(
+    verifier_execution: str | None, *, in_place_verifier: bool,
+) -> tuple[str | None, bool]:
+    """Map a frozen attempt plan onto the verification axis.
+
+    ``in_attempt`` is the pod that grades, not the axis. Shared grading runs
+    inside the task sandbox (``in_place_verifier``). A fresh verifier sandbox
+    that stays in that pod — guest separate, or a verifier kept beside retained
+    services — is still separate. A deferred child execution is separate too.
+    """
+
+    if verifier_execution == "skipped":
+        return "skipped", False
+    fresh_sandbox = verifier_execution == "separate_execution" or (
+        verifier_execution == "in_attempt" and not in_place_verifier
+    )
+    if fresh_sandbox:
+        return "separate", True
+    if verifier_execution == "in_attempt":
+        return "shared", False
+    return verifier_execution, False
+
+
 def execution_selection_readback(trial_config: Any, plan: Any | None) -> dict[str, Any]:
     """What a trial asked for on each axis, beside what its frozen attempt plan ran."""
-
-    from loom.execution_runtime_contract import VerifierExecution
 
     config = trial_config if isinstance(trial_config, dict) else {}
     agent_name = config.get("agent_name")
@@ -95,11 +116,9 @@ def execution_selection_readback(trial_config: Any, plan: Any | None) -> dict[st
     }
     if plan is None:
         return {"requested": requested, "effective": None}
-    verification = {
-        VerifierExecution.IN_ATTEMPT: "shared",
-        VerifierExecution.SEPARATE_EXECUTION: "separate",
-        VerifierExecution.SKIPPED: "skipped",
-    }[plan.verifier_execution]
+    verification, fresh_sandbox_grading = reported_verification(
+        plan.verifier_execution, in_place_verifier=plan.in_place_verifier,
+    )
     return {
         "requested": requested,
         "effective": {
@@ -109,7 +128,7 @@ def execution_selection_readback(trial_config: Any, plan: Any | None) -> dict[st
                 if plan.effective_network_policy is not None else None
             ),
             "verification": verification,
-            "fresh_sandbox_grading": verification == "separate",
+            "fresh_sandbox_grading": fresh_sandbox_grading,
             "isolation": (
                 "guest" if any(sidecar.guest_execution is not None for sidecar in plan.sidecars)
                 else "container"
@@ -131,7 +150,6 @@ def resolved_execution_selection(task: TaskConfig, trial: TrialConfig) -> dict[s
     try:
         policy: dict[str, Any] | None = resolve_effective_network_policy(
             baseline=task.environment.baseline_network_policy,
-            supported=task.environment.network_policies_supported,
             override=trial.baseline_network_policy_override,
         ).model_dump(mode="json")
     except UnsupportedNetworkPolicyOverrideError:

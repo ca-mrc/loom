@@ -65,6 +65,11 @@ on:
     - cron: "23 8 * * *"
   workflow_dispatch:
     inputs:
+      shared_pool_simulations:
+        description: "Qualify unlaunched shared-pool handoff/recovery simulations (manual only)"
+        required: false
+        type: boolean
+        default: false
       legacy_compatibility:
         description: "Include historical platform tests and both integration tiers (manual only)"
         required: false
@@ -115,36 +120,44 @@ jobs:
     name: workflow-plan
     runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-latest' }}
     timeout-minutes: 5
+    # Read-only live PR and run state, to recognize a stale draft payload.
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
     outputs:
-      event_relevant: ${{ steps.plan.outputs.event_relevant || steps.event.outputs.event_relevant }}
-      full_gate: ${{ steps.plan.outputs.full_gate || steps.event.outputs.full_gate }}
-      gate_mode: ${{ steps.plan.outputs.gate_mode || steps.event.outputs.gate_mode }}
-      docs_only: ${{ steps.plan.outputs.docs_only || steps.event.outputs.docs_only }}
-      integration: ${{ steps.plan.outputs.integration || steps.event.outputs.integration }}
-      integration_docker: ${{ steps.plan.outputs.integration_docker || steps.event.outputs.integration_docker }}
-      images: ${{ steps.plan.outputs.images || steps.event.outputs.images }}
-      cluster_smoke: ${{ steps.plan.outputs.cluster_smoke || steps.event.outputs.cluster_smoke }}
-      staging_smoke: ${{ steps.plan.outputs.staging_smoke || steps.event.outputs.staging_smoke }}
-      coverage_summary: ${{ steps.plan.outputs.coverage_summary || steps.event.outputs.coverage_summary }}
-      web_checks: ${{ steps.plan.outputs.web_checks || steps.event.outputs.web_checks }}
+      event_relevant: ${{ steps.plan.outputs.event_relevant || steps.filtered.outputs.event_relevant }}
+      full_gate: ${{ steps.plan.outputs.full_gate || steps.filtered.outputs.full_gate }}
+      gate_mode: ${{ steps.plan.outputs.gate_mode || steps.filtered.outputs.gate_mode }}
+      docs_only: ${{ steps.plan.outputs.docs_only || steps.filtered.outputs.docs_only }}
+      integration: ${{ steps.plan.outputs.integration || steps.filtered.outputs.integration }}
+      integration_docker: ${{ steps.plan.outputs.integration_docker || steps.filtered.outputs.integration_docker }}
+      images: ${{ steps.plan.outputs.images || steps.filtered.outputs.images }}
+      cluster_smoke: ${{ steps.plan.outputs.cluster_smoke || steps.filtered.outputs.cluster_smoke }}
+      staging_smoke: ${{ steps.plan.outputs.staging_smoke || steps.filtered.outputs.staging_smoke }}
+      coverage_summary: ${{ steps.plan.outputs.coverage_summary || steps.filtered.outputs.coverage_summary }}
+      web_checks: ${{ steps.plan.outputs.web_checks || steps.filtered.outputs.web_checks }}
       web_runtime: ${{ steps.plan.outputs.web_runtime }}
       go_packages: ${{ steps.plan.outputs.go_packages || '["./cmd/...","./internal/..."]' }}
       iac_targets: ${{ steps.plan.outputs.iac_targets || '[]' }}
-      lint_and_static: ${{ steps.plan.outputs.lint_and_static || steps.event.outputs.lint_and_static }}
-      tests_root: ${{ steps.plan.outputs.tests_root || steps.event.outputs.tests_root }}
-      nebius_pool: ${{ steps.plan.outputs.nebius_pool || steps.event.outputs.nebius_pool }}
-      tests_packages: ${{ steps.plan.outputs.tests_packages || steps.event.outputs.tests_packages }}
-      go_checks: ${{ steps.plan.outputs.go_checks || steps.event.outputs.go_checks }}
-      runtime_payload: ${{ steps.plan.outputs.runtime_payload || steps.event.outputs.runtime_payload }}
-      nebius_iac: ${{ steps.plan.outputs.nebius_iac || steps.event.outputs.nebius_iac }}
-      locked_environments: ${{ steps.plan.outputs.locked_environments || steps.event.outputs.locked_environments }}
+      lint_and_static: ${{ steps.plan.outputs.lint_and_static || steps.filtered.outputs.lint_and_static }}
+      tests_root: ${{ steps.plan.outputs.tests_root || steps.filtered.outputs.tests_root }}
+      nebius_pool: ${{ steps.plan.outputs.nebius_pool || steps.filtered.outputs.nebius_pool }}
+      tests_packages: ${{ steps.plan.outputs.tests_packages || steps.filtered.outputs.tests_packages }}
+      go_checks: ${{ steps.plan.outputs.go_checks || steps.filtered.outputs.go_checks }}
+      runtime_payload: ${{ steps.plan.outputs.runtime_payload || steps.filtered.outputs.runtime_payload }}
+      nebius_iac: ${{ steps.plan.outputs.nebius_iac || steps.filtered.outputs.nebius_iac }}
+      locked_environments: ${{ steps.plan.outputs.locked_environments || steps.filtered.outputs.locked_environments }}
+      stale_draft: ${{ steps.stale.outputs.stale_draft || 'false' }}
       test_changes: ${{ steps.plan.outputs.test_changes || '[]' }}
+      test_diff: ${{ steps.plan.outputs.test_diff || '[]' }}
+      shared_pool_simulations: ${{ steps.plan.outputs.shared_pool_simulations || 'false' }}
       tests_root_matrix: ${{ steps.plan.outputs.tests_root_matrix || '[]' }}
       nebius_pool_matrix: ${{ steps.plan.outputs.nebius_pool_matrix || '[]' }}
       integration_matrix: ${{ steps.plan.outputs.integration_matrix || '[]' }}
       integration_docker_matrix: ${{ steps.plan.outputs.integration_docker_matrix || '[]' }}
     steps:
-      - name: Classify filtered event before checkout
+      - name: Classify draft event payload
         id: event
         shell: bash
         env:
@@ -152,47 +165,60 @@ jobs:
             ${{ github.event_name == 'pull_request' &&
                 (github.event.pull_request.draft ||
                  github.event.action == 'converted_to_draft') }}
-        run: |
-          set -euo pipefail
-          if [[ "$FILTERED_EVENT" == "true" ]]; then
-            {
-              echo 'checkout_required=false'
-              echo 'event_relevant=false'
-              echo 'full_gate=false'
-              echo 'gate_mode=filtered'
-              echo 'docs_only=true'
-              echo 'integration=false'
-              echo 'integration_docker=false'
-              echo 'images=false'
-              echo 'cluster_smoke=false'
-              echo 'staging_smoke=false'
-              echo 'coverage_summary=false'
-              echo 'web_checks=false'
-              echo 'lint_and_static=false'
-              echo 'tests_root=false'
-              echo 'nebius_pool=false'
-              echo 'tests_packages=false'
-              echo 'go_checks=false'
-              echo 'runtime_payload=false'
-              echo 'nebius_iac=false'
-              echo 'locked_environments=false'
-            } >> "$GITHUB_OUTPUT"
-          else
-            echo 'checkout_required=true' >> "$GITHUB_OUTPUT"
-          fi
+        run: echo "draft_payload=$FILTERED_EVENT" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-        if: steps.event.outputs.checkout_required == 'true'
         with:
           fetch-depth: 0
 
+      # A draft payload can get a newer suite than the Ready run on the same
+      # head; filtering it would hide that run's required contexts.
+      - name: Recheck draft event against the live pull request
+        id: stale
+        if: steps.event.outputs.draft_payload == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 scripts/ci_stale_draft_event.py
+
+      - name: Filter draft event
+        id: filtered
+        if: >-
+          steps.event.outputs.draft_payload == 'true' &&
+          steps.stale.outputs.stale_draft != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo 'event_relevant=false'
+            echo 'full_gate=false'
+            echo 'gate_mode=filtered'
+            echo 'docs_only=true'
+            echo 'integration=false'
+            echo 'integration_docker=false'
+            echo 'images=false'
+            echo 'cluster_smoke=false'
+            echo 'staging_smoke=false'
+            echo 'coverage_summary=false'
+            echo 'web_checks=false'
+            echo 'lint_and_static=false'
+            echo 'tests_root=false'
+            echo 'nebius_pool=false'
+            echo 'tests_packages=false'
+            echo 'go_checks=false'
+            echo 'runtime_payload=false'
+            echo 'nebius_iac=false'
+            echo 'locked_environments=false'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Enforce repository path policy
-        if: steps.event.outputs.checkout_required == 'true'
+        if: steps.filtered.outcome == 'skipped'
         run: python3 scripts/check_repository_paths.py
 
       - name: Plan required validations
         id: plan
-        if: steps.event.outputs.checkout_required == 'true'
+        if: steps.filtered.outcome == 'skipped'
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -202,10 +228,12 @@ jobs:
           PR_ACTION: ${{ github.event.action }}
           PR_ACTION_LABEL: ${{ github.event.label.name }}
           PR_DRAFT: ${{ github.event.pull_request.draft || false }}
+          PR_STALE_DRAFT: ${{ steps.stale.outputs.stale_draft == 'true' }}
           PR_BASE_CHANGED: ${{ github.event.changes.base != null }}
           DISPATCH_INTEGRATION: ${{ inputs.integration || inputs.legacy_compatibility }}
           DISPATCH_INTEGRATION_DOCKER: ${{ inputs.integration_docker || inputs.legacy_compatibility }}
           DISPATCH_COVERAGE_SUMMARY: ${{ inputs.coverage_summary }}
+          DISPATCH_SHARED_POOL: ${{ github.event_name == 'workflow_dispatch' && inputs.shared_pool_simulations || false }}
         run: |
           set -euo pipefail
           case "$EVENT_NAME" in
@@ -255,10 +283,13 @@ jobs:
             --changed-files /tmp/loom-changed-files.txt \
             --labels-json "$PR_LABELS_JSON" \
             --event-name "$EVENT_NAME" \
+            --shared-pool-simulations "${DISPATCH_SHARED_POOL:-false}" \
             --pull-request-action "$PR_ACTION" \
             --pull-request-action-label "$PR_ACTION_LABEL" \
             --pull-request-draft "$PR_DRAFT" \
+            --pull-request-stale-draft "${PR_STALE_DRAFT:-false}" \
             --pull-request-base-changed "$PR_BASE_CHANGED" \
+            --base-sha "${BASE_SHA:-}" \
             --github-output "$GITHUB_OUTPUT"
 
       - name: Docs-only fast path
@@ -284,11 +315,12 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Install exact uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: "0.11.26"
           checksum: ${{ matrix.uv_checksum }}
           enable-cache: true
+          prune-cache: true
           save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
           cache-dependency-glob: uv.lock
 
@@ -331,12 +363,18 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Install uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
           enable-cache: true
-          save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+          # Read-only full wheel cache; only ci-dependency-cache.yml saves it.
+          save-cache: false
+          prune-cache: false
+          cache-suffix: ci-wheels-v2
+          # Same path on GitHub-hosted and self-hosted runners; setup-uv's
+          # defaults differ and the cache version hashes the path.
+          cache-local-path: /home/runner/.cache/uv
           cache-dependency-glob: uv.lock
 
       - name: Set up Python 3.11
@@ -372,18 +410,32 @@ jobs:
       - name: Verify controlled CI upgrade policy
         run: uv run --no-sync python scripts/check_ci_upgrade_policy.py
 
+  # Native dependencies reserve runner slots for quick checks first. Unselected
+  # prerequisites may skip; a selected skip/failure/cancellation blocks fan-out.
   tests-root:
     name: tests-root (${{ matrix.shard }})
     runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-24.04' }}
-    needs: [workflow-plan]
+    needs: [workflow-plan, lint-and-static, locked-environments, tests-packages, go-checks, nebius-iac]
     # Shards project ~7 minutes of pytest without coverage; leave room for
     # coverage, setup, wheel verification and cleanup.
     timeout-minutes: 50
     if: >-
+      !cancelled() &&
+      needs.workflow-plan.result == 'success' &&
+      ((needs.workflow-plan.outputs.lint_and_static == 'true' && needs.lint-and-static.result == 'success') ||
+       (needs.workflow-plan.outputs.lint_and_static == 'false' && needs.lint-and-static.result == 'skipped')) &&
+      ((needs.workflow-plan.outputs.locked_environments == 'true' && needs.locked-environments.result == 'success') ||
+       (needs.workflow-plan.outputs.locked_environments == 'false' && needs.locked-environments.result == 'skipped')) &&
+      ((needs.workflow-plan.outputs.tests_packages == 'true' && needs.tests-packages.result == 'success') ||
+       (needs.workflow-plan.outputs.tests_packages == 'false' && needs.tests-packages.result == 'skipped')) &&
+      ((needs.workflow-plan.outputs.go_checks == 'true' && needs.go-checks.result == 'success') ||
+       (needs.workflow-plan.outputs.go_checks == 'false' && needs.go-checks.result == 'skipped')) &&
+      ((needs.workflow-plan.outputs.nebius_iac == 'true' && needs.nebius-iac.result == 'success') ||
+       (needs.workflow-plan.outputs.nebius_iac == 'false' && needs.nebius-iac.result == 'skipped')) &&
       needs.workflow-plan.outputs.tests_root == 'true' &&
       needs.workflow-plan.outputs.gate_mode == 'full'
     strategy:
-      fail-fast: false
+      fail-fast: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
       matrix:
         include: ${{ fromJSON(needs.workflow-plan.outputs.tests_root_matrix) }}
     env:
@@ -415,12 +467,18 @@ jobs:
           echo "paths_file=$manifest_paths_file" >> "$GITHUB_OUTPUT"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
           enable-cache: true
-          save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+          # Read-only full wheel cache; only ci-dependency-cache.yml saves it.
+          save-cache: false
+          prune-cache: false
+          cache-suffix: ci-wheels-v2
+          # Same path on GitHub-hosted and self-hosted runners; setup-uv's
+          # defaults differ and the cache version hashes the path.
+          cache-local-path: /home/runner/.cache/uv
           cache-dependency-glob: uv.lock
 
       - name: Set up Python 3.11
@@ -442,7 +500,7 @@ jobs:
           [[ ${#test_paths[@]} -gt 0 ]]
           coverage_args=(-p no:cov)
           if [[ "$COVERAGE_ENABLED" == "true" ]]; then
-            coverage_args=(--cov=src --cov=packages --cov-report=)
+            coverage_args=(--cov=src --cov=packages --cov-report= --cov-config=pyproject.toml)
           fi
           uv run --no-sync pytest -m "${CI_PYTEST_MARKERS:-not legacy_pool}" "${test_paths[@]}" \
             -x --durations=25 \
@@ -544,22 +602,181 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
 
+  fast-feedback:
+    name: fast-feedback
+    # Match candidate planning's actual gh toolchain; OLDLAB guests omit gh.
+    runs-on: ubuntu-24.04
+    needs: [workflow-plan, lint-and-static, locked-environments, tests-packages, go-checks, nebius-iac, tests-root, integration, web-checks]
+    if: >-
+      always() && needs.workflow-plan.outputs.gate_mode == 'full' &&
+      (needs.workflow-plan.outputs.docs_only != 'true' ||
+       needs.workflow-plan.outputs.nebius_pool == 'true' ||
+       needs.workflow-plan.outputs.integration_docker == 'true' ||
+       needs.workflow-plan.outputs.runtime_payload == 'true' ||
+       needs.workflow-plan.outputs.web_runtime == 'true' ||
+       needs.workflow-plan.outputs.images == 'true' ||
+       needs.workflow-plan.outputs.cluster_smoke == 'true' ||
+       needs.workflow-plan.outputs.staging_smoke == 'true')
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+      - name: Enforce selected quick checks and affected tests
+        env:
+          FEEDBACK_NEEDS: ${{ toJSON(needs) }}
+        run: python3 scripts/ci_fast_feedback.py enforce
+      - name: Exercise installed candidate GitHub CLI on colored raw logs
+        run: python3 scripts/check_github_cli_logs.py
+      - name: Check current strict PR base before heavy validation
+        if: >-
+          github.event_name == 'pull_request' &&
+          (needs.workflow-plan.outputs.nebius_pool == 'true' ||
+           needs.workflow-plan.outputs.integration_docker == 'true' ||
+           needs.workflow-plan.outputs.runtime_payload == 'true' ||
+           needs.workflow-plan.outputs.web_runtime == 'true' ||
+           needs.workflow-plan.outputs.images == 'true' ||
+           needs.workflow-plan.outputs.cluster_smoke == 'true' ||
+           needs.workflow-plan.outputs.staging_smoke == 'true')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python3 scripts/ci_fast_feedback.py check-base
+
+  # Calls wait in GitHub's dependency graph; no runner polls another workflow.
+  images-validation:
+    needs: [workflow-plan, fast-feedback]
+    if: >-
+      !cancelled() &&
+      (github.event_name == 'pull_request' || github.event_name == 'merge_group') &&
+      needs.workflow-plan.result == 'success' &&
+      needs.workflow-plan.outputs.gate_mode == 'full' &&
+      needs.workflow-plan.outputs.images == 'true' &&
+      needs.fast-feedback.result == 'success'
+    uses: ./.github/workflows/images.yml
+    with:
+      stale_draft: ${{ needs.workflow-plan.outputs.stale_draft == 'true' }}
+
+  images-gate:
+    name: >-
+      ${{ github.event_name == 'schedule' && 'images-gate-scheduled' ||
+          github.event_name == 'workflow_dispatch' && 'images-gate-manual' ||
+          github.event_name == 'push' && 'images-gate-push' ||
+          needs.workflow-plan.outputs.gate_mode == 'full' && 'images-gate' ||
+          'images-gate-filtered' }}
+    needs: [workflow-plan, fast-feedback, images-validation]
+    if: >-
+      always() &&
+      (github.event_name == 'pull_request' || github.event_name == 'merge_group') &&
+      needs.workflow-plan.outputs.gate_mode != 'filtered'
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && vars.LOOM_CI_REUSABLE_SUPPLY_READY == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+      - name: Enforce selected specialist validation
+        env:
+          FEEDBACK_NEEDS: ${{ toJSON(needs) }}
+        run: python3 scripts/ci_fast_feedback.py enforce-specialist --selector images
+
+  cluster-validation:
+    needs: [workflow-plan, fast-feedback]
+    if: >-
+      !cancelled() &&
+      (github.event_name == 'pull_request' || github.event_name == 'merge_group') &&
+      needs.workflow-plan.result == 'success' &&
+      needs.workflow-plan.outputs.gate_mode == 'full' &&
+      needs.workflow-plan.outputs.cluster_smoke == 'true' &&
+      needs.fast-feedback.result == 'success'
+    uses: ./.github/workflows/cluster-smoke.yml
+    with:
+      stale_draft: ${{ needs.workflow-plan.outputs.stale_draft == 'true' }}
+
+  cluster-smoke-gate:
+    name: >-
+      ${{ github.event_name == 'schedule' && 'cluster-smoke-gate-scheduled' ||
+          github.event_name == 'workflow_dispatch' && 'cluster-smoke-gate-manual' ||
+          github.event_name == 'push' && 'cluster-smoke-gate-push' ||
+          needs.workflow-plan.outputs.gate_mode == 'full' && 'cluster-smoke-gate' ||
+          'cluster-smoke-gate-filtered' }}
+    needs: [workflow-plan, fast-feedback, cluster-validation]
+    if: >-
+      always() &&
+      (github.event_name == 'pull_request' || github.event_name == 'merge_group') &&
+      needs.workflow-plan.outputs.gate_mode != 'filtered'
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && vars.LOOM_CI_REUSABLE_SUPPLY_READY == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+      - name: Enforce selected specialist validation
+        env:
+          FEEDBACK_NEEDS: ${{ toJSON(needs) }}
+        run: python3 scripts/ci_fast_feedback.py enforce-specialist --selector cluster_smoke
+
+  staging-validation:
+    needs: [workflow-plan, fast-feedback]
+    if: >-
+      !cancelled() &&
+      (github.event_name == 'pull_request' || github.event_name == 'merge_group') &&
+      needs.workflow-plan.result == 'success' &&
+      needs.workflow-plan.outputs.gate_mode == 'full' &&
+      needs.workflow-plan.outputs.staging_smoke == 'true' &&
+      needs.fast-feedback.result == 'success'
+    uses: ./.github/workflows/staging-smoke.yml
+    with:
+      stale_draft: ${{ needs.workflow-plan.outputs.stale_draft == 'true' }}
+
+  staging-smoke-gate:
+    name: >-
+      ${{ github.event_name == 'schedule' && 'staging-smoke-gate-scheduled' ||
+          github.event_name == 'workflow_dispatch' && 'staging-smoke-gate-manual' ||
+          github.event_name == 'push' && 'staging-smoke-gate-push' ||
+          needs.workflow-plan.outputs.gate_mode == 'full' && 'staging-smoke-gate' ||
+          'staging-smoke-gate-filtered' }}
+    needs: [workflow-plan, fast-feedback, staging-validation]
+    if: >-
+      always() &&
+      (github.event_name == 'pull_request' || github.event_name == 'merge_group') &&
+      needs.workflow-plan.outputs.gate_mode != 'filtered'
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && vars.LOOM_CI_REUSABLE_SUPPLY_READY == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+      - name: Enforce selected specialist validation
+        env:
+          FEEDBACK_NEEDS: ${{ toJSON(needs) }}
+        run: python3 scripts/ci_fast_feedback.py enforce-specialist --selector staging_smoke
+
+  # Heavy execution starts only after the selected quick and affected-test jobs.
+  # Reuse the existing manifests; no tests are duplicated or moved out of admission.
   nebius-pool:
     name: nebius-pool (${{ matrix.shard }})
     runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-24.04' }}
-    needs: [workflow-plan]
+    needs: [workflow-plan, fast-feedback]
     # Pool operator lifecycle modules; the slowest shard needs ~40 minutes
     # for pytest alone. Selected only when operator inputs change.
     timeout-minutes: 50
     if: >-
+      !cancelled() &&
+      needs.workflow-plan.result == 'success' &&
+      needs.fast-feedback.result == 'success' &&
       needs.workflow-plan.outputs.nebius_pool == 'true' &&
       needs.workflow-plan.outputs.gate_mode == 'full'
     strategy:
-      fail-fast: false
+      fail-fast: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
       matrix:
         include: ${{ fromJSON(needs.workflow-plan.outputs.nebius_pool_matrix) }}
     env:
       TEST_CHANGED_PATHS: ${{ needs.workflow-plan.outputs.test_changes }}
+      # Job-level, so candidate reuse reads it from the checkout step's log.
+      TEST_DIFF_PATHS: ${{ needs.workflow-plan.outputs.test_diff }}
+      SHARED_POOL_SIMULATIONS: ${{ needs.workflow-plan.outputs.shared_pool_simulations }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
@@ -578,19 +795,26 @@ jobs:
           set -euo pipefail
           manifest_paths_file="${RUNNER_TEMP}/nebius-pool-manifest.txt"
           python3 scripts/component_ownership.py test-paths --lane nebius-pool --test-scope "${CI_TEST_SCOPE:-all}" \
-            --changed-paths-json "$TEST_CHANGED_PATHS" \
+            --changed-paths-json "$TEST_CHANGED_PATHS" --diff-paths-json "${TEST_DIFF_PATHS:-[]}" \
+            --include-shared-pool "${SHARED_POOL_SIMULATIONS:-false}" \
             --shard-index "$SHARD_INDEX" --shard-count "$SHARD_COUNT" \
             > "$manifest_paths_file"
           test -s "$manifest_paths_file"
           echo "paths_file=$manifest_paths_file" >> "$GITHUB_OUTPUT"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
           enable-cache: true
-          save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+          # Read-only full wheel cache; only ci-dependency-cache.yml saves it.
+          save-cache: false
+          prune-cache: false
+          cache-suffix: ci-wheels-v2
+          # Same path on GitHub-hosted and self-hosted runners; setup-uv's
+          # defaults differ and the cache version hashes the path.
+          cache-local-path: /home/runner/.cache/uv
           cache-dependency-glob: uv.lock
 
       - name: Set up Python 3.11
@@ -629,12 +853,18 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Install uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
           enable-cache: true
-          save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+          # Read-only full wheel cache; only ci-dependency-cache.yml saves it.
+          save-cache: false
+          prune-cache: false
+          cache-suffix: ci-wheels-v2
+          # Same path on GitHub-hosted and self-hosted runners; setup-uv's
+          # defaults differ and the cache version hashes the path.
+          cache-local-path: /home/runner/.cache/uv
           cache-dependency-glob: uv.lock
 
       - name: Set up Python 3.11
@@ -659,7 +889,7 @@ jobs:
           fi
           coverage_args=(-p no:cov)
           if [[ "$COVERAGE_ENABLED" == "true" ]]; then
-            coverage_args=(--cov=src --cov=packages --cov-report=)
+            coverage_args=(--cov=src --cov=packages --cov-report= --cov-config=pyproject.toml)
           fi
           uv run --no-sync pytest -m "${CI_PYTEST_MARKERS:-not legacy_pool}" "${test_paths[@]}" \
             "${coverage_args[@]}"
@@ -676,9 +906,12 @@ jobs:
   runtime-payload:
     name: runtime-payload
     runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-24.04' }}
-    needs: [workflow-plan]
+    needs: [workflow-plan, fast-feedback]
     timeout-minutes: 10
     if: >-
+      !cancelled() &&
+      needs.workflow-plan.result == 'success' &&
+      needs.fast-feedback.result == 'success' &&
       needs.workflow-plan.outputs.runtime_payload == 'true' &&
       (needs.workflow-plan.outputs.gate_mode == 'full' ||
        needs.workflow-plan.outputs.gate_mode == 'preflight')
@@ -762,12 +995,18 @@ jobs:
 
       - name: Install exact uv
         if: needs.workflow-plan.outputs.coverage_summary == 'true'
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
           enable-cache: true
-          save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+          # Read-only full wheel cache; only ci-dependency-cache.yml saves it.
+          save-cache: false
+          prune-cache: false
+          cache-suffix: ci-wheels-v2
+          # Same path on GitHub-hosted and self-hosted runners; setup-uv's
+          # defaults differ and the cache version hashes the path.
+          cache-local-path: /home/runner/.cache/uv
           cache-dependency-glob: uv.lock
 
       - name: Sync locked coverage tool
@@ -906,9 +1145,7 @@ jobs:
           mapfile -t packages < "$RUNNER_TEMP/go-packages.txt"
           go test -race "${packages[@]}"
 
-  # Required frontend gate. It builds and serves the production bundle under
-  # a route prefix, then exercises logged-out, user, and admin paths at
-  # four viewports with strict browser failure ledgers and axe.
+  # Frontend contract, static and unit feedback precedes production/browser work.
   web-checks:
     name: web-checks
     runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-24.04' }}
@@ -933,12 +1170,18 @@ jobs:
         run: npm ci
 
       - name: Set up offline API code generation
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
           enable-cache: true
-          save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+          # Read-only full wheel cache; only ci-dependency-cache.yml saves it.
+          save-cache: false
+          prune-cache: false
+          cache-suffix: ci-wheels-v2
+          # Same path on GitHub-hosted and self-hosted runners; setup-uv's
+          # defaults differ and the cache version hashes the path.
+          cache-local-path: /home/runner/.cache/uv
           cache-dependency-glob: uv.lock
 
       - name: Install locked service contract dependencies
@@ -987,6 +1230,32 @@ jobs:
             npm run test:coverage
           fi
 
+  # Production/browser work remains required, after shared fast feedback.
+  web-runtime:
+    name: web-runtime
+    runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-24.04' }}
+    needs: [workflow-plan, fast-feedback]
+    timeout-minutes: 20
+    if: >-
+      !cancelled() &&
+      needs.workflow-plan.result == 'success' &&
+      needs.fast-feedback.result == 'success' &&
+      needs.workflow-plan.outputs.web_runtime == 'true' &&
+      needs.workflow-plan.outputs.gate_mode == 'full'
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install frozen frontend dependencies
+        working-directory: web
+        run: npm ci
+
       - name: Production build
         if: needs.workflow-plan.outputs.web_runtime == 'true'
         working-directory: web
@@ -1020,21 +1289,29 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  # Fast integration tier — testcontainers Postgres + MinIO only.
-  # Excludes the `@pytest.mark.docker` tests (real DockerDriver,
-  # network-policy, trial-e2e, subprocess-agent, gateway-with-litellm).
-  # The planner selects each tier from paths or opt-in labels. The growing
-  # integration shards need bounded headroom for tests, coverage and cleanup.
+  # Fast integration tier uses the existing affected manifests.
   integration:
     name: integration (${{ matrix.shard }})
     runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-latest' }}
-    needs: [workflow-plan]
+    needs: [workflow-plan, lint-and-static, locked-environments, tests-packages, go-checks, nebius-iac]
     timeout-minutes: 75
     if: >-
+      !cancelled() &&
+      needs.workflow-plan.result == 'success' &&
+      ((needs.workflow-plan.outputs.lint_and_static == 'true' && needs.lint-and-static.result == 'success') ||
+       (needs.workflow-plan.outputs.lint_and_static == 'false' && needs.lint-and-static.result == 'skipped')) &&
+      ((needs.workflow-plan.outputs.locked_environments == 'true' && needs.locked-environments.result == 'success') ||
+       (needs.workflow-plan.outputs.locked_environments == 'false' && needs.locked-environments.result == 'skipped')) &&
+      ((needs.workflow-plan.outputs.tests_packages == 'true' && needs.tests-packages.result == 'success') ||
+       (needs.workflow-plan.outputs.tests_packages == 'false' && needs.tests-packages.result == 'skipped')) &&
+      ((needs.workflow-plan.outputs.go_checks == 'true' && needs.go-checks.result == 'success') ||
+       (needs.workflow-plan.outputs.go_checks == 'false' && needs.go-checks.result == 'skipped')) &&
+      ((needs.workflow-plan.outputs.nebius_iac == 'true' && needs.nebius-iac.result == 'success') ||
+       (needs.workflow-plan.outputs.nebius_iac == 'false' && needs.nebius-iac.result == 'skipped')) &&
       needs.workflow-plan.outputs.gate_mode == 'full' &&
       needs.workflow-plan.outputs.integration == 'true'
     strategy:
-      fail-fast: false
+      fail-fast: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
       matrix:
         include: ${{ fromJSON(needs.workflow-plan.outputs.integration_matrix) }}
     env:
@@ -1069,16 +1346,26 @@ jobs:
         if: steps.manifest.outputs.minio_cache_key != 'none'
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
-          path: ${{ runner.temp }}/minio-fixtures
+          # Read-only; only ci-dependency-cache.yml saves it, on a hosted runner.
+          # The cache version hashes this path and the archive stores it relative
+          # to the workspace, so one literal, workspace-relative path is the only
+          # one that lands in the same place on hosted and self-hosted runners.
+          path: .ci-cache/loom-minio-fixtures
           key: ${{ runner.os }}-${{ steps.manifest.outputs.minio_cache_key }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
           enable-cache: true
-          save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+          # Read-only full wheel cache; only ci-dependency-cache.yml saves it.
+          save-cache: false
+          prune-cache: false
+          cache-suffix: ci-wheels-v2
+          # Same path on GitHub-hosted and self-hosted runners; setup-uv's
+          # defaults differ and the cache version hashes the path.
+          cache-local-path: /home/runner/.cache/uv
           cache-dependency-glob: uv.lock
 
       - name: Set up Python 3.11
@@ -1094,17 +1381,7 @@ jobs:
         run: >-
           uv run --no-sync python -m tests.support.minio_images
           --test-paths-file "${{ steps.manifest.outputs.paths_file }}"
-          --cache-dir "${{ runner.temp }}/minio-fixtures"
-          --save-cache "${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}"
-
-      - name: Save verified MinIO fixtures from trusted runs
-        if: >-
-          steps.manifest.outputs.minio_cache_key != 'none' &&
-          github.event_name != 'pull_request' && github.event_name != 'merge_group'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: ${{ runner.temp }}/minio-fixtures
-          key: ${{ runner.os }}-${{ steps.manifest.outputs.minio_cache_key }}
+          --cache-dir .ci-cache/loom-minio-fixtures
 
       - name: Prepare selected Docker Hub fixtures before test deadlines
         run: >-
@@ -1122,7 +1399,7 @@ jobs:
           [[ ${#test_paths[@]} -gt 0 ]]
           coverage_args=(-p no:cov)
           if [[ "$COVERAGE_ENABLED" == "true" ]]; then
-            coverage_args=(--cov=src --cov=packages --cov-report=)
+            coverage_args=(--cov=src --cov=packages --cov-report= --cov-config=pyproject.toml)
           fi
           uv run --no-sync pytest "${test_paths[@]}" \
             -m "not docker and (${CI_PYTEST_MARKERS:-not legacy_pool})" \
@@ -1149,13 +1426,16 @@ jobs:
   integration-docker:
     name: integration-docker (${{ matrix.shard }})
     runs-on: ${{ vars.LOOM_CI_UNIFIED_RUNNERS == 'true' && github.ref != 'refs/heads/main' && github.base_ref != 'main' && github.event.merge_group.base_ref != 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","loom-ci-exec","loom-ci-isolated-v1"]') || 'ubuntu-24.04' }}
-    needs: [workflow-plan]
+    needs: [workflow-plan, fast-feedback]
     timeout-minutes: 40
     if: >-
+      !cancelled() &&
+      needs.workflow-plan.result == 'success' &&
+      needs.fast-feedback.result == 'success' &&
       needs.workflow-plan.outputs.gate_mode == 'full' &&
       needs.workflow-plan.outputs.integration_docker == 'true'
     strategy:
-      fail-fast: false
+      fail-fast: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
       matrix:
         include: ${{ fromJSON(needs.workflow-plan.outputs.integration_docker_matrix) }}
     env:
@@ -1188,16 +1468,26 @@ jobs:
         if: steps.manifest.outputs.minio_cache_key != 'none'
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
-          path: ${{ runner.temp }}/minio-fixtures
+          # Read-only; only ci-dependency-cache.yml saves it, on a hosted runner.
+          # The cache version hashes this path and the archive stores it relative
+          # to the workspace, so one literal, workspace-relative path is the only
+          # one that lands in the same place on hosted and self-hosted runners.
+          path: .ci-cache/loom-minio-fixtures
           key: ${{ runner.os }}-${{ steps.manifest.outputs.minio_cache_key }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
           enable-cache: true
-          save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+          # Read-only full wheel cache; only ci-dependency-cache.yml saves it.
+          save-cache: false
+          prune-cache: false
+          cache-suffix: ci-wheels-v2
+          # Same path on GitHub-hosted and self-hosted runners; setup-uv's
+          # defaults differ and the cache version hashes the path.
+          cache-local-path: /home/runner/.cache/uv
           cache-dependency-glob: uv.lock
 
       - name: Set up Python 3.11
@@ -1213,17 +1503,7 @@ jobs:
         run: >-
           uv run --no-sync python -m tests.support.minio_images
           --test-paths-file "${{ steps.manifest.outputs.paths_file }}"
-          --cache-dir "${{ runner.temp }}/minio-fixtures"
-          --save-cache "${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}"
-
-      - name: Save verified MinIO fixtures from trusted runs
-        if: >-
-          steps.manifest.outputs.minio_cache_key != 'none' &&
-          github.event_name != 'pull_request' && github.event_name != 'merge_group'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: ${{ runner.temp }}/minio-fixtures
-          key: ${{ runner.os }}-${{ steps.manifest.outputs.minio_cache_key }}
+          --cache-dir .ci-cache/loom-minio-fixtures
 
       - name: Prepare selected Docker Hub fixtures before test deadlines
         run: >-
@@ -1249,7 +1529,7 @@ jobs:
           mapfile -t test_paths < "${{ steps.manifest.outputs.paths_file }}"
           [[ ${#test_paths[@]} -gt 0 ]]
           uv run --no-sync pytest -m "${CI_PYTEST_MARKERS:-not legacy_pool}" "${test_paths[@]}" \
-            --durations=15
+            --maxfail=1 --durations=15
 
   # Optional combined coverage summary for PRs and manual diagnostics.
   # The default fast-tier
@@ -1274,12 +1554,18 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Install uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
           enable-cache: true
-          save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+          # Read-only full wheel cache; only ci-dependency-cache.yml saves it.
+          save-cache: false
+          prune-cache: false
+          cache-suffix: ci-wheels-v2
+          # Same path on GitHub-hosted and self-hosted runners; setup-uv's
+          # defaults differ and the cache version hashes the path.
+          cache-local-path: /home/runner/.cache/uv
           cache-dependency-glob: uv.lock
 
       - name: Set up Python 3.11
@@ -1355,6 +1641,7 @@ jobs:
       needs.workflow-plan.outputs.gate_mode != 'filtered'
     needs:
       - workflow-plan
+      - fast-feedback
       - locked-environments
       - lint-and-static
       - runtime-payload
@@ -1368,10 +1655,12 @@ jobs:
       - integration-docker
       - coverage-summary
       - web-checks
+      - web-runtime
     steps:
       - name: Enforce selected validation results
         env:
           PLAN_RESULT: ${{ needs.workflow-plan.result }}
+          FEEDBACK_RESULT: ${{ needs.fast-feedback.result }}
           GATE_MODE: ${{ needs.workflow-plan.outputs.gate_mode }}
           LINT_RESULT: ${{ needs.lint-and-static.result }}
           LINT_SELECTED: ${{ needs.workflow-plan.outputs.lint_and_static }}
@@ -1399,6 +1688,8 @@ jobs:
           COVERAGE_RESULT: ${{ needs.coverage-summary.result }}
           WEB_SELECTED: ${{ needs.workflow-plan.outputs.web_checks }}
           WEB_RESULT: ${{ needs.web-checks.result }}
+          WEB_RUNTIME_SELECTED: ${{ needs.workflow-plan.outputs.web_runtime }}
+          WEB_RUNTIME_RESULT: ${{ needs.web-runtime.result }}
         run: |
           set -euo pipefail
           case "$GATE_MODE" in
@@ -1440,7 +1731,11 @@ jobs:
           require_boolean integration_docker "$DOCKER_SELECTED"
           require_boolean coverage_summary "$COVERAGE_SELECTED"
           require_boolean web_checks "$WEB_SELECTED"
+          require_boolean web_runtime "$WEB_RUNTIME_SELECTED"
           require_success workflow-plan "$PLAN_RESULT"
+          if [[ "$DOCS_ONLY" != "true" ]]; then
+            require_success fast-feedback "$FEEDBACK_RESULT"
+          fi
           require_boolean locked_environments "$LOCKED_SELECTED"
           require_boolean tests_root "$ROOT_SELECTED"
           require_boolean nebius_pool "$POOL_SELECTED"
@@ -1457,6 +1752,7 @@ jobs:
           require_selected "$GO_SELECTED" go-checks "$GO_RESULT"
           require_selected "$COVERAGE_SELECTED" fast-coverage "$FAST_COVERAGE_RESULT"
           require_selected "$WEB_SELECTED" web-checks "$WEB_RESULT"
+          require_selected "$WEB_RUNTIME_SELECTED" web-runtime "$WEB_RUNTIME_RESULT"
           require_selected "$INTEGRATION_SELECTED" integration "$INTEGRATION_RESULT"
           require_selected "$DOCKER_SELECTED" integration-docker "$DOCKER_RESULT"
           require_selected "$COVERAGE_SELECTED" coverage-summary "$COVERAGE_RESULT"

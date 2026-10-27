@@ -58,15 +58,15 @@ def test_published_retirement_preserves_rows_and_reverses_empty_retirement(
         engine.dispose()
 
 
-@pytest.mark.parametrize("postgres_major", [16, 17])
-def test_guard_free_pre_retirement_database_upgrades_to_current_head(postgres_major: int) -> None:
+@pytest.mark.parametrize("postgres_image", ["postgres:16", "postgres:17"])
+def test_guard_free_pre_retirement_database_upgrades_to_current_head(postgres_image: str) -> None:
     from testcontainers.postgres import PostgresContainer
 
     from loom.db.schema_startup import service_schema_head
 
     # Independent forward provisioning distinguishes the current application
     # profile from the retained application+capacity-guard reference.
-    with PostgresContainer(f"postgres:{postgres_major}", driver="psycopg") as pg:
+    with PostgresContainer(postgres_image, driver="psycopg") as pg:
         url = pg.get_connection_url()
         cfg = _config(url)
         engine = create_engine(url)

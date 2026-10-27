@@ -7,7 +7,7 @@ import pytest
 
 from loom.execution_contract import ExecutionClassV1, ExecutionTopologyV1
 from loom.nebius_platform_render import NebiusPlatformError, build_platform, write_platform
-from tests.unit.test_nebius_platform_render import platform_inputs  # noqa: F401
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -24,7 +24,7 @@ def guest_inputs(inputs):
     return config, candidate, profile
 
 
-def test_guest_render_has_independent_catalog_and_actuator_with_one_physical_owner(platform_inputs, tmp_path):  # noqa: F811
+def test_guest_render_has_independent_catalog_and_actuator_with_one_physical_owner(platform_inputs, tmp_path):
     from scripts.ops.deploy_nebius_platform import load_render
 
     config, candidate, profile = guest_inputs(platform_inputs)
@@ -57,7 +57,7 @@ def test_guest_render_has_independent_catalog_and_actuator_with_one_physical_own
     assert observed_config["guest_execution_target"] == config["guest_execution_target"]
 
 
-def test_guest_actuator_retains_the_published_image_and_shared_credentials(platform_inputs):  # noqa: F811
+def test_guest_actuator_retains_the_published_image_and_shared_credentials(platform_inputs):
     config, candidate, profile = guest_inputs(platform_inputs)
     image = "cr.eu-north1.nebius.cloud/project/loom-execution-actuator@sha256:" + "a" * 64
     candidate["images"]["execution_actuator"]["image_ref"] = image
@@ -72,7 +72,7 @@ def test_guest_actuator_retains_the_published_image_and_shared_credentials(platf
 
 
 @pytest.mark.parametrize("damage", ["no-target", "same-target", "actuator-collision", "wrong-scope", "no-policy", "unknown-runtime"])
-def test_guest_readiness_rejects_incomplete_or_unbound_deployment(platform_inputs, damage):  # noqa: F811
+def test_guest_readiness_rejects_incomplete_or_unbound_deployment(platform_inputs, damage):
     config, candidate, profile = guest_inputs(platform_inputs)
     if damage == "no-target":
         del config["guest_execution_target"]
@@ -91,7 +91,7 @@ def test_guest_readiness_rejects_incomplete_or_unbound_deployment(platform_input
 
 
 @pytest.mark.parametrize("readiness", [None, False, True])
-def test_emulated_auth_adds_distinct_target_without_rebinding_existing_guest(platform_inputs, tmp_path, readiness):  # noqa: F811
+def test_emulated_auth_adds_distinct_target_without_rebinding_existing_guest(platform_inputs, tmp_path, readiness):
     from scripts.ops.deploy_nebius_platform import load_render
 
     from loom_control_plane.execution_capacity_targets import validate_capacity_owner
@@ -129,7 +129,7 @@ def test_emulated_auth_adds_distinct_target_without_rebinding_existing_guest(pla
 
 
 @pytest.mark.parametrize("damage", ["missing-target", "missing-runtime", "missing-guest", "same-owner", "same-guest", "bad-fields"])
-def test_emulated_auth_readiness_requires_exact_distinct_target(platform_inputs, damage):  # noqa: F811
+def test_emulated_auth_readiness_requires_exact_distinct_target(platform_inputs, damage):
     config, candidate, profile = guest_inputs(platform_inputs)
     config["emulated_auth_execution_target"] = {"target_id": "nebius-auth-fixture"}
     profile["supports_emulated_pkcs11"] = True
@@ -149,7 +149,7 @@ def test_emulated_auth_readiness_requires_exact_distinct_target(platform_inputs,
         build_platform(config, candidate, profile, {}, repo_root=ROOT)
 
 
-def test_shared_guest_readiness_requires_guest_runtime_and_is_published(platform_inputs):  # noqa: F811
+def test_shared_guest_readiness_requires_guest_runtime_and_is_published(platform_inputs):
     config, candidate, profile = guest_inputs(platform_inputs)
     profile["supports_shared_guest"] = True
     files = build_platform(config, candidate, profile, {}, repo_root=ROOT)

@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class ResourceTotals(BaseModel):
@@ -41,10 +41,65 @@ class ManagedPodPlacement(BaseModel):
     requests: ResourceTotals
 
 
+class NodeIOPressure(BaseModel):
+    """Measured node stall pressure; absent telemetry is never numeric zero."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    sampled_at: AwareDatetime
+    full_avg10: float = Field(ge=0, le=100, allow_inf_nan=False)
+
+    @field_validator("sampled_at", mode="before")
+    @classmethod
+    def _stored_time(cls, value: Any) -> Any:
+        # Placement is persisted as JSONB and revalidated in Python mode. Keep
+        # strict aware-datetime validation after decoding its ISO wire format.
+        return datetime.fromisoformat(value) if isinstance(value, str) else value
+
+
+class NodeIOWindowPressure(BaseModel):
+    """Full host stall percentage over two real provider counter timestamps.
+
+    This rectangular window is not the kernel's exponentially weighted avg10.
+    Both endpoints are retained so admission can require a complete post-start
+    feedback window rather than diluting a new build with earlier idle time.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    source: Literal["nebius_io_stalled_counter"] = "nebius_io_stalled_counter"
+    window_started_at: AwareDatetime
+    sampled_at: AwareDatetime
+    full_window_percent: float = Field(ge=0, le=100, allow_inf_nan=False)
+
+    @field_validator("window_started_at", "sampled_at", mode="before")
+    @classmethod
+    def _stored_time(cls, value: Any) -> Any:
+        return datetime.fromisoformat(value) if isinstance(value, str) else value
+
+    @model_validator(mode="after")
+    def _bounded_window(self) -> NodeIOWindowPressure:
+        if not 10 <= (self.sampled_at - self.window_started_at).total_seconds() <= 60:
+            raise ValueError("node I/O pressure needs a real ten-to-sixty-second window")
+        return self
+
+
 class NodePlacement(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     uid: str = Field(min_length=1)
+    name: str | None = Field(
+        default=None, min_length=1, max_length=253, exclude_if=lambda value: value is None,
+    )
+    io_pressure: NodeIOPressure | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
+    io_stall_window: NodeIOWindowPressure | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
+    created_at: AwareDatetime | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
     provider_id: str = Field(min_length=1)
     ready: bool
     unschedulable: bool
@@ -56,6 +111,11 @@ class NodePlacement(BaseModel):
     pod_slots: int = Field(gt=0)
     used_pod_slots: int = Field(ge=0)
     managed_pods: list[ManagedPodPlacement]
+
+    @field_validator("created_at", mode="before")
+    @classmethod
+    def _stored_creation_time(cls, value: Any) -> Any:
+        return datetime.fromisoformat(value) if isinstance(value, str) else value
 
 
 class DaemonSetPlacement(BaseModel):
@@ -260,6 +320,7 @@ __all__ = [
     "CapacityObservationV1",
     "CapacityPolicyBinding",
     "KubernetesCapacitySnapshot",
+    "NodeIOPressure",
     "NodeStateCounts",
     "ProviderCapacitySnapshot",
     "ResourceTotals",

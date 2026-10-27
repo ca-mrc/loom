@@ -24,10 +24,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
 from pathlib import Path
+from uuid import uuid4
 
 import httpx
 from sqlalchemy import create_engine, select
@@ -40,9 +42,11 @@ from tests.support.minio_images import prepare_test_image
 REPO_ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_FILE = REPO_ROOT / "deploy" / "docker-compose.test.yml"
 ALEMBIC_CONFIG = REPO_ROOT / "database" / "migrations" / "alembic.ini"
-DB_URL = "postgresql+psycopg://loom:loom@localhost:55432/loom"
 CONTROL_PLANE_URL = "http://localhost:58080"
+GATEWAY_URL = "http://localhost:59100"
+MINIO_URL = "http://localhost:59000"
 DIAGNOSTICS_ENV = "LOOM_SYSTEM_SMOKE_DIAGNOSTICS"
+_DEFAULT_PROJECT_NAME = f"loom-system-{uuid4().hex[:12]}"
 _CANARY_MAX_TIMEOUT_SEC = 30.0
 _CANARY_POLL_INTERVAL_SEC = 0.25
 _COMPOSE_INSPECT_TIMEOUT_SEC = 5.0
@@ -55,6 +59,31 @@ _RUNTIME_PROFILE_ARGS = (
     "--profile",
     "task-image-builder",
 )
+_CONTROL_PLANE_LIVENESS_PROBE = """\
+import json, time, urllib.request
+started = time.monotonic()
+try:
+    with urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2) as response:
+        outcome = str(response.status)
+except Exception as error:
+    outcome = type(error).__name__
+print(json.dumps({'outcome': outcome, 'elapsed_seconds': round(time.monotonic() - started, 3)}))
+"""
+_POSTGRES_ACTIVITY_PROBE = """\
+SET default_transaction_read_only = on;
+SET statement_timeout = '2s';
+SELECT pid, state, wait_event_type, wait_event,
+       round(extract(epoch FROM clock_timestamp() - query_start), 3) AS query_age_seconds,
+       round(extract(epoch FROM clock_timestamp() - xact_start), 3) AS transaction_age_seconds,
+       pg_blocking_pids(pid) AS blockers
+FROM pg_stat_activity
+WHERE datname = current_database() AND pid <> pg_backend_pid()
+ORDER BY pid LIMIT 64;
+"""
+
+
+def _compose_project_name() -> str:
+    return os.environ.get("COMPOSE_PROJECT_NAME") or _DEFAULT_PROJECT_NAME
 
 
 def _compose(
@@ -65,22 +94,61 @@ def _compose(
 ) -> subprocess.CompletedProcess[str]:
     cmd = ["docker", "compose", "-f", str(COMPOSE_FILE), *args]
     env = os.environ.copy()
+    env["COMPOSE_PROJECT_NAME"] = _compose_project_name()
     # Stub LOOM_WORKER_TOKEN so compose can parse the file even when the
     # worker service is not in the active profile. The :? required-form
     # in compose only triggers when the service is selected.
     env.setdefault("LOOM_WORKER_TOKEN", "unused-no-profile")
     env.setdefault("LOOM_TASK_IMAGE_BUILDER_TOKEN", "unused-no-profile")
+    # Docker reserves each loopback port atomically. Keep these mappings at
+    # zero across up/build/restart; discovered endpoints have separate values.
+    for service in ("POSTGRES", "MINIO", "REGISTRY", "GATEWAY", "CONTROL_PLANE"):
+        env.setdefault(f"LOOM_SYSTEM_{service}_PORT", "0")
     if env_extra:
         env.update(env_extra)
-    return subprocess.run(
-        cmd,
-        check=check,
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=timeout_sec,
-    )
+    try:
+        return subprocess.run(
+            cmd,
+            check=check,
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=timeout_sec,
+        )
+    except subprocess.CalledProcessError as exc:
+        # Pytest truncates exception-local stdout/stderr, hiding build failures
+        # before services exist. Redact before truncating so a cut token prefix
+        # cannot leave its secret suffix in the diagnostic tail.
+        output = _redact_diagnostics(f"{exc.stdout or ''}\n{exc.stderr or ''}")
+        try:
+            print(
+                f"Compose command failed (exit {exc.returncode}); output tail:\n"
+                f"{output[-32_768:]}",
+                file=sys.stderr,
+            )
+        except OSError:
+            pass  # A failed diagnostic must not replace the original failure.
+        raise
+
+
+def _published_port(service: str, container_port: str) -> int:
+    result = _compose("port", service, container_port, timeout_sec=_COMPOSE_INSPECT_TIMEOUT_SEC)
+    binding = re.fullmatch(r"127\.0\.0\.1:([0-9]+)", result.stdout.strip())
+    if binding is None or not 1 <= int(binding[1]) <= 65535:
+        label = "database" if service == "postgres" else service
+        raise RuntimeError(f"system-smoke {label} port must have one valid loopback binding")
+    return int(binding[1])
+
+
+def database_url() -> str:
+    """Resolve this stack's loopback database binding for host-side clients."""
+    return f"postgresql+psycopg://loom:loom@127.0.0.1:{_published_port('postgres', '5432')}/loom"
+
+
+def service_urls() -> dict[str, str]:
+    """Endpoints resolved once at startup; canary polling never shells out."""
+    return {"control_plane": CONTROL_PLANE_URL, "gateway": GATEWAY_URL, "minio": MINIO_URL}
 
 
 def _wait_services_healthy(
@@ -136,14 +204,16 @@ def _stack_up(
     timeout_sec: float,
 ) -> tuple[str, str]:
     """Ordered system-stack bootstrap. Returns (team_token, worker_token)."""
+    global CONTROL_PLANE_URL, GATEWAY_URL, MINIO_URL
     minio_env = {"LOOM_SYSTEM_MINIO_IMAGE": prepare_test_image(MINIO_TEST_IMAGE)}
     # Stage 1: start stateful dependencies, then apply migrations explicitly.
     # Long-running services validate schema-at-head and intentionally never
     # auto-migrate, so they must not be started against a blank database.
     _compose("up", "-d", "postgres", "minio", "registry", env_extra=minio_env)
     _wait_services_healthy(["postgres", "minio", "registry"], timeout_sec=timeout_sec)
+    db_url = database_url()
     migration_env = os.environ.copy()
-    migration_env["LOOM_DB_URL"] = DB_URL
+    migration_env["LOOM_DB_URL"] = db_url
     subprocess.run(
         [
             sys.executable,
@@ -165,10 +235,30 @@ def _stack_up(
         ["postgres", "minio", "registry", "llm-gateway", "control-plane"],
         timeout_sec=timeout_sec,
     )
+    # Resolve only after the full default stack is healthy. Keep the Docker
+    # mappings unchanged; only the builder's repository uses the actual port.
+    registry_repo = f"localhost:{_published_port('registry', '5000')}/loom-task-images"
+    urls = {
+        "control_plane": f"http://127.0.0.1:{_published_port('control-plane', '8080')}",
+        "gateway": f"http://127.0.0.1:{_published_port('llm-gateway', '9100')}",
+        "minio": f"http://127.0.0.1:{_published_port('minio', '9000')}",
+    }
+    CONTROL_PLANE_URL, GATEWAY_URL, MINIO_URL = (
+        urls["control_plane"], urls["gateway"], urls["minio"],
+    )
 
     # Stage 3: mint a team + worker token (and seed the fixture).
     seed = subprocess.run(
-        [sys.executable, "scripts/seed_test_data.py", "--task-id", task_id, "--print", "system"],
+        [
+            sys.executable,
+            "scripts/seed_test_data.py",
+            "--task-id",
+            task_id,
+            "--db-url",
+            db_url,
+            "--print",
+            "system",
+        ],
         check=True,
         cwd=REPO_ROOT,
         capture_output=True,
@@ -186,9 +276,10 @@ def _stack_up(
         "--build",
         "--no-deps",
         "task-image-builder",
-        env_extra={**minio_env, "LOOM_TASK_IMAGE_BUILDER_TOKEN": builder_token},
+        env_extra={**minio_env, "LOOM_TASK_IMAGE_BUILDER_TOKEN": builder_token,
+                   "LOOM_SYSTEM_REGISTRY_REPO": registry_repo},
     )
-    _wait_task_image_materialization_ready(task_id, timeout_sec=timeout_sec)
+    _wait_task_image_materialization_ready(task_id, timeout_sec=timeout_sec, db_url=db_url)
 
     # Stage 5: start the worker with the ordinary trial token wired in.
     _compose(
@@ -211,12 +302,13 @@ def _wait_task_image_materialization_ready(
     task_id: str,
     *,
     timeout_sec: float,
+    db_url: str,
 ) -> None:
     # Local compose publishes the supported execution architecture (x86_64),
     # including on Apple Silicon hosts that cross-build via Docker Desktop.
     cpu_arch = "x86_64"
 
-    engine = create_engine(DB_URL)
+    engine = create_engine(db_url)
     deadline = time.monotonic() + timeout_sec
     next_builder_probe = 0.0
     try:
@@ -297,6 +389,8 @@ def stack_down() -> None:
             "down",
             "-v",
             "--remove-orphans",
+            "--rmi",
+            "local",
             check=False,
             timeout_sec=_COMPOSE_TEARDOWN_TIMEOUT_SEC,
         )
@@ -545,12 +639,23 @@ def _redact_diagnostics(text: str) -> str:
 def preserve_compose_diagnostics() -> None:
     """Capture Compose state while containers still exist, with redaction."""
 
+    destination = os.environ.get(DIAGNOSTICS_ENV)
+    destination_path = Path(destination) if destination else None
+    if destination_path is not None and destination_path.exists() and destination_path.stat().st_size > 0:
+        return
     sections: list[str] = []
     for heading, args in (
+        # These run only inside this disposable Compose project. Capture the
+        # volatile waits before slower logs; never include query text or bodies.
+        ("Control Plane liveness", (*_RUNTIME_PROFILE_ARGS, "exec", "-T", "control-plane",
+            "python", "-c", _CONTROL_PLANE_LIVENESS_PROBE)),
+        ("PostgreSQL waits (no query text)", (*_RUNTIME_PROFILE_ARGS, "exec", "-T", "postgres",
+            "psql", "-X", "-U", "loom", "-d", "loom", "-v", "ON_ERROR_STOP=1", "-c", _POSTGRES_ACTIVITY_PROBE)),
+        ("compose stats --no-stream", (*_RUNTIME_PROFILE_ARGS, "stats", "--no-stream", "--format", "json")),
         ("compose ps -a", (*_RUNTIME_PROFILE_ARGS, "ps", "-a")),
         (
             "compose logs --tail=300",
-            (*_RUNTIME_PROFILE_ARGS, "logs", "--no-color", "--tail=300"),
+            (*_RUNTIME_PROFILE_ARGS, "logs", "--no-color", "--timestamps", "--tail=300"),
         ),
     ):
         try:
@@ -565,7 +670,7 @@ def preserve_compose_diagnostics() -> None:
         except subprocess.TimeoutExpired:
             content = "capture exceeded its bounded timeout"
         sections.append(f"===== {heading} =====\n{content}".rstrip())
-    project_name = os.environ.get("COMPOSE_PROJECT_NAME", COMPOSE_FILE.parent.name)
+    project_name = _compose_project_name()
     try:
         raw_ps = subprocess.run(
             [
@@ -591,11 +696,7 @@ def preserve_compose_diagnostics() -> None:
         raw_content = "capture exceeded its bounded timeout"
     sections.append(f"===== docker ps for project {project_name} =====\n{raw_content}")
     payload = _redact_diagnostics("\n\n".join(sections)) + "\n"
-    destination = os.environ.get(DIAGNOSTICS_ENV)
-    if destination:
-        destination_path = Path(destination)
-        if destination_path.exists() and destination_path.stat().st_size > 0:
-            return
+    if destination_path is not None:
         destination_path.write_text(payload, encoding="utf-8")
     else:
         print(payload, file=sys.stderr, end="")
@@ -646,7 +747,16 @@ def run_seed(task_id: str = "hello-world", which: str = "team") -> str:
     token (stripped). `which` is forwarded to --print.
     """
     out = subprocess.run(
-        [sys.executable, "scripts/seed_test_data.py", "--task-id", task_id, "--print", which],
+        [
+            sys.executable,
+            "scripts/seed_test_data.py",
+            "--task-id",
+            task_id,
+            "--db-url",
+            database_url(),
+            "--print",
+            which,
+        ],
         check=True,
         cwd=REPO_ROOT,
         capture_output=True,

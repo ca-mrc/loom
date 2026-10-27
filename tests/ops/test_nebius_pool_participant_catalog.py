@@ -51,15 +51,19 @@ def live_children(manager):
         {'apiVersion': 'v1', 'kind': 'PodList', 'metadata': {'resourceVersion': '27'}, 'items': [pod]})
 
 
-@pytest.fixture
-def connection(catalog_inputs, tmp_path):
+@pytest.fixture(params=['participant', 'catalog-only'])
+def connection(catalog_inputs, tmp_path, request):
     inputs = copy.deepcopy(catalog_inputs)
+    binding = inputs['release'].migration.registration.binding
+    if request.param == 'catalog-only':
+        from scripts.ops import nebius_pool_participant_release as release
+
+        inputs['release'] = release.PoolCatalogRefresh(inputs['release'].refresh, binding)
     manager = inputs['manager']
     manager['metadata']['generation'] = 1
     manager['status'] = {'observedGeneration': 1, 'replicas': 1, 'updatedReplicas': 1,
         'readyReplicas': 1, 'availableReplicas': 1}
     request = module().ParticipantCatalogRequest(**inputs)
-    binding = request.release.migration.registration.binding
     state = SimpleNamespace(request=request, directory=tmp_path, manager=copy.deepcopy(manager), config=None,
         writes=[], failure=None, ready=True, init_ready=True, old_pod=False, replaced_catalog=False, collections=None)
 
@@ -154,6 +158,55 @@ def stage(api, state):
 
 def advance(api, state):
     return module().refresh_participant_manager(request=state.request, api=api, state_dir=state.directory)
+
+
+def test_catalog_receipt_loader_retains_successor_identity_and_original_history(connection):
+    from scripts.ops.nebius_ingress_stage import _snapshot
+    from scripts.ops.nebius_management_switch import _matches
+
+    api, state = connection
+    original = copy.deepcopy(state.request)
+    with api:
+        stage(api, state)
+        assert advance(api, state) is True
+    observed = module().read_applied_catalog(request=state.request, state_dir=state.directory)
+    assert observed.manager['metadata']['uid'] == original.manager['metadata']['uid']
+    # The transition journal normalizes exact API-equivalent resource quantities.
+    assert _matches(state.manager, observed.manager, original.manager['metadata']['uid'])
+    assert observed.catalog['metadata']['uid'] == state.config['metadata']['uid']
+    assert _snapshot(observed.catalog) == _snapshot(state.config)
+    assert set(observed.files) == {state.directory / 'catalog/stage.json', state.directory / 'manager/transition.json'}
+    assert all(path.read_bytes() == raw for path, raw in observed.files.items())
+    assert state.request == original
+
+
+@pytest.mark.parametrize('damage', ['missing-catalog', 'missing-manager', 'pending', 'image', 'catalog-body', 'catalog-uid'])
+def test_catalog_receipt_loader_rejects_incomplete_or_changed_children(connection, damage):
+    from scripts.ops import nebius_certificates as private_state
+
+    api, state = connection
+    with api:
+        stage(api, state)
+        assert advance(api, state) is True
+    catalog_path = state.directory / 'catalog/stage.json'
+    manager_path = state.directory / 'manager/transition.json'
+    if damage.startswith('missing-'):
+        (catalog_path if damage == 'missing-catalog' else manager_path).unlink()
+    else:
+        path = catalog_path if damage.startswith('catalog-') else manager_path
+        record = json.loads(path.read_text())
+        item, = record['resources'].values()
+        if damage == 'pending':
+            item['status'] = 'intent'
+        elif damage == 'image':
+            item['expected']['spec']['template']['spec']['containers'][0]['image'] = 'foreign@sha256:' + 'a' * 64
+        elif damage == 'catalog-body':
+            item['observed']['data']['profiles.json'] = '{}'
+        else:
+            item['uid'] = 'invalid-uid'
+        private_state._atomic_json(path, record)
+    with pytest.raises(ValueError):
+        module().read_applied_catalog(request=state.request, state_dir=state.directory)
 
 
 @pytest.mark.parametrize('failure', [None, 'lost-after', 'unready', 'init-unready', 'old-pod', 'conflict'])

@@ -1,9 +1,12 @@
 # CI runner placement
 
-Loom development CI runs on GitHub-hosted runners. The OLDLAB KVM pool,
-placement leases, route controller, custom route CheckRun publisher and local
-uv mirror integration have been removed from the repository. CI does not need
-Nebius worker nodes or access to a shared development host.
+Loom development validation and normal candidate publication use GitHub-hosted
+runners by default. With `LOOM_CI_UNIFIED_RUNNERS=true`, eligible jobs share
+native Actions labels across disposable OLDLAB KVM guests and disposable
+GitHub-hosted donor VMs. GitHub assigns the jobs and owns their tokens, logs,
+artifacts and CheckRuns. See [native runner supply](../contributing/ci-unified-runners.md)
+for exclusions, capacity, activation and rollback. CI does not need Nebius
+worker nodes.
 
 The four protected source checks remain `repository-checks`, `images-gate`,
 `cluster-smoke-gate`, and `staging-smoke-gate`. GitHub's native queue validates
@@ -22,10 +25,11 @@ Historical tests are available through CI dispatch `legacy_compatibility=true`.
 Dev PR image builds select from the seven AMD64 Nebius platform images.
 Retired personal-development fleet images have no publication lane. Main
 production promotion retains its protected contract. macOS CLI
-compatibility remains a separate developer-host check.
+compatibility retains its separate hosted locked-environment workflow.
 
-This repository change does not stop existing runner services or cancel running
-jobs. Retire residual host services separately after in-flight jobs drain.
+Changing the routing flag affects future jobs; already queued common-label
+jobs must drain before their supplies are retired. The runner-supply runbook
+owns that procedure.
 
 For a PR that edits only unreferenced Python test modules, each test lane runs
 only the edited modules assigned to it. A test module referenced elsewhere is

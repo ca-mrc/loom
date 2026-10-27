@@ -43,6 +43,11 @@ DEFAULT_TASK_RESOURCE_REQUESTS = {
     "verifier_sandbox": {"cpu_millis": 200, "memory_mib": 512, "ephemeral_storage_mib": 512},
 }
 
+EXECUTION_DISK_STORAGE_QUOTAS = {
+    "NETWORK_SSD": "compute.disk.size.network-ssd",
+    "NETWORK_SSD_NON_REPLICATED": "compute.disk.size.network-ssd-non-replicated",
+}
+
 
 class NebiusPlatformError(ValueError):
     """An input cannot describe an independent, reproducible environment."""
@@ -65,7 +70,7 @@ def _name(value: Any, label: str) -> str:
 
 
 def validate_environment(config: dict[str, Any]) -> None:
-    managed = config.get("schema_version") == "loom.nebius-managed-environment.v1"
+    managed = config.get("schema_version") in {"loom.nebius-managed-environment.v1", "loom.nebius-environment-platform.v2"}
     if not managed and config.get("schema_version") != "loom.nebius-platform.v1":
         raise NebiusPlatformError("unsupported platform configuration")
     expected = {
@@ -114,6 +119,7 @@ def validate_environment(config: dict[str, Any]) -> None:
             "task_identity_policy",
             "guest_execution_target",
             "emulated_auth_execution_target",
+            "execution_disk_type",
         }
         != expected
     ):
@@ -125,6 +131,9 @@ def validate_environment(config: dict[str, Any]) -> None:
         raise NebiusPlatformError(str(exc)) from exc
     if type(config.get("public_tls_bootstrap", False)) is not bool:
         raise NebiusPlatformError("public_tls_bootstrap must be a boolean")
+    disk_type = config.get("execution_disk_type", "NETWORK_SSD")
+    if not isinstance(disk_type, str) or disk_type not in EXECUTION_DISK_STORAGE_QUOTAS:
+        raise NebiusPlatformError("execution_disk_type must be NETWORK_SSD or NETWORK_SSD_NON_REPLICATED")
     if "task_egress" in config:
         from loom_llm_gateway.task_egress import TaskEgressConfig
 
@@ -171,8 +180,11 @@ def validate_environment(config: dict[str, Any]) -> None:
         _name(config.get(key), key)
     if managed:
         from loom.nebius_environment_contract import EnvironmentRegistrationV1
+        from loom.nebius_environment_foundation import EnvironmentFoundationIdentityV2
 
-        registration = EnvironmentRegistrationV1.model_validate(config["registration"])
+        registration = (EnvironmentFoundationIdentityV2.model_validate(config["registration"])
+            if config['schema_version'] == 'loom.nebius-environment-platform.v2'
+            else EnvironmentRegistrationV1.model_validate(config["registration"]))
         for key, expected_value in (
             ("namespace", registration.application_namespace),
             ("execution_namespace", registration.execution_namespace),
@@ -399,6 +411,9 @@ def _regional_config(config: dict[str, Any], target: dict[str, Any]) -> dict[str
     result = dict(config)
     result.pop("regional_execution_targets", None)
     result.pop("execution_resource_quota", None)
+    # Regional node groups retain their independently owned SSD templates.
+    # The primary build disk selection must not change their quota class.
+    result.pop("execution_disk_type", None)
     # Native image builds remain in the primary region, even when execution
     # targets are configured elsewhere.
     result.pop("task_image_builder", None)
@@ -932,6 +947,7 @@ def _task_image_builder_settings(config: dict[str, Any], *, service_image: str) 
         "active_deadline_seconds",
         "max_concurrent",
         "snapshotter",
+        "io_full_avg10_max",
         "compatible_revision_cache",
         "export_cache_mode",
         "cache_transfer",
@@ -987,6 +1003,8 @@ def _task_image_builder_documents(config: dict[str, Any], settings: Any) -> list
     namespace["metadata"]["labels"]["pod-security.kubernetes.io/enforce"] = "privileged"
     quota = _obj("ResourceQuota", "loom-task-image-build-capacity", ns)
     count = settings.max_concurrent
+    # Keep this same apply-owned object even without an operator guard. An
+    # explicit empty hard map removes previously applied count/resource caps.
     quota["spec"] = {
         "hard": {
             "pods": str(count),
@@ -999,7 +1017,7 @@ def _task_image_builder_documents(config: dict[str, Any], settings: Any) -> list
             "limits.cpu": f"{settings.cpu_millis * count}m",
             "limits.memory": f"{settings.memory_mib * count}Mi",
             "limits.ephemeral-storage": f"{settings.ephemeral_storage_mib * count}Mi",
-        }
+        } if count is not None else {}
     }
     account = _obj("ServiceAccount", "loom-execution-attempt", ns)
     account["automountServiceAccountToken"] = False
@@ -1112,10 +1130,16 @@ def _execution_documents(
                         if labels.get("kubernetes.io/metadata.name") == "loom":
                             labels["kubernetes.io/metadata.name"] = ns
             if doc["kind"] == "ConfigMap":
-                if filename == "nebius-capacity-collector.yaml" and builder is not None:
-                    doc["data"]["LOOM_EXECUTION_CAPACITY_COLLECTOR_BUILD_CONCURRENCY_LIMIT"] = str(
-                        builder.max_concurrent
+                if filename == "nebius-capacity-collector.yaml":
+                    doc["data"]["LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_STORAGE_NAME"] = (
+                        EXECUTION_DISK_STORAGE_QUOTAS[config.get("execution_disk_type", "NETWORK_SSD")]
                     )
+                if filename == "nebius-capacity-collector.yaml" and builder is not None:
+                    limit_key = "LOOM_EXECUTION_CAPACITY_COLLECTOR_BUILD_CONCURRENCY_LIMIT"
+                    if builder.max_concurrent is None:
+                        doc["data"].pop(limit_key, None)
+                    else:
+                        doc["data"][limit_key] = str(builder.max_concurrent)
                 for suffix, key in (
                     ("NEBIUS_PROJECT_ID", "project_id"),
                     ("NEBIUS_QUOTA_PARENT_ID", "quota_parent_id"),
@@ -1373,7 +1397,7 @@ def build_platform(
     repo_root: Path,
 ) -> dict[str, list[dict[str, Any]]]:
     """Build Kubernetes resources from published image refs and environment settings."""
-    if config.get("schema_version") == "loom.nebius-managed-environment.v1":
+    if config.get("schema_version") in {"loom.nebius-managed-environment.v1", "loom.nebius-environment-platform.v2"}:
         raise NebiusPlatformError("use render_environment for managed children")
     return _build_platform(config, candidate, profile, keyring, repo_root=repo_root)
 

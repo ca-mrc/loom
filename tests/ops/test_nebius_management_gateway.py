@@ -35,6 +35,7 @@ for name in (
     'nebius_management_retirement_recovery_entry',
     'nebius_management_refresh_entry', 'nebius_management_refresh_connected',
     'nebius_pool_cutover_entry', 'nebius_pool_repair_entry', 'nebius_pool_image_entry',
+    'nebius_platform_rollout_successor', 'nebius_candidate_render', 'nebius_staging_pool_attachment',
 ):
     importlib.import_module('scripts.ops.' + name)
 print('bundle entries imported')

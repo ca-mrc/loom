@@ -146,17 +146,20 @@ isolation commands run only in main or manual compatibility scope. These checks
 are credential-free candidate evidence; real model-backed tasks and live
 environment readiness require deployment acceptance rather than PR jobs.
 
-Changed paths select static checks, up to twenty nonempty root-test shards and
-package tests as needed, in parallel on GitHub-hosted runners. Web-only changes
-skip backend baseline jobs; dependency, shared and unknown changes retain them.
+Changed paths select static checks, up to four root-test shards and twenty
+pool-operator shards, plus package tests as needed. Only nonempty shards run.
+Eligible development jobs use the [unified runner queue](ci-unified-runners.md) when enabled and
+GitHub-hosted runners otherwise. Web-only changes skip backend baseline jobs;
+dependency, shared and unknown changes retain them.
 `repository-checks` verifies every selected result. Coverage instrumentation and
 aggregation run when requested with `ci:coverage-summary` or
 `coverage_summary=true`, and in the daily full Nebius regression. Nebius coverage
 is reported without the historical all-platform 70% floor; main and manual
 compatibility coverage retain that floor. Report errors still fail. Independent
 test-only edits select their owning files; shared fixtures and runtime changes
-retain full lanes. Root shards have a 40-minute budget and integration shards
-have a 75-minute budget; selection does not relax per-test timeouts or failures.
+retain full lanes. Root and pool shards have a 50-minute budget; integration
+shards have 75 minutes and Docker integration shards have 40 minutes. Selection
+does not relax per-test timeouts or failures.
 `repository-checks` enforces every selected result after the independent lanes
 finish. Docs-only PRs preserve the stable required contexts while unselected
 functional lanes remain skipped. Python jobs restore uv's package/download cache
@@ -248,13 +251,24 @@ uv run --no-sync pytest tests/integration                # full directory
 uv run --no-sync pytest tests/integration -m "not docker" # exclude docker-marked tests
 uv run --no-sync pytest tests/integration -m docker       # Docker driver and runtime tests
 
-# System tier — full docker-compose stack
-uv run --no-sync pytest tests/system -v
+# System tier — full docker-compose stack, including image/fixture setup
+uv run --no-sync pytest tests/system --timeout=1200 -v
 
 # Live Modal — requires provider credentials
 LOOM_RUN_MODAL_INTEGRATION=1 \
   uv run --no-sync pytest tests/integration/test_modal_driver_live.py -v
 ```
+
+The system-test harness chooses a unique Compose project for each pytest
+process, or honors an explicitly set `COMPOSE_PROJECT_NAME`. Worker and builder
+use that project as their sandbox identity. Compose generates project-scoped
+service image names and removes those tags during teardown. Restart cleanup
+preserves other projects' running/stopped trial containers and shared
+task-image caches. Shared image garbage collection is
+the Docker daemon owner's responsibility; insufficient disk space still fails
+builder admission. To inspect or recover a manually interrupted run, set a
+unique `COMPOSE_PROJECT_NAME` before invoking pytest and use that same value
+with `docker compose -f deploy/docker-compose.test.yml`.
 
 The `not docker` subset can still require Docker for PostgreSQL and MinIO
 fixtures. These directory/marker commands include retained compatibility tests;
@@ -277,6 +291,13 @@ Fixture resolution is lazy. System smoke prepares the image before Compose and
 passes `LOOM_SYSTEM_MINIO_IMAGE` to every startup phase. This override belongs to
 `docker-compose.test.yml`; ordinary developer Compose and its existing storage
 volumes keep their current image and are not modified by fixture preparation.
+
+The system-test harness requests a Docker-allocated Postgres host port on
+`127.0.0.1` and uses the reported binding for migrations, seeding, and test queries.
+Direct manual use of `docker-compose.test.yml` defaults to loopback port `55432`;
+set `LOOM_SYSTEM_POSTGRES_PORT` to override it (`0` requests an allocated port).
+Use `docker compose -f deploy/docker-compose.test.yml port postgres 5432` to find
+the running stack's database port. Other system-stack service ports remain fixed.
 
 On GitHub, selected non-Docker integration tests are split into four disjoint,
 contiguous ranges of the manifest-owned filename order. Contiguous ordering
@@ -374,8 +395,9 @@ and shared Python/runtime changes rebuild the affected Python images. Relevant
 pull requests, merge groups, and manual dispatches use the checked-in read-only
 build path, do not log in to GHCR, and do not use a publication cache. Manual
 dispatch is build-only. Image validation builds the seven-image Nebius AMD64 set
-on GitHub-hosted native CPUs. `nebius-candidate` publishes immutable images from
-`dev`; the existing production gates promote that same candidate into `main`.
+on native CPUs through the configured runner route. `nebius-candidate` publishes
+immutable images from `dev`; the existing production gates promote that same
+candidate into `main`.
 There is no GHCR publisher, ARM64 manifest joiner, or personal-dev publication
 controller. `images` requests no publication credentials. See the
 [workflow inventory](ci.md#workflow-inventory) for the remaining entry points.
@@ -427,12 +449,19 @@ and follow the normal `dev` auto-merge policy.
 
 Every non-draft `dev` PR uses GitHub's native squash auto-merge. A developer or
 maintainer enables it without considering author or reviewer identity. GitHub
-keeps each candidate queued until `repository-checks`, `images-gate`,
+waits until `repository-checks`, `images-gate`,
 `cluster-smoke-gate`, and `staging-smoke-gate` are visible and successful on
 the current head SHA. Those four strict, GitHub-Actions-app-bound checks are
 the only merge authority: `dev` requires no human approval, no CODEOWNER
 approval, and no conversation resolution. Maintainers should not manually
 merge an eligible `dev` PR just because CI is green.
+
+Check the live queue state and integration coordination in
+[#2416](https://github.com/ca-mrc/loom/issues/2416). When the queue is enabled,
+the same four checks also qualify its generated merge group. While it is
+disabled, strict latest-base protection requires the branch writer to update
+an outdated head and earn checks again; follow the coordinated order to avoid
+repeated base updates and competing CI runs.
 
 For `main`, enable native squash auto-merge only for a same-repository `dev`
 production candidate. The active `main protected promotion` ruleset requires

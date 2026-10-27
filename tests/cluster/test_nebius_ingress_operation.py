@@ -12,10 +12,13 @@ import shutil
 import socket
 import ssl
 import subprocess
+import sys
+import tarfile
 import time
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from uuid import uuid4
 
 import pytest
@@ -46,7 +49,7 @@ from tests.integration.test_execution_actuator_k3s import _load_client, _start_k
 from tests.ops import test_nebius_certificates as certificate_material
 from tests.ops.test_nebius_dns_publication import Provider
 from tests.ops.test_nebius_ingress_gateway import inputs as inputs
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 
 ROOT = Path(__file__).resolve().parents[2]
 POSTGRES = "docker.io/library/postgres@sha256:304ab813518754228f9f792f79d6da36359b82d8ecf418096c636725f8c930ad"
@@ -57,21 +60,84 @@ pytestmark = pytest.mark.skipif(os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1"
                                 reason="requires an explicitly disposable Kubernetes API")
 
 
-def _pull_fixture_image(container, image):
-    # Docker save/import reconstructs the manifest and changes its digest. Pull
-    # original bytes; only a mirror quota error permits the same pinned upstream.
+def _prepare_fixture_image(image, directory, mirror_limited=None):
+    # Host-side OCI transport preserves original bytes without requiring the
+    # nested node's resolver for application images. Classic Docker save can
+    # reconstruct the manifest and change its digest.
     source = image.replace("docker.io/library/", "public.ecr.aws/docker/library/")
+    upstream = source.replace("public.ecr.aws/docker/library/", "docker.io/library/")
+    with TemporaryDirectory(dir=directory) as scratch:
+        layout = Path(scratch) / "layout"
+        layout.mkdir()
+
+        def copy(source):
+            # Index pins need both the selected platform's blobs and the original
+            # index. Preserve the latter without downloading other architectures.
+            # Public fixtures must not discover the runner's registry credentials.
+            for mode in ("system", "index-only"):
+                try:
+                    subprocess.run(["skopeo", "copy", "--src-no-creds", "--preserve-digests", "--override-os", "linux",
+                                    "--override-arch", "amd64", "--multi-arch", mode,
+                                    "docker://" + source, f"oci:{layout}:{image}"],
+                                   check=True, capture_output=True, text=True, timeout=180)
+                except subprocess.CalledProcessError as error:
+                    error.add_note("Host fixture image acquisition failed: " + (error.stderr or "")[-4096:])
+                    raise
+
+        if mirror_limited:
+            copy(upstream)
+        else:
+            try:
+                copy(source)
+            except subprocess.CalledProcessError as error:
+                # Skopeo reports registry HTTP 429 as the distribution error code.
+                if "toomanyrequests:" not in (error.stderr or "").lower():
+                    raise
+                # A data-limited runner IP gets 429 for every request, after
+                # skopeo's ~30s backoff per request. Pay that once per fixture.
+                if mirror_limited is not None:
+                    mirror_limited.add(source.split("/", 1)[0])
+                copy(upstream)
+        archive = Path(scratch) / "image.oci.tar"
+        with tarfile.open(archive, "w") as saved:
+            for name in ("oci-layout", "index.json", "blobs"):
+                saved.add(layout / name, arcname=name)
+        return archive.rename(directory / (image.split("@sha256:", 1)[1] + ".oci.tar"))
+
+
+@pytest.fixture
+def fixture_images(tmp_path):
+    # Finish host acquisition before starting Kubernetes, and remove every
+    # archive even when setup or the later test fails before importing it.
+    mirror_limited = set()
+    with TemporaryDirectory(dir=tmp_path) as directory:
+        yield {image: _prepare_fixture_image(image, Path(directory), mirror_limited)
+               for image in (TRAEFIK, PYTHON, POSTGRES, GUARD_PYTHON)}
+
+
+def _import_fixture_image(container, image, archive):
+    remote = "/tmp/loom-ingress-fixture.oci.tar"
     try:
-        _run(container, "ctr", "images", "pull", "--platform", "linux/amd64", "--skip-metadata", source, timeout=180)
-    except AssertionError as error:
-        if "429 Too Many Requests" not in str(error):
-            raise
-        source = source.replace("public.ecr.aws/docker/library/", "docker.io/library/")
-        _run(container, "ctr", "images", "pull", "--platform", "linux/amd64", "--skip-metadata", source, timeout=180)
-    rows = [line.split() for line in _run(container, "ctr", "images", "ls").splitlines()]
-    assert any(row[0] == source and row[2] == image.split("@", 1)[1] for row in rows if len(row) >= 3)
-    if source != image:
-        _run(container, "ctr", "images", "tag", source, image)
+        subprocess.run(["docker", "cp", str(archive), container.get_wrapped_container().id + ":" + remote],
+                       check=True, timeout=60)
+        _run(container, "ctr", "images", "import", "--platform", "linux/amd64", remote, timeout=180)
+        rows = [line.split() for line in _run(container, "ctr", "images", "ls").splitlines()]
+        assert any(row[0] == image and row[2] == image.split("@", 1)[1] for row in rows if len(row) >= 3), rows
+    finally:
+        original = sys.exception()
+        cleanup_errors = []
+        for cleanup in (lambda: archive.unlink(missing_ok=True),
+                        lambda: _run(container, "rm", "-f", remote, timeout=5)):
+            try:
+                cleanup()
+            except Exception as error:
+                cleanup_errors.append(error)
+        if cleanup_errors:
+            failure = original if original is not None else cleanup_errors.pop(0)
+            for error in cleanup_errors:
+                failure.add_note(f"Fixture archive cleanup failed: {error}")
+            if original is None:
+                raise failure
 
 
 @pytest.fixture(autouse=True)
@@ -245,7 +311,7 @@ CREATE TABLE task_image_materialization_attempts (native_build jsonb);
                       "volumes": [{"name": "tooling", "hostPath": {"path": "/tmp/loom-ingress-qualification", "type": "Directory"}},
                                   {"name": "runtime", "emptyDir": {}}],
                       "initContainers": [{"name": "install", "image": GUARD_PYTHON, "command": ["sh", "-ec",
-                          "/tooling/uv venv --no-config --no-cache --no-python-downloads --python /usr/local/bin/python /runtime; "
+                          "/tooling/uv venv --clear --no-config --no-cache --no-python-downloads --python /usr/local/bin/python /runtime; "
                           "/tooling/uv pip sync --no-config --no-cache --python /runtime/bin/python --require-hashes "
                           "--only-binary :all: /tooling/requirements.txt; "
                           "/tooling/uv pip install --no-config --no-cache --python /runtime/bin/python --offline --no-deps /tooling/wheels/*.whl"],
@@ -264,14 +330,22 @@ CREATE TABLE task_image_materialization_attempts (native_build jsonb);
 
 
 @pytest.mark.timeout(420)
-def test_connected_installation_recovers_then_cuts_over_with_installed_guard(inputs, platform_inputs, tmp_path, monkeypatch):
+def test_connected_installation_recovers_then_cuts_over_with_installed_guard(
+        inputs, platform_inputs, tmp_path, monkeypatch, fixture_images):
     config, binding, _fake, roots, _selected, _root = inputs
     platform, candidate, profile = platform_inputs
     namespace, node_name = platform["namespace"], "computeinstance-ingressfixture"
     tools = tmp_path / "tooling"
     tools.mkdir(mode=0o700)
+    # Elapsed phase times appear in a failure, including a pytest-timeout.
+    started, phases = time.monotonic(), []
+
+    def phase(name):
+        phases.append(f"{name}={time.monotonic() - started:.1f}s")
+
     uv = Path(shutil.which("uv"))
     build_wheels(tools, uv=uv)
+    phase("wheels")
     subprocess.run([str(uv), "export", "--locked", "--no-default-groups", "--extra", "cluster", "--group", "nebius-certificates",
                     "--no-emit-workspace", "--format", "requirements-txt", "--no-header", "--quiet",
                     "--output-file", str(tools / "requirements.txt")], cwd=ROOT, check=True, timeout=60)
@@ -280,6 +354,7 @@ def test_connected_installation_recovers_then_cuts_over_with_installed_guard(inp
     try:
         from kubernetes import client
         _, core, _ = _load_client(container)
+        phase("k3s")
         ns = core.create_namespace(client.V1Namespace(metadata=client.V1ObjectMeta(name=namespace)))
         binding = replace(binding, namespace=namespace, namespace_uid=ns.metadata.uid,
                           kube_system_uid=core.read_namespace("kube-system").metadata.uid)
@@ -288,19 +363,9 @@ def test_connected_installation_recovers_then_cuts_over_with_installed_guard(inp
         _run(container, "kubectl", "wait", "node/" + node_name, "--for=condition=Ready", "--timeout=60s")
         _run(container, "mkdir", "-p", "/tmp/loom-ingress-qualification")
         subprocess.run(["docker", "cp", str(tools) + "/.", ident + ":/tmp/loom-ingress-qualification/"], check=True, timeout=60)
-        # Reproduce the observed mirror quota failure, but fetch and execute the
-        # original pinned image from its real upstream through the fallback.
-        real_run = _run
-        limited_image = TRAEFIK.replace("docker.io/library/", "public.ecr.aws/docker/library/")
-
-        def registry_quota(container, *args, **kwargs):
-            if args[:3] == ("ctr", "images", "pull") and args[-1] == limited_image:
-                raise AssertionError("429 Too Many Requests: Data limit exceeded")
-            return real_run(container, *args, **kwargs)
-
-        monkeypatch.setitem(globals(), "_run", registry_quota)
-        for image in (TRAEFIK, PYTHON, POSTGRES, GUARD_PYTHON):
-            _pull_fixture_image(container, image)
+        for image, archive in fixture_images.items():
+            _import_fixture_image(container, image, archive)
+        phase("images")
         image = "cr.eu-north1.nebius.cloud/test/loom-shared-ingress@" + TRAEFIK.split("@", 1)[1]
         _run(container, "ctr", "images", "tag", TRAEFIK, image)
         _run(container, "kubectl", "wait", "--for=create", "node/" + node_name, "--timeout=60s")
@@ -375,6 +440,7 @@ server.socket=context.wrap_socket(server.socket,server_side=True); server.serve_
                     break
             assert time.monotonic() < deadline, "guard fixture startup deadline"
             time.sleep(0.25)
+        phase("guard")
         for pod in ("loom-web", "postgres"):
             _run(container, "kubectl", "wait", "pod/" + pod, "-n", namespace, "--for=condition=Ready", "--timeout=60s", timeout=70)
         _run(container, "kubectl", "rollout", "status", "deployment/coredns", "-n", "kube-system", "--timeout=60s", timeout=70)
@@ -394,6 +460,7 @@ server.socket=context.wrap_socket(server.socket,server_side=True); server.serve_
         trust = original_context(cadata=roots[0].public_bytes(serialization.Encoding.PEM).decode() + old_tls["tls.crt"])
         monkeypatch.setattr(ssl, "create_default_context", lambda: trust)
         state = tmp_path / "ingress-state"
+        phase("backends")
         with pytest.raises(OperationError) as failure:
             install_ingress(api=api, certificate_config=config, state_dir=state, roots=roots)
         record = (json.loads((state / "cutover/cutover.json").read_text())
@@ -417,7 +484,9 @@ server.socket=context.wrap_socket(server.socket,server_side=True); server.serve_
         # reuse the immutable stage ownership record, never adopt objects by name.
         (state / "cutover").rename(state / "recovered-cutover")
         api = LiveIngressAPI(kubeconfig, **kwargs)
+        phase("interrupted+rollback")
         result = install_ingress(api=api, certificate_config=config, state_dir=state, roots=roots)
+        phase("install")
         assert result["status"] == "complete"
         assert install_ingress(api=api, certificate_config=config, state_dir=state, roots=roots) == result
         after = core.read_namespaced_service("loom-web", namespace)
@@ -441,6 +510,7 @@ server.socket=context.wrap_socket(server.socket,server_side=True); server.serve_
             return qualify_dns_target(api=api, certificate_config=config, state_dir=state)
 
         target = qualify()
+        phase("dns-qualify")
         assert target["address"] == public_address and target["service_uid"] == public.metadata.uid
         dns = Provider()
         dns.rows = {"*.dev": [], "management": []}
@@ -464,6 +534,8 @@ server.socket=context.wrap_socket(server.socket,server_side=True); server.serve_
             with alpn.wrap_socket(stream, server_hostname=old_host) as secure:
                 assert secure.selected_alpn_protocol() == "acme-tls/1"
     except BaseException as error:
+        phase("failed")
+        error.add_note("phase timeline: " + " ".join(phases))
         try:
             node = container.get_wrapped_container()
             node.reload()

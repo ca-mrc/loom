@@ -23,7 +23,7 @@ dependencies = [
   # Security floor for Hugging Face Hub's transitive filesystem dependency.
   "fsspec>=2026.6,<2027",
   "greenlet>=3.0,<4.0",
-  "google-generativeai>=0.8,<1.0",
+  "google-genai>=2.30.1,<3.0",
   "h11>=0.16,<1.0",
   "httpx>=0.27,<1.0",
   "huggingface-hub>=0.30,<1.0",
@@ -31,7 +31,7 @@ dependencies = [
   "jsonschema>=4.21,<5.0",
   "litellm>=1.92.2,<2.0",
   "openai>=1.55,<3.0",
-  "pillow>=12.0,<13.0",
+  "pillow>=13.0,<14.0",
   "prometheus-client>=0.19,<1.0",
   "psycopg[binary]>=3.2,<4.0",
   "pyjwt>=2.15,<3.0",
@@ -84,22 +84,18 @@ rollout = [
 vllm = [
   "vllm>=0.6,<1.0",
 ]
-# `loom_egress_xds` is a standalone process whose
-# Envoy/gRPC deps (`envoy-data-plane`, `xds-protos`) require
-# `protobuf>=6`, which conflicts with `google-generativeai`'s
-# `protobuf<6` pin. Rather than crippling the main project's
-# uv-resolution by adding an incompatible extra, those deps live in
-# the standalone `deploy/Dockerfile.egress-xds` requirements (added
-# in PR-C1b). This PR's code (config_builder + watcher) has no
-# Envoy/gRPC imports — they live in the gRPC server module only.
+# `loom_egress_xds` is a standalone process. Its Envoy/gRPC dependencies
+# (`envoy-data-plane`, `xds-protos`) remain in deploy/Dockerfile.egress-xds
+# so application installs do not acquire control-plane-only dependencies.
+# google-genai no longer imposes the old google-generativeai protobuf<6 cap.
 dev = [
   "dnspython>=2.8,<3.0",
   "hypothesis>=6.100,<7.0",
   "kubernetes>=28.1,<32.0",
   "mypy>=1.10,<2.0",
   "nebius>=0.6,<0.7",
-  "pytest>=8.0,<9.0",
-  "pytest-asyncio>=0.23,<1.0",
+  "pytest>=9.0.3,<10.0",
+  "pytest-asyncio>=1.3,<2.0",
   "pytest-cov>=5.0,<7.0",
   "pytest-timeout>=2.3,<3.0",
   "ruff>=0.5,<1.0",
@@ -303,6 +299,13 @@ module = [
 ]
 ignore_missing_imports = true
 
+[tool.coverage.run]
+# The pinned candidate renderer executes a different revision in a disposable
+# archive. Its imports must not count as current-checkout coverage or be mapped
+# onto current source after the archive is removed. Keep other missing-source
+# errors visible; only this historical execution tree is outside collection.
+omit = ["*/loom-candidate-manifests-*/src/loom/*"]
+
 [tool.coverage.paths]
 # Normalize local, GitHub-hosted, and isolated JIT checkout roots for aggregation.
 source = [
@@ -330,17 +333,12 @@ norecursedirs = [
 # tests/system require docker-compose + built service images and take
 # minutes to run; opt in explicitly with `pytest tests/system`.
 addopts = "--ignore=tests/system"
-# Per-test wall-clock cap from pytest-timeout. A single hanging test
-# A hang in `test_claim_endpoint::test_claim_rejects_unauth` can otherwise
-# block the whole CI for about 20 minutes. It becomes a single failed test,
-# letting the rest of the suite finish. Docker-tier tests can override
-# with `@pytest.mark.timeout(N)` on the test/class.
+# Per-test wall-clock cap from pytest-timeout. A hanging test becomes a
+# single failure so the rest of the suite can finish. Docker-tier tests
+# can override with `@pytest.mark.timeout(N)` on the test/class.
 timeout = 60
-# `signal` (SIGALRM) is more aggressive than `thread` — interrupts
-# the test even when it's blocked in a C-level extension. Required to
-# interrupt `test_claim_endpoint::test_claim_rejects_unauth` when it blocks on
-# `starlette.TestClient.__exit__` and
-# `anyio` portal shutdown that the thread-method timer can't interrupt.
+# `signal` (SIGALRM) can interrupt TestClient/anyio shutdown even when
+# blocked in a C-level extension, unlike the thread-method timer.
 timeout_method = "signal"
 markers = [
   "legacy_pool: Historical platform coverage; included by manual compatibility CI, excluded from daily Nebius CI.",

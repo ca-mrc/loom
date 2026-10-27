@@ -1,6 +1,6 @@
 """Guest aliases preserve the ordinary native builder's prior waiting authority."""
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -32,6 +32,10 @@ async def test_guest_cannot_overtake_a_waiting_native_builder(waiting_build):
         guest = await _register_guest(session, (trial_id, target), now)
         group = await resolve_capacity_targets(session, target.target_id)
         free = placement_fixture(target_id=target.target_id, nodes=1, used_nodes=1, quota_nodes=1)
+        free["nodes"][0].update(
+            name="worker-1", draining=False,
+            io_pressure={"sampled_at": datetime.now(UTC).isoformat(), "full_avg10": 0.0},
+        )
         free["target_scope"] = group.scope.model_dump(mode="json")
         await _record(session, target.target_id, now + timedelta(seconds=1), free)
     with pytest.raises(ExecutionProvisioningBlockedError, match="quota_nodes_exceeded"):

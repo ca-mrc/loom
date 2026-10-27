@@ -9,8 +9,6 @@ from __future__ import annotations
 import base64
 import copy
 import json
-import sys
-import tempfile
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -18,8 +16,9 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from scripts.ops.deploy_nebius_platform import load_render
-from scripts.ops.nebius_certificate_gateway import run_private
+from scripts.ops.nebius_candidate_render import (
+    render_candidate_source as render_participant_candidate,  # noqa: F401
+)
 from scripts.ops.nebius_development_runtime_retained import (
     CompletedDevelopmentRuntime,
     qualify_build_policy_spec,
@@ -61,34 +60,6 @@ def participant_source_candidate(*, predecessor: ParticipantPredecessor,
         return predecessor.retained.inputs.candidate
     source = bindings.plan.staging.source
     return source.candidate if source is not None else predecessor.migration.registration.candidate
-
-
-def render_participant_candidate(*, bundle: CandidateBundle, source_files: dict[str, bytes],
-        config: Document, keyring: Document) -> dict[str, list[Document]]:
-    """Run only the approved candidate's renderer/imports in a private directory.
-
-    Inputs came from the installed publication reader, not runner file uploads.
-    Do not inherit Python paths or operator credentials into the renderer. Its
-    output remains subject to the existing deployment and shared-pool validators.
-    """
-    with tempfile.TemporaryDirectory(prefix='loom-participant-render-') as directory:
-        root = Path(directory)
-        for name, raw in source_files.items():
-            path = root / name
-            if (not path.is_relative_to(root) or '..' in path.parts or path.is_symlink()
-                    or not (name.startswith(('deploy/k8s/', 'src/loom/'))
-                        or name == 'scripts/ops/render_nebius_platform.py')):
-                raise ValueError('candidate rendering source outside scope')
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(raw)
-        for name, value in {'environment': config, 'candidate': bundle.candidate,
-                'runtime-profile': bundle.profile, 'keyring': keyring}.items():
-            (root / (name + '.json')).write_text(json.dumps(value, allow_nan=False))
-        run_private([sys.executable, '-I', str(root / 'scripts/ops/render_nebius_platform.py'),
-            '--environment-config', str(root / 'environment.json'), '--candidate', str(root / 'candidate.json'),
-            '--runtime-profile', str(root / 'runtime-profile.json'), '--trusted-keyring', str(root / 'keyring.json'),
-            '--output', str(root / 'render'), '--regional-output', str(root / 'regional')], timeout=60)
-        return load_render(root / 'render')[2]
 
 
 @asynccontextmanager
@@ -162,9 +133,10 @@ def capture_participant_release(*, predecessor: ParticipantPredecessor,
                 _uid(row)
                 known[key] = copy.deepcopy(row)
             key = 'Deployment:' + binding.namespace + ':loom-service'
-            manager = copy.deepcopy(known.get(key, runtime.resources[key]))
+            resources = bindings.plan.effective_runtime_resources
+            manager = copy.deepcopy(known.get(key, resources[key]))
             key = 'ConfigMap:' + binding.namespace + ':loom-pool-profiles-' + spec.operation_id.hex
-            catalog = copy.deepcopy(runtime.resources[key])
+            catalog = copy.deepcopy(resources[key])
         if (config['namespace'] != guard.namespace
                 or config['execution_namespace'] != participant.execution_namespace.name
                 or config['cluster_id'] != spec.cluster_id or profile.candidate_sha != candidate['candidate_sha']

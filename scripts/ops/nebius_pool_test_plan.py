@@ -1,4 +1,4 @@
-"""Reuse native CI's exact-commit pool coverage; execute only missing modules.
+"""Reuse native CI's verified candidate-tree coverage; run missing modules.
 
 This plans tests, not branch admission. GitHub's four protected gates and the
 candidate's image build/scan/publication remain unchanged. Unknown evidence is
@@ -13,7 +13,9 @@ import os
 import re
 import subprocess
 import sys
+import time
 from collections.abc import Callable
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +30,14 @@ from scripts.component_ownership import (
 REPOSITORY = "ca-mrc/loom"
 REPOSITORY_ID = 1281629473
 Read = Callable[[str], list[dict[str, Any]]]
+CHECKOUT_ACTION = "actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd"
+EVIDENCE_REASONS = {
+    "actions_read_incomplete", "checkout_log_too_large", "pool_checkout_unqualified",
+    "checkout_time_unqualified", "checkout_log_incomplete", "pool_scope_unqualified",
+    "pool_selection_unqualified", "checkout_sha_unqualified", "checkout_ref_unqualified",
+    "candidate_reuse_budget_exhausted", "pool_job_unqualified", "candidate_commit_unqualified",
+    "candidate_pr_unqualified",
+}
 
 
 def github_pages(path: str) -> list[dict[str, Any]]:
@@ -39,9 +49,126 @@ def github_pages(path: str) -> list[dict[str, Any]]:
         timeout=60,
     )
     pages = json.loads(result.stdout)
-    if not isinstance(pages, list) or not all(isinstance(page, dict) for page in pages):
+    if not isinstance(pages, list):
         raise ValueError("actions_read_incomplete")
-    return pages
+    # Object endpoints produce one object per page; association endpoints
+    # (commit -> PRs) produce arrays. Keep the same read-only API boundary.
+    values = [value for page in pages for value in (page if isinstance(page, list) else [page])]
+    if not all(isinstance(value, dict) for value in values):
+        raise ValueError("actions_read_incomplete")
+    return values
+
+
+def github_job_log(job_id: int) -> str:
+    endpoint = f"repos/{REPOSITORY}/actions/jobs/{job_id}/logs"
+
+    def read(*flags: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(["gh", "api", *flags, endpoint],
+                              check=True, capture_output=True, text=True, timeout=20)
+
+    try:
+        # This is a private machine read, never terminal output. Recent gh
+        # rejects normal Actions logs containing ANSI; retain their exact text
+        # for the existing checkout proof rather than stripping/reformatting.
+        result = read("--allow-escape-sequences")
+    except subprocess.CalledProcessError as error:
+        # Older clients do not have the flag. Retry only that local argument
+        # rejection; HTTP, permission and transport failures remain failures.
+        if (error.stderr or "").splitlines()[:1] != ["unknown flag: --allow-escape-sequences"]:
+            raise
+        result = read()
+    if len(result.stdout) > 4 * 1024 * 1024:
+        raise ValueError("checkout_log_too_large")
+    return result.stdout
+
+
+def checkout_inputs(
+    job: dict[str, Any], log: str, number: int
+) -> tuple[str, tuple[str, ...], tuple[str, ...], bool]:
+    """Read the pinned checkout action, before any repository command runs.
+
+    The run/check-suite SHA is the PR head, not the tested merge commit. Do
+    not use today's mutable refs/pull merge ref or a later command's output.
+    Missing/changed action output simply leaves this shard's tests pending.
+    """
+    [step] = [s for s in job["steps"] if s["name"] == f"Run {CHECKOUT_ACTION}"]
+    if (
+        step["number"] != 2
+        or step["conclusion"] != "success"
+        or not any(
+            s["name"] == "Pytest — manifest-owned pool shard" and s["conclusion"] == "success"
+            for s in job["steps"]
+        )
+    ):
+        raise ValueError("pool_checkout_unqualified")
+    start = datetime.fromisoformat(step["started_at"].replace("Z", "+00:00"))
+    # Actions' step API timestamps have second precision; log timestamps do not.
+    end = datetime.fromisoformat(step["completed_at"].replace("Z", "+00:00")) + timedelta(seconds=1)
+    if start.tzinfo is None or end.tzinfo is None:
+        raise ValueError("checkout_time_unqualified")
+    lines: list[str] = []
+    found = finished = False
+    for line in log.lstrip("\ufeff").splitlines():
+        stamp, _, body = line.partition(" ")
+        if body == f"##[group]Run {CHECKOUT_ACTION}" and not found:
+            found = True
+        elif found and body.startswith("##[group]Run "):
+            finished = True
+            break
+        if found:
+            when = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+            if not start <= when < end:
+                raise ValueError("checkout_time_unqualified")
+            lines.append(body)
+    if not found or not finished:
+        raise ValueError("checkout_log_incomplete")
+    if (
+        "  CI_TEST_SCOPE: nebius" not in lines
+        or "  CI_PYTEST_MARKERS: not legacy_pool" not in lines
+    ):
+        raise ValueError("pool_scope_unqualified")
+    [hint] = [
+        line.removeprefix("  TEST_CHANGED_PATHS: ")
+        for line in lines
+        if line.startswith("  TEST_CHANGED_PATHS: ")
+    ]
+    paths = json.loads(hint)
+    if not isinstance(paths, list) or not all(isinstance(path, str) for path in paths):
+        raise ValueError("pool_selection_unqualified")
+    # Runs before TEST_DIFF_PATHS existed ran affected_only suites in full; an
+    # absent diff reconstructs exactly that. A present diff must be well formed.
+    diff_hints = [
+        line.removeprefix("  TEST_DIFF_PATHS: ")
+        for line in lines
+        if line.startswith("  TEST_DIFF_PATHS: ")
+    ]
+    if len(diff_hints) > 1:
+        raise ValueError("pool_selection_unqualified")
+    diff = json.loads(diff_hints[0]) if diff_hints else []
+    if not isinstance(diff, list) or not all(isinstance(path, str) for path in diff):
+        raise ValueError("pool_selection_unqualified")
+    simulation_hints = [line.removeprefix("  SHARED_POOL_SIMULATIONS: ") for line in lines
+                        if line.startswith("  SHARED_POOL_SIMULATIONS: ")]
+    if len(simulation_hints) > 1 or any(value not in {"true", "false"} for value in simulation_hints):
+        raise ValueError("pool_selection_unqualified")
+    # Missing evidence cannot prove that optional simulations executed. This
+    # conservatively undercounts older jobs and never promotes a skipped module.
+    simulations = simulation_hints == ["true"]
+    [index] = [
+        i
+        for i, line in enumerate(lines)
+        if re.fullmatch(r"\[command\]/\S*/git log -1 --format=%H", line)
+    ]
+    sha = lines[index + 1]
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        raise ValueError("checkout_sha_unqualified")
+    ref = f"refs/remotes/pull/{number}/merge"
+    if not any(line.endswith(f" +{sha}:{ref}") and " fetch " in line for line in lines) or not any(
+        re.fullmatch(r"\[command\]/\S*/git checkout --progress --force " + re.escape(ref), line)
+        for line in lines
+    ):
+        raise ValueError("checkout_ref_unqualified")
+    return sha, tuple(paths), tuple(diff), simulations
 
 
 def rows(pages: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
@@ -70,7 +197,13 @@ def candidate_changes(root: Path, candidate: str) -> tuple[str, ...]:
     return source_changes(root, candidate + "^", candidate)
 
 
-def plan(root: Path, candidate: str, *, read: Read = github_pages) -> dict[str, Any]:
+def plan(
+    root: Path,
+    candidate: str,
+    *,
+    read: Read = github_pages,
+    read_log: Callable[[int], str] | None = None,
+) -> dict[str, Any]:
     if not re.fullmatch(r"[0-9a-f]{40}", candidate):
         raise ValueError("candidate_sha_invalid")
     manifest = load_manifest(root / "config/component-ownership.toml")
@@ -80,7 +213,8 @@ def plan(root: Path, candidate: str, *, read: Read = github_pages) -> dict[str, 
         raise ValueError("pool_shard_policy_missing")
 
     def test_paths(
-        *, changed_paths: tuple[str, ...] = (), shard_index: int = 0, shard_count: int = 1
+        *, changed_paths: tuple[str, ...] = (), diff_paths: tuple[str, ...] = (),
+        shard_index: int = 0, shard_count: int = 1, include_shared_pool: bool = False,
     ) -> tuple[str, ...]:
         return selected_test_paths(
             manifest,
@@ -88,10 +222,11 @@ def plan(root: Path, candidate: str, *, read: Read = github_pages) -> dict[str, 
             lane="nebius-pool",
             repo_root=root,
             test_scope="nebius",
-            suite="nebius-pool-ops",
             changed_paths=changed_paths,
+            diff_paths=diff_paths,
             shard_index=shard_index,
             shard_count=shard_count,
+            include_shared_pool=include_shared_pool,
         )
 
     try:
@@ -102,6 +237,53 @@ def plan(root: Path, candidate: str, *, read: Read = github_pages) -> dict[str, 
     covered: set[str] = set()
     reused_runs: list[int] = []
     unavailable = False
+    errors: list[dict[str, Any]] = []
+    association_counts: dict[str, int] = {}
+
+    def unavailable_evidence(
+        stage: str, error: Exception, *, run_id: Any = None, job_id: Any = None,
+    ) -> None:
+        nonlocal unavailable
+        unavailable = True
+        if len(errors) >= 25:
+            return
+        # Never serialize stderr, exception text, commands or response bodies:
+        # even a JSON/OS/CLI failure may contain inherited credentials.
+        kind = "validation"
+        if isinstance(error, subprocess.TimeoutExpired):
+            kind = "subprocess_timeout"
+        elif isinstance(error, subprocess.CalledProcessError):
+            kind = "github_cli"
+        elif isinstance(error, json.JSONDecodeError):
+            kind = "invalid_json"
+        elif isinstance(error, OSError):
+            kind = "os_error"
+        elif isinstance(error, LookupError):
+            kind = "missing_field"
+        row: dict[str, Any] = {"stage": stage, "error": kind}
+        if isinstance(error, subprocess.CalledProcessError) and isinstance(error.stderr, str):
+            status = re.search(r"\(HTTP ([1-5][0-9]{2})\)", error.stderr)
+            if status:
+                row["http_status"] = int(status[1])
+            for phrase, reason in (
+                ("secondary rate limit", "secondary_rate_limit"),
+                ("api rate limit exceeded", "rate_limit"),
+                ("resource not accessible by integration", "permission_denied"),
+                ("bad credentials", "bad_credentials"),
+            ):
+                if phrase in error.stderr.lower():
+                    row["api_reason"] = reason
+                    break
+        if stage == "squash_pr_association":
+            row.update(association_counts)
+        if error.args and isinstance(error.args[0], str) and error.args[0] in EVIDENCE_REASONS:
+            row["reason"] = error.args[0]
+        for key, value in (("run_id", run_id), ("job_id", job_id)):
+            if type(value) is int and value > 0:
+                row[key] = value
+        errors.append(row)
+
+    stage = "merge_group_runs"
     try:
         runs = rows(
             read(
@@ -110,10 +292,11 @@ def plan(root: Path, candidate: str, *, read: Read = github_pages) -> dict[str, 
             ),
             "workflow_runs",
         )
-    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
         runs = []
-        unavailable = True
+        unavailable_evidence(stage, error)
     for run in runs:
+        stage = "merge_group_run"
         try:
             # Only the actual native dev merge group's CI can be reused. PR
             # heads, a different checkout, filtered runs and renamed statuses
@@ -134,13 +317,16 @@ def plan(root: Path, candidate: str, *, read: Read = github_pages) -> dict[str, 
             )
             if title is None or title[1] != candidate:
                 continue
+            stage = "merge_group_check_suite"
             [suite] = read(f"check-suites/{run['check_suite_id']}")
             if suite["app"]["id"] != 15368 or suite["head_sha"] != candidate:
                 continue
+            stage = "merge_group_selection"
             changes = source_changes(root, title[2], candidate)
             selected = set(test_paths(changed_paths=changes))
             # A job-only retry retains other successful jobs on this commit.
             # Use each job's latest result, not only jobs rerun in that attempt.
+            stage = "merge_group_jobs"
             jobs = rows(read(f"actions/runs/{run['id']}/jobs?filter=latest&per_page=100"), "jobs")
             successful = {
                 job["name"]
@@ -158,9 +344,150 @@ def plan(root: Path, candidate: str, *, read: Read = github_pages) -> dict[str, 
             if verified:
                 covered.update(verified)
                 reused_runs.append(run["id"])
-        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
             # Retain already qualified coverage from other successful runs.
-            unavailable = True
+            unavailable_evidence(stage, error, run_id=run.get("id"))
+    if required - covered:
+        # Queue-off native squash creates a new commit, but its tested PR merge
+        # can have exactly the same tree. Reuse only that merged PR's own jobs,
+        # proving each actual checkout; never trust a green PR head by itself.
+        deadline = time.monotonic() + 120
+        api_cache: dict[str, list[dict[str, Any]]] = {}
+        log_cache: dict[int, str] = {}
+
+        def evidence(endpoint: str) -> list[dict[str, Any]]:
+            if endpoint not in api_cache:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("candidate_reuse_budget_exhausted")
+                api_cache[endpoint] = read(endpoint)
+            return api_cache[endpoint]
+
+        def job_log(job_id: int) -> str:
+            if type(job_id) is not int or job_id <= 0:
+                raise ValueError("pool_job_unqualified")
+            if job_id not in log_cache:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("candidate_reuse_budget_exhausted")
+                log_cache[job_id] = (read_log or github_job_log)(job_id)
+            return log_cache[job_id]
+
+        try:
+            stage = "candidate_commit"
+            [commit] = evidence(f"git/commits/{candidate}")
+            [parent] = commit["parents"]
+            base, tree = parent["sha"], commit["tree"]["sha"]
+            if commit["sha"] != candidate or not all(
+                re.fullmatch(r"[0-9a-f]{40}", value) for value in (base, tree)
+            ):
+                raise ValueError("candidate_commit_unqualified")
+            stage = "squash_pr_association"
+            associated = evidence(f"commits/{candidate}/pulls?per_page=100")
+            association_counts["associated_prs"] = len(associated)
+            candidates = [
+                pr
+                for pr in associated
+                if (
+                    pr["state"] == "closed"
+                    and pr["merged_at"] is not None
+                    and pr["merge_commit_sha"] == candidate
+                    and pr["base"]["ref"] == "dev"
+                    and pr["base"]["sha"] == base
+                    and pr["base"]["repo"]["id"] == REPOSITORY_ID
+                    and pr["head"]["repo"]["id"] == REPOSITORY_ID
+                )
+            ]
+            association_counts["matching_prs"] = len(candidates)
+            if len(candidates) != 1:
+                raise ValueError("candidate_pr_unqualified")
+            [pr] = candidates
+            head, number = pr["head"]["sha"], pr["number"]
+            if type(number) is not int or number <= 0 or not re.fullmatch(r"[0-9a-f]{40}", head):
+                raise ValueError("candidate_pr_unqualified")
+            stage = "squash_pr_runs"
+            pr_runs = rows(
+                evidence(
+                    "actions/workflows/ci.yml/runs?event=pull_request&status=success"
+                    f"&head_sha={head}&per_page=100"
+                ),
+                "workflow_runs",
+            )
+            for run in pr_runs:
+                stage = "squash_run"
+                try:
+                    if (
+                        run["event"] != "pull_request"
+                        or run["head_sha"] != head
+                        or run["status"] != "completed"
+                        or run["conclusion"] != "success"
+                        or run["path"] != ".github/workflows/ci.yml"
+                        or run["repository"]["id"] != REPOSITORY_ID
+                        or run["head_repository"]["id"] != REPOSITORY_ID
+                        or run["head_branch"] != pr["head"]["ref"]
+                        or not run["display_title"].startswith(
+                            f"gate=full / head={head} / base={base} / "
+                        )
+                        or not run["display_title"].endswith(f" / pull={number}")
+                    ):
+                        continue
+                    stage = "squash_check_suite"
+                    [suite] = evidence(f"check-suites/{run['check_suite_id']}")
+                    if suite["app"]["id"] != 15368 or suite["head_sha"] != head:
+                        continue
+                    stage = "squash_jobs"
+                    jobs = rows(
+                        evidence(f"actions/runs/{run['id']}/jobs?filter=latest&per_page=100"),
+                        "jobs",
+                    )
+                    verified = set()
+                    for index in range(policy.shard_count):
+                        owning = [
+                            job
+                            for job in jobs
+                            if job["name"] == f"nebius-pool ({index + 1}-of-{policy.shard_count})"
+                        ]
+                        if len(owning) != 1:
+                            continue
+                        job = owning[0]
+                        if job["status"] != "completed" or job["conclusion"] != "success":
+                            continue
+                        try:
+                            stage = "job_log"
+                            log = job_log(job["id"])
+                            stage = "checkout_binding"
+                            checkout, changed, diff, simulations = checkout_inputs(job, log, number)
+                            stage = "tested_commit"
+                            [tested] = evidence(f"git/commits/{checkout}")
+                            if (
+                                tested["sha"] != checkout
+                                or tested["tree"]["sha"] != tree
+                                or [p["sha"] for p in tested["parents"]] != [base, head]
+                            ):
+                                continue
+                            stage = "test_selection"
+                            verified.update(
+                                test_paths(
+                                    changed_paths=changed,
+                                    diff_paths=diff,
+                                    include_shared_pool=simulations,
+                                    shard_index=index,
+                                    shard_count=policy.shard_count,
+                                )
+                            )
+                        except (
+                            OSError,
+                            ValueError,
+                            LookupError,
+                            TypeError,
+                            subprocess.SubprocessError,
+                        ) as error:
+                            unavailable_evidence(stage, error, run_id=run.get("id"), job_id=job.get("id"))
+                    if verified:
+                        covered.update(verified)
+                        reused_runs.append(run["id"])
+                except (OSError, ValueError, LookupError, TypeError, subprocess.SubprocessError) as error:
+                    unavailable_evidence(stage, error, run_id=run.get("id"))
+        except (OSError, ValueError, LookupError, TypeError, subprocess.SubprocessError) as error:
+            unavailable_evidence(stage, error)
     covered &= required
     missing = required - covered
     matrix = []
@@ -177,6 +504,7 @@ def plan(root: Path, candidate: str, *, read: Read = github_pages) -> dict[str, 
         missing_files=len(missing),
         reused_runs=reused_runs,
         evidence_unavailable=unavailable,
+        evidence_errors=errors,
         matrix={"include": matrix},
     )
 

@@ -42,8 +42,14 @@ commands expose `--supports-shared-guest`. Without readiness, an explicit shared
 request remains `isolation_guest_shared_unsupported`. With readiness, one resident
 task guest retains system files, processes and kernel state between agent and
 verifier controllers. Private verifier inputs are staged only after the agent ends.
-Separate grading retains two private guests. Both modes require explicit root
-task/verifier identities. Unresolved prerequisites and external
+Separate grading retains two private guests. An omitted ``verifier.user``
+inherits the resolved task identity; ``isolation=guest`` does not rewrite
+an authored or OCI-resolved nonroot user to root. The QEMU launcher stays
+uid/gid 0. The task user is ``guest_task_identity`` and is what runs inside
+the guest. A shared guest is one VM, so an explicit verifier user that
+resolves to a different uid, gid, home, or group list is
+``guest_shared_identity_mismatch``. An omitted verifier user still inherits.
+Unresolved prerequisites and external
 cluster, general PKCS#11 or DPDK requirements remain admission rejections.
 Emulated authentication additionally requires the deployment profile's explicit
 `supports_emulated_pkcs11 = true`. Only a task declaring that capability selects
@@ -58,9 +64,14 @@ Each sidecar carries `guest_execution` with schema
 capabilities. A plain guest carries an empty list; Go rejects a missing
 (`null`) list, and an empty one adds no `--nested-docker` or other capability
 setup. Python and Go both validate the exact class, the matching one or two private roles,
-matching task images/resources, root identities, private socket/probe paths,
+matching task images/resources, a root launcher identity, private socket/probe paths,
 timeouts and payload reservation. Historical requirements cannot silently
-upgrade into a guest. Nonroot guest identities are currently rejected.
+upgrade into a guest. A new guest plan also carries ``guest_task_identity``.
+Absent, an already compiled guest stays root inside the VM. Present, exec
+and file operations use that frozen uid, gid, supplementary groups, and HOME.
+The launcher command gains ``--task-uid``, ``--task-gid``, ``--task-groups``,
+and ``--task-home``; the namespace policy still accepts the historical
+command that boots as root.
 
 ## Isolation and lifetime
 
@@ -97,6 +108,10 @@ allowing existing execution reconciliation to report failure rather than reuse
 an incomplete environment. Kubernetes ownership and cleanup reconciliation
 remain authoritative; local process tests do not establish controller-restart
 or hosted cleanup qualification.
+
+During shutdown, the launcher closes the guest channel before the HTTP
+transport's idle streams. This interrupts pending channel I/O so an idle
+stream's FIN cannot delay QEMU cleanup while the guest is unresponsive.
 
 Startup is bounded separately from task commands. Disk preparation has 30 seconds;
 the subsequent guest boot has 90 seconds, including up to 60 seconds for Docker

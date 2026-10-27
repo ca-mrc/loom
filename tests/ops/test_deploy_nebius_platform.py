@@ -14,7 +14,8 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from scripts.ops import deploy_nebius_platform as deploy
 from scripts.ops import nebius_candidate as candidate
-from tests.unit.test_nebius_platform_render import platform_inputs, regional_inputs  # noqa: F401
+from tests.support.nebius_platform import platform_inputs as platform_inputs
+from tests.support.nebius_platform import regional_inputs as regional_inputs
 
 from loom.nebius_platform_render import build_platform, write_platform
 
@@ -999,6 +1000,175 @@ def test_kubectl_error_retains_api_reason_without_secret_message(
     with pytest.raises(deploy.DeploymentError, match="Forbidden") as error:
         deploy.Kubectl(tmp_path / "config").run("apply", "-f", "test.yaml")
     assert "secret" not in str(error.value) and "private" not in str(error.value)
+
+
+@pytest.mark.parametrize("stderr,reason", [
+    ("ssh: connect to host private.test port 22: Connection timed out", "SSHConnectTimeout"),
+    ("Connection timed out during banner exchange", "SSHConnectTimeout"),
+    ("kex_exchange_identification: Connection closed by remote host", "SSHConnectionClosed"),
+    ("Connection reset by private.test port 22", "SSHConnectionClosed"),
+    ("Connection to private.test closed by remote host.", "SSHConnectionClosed"),
+    ("deploy@private.test: Permission denied (publickey).", "SSHAuthenticationFailed"),
+    ("Host key verification failed.", "SSHHostKeyFailed"),
+    ("WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!", "SSHHostKeyFailed"),
+    ("unrecognized transport failure token=secret", "SSHCommandFailed"),
+])
+def test_kubectl_classifies_ssh_failure_without_leaking_details_or_retrying(
+    tmp_path, monkeypatch, stderr, reason
+):
+    monkeypatch.setenv("LOOM_DEPLOY_SSH_TARGET", "deploy@private.test")
+    monkeypatch.setenv("LOOM_DEPLOY_SSH_KEY_FILE", "/private/secret-key")
+    monkeypatch.setenv("LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE", "/private/known_hosts")
+    calls = []
+
+    def command(argv, **kwargs):
+        calls.append(argv)
+        return SimpleNamespace(returncode=255, stdout="token=secret", stderr=stderr)
+
+    monkeypatch.setattr(deploy.subprocess, "run", command)
+    with pytest.raises(deploy.DeploymentError) as error:
+        deploy.Kubectl(tmp_path / "private-config").run("get", "pods")
+    assert str(error.value) == f"kubectl get failed with exit code 255: {reason}"
+    assert error.value.reason_code == reason
+    assert len(calls) == 1
+    assert calls[0][0] == "ssh"
+
+
+@pytest.mark.parametrize("remote,returncode,stderr,reason", [
+    (False, 255, "ssh: connect to host private.test port 22: Connection timed out", "CommandFailed"),
+    (True, 1, "ssh: connect to host private.test port 22: Connection timed out", "CommandFailed"),
+    (True, 255, "Error from server (Forbidden): Connection timed out token=secret", "Forbidden"),
+    (False, 1, "timed out waiting for the condition token=secret", "DeadlineExceeded"),
+])
+def test_kubectl_classification_respects_route_exit_code_and_api_reason(
+    tmp_path, monkeypatch, remote, returncode, stderr, reason
+):
+    monkeypatch.delenv("LOOM_DEPLOY_SSH_TARGET", raising=False)
+    if remote:
+        monkeypatch.setenv("LOOM_DEPLOY_SSH_TARGET", "deploy@private.test")
+        monkeypatch.setenv("LOOM_DEPLOY_SSH_KEY_FILE", "/private/secret-key")
+        monkeypatch.setenv("LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE", "/private/known_hosts")
+    calls = []
+
+    def command(argv, **kwargs):
+        calls.append(argv)
+        return SimpleNamespace(returncode=returncode, stdout="token=secret", stderr=stderr)
+
+    monkeypatch.setattr(deploy.subprocess, "run", command)
+    with pytest.raises(deploy.DeploymentError) as error:
+        deploy.Kubectl(tmp_path / "private-config").run("get", "pods")
+    assert str(error.value) == f"kubectl get failed with exit code {returncode}: {reason}"
+    assert error.value.reason_code == reason
+    assert len(calls) == 1
+
+
+def test_kubectl_task_identity_denial_precedes_ssh_classification(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOOM_DEPLOY_SSH_TARGET", "deploy@private.test")
+    monkeypatch.setenv("LOOM_DEPLOY_SSH_KEY_FILE", "/private/secret-key")
+    monkeypatch.setenv("LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE", "/private/known_hosts")
+    calls = []
+
+    def command(argv, **kwargs):
+        calls.append(argv)
+        return SimpleNamespace(
+            returncode=255, stdout="token=secret",
+            stderr="Error from server (Forbidden): ValidatingAdmissionPolicy "
+            "'execution-private-root-v1' with binding 'execution-private-root' denied request "
+            "Connection timed out token=secret",
+        )
+
+    monkeypatch.setattr(deploy.subprocess, "run", command)
+    with pytest.raises(deploy.TaskIdentityPolicyDeniedError) as error:
+        deploy.Kubectl(tmp_path / "private-config").run("get", "pods")
+    assert error.value.policy_name == "execution-private-root-v1"
+    assert str(error.value) == "task identity policy rejected the admission probe"
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("remote", [False, True])
+def test_kubectl_process_timeout_is_safe_deployment_error_without_retry(
+    tmp_path, monkeypatch, remote
+):
+    import traceback
+
+    monkeypatch.delenv("LOOM_DEPLOY_SSH_TARGET", raising=False)
+    if remote:
+        monkeypatch.setenv("LOOM_DEPLOY_SSH_TARGET", "deploy@private.test")
+        monkeypatch.setenv("LOOM_DEPLOY_SSH_KEY_FILE", "/private/secret-key")
+        monkeypatch.setenv("LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE", "/private/known_hosts")
+    calls = []
+
+    def command(argv, **kwargs):
+        calls.append(argv)
+        raise subprocess.TimeoutExpired(
+            argv, kwargs["timeout"], output="sensitive-stdout-token", stderr="sensitive-stderr-token"
+        )
+
+    monkeypatch.setattr(deploy.subprocess, "run", command)
+    kube = deploy.Kubectl(tmp_path / "private-config")
+    with pytest.raises(deploy.DeploymentError, match="CommandTimeout") as error:
+        kube.run("get", "pods", timeout=17)
+    assert error.value.reason_code == "CommandTimeout"
+    assert error.value.__cause__ is None
+    formatted = "".join(traceback.format_exception(error.value))
+    for sensitive in ("private.test", "secret-key", "private-config", "sensitive-stdout-token", "sensitive-stderr-token"):
+        assert sensitive not in str(error.value)
+        assert sensitive not in formatted
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("failure,reason", [
+    ("ssh", "SSHConnectTimeout"),
+    ("process-timeout", "CommandTimeout"),
+])
+def test_deployment_receipt_retains_safe_command_failure_reason(rendered, monkeypatch, failure, reason):
+    args, config, _, files = rendered
+    args.apply = True
+    monkeypatch.setenv("LOOM_DEPLOY_SSH_TARGET", "deploy@private.test")
+    monkeypatch.setenv("LOOM_DEPLOY_SSH_KEY_FILE", "/private/secret-key")
+    monkeypatch.setenv("LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE", "/private/known_hosts")
+    calls = []
+
+    class ConfigureFailureKubectl(FakeKubectl):
+        def run(self, *command, timeout=90):
+            if command[:2] == ("apply", "-f") and Path(command[2]).name == "50-configure.yaml":
+                self.commands.append(command)
+                return deploy.Kubectl.run(self, *command, timeout=timeout)
+            return super().run(*command, timeout=timeout)
+
+    kube = ConfigureFailureKubectl(config, files, database=True)
+    kube.kubeconfig = args.kubeconfig
+    kube.context = None
+    kube.local_executable = None
+
+    def command(argv, **kwargs):
+        calls.append(argv)
+        if failure == "process-timeout":
+            raise subprocess.TimeoutExpired(
+                argv, kwargs["timeout"], output="sensitive-stdout-token", stderr="sensitive-stderr-token"
+            )
+        return SimpleNamespace(
+            returncode=255, stdout="sensitive-stdout-token",
+            stderr="ssh: connect to host private.test port 22: Connection timed out token=secret",
+        )
+
+    monkeypatch.setattr(deploy.subprocess, "run", command)
+    with pytest.raises(deploy.DeploymentError, match=reason):
+        deploy.deploy(args, kube=kube)
+    evidence_path, = args.evidence_dir.glob("*.json")
+    evidence = json.loads(evidence_path.read_text())
+    assert evidence["status"] == "failed"
+    assert evidence["reason_code"] == reason
+    assert evidence["error_type"] == "DeploymentError"
+    assert evidence["dispatch_paused"] is True
+    assert evidence["guard_observation"]["status"] == "held"
+    assert evidence["phases"][-1]["name"] == "50-configure"
+    assert kube.guard_identity is not None
+    assert len(calls) == 1
+    assert ("job", files["50-configure.yaml"][0]["metadata"]["name"]) not in kube.objects
+    assert deploy.job_complete(kube.objects["job", files["30-migrate.yaml"][0]["metadata"]["name"]])
+    for sensitive in ("private.test", "secret-key", "sensitive-stdout-token", "sensitive-stderr-token", "token=secret"):
+        assert sensitive not in evidence_path.read_text()
 
 
 @pytest.mark.parametrize("condition", ["Complete", "Failed", "Pending"])

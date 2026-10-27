@@ -9,11 +9,38 @@ the worker_crash test passes `compose_stack["worker_token"]` back to
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+import sys
+from collections.abc import Generator, Iterator
 
 import pytest
 
-from tests.system.docker_compose import stack_down_with_diagnostics, stack_up
+from loom.security.redaction import redact_text
+from tests.system.docker_compose import (
+    database_url,
+    preserve_compose_diagnostics,
+    service_urls,
+    stack_down_with_diagnostics,
+    stack_up,
+)
+
+
+@pytest.hookimpl(wrapper=True, tryfirst=True)
+def pytest_runtest_makereport(
+    item: pytest.Item,
+) -> Generator[None, pytest.TestReport, pytest.TestReport]:
+    report = yield
+    if report.failed and report.when in {"setup", "call"} and "compose_stack" in getattr(item, "funcargs", {}):
+        # Session teardown can be minutes later, after another test recovers the
+        # stack and pushes the original failure out of the bounded log tail.
+        # Harness tests without the actual fixture must never capture Docker.
+        try:
+            preserve_compose_diagnostics()
+        except Exception as exc:
+            print(
+                f"warning: failed to preserve Compose diagnostics: {redact_text(str(exc))}",
+                file=sys.stderr,
+            )
+    return report
 
 
 @pytest.fixture(scope="session")
@@ -23,18 +50,16 @@ def compose_stack(request: pytest.FixtureRequest) -> Iterator[dict[str, str]]:
     team_token, worker_token = stack_up()
     try:
         yield {
-            "control_plane": "http://localhost:58080",
-            "gateway": "http://localhost:59100",
-            "minio": "http://localhost:59000",
+            **service_urls(),
             "team_token": team_token,
             "worker_token": worker_token,
             # Plan 16 smoke tests drive `run_import` directly, which
             # needs DB + MinIO creds. The compose file fixes these to
             # static test values — see deploy/docker-compose.test.yml
-            # for `POSTGRES_USER/PASSWORD/DB`, the `55432:5432` mapping,
-            # and `MINIO_ROOT_USER/PASSWORD`. Keep this block in sync
-            # if the compose file's test creds ever change.
-            "db_url": "postgresql+psycopg://loom:loom@localhost:55432/loom",
+            # for `POSTGRES_USER/PASSWORD/DB` and `MINIO_ROOT_USER/PASSWORD`.
+            # Docker allocates the host DB port; use the actual binding.
+            # Keep this block in sync if the test creds ever change.
+            "db_url": database_url(),
             "minio_access_key": "loomtest",
             "minio_secret_key": "loomtest",
         }

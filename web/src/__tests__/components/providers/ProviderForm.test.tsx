@@ -46,6 +46,21 @@ describe("ProviderForm", () => {
     );
   });
 
+  it("labels native types as unusable for agent runs (#2054)", async () => {
+    const user = userEvent.setup();
+    render(<ProviderForm mode="create" onSubmit={vi.fn()} />);
+    expect(screen.queryByRole("note")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("option", { name: "anthropic (not for agent runs)" }),
+    ).toBeInTheDocument();
+    await user.selectOptions(screen.getByLabelText(/type/i), "google");
+    expect(screen.getByRole("note")).toHaveTextContent(
+      /agent batches and trials can't use this connection/i,
+    );
+    await user.selectOptions(screen.getByLabelText(/type/i), "custom");
+    expect(screen.queryByRole("note")).not.toBeInTheDocument();
+  });
+
   it("submit button is disabled while pending=true is passed", () => {
     render(<ProviderForm mode="create" onSubmit={vi.fn()} pending />);
     expect(screen.getByRole("button", { name: /create/i })).toBeDisabled();

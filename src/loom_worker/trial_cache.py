@@ -20,8 +20,8 @@ trial against the layered image. The build is shared:
   Docker build/push work so different cold cache keys cannot overload
   the same host Docker daemon concurrently.
 
-See `.claude/plans/2026-06-22-issue-317-agent-runtime-install.md` for
-the full design including the v3 self-review log.
+See `docs/architecture/agent-adapter.md#per-trial-agent-installation`
+for the installation and cache contract.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 import docker
@@ -667,7 +667,7 @@ def _container_status(container: Any) -> str:
     return ""
 
 
-def _remove_stopped_managed_containers(client: Any) -> int:
+def _remove_stopped_managed_containers(client: Any, *, sandbox_identity: str) -> int:
     errors = 0
     try:
         containers = client.containers.list(all=True)
@@ -676,6 +676,10 @@ def _remove_stopped_managed_containers(client: Any) -> int:
         return 1
     for container in containers:
         try:
+            # A managed image can be shared across sandboxes. Only the
+            # container's own identity establishes cleanup ownership.
+            if (_docker_labels(container).get("loom.sandbox") or "") != sandbox_identity:
+                continue
             if _container_status(container) not in _STOPPED_CONTAINER_STATES:
                 continue
             if not _is_loom_managed(container) and not _is_loom_managed(container.image):
@@ -725,8 +729,15 @@ def evict_stale_managed_images(
     client: Any,
     settings: WorkerSettings,
 ) -> ManagedImageCleanupResult:
-    """Clean only Loom-owned Docker resources and return final storage evidence."""
-    error_count = _remove_stopped_managed_containers(client)
+    """Clean owned containers and, on dedicated daemons, managed image caches.
+
+    Sandbox-scoped workers share their daemon's content-addressed images.
+    Image labels identify cache contents, not exclusive sandbox ownership, so
+    those workers leave image eviction to the daemon owner. Free-space probes
+    still run: insufficient space must remain an admission failure.
+    """
+    sandbox_identity = getattr(settings, "sandbox_identity", "")
+    error_count = _remove_stopped_managed_containers(client, sandbox_identity=sandbox_identity)
     ttl_hours = int(
         getattr(
             settings,
@@ -735,7 +746,7 @@ def evict_stale_managed_images(
         )
     )
     required_free_bytes = _required_managed_image_free_bytes(settings)
-    for label in _MANAGED_IMAGE_LABELS:
+    for label in (() if sandbox_identity else _MANAGED_IMAGE_LABELS):
         try:
             client.images.prune(
                 filters={
@@ -782,7 +793,7 @@ def evict_stale_managed_images(
             required_free_bytes=required_free_bytes,
             error_count=error_count,
         )
-    if free_bytes >= required_free_bytes:
+    if sandbox_identity or free_bytes >= required_free_bytes:
         return ManagedImageCleanupResult(
             docker_root=docker_root,
             storage_probe_path=storage_probe_path_text,
@@ -877,33 +888,3 @@ def evict_stale_managed_images_from_env(
     finally:
         with contextlib.suppress(Exception):
             client.close()
-
-
-class _SupportsCacheSlots(Protocol):
-    """Subset of HttpControlPlaneClient the cache layer uses. Kept
-    here so unit tests can supply a fake without instantiating the
-    full HTTP client."""
-
-    async def claim_trial_cache_slot(
-        self,
-        cache_key: str,
-        worker_id: UUID,
-        *,
-        ttl_sec: float,
-    ) -> bool: ...
-
-    async def trial_cache_slot_exists(self, cache_key: str) -> bool: ...
-
-    async def release_trial_cache_slot(
-        self,
-        cache_key: str,
-        worker_id: UUID,
-    ) -> None: ...
-
-    async def refresh_trial_cache_slot(
-        self,
-        cache_key: str,
-        worker_id: UUID,
-        *,
-        ttl_sec: float,
-    ) -> bool: ...

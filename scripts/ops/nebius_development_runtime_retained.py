@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_development_runtime_install import (
     _PHASES,
@@ -29,6 +31,19 @@ from scripts.ops.nebius_management_stage import _comparison_snapshot
 from loom.nebius_platform_render import digest
 
 
+class RetainedRuntimeReference(BaseModel):
+    model_config = ConfigDict(extra='forbid', frozen=True, hide_input_in_errors=True)
+    operation_path: Path
+    operation_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
+
+    @field_validator('operation_path')
+    @classmethod
+    def canonical_operation(cls, value: Path) -> Path:
+        if not value.is_absolute() or value != value.resolve() or value.name != 'operation.json':
+            raise ValueError('retained runtime operation path differs')
+        return value
+
+
 @dataclass(frozen=True, repr=False)
 class CompletedDevelopmentRuntime:
     request: DevelopmentRuntimeInstallRequest
@@ -38,6 +53,30 @@ class CompletedDevelopmentRuntime:
     resources: dict[str, dict[str, Any]]
     files: dict[Path, bytes]
     history_sha256: str
+
+
+def _canonical_node_selectors(expression: str) -> str:
+    """Normalize only JSON map-member order in the rendered selector equality.
+
+    Historical policies predate deterministic JSON rendering. JSON persistence
+    sorts profile mappings, but CEL map equality is independent of that order.
+    Preserve every other byte, including surrounding operators and operands.
+    """
+    def mapping(pairs: list[tuple[str, Any]]) -> dict[str, str]:
+        if len(dict(pairs)) != len(pairs) or any(not isinstance(value, str) for _, value in pairs):
+            raise ValueError('native build selector literal differs')
+        return dict(pairs)
+    decoder = json.JSONDecoder(object_pairs_hook=mapping)
+    prefix = '(variables.p.nodeSelector == '
+    pieces = []
+    while (position := expression.find(prefix)) >= 0:
+        end = position + len(prefix)
+        value, length = decoder.raw_decode(expression[end:])
+        if not isinstance(value, dict) or expression[end + length:end + length + 1] != ')':
+            raise ValueError('native build selector literal differs')
+        pieces.append(expression[:end] + json.dumps(value, separators=(',', ':'), sort_keys=True))
+        expression = expression[end + length:]
+    return ''.join(pieces) + expression
 
 
 def qualify_build_policy_spec(desired: dict[str, Any], observed: dict[str, Any]) -> None:
@@ -59,6 +98,9 @@ def qualify_build_policy_spec(desired: dict[str, Any], observed: dict[str, Any])
             match.setdefault('namespaceSelector', {})
             match.setdefault('objectSelector', {})
             match.setdefault('matchPolicy', 'Equivalent')
+            if kind == 'ValidatingAdmissionPolicy':
+                final = spec['validations'][-1]
+                final['expression'] = _canonical_node_selectors(final['expression'])
         if specs[0] != specs[1]:
             raise ValueError
     except Exception:

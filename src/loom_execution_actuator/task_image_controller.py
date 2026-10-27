@@ -31,6 +31,7 @@ from loom.nebius_kubernetes import (
 from loom.nebius_pool_native_runtime import PoolNativeRuntimeV1
 from loom.security.redaction import redact_text
 from loom.task_image_build_plan import derive_task_image_build_components
+from loom.task_image_errors import package_guard_failure, preparation_failure_from_receipt
 from loom_control_plane.execution_capacity import (
     _CAPACITY_ADMISSION_LOCK,
     ExecutionProvisioningBlockedError,
@@ -64,6 +65,7 @@ _LOG = logging.getLogger(__name__)
 class NativeBuildApi(Protocol):
     async def inventory(self, namespace: str) -> list[dict[str, Any]]: ...
     async def ensure(self, configmap: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]: ...
+    async def bound_node_unavailable(self, job: dict[str, Any]) -> str | None: ...
     async def observe(self, namespace: str, name: str, *, capture_logs: bool = False) -> dict[str, Any] | None: ...
     async def delete(self, namespace: str, name: str, uid: str | None, *, configmap: dict[str, Any]) -> bool: ...
 
@@ -115,6 +117,28 @@ def _owned_pods(observation: dict[str, Any], uid: str | None) -> list[dict[str, 
     )]
 
 
+def _build_has_progress(native: dict[str, Any], observed: dict[str, Any] | None, uid: str | None) -> bool:
+    """Never apply pre-scheduling recovery to started work or terminal results."""
+    if native.get("node_name") or (native.get("scheduling") or {}).get("status") == "True":
+        return True
+    if any(set(phase.get("state", {})) & {"running", "terminated"} for phase in native.get("phases", [])):
+        return True
+    if observed is None:
+        return False
+    if observed.get("status", {}).get("succeeded") or observed.get("status", {}).get("failed"):
+        return True
+    for pod in _owned_pods(observed, uid):
+        status = pod.get("status", {})
+        if pod.get("spec", {}).get("nodeName") or status.get("phase") in {"Running", "Succeeded", "Failed"}:
+            return True
+        if any(c.get("type") == "PodScheduled" and c.get("status") == "True" for c in status.get("conditions", [])):
+            return True
+        if any(set(c.get("state", {})) & {"running", "terminated"}
+               for c in (*status.get("initContainerStatuses", []), *status.get("containerStatuses", []))):
+            return True
+    return False
+
+
 class NativeBuildKubernetesApi:
     def __init__(self, *, connection: NebiusKubernetesConnection | None = None, api_client: Any | None = None) -> None:
         """Own one SDK client, optionally transferred by an explicit credential owner."""
@@ -146,9 +170,49 @@ class NativeBuildKubernetesApi:
             ).items]
         return await asyncio.to_thread(run)
 
+    async def bound_node_unavailable(self, job: dict[str, Any]) -> str | None:
+        """Only definitive current node loss can retire an immutable binding."""
+        annotations = job.get("metadata", {}).get("annotations", {})
+        name = annotations.get("loom.openai.com/build-node-name")
+        uid = annotations.get("loom.openai.com/build-node-uid")
+        if not isinstance(name, str) or not name or not isinstance(uid, str) or not uid:
+            return None  # Bootstrap placement has no bound node identity.
+
+        def run() -> str | None:
+            try:
+                node = self._json(self._core.read_node(name, _request_timeout=20))
+            except Exception as error:
+                # API outages, permissions and transient readiness are not node
+                # loss. Continue normal observation and heartbeat in that case.
+                return "missing" if getattr(error, "status", None) == 404 else None
+            metadata = node.get("metadata", {})
+            if metadata.get("name") != name or metadata.get("uid") != uid:
+                return "identity_changed"
+            if metadata.get("deletionTimestamp"):
+                return "deleting"
+            if any(taint.get("key") == "ToBeDeletedByClusterAutoscaler" for taint in node.get("spec", {}).get("taints", [])):
+                return "autoscaler_draining"
+            return None
+
+        return await asyncio.to_thread(run)
+
     async def ensure(self, configmap: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
         def run() -> dict[str, Any]:
             ns, name = job["metadata"]["namespace"], job["metadata"]["name"]
+            annotations = job["metadata"].get("annotations", {})
+            node_uid = annotations.get("loom.openai.com/build-node-uid")
+            if node_uid is not None:
+                node_name = annotations.get("loom.openai.com/build-node-name")
+                if not isinstance(node_uid, str) or not node_uid or not isinstance(node_name, str) or not node_name:
+                    raise ExecutionProvisioningBlockedError("execution_capacity_native_io_binding_invalid")
+                try:
+                    node = self._json(self._core.read_node(node_name, _request_timeout=20))
+                except Exception:
+                    raise ExecutionProvisioningBlockedError("execution_capacity_native_io_observation_unavailable") from None
+                metadata = node.get("metadata", {})
+                if (metadata.get("name") != node_name or metadata.get("uid") != node_uid
+                        or metadata.get("deletionTimestamp")):
+                    raise ExecutionProvisioningBlockedError("execution_capacity_native_io_node_identity_changed")
             try:
                 self._core.create_namespaced_config_map(ns, configmap, _request_timeout=20)
             except Exception as error:
@@ -309,7 +373,7 @@ def _safe_log(value: str) -> str:
     return redact_text(value, limit=16384)
 
 
-def publication_receipt(observation: dict[str, Any], *, materialization_id: UUID, lease_epoch: int) -> dict[str, str]:
+def _publication_document(observation: dict[str, Any], *, materialization_id: UUID, lease_epoch: int) -> dict[str, Any]:
     pods = _owned_pods(observation, observation.get("metadata", {}).get("uid"))
     if len(pods) != 1:
         raise ValueError("native build must have exactly one owned Pod")
@@ -327,7 +391,20 @@ def publication_receipt(observation: dict[str, Any], *, materialization_id: UUID
     images = receipt.get("registry_images")
     if not isinstance(images, dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in images.items()):
         raise ValueError("publication receipt has invalid images")
-    return images
+    from loom.task_image_metadata import TaskImageRuntimeMetadataV1
+
+    metadata = receipt.get("image_runtime_metadata", {})
+    if not isinstance(metadata, dict):
+        raise ValueError("publication receipt has invalid OCI metadata")
+    for component, value in metadata.items():
+        parsed = TaskImageRuntimeMetadataV1.model_validate(value)
+        if parsed.image_ref != images.get(component):
+            raise ValueError("OCI runtime metadata differs from the published image")
+    return receipt
+
+
+def publication_receipt(observation: dict[str, Any], *, materialization_id: UUID, lease_epoch: int) -> dict[str, str]:
+    return dict(_publication_document(observation, materialization_id=materialization_id, lease_epoch=lease_epoch)["registry_images"])
 
 
 def _phase_error(observation: dict[str, Any], name: str) -> str:
@@ -379,6 +456,19 @@ def build_observation(observation: dict[str, Any]) -> dict[str, Any]:
                 if isinstance(reason, str) and re.fullmatch(r"[A-Za-z][A-Za-z0-9]{0,63}", reason):
                     safe["reason"] = reason
                 phase["state"] = {kind: safe}
+                if row["name"] == "prepare" and kind == "terminated":
+                    message = detail.get("message", "")
+                    if isinstance(message, str) and len(message.encode()) <= 4096:
+                        try:
+                            receipt = json.loads(message)
+                        except ValueError:
+                            receipt = None
+                        classified = preparation_failure_from_receipt(receipt)
+                        if classified is not None:
+                            phase["preparation_error"] = {
+                                key: receipt[key] for key in ('error_schema', 'error_code', 'retryable')
+                            }
+                            phase["preparation_error"]["error"] = _safe_log(classified[1])
             phases.append(phase)
         result["phases"] = phases
     if observation.get("builder_log"):
@@ -407,12 +497,25 @@ def _native_failure(native: dict[str, Any]) -> tuple[str, str, bool] | None:
     for phase in native.get("phases", []):
         if phase.get("state", {}).get("terminated", {}).get("reason") == "OOMKilled":
             return "build_oom_killed", "Native build phase " + phase["name"] + " was OOMKilled", False
+    unclassified_prepare_failure = False
+    for phase in native.get("phases", []):
+        if phase.get("name") == "prepare" and phase.get("state", {}).get("terminated", {}).get("exitCode", 0):
+            classified = preparation_failure_from_receipt(phase.get("preparation_error"))
+            if classified is not None:
+                return classified
+            unclassified_prepare_failure = True
     for phase in native.get("phases", []):
         if phase.get("name") == "build" and phase.get("state", {}).get("terminated", {}).get("exitCode") == 124:
             return "build_deadline_exceeded", "Native build exceeded the task's build timeout", True
+        if phase.get("name") == "build" and phase.get("state", {}).get("terminated", {}).get("exitCode", 0):
+            classified = package_guard_failure(native.get('builder_log', ''))
+            if classified is not None:
+                return classified
     for condition in native.get("job_conditions", []):
         if condition.get("status") == "True" and condition.get("reason") == "DeadlineExceeded":
             return "build_deadline_exceeded", "Job DeadlineExceeded: " + condition.get("message", ""), True
+    if unclassified_prepare_failure:
+        return "build_prepare_failed", "Native prepare failed without a classified retryable cause", False
     return None
 
 
@@ -445,7 +548,7 @@ class NativeTaskImageController:
         if unexpected:
             raise RuntimeError("Native build reconciliation failed; inspect bounded actuator diagnostics")
         jobs = await self.kubernetes.inventory(self.settings.namespace)
-        if len(jobs) >= self.settings.max_concurrent:
+        if self.settings.max_concurrent is not None and len(jobs) >= self.settings.max_concurrent:
             return
         try:
             claimed_attempt_id = await self._claim()
@@ -492,7 +595,8 @@ class NativeTaskImageController:
         target = await session.get(ServiceExecutionTarget, self.target.target_id)
         if target is None or target.provider != "nebius" or target.desired_state != "active" or target.health_status != "healthy":
             return None
-        if len(await self._outstanding(session)) >= self.settings.max_concurrent:
+        if (self.settings.max_concurrent is not None
+                and len(await self._outstanding(session)) >= self.settings.max_concurrent):
             return None
         row = await claim_task_image_materialization(session, builder_id=self.builder_id, cpu_arch="x86_64",
                                                     nebius_pool_id=self.settings.pool_id)
@@ -505,6 +609,8 @@ class NativeTaskImageController:
         assert attempt is not None
         try:
             claim = {**task_image_materialization_payload(row), **self.settings.runtime_configuration()}
+            if self.settings.snapshotter == "native":
+                claim["io_full_avg10_max"] = self.settings.io_full_avg10_max
             if (
                 self.settings.compatible_revision_cache == "same_task"
                 and self.settings.cache_bucket is not None
@@ -539,6 +645,8 @@ class NativeTaskImageController:
             "deadline_at": (now + timedelta(seconds=job["spec"]["activeDeadlineSeconds"])).isoformat(),
             "configmap": cm, "job": job,
         }
+        if self.settings.snapshotter == "native":
+            attempt.native_build = {**attempt.native_build, "io_full_avg10_max": self.settings.io_full_avg10_max}
         await session.flush()
         return attempt
 
@@ -597,25 +705,25 @@ class NativeTaskImageController:
             attempt.native_build = native
         # Expiry/cancellation can precede Kubernetes' terminal status. Capture
         # bounded output before cleanup removes the running Pod's only log.
-        observed = await self.kubernetes.observe(native["namespace"], native["job_name"], capture_logs=not owned or expired)
-        uid = native.get("job_uid")
-        if observed is not None and not observed.get("job_missing"):
-            actual_uid = observed.get("metadata", {}).get("uid")
-            if not actual_uid or uid not in (None, actual_uid) or not _matches(observed, native["job"]):
-                raise ValueError("observed build identity differs from its durable attempt")
-            uid = actual_uid
-        elif observed is not None and uid is None:
-            # Recover a create whose response and Job were lost before restart.
-            owners = {owner.get("uid") for pod in observed.get("pods", [])
-                      if _matches(pod.get("metadata", {}).get("labels", {}), native["job"]["spec"]["template"]["metadata"]["labels"])
-                      for owner in pod.get("metadata", {}).get("ownerReferences", [])
-                      if owner.get("kind") == "Job" and owner.get("name") == native["job_name"]}
-            if len(owners) != 1 or None in owners:
-                raise ValueError("orphan build Pod has no unique owner")
-            uid = next(iter(owners))
-        if uid != native.get("job_uid"):
-            native["job_uid"] = uid
-            await self._save_native(attempt_id, native)
+        observed, uid = await self._observe_native(attempt_id, native, capture_logs=not owned or expired)
+        if owned and (native.get("io_binding") or {}).get("mode") == "node" and not _build_has_progress(native, observed, uid):
+            unavailable = await self.kubernetes.bound_node_unavailable(native["job"])
+            if unavailable is not None:
+                # Node reads can race Pod scheduling or publication. Re-observe
+                # and requalify the frozen identity before retiring this attempt.
+                observed, uid = await self._observe_native(attempt_id, native, capture_logs=True)
+                if observed is not None and not observed.get("job_missing"):
+                    pods = _owned_pods(observed, uid)
+                    if len(pods) > 1 or (native.get("pod_uid") and any(
+                        pod.get("metadata", {}).get("uid") != native["pod_uid"] for pod in pods
+                    )):
+                        await self._record_result(attempt_id, observed)
+                        return  # Preserve the existing Pod identity failure.
+                if not _build_has_progress(native, observed, uid):
+                    await self._finish_failure(attempt_id, "build_bound_node_unavailable", retryable=True,
+                        message=f"Frozen build node is unavailable before scheduling: {unavailable}")
+                    native["state"] = "cleaning"
+                    owned = False
         if owned and expired:
             # Reconciliation can run after the Job has already published. Honor
             # its validated receipt before applying the lifecycle deadline.
@@ -660,6 +768,30 @@ class NativeTaskImageController:
             await self._save_native(attempt_id, native)
         await self._record_result(attempt_id, observed)
 
+    async def _observe_native(
+        self, attempt_id: UUID, native: dict[str, Any], *, capture_logs: bool,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        observed = await self.kubernetes.observe(native["namespace"], native["job_name"], capture_logs=capture_logs)
+        uid = native.get("job_uid")
+        if observed is not None and not observed.get("job_missing"):
+            actual_uid = observed.get("metadata", {}).get("uid")
+            if not actual_uid or uid not in (None, actual_uid) or not _matches(observed, native["job"]):
+                raise ValueError("observed build identity differs from its durable attempt")
+            uid = actual_uid
+        elif observed is not None and uid is None:
+            # Recover a create whose response and Job were lost before restart.
+            owners = {owner.get("uid") for pod in observed.get("pods", [])
+                      if _matches(pod.get("metadata", {}).get("labels", {}), native["job"]["spec"]["template"]["metadata"]["labels"])
+                      for owner in pod.get("metadata", {}).get("ownerReferences", [])
+                      if owner.get("kind") == "Job" and owner.get("name") == native["job_name"]}
+            if len(owners) != 1 or None in owners:
+                raise ValueError("orphan build Pod has no unique owner")
+            uid = next(iter(owners))
+        if uid != native.get("job_uid"):
+            native["job_uid"] = uid
+            await self._save_native(attempt_id, native)
+        return observed, uid
+
     async def _save_native(self, attempt_id: UUID, native: dict[str, Any]) -> None:
         async with self.sessions() as session, session.begin():
             await session.execute(_CAPACITY_ADMISSION_LOCK)
@@ -669,14 +801,14 @@ class NativeTaskImageController:
             # this lifecycle snapshot was read. Cleanup must retain that result.
             attempt.native_build = {**(attempt.native_build or {}), **native}
 
-    async def _finish_failure(self, attempt_id: UUID, reason: str, *, retryable: bool) -> None:
+    async def _finish_failure(self, attempt_id: UUID, reason: str, *, retryable: bool, message: str | None = None) -> None:
         async with self.sessions() as session, session.begin():
             await session.execute(_CAPACITY_ADMISSION_LOCK)
             row, attempt = await self._lock_build(session, attempt_id)
             assert attempt is not None
             if self._owned(row, attempt):
                 assert row is not None
-                await self._fail(session, row, reason, retryable=retryable)
+                await self._fail(session, row, reason, retryable=retryable, message=message)
 
     async def _cleanup(self, attempt_id: UUID, native: dict[str, Any]) -> None:
         if await self.kubernetes.delete(native["namespace"], native["job_name"], native.get("job_uid"), configmap=native["configmap"]):
@@ -744,10 +876,16 @@ async def record_native_build_result(session: AsyncSession, row: TaskImageMateri
     images: dict[str, str] = {}
     invalid = False
     try:
-        images = publication_receipt(observed, materialization_id=row.id, lease_epoch=attempt.lease_epoch)
+        receipt = _publication_document(observed, materialization_id=row.id, lease_epoch=attempt.lease_epoch)
+        images = receipt["registry_images"]
         if any(not re.fullmatch(re.escape(registry_repository) + r"@sha256:[a-f0-9]{64}", ref) for ref in images.values()):
             raise ValueError("publication outside the frozen task repository")
         if status.get("succeeded"):
+            metadata = receipt.get("image_runtime_metadata", {})
+            environment = row.task_config.get("environment", {})
+            if (environment.get("user") == "image" or environment.get("image_entrypoint") or environment.get("image_workdir")) and "task" not in metadata:
+                raise ValueError("required task OCI runtime metadata is missing")
+            attempt.native_build = {**native, "image_runtime_metadata": metadata}
             await complete_task_image_materialization(session, materialization_id=row.id,
                 builder_id=builder_id, lease_epoch=attempt.lease_epoch, registry_images=images)
             return
@@ -764,7 +902,7 @@ async def record_native_build_result(session: AsyncSession, row: TaskImageMateri
             "build_" + phase + "_failed",
             ("Native build phase " + phase + " failed. " + native.get("builder_log", ""))
             if phase == "build" else "Native build phase " + phase + " failed: " + _phase_error(observed, phase),
-            phase != "build")
+            phase not in {"build", "prepare"})
         try:
             await fail_native_build(session, row, reason, builder_id=builder_id, retryable=retryable, images=images, message=message)
         except TaskImageCompletionError:

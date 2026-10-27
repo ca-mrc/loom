@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -30,6 +31,97 @@ type guestConfig struct {
 	MaxTransfer                      int64
 	ExecTimeout                      int
 	NestedDocker                     bool
+	TaskIdentity                     bool
+	TaskUID, TaskGID                 uint32
+	TaskGroups                       []uint32
+	TaskHome                         string
+}
+
+var (
+	taskIDPattern   = regexp.MustCompile(`^(?:0|[1-9][0-9]*)$`)
+	taskHomePattern = regexp.MustCompile(`^/(?:[-A-Za-z0-9._]+/)*[-A-Za-z0-9._]+$`)
+)
+
+func parseBoundedID(raw string) (uint32, error) {
+	if !taskIDPattern.MatchString(raw) {
+		return 0, errors.New("invalid guest task identity")
+	}
+	value, err := strconv.ParseUint(raw, 10, 32)
+	if err != nil || value > 2147483647 {
+		return 0, errors.New("invalid guest task identity")
+	}
+	return uint32(value), nil
+}
+
+func parseTaskGroups(raw string) ([]uint32, error) {
+	if raw == "-" {
+		return []uint32{}, nil
+	}
+	if len(raw) > 512 {
+		return nil, errors.New("invalid guest task identity")
+	}
+	parts := strings.Split(raw, ",")
+	if len(parts) > 32 {
+		return nil, errors.New("invalid guest task identity")
+	}
+	groups := make([]uint32, 0, len(parts))
+	var previous uint32
+	for index, part := range parts {
+		value, err := parseBoundedID(part)
+		if err != nil {
+			return nil, err
+		}
+		if index > 0 && value <= previous {
+			return nil, errors.New("invalid guest task identity")
+		}
+		previous = value
+		groups = append(groups, value)
+	}
+	return groups, nil
+}
+
+func (c *guestConfig) applyTaskIdentity(uid, gid, groups, home string) error {
+	if uid == "" && gid == "" && groups == "" && home == "" {
+		return nil
+	}
+	if uid == "" || gid == "" || groups == "" || home == "" {
+		return errors.New("guest task identity flags must be set together")
+	}
+	parsedUID, err := parseBoundedID(uid)
+	if err != nil {
+		return err
+	}
+	parsedGID, err := parseBoundedID(gid)
+	if err != nil {
+		return err
+	}
+	parsedGroups, err := parseTaskGroups(groups)
+	if err != nil {
+		return err
+	}
+	c.TaskIdentity = true
+	c.TaskUID = parsedUID
+	c.TaskGID = parsedGID
+	c.TaskGroups = parsedGroups
+	c.TaskHome = home
+	return nil
+}
+
+func validTaskHome(home string) bool {
+	if len(home) > 4096 || !taskHomePattern.MatchString(home) || filepath.Clean(home) != home {
+		return false
+	}
+	for _, part := range strings.Split(home, "/") {
+		if part == "." || part == ".." {
+			return false
+		}
+	}
+	for _, protected := range []string{"/proc", "/sys", "/dev", "/run", "/loom", "/tests", "/verifier", "/solution"} {
+		if home == protected || strings.HasPrefix(home, protected+"/") {
+			return false
+		}
+	}
+	return true
 }
 
 func (c guestConfig) validate() error {
@@ -43,6 +135,9 @@ func (c guestConfig) validate() error {
 	}
 	if c.MemoryMiB < 512 || c.MemoryMiB > 1048576 || c.StorageMiB < 128 || c.StorageMiB > 1048576 || c.CPUMillis <= 0 || c.CPUMillis > 128000 || c.ExecTimeout <= 0 || c.ExecTimeout > 86400 || c.MaxTransfer <= 0 {
 		return errors.New("guest resource or transfer bounds are invalid")
+	}
+	if c.TaskIdentity && !validTaskHome(c.TaskHome) {
+		return errors.New("invalid guest task identity")
 	}
 	return nil
 }
@@ -168,7 +263,7 @@ func runGuest(parent context.Context, c guestConfig) (failure error) {
 	target := &url.URL{Scheme: "http", Host: "guest"}
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	transport := &http.Transport{DialContext: channel.DialContext, MaxConnsPerHost: 128, MaxIdleConnsPerHost: 16}
-	defer transport.CloseIdleConnections()
+	defer closeGuestTransport(channel, transport)
 	proxy.Transport = transport
 	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, _ error) {
 		http.Error(w, "guest unavailable", http.StatusBadGateway)

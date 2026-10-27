@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from loom.trial.workspace import WorkspaceStagingPolicy
 
 _RPC_OPERATIONS = {"/health": "health", "/exec": "exec", "/file": "file_transfer",
+                   "/workspace-archive": "workspace_archive_transfer",
                    "/stop-processes": "stop_processes", "/pause-processes": "pause_processes",
                    "/resume-processes": "resume_processes", "/restore-directory": "directory_restore"}
 _CLEANUP_REASONS = frozenset({
@@ -50,6 +51,10 @@ _EXEC_REASONS = frozenset({
     "exec_environment_invalid",
 })
 _PROCESS_REASONS = _EXEC_REASONS | {"process_limit_reached", "process_offset_unavailable"}
+_FILE_REASONS = frozenset({
+    "file_permission_denied", "file_read_only_filesystem", "file_invalid_target", "file_io_error",
+    "file_too_large", "file_budget_invalid", "file_not_found", "file_changed",
+})
 # Long-poll budget per process status/output request; the server caps it at 10s.
 _PROCESS_POLL_MS = 5000
 _PROCESS_DIAGNOSTIC = re.compile(
@@ -84,7 +89,7 @@ def _bounded_cleanup_snapshot(value: str) -> bool:
 class SandboxRPCError(DriverError):
     """Only fixed operation/reason codes and HTTP status are safe to publish."""
 
-    def __init__(self, path: str, exc: httpx.HTTPError) -> None:
+    def __init__(self, path: str, exc: httpx.HTTPError, *, stage: str | None = None) -> None:
         process = path == "/processes" or path.startswith("/processes/")
         operation = "process" if process else _RPC_OPERATIONS.get(path, "request")
         if isinstance(exc, httpx.HTTPStatusError):
@@ -93,6 +98,7 @@ class SandboxRPCError(DriverError):
             allowed_reasons = (
                 _EXEC_REASONS if path == "/exec" else
                 _PROCESS_REASONS if process else
+                _FILE_REASONS if path in {"/file", "/workspace-archive"} else
                 frozenset({"restore_request_invalid", "directory_restore_failed"})
                 if path == "/restore-directory" else
                 _CLEANUP_REASONS if path in {"/stop-processes", "/pause-processes", "/resume-processes"}
@@ -101,6 +107,11 @@ class SandboxRPCError(DriverError):
             if reason not in allowed_reasons:
                 reason = "http_error"
             detail = f"HTTP {status}; {reason}"
+            if path in {"/file", "/workspace-archive"}:
+                for header, label in (("X-Loom-File-Size", "bytes"), ("X-Loom-File-Limit", "limit")):
+                    value = exc.response.headers.get(header, "")
+                    if re.fullmatch(r"[0-9]{1,19}", value) and int(value) < 2**63:
+                        detail += f"; {label}={int(value)}"
             if reason == "process_owner_mismatch":
                 diagnostic = exc.response.headers.get("X-Loom-Sandbox-Process", "")
                 match = _PROCESS_DIAGNOSTIC.fullmatch(diagnostic)
@@ -115,6 +126,8 @@ class SandboxRPCError(DriverError):
                     detail += "; " + diagnostic
         else:
             detail = "transport_timeout" if isinstance(exc, httpx.TimeoutException) else "transport_error"
+        if stage in {"upload", "download"}:
+            operation += f" {stage}"
         super().__init__(f"sandbox {operation} failed ({detail})")
 
 
@@ -197,14 +210,22 @@ class ServiceSandboxDriver:
         capabilities: Capabilities,
         network_policy: NetworkPolicy,
         max_transfer_bytes: int = 256 * 1024 * 1024,
+        max_workspace_archive_bytes: int | None = None,
         command_environment: Mapping[str, str] | None = None,
     ) -> None:
         if max_transfer_bytes <= 0:
             raise ValueError("positive max_transfer_bytes required")
+        if max_workspace_archive_bytes is not None and max_workspace_archive_bytes <= 0:
+            raise ValueError("positive max_workspace_archive_bytes required")
         self.capabilities = capabilities
         self._network_policy = network_policy
         self._command_environment = dict(command_environment or {})
         self._max_transfer = max_transfer_bytes
+        # This is supplied by the trusted runtime's existing artifact/storage
+        # budget, never by a task request. Ordinary files keep their own limit.
+        self._max_workspace_archive = (
+            max_transfer_bytes if max_workspace_archive_bytes is None else max_workspace_archive_bytes
+        )
         self._socket_path = socket_path
         self._client: httpx.AsyncClient | None = None
         self._started = False
@@ -227,6 +248,10 @@ class ServiceSandboxDriver:
             health = response.json()
             if not isinstance(health, dict) or health.get("ready") is not True:
                 raise DriverError("sandbox readiness response invalid")
+        except httpx.HTTPError as exc:
+            # An unreachable sandbox gets a publishable code, not a bare class name.
+            await client.aclose()
+            raise SandboxRPCError("/health", exc) from exc
         except BaseException:
             await client.aclose()
             raise
@@ -263,7 +288,8 @@ class ServiceSandboxDriver:
             return response
         except httpx.HTTPError as exc:
             # Do not attach request bodies (commands/env may contain secrets).
-            raise SandboxRPCError(path, exc) from exc
+            stage = "upload" if method == "PUT" and path in {"/file", "/workspace-archive"} else None
+            raise SandboxRPCError(path, exc, stage=stage) from exc
         finally:
             self._requests.discard(task)
 
@@ -326,26 +352,56 @@ class ServiceSandboxDriver:
         return _SandboxProcess(self, str(started["id"]), int(started["pid"])).handle()
 
     async def upload(self, src: Path, dst: PurePosixPath) -> None:
+        await self._upload_file(src, dst)
+
+    async def _upload_file(
+        self, src: Path, dst: PurePosixPath, *, workspace_archive: bool = False,
+    ) -> None:
         self._running_client()
+        limit = self._max_workspace_archive if workspace_archive else self._max_transfer
+        endpoint = "/workspace-archive" if workspace_archive else "/file"
         fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         with os.fdopen(fd, "rb") as stream:
             info = os.fstat(stream.fileno())
-            if not stat.S_ISREG(info.st_mode) or info.st_size > self._max_transfer:
+            if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
                 raise DriverError("upload requires a regular file within transfer limit")
+
+            def validate_source() -> None:
+                if stream.read(1):
+                    raise DriverError("upload source grew during transfer")
+                after = os.fstat(stream.fileno())
+                if (info.st_size, info.st_mtime_ns, info.st_ctime_ns) != (
+                    after.st_size, after.st_mtime_ns, after.st_ctime_ns
+                ):
+                    raise DriverError("upload source changed during transfer")
+
+            # A zero-length request can commit as soon as its headers arrive.
+            # Validate it before starting the HTTP request, not in its iterator.
+            if info.st_size == 0:
+                validate_source()
+
             async def chunks() -> AsyncIterator[bytes]:
                 remaining = info.st_size
+                last = b""
                 while remaining:
                     chunk = await asyncio.to_thread(stream.read, min(1024 * 1024, remaining))
                     if not chunk:
                         raise DriverError("upload source shrank during transfer")
                     remaining -= len(chunk)
-                    yield chunk
-                if stream.read(1):
-                    raise DriverError("upload source grew during transfer")
+                    if not remaining:
+                        # Keep the HTTP body incomplete until validation passes.
+                        # The server may atomically commit immediately upon
+                        # receiving Content-Length bytes, before another yield.
+                        chunk, last = chunk[:-1], chunk[-1:]
+                    if chunk:
+                        yield chunk
+                if last:
+                    validate_source()
+                    yield last
 
             await self._request(
                 "PUT",
-                "/file",
+                endpoint,
                 params={"path": str(dst)},
                 headers={"X-File-Mode": format(stat.S_IMODE(info.st_mode) & 0o777, "o"),
                          "Content-Length": str(info.st_size)},
@@ -354,7 +410,14 @@ class ServiceSandboxDriver:
             )
 
     async def download(self, src: PurePosixPath, dst: Path) -> None:
+        await self._download_file(src, dst)
+
+    async def _download_file(
+        self, src: PurePosixPath, dst: Path, *, workspace_archive: bool = False,
+    ) -> None:
         client = self._running_client()
+        limit = self._max_workspace_archive if workspace_archive else self._max_transfer
+        endpoint = "/workspace-archive" if workspace_archive else "/file"
         # Download to a private temporary file and atomically publish only a
         # complete, bounded transfer. Existing output survives failed reads.
         if dst.is_symlink() or any(p.is_symlink() for p in dst.parents):
@@ -366,22 +429,30 @@ class ServiceSandboxDriver:
         temporary: Path | None = None
         try:
             async with client.stream(
-                "GET", "/file", params={"path": str(src)}, timeout=120
+                "GET", endpoint, params={"path": str(src)}, timeout=120
             ) as response:
                 response.raise_for_status()
-                if int(response.headers.get("Content-Length", "0")) > self._max_transfer:
+                raw_size = response.headers.get("Content-Length", "")
+                if re.fullmatch(r"[0-9]{1,19}", raw_size) is None or int(raw_size) >= 2**63:
+                    raise DriverError("download declared size invalid")
+                expected = int(raw_size)
+                if expected > limit:
                     raise DriverError("download exceeds transfer limit")
                 with tempfile.NamedTemporaryFile(dir=dst.parent, delete=False) as output:
                     temporary = Path(output.name)
                     size = 0
-                    async for chunk in response.aiter_bytes():
+                    async for chunk in response.aiter_bytes(chunk_size=1024 * 1024):
                         size += len(chunk)
-                        if size > self._max_transfer:
+                        if size > limit:
                             raise DriverError("download exceeds transfer limit")
+                        if size > expected:
+                            raise DriverError("download differs from declared size")
                         output.write(chunk)
+                    if size != expected:
+                        raise DriverError("download differs from declared size")
                 temporary.replace(dst)
         except httpx.HTTPError as exc:
-            raise DriverError("sandbox download failed") from exc
+            raise SandboxRPCError(endpoint, exc, stage="download") from exc
         finally:
             self._requests.discard(task)
             if temporary is not None:
@@ -503,7 +574,7 @@ class ServiceSandboxDriver:
                     "unable to export POSIX ACL workspace archive (tar --acls required)"
                     if preserve_acls else "unable to export a stable workspace archive",
                 )
-            await self.download(remote, dst)
+            await self._download_file(remote, dst, workspace_archive=True)
         finally:
             await self.exec(f"rm -f {archive}")
 
@@ -527,7 +598,7 @@ class ServiceSandboxDriver:
         remote = PurePosixPath(f"/tmp/loom-workspace-{uuid4().hex}.tar")
         destination, archive = shlex.quote(str(dst)), shlex.quote(str(remote))
         try:
-            await self.upload(src, remote)
+            await self._upload_file(src, remote, workspace_archive=True)
             result = await self.exec(
                 f"mkdir -p {destination} && tar {'--acls ' if preserve_acls else ''}"
                 f"--numeric-owner -C {destination} -xpf {archive}"

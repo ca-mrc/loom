@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tomllib
@@ -15,9 +16,126 @@ from tests.integration.minio_test_images import MINIO_TEST_IMAGE
 from tests.system import docker_compose
 
 
+@pytest.mark.parametrize("configured", [None, "explicit-system-session"])
+def test_compose_keeps_one_isolated_project_for_start_restart_and_cleanup(
+    monkeypatch: Any, configured: str | None,
+) -> None:
+    projects: list[str] = []
+
+    def run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        projects.append(kwargs["env"]["COMPOSE_PROJECT_NAME"])
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.delenv("COMPOSE_PROJECT_NAME", raising=False)
+    if configured:
+        monkeypatch.setenv("COMPOSE_PROJECT_NAME", configured)
+    monkeypatch.setattr(docker_compose.subprocess, "run", run)
+    docker_compose._compose("up", "-d")
+    docker_compose.start_service("worker", "test-token")
+    docker_compose.stack_down()
+
+    assert len(set(projects)) == 1
+    assert projects[0] == configured if configured else projects[0].startswith("loom-system-")
+
+
+def test_compose_failure_reports_bounded_redacted_output_without_replacing_error(
+    monkeypatch: Any, capsys: Any,
+) -> None:
+    secret = "s" * 40_000
+    failure = subprocess.CalledProcessError(
+        1,
+        ["docker", "compose", "up", "--build"],
+        output=(
+            "discarded build preamble\n" + "build progress\n" * 4_000
+            + f"Bearer {secret}\npackage build failed: concrete root cause\n"
+        ),
+        stderr="Dockerfile.control-plane:20\nloom_w_worker-secret\n",
+    )
+
+    def fail(*args: Any, **kwargs: Any) -> None:
+        raise failure
+
+    monkeypatch.setattr(docker_compose.subprocess, "run", fail)
+    with pytest.raises(subprocess.CalledProcessError) as caught:
+        docker_compose._compose("up", "--build")
+
+    assert caught.value is failure
+    output = capsys.readouterr().err
+    assert "package build failed: concrete root cause" in output
+    assert "Dockerfile.control-plane:20" in output
+    assert "discarded build preamble" not in output
+    assert secret[:64] not in output
+    assert "loom_w_worker-secret" not in output
+    assert "[REDACTED:bearer]" in output
+    assert "[REDACTED:loom-token]" in output
+    assert len(output) <= 33_000
+
+
+@pytest.mark.parametrize("requested_port", [None, "61234"])
+@pytest.mark.parametrize("service,container_port,setting", [
+    ("postgres", "5432", "POSTGRES"), ("registry", "5000", "REGISTRY"),
+    ("minio", "9000", "MINIO"), ("llm-gateway", "9100", "GATEWAY"),
+    ("control-plane", "8080", "CONTROL_PLANE"),
+])
+def test_compose_services_use_docker_allocated_loopback_ports(
+    monkeypatch: Any, requested_port: str | None, service: str, container_port: str, setting: str,
+) -> None:
+    def run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        assert command[-3:] == ["port", service, container_port]
+        assert kwargs["env"][f"LOOM_SYSTEM_{setting}_PORT"] == (requested_port or "0")
+        assert 0 < kwargs["timeout"] <= 5
+        return subprocess.CompletedProcess(command, 0, stdout="127.0.0.1:61234\n", stderr="")
+
+    monkeypatch.delenv(f"LOOM_SYSTEM_{setting}_PORT", raising=False)
+    if requested_port is not None:
+        monkeypatch.setenv(f"LOOM_SYSTEM_{setting}_PORT", requested_port)
+    monkeypatch.setattr(docker_compose.subprocess, "run", run)
+    if service == "postgres":
+        assert docker_compose.database_url() == "postgresql+psycopg://loom:loom@127.0.0.1:61234/loom"
+    else:
+        assert docker_compose._published_port(service, container_port) == 61234
+
+
+@pytest.mark.parametrize(
+    "binding",
+    ["", "0.0.0.0:61234", "127.0.0.1:0", "127.0.0.1:65536", "127.0.0.1:61234\n127.0.0.1:61235"],
+)
+@pytest.mark.parametrize("service,port", [("postgres", "5432"), ("registry", "5000")])
+def test_compose_rejects_missing_or_ambiguous_binding(
+    monkeypatch: Any, binding: str, service: str, port: str,
+) -> None:
+    monkeypatch.setattr(
+        docker_compose,
+        "_compose",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout=binding, stderr=""),
+    )
+    with pytest.raises(RuntimeError, match="database port" if service == "postgres" else "registry port"):
+        if service == "postgres":
+            docker_compose.database_url()
+        else:
+            docker_compose._published_port(service, port)
+
+
+def test_additional_fixture_seed_uses_running_stack_database(monkeypatch: Any) -> None:
+    allocated_database = "postgresql+psycopg://loom:loom@127.0.0.1:61234/loom"
+
+    def run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        assert command[command.index("--db-url") + 1] == allocated_database
+        assert command[command.index("--task-id") + 1] == "multi-step-3"
+        assert command[command.index("--print") + 1] == "team"
+        return subprocess.CompletedProcess(command, 0, stdout="team-token\n", stderr="")
+
+    monkeypatch.setattr(docker_compose, "database_url", lambda: allocated_database)
+    monkeypatch.setattr(docker_compose.subprocess, "run", run)
+    assert docker_compose.run_seed(task_id="multi-step-3") == "team-token"
+
+
 def test_compose_uses_available_pinned_minio_fixture() -> None:
     compose = yaml.safe_load(docker_compose.COMPOSE_FILE.read_text(encoding="utf-8"))
-    assert compose["services"]["minio"]["image"] == "${LOOM_SYSTEM_MINIO_IMAGE:-" + MINIO_TEST_IMAGE + "}"
+    assert (
+        compose["services"]["minio"]["image"]
+        == "${LOOM_SYSTEM_MINIO_IMAGE:-" + MINIO_TEST_IMAGE + "}"
+    )
 
 
 def test_compose_uses_one_test_only_step_jwt_signing_key() -> None:
@@ -47,6 +165,13 @@ def test_compose_mounts_runtime_fixtures_and_uses_fast_test_cancellation() -> No
     worker = compose["services"]["worker"]
     builder = services["task-image-builder"]
 
+    for service in (worker, builder):
+        assert service["environment"]["LOOM_WORKER_SANDBOX_IDENTITY"] == "${COMPOSE_PROJECT_NAME}"
+    for name in ("control-plane", "llm-gateway", "worker", "task-image-builder"):
+        # Compose owns the generated project/service image name and can
+        # remove it with --rmi local without removing pulled shared images.
+        assert "image" not in services[name]
+
     assert worker["environment"]["LOOM_WORKER_FIXTURES_ROOT"] == ("/app/tests/fixtures/tasks")
     assert worker["environment"]["LOOM_WORKER_TRIAL_CANCEL_POLL_INTERVAL_SEC"] == "0.1"
     assert worker["environment"]["LOOM_WORKER_SETUP_HEALTH_GUARD_ENABLED"] == "false"
@@ -64,14 +189,14 @@ def test_compose_mounts_runtime_fixtures_and_uses_fast_test_cancellation() -> No
         ),
     )
     assert hello_task["environment"]["cpu_arch"] == "any"
-    assert services["registry"]["ports"] == ["55000:5000"]
+    assert services["registry"]["ports"] == ["127.0.0.1:${LOOM_SYSTEM_REGISTRY_PORT:-55000}:5000"]
     assert builder["command"] == ["python", "-m", "loom_worker.task_image_builder"]
     assert builder["environment"]["LOOM_WORKER_TOKEN"] == (
         "${LOOM_TASK_IMAGE_BUILDER_TOKEN:?LOOM_TASK_IMAGE_BUILDER_TOKEN "
         "must be set before builder compose-up}"
     )
     assert builder["environment"]["LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO"] == (
-        "localhost:55000/loom-task-images"
+        "${LOOM_SYSTEM_REGISTRY_REPO:-localhost:55000/loom-task-images}"
     )
     assert builder["environment"]["LOOM_WORKER_TASK_IMAGE_BUILDER_IDLE_EXIT_SECONDS"] == "120"
     assert (
@@ -99,8 +224,15 @@ def test_stack_up_migrates_blank_database_before_starting_services(
 ) -> None:
     events: list[tuple[Any, ...]] = []
     compose_envs: list[tuple[tuple[str, ...], dict[str, str] | None]] = []
+    resolved_ports: list[str] = []
+    allocated_database = "postgresql+psycopg://loom:loom@127.0.0.1:61234/loom"
 
     def fake_compose(*args: str, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if args[0] == "port":
+            resolved_ports.append(args[1])
+            port = {"registry": 61235, "control-plane": 61236,
+                    "llm-gateway": 61237, "minio": 61238}[args[1]]
+            return subprocess.CompletedProcess(args, 0, stdout=f"127.0.0.1:{port}\n", stderr="")
         events.append(("compose", *args))
         compose_envs.append((args, kwargs.get("env_extra")))
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
@@ -123,13 +255,19 @@ def test_stack_up_migrates_blank_database_before_starting_services(
             stderr="",
         )
 
-    def fake_wait_for_materialization(task_id: str, *, timeout_sec: float) -> None:
+    def fake_wait_for_materialization(task_id: str, *, timeout_sec: float, db_url: str) -> None:
+        assert db_url == allocated_database
         events.append(("materialization-ready", task_id, timeout_sec))
 
     def fake_canary(team_token: str, *, timeout_sec: float) -> None:
+        assert docker_compose.CONTROL_PLANE_URL == "http://127.0.0.1:61236"
+        assert resolved_ports == ["registry", "control-plane", "llm-gateway", "minio"]
         events.append(("claim-canary", team_token, timeout_sec))
 
+    for setting in ("CONTROL_PLANE_URL", "GATEWAY_URL", "MINIO_URL"):
+        monkeypatch.setattr(docker_compose, setting, getattr(docker_compose, setting))
     monkeypatch.setattr(docker_compose, "prepare_test_image", lambda image: "local-minio-source")
+    monkeypatch.setattr(docker_compose, "database_url", lambda: allocated_database)
     monkeypatch.setattr(docker_compose, "_compose", fake_compose)
     monkeypatch.setattr(docker_compose, "_wait_services_healthy", fake_wait)
     monkeypatch.setattr(
@@ -142,12 +280,16 @@ def test_stack_up_migrates_blank_database_before_starting_services(
     monkeypatch.setattr(docker_compose.subprocess, "run", fake_run)
 
     assert docker_compose.stack_up(timeout_sec=17) == ("team-token", "worker-token")
+    assert docker_compose.service_urls() == {
+        "control_plane": "http://127.0.0.1:61236", "gateway": "http://127.0.0.1:61237",
+        "minio": "http://127.0.0.1:61238",
+    }
 
     assert events[0] == ("compose", "up", "-d", "postgres", "minio", "registry")
     assert events[1] == ("wait", ("postgres", "minio", "registry"), 17)
     assert events[2][0] == "migrate"
     assert events[2][1][0:3] == (sys.executable, "-m", "alembic")
-    assert events[2][2] == docker_compose.DB_URL
+    assert events[2][2] == allocated_database
     assert events[3] == ("compose", "up", "-d", "--build")
     assert events[4] == (
         "wait",
@@ -156,6 +298,8 @@ def test_stack_up_migrates_blank_database_before_starting_services(
     )
     assert events[5][0] == "seed"
     assert events[5][1][0] == sys.executable
+    seed_command = events[5][1]
+    assert seed_command[seed_command.index("--db-url") + 1] == allocated_database
     assert events[6] == (
         "compose",
         "--profile",
@@ -183,13 +327,47 @@ def test_stack_up_migrates_blank_database_before_starting_services(
         "team-token",
         docker_compose._CANARY_MAX_TIMEOUT_SEC,
     )
-    assert all(env and env["LOOM_SYSTEM_MINIO_IMAGE"] == "local-minio-source" for _, env in compose_envs)
+    assert all(
+        env and env["LOOM_SYSTEM_MINIO_IMAGE"] == "local-minio-source" for _, env in compose_envs
+    )
     builder_env = next(
         env for args, env in compose_envs if args and args[-1] == "task-image-builder"
     )
     worker_env = next(env for args, env in compose_envs if args and args[-1] == "worker")
-    assert builder_env == {"LOOM_TASK_IMAGE_BUILDER_TOKEN": "builder-token", "LOOM_SYSTEM_MINIO_IMAGE": "local-minio-source"}
-    assert worker_env == {"LOOM_WORKER_TOKEN": "worker-token", "LOOM_SYSTEM_MINIO_IMAGE": "local-minio-source"}
+    assert builder_env == {
+        "LOOM_TASK_IMAGE_BUILDER_TOKEN": "builder-token",
+        "LOOM_SYSTEM_MINIO_IMAGE": "local-minio-source",
+        "LOOM_SYSTEM_REGISTRY_REPO": "localhost:61235/loom-task-images",
+    }
+    assert worker_env == {
+        "LOOM_WORKER_TOKEN": "worker-token",
+        "LOOM_SYSTEM_MINIO_IMAGE": "local-minio-source",
+    }
+
+
+def test_stack_up_rejects_ambiguous_registry_before_seeding_or_starting_builder(monkeypatch: Any):
+    events = []
+
+    def compose(*args, **kwargs):
+        events.append(args)
+        return subprocess.CompletedProcess(args, 0,
+            stdout="127.0.0.1:61234\n127.0.0.1:61235\n" if args[0] == "port" else "", stderr="")
+
+    def migrate(command, **kwargs):
+        assert command[1:3] == ["-m", "alembic"]
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    cleanup = []
+    monkeypatch.setattr(docker_compose, "prepare_test_image", lambda _: "local-minio-source")
+    monkeypatch.setattr(docker_compose, "database_url", lambda: "postgresql://fixture")
+    monkeypatch.setattr(docker_compose, "_compose", compose)
+    monkeypatch.setattr(docker_compose, "_wait_services_healthy", lambda *args, **kwargs: None)
+    monkeypatch.setattr(docker_compose.subprocess, "run", migrate)
+    monkeypatch.setattr(docker_compose, "stack_down_with_diagnostics", lambda *, failed: cleanup.append(failed))
+    with pytest.raises(RuntimeError, match="registry port"):
+        docker_compose.stack_up()
+    assert cleanup == [True]
+    assert all("task-image-builder" not in args for args in events)
 
 
 def test_wait_services_healthy_bounds_compose_inspection(monkeypatch: Any) -> None:
@@ -253,13 +431,16 @@ def test_wait_materialization_fails_fast_when_builder_container_exits(
         docker_compose._wait_task_image_materialization_ready(
             "hello-world",
             timeout_sec=1.0,
+            db_url="postgresql+psycopg://loom:loom@127.0.0.1:61234/loom",
         )
 
 
 def test_stack_up_cleans_partial_compose_state_on_setup_failure(
     monkeypatch: Any,
+    tmp_path: Path,
 ) -> None:
     compose_calls: list[tuple[str, ...]] = []
+    diagnostics = tmp_path / "setup-failure.log"
 
     def fake_compose(*args: str, **kwargs: Any) -> subprocess.CompletedProcess[str]:
         compose_calls.append(args)
@@ -268,9 +449,17 @@ def test_stack_up_cleans_partial_compose_state_on_setup_failure(
     def fail_wait(services: list[str], timeout_sec: float) -> None:
         raise RuntimeError(f"failed waiting for {services} after {timeout_sec}")
 
+    def fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        assert command[:3] == ["docker", "ps", "-a"]
+        return subprocess.CompletedProcess(
+            command, 0, stdout="fixture-postgres-1\tfixture-image\tUp 1 second\n", stderr="",
+        )
+
+    monkeypatch.setenv(docker_compose.DIAGNOSTICS_ENV, str(diagnostics))
     monkeypatch.setattr(docker_compose, "prepare_test_image", lambda image: "local-minio-source")
     monkeypatch.setattr(docker_compose, "_compose", fake_compose)
     monkeypatch.setattr(docker_compose, "_wait_services_healthy", fail_wait)
+    monkeypatch.setattr(docker_compose.subprocess, "run", fake_run)
 
     with pytest.raises(RuntimeError, match="failed waiting"):
         docker_compose.stack_up(timeout_sec=17)
@@ -283,6 +472,8 @@ def test_stack_up_cleans_partial_compose_state_on_setup_failure(
         "down",
         "-v",
         "--remove-orphans",
+        "--rmi",
+        "local",
     )
     assert compose_calls[-3:-1] == [
         (
@@ -300,9 +491,11 @@ def test_stack_up_cleans_partial_compose_state_on_setup_failure(
             "task-image-builder",
             "logs",
             "--no-color",
+            "--timestamps",
             "--tail=300",
         ),
     ]
+    assert "fixture-postgres-1" in diagnostics.read_text(encoding="utf-8")
 
 
 def _worker_compose_result(state: str = "running") -> subprocess.CompletedProcess[str]:
@@ -494,9 +687,11 @@ def test_worker_claim_canary_retries_transient_initial_connect_error(
     assert attempts == 2
 
 
+@pytest.mark.parametrize("probe_times_out", [False, True])
 def test_failed_teardown_redacts_diagnostics_before_down(
     monkeypatch: Any,
     tmp_path: Path,
+    probe_times_out: bool,
 ) -> None:
     monkeypatch.setenv("COMPOSE_PROJECT_NAME", "deploy")
     calls: list[tuple[str, ...]] = []
@@ -512,6 +707,8 @@ def test_failed_teardown_redacts_diagnostics_before_down(
     def fake_compose(*args: str, **kwargs: Any) -> subprocess.CompletedProcess[str]:
         calls.append(args)
         timeouts.append(kwargs["timeout_sec"])
+        if probe_times_out and "exec" in args:
+            raise subprocess.TimeoutExpired(args, kwargs["timeout_sec"])
         return subprocess.CompletedProcess(
             args,
             0,
@@ -534,7 +731,12 @@ def test_failed_teardown_redacts_diagnostics_before_down(
 
     docker_compose.stack_down_with_diagnostics(failed=True)
 
-    assert calls == [
+    assert [args[4:8] for args in calls[:3]] == [
+        ("exec", "-T", "control-plane", "python"),
+        ("exec", "-T", "postgres", "psql"),
+        ("stats", "--no-stream", "--format", "json"),
+    ]
+    assert calls[3:] == [
         (
             "--profile",
             "worker",
@@ -550,6 +752,7 @@ def test_failed_teardown_redacts_diagnostics_before_down(
             "task-image-builder",
             "logs",
             "--no-color",
+            "--timestamps",
             "--tail=300",
         ),
         (
@@ -560,14 +763,17 @@ def test_failed_teardown_redacts_diagnostics_before_down(
             "down",
             "-v",
             "--remove-orphans",
+            "--rmi",
+            "local",
         ),
     ]
-    assert timeouts == [
-        docker_compose._COMPOSE_DIAGNOSTICS_TIMEOUT_SEC,
-        docker_compose._COMPOSE_DIAGNOSTICS_TIMEOUT_SEC,
-        docker_compose._COMPOSE_TEARDOWN_TIMEOUT_SEC,
-    ]
+    assert timeouts == [docker_compose._COMPOSE_DIAGNOSTICS_TIMEOUT_SEC] * 5 + [
+        docker_compose._COMPOSE_TEARDOWN_TIMEOUT_SEC]
     payload = diagnostics.read_text(encoding="utf-8")
+    assert "===== Control Plane liveness =====" in payload
+    assert "===== PostgreSQL waits (no query text) =====" in payload
+    assert "===== compose stats --no-stream =====" in payload
+    assert ("capture exceeded its bounded timeout" in payload) == probe_times_out
     assert "===== compose ps -a =====" in payload
     assert "===== compose logs --tail=300 =====" in payload
     assert "===== docker ps for project deploy =====" in payload
@@ -585,30 +791,108 @@ def test_preserve_diagnostics_keeps_first_failure_evidence(
     diagnostics = tmp_path / "system-smoke.log"
     diagnostics.write_text("first failure evidence\n", encoding="utf-8")
     monkeypatch.setenv(docker_compose.DIAGNOSTICS_ENV, str(diagnostics))
-    monkeypatch.setattr(
-        docker_compose,
-        "_compose",
-        lambda *args, **kwargs: subprocess.CompletedProcess(
-            args,
-            0,
-            stdout="later mocked output\n",
-            stderr="",
-        ),
-    )
-    monkeypatch.setattr(
-        docker_compose.subprocess,
-        "run",
-        lambda *args, **kwargs: subprocess.CompletedProcess(
-            args[0],
-            0,
-            stdout="later docker output\n",
-            stderr="",
-        ),
-    )
+
+    def unexpected_capture(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("existing first-failure evidence must avoid another capture")
+
+    monkeypatch.setattr(docker_compose, "_compose", unexpected_capture)
+    monkeypatch.setattr(docker_compose.subprocess, "run", unexpected_capture)
 
     docker_compose.preserve_compose_diagnostics()
 
     assert diagnostics.read_text(encoding="utf-8") == "first failure evidence\n"
+
+
+@pytest.mark.parametrize("phase,probe_fails", [("call", False), ("setup", False), ("call", True)])
+def test_stack_failure_captures_before_next_test_without_masking_failure(
+    tmp_path: Path, phase: str, probe_fails: bool,
+) -> None:
+    """Exercise the real report hook, with only Docker and the stack doubled."""
+    (tmp_path / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+    (tmp_path / "conftest.py").write_text('''
+import os
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from tests.system import docker_compose
+
+root = Path(__file__).parent
+os.environ[docker_compose.DIAGNOSTICS_ENV] = str(root / "diagnostics.log")
+
+def capture(*args, **kwargs):
+    if os.environ["LOOM_DIAGNOSTIC_PROBE_FAILS"] == "1":
+        raise OSError("Bearer hidden-probe-token")
+    return subprocess.CompletedProcess(args, 0, stdout=(root / "state").read_text(), stderr="")
+
+docker_compose._compose = capture
+docker_compose.subprocess.run = capture
+
+@pytest.fixture(scope="session")
+def compose_stack():
+    (root / "state").write_text("failure-time state")
+    yield {}
+    (root / "torn-down").touch()
+
+@pytest.fixture
+def failing_setup(compose_stack):
+    pytest.fail("original stack failure")
+''', encoding="utf-8")
+    failing_test = (
+        'def test_02_first_failure(failing_setup):\n    pass\n'
+        if phase == "setup" else
+        'def test_02_first_failure(compose_stack):\n    pytest.fail("original stack failure")\n'
+    )
+    (tmp_path / "test_capture.py").write_text('''
+import os
+from pathlib import Path
+
+import pytest
+
+root = Path(__file__).parent
+
+def test_00_harness_failure():
+    pytest.fail("synthetic failure without the stack")
+
+def test_01_no_capture_for_harness_or_success(compose_stack):
+    assert not (root / "diagnostics.log").exists()
+
+''' + failing_test + '''
+def test_03_next_test_already_has_failure_snapshot(compose_stack):
+    assert not (root / "torn-down").exists()
+    if os.environ["LOOM_DIAGNOSTIC_PROBE_FAILS"] == "1":
+        assert not (root / "diagnostics.log").exists()
+    else:
+        assert "failure-time state" in (root / "diagnostics.log").read_text()
+    (root / "state").write_text("later state must not replace first failure")
+
+def test_04_later_failure(compose_stack):
+    pytest.fail("later failure")
+
+def test_05_original_snapshot_remains(compose_stack):
+    if os.environ["LOOM_DIAGNOSTIC_PROBE_FAILS"] != "1":
+        snapshot = (root / "diagnostics.log").read_text()
+        assert "failure-time state" in snapshot and "later state" not in snapshot
+''', encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "tests.system.conftest",
+         "-c", str(tmp_path / "pytest.ini"), "--confcutdir", str(tmp_path),
+         "--tb=short", "-q", str(tmp_path / "test_capture.py")],
+        cwd=docker_compose.REPO_ROOT,
+        env={**os.environ, "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+             "LOOM_DIAGNOSTIC_PROBE_FAILS": "1" if probe_fails else "0"},
+        capture_output=True, text=True, timeout=20,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 1, output
+    expected = "2 failed, 3 passed, 1 error" if phase == "setup" else "3 failed, 3 passed"
+    assert expected in output, output
+    assert "original stack failure" in output
+    assert (tmp_path / "torn-down").exists()
+    assert "hidden-probe-token" not in output
+    if probe_fails:
+        assert "[REDACTED:bearer]" in output
 
 
 def test_diagnostics_failure_does_not_mask_teardown(monkeypatch: Any) -> None:
@@ -636,6 +920,8 @@ def test_diagnostics_failure_does_not_mask_teardown(monkeypatch: Any) -> None:
             "down",
             "-v",
             "--remove-orphans",
+            "--rmi",
+            "local",
         ),
     ]
 
@@ -658,4 +944,7 @@ def test_system_stack_uses_shared_digest_pinned_minio() -> None:
     from tests.integration.minio_test_images import MINIO_TEST_IMAGE
 
     config = yaml.safe_load(docker_compose.COMPOSE_FILE.read_text())
-    assert config["services"]["minio"]["image"] == "${LOOM_SYSTEM_MINIO_IMAGE:-" + MINIO_TEST_IMAGE + "}"
+    assert (
+        config["services"]["minio"]["image"]
+        == "${LOOM_SYSTEM_MINIO_IMAGE:-" + MINIO_TEST_IMAGE + "}"
+    )

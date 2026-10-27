@@ -1,15 +1,11 @@
 """SecretStore Protocol + the local-encrypted Postgres-backed impl.
 
-Spec: docs/architecture/cluster-deploy.md §Secrets, SSRF, gateway hot path.
-
-The Protocol lets gateway code stay backend-agnostic — it does not need
-to know whether a given ref points at an AES-GCM-encrypted Postgres
-row (``loom://...``) or a k8s Secret (``k8s://...``). The
-:func:`dispatch_for_ref` function routes by URL scheme; the k8s-secret
-backend lands in a follow-up PR.
+The Protocol lets gateway code use opaque secret references. The current
+implementation stores AES-GCM-encrypted Postgres rows addressed by
+``loom://...`` refs; other schemes are rejected.
 
 Why async: the gateway is FastAPI; sync DB calls would block the event
-loop. asyncpg via SQLAlchemy 2.0's async session is the existing
+loop. psycopg via SQLAlchemy 2.0's async session is the existing
 convention (see ``loom_service/dependencies.py``).
 
 Why AES-GCM: authenticated encryption with associated data. Tampering
@@ -123,13 +119,11 @@ def parse_ref(ref: str) -> ParsedRef:
 class SecretStore(Protocol):
     """Async Protocol for encrypted-secret storage.
 
-    Implementations:
+    Current implementation:
 
     - :class:`LocalEncryptedSecretStore` — AES-GCM ciphertext in the
       ``secrets`` Postgres table. Default in both ``loom service`` and
       ``loom cluster`` for the user-API-key data path.
-    - k8s-secret (separate PR) — one k8s Secret per ref. Default in
-      ``loom cluster`` for bootstrap-supplied infra creds.
     """
 
     async def put(self, *, namespace: str, value: str) -> str:
@@ -170,9 +164,7 @@ class SecretStore(Protocol):
         """Decrypt with the current master key, re-encrypt with the
         supplied new master key, persist. Returns the ref — for
         ``local-encrypted`` the ref is stable (only ciphertext +
-        master_key_version change); for k8s-secret it's a no-op
-        (etcd encryption handles at-rest rotation) and returns the
-        same ref unchanged.
+        master_key_version change).
         """
         ...
 
@@ -260,24 +252,6 @@ def load_master_keys_from_env() -> tuple[bytes, int, dict[int, bytes]]:
             part, f"LOOM_SECRET_STORE_MASTER_KEYS[{i}] (fallback v{version})",
         )
     return primary_key, primary_version, fallbacks
-
-
-def _load_master_key_from_env(env_var: str = "LOOM_SECRET_STORE_MASTER_KEY") -> bytes:
-    """Load + validate a 32-byte AES-256 master key from a base64-encoded
-    env var. Fail-fast if missing / wrong length / not base64.
-
-    This single-key loader is kept for callers that bypass the env
-    resolution logic (e.g. tests constructing a store directly).
-    Production code uses :func:`load_master_keys_from_env`.
-    """
-    raw = os.environ.get(env_var)
-    if not raw:
-        raise SecretStoreError(
-            f"{env_var} not set. Generate with: "
-            f"python -c 'import os, base64; "
-            f"print(base64.b64encode(os.urandom(32)).decode())'",
-        )
-    return _decode_b64_key(raw, env_var)
 
 
 class LocalEncryptedSecretStore:

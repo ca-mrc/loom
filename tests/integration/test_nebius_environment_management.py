@@ -14,16 +14,20 @@ from loom.auth import AuthContext
 from loom.db.schema import Team, User
 from loom.nebius_environment_contract import EnvironmentRegistrationV1, new_environment_registration
 from loom.nebius_environment_render import render_environment
+from tests.support.nebius_platform import ROOT
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_environment_contract import foundation_from
-from tests.unit.test_nebius_platform_render import ROOT
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
 @pytest.fixture
-async def environment_registry(isolated_migration_postgres_url, platform_inputs):
+async def environment_registry(isolated_migration_postgres_url, platform_inputs, request):
     from loom.db.nebius_environment_schema import NebiusPlatformBudget
     from loom_service.environment_management.registry import EnvironmentRegistry
 
+    if getattr(request, 'param', None) == '0176':
+        from tests.integration.conftest import retain_pool_schema
+
+        await asyncio.to_thread(retain_pool_schema, isolated_migration_postgres_url)
     engine = create_async_engine(isolated_migration_postgres_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     foundation = foundation_from(platform_inputs[0])

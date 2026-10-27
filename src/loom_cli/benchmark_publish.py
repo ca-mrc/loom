@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import tempfile
 from pathlib import Path
@@ -70,15 +71,30 @@ async def publish_benchmark(
                 adapter = HarborNativeAdapter(spec)
                 benchmark = spec.id
             assert benchmark is not None
-            prepared = prepare_adapter_benchmark(
-                benchmark,
+            preparation = asyncio.create_task(asyncio.to_thread(
+                prepare_adapter_benchmark, benchmark,
                 adapter_override=adapter,
                 cache_dir=(cache_dir or default_benchmark_cache()).expanduser(),
                 staging_dir=root,
                 refresh=refresh,
                 limit=limit,
                 instance_ids=instance_ids,
-            )
+            ))
+            try:
+                prepared = await asyncio.shield(preparation)
+            except asyncio.CancelledError:
+                # Cancellation cannot stop the worker. Retain its staging tree
+                # until it exits, including through repeated cancellation.
+                while not preparation.done():
+                    try:
+                        await asyncio.shield(preparation)
+                    except asyncio.CancelledError:
+                        continue
+                    except Exception:
+                        break
+                if not preparation.cancelled():
+                    preparation.exception()
+                raise
             return await local_benchmark_publish.publish_local_benchmark(
                 root, prepared_adapter=prepared, **publication
             )

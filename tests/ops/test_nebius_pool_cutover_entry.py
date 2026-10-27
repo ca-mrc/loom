@@ -62,10 +62,8 @@ from tests.support.execution_image_admission import (
     IMAGE_ADMISSION_KEYRING,
     signed_image_admission_bundle,
 )
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_management_render import management_inputs as base_management_inputs
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
-
-from loom.db.schema_startup import service_schema_head
 
 
 @pytest.fixture
@@ -271,6 +269,29 @@ def save_private(metadata, payload):
     metadata["inputs_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def test_original_refresh_rejects_same_uid_ordinary_rollout_template(private_cutover):
+    """#2410: a successful ordinary rollout is not a frozen pool template."""
+    from types import SimpleNamespace
+
+    from scripts.ops import nebius_pool_cutover_entry as entry
+    from scripts.ops.nebius_ingress_stage import _key
+
+    metadata, _, _ = private_cutover
+    context = entry.load_pool_cutover_inputs(metadata)
+    migration = context.request.fencing.retirement.migration
+    rows = [row.controller for row in migration.guards]
+    rows.extend(context.request.services)
+    rows.extend(context.request.fencing.retirement.actuators)
+    actual = {(_key(row)): copy.deepcopy(row) for row in rows}
+    first = migration.guards[0].controller
+    actual[_key(first)]['spec']['template']['spec']['containers'][0]['image'] = (
+        'cr.eu-north1.nebius.cloud/test/loom-control-plane@sha256:' + 'f' * 64)
+    guards = SimpleNamespace(request=migration,
+        _get=lambda kind, name, namespace: actual['Deployment:' + namespace + ':' + name])
+    with pytest.raises(entry.EntryError, match='runtime databases unqualified'):
+        entry.qualify_pool_runtime_databases(context, guards)
+
+
 @pytest.mark.parametrize("damage", [None, "extra_field", "running", "database"])
 def test_private_cutover_loads_only_explicit_qualified_dormant_consumers(private_cutover, damage):
     from scripts.ops.nebius_management_entry import EntryError
@@ -328,7 +349,9 @@ def connected_cutover_entry(private_cutover, monkeypatch):
     def database_page(target, *, after):
         assert target in migration.guards and after is None
         observed["database_reads"].append("participant")
-        return {"status": "observed", "schema_revision": "0171" if observed["database_failure"] == "participant" else service_schema_head(), "rows": []}
+        # The retained pool data database is independently pinned at 0176;
+        # the source-publication migration advances the generic service head.
+        return {"status": "observed", "schema_revision": "0171" if observed["database_failure"] == "participant" else "0176", "rows": []}
     def history_page(target, origins):
         assert target in migration.guards and origins == ()
         observed["database_reads"].append("manager")
@@ -475,7 +498,7 @@ def test_connected_startup_reuses_the_exact_parent_transport_without_mutations(c
 @pytest.mark.parametrize("failure", [None, "before", "after"])
 def test_connected_registration_stages_once_and_does_not_confuse_creation_with_success(connected_cutover_entry, failure):
     from scripts.ops import nebius_pool_cutover_entry as entry
-    from tests.ops.test_nebius_management_stage import PhaseAPI
+    from tests.support.nebius_phase_api import PhaseAPI as PhaseAPI
 
     context, _, observed = connected_cutover_entry
     state = Path(context.operation["state_dir"]) / "writers" / "registration"
@@ -865,7 +888,7 @@ def test_connected_entry_qualifies_all_runtime_consumers_before_returning_operat
         if damage == 'manager':
             raise PoolMigrationError('management_runtime_database')
 
-    def provider_probe(selected, base):
+    def provider_probe(selected, base, *, refresh=None):
         assert selected == context
         physical.append(True)
         if damage == 'provider':

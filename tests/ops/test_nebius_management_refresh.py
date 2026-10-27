@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import pytest
 from tests.ops.test_nebius_pool_runtime import runtime_inputs as runtime_inputs
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_application_image_renderer import build_inputs as build_inputs
 from tests.unit.test_nebius_management_render import (
     ROOT,
@@ -25,7 +26,6 @@ from tests.unit.test_nebius_management_render import (
 from tests.unit.test_nebius_management_render import (
     source_management_inputs as source_management_inputs,
 )
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
 @pytest.fixture
@@ -50,6 +50,98 @@ def build(request):
     from scripts.ops.nebius_management_refresh import render_refresh
 
     return render_refresh(request)
+
+
+def test_refresh_accepts_explicit_default_disk_reference_without_changing_runtime(refresh_request):
+    from scripts.ops.nebius_management_refresh import _configuration, platform_disk_type
+
+    from loom_service.environment_management.deployment import ManagementDeployment
+
+    raw = refresh_request.after.model_dump(mode='json')
+    config = json.loads(raw['installation']['foundation']['platform_config_json'])
+    config.pop('execution_disk_type', None)
+    raw['installation']['foundation']['platform_config_json'] = json.dumps(config)
+    implicit = ManagementDeployment.model_validate(raw)
+    config['execution_disk_type'] = 'NETWORK_SSD'
+    raw['installation']['foundation']['platform_config_json'] = json.dumps(config)
+    explicit = ManagementDeployment.model_validate(raw)
+    assert platform_disk_type(implicit) == platform_disk_type(explicit) == 'NETWORK_SSD'
+    _configuration(implicit, explicit)
+    result = build(replace(refresh_request, before=implicit, after=explicit))
+    assert [row for row in result.deployment['spec']['template']['spec']['volumes'] if 'secret' in row] == (
+        [row for row in refresh_request.active['spec']['template']['spec']['volumes'] if 'secret' in row])
+
+
+@pytest.fixture
+def builder_limit_request(refresh_request, request):
+    from loom_service.environment_management.deployment import ManagementDeployment
+
+    before_limit, after_limit = getattr(request, 'param', (16, None))
+    raw = refresh_request.before.model_dump(mode='json')
+    config = json.loads(raw['installation']['foundation']['platform_config_json'])
+    config['task_image_builder'] = {
+        'registry_repository': 'cr.eu-north1.nebius.cloud/test/task-images', 'max_concurrent': before_limit}
+    raw['installation']['foundation']['platform_config_json'] = json.dumps(config)
+    before = ManagementDeployment.model_validate(raw)
+    config['task_image_builder']['max_concurrent'] = after_limit
+    raw['installation']['foundation']['platform_config_json'] = json.dumps(config)
+    after = ManagementDeployment.model_validate(raw)
+    return replace(refresh_request, before=before, after=after)
+
+
+@pytest.mark.parametrize('builder_limit_request', [(16, None), (None, 7), (16, 3)], indirect=True)
+def test_refresh_renders_only_manager_delta_for_observed_builder_limit(builder_limit_request, refresh_request):
+    request = builder_limit_request
+    original = copy.deepcopy(request)
+    result = build(request)
+    expected = build(refresh_request).deployment['spec']['template']['spec']
+    pod = copy.deepcopy(result.deployment['spec']['template']['spec'])
+    for volume, prior in zip(pod['volumes'], expected['volumes'], strict=True):
+        if volume['name'] == 'management-config':
+            assert volume['configMap']['name'] == result.config['metadata']['name']
+            volume['configMap']['name'] = prior['configMap']['name']
+    assert pod == expected
+    assert json.loads(result.config['data']['installation.json']) == request.after.installation.model_dump(mode='json')
+    assert request == original
+
+
+@pytest.mark.parametrize('field,value', [
+    ('registry_repository', 'cr.eu-north1.nebius.cloud/test/foreign/task-images'),
+    ('cpu_millis', 2000), ('memory_mib', 4096), ('ephemeral_storage_mib', 32768),
+    ('cache_bucket', 'foreign-build-cache'), ('remove', None), ('add', None),
+])
+def test_refresh_builder_limit_reference_keeps_other_builder_settings_frozen(builder_limit_request, field, value):
+    from loom_service.environment_management.deployment import ManagementDeployment
+
+    request = builder_limit_request
+    raw = request.after.model_dump(mode='json')
+    config = json.loads(raw['installation']['foundation']['platform_config_json'])
+    if field == 'remove':
+        config.pop('task_image_builder')
+    elif field == 'add':
+        before = request.before.model_dump(mode='json')
+        previous = json.loads(before['installation']['foundation']['platform_config_json'])
+        previous.pop('task_image_builder')
+        before['installation']['foundation']['platform_config_json'] = json.dumps(previous)
+        request = replace(request, before=ManagementDeployment.model_validate(before))
+    else:
+        config['task_image_builder'][field] = value
+    raw['installation']['foundation']['platform_config_json'] = json.dumps(config)
+    after = ManagementDeployment.model_validate(raw)
+    with pytest.raises(ValueError, match='refresh'):
+        build(replace(request, after=after))
+
+
+@pytest.mark.parametrize('limit', [True, 0, -1])
+def test_refresh_builder_limit_rejects_invalid_observed_values(builder_limit_request, limit):
+    from loom_service.environment_management.deployment import ManagementDeployment
+
+    raw = builder_limit_request.after.model_dump(mode='json')
+    config = json.loads(raw['installation']['foundation']['platform_config_json'])
+    config['task_image_builder']['max_concurrent'] = limit
+    raw['installation']['foundation']['platform_config_json'] = json.dumps(config)
+    with pytest.raises(ValueError):
+        ManagementDeployment.model_validate(raw)
 
 
 @pytest.fixture
@@ -127,10 +219,16 @@ def test_builder_refresh_cannot_change_source_runtime(builder_refresh_request):
         build(replace(builder_refresh_request, after=changed))
 
 
-def test_refresh_changes_only_image_config_and_revision(refresh_request):
+@pytest.mark.parametrize('shared_guest', [False, True])
+def test_refresh_changes_only_image_config_and_revision(refresh_request, shared_guest):
     from scripts.ops.nebius_ingress_stage import _snapshot
 
     request = refresh_request
+    if shared_guest:
+        profile = {**request.profile, 'guest_runtime': 'qemu-tcg-v1', 'guest_runtime_volume_mib': 1024,
+                   'guest_max_artifact_bytes': 64 * 1024**2, 'supports_task_identity': True,
+                   'supports_shared_guest': True}
+        request = replace(request, profile=profile)
     before = copy.deepcopy(request)
     result = build(request)
     original = request.active['spec']['template']

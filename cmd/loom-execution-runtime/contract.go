@@ -24,7 +24,9 @@ var (
 	keyID             = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 	envName           = regexp.MustCompile(`^[A-Z_][A-Z0-9_]{0,127}$`)
 	secretEnv         = regexp.MustCompile(`(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|KUBECONFIG)`)
+	publicFingerprint = regexp.MustCompile(`^(?:[A-Fa-f0-9]{40}|[A-Fa-f0-9]{64})$`)
 	workspacePath     = regexp.MustCompile(`^/workspace(?:/[-A-Za-z0-9._]+)*$`)
+	sandboxHome       = regexp.MustCompile(`^/(?:[-A-Za-z0-9._]+/)*[-A-Za-z0-9._]+$`)
 	probePath         = regexp.MustCompile(`^/[ -~]*$`)
 	materializationID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 )
@@ -66,6 +68,7 @@ type sidecar struct {
 	TaskImageComponent *string           `json:"task_image_component,omitempty"`
 	Hostname           *string           `json:"hostname,omitempty"`
 	Identity           *sandboxIdentity  `json:"identity,omitempty"`
+	GuestTaskIdentity  *sandboxIdentity  `json:"guest_task_identity,omitempty"`
 	PrivateSandbox     bool              `json:"private_sandbox,omitempty"`
 	RoleName           string            `json:"role_name"`
 	ImageRef           string            `json:"image_ref"`
@@ -78,9 +81,40 @@ type sidecar struct {
 }
 
 type sandboxIdentity struct {
-	RunAsUser  *int64 `json:"run_as_user"`
-	RunAsGroup *int64 `json:"run_as_group"`
-	Home       string `json:"home"`
+	RunAsUser           *int64  `json:"run_as_user"`
+	RunAsGroup          *int64  `json:"run_as_group"`
+	SupplementaryGroups []int64 `json:"supplementary_groups,omitempty"`
+	Home                string  `json:"home"`
+}
+
+func (i sandboxIdentity) concrete() error {
+	if i.RunAsUser == nil || i.RunAsGroup == nil || *i.RunAsUser < 0 || *i.RunAsUser > 2_147_483_647 || *i.RunAsGroup < 0 || *i.RunAsGroup > 2_147_483_647 {
+		return fmt.Errorf("invalid private sandbox identity")
+	}
+	if len(i.SupplementaryGroups) > 32 {
+		return fmt.Errorf("invalid supplementary groups")
+	}
+	var previous int64
+	for index, group := range i.SupplementaryGroups {
+		if group < 0 || group > 2_147_483_647 || (index > 0 && group <= previous) {
+			return fmt.Errorf("invalid supplementary groups")
+		}
+		previous = group
+	}
+	if len(i.Home) > 4096 || !sandboxHome.MatchString(i.Home) || filepath.Clean(i.Home) != i.Home {
+		return fmt.Errorf("invalid sandbox HOME")
+	}
+	for _, part := range strings.Split(i.Home, "/") {
+		if part == "." || part == ".." {
+			return fmt.Errorf("invalid sandbox HOME")
+		}
+	}
+	for _, protected := range []string{"/proc", "/sys", "/dev", "/run", "/loom", "/tests", "/verifier", "/solution"} {
+		if i.Home == protected || strings.HasPrefix(i.Home, protected+"/") {
+			return fmt.Errorf("protected sandbox HOME")
+		}
+	}
+	return nil
 }
 
 type taskInput struct {
@@ -219,8 +253,29 @@ func (p plan) residentPrivateRoles() map[string]bool {
 	return map[string]bool{"task-sandbox": true, "verifier-sandbox": true}
 }
 
+// acceptedPrivateRoles is the sandbox set this plan may carry.
+// verifier_execution=skipped on an attempt means there is no verifier phase.
+// Older plans still place both sandboxes in that pod. A hosted skip places
+// only the agent sandbox.
+func (p plan) acceptedPrivateRoles() map[string]bool {
+	roles := p.residentPrivateRoles()
+	if p.ExecutionRole != "attempt" || p.VerifierExecution != "skipped" || p.Verifier != nil || p.InPlaceVerifier || p.VerifierAfterAgentTimeout {
+		return roles
+	}
+	found := map[string]bool{}
+	for _, item := range p.Sidecars {
+		if item.PrivateSandbox {
+			found[item.RoleName] = true
+		}
+	}
+	if len(found) == 1 && found["task-sandbox"] {
+		return found
+	}
+	return roles
+}
+
 func (p plan) privateSandboxesMatch() bool {
-	expected := p.residentPrivateRoles()
+	expected := p.acceptedPrivateRoles()
 	found := map[string]bool{}
 	for _, item := range p.Sidecars {
 		if item.PrivateSandbox {
@@ -397,7 +452,7 @@ func (p plan) validate() error {
 	}
 	if fixtureCount > 0 && (fixtureCount != 1 || p.TaskImageMaterializationID == nil ||
 		p.AgentImageRef == nil || p.ExecutionRole != "attempt" || p.Composition != "init_payload" ||
-		!p.privateSandboxesMatch() || len(p.Sidecars) != 1+len(p.residentPrivateRoles()) || !p.Sidecars[0].TaskFixture) {
+		!p.privateSandboxesMatch() || len(p.Sidecars) != 1+len(p.acceptedPrivateRoles()) || !p.Sidecars[0].TaskFixture) {
 		return fmt.Errorf("one prepared fixture requires an isolated attempt controller and both sandboxes")
 	}
 	if p.VerifierAfterAgentTimeout && (p.ExecutionRole != "attempt" ||
@@ -629,7 +684,7 @@ func (p phase) validate() error {
 		return fmt.Errorf("invalid %s environment", p.Role)
 	}
 	for name, value := range p.Environment {
-		if !envName.MatchString(name) || secretEnv.MatchString(name) || strings.ContainsRune(value, '\x00') || len(value) > 4096 {
+		if !validEnvironmentEntry(name, value) {
 			return fmt.Errorf("invalid %s environment", p.Role)
 		}
 	}
@@ -648,27 +703,29 @@ func (s sidecar) validate(known map[string]bool) error {
 		if s.Hostname == nil || !validFixtureHostname(*s.Hostname) {
 			return fmt.Errorf("fixture requires a non-reserved DNS hostname")
 		}
-		if s.PrivateSandbox || s.Identity != nil || len(s.DependsOn) != 0 || len(s.Environment) != 0 {
+		if s.PrivateSandbox || s.Identity != nil || s.GuestTaskIdentity != nil || len(s.DependsOn) != 0 || len(s.Environment) != 0 {
 			return fmt.Errorf("fixture cannot share a sandbox identity or trusted sidecar contract")
 		}
 	} else if s.TaskImageComponent != nil || s.Hostname != nil || strings.HasPrefix(s.RoleName, "fixture-") {
 		return fmt.Errorf("fixture metadata and roles require explicit fixture isolation")
 	}
 	if s.Identity != nil {
-		i := s.Identity
-		if !s.PrivateSandbox || i.RunAsUser == nil || i.RunAsGroup == nil || *i.RunAsUser < 0 || *i.RunAsUser > 2_147_483_647 || *i.RunAsGroup < 0 || *i.RunAsGroup > 2_147_483_647 {
+		if !s.PrivateSandbox {
 			return fmt.Errorf("invalid private sandbox identity")
+		}
+		if err := s.Identity.concrete(); err != nil {
+			return err
 		}
 		if _, present := s.Environment["HOME"]; present {
 			return fmt.Errorf("sandbox HOME must use identity")
 		}
-		if len(i.Home) > 4096 || !regexp.MustCompile(`^/(?:[-A-Za-z0-9._]+/)*[-A-Za-z0-9._]+$`).MatchString(i.Home) || filepath.Clean(i.Home) != i.Home {
-			return fmt.Errorf("invalid sandbox HOME")
+	}
+	if s.GuestTaskIdentity != nil {
+		if s.GuestExecution == nil {
+			return fmt.Errorf("guest task identity requires guest execution")
 		}
-		for _, protected := range []string{"/proc", "/sys", "/dev", "/run", "/loom", "/tests", "/verifier", "/solution"} {
-			if i.Home == protected || strings.HasPrefix(i.Home, protected+"/") {
-				return fmt.Errorf("protected sandbox HOME")
-			}
+		if err := s.GuestTaskIdentity.concrete(); err != nil {
+			return err
 		}
 	}
 	if s.PrivateSandbox != (s.RoleName == "task-sandbox" || s.RoleName == "verifier-sandbox") {
@@ -701,7 +758,7 @@ func (s sidecar) validate(known map[string]bool) error {
 		}
 	}
 	for name, value := range s.Environment {
-		if !envName.MatchString(name) || secretEnv.MatchString(name) || strings.ContainsRune(value, '\x00') || len(value) > 4096 {
+		if !validEnvironmentEntry(name, value) {
 			return fmt.Errorf("invalid sidecar environment")
 		}
 	}
@@ -709,6 +766,11 @@ func (s sidecar) validate(known map[string]bool) error {
 		return err
 	}
 	return s.ReadinessProbe.validate()
+}
+
+func validEnvironmentEntry(name, value string) bool {
+	public := name == "GPG_KEY" && publicFingerprint.MatchString(value)
+	return envName.MatchString(name) && (!secretEnv.MatchString(name) || public) && !strings.ContainsRune(value, '\x00') && len(value) <= 4096
 }
 
 func (p probe) validate() error {

@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import re
 import shutil
 import stat
@@ -22,14 +23,18 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Lock
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 import boto3
 from botocore.config import Config
-from botocore.exceptions import BotoCoreError, ClientError
+from botocore.exceptions import (
+    BotoCoreError,
+    ClientError,
+)
 from loom_bundle_checksum import sha256_of_dir
 
+from loom.nebius_terminus_image import append_terminus_runtime_tools
 from loom.service_execution_materialization import (
     MAX_INPUT_MANIFEST_BYTES,
     ServiceExecutionInputManifestV1,
@@ -37,7 +42,9 @@ from loom.service_execution_materialization import (
 )
 from loom.task_image_build_plan import derive_task_image_build_components
 from loom.task_image_bundle_manifest import capture_task_image_bundle_manifest
+from loom.task_image_errors import TaskImagePreparationError, classify_preparation_failure
 from loom.task_image_materialization import task_bundle_content_manifest_digest
+from loom.task_image_metadata import TaskImageRuntimeMetadataV1
 from loom.trajectory.storage import (
     BUNDLE_FILE_METADATA_NAME,
     _parse_bundle_file_metadata,
@@ -50,6 +57,10 @@ from loom_execution_actuator.task_image_oci import (
     validate_native_oci_directory,
 )
 
+# Cache tests replace the public name with a component-count stub. Tool
+# installation must keep reading the authored Dockerfiles.
+_derive_task_image_build_components = derive_task_image_build_components
+
 _FILE_LIMIT = 2000
 _BUNDLE_BYTES = 512 * 1024 * 1024
 _CACHE_BYTES = 1024 * 1024 * 1024
@@ -59,10 +70,15 @@ _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _KEY = re.compile(r"[0-9a-f]{64}\Z")
 # Stable Job-log markers for stage timing (Phase 2). Logs only — no DB schema.
 _STAGE_KEY = "loom_task_image_stage"
+_IO_FULL = re.compile(
+    r"full\s+avg10=([0-9]+(?:\.[0-9]+)?)\s+avg60=[0-9]+(?:\.[0-9]+)?"
+    r"\s+avg300=[0-9]+(?:\.[0-9]+)?\s+total=[0-9]+\Z"
+)
 
 
-class BuildPreparationError(ValueError):
-    pass
+class BuildPreparationError(TaskImagePreparationError):
+    def __init__(self, message: str, *, code: str = "image_preparation_input_invalid") -> None:
+        super().__init__(code, message)
 
 
 def emit_stage(stage: str, event: str, **fields: Any) -> None:
@@ -145,7 +161,46 @@ def load_claim(path: Path) -> dict[str, Any]:
     export_format = claim.get("oci_export_format", "archive")
     if export_format not in {"archive", "directory"}:
         raise BuildPreparationError("invalid OCI export format")
+    _io_full_avg10_limit(claim)
     return claim
+
+
+def _io_full_avg10_limit(claim: dict[str, Any]) -> float | None:
+    if "io_full_avg10_max" not in claim:
+        return None
+    value = claim["io_full_avg10_max"]
+    if type(value) not in {int, float} or not 0 <= value <= 100 or not math.isfinite(value):
+        raise BuildPreparationError("invalid I/O pressure threshold")
+    return float(value)
+
+
+def _parse_io_full_avg10(body: str) -> float | None:
+    full = [line.strip() for line in body.splitlines() if line.split()[:1] == ["full"]]
+    if len(full) != 1 or (match := _IO_FULL.fullmatch(full[0])) is None:
+        return None
+    value = float(match[1])
+    return value if math.isfinite(value) and 0 <= value <= 100 else None
+
+
+def _wait_for_io_health(claim: dict[str, Any]) -> None:
+    maximum = _io_full_avg10_limit(claim)
+    if maximum is None:
+        return
+    with stage_span("io_pressure", full_avg10_max=maximum):
+        while True:
+            try:
+                value = _parse_io_full_avg10(Path("/proc/pressure/io").read_text())
+            except (OSError, UnicodeError):
+                value = None
+            if value is not None and value <= maximum:
+                emit_stage("io_pressure", "healthy", full_avg10=value, full_avg10_max=maximum)
+                return
+            emit_stage(
+                "io_pressure", "wait", full_avg10=value, full_avg10_max=maximum,
+                poll_interval_sec=5,
+            )
+            # The existing Kubernetes Job deadline bounds waiting and the build.
+            time.sleep(5)
 
 
 def _client(claim: dict[str, Any], secret: Path) -> Any:
@@ -759,26 +814,46 @@ def _try_import_cache(
         shutil.rmtree(archive_parent, ignore_errors=True)
 
 
+def _install_terminus_runtime_tools(claim: dict[str, Any], context: Path) -> None:
+    """Prepare the primary task Dockerfile before buildkit reads it.
+
+    Sidecars stay as authored. An unsupported base fails this build instead of
+    the first trial.
+    """
+    for component in _derive_task_image_build_components(claim["task_config"]):
+        if component.name != "task":
+            continue
+        dockerfile = context / component.dockerfile_path
+        try:
+            rewritten = append_terminus_runtime_tools(dockerfile.read_text())
+        except TaskImagePreparationError as exc:
+            raise BuildPreparationError(str(exc), code=exc.code) from exc
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise BuildPreparationError(str(exc)) from exc
+        dockerfile.write_text(rewritten)
+
+
 def prepare(claim: dict[str, Any], work: Path, secrets: Path) -> None:
     with stage_span("prepare"):
         source = _client(claim, secrets / "source")
         try:
             download_bundle(claim, source, work / "context")
+            _install_terminus_runtime_tools(claim, work / "context")
         finally:
             source.close()
         (work / "oci").mkdir(exist_ok=True)
-        if not (secrets / "cache").is_dir():
-            return
-        cache = _client(claim, secrets / "cache")
-        try:
-            verified: dict[str, tuple[Path, int]] = {}
-            for index, _ in enumerate(derive_task_image_build_components(claim["task_config"])):
-                with stage_span("cache_import", component_index=index), cache_request_counts(
-                    cache, "cache_import", component_index=index,
-                ):
-                    _try_import_cache(cache, claim, index=index, work=work, verified=verified)
-        finally:
-            cache.close()
+        if (secrets / "cache").is_dir():
+            cache = _client(claim, secrets / "cache")
+            try:
+                verified: dict[str, tuple[Path, int]] = {}
+                for index, _ in enumerate(derive_task_image_build_components(claim["task_config"])):
+                    with stage_span("cache_import", component_index=index), cache_request_counts(
+                        cache, "cache_import", component_index=index,
+                    ):
+                        _try_import_cache(cache, claim, index=index, work=work, verified=verified)
+            finally:
+                cache.close()
+        _wait_for_io_health(claim)
 
 
 def pack_cache(directory: Path, archive: Path) -> None:
@@ -919,6 +994,7 @@ def publish(
     receipt_path: Path = Path("/dev/termination-log"),
 ) -> dict[str, Any]:
     images: dict[str, str] = {}
+    runtime_metadata: dict[str, dict[str, Any]] = {}
     cache = _client(claim, secrets / "cache") if (secrets / "cache").is_dir() else None
     auth_directory = tempfile.TemporaryDirectory()
     export_format = _oci_export_format(claim)
@@ -934,18 +1010,56 @@ def publish(
                 credentials, "/".join(claim["registry_repository"].split("/")[:2]), registry_auth
             )
         for index, component in enumerate(derive_task_image_build_components(claim["task_config"])):
+            environment = claim["task_config"]["environment"]
+            requires_metadata = component.name == "task" and (
+                environment.get("user") == "image" or environment.get("image_entrypoint") or environment.get("image_workdir")
+            )
+            architecture: Literal["amd64", "arm64"] = "arm64" if claim["cpu_arch"] == "arm64" else "amd64"
             if export_format == "directory":
                 # Plan schema still emits oci/NNNN.tar; directory Jobs rewrite dest.
                 relative = component.oci_output_path.removesuffix(".tar")
                 output = _output_path(work, relative, directory=True)
-                validate_native_oci_directory(output)
+                if not requires_metadata:
+                    validate_native_oci_directory(output, architecture=architecture)
                 skopeo_source = f"oci:{output}"
             else:
                 archive = _output_path(work, component.oci_output_path)
                 if archive.stat().st_size > 3 * _CACHE_BYTES:
                     raise BuildPreparationError("build output is not a bounded regular OCI archive")
-                validate_native_oci_archive(archive)
+                if not requires_metadata:
+                    validate_native_oci_archive(archive, architecture=architecture)
                 skopeo_source = f"oci-archive:{archive}"
+            metadata = None
+            if requires_metadata:
+                from loom_execution_actuator.task_image_metadata import (
+                    read_task_image_runtime_metadata,
+                )
+
+                metadata = read_task_image_runtime_metadata(
+                    output if export_format == "directory" else archive,
+                    architecture=architecture,
+                    directory=export_format == "directory",
+                )
+                if environment.get("image_workdir"):
+                    from loom.mutable_paths import validate_task_workdir
+
+                    try:
+                        validate_task_workdir(metadata["workdir"])
+                    except ValueError:
+                        raise BuildPreparationError("OCI image workdir is unsupported by the selected runtime") from None
+                try:
+                    preview = TaskImageRuntimeMetadataV1.model_validate({
+                        **metadata, "image_ref": claim["registry_repository"] + "@sha256:" + "0" * 64,
+                    }).model_dump(mode="json")
+                except ValueError:
+                    raise BuildPreparationError("OCI runtime metadata is unsupported") from None
+                preview_receipt = {
+                    "materialization_id": claim["id"], "lease_epoch": claim["lease_epoch"],
+                    "registry_images": {**images, component.name: preview["image_ref"]},
+                    "image_runtime_metadata": {**runtime_metadata, component.name: preview},
+                }
+                if len(json.dumps(preview_receipt).encode()) > 4000:
+                    raise BuildPreparationError("OCI runtime metadata exceeds publication receipt budget")
             tag = f"{claim['registry_repository']}:{claim['materialization_key']}-{claim['lease_epoch']}-{index}"
             with tempfile.TemporaryDirectory() as temporary:
                 digest_file = Path(temporary) / "digest"
@@ -973,12 +1087,17 @@ def publish(
                     if not _DIGEST.fullmatch(digest):
                         raise BuildPreparationError("registry did not return an OCI digest")
                     images[component.name] = f"{claim['registry_repository']}@{digest}"
+                    if metadata is not None:
+                        runtime_metadata[component.name] = TaskImageRuntimeMetadataV1.model_validate({
+                            **metadata, "image_ref": images[component.name],
+                        }).model_dump(mode="json")
                     receipt_path.write_text(
                         json.dumps(
                             {
                                 "materialization_id": claim["id"],
                                 "lease_epoch": claim["lease_epoch"],
                                 "registry_images": images,
+                                **({"image_runtime_metadata": runtime_metadata} if runtime_metadata else {}),
                             }
                         )
                     )
@@ -1013,6 +1132,7 @@ def publish(
         "materialization_id": claim["id"],
         "lease_epoch": claim["lease_epoch"],
         "registry_images": images,
+        **({"image_runtime_metadata": runtime_metadata} if runtime_metadata else {}),
     }
     if len(json.dumps(receipt).encode()) > 4000:
         raise BuildPreparationError(
@@ -1047,6 +1167,8 @@ def main() -> None:
         except (OSError, ValueError):
             pass
         error_receipt.update(phase=args.phase, error=reason[:500])
+        if args.phase == "prepare":
+            error_receipt.update(classify_preparation_failure(error).receipt())
         Path("/dev/termination-log").write_text(json.dumps(error_receipt))
         raise SystemExit(1) from None
 

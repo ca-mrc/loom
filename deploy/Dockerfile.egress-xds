@@ -1,8 +1,7 @@
 # loom_egress_xds — Envoy egress-proxy control plane.
 #
-# Standalone Python image. envoy-data-plane + xds-protos conflict
-# with the main project's google-generativeai protobuf<6 pin, so this image
-# installs them in its own environment rather than through a project extra.
+# Standalone Python image. Envoy/gRPC dependencies are isolated from the
+# application install; google-genai no longer imposes the legacy protobuf cap.
 
 FROM python:3.11-slim
 RUN apt-get update -qq && \

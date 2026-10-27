@@ -886,6 +886,7 @@ def resolve_verifier_artifacts(
 
     Terminus-2 trials with ``trial.config.skip_verifier`` may export without
     indexed verifier audit artifacts; agent-only trajectories still pack.
+    Committed ``separate_execution`` reads the child under ``verifier-execution/``.
     """
     indexed = _index_artifacts(trial)
     if any("relative_path" in item for item in indexed) and not _trial_skipped_verifier(trial):

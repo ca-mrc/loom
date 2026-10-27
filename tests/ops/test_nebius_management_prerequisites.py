@@ -15,10 +15,10 @@ import pytest
 from tests.ops.test_nebius_management_cloud_scope import cloud as cloud
 from tests.ops.test_nebius_management_install import installation as installation
 from tests.ops.test_nebius_management_supplied import material as material
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_candidate_catalog import github_transport
 from tests.unit.test_nebius_candidate_catalog import publication as publication
 from tests.unit.test_nebius_management_render import management_inputs as management_inputs
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
 def published_request(installation, publication):

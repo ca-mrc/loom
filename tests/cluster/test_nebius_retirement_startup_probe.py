@@ -41,6 +41,7 @@ from tests.integration.test_execution_actuator_k3s import (
     _docker_platform,
     _import_image,
     _load_client,
+    _native_addon_diagnostics,
     _start_k3s,
 )
 from tests.integration.test_nebius_environment_management import (
@@ -49,11 +50,11 @@ from tests.integration.test_nebius_environment_management import (
 from tests.integration.test_nebius_environment_retirement import prepare_retirement
 from tests.ops.test_nebius_application_setup import setup_request as setup_request
 from tests.ops.test_nebius_management_retirement import retirement_request as retirement_request
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 from tests.unit.test_nebius_management_render import (
     application_management_inputs as application_management_inputs,
 )
 from tests.unit.test_nebius_management_render import management_inputs as management_inputs
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 pytestmark = pytest.mark.skipif(os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1",
                                 reason="requires explicitly disposable Kubernetes")
@@ -195,8 +196,9 @@ async def test_rendered_diagnostic_reads_without_retiring_or_replacing(
     _docker("tag", POSTGRES, postgres_tag)
     cluster = _start_k3s(ephemeral_storage_floor="1Gi")
     namespace = request.binding.namespace
+    core = None
     try:
-        _, core, batch = _load_client(cluster)
+        _, core, batch = _load_client(cluster, required_addons=('dns', 'storage'))
         image = _import_image(cluster, tag=tag, root=tmp_path, ordinal=1)
         postgres_image = _import_image(cluster, tag=postgres_tag, root=tmp_path, ordinal=2)
         node, = core.list_node().items
@@ -378,9 +380,21 @@ async def test_rendered_diagnostic_reads_without_retiring_or_replacing(
                 assert quota.spec.hard == {"pods": "0"}
                 assert not core.list_namespaced_pod(name).items
     except Exception as error:
-        # No raw logs or Secret/config contents: enough disposable Pod status to
-        # distinguish fixture scheduling from the runtime's sanitized report.
-        error.add_note(_run(cluster, "kubectl", "get", "pods", "-A", "-o", "wide", timeout=10))
+        # Read-only fixture status must preserve the original failure. Include
+        # PVC/provisioner state to distinguish storage startup from runtime SQL.
+        if core is not None:
+            error.add_note(_native_addon_diagnostics(core, ('dns', 'storage')))
+        for label, args in (
+            ('disposable Pods', ('get', 'pods', '-A', '-o', 'wide')),
+            ('disposable PVCs', ('get', 'pvc', '-n', namespace, '-o', 'wide')),
+            ('disposable warning events', ('get', 'events', '-n', namespace,
+                '--field-selector=type=Warning')),
+        ):
+            try:
+                detail = _run(cluster, 'kubectl', '--request-timeout=3s', *args, timeout=5)
+            except Exception as diagnostic_error:
+                detail = type(diagnostic_error).__name__
+            error.add_note(label + '\n' + detail[-16384:])
         raise
     finally:
         cluster.stop()

@@ -14,7 +14,7 @@ variables {
 run "disabled_is_empty" {
   command = plan
   assert {
-    condition     = output.integration_platform == null && length(nebius_mk8s_v1_node_group.integration) == 0 && length(nebius_storage_v1_bucket.integration) == 0
+    condition     = output.integration_platform == null && length(nebius_mk8s_v1_node_group.integration) == 0 && length(nebius_storage_v1_bucket.integration) == 0 && length(nebius_iam_v1_access_permit.integration_catalog_metadata) == 0
     error_message = "No platform resources without explicit configuration."
   }
 }
@@ -59,6 +59,52 @@ run "independent_platform" {
 run "reject_unbounded_capacity" {
   command = plan
   variables { integration_platform = { bucket_prefix = "loom-platform-test", execution_max_nodes = 999 } }
+  expect_failures = [var.integration_platform]
+}
+
+run "execution_build_disk_is_explicit_and_leaves_system_unchanged" {
+  command = plan
+  variables {
+    integration_platform = {
+      bucket_prefix       = "loom-platform-test"
+      execution_disk_type = "NETWORK_SSD_NON_REPLICATED"
+      execution_disk_gib  = 93
+    }
+  }
+  assert {
+    condition = (
+      nebius_mk8s_v1_node_group.integration["execution"].template.boot_disk.type == "NETWORK_SSD_NON_REPLICATED" &&
+      nebius_mk8s_v1_node_group.integration["execution"].template.boot_disk.size_gibibytes == 93 &&
+      nebius_mk8s_v1_node_group.integration["system"].template.boot_disk.type == "NETWORK_SSD" &&
+      nebius_mk8s_v1_node_group.integration["system"].template.boot_disk.size_gibibytes == 80 &&
+      nebius_mk8s_v1_node_group.integration["execution"].autoscaling.min_node_count == 0 &&
+      nebius_mk8s_v1_node_group.integration["execution"].autoscaling.max_node_count == 100
+    )
+    error_message = "An explicitly selected high-I/O execution disk must reach the node template without changing the system disk or execution node ceiling."
+  }
+}
+
+run "reject_invalid_nrd_allocation_unit" {
+  command = plan
+  variables {
+    integration_platform = {
+      bucket_prefix       = "loom-platform-test"
+      execution_disk_type = "NETWORK_SSD_NON_REPLICATED"
+      execution_disk_gib  = 100
+    }
+  }
+  expect_failures = [var.integration_platform]
+}
+
+run "reject_fractional_execution_disk" {
+  command = plan
+  variables { integration_platform = { bucket_prefix = "loom-platform-test", execution_disk_gib = 93.5 } }
+  expect_failures = [var.integration_platform]
+}
+
+run "reject_unknown_execution_disk_class" {
+  command = plan
+  variables { integration_platform = { bucket_prefix = "loom-platform-test", execution_disk_type = "UNKNOWN" } }
   expect_failures = [var.integration_platform]
 }
 
@@ -226,5 +272,38 @@ run "enabled_scopes_access_and_retention" {
   assert {
     condition     = nebius_storage_v1_bucket.integration["artifacts"].lifecycle_configuration.rules[1].filter.prefix == "task-build-cache/" && nebius_storage_v1_bucket.integration["artifacts"].lifecycle_configuration.rules[1].noncurrent_version_expiration.noncurrent_days == 1
     error_message = "Version retention must be scoped to cache."
+  }
+}
+
+run "catalog_metadata_is_artifacts_scoped" {
+  command = plan
+  variables { integration_platform = { bucket_prefix = "loom-catalog-test", native_builder_group_id = "group-e00nativebuilder" } }
+  override_resource {
+    target          = nebius_iam_v1_group.integration_store["canonical"]
+    override_during = plan
+    values          = { id = "group-e00canonical" }
+  }
+  override_resource {
+    target          = nebius_storage_v1_bucket.integration["artifacts"]
+    override_during = plan
+    values          = { id = "storagebucket-e00artifacts" }
+  }
+  assert {
+    condition = (
+      length(nebius_iam_v1_access_permit.integration_catalog_metadata) == 1 &&
+      nebius_iam_v1_access_permit.integration_catalog_metadata["integration"].parent_id == nebius_iam_v1_group.integration_store["canonical"].id &&
+      nebius_iam_v1_access_permit.integration_catalog_metadata["integration"].resource_id == nebius_storage_v1_bucket.integration["artifacts"].id &&
+      nebius_iam_v1_access_permit.integration_catalog_metadata["integration"].role == "storage.viewer"
+    )
+    error_message = "Catalog bucket reads must be granted only to the canonical group on the artifacts bucket, never the project or other stores."
+  }
+  assert {
+    condition = (
+      alltrue([for bucket in nebius_storage_v1_bucket.integration : bucket.bucket_policy.rules[0].roles == tolist(["storage.object-editor"])]) &&
+      nebius_storage_v1_bucket.integration["artifacts"].bucket_policy.rules[1].roles == tolist(["storage.object-viewer", "storage.object-lister"]) &&
+      nebius_storage_v1_bucket.integration["artifacts"].bucket_policy.rules[2].roles == tolist(["storage.object-editor"]) &&
+      nebius_storage_v1_bucket.integration["artifacts"].bucket_policy.rules[2].paths == tolist(["task-build-cache/*"])
+    )
+    error_message = "Bucket metadata access must preserve existing canonical object permissions and the native builder's cache-only write scope."
   }
 }

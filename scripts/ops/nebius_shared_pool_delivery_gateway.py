@@ -23,6 +23,34 @@ from scripts.ops.nebius_shared_pool_command import (
 )
 
 SOURCES = RUNTIME_SOURCES + tuple("scripts/ops/" + name + ".py" for name in (
+    "nebius_development_runtime_selection",
+    "nebius_development_schema_catalog",
+    "nebius_development_schema_jobs",
+    "nebius_development_schema_projection",
+    "nebius_development_schema_resources",
+    "nebius_development_schema_upgrade",
+    "nebius_environment_foundation",
+    "nebius_environment_release_contracts",
+    "nebius_environment_runtime",
+    "nebius_environment_runtime_install",
+    "nebius_foundation_readiness",
+    "nebius_platform_namespace",
+    "nebius_pool_administration_dispatch",
+    "nebius_pool_administration_job",
+    "nebius_pool_enrollment_issuer",
+    "nebius_closed_registry",
+    "nebius_pool_participant_catalog",
+    "nebius_pool_participant_release",
+    "nebius_pool_preactivation_database",
+    "nebius_pool_preactivation_live",
+    "nebius_pool_preactivation_operation",
+    "nebius_pool_preactivation_registry",
+    "nebius_pool_storage_binding",
+    "nebius_pool_storage_capacity",
+    "nebius_pool_storage_live",
+    "nebius_pool_storage_operation",
+    "nebius_pool_storage_registry",
+    "nebius_pool_storage_transport",
     "nebius_shared_pool_activation_live",
     "nebius_shared_pool_api",
     "nebius_shared_pool_delivery_gateway",
@@ -37,7 +65,8 @@ LIMITS = {**dict.fromkeys(SOURCES, 262144), "uv": 80 * 1024**2,
     "requirements.txt": 262144, "operation.json": 16384, "shared-pool-source.json": 4096, "manifest.json": 65536}
 MAX_BUNDLE, MAX_WHEEL = 100 * 1024**2, 16 * 1024**2
 COMMANDS = {"loom-nebius-shared-pool-preflight-v1": "preflight", "loom-nebius-shared-pool-install-v1": "install",
-    "loom-nebius-shared-pool-recover-v1": "recover"}
+    "loom-nebius-shared-pool-recover-v1": "recover", "loom-nebius-shared-pool-refresh-catalog-v1": "refresh-catalog",
+    "loom-nebius-shared-pool-refresh-storage-v1": "refresh-storage"}
 # main emits a closed blocked report on an ordinary failure. Preserve that report
 # for validation, without relaxing the watchdog's handling of crash/timeout/output.
 _ENTRY = ("import sys; sys.path.insert(0, sys.argv[1]); "
@@ -81,7 +110,7 @@ def unpack_bundle(content: bytes) -> tuple[dict[str, bytes], dict[str, Any]]:
 
 
 def command(release: Path, action: str) -> list[str]:
-    if action not in {"qualify", "preflight", "install", "recover"}:
+    if action not in {"qualify", *COMMANDS.values()}:
         raise GatewayError("shared pool action outside fixed authority")
     return [str(release / "venv/bin/python"), "-I", "-c", _ENTRY,
         str(release), str(release / "operation.json"), action]
@@ -144,7 +173,9 @@ def safe_report(raw: bytes, operation: dict[str, Any], action: str) -> dict[str,
         status = value["status"]
         allowed = {"preflight": {"shared_pool_preflight_qualified"},
             "install": {"pending", "shared_pool_handoff_complete"},
-            "recover": {"pending", "staging_restored_dev_closed"}}[action]
+            "recover": {"pending", "staging_restored_dev_closed"},
+            "refresh-catalog": {"catalog_pending", "shared_pool_catalog_refreshed"},
+            "refresh-storage": {"storage_pending", "shared_pool_storage_refreshed"}}[action]
         if status not in allowed | {"blocked"}:
             raise ValueError()
         result = {"status": status}
@@ -167,6 +198,12 @@ def safe_report(raw: bytes, operation: dict[str, Any], action: str) -> dict[str,
         if status != "shared_pool_preflight_qualified" and opened != (status == "shared_pool_handoff_complete"):
             raise ValueError()
         result.update(admission_open=opened, writer_migration_complete=complete)
+        if action in {"refresh-catalog", "refresh-storage"}:
+            field = "preactivation_id" if action == "refresh-catalog" else "storage_id"
+            selected = value[field]
+            if not isinstance(selected, str) or str(UUID(selected)) != selected or not UUID(selected).int:
+                raise ValueError()
+            result[field] = selected
         if status == "pending":
             phases = FORWARD_PHASES if action == "install" else RECOVERY_PHASES
             if value["phase"] not in phases:

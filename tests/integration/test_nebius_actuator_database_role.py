@@ -1,5 +1,6 @@
 """Exercise the real actuator command/trigger path with its bootstrap DB role."""
 
+import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
@@ -23,7 +24,6 @@ from loom.db.schema import (
     TeamQuota,
     Trial,
 )
-from loom.db.schema_startup import service_schema_head
 from loom.execution_runtime_contract import ExecutionRuntimeResultV1
 from loom_control_plane.execution_admission import upsert_execution_admission_policy
 from loom_control_plane.service_execution import (
@@ -176,12 +176,18 @@ def global_role_database(platform_database):  # noqa: F811 -- imported shared fi
         yield make_url(database).set(drivername="postgresql").render_as_string(hide_password=False)
 
 
-@pytest.mark.parametrize("kind", ["execution", "build", "registered-build"])
+@pytest.mark.parametrize("kind,schema_revision,upgrade_from", [
+    (kind, revision, None)
+    for revision in ('0175', '0176', '0177', '0178', '0179')
+    for kind in ('execution', 'build', 'registered-build')
+] + [pytest.param('execution', '0178', '0175', id='upgrade-0175-to-0178')])
 async def test_global_handoff_runs_as_restricted_actuator_after_guarded_role_stage(
     global_role_database: str,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
     kind: str,
+    schema_revision: str,
+    upgrade_from: str | None,
 ) -> None:
     from scripts.ops import nebius_pool_migration_guard as migration
 
@@ -200,6 +206,19 @@ async def test_global_handoff_runs_as_restricted_actuator_after_guarded_role_sta
         monkeypatch.setenv("LOOM_DB_" + role + "_PASSWORD", "restricted-role-password-" + "a" * 32)
     bootstrap.bootstrap_database({"namespace": "loom-nebius-platform"})
     url = make_url(global_role_database).set(drivername="postgresql+psycopg")
+    from tests.integration.conftest import retain_pool_schema
+
+    if upgrade_from is not None:
+        await asyncio.to_thread(retain_pool_schema, url.render_as_string(hide_password=False), upgrade_from)
+        with psycopg.connect(global_role_database, autocommit=True) as db:
+            assert db.execute('SELECT version_num FROM alembic_version').fetchall() == [(upgrade_from,)]
+            with pytest.raises(psycopg.errors.RaiseException, match='journal authority unqualified'):
+                db.execute(migration.pool_runtime_role_sql(owner=str(uuid4()), candidate='a' * 40, action='inspect'), prepare=False)
+        # The existing bootstrap is the schema migration authority. Pre-upgrade
+        # diagnostics do not grant runtime writes even on an audited old schema.
+        bootstrap.bootstrap_database({'namespace': 'loom-nebius-platform'})
+    # Prove actual migration layouts, not a relabeled current database.
+    await asyncio.to_thread(retain_pool_schema, url.render_as_string(hide_password=False), schema_revision)
     admin = create_async_engine(url)
     worker = create_async_engine(url.set(username="loom_actuator", password="restricted-role-password-" + "a" * 32))
     scheduler = create_async_engine(url.set(username="loom_control_plane", password="restricted-role-password-" + "a" * 32))
@@ -209,6 +228,9 @@ async def test_global_handoff_runs_as_restricted_actuator_after_guarded_role_sta
     owner, candidate = str(uuid4()), "a" * 40
     try:
         with psycopg.connect(url.set(drivername="postgresql").render_as_string(hide_password=False), autocommit=True) as db:
+            assert db.execute("SELECT version_num FROM alembic_version").fetchall() == [(schema_revision,)]
+            if schema_revision == "0175":
+                assert db.execute("SELECT to_regclass('harbor_baseline_sessions')").fetchone() == (None,)
             for held_owner, held_candidate in ((None, None), (str(uuid4()), candidate), (owner, "f" * 40)):
                 if held_owner is not None:
                     db.execute("INSERT INTO nebius_rollout_guard(id,owner,candidate_sha) VALUES(1,%s,%s)",
@@ -226,7 +248,7 @@ async def test_global_handoff_runs_as_restricted_actuator_after_guarded_role_sta
                 with pytest.raises(psycopg.errors.RaiseException, match="not closed and idle"):
                     db.execute(migration.pool_runtime_role_sql(owner=owner, candidate=candidate, action="stage"), prepare=False)
                 db.rollback()
-                db.execute("INSERT INTO alembic_version(version_num) VALUES(%s)", (service_schema_head(),))
+                db.execute("INSERT INTO alembic_version(version_num) VALUES(%s)", (schema_revision,))
             with db.cursor() as cursor:
                 cursor.execute(migration.pool_runtime_role_sql(owner=owner, candidate=candidate, action="stage"), prepare=False)
                 reports = []
@@ -236,6 +258,25 @@ async def test_global_handoff_runs_as_restricted_actuator_after_guarded_role_sta
                     if not cursor.nextset():
                         break
             assert reports == [({"status": "staged"},)]
+            if schema_revision in {"0177", "0178", "0179"}:
+                assert db.execute("SELECT has_table_privilege('loom_actuator','task_source_publications','SELECT,INSERT,UPDATE,DELETE')").fetchone() == (False,)
+                db.execute("GRANT SELECT ON task_source_publications TO loom_actuator")
+                for action in ("observe", "stage", "inspect"):
+                    with pytest.raises(psycopg.errors.RaiseException, match="source publication authority unqualified"):
+                        db.execute(migration.pool_runtime_role_sql(owner=owner, candidate=candidate, action=action), prepare=False)
+                    db.rollback()
+                db.execute("REVOKE SELECT ON task_source_publications FROM loom_actuator")
+            if schema_revision in {"0178", "0179"} and kind == "execution":
+                for table in ('nebius_pool_participant_catalogs', 'nebius_pool_profile_documents',
+                              'nebius_pool_lifecycle_operations', 'nebius_pool_participant_lifecycle'):
+                    assert db.execute("SELECT has_table_privilege('loom_actuator',%s,'SELECT,INSERT,UPDATE,DELETE')",
+                        (table,)).fetchone() == (False,)
+                    db.execute(psycopg.sql.SQL('GRANT SELECT(pool_id) ON {} TO loom_actuator').format(psycopg.sql.Identifier(table)))
+                    for action in ('observe', 'stage', 'inspect'):
+                        with pytest.raises(psycopg.errors.RaiseException, match='management authority unqualified'):
+                            db.execute(migration.pool_runtime_role_sql(owner=owner, candidate=candidate, action=action), prepare=False)
+                        db.rollback()
+                    db.execute(psycopg.sql.SQL('REVOKE SELECT(pool_id) ON {} FROM loom_actuator').format(psycopg.sql.Identifier(table)))
             if kind == "execution":
                 db.execute("GRANT UPDATE(mode) ON nebius_pool_bindings TO loom_actuator")
                 for action in ("observe", "stage", "inspect"):

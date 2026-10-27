@@ -102,7 +102,7 @@ def test_application_recipe_or_source_drift_never_renders(build_inputs, damage):
     elif damage == "buildkit":
         config = replace(config, buildkit_image="registry.example/buildkit@sha256:" + "e" * 64)
     elif damage == "snapshotter":
-        config = replace(config, snapshotter="native")
+        config = replace(config, snapshotter="overlayfs")
     elif damage == "export":
         config = replace(config, export_cache_mode="min")
     elif damage == "format":
@@ -122,7 +122,7 @@ def test_application_recipe_or_source_drift_never_renders(build_inputs, damage):
 def test_recipe_digest_binds_options_and_platform_independently_of_owner_and_attempt(build_inputs):
     claim, _, _ = build_inputs
     assert claim.recipe.digest == claim.model_copy(update={"build_id": uuid4(), "attempt": 3}).recipe.digest
-    for field, value in (("cpu_arch", "arm64"), ("schema_revision", "0174"), ("snapshotter", "native")):
+    for field, value in (("cpu_arch", "arm64"), ("schema_revision", "0174"), ("snapshotter", "overlayfs")):
         assert claim.recipe.digest != claim.recipe.model_copy(update={field: value}).digest
     assert claim.source_key == "application-sources/v1/sha256/" + "b" * 64 + ".tar"
 

@@ -18,7 +18,7 @@ import tarfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
 
@@ -33,26 +33,18 @@ def download(item: dict[str, object], directory: Path) -> Path:
     if destination.exists() and digest(destination) == expected:
         return destination
     partial = destination.with_suffix(".partial")
-    url = str(item["url"])
-    if not url.startswith("https://"):
-        raise ValueError(f"archive URL must use HTTPS: {url}")
+    # The mirror is fast but drops superseded files. A 404 falls back
+    # immediately. After three tries, 500/502/503/504 do too: the mirror
+    # returns 503 while a pool file is being removed. The fallback is the
+    # permanent Launchpad Librarian copy of the same bytes.
+    sources = [str(item["url"]), *([str(item["fallback_url"])] if "fallback_url" in item else [])]
+    for url in sources:
+        if not url.startswith("https://"):
+            raise ValueError(f"archive URL must use HTTPS: {url}")
     try:
-        for attempt in range(1, 4):
-            try:
-                with urlopen(url, timeout=120) as response, partial.open("wb") as output:
-                    shutil.copyfileobj(response, output)
-            except HTTPError as error:
-                error.close()
-                partial.unlink(missing_ok=True)
-                print(
-                    f"guest archive {expected}: HTTP {error.code}, attempt {attempt}/3",
-                    file=sys.stderr,
-                    flush=True,
-                )
-                if error.code not in {502, 503, 504} or attempt == 3:
-                    raise
-                time.sleep(attempt)
-            else:
+        for index, url in enumerate(sources):
+            failure = _fetch(url, partial, expected, last_source=index == len(sources) - 1)
+            if failure is None:
                 break
         if partial.stat().st_size != item["bytes"] or digest(partial) != expected:
             raise ValueError(f"archive content does not match source lock: {url}")
@@ -60,6 +52,56 @@ def download(item: dict[str, object], directory: Path) -> Path:
         return destination
     finally:
         partial.unlink(missing_ok=True)
+
+
+def _fetch(url: str, partial: Path, expected: str, *, last_source: bool) -> HTTPError | None:
+    """Download url into partial. Return a mirror failure to fall back on, or raise."""
+    for attempt in range(1, 4):
+        failure: URLError | TimeoutError | None = None
+        reason = "connection timeout"
+        try:
+            response = urlopen(url, timeout=120)
+        except HTTPError as error:
+            error.close()
+            failure = error
+            reason = f"HTTP {error.code}"
+        except URLError as error:
+            if not isinstance(error.reason, TimeoutError):
+                raise
+            failure = error
+        except TimeoutError as error:
+            failure = error
+        else:
+            with response, partial.open("wb") as output:
+                while True:
+                    try:
+                        chunk = response.read(64 * 1024)
+                    except TimeoutError as error:
+                        # Restart a timed-out body from byte zero. Keep
+                        # local cache I/O outside this transport boundary.
+                        failure = error
+                        reason = "body timeout"
+                        break
+                    if not chunk:
+                        break
+                    output.write(chunk)
+        if failure is None:
+            return None
+        partial.unlink(missing_ok=True)
+        print(
+            f"guest archive {expected}: {reason}, attempt {attempt}/3",
+            file=sys.stderr,
+            flush=True,
+        )
+        unavailable = isinstance(failure, HTTPError) and failure.code in {500, 502, 503, 504}
+        if isinstance(failure, HTTPError) and not last_source and (
+            failure.code == 404 or (unavailable and attempt == 3)
+        ):
+            return failure
+        if (isinstance(failure, HTTPError) and not unavailable) or attempt == 3:
+            raise failure
+        time.sleep(attempt)
+    raise AssertionError("attempt loop always returns or raises")
 
 
 def run(*args: str | Path) -> str:

@@ -29,6 +29,7 @@ from loom_launcher.adapter import AgentAdapter, SandboxAccess
 from loom_launcher.adapter import ExecHandle as LauncherExecHandle
 from loom_launcher.adapter import ModelSpec as LauncherModelSpec
 
+from loom.agent.direct_provider import DirectProviderConnection
 from loom.attempt_deadline import AttemptDeadline
 from loom.driver.base import Driver
 from loom.driver.base import ExecHandle as DriverExecHandle
@@ -189,11 +190,12 @@ class SubprocessAgent:
 
     adapter: AgentAdapter
     model: ModelSpec
-    cp_client: StepTokenClient
+    cp_client: StepTokenClient | None
     gateway_url: str
     team_id: UUID
     trial_id: UUID
     agent_gateway_url: str | None = None
+    direct_provider: DirectProviderConnection | None = field(default=None, repr=False)
     # Standard AgentRuntime Protocol fields:
     mode: Literal["out-of-box", "in-box"] = "out-of-box"
     name: str = field(init=False)
@@ -251,10 +253,38 @@ class SubprocessAgent:
         skills_dir: PurePosixPath | None,
         step_id: str,
     ) -> None:
+        try:
+            await self._run(instruction=instruction, env=env, trajectory=trajectory,
+                            mcp=mcp, skills_dir=skills_dir, step_id=step_id)
+        except Exception as exc:
+            if self.direct_provider is None:
+                raise
+            cleaned = self.direct_provider.redact_text(str(exc))
+            if cleaned == str(exc):
+                raise
+            raise AgentError(cleaned) from None
+
+    async def _run(
+        self, *, instruction: str, env: Driver, trajectory: TrajectoryWriter,
+        mcp: Sequence[MCPConnection], skills_dir: PurePosixPath | None, step_id: str,
+    ) -> None:
+        if self.direct_provider is not None and (
+            self.request_params or (
+                self.adapter.name == "codex" and os.environ.get("LOOM_CODEX_SETTINGS_JSON")
+            )
+        ):
+            raise AgentError(
+                "direct subprocess request_params and Codex gateway settings are unsupported; "
+                "use native agent configuration or terminus-2"
+            )
         # 1. Mint a step-scoped JWT (Plan 9). Errors here are fatal: we
         # can't run the agent without a Gateway-acceptable bearer.
         try:
-            if self._attempt_deadline is None:
+            if self.direct_provider is not None:
+                step_token = self.direct_provider.api_key
+            elif self.cp_client is None:
+                raise AgentError("hosted subprocess requires a step-token client")
+            elif self._attempt_deadline is None:
                 step_token = await self.cp_client.mint_step_token(
                     team_id=self.team_id,
                     trial_id=self.trial_id,
@@ -286,7 +316,7 @@ class SubprocessAgent:
             ) from exc
 
         # 2. Build env + argv via the adapter.
-        base_url = _gateway_url_for_adapter(
+        base_url = (self.direct_provider.base_url or "") if self.direct_provider else _gateway_url_for_adapter(
             self.agent_gateway_url or self.gateway_url,
             self.adapter,
         )
@@ -297,11 +327,14 @@ class SubprocessAgent:
             base_url,
         )
         env_vars: dict[str, str] = {
-            self.adapter.api_key_env: step_token,
+            (self.direct_provider.api_key_env if self.direct_provider and self.direct_provider.api_key_env
+             else self.adapter.api_key_env): step_token,
             self.adapter.base_url_env: base_url,
             "LOOM_TRIAL_ID": str(self.trial_id),
             "LOOM_STEP_ID": step_id,
         }
+        if self.direct_provider and self.adapter.name == "claude-code":
+            env_vars["ANTHROPIC_AUTH_TOKEN"] = ""
         for name in _SUBPROCESS_AGENT_ENV_PASSTHROUGH:
             value = os.environ.get(name)
             if value:
@@ -315,7 +348,7 @@ class SubprocessAgent:
         argv = self.adapter.build_invocation(
             instruction=instruction,
             workdir=cwd,
-            model=_bridge_model(self.model),
+            model=_bridge_model(self.direct_provider.model if self.direct_provider else self.model),
             env=env_vars,
         )
 
@@ -352,6 +385,8 @@ class SubprocessAgent:
                 # by Plan 11 task 4) or pre-validates against the event union.
                 # For v1 we use write_raw_dict to stay decoupled.
                 payload = event.model_dump()
+                if self.direct_provider is not None:
+                    payload = self.direct_provider.redact(payload)
                 failure_diagnostics.observe(payload)
                 # #321: capture helpers emit a synthetic terminal event
                 # `{"kind": "stream_capture_warning", ...}` when they

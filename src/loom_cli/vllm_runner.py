@@ -74,6 +74,8 @@ class VLLMLaunchSpec:
     # Don't stop vLLM after the trial finishes — useful when iterating
     # on tasks against the same model.
     keep_alive: bool = False
+    # Persistent launches need file-backed output after the invoking CLI exits.
+    log_path: Path | None = None
 
 
 @dataclass
@@ -85,8 +87,8 @@ class VLLMServerInfo:
     pid: int               # so callers can also kill it themselves
 
 
-# Module-level registry of live processes so SIGINT/SIGTERM cleanup hits
-# everything. Mirrors the cleanup registry used by cloud runtimes.
+# CLI-owned processes. A successfully retained single-model server is removed
+# before exit; all remaining processes receive exit/signal cleanup.
 _LIVE_PROCESSES: list[subprocess.Popen[bytes]] = []
 _SIGNAL_HANDLERS_INSTALLED = False
 
@@ -101,6 +103,8 @@ def launch_vllm(spec: VLLMLaunchSpec) -> VLLMServerInfo:
       become healthy within the timeout).
     """
     _ensure_vllm_installed()
+    if spec.keep_alive and spec.log_path is None:
+        raise ValueError("a persistent vLLM launch requires log_path")
     _install_cleanup_handlers()
 
     model = _resolve_model_path(spec.model)
@@ -114,32 +118,38 @@ def launch_vllm(spec: VLLMLaunchSpec) -> VLLMServerInfo:
         sys.stderr.write(
             f"→ starting vLLM (model={model}, port={port}) ...\n",
         )
-        proc = subprocess.Popen(cmd)
+        if spec.keep_alive:
+            assert spec.log_path is not None
+            with spec.log_path.open("ab") as log:
+                proc = subprocess.Popen(
+                    cmd, stdin=subprocess.DEVNULL, stdout=log,
+                    stderr=subprocess.STDOUT, start_new_session=True,
+                )
+        else:
+            proc = subprocess.Popen(cmd)
         _LIVE_PROCESSES.append(proc)
 
-        # Brief settling window: if vLLM is going to die from a bind
-        # failure, it does so within a few seconds. Sample its
-        # state, then continue with the normal health-probe flow.
-        time.sleep(2.0)
-        if proc.poll() is not None and proc.returncode != 0:
-            # Likely a bind failure on this port; try the next.
-            if proc in _LIVE_PROCESSES:
-                _LIVE_PROCESSES.remove(proc)
-            sys.stderr.write(
-                f"→ vLLM exited code {proc.returncode} on port "
-                f"{port}; retrying next port\n",
-            )
-            port += 1
-            continue
-
-        base_url = f"http://localhost:{port}/v1"
         try:
+            # Brief settling window: if vLLM is going to die from a bind
+            # failure, it does so within a few seconds. Sample its
+            # state, then continue with the normal health-probe flow.
+            time.sleep(2.0)
+            if proc.poll() is not None and proc.returncode != 0:
+                # Likely a bind failure on this port; try the next.
+                if proc in _LIVE_PROCESSES:
+                    _LIVE_PROCESSES.remove(proc)
+                sys.stderr.write(
+                    f"→ vLLM exited code {proc.returncode} on port "
+                    f"{port}; retrying next port\n",
+                )
+                port += 1
+                continue
+
+            base_url = f"http://localhost:{port}/v1"
             _wait_for_ready(base_url, proc, timeout_sec=300.0)
             served = _query_served_model_name(base_url)
-        except Exception:
-            _stop_process(proc)
-            if proc in _LIVE_PROCESSES:
-                _LIVE_PROCESSES.remove(proc)
+        except BaseException:
+            stop_one(proc)
             raise
 
         info = VLLMServerInfo(
@@ -186,6 +196,11 @@ def stop_one(proc: subprocess.Popen[bytes]) -> None:
     if proc in _LIVE_PROCESSES:
         _LIVE_PROCESSES.remove(proc)
     _stop_process(proc)
+
+
+def retain_one(proc: subprocess.Popen[bytes]) -> None:
+    """Transfer a successfully used server out of CLI exit/signal cleanup."""
+    _LIVE_PROCESSES.remove(proc)
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +319,7 @@ def _stop_process(proc: subprocess.Popen[bytes]) -> None:
 
 
 def _install_cleanup_handlers() -> None:
-    """Register atexit + SIGTERM handler exactly once per process.
+    """Register exit, termination and terminal-hangup cleanup once per process.
 
     Why no SIGINT handler: the default Python SIGINT raises
     `KeyboardInterrupt`, which propagates through `asyncio.run` and
@@ -312,18 +327,19 @@ def _install_cleanup_handlers() -> None:
     tear down vLLM and Docker together). Installing our own
     SIGINT handler here would short-circuit that path.
 
-    SIGTERM doesn't raise — atexit doesn't fire on it either — so we
-    do install a handler that tears down vLLM and then re-raises
-    default behavior so the host process exits.
+    SIGTERM and SIGHUP don't raise — atexit doesn't fire on them either.
+    Stop CLI-owned servers before restoring their default signal behavior.
+    This includes detached keep-alive launches whose ownership has not yet
+    transferred after successful completion.
     """
     global _SIGNAL_HANDLERS_INSTALLED
     if _SIGNAL_HANDLERS_INSTALLED:
         return
     atexit.register(stop_all)
 
-    def _sigterm_handler(signum: int, frame: Any) -> None:
+    def _termination_handler(signum: int, frame: Any) -> None:
         sys.stderr.write(
-            f"\n→ caught SIGTERM; tearing down "
+            f"\n→ caught {signal.Signals(signum).name}; tearing down "
             f"{len(_LIVE_PROCESSES)} vLLM server(s) ...\n",
         )
         stop_all()
@@ -331,7 +347,9 @@ def _install_cleanup_handlers() -> None:
         os.kill(os.getpid(), signum)
 
     try:
-        signal.signal(signal.SIGTERM, _sigterm_handler)
+        signal.signal(signal.SIGTERM, _termination_handler)
+        if hasattr(signal, "SIGHUP"):
+            signal.signal(signal.SIGHUP, _termination_handler)
     except ValueError:  # pragma: no cover — not the main thread
         pass
     _SIGNAL_HANDLERS_INSTALLED = True

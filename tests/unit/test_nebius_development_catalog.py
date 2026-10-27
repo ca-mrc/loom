@@ -13,7 +13,7 @@ import pytest
 from loom.execution_contract import ExecutionClassV1, ExecutionTargetV1
 from loom.nebius_platform_render import build_platform
 from loom.pipeline.keys import canonical_digest
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
+from tests.support.nebius_platform import platform_inputs as platform_inputs
 
 
 @pytest.fixture
