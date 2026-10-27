@@ -133,6 +133,10 @@ the agent uses Compose. When `[verifier.environment]` is declared, an omitted
 internet setting maps to hosted `public-web` independently of the agent; explicit
 offline and allowlist policies remain unchanged. Submission validates the
 independent verifier against its selected execution class before execution.
+An independent tests image does not inherit the agent workbench's readiness
+probe: that image does not start the agent's services. An explicitly declared
+verifier healthcheck remains authoritative. Original upstream configuration is
+retained in the bundle alongside this executable projection.
 The legacy worker still rejects these hosted-only contracts. Unsupported Compose fields and exact GPU-model placement remain
 explicit blockers.
 

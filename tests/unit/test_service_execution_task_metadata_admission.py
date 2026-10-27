@@ -5,6 +5,7 @@ from pathlib import PurePosixPath
 import pytest
 
 from loom.models.mcp import MCPConnection
+from loom.models.networking import Public, PublicWeb
 from loom.models.trial import TrialConfig
 from loom.service_execution_materialization import (
     automatic_service_execution_rejections,
@@ -13,6 +14,7 @@ from loom.service_execution_materialization import (
     freeze_agent_runtime_releases,
 )
 from tests.support.agent_runtime import release
+from tests.unit.test_independent_verifier_submission_admission import _inputs_with_verifier
 from tests.unit.test_service_execution_materialization import _REVISION, _provenance
 from tests.unit.test_service_execution_terminus_plan import _inputs
 
@@ -86,3 +88,26 @@ def test_old_release_remains_usable_for_tasks_without_metadata():
 def test_old_frozen_profile_does_not_acquire_new_serialized_capability():
     _, _, profile = _inputs()
     assert "supports_terminus_environment_metadata" not in profile.model_dump(mode="json")
+
+
+@pytest.mark.parametrize("case", ["old", "skip", "oracle", "new_no_verifier_egress"])
+def test_metadata_and_independent_grader_admission_do_not_bypass_each_other(case):
+    task, trial, profile = _inputs_with_verifier(PublicWeb() if case == "new_no_verifier_egress" else Public())
+    task = _with_metadata(task, "mcp")
+    profile = profile.model_copy(update={"supports_terminus_environment_metadata": case != "new_no_verifier_egress"})
+    if case == "oracle":
+        trial = TrialConfig(agent_name="oracle", agent_model=None)
+    else:
+        runtime = release().model_copy(update={
+            "loom_bridge_revision": "1.1" if case == "new_no_verifier_egress" else "1.0",
+            "harbor_version": "0.24.0",
+        })
+        profile = freeze_agent_runtime_releases(profile, (runtime,))
+        trial = trial.model_copy(update={"agent_version": runtime.agent_version, "skip_verifier": case == "skip"})
+    reasons = execution_selection_rejections(task, trial, profile, source_provenance=_provenance())
+    assert ("terminus_environment_metadata_runtime_unavailable" in reasons) is (case in {"old", "skip"})
+    verifier_reasons = [r for r in reasons if r.startswith("verifier.environment:")]
+    assert verifier_reasons == ([] if case == "skip" else [
+        "verifier.environment: task_web_egress_unsupported" if case == "new_no_verifier_egress"
+        else "verifier.environment: network_access_unsupported",
+    ])

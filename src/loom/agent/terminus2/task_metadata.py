@@ -22,8 +22,14 @@ def terminus_task_metadata_rejections(mcp: Sequence[MCPConnection]) -> tuple[str
             reasons.append(f"{prefix}.env: terminus_mcp_environment_unsupported")
         if server.headers:
             reasons.append(f"{prefix}.headers: terminus_mcp_headers_unsupported")
-        if server.url and urlsplit(server.url).username is not None:
-            reasons.append(f"{prefix}.url: terminus_mcp_url_credentials_unsupported")
+        if server.url:
+            try:
+                parsed = urlsplit(server.url)
+            except ValueError:
+                reasons.append(f"{prefix}.url: terminus_mcp_url_invalid")
+            else:
+                if parsed.username is not None:
+                    reasons.append(f"{prefix}.url: terminus_mcp_url_credentials_unsupported")
     return tuple(reasons)
 
 

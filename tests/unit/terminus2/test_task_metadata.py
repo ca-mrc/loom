@@ -29,6 +29,7 @@ def test_native_mcp_transport_projection():
     ({"env": {"TOKEN": "env:MCP_TOKEN"}}, "environment"),
     ({"headers": {"Authorization": "Bearer ${MCP_TOKEN}"}}, "headers"),
     ({"url": "http://user:private-password@server/sse"}, "url_credentials"),
+    ({"url": "http://[invalid"}, "url_invalid"),
     ({"transport": "stdio", "command": [""], "url": None}, "command"),
     ({"transport": "stdio", "command": [" \t"], "url": None}, "command"),
 ])

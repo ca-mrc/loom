@@ -85,6 +85,10 @@ def prepare_harbor_bundle(bundle: Path, config: dict[str, Any]) -> None:
         env.pop("compose_files", None)
         env.pop("single_service_compose", None)
         env.pop("native_compose", None)
+        # A separate tests image does not start the agent's services. Its
+        # readiness must be explicit, rather than inherited from that workbench.
+        if not isinstance(declared, dict) or "healthcheck" not in declared:
+            env.pop("healthcheck", None)
         env.update(dockerfile="tests/Dockerfile", docker_build_context="tests")
         verifier["environment"] = env
         verifier.setdefault("env_mode", "separate")

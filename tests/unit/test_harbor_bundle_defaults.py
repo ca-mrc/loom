@@ -47,6 +47,31 @@ def prepare(
 
 
 @pytest.mark.parametrize("compose", [False, True])
+@pytest.mark.parametrize("verifier_environment", [None, {}, {"cpus": 3}])
+def test_separate_tests_image_does_not_inherit_agent_service_probe(
+    tmp_path, compose, verifier_environment,
+):
+    task = prepare(tmp_path, compose=compose, environment={
+        "healthcheck": {"command": "test -f /tmp/agent-baseline-done", "retries": 2},
+    }, verifier_environment=verifier_environment)
+    assert task.environment.healthcheck.command == "test -f /tmp/agent-baseline-done"
+    assert task.verifier.environment is not None
+    assert task.verifier.environment.healthcheck is None
+
+
+def test_explicit_independent_verifier_probe_is_preserved(tmp_path):
+    task = prepare(tmp_path, compose=False, environment={
+        "healthcheck": {"command": "test -f /tmp/agent-baseline-done"},
+    }, verifier_environment={
+        "cpus": 3, "memory_mb": 2048, "storage_mb": 4096,
+        "healthcheck": {"command": "test -f /tests/scorer-ready", "retries": 4},
+    })
+    assert task.environment.healthcheck.command == "test -f /tmp/agent-baseline-done"
+    assert task.verifier.environment.healthcheck.command == "test -f /tests/scorer-ready"
+    assert task.verifier.environment.healthcheck.retries == 4
+
+
+@pytest.mark.parametrize("compose", [False, True])
 @pytest.mark.parametrize("explicit_environment", [False, True])
 @pytest.mark.parametrize("uid,gid", [(0, 0), (1001, 1002)])
 def test_independent_verifier_uses_its_own_image_identity_and_workdir(
