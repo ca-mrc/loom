@@ -78,11 +78,12 @@ func (p plan) validateGuestExecution() error {
 		expectedGuests = 1
 	}
 	skippedGuest := p.VerifierExecution == "skipped" && p.Verifier == nil && !p.InPlaceVerifier && !p.VerifierAfterAgentTimeout
-	if skippedGuest {
+	deferredGuest := p.VerifierExecution == "separate_execution" && p.Verifier == nil && !p.InPlaceVerifier && !p.VerifierAfterAgentTimeout
+	if skippedGuest || deferredGuest {
 		expectedGuests = 1
 	}
 	verifierOK := p.VerifierExecution == "in_attempt" && p.Verifier != nil
-	if skippedGuest {
+	if skippedGuest || deferredGuest {
 		verifierOK = true
 	}
 	if guestClass && (guests != expectedGuests || len(p.Sidecars) != expectedGuests || p.RuntimeVolumeMiB < 1024 || p.ControllerResources == nil || p.AgentImageRef == nil || p.ExecutionRole != "attempt" || p.Composition != "init_payload" || !verifierOK) {

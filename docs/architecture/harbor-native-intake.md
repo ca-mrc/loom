@@ -90,7 +90,7 @@ catalog.
 | Environment image/build/resources | `environment` |
 | `architecture`, `memory`, `storage`, `env` | `cpu_arch`, MiB resource fields, `environment.environment` |
 | `gpus`, exact `gpu_types` | GPU count and model declarations in each environment |
-| Native Compose files | Original files plus `environment.compose_files`; supported workbenches carry `single_service_compose` |
+| Native Compose files | Original files plus `environment.compose_files`; single workbenches carry `single_service_compose`, supported service topologies carry `native_compose` |
 | `verifier.environment` and `tests/Dockerfile` | Independent typed verifier environment/build context |
 | `verifier.env`, `collect`, execution mode | `environment_vars`, typed collection hooks, `env_mode` |
 | Relative artifact strings | Existing step artifact globs |
@@ -108,10 +108,70 @@ such errors were recorded; it does not repair the Dockerfile or erase the error.
 A shared requirement checker drives catalog/API/CLI diagnostics, automatic
 service materialization, worker admission before factories/model launch, and
 the Trial's driver-start boundary. Schema validity and preserved raw files do
-not grant runtime support. Current blockers include independent verifier
-images/resources, unsupported Compose features, exact GPU-model placement, verifier env and
-collection hooks, structured/absolute artifacts, oracle-specific environment
-variables, and declared healthcheck startup intervals.
+not grant runtime support. Hosted execution prepares independent verifier images,
+keeps their resource and environment declarations distinct, and restores declared
+artifacts before grading. The legacy worker still rejects these hosted-only
+contracts. Unsupported Compose fields and exact GPU-model placement remain
+explicit blockers.
+
+Supported native Compose topologies run inside a private software guest. The
+agent can operate only the main service; the trusted controller manages service
+health/dependency order and collection from named services. Host mounts, Docker
+sockets, host networking and ambient environment interpolation are rejected.
+The `setup-native-compose` phase imports prepared images and starts the service
+topology before the agent/model clock begins. Harness setup and agent execution
+reconnect through a controller-private receipt. The outer guest's root Docker
+control channel is never exposed to the agent; the inner main container retains
+its authored identity. Main collection runs before main shutdown, followed by
+sidecar hooks and collection, then retirement of the owned containers/network.
+The guest allocation preserves the main task requirements and adds each
+service's declared CPU/memory. Undeclared sidecars receive 1 CPU, 1 GiB memory
+and 2 GiB storage each; the guest Docker daemon adds 1 CPU, 1 GiB memory and
+4 GiB storage. These are platform allocations, not rewritten upstream fields.
+Image archives have a separate bounded input storage allocation plus 3 GiB for
+one OCI-to-Docker transport conversion. Placement accounts for all resident
+allocations and rejects a node that cannot fit them.
+
+The trusted native image publisher stores Compose OCI archives as exact versions
+in the canonical artifacts bucket. It journals component keys and write IDs in
+the native attempt before upload, then records each returned version and native
+storage checksum in the prepared image grant. The authenticated input broker
+streams only that execution's admitted service images. Registry and storage
+credentials never enter the guest or its services. `task_image_builder.archive_secret_name`
+selects the trusted publisher's existing canonical storage credential reference.
+The standalone platform renderer defaults it to `loom-task-build-source`, whose
+source binding already uses the canonical artifacts bucket; explicit alternate
+references remain supported. Deployment preflight verifies the required keys.
+
+The existing control-plane materializer loop reconciles interrupted archive
+writes after the actuator observes build Pod removal. It retains admitted
+archives until materialization retirement, persists an exact deletion inventory
+before deleting, verifies absence, and periodically revisits retained write
+intents for late completions. Foreign versions under an issued key are not
+owned by that attempt. The actuator can append lifecycle registrations; only the
+control plane owns archive retirement.
+
+Native Compose requires the explicitly qualified `supports_native_compose`
+runtime profile, guest support and task identity isolation. Publication defaults
+the capability off. A Compose agent uses an independent verifier after service
+collection; shared grading and verifier-side Compose are not qualified.
+
+Collection hooks run against their named services and preserve authored timeouts.
+The model deadline remains unchanged; a bounded finalization interval permits
+collection after that deadline.
+The admitted agent phase's `finalization_timeout_seconds` is the sum of authored
+collection-hook timeouts plus 120 seconds for capture, bounded to one hour. The
+scheduler includes it in the overall lease. The broker retains the original
+agent cutoff; external cancellation receives only ordinary termination grace.
+Compose command cancellation retires the inner process group before collection
+hooks run. A single read-only BusyBox helper provides session control without
+exposing the guest Docker socket; the authored service user and umask are preserved.
+Structured artifact transfer preserves source
+paths and exclusions, overlays only transferred files onto the verifier image,
+and rejects unsafe links and private paths. Generic separate verification keeps
+its full-workspace handoff; a native independent verifier consumes its authored
+artifact declarations. Oracle solution variables apply only to the solution
+process. Health probes honor the declared startup interval.
 
 The native reward bridge runs the original `tests/test.sh`, removes stale
 reward/output files, and accepts finite numeric scalar or JSON rewards,
@@ -124,9 +184,9 @@ success. This bridge does not qualify the separate verifier's execution backend.
 [`terminal-bench-4.0.0.json`](../evidence/2282/terminal-bench-4.0.0.json)
 records all 66 official tasks imported through the common preparation pipeline
 from the existing commit-addressed archive. Original package errors and native
-requirements remain visible. All 66 are blocked for execution by current
+requirements remain visible. At that intake milestone all 66 were blocked by
 runtime capability requirements, including independent verifier environments.
-This evidence used no catalog mutation, image build, model or cloud allocation.
+That historical evidence used no catalog mutation, image build, model or cloud allocation.
 
 Tests exercise another benchmark identity through the same importer, legacy
 TB2 normalization, installed CLI pinned-Git preparation and atomic failure,
@@ -135,10 +195,21 @@ versioned TLS object-store publication/reimport, concurrent origin binding, and
 admission before runtime factories. Existing run/delivery snapshots retain
 source linkage; no live run or delivery export has been qualified for TB4.
 
-Issue #2282 remains open for reusable runtime materialization/collection,
-H100 admission/placement and actual capacity observation, representative native
-oracle equivalence, run/export readback and separately authorized bounded live
-acceptance. The import census is not deployed or executable benchmark acceptance.
+Runtime qualification is tracked in [#2292](https://github.com/ca-mrc/loom/issues/2292).
+The official 66-task catalog has passed publication and exact-version storage
+readback; that does not establish execution acceptance. Per the owner's
+2026-10-27 scope decision, the current runtime acceptance covers 63 tasks.
+`fp8-rmsnorm-gemm`, `jax-speedrun-gpu` and `math-eval-grader` are excluded because
+they require H100 hardware. Support is deferred in
+[#2649](https://github.com/ca-mrc/loom/issues/2649); no GPU capacity is activated.
+
+The explicit
+[non-H100 subset descriptor](../../config/harbor-sources/terminal-bench-4.0.0-non-h100-subset.json)
+retains the same upstream revision and complete source count of 66, with exactly
+63 persisted source task IDs. The official descriptor remains unchanged.
+This subset stays marked unqualified until image preparation, actual Oracle
+runs, bounded Terminus-2 model runs and durable result/export readback pass.
+Local tests and import census alone are not deployed benchmark acceptance.
 
 When a task selects a prebuilt image with no explicit build or Compose
 definition, findings in its unused default Dockerfile remain source warnings.

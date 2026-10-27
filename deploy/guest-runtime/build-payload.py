@@ -17,7 +17,9 @@ import sys
 import tarfile
 import time
 from concurrent.futures import ThreadPoolExecutor
+from http.client import IncompleteRead
 from pathlib import Path
+from ssl import SSLEOFError
 from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
@@ -57,7 +59,7 @@ def download(item: dict[str, object], directory: Path) -> Path:
 def _fetch(url: str, partial: Path, expected: str, *, last_source: bool) -> HTTPError | None:
     """Download url into partial. Return a mirror failure to fall back on, or raise."""
     for attempt in range(1, 4):
-        failure: URLError | TimeoutError | None = None
+        failure: URLError | OSError | IncompleteRead | None = None
         reason = "connection timeout"
         try:
             response = urlopen(url, timeout=120)
@@ -66,21 +68,26 @@ def _fetch(url: str, partial: Path, expected: str, *, last_source: bool) -> HTTP
             failure = error
             reason = f"HTTP {error.code}"
         except URLError as error:
-            if not isinstance(error.reason, TimeoutError):
+            if not isinstance(error.reason, (TimeoutError, ConnectionResetError, SSLEOFError)):
                 raise
             failure = error
-        except TimeoutError as error:
+            reason = "connection timeout" if isinstance(error.reason, TimeoutError) else "connection interrupted"
+        except (TimeoutError, ConnectionResetError, SSLEOFError) as error:
             failure = error
+            reason = "connection timeout" if isinstance(error, TimeoutError) else "connection interrupted"
         else:
             with response, partial.open("wb") as output:
                 while True:
                     try:
                         chunk = response.read(64 * 1024)
-                    except TimeoutError as error:
-                        # Restart a timed-out body from byte zero. Keep
+                    except (URLError, TimeoutError, ConnectionResetError, SSLEOFError, IncompleteRead) as error:
+                        underlying = error.reason if isinstance(error, URLError) else error
+                        if not isinstance(underlying, (TimeoutError, ConnectionResetError, SSLEOFError, IncompleteRead)):
+                            raise
+                        # Restart an interrupted body from byte zero. Keep
                         # local cache I/O outside this transport boundary.
                         failure = error
-                        reason = "body timeout"
+                        reason = "body timeout" if isinstance(underlying, TimeoutError) else "body interrupted"
                         break
                     if not chunk:
                         break

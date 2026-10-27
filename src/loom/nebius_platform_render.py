@@ -952,6 +952,7 @@ def _task_image_builder_settings(config: dict[str, Any], *, service_image: str) 
         "export_cache_mode",
         "cache_transfer",
         "oci_export_format",
+        "archive_secret_name",
     }
     if (
         not isinstance(supplied, dict)
@@ -989,7 +990,7 @@ def _task_image_builder_settings(config: dict[str, Any], *, service_image: str) 
             # bucket. The separate source bucket stores execution input packs.
             source_bucket=config["buckets"]["artifacts"],
             cache_secret_name="loom-task-build-cache" if cache else None,
-            **{**supplied, "cache_bucket": cache},
+            **{"archive_secret_name": "loom-task-build-source", **supplied, "cache_bucket": cache},
         )
     except ValueError:
         raise NebiusPlatformError("invalid task image build resource limits or namespace") from None
@@ -1150,6 +1151,10 @@ def _execution_documents(
             pod = None
             if doc["kind"] == "Deployment":
                 pod = doc["spec"]["template"]["spec"]
+                if filename == "nebius-execution-actuator.yaml":
+                    pod["containers"][0].setdefault("env", []).extend(_env({
+                        "LOOM_ENV": config["environment"], "LOOM_NAMESPACE": ns,
+                    }))
                 if builder is not None:
                     pod["containers"][0].setdefault("env", []).extend(
                         _env(

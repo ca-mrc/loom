@@ -821,7 +821,7 @@ def _install_terminus_runtime_tools(claim: dict[str, Any], context: Path) -> Non
     the first trial.
     """
     for component in _derive_task_image_build_components(claim["task_config"]):
-        if component.name != "task":
+        if component.name not in {"task", "verifier"}:
             continue
         dockerfile = context / component.dockerfile_path
         try:
@@ -995,6 +995,10 @@ def publish(
 ) -> dict[str, Any]:
     images: dict[str, str] = {}
     runtime_metadata: dict[str, dict[str, Any]] = {}
+    image_archives: dict[str, dict[str, Any]] = {}
+    from loom.task_image_archives import checked_archive_intents, publish_image_archive
+    archive_intents = checked_archive_intents(claim)
+    archive_client = _client(claim, secrets / "archive") if archive_intents else None
     cache = _client(claim, secrets / "cache") if (secrets / "cache").is_dir() else None
     auth_directory = tempfile.TemporaryDirectory()
     export_format = _oci_export_format(claim)
@@ -1010,8 +1014,9 @@ def publish(
                 credentials, "/".join(claim["registry_repository"].split("/")[:2]), registry_auth
             )
         for index, component in enumerate(derive_task_image_build_components(claim["task_config"])):
-            environment = claim["task_config"]["environment"]
-            requires_metadata = component.name == "task" and (
+            environment = (claim["task_config"]["verifier"]["environment"]
+                           if component.name == "verifier" else claim["task_config"]["environment"])
+            requires_metadata = component.name in {"task", "verifier"} and (
                 environment.get("user") == "image" or environment.get("image_entrypoint") or environment.get("image_workdir")
             )
             architecture: Literal["amd64", "arm64"] = "arm64" if claim["cpu_arch"] == "arm64" else "amd64"
@@ -1087,6 +1092,17 @@ def publish(
                     if not _DIGEST.fullmatch(digest):
                         raise BuildPreparationError("registry did not return an OCI digest")
                     images[component.name] = f"{claim['registry_repository']}@{digest}"
+                    if component.name in archive_intents:
+                        assert archive_client is not None
+                        archive_path = archive if export_format == "archive" else Path(temporary) / "image.tar"
+                        if export_format == "directory":
+                            with tarfile.open(archive_path, "w") as packed:
+                                for child in sorted(output.iterdir()):
+                                    packed.add(child, arcname=child.name)
+                        image_archives[component.name] = publish_image_archive(
+                            archive_client, claim, component=component.name,
+                            image_ref=images[component.name], archive=archive_path,
+                        ).model_dump(mode="json")
                     if metadata is not None:
                         runtime_metadata[component.name] = TaskImageRuntimeMetadataV1.model_validate({
                             **metadata, "image_ref": images[component.name],
@@ -1097,6 +1113,7 @@ def publish(
                                 "materialization_id": claim["id"],
                                 "lease_epoch": claim["lease_epoch"],
                                 "registry_images": images,
+                                **({"image_archives": image_archives} if image_archives else {}),
                                 **({"image_runtime_metadata": runtime_metadata} if runtime_metadata else {}),
                             }
                         )
@@ -1125,6 +1142,8 @@ def publish(
                                 else:
                                     emit_stage("cache_export", "deferred", reason="cache_mutation_busy", component_index=index)
     finally:
+        if archive_client is not None:
+            archive_client.close()
         if cache is not None:
             cache.close()
         auth_directory.cleanup()
@@ -1132,6 +1151,7 @@ def publish(
         "materialization_id": claim["id"],
         "lease_epoch": claim["lease_epoch"],
         "registry_images": images,
+        **({"image_archives": image_archives} if image_archives else {}),
         **({"image_runtime_metadata": runtime_metadata} if runtime_metadata else {}),
     }
     if len(json.dumps(receipt).encode()) > 4000:

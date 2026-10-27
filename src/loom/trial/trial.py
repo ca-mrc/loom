@@ -224,7 +224,7 @@ class Trial:
                     from loom.errors import DriverError
                     from loom.task_runtime_compatibility import task_runtime_rejections
 
-                    rejections = task_runtime_rejections(self.ctx.task_config, agent_name=self.ctx.agent.name)
+                    rejections = task_runtime_rejections(self.ctx.task_config, agent_name=self.ctx.agent.name, runtime="legacy")
                     if rejections:
                         raise DriverError("Unsupported task requirements: " + "; ".join(rejections))
 
@@ -321,6 +321,11 @@ class Trial:
                     )
                     if hasattr(self.ctx.agent, "workdir"):
                         self.ctx.agent.workdir = workdir
+
+                    if isinstance(self.ctx.agent, OracleAgent):
+                        self.ctx.agent.solution_environment = dict(
+                            self.ctx.task_config.solution_environment,
+                        )
 
                     if isinstance(self.ctx.agent, InBoxAgentRuntime):
                         await self.ctx.agent.setup(env=self.ctx.driver)

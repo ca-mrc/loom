@@ -29,6 +29,7 @@ import httpx
 from pydantic import TypeAdapter, ValidationError
 
 from loom.attempt_deadline import AttemptDeadline
+from loom.driver.guest_compose import GuestComposeRuntime, GuestComposeServiceDriver
 from loom.driver.service_sandbox import SandboxRPCError, ServiceSandboxDriver
 from loom.errors import AgentError, DriverError, exception_info
 from loom.execution_contract import effective_guest_capabilities
@@ -68,6 +69,7 @@ from loom.service_execution_terminus2 import TASK_IMAGE_TOOLS_REQUIRED, run_term
 from loom.service_execution_terminus_trace import parse_terminus_events, terminus_usage
 from loom.task_environment_handoff import (
     RESOLVED_TASK_ENVIRONMENT,
+    RESOLVED_VERIFIER_ENVIRONMENT,
     decode_resolved_task_environment,
 )
 from loom.trial.mutable_snapshot import export_mutable_paths, import_mutable_paths
@@ -88,7 +90,7 @@ from loom.trial.workspace_snapshot import (
     _import_workspace_archive,
     _strip_private_entries,
 )
-from loom.verifier_runtime import resolve_verifier_env_mode
+from loom.verifier_runtime import native_independent_verifier_handoff, resolve_verifier_env_mode
 
 _PRIVATE_PATHS = ("tests/**", "verifier/**", "solution/**", "upstream-task.toml", ".loom/**")
 _POLICY = WorkspaceStagingPolicy(_PRIVATE_PATHS, _PRIVATE_PATHS, ())
@@ -181,7 +183,10 @@ def _proxy_environment(proxy: str, guest: bool) -> dict[str, str]:
 def sandbox_driver(role: str, task: TaskConfig, trial: TrialConfig) -> ServiceSandboxDriver:
     network_policy = _frozen_network_policy()
     command_environment = {}
-    guest = in_guest(task, trial)
+    environment = (task.verifier.environment
+                   if role == "verifier-sandbox" and task.verifier.environment is not None
+                   else task.environment)
+    guest = in_guest(task, trial) and environment is task.environment
     max_transfer = 256 * 1024 * 1024
     if guest:
         try:
@@ -197,8 +202,8 @@ def sandbox_driver(role: str, task: TaskConfig, trial: TrialConfig) -> ServiceSa
         raise ServiceExecutionTaskError("workspace_archive_limit_invalid") from None
     if not 0 < archive_budget <= 10 * 1024**3:
         raise ServiceExecutionTaskError("workspace_archive_limit_invalid")
-    if task.environment.storage_mb is not None:
-        archive_budget = min(archive_budget, task.environment.storage_mb * 1024**2)
+    if environment.storage_mb is not None:
+        archive_budget = min(archive_budget, environment.storage_mb * 1024**2)
     if hosted_http_egress(network_policy) is not None:
         url = urlsplit(os.environ.get("LOOM_TASK_EGRESS_PROXY", ""))
         if url.scheme != "http" or url.hostname != "127.0.0.1" or not url.port:
@@ -301,13 +306,13 @@ def _remaining(deadline: AttemptDeadline | None, fallback: float) -> float:
     return deadline.remaining() if deadline else fallback
 
 
-async def _check_install(driver: ServiceSandboxDriver, setup: HarnessSetup, timeout: float) -> bool:
+async def _check_install(driver: ServiceSandboxDriver | GuestComposeServiceDriver, setup: HarnessSetup, timeout: float) -> bool:
     result = await driver.exec(shlex.join(setup.check), timeout_sec=timeout)
     return result.return_code == 0
 
 
 async def _restore_cached_install(
-    driver: ServiceSandboxDriver, workspace: Path, setup: HarnessSetup, deadline: AttemptDeadline | None,
+    driver: ServiceSandboxDriver | GuestComposeServiceDriver, workspace: Path, setup: HarnessSetup, deadline: AttemptDeadline | None,
 ) -> str:
     """Restore a fetched entry and prove it works; any problem means reinstall."""
     archive = workspace / SETUP_CACHE_RESTORE
@@ -331,7 +336,7 @@ async def _restore_cached_install(
 
 
 async def _archive_install(
-    driver: ServiceSandboxDriver, workspace: Path, setup: HarnessSetup, deadline: AttemptDeadline | None,
+    driver: ServiceSandboxDriver | GuestComposeServiceDriver, workspace: Path, setup: HarnessSetup, deadline: AttemptDeadline | None,
 ) -> str:
     """Archive a fresh, checked install for the runtime to store."""
     assert setup.install_root is not None
@@ -362,7 +367,7 @@ _ARCHIVE_DOWNLOAD = PurePosixPath(".loom/harness-cache/release.download")
 
 
 async def _run_install_command(
-    driver: ServiceSandboxDriver, task: TaskConfig, setup: HarnessSetup,
+    driver: ServiceSandboxDriver | GuestComposeServiceDriver, task: TaskConfig, setup: HarnessSetup,
     environment: dict[str, str], deadline: AttemptDeadline | None,
 ) -> None:
     handle = await driver.exec_streaming(
@@ -387,7 +392,7 @@ async def _run_install_command(
 
 
 async def _install_pinned_archive(
-    driver: ServiceSandboxDriver, workspace: Path, setup: HarnessSetup,
+    driver: ServiceSandboxDriver | GuestComposeServiceDriver, workspace: Path, setup: HarnessSetup,
     environment: dict[str, str], deadline: AttemptDeadline | None,
 ) -> None:
     """Fetch and verify the release in trusted code, then extract it in the sandbox."""
@@ -442,6 +447,37 @@ async def _install_pinned_archive(
         raise ServiceExecutionTaskError(f"harness archive extraction failed with exit status {extracted.return_code}")
 
 
+async def _compose_main_driver(
+    guest: ServiceSandboxDriver, workspace: Path, task: TaskConfig, trial: TrialConfig,
+) -> tuple[ServiceSandboxDriver | GuestComposeServiceDriver, GuestComposeRuntime | None]:
+    """Keep the guest's Docker control channel outside every agent operation."""
+    topology = task.environment.native_compose
+    if topology is None:
+        return guest, None
+    if trial.isolation == "container" or not in_guest(task, trial):
+        raise ServiceExecutionTaskError("native Compose requires guest isolation")
+    if task.verifier.environment is None:
+        raise ServiceExecutionTaskError("native Compose requires an independent verifier")
+    from loom.verifier_runtime import native_independent_verifier_handoff
+
+    if not native_independent_verifier_handoff(task) or _harbor_verifier_kind(workspace, task) != "native":
+        raise ServiceExecutionTaskError("native Compose requires the immutable native verifier handoff")
+
+    runtime = GuestComposeRuntime(guest=guest, topology=topology,
+        startup_timeout_sec=task.environment.build_timeout_sec,
+        main_proxy=(_setup_proxy_environment(True)["HTTP_PROXY"]
+                    if hosted_http_egress(_frozen_network_policy()) is not None else None),
+        image_archives={service.name: Path("/loom/compose-images") / (service.name + ".tar")
+                        for service in topology.services})
+    receipt = workspace / ".loom/compose-runtime.json"
+    if receipt.exists():
+        await runtime.attach(receipt)
+    else:
+        await runtime.start()
+        runtime.save(receipt)
+    return runtime.driver("main"), runtime
+
+
 async def run_setup(workspace: Path, task: TaskConfig, trial: TrialConfig) -> None:
     """Run the selected harness's pinned install inside the task sandbox.
 
@@ -466,14 +502,19 @@ async def run_setup(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
     current = asyncio.current_task()
     assert current is not None
     loop.add_signal_handler(signal.SIGTERM, current.cancel)
-    driver = sandbox_driver("task-sandbox", task, trial)
+    root_driver = sandbox_driver("task-sandbox", task, trial)
+    driver: ServiceSandboxDriver | GuestComposeServiceDriver = root_driver
+    compose_runtime = None
+    setup_complete = False
     # {"restore": hit|miss|restore_rejected, "store": stored|store_unavailable}
     outcome: dict[str, str] = {}
     try:
         await driver.start()
+        driver, compose_runtime = await _compose_main_driver(root_driver, workspace, task, trial)
         if setup.cacheable:
             outcome["restore"] = await _restore_cached_install(driver, workspace, setup, deadline)
             if outcome["restore"] == "hit":
+                setup_complete = True
                 return
         if setup.archive is not None:
             await _install_pinned_archive(driver, workspace, setup, controller_proxy, deadline)
@@ -483,13 +524,29 @@ async def run_setup(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
             if not await _check_install(driver, setup, _remaining(deadline, setup.timeout_seconds)):
                 raise ServiceExecutionTaskError("harness install check failed")
             outcome["store"] = await _archive_install(driver, workspace, setup, deadline)
+        setup_complete = True
     finally:
         loop.remove_signal_handler(signal.SIGTERM)
-        await driver.stop()
+        try:
+            if compose_runtime is not None and not setup_complete:
+                await compose_runtime.stop()
+                (workspace / ".loom/compose-runtime.json").unlink(missing_ok=True)
+        finally:
+            await root_driver.stop()
         if outcome:
             _write_json_atomic(workspace / SETUP_CACHE_OUTCOME, {
                 "schema_version": "loom.harness-cache-outcome.v1", **outcome,
             })
+
+
+async def run_compose_setup(workspace: Path, task: TaskConfig, trial: TrialConfig) -> None:
+    """Start immutable services before the agent/model phase clock begins."""
+    guest = sandbox_driver("task-sandbox", task, trial)
+    try:
+        await guest.start()
+        await _compose_main_driver(guest, workspace, task, trial)
+    finally:
+        await guest.stop()
 
 
 class AgentTimeoutFinalizedError(TimeoutError):
@@ -499,11 +556,14 @@ class AgentTimeoutFinalizedError(TimeoutError):
 async def run_agent(
     workspace: Path, task: TaskConfig, trial: TrialConfig, *, original_task: TaskConfig | None = None,
 ) -> None:
+    from loom.verifier_runtime import native_independent_verifier_handoff
+
     # Build hints belong to the immutable submitted source, while identity and
     # workdir belong to the resolved runtime environment. Freeze exclusions
     # before the sandbox can return a task-controlled replacement task.toml.
     input_exclusions = _agent_input_exclusions(original_task if original_task is not None else task)
     harbor_inputs = _uses_harbor_private_inputs(workspace, task)
+    native_handoff = native_independent_verifier_handoff(task) and _harbor_verifier_kind(workspace, task) == "native"
     if harbor_inputs:
         # The existing image/workdir contract forbids /, /tmp and overlap with
         # protected verifier roots. Do not invent a privileged fallback path.
@@ -515,7 +575,12 @@ async def run_agent(
     if not math.isfinite(grace) or grace <= 0:
         raise ServiceExecutionTaskError("termination grace must be finite and positive")
     gateway = os.environ["LOOM_GATEWAY_URL"]
-    driver = sandbox_driver("task-sandbox", task, trial)
+    finalization_budget = float(os.environ.get("LOOM_EXECUTION_FINALIZATION_TIMEOUT_SECONDS", "0"))
+    if not math.isfinite(finalization_budget) or not 0 <= finalization_budget <= 3600:
+        raise ServiceExecutionTaskError("finalization budget must be finite and bounded")
+    root_driver = sandbox_driver("task-sandbox", task, trial)
+    driver: ServiceSandboxDriver | GuestComposeServiceDriver = root_driver
+    compose_runtime = None
     output = workspace / ".loom/agent"
     output.mkdir(parents=True, exist_ok=True)
     trial_id = None
@@ -551,6 +616,7 @@ async def run_agent(
                 trial_id, team_id = await _execution_identity(gateway)
                 await driver.start()
                 driver_started = True
+                driver, compose_runtime = await _compose_main_driver(root_driver, workspace, task, trial)
                 # Only Oracle's own sandbox receives the reference solution.
                 solution_staged = spec.stages_solution
                 await materialize_workspace(
@@ -569,6 +635,8 @@ async def run_agent(
 
                     for root in (task.environment.workdir, *task.environment.mutable_paths):
                         await require_acl_support(driver, root)
+                if task.environment.healthcheck is not None:
+                    await driver.run_healthcheck(task.environment.healthcheck)
                 if lifecycle is not None and lifecycle.startup_command:
                     result = await driver.exec(
                         shlex.join(lifecycle.startup_command), cwd=task.environment.workdir,
@@ -629,9 +697,13 @@ async def run_agent(
             raise
         finally:
             finalizing = True
-            # This budget permits only local accounting, quiescence and a
-            # validated workspace snapshot. It never extends the agent deadline.
-            remaining = max(0, deadline.monotonic_deadline + grace - loop.time()) if deadline else None
+            # Only collection, accounting, quiescence and handoff can use this
+            # interval. The agent/model deadline above is never extended.
+            remaining = (max(0, deadline.monotonic_deadline + finalization_budget + grace - loop.time())
+                         if deadline else None)
+            if finalization_budget:
+                remaining = min(remaining, finalization_budget + grace) if remaining is not None else finalization_budget + grace
+            finalization_end = loop.time() + remaining if remaining is not None else None
             async with asyncio.timeout(remaining):
                 try:
                     if agent_entered:
@@ -645,6 +717,24 @@ async def run_agent(
                                 )
                                 _write_json_atomic(output / "usage.json", terminus_usage(events, trial))
                         finally:
+                            if compose_runtime is not None and solution_staged:
+                                await remove_oracle_solution(driver, task.environment.workdir, solution_dir=solution_dir)
+                                solution_staged = False
+                            if task.steps[0].artifact_sources or task.verifier.collect or native_handoff:
+                                from loom.structured_artifacts import (
+                                    ARCHIVE_NAME,
+                                    capture_structured_artifacts,
+                                )
+
+                                await capture_structured_artifacts(
+                                    sources=task.steps[0].artifact_sources,
+                                    hooks=task.verifier.collect,
+                                    drivers=({name: compose_runtime.driver(name) for name in compose_runtime.containers}
+                                             if compose_runtime is not None else {"main": driver}),
+                                    workdir=task.environment.workdir,
+                                    destination=workspace / ".loom" / ARCHIVE_NAME,
+                                    stop_main=driver.stop_processes if compose_runtime is not None else None,
+                                )
                             in_place = resolve_verifier_env_mode(task, trial) == "shared"
                             if in_place and driver_started:
                                 # Harbor shared mode does not reap before grading.
@@ -669,7 +759,11 @@ async def run_agent(
                             driver, task.environment.workdir, solution_dir=solution_dir,
                         )
                     # Matches the plan's in-place verifier, whose archive is optional.
-                    if agent_entered and in_place and not trial.skip_verifier:
+                    if agent_entered and native_handoff:
+                        diagnostic_timeout = (min(30.0, max(.01, finalization_end - loop.time() - grace))
+                                              if finalization_end is not None else 30.0)
+                        await capture_debug_workspace_archive(driver, workspace, task, timeout_seconds=diagnostic_timeout)
+                    elif agent_entered and in_place and not trial.skip_verifier:
                         await capture_debug_workspace_archive(driver, workspace, task)
                     elif agent_entered:
                         archive = workspace / ".loom/workspace.tar"
@@ -723,8 +817,16 @@ async def run_agent(
                 finally:
                     await driver.stop()
         finally:
-            if deadline is not None:
-                loop.remove_signal_handler(signal.SIGTERM)
+            try:
+                if compose_runtime is not None:
+                    try:
+                        await compose_runtime.stop()
+                    finally:
+                        (workspace / ".loom/compose-runtime.json").unlink(missing_ok=True)
+                        await root_driver.stop()
+            finally:
+                if deadline is not None:
+                    loop.remove_signal_handler(signal.SIGTERM)
 
 
 async def run_verifier(workspace: Path, task: TaskConfig, trial: TrialConfig) -> None:
@@ -774,7 +876,8 @@ WORKSPACE_HANDOFF_REPORT = PurePosixPath(".loom/verifier/workspace-handoff.json"
 DEBUG_ARCHIVE_TIMEOUT_SECONDS = 300.0
 
 
-async def capture_debug_workspace_archive(driver: ServiceSandboxDriver, workspace: Path, task: TaskConfig) -> None:
+async def capture_debug_workspace_archive(driver: ServiceSandboxDriver | GuestComposeServiceDriver, workspace: Path, task: TaskConfig,
+                                          *, timeout_seconds: float | None = None) -> None:
     """Keep the agent's workdir as debugging evidence for an in-place verifier (#2589).
 
     Nothing restores it, so it is not validated for handoff and a failure is
@@ -782,7 +885,7 @@ async def capture_debug_workspace_archive(driver: ServiceSandboxDriver, workspac
     """
     archive = workspace / ".loom/workspace.tar"
     try:
-        async with asyncio.timeout(DEBUG_ARCHIVE_TIMEOUT_SECONDS):
+        async with asyncio.timeout(DEBUG_ARCHIVE_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds):
             await _export_workspace_archive(
                 driver, task.environment.workdir, archive, preserve_acls=task.environment.preserve_acls,
             )
@@ -804,11 +907,14 @@ async def _run_verifier(
     begin_cleanup: Callable[[], None],
 ) -> None:
     in_place = resolve_verifier_env_mode(task, trial) == "shared"
+    verifier_env = task.verifier.environment or task.environment
+    if in_place and task.verifier.environment is not None:
+        raise ServiceExecutionTaskError("independent_verifier_environment_requires_separate_mode")
     harbor_kind = _harbor_verifier_kind(workspace, task)
     if harbor_kind is not None:
         validate_task_workdir(task.environment.workdir)
     private_inputs = harbor_kind is not None
-    input_root = _PRIVATE_VERIFIER_INPUT_ROOT if private_inputs else task.environment.workdir
+    input_root = _PRIVATE_VERIFIER_INPUT_ROOT if private_inputs else verifier_env.workdir
     driver = sandbox_driver("task-sandbox" if in_place else "verifier-sandbox", task, trial)
     driver_started = False
     failure: BaseException | None = None
@@ -840,7 +946,7 @@ async def _run_verifier(
             policy=_POLICY, phase="verifier",
             excluded_paths=(".loom/**",),
         )
-        if not in_place:
+        if not in_place and not (native_independent_verifier_handoff(task) and harbor_kind == "native"):
             archive = stage_committed_workspace_archive(workspace)
             # The archive was validated by the agent phase before durable capture;
             # it stays in the private controller workspace between phases.
@@ -867,9 +973,18 @@ async def _run_verifier(
                     reference_files=task.environment.mutable_path_reference_files,
                     reference_symlinks=task.environment.reference_file_symlinks,
                 )
+        if not in_place and (task.steps[0].artifact_sources or task.verifier.collect
+                             or (native_independent_verifier_handoff(task) and harbor_kind == "native")):
+            from loom.structured_artifacts import ARCHIVE_NAME, restore_structured_artifacts
+
+            await restore_structured_artifacts(
+                archive=workspace / ".loom" / ARCHIVE_NAME,
+                sources=task.steps[0].artifact_sources, driver=driver,
+                workdir=task.environment.workdir,
+            )
         remote_output = (
             _PRIVATE_VERIFIER_INPUT_ROOT.parent / "output.json" if private_inputs
-            else task.environment.workdir / ".loom/verifier/output.json"
+            else verifier_env.workdir / ".loom/verifier/output.json"
         )
         # The trusted file RPC creates parents under the runtime identity and
         # refuses symlinks in every component. Clear stale scoring bytes too;
@@ -887,12 +1002,14 @@ async def _run_verifier(
                     Path(bridge.name).write_bytes(native_verifier_workdir_run_sh_bytes())
                     await driver.upload(Path(bridge.name), bridge_path)
                 script_path = str(bridge_path)
+        if verifier_env.healthcheck is not None:
+            await driver.run_healthcheck(verifier_env.healthcheck)
         result = await driver.exec(
             "/bin/sh " + shlex.quote(script_path),
-            cwd=task.environment.workdir,
-            env={"LOOM_TASK_DIR": str(input_root),
+            cwd=verifier_env.workdir,
+            env={**task.verifier.environment_vars, "LOOM_TASK_DIR": str(input_root),
                  "LOOM_VERIFIER_OUTPUT": str(remote_output),
-                 **({"LOOM_HARBOR_WORKDIR": str(task.environment.workdir)} if private_inputs else {})},
+                 **({"LOOM_HARBOR_WORKDIR": str(verifier_env.workdir)} if private_inputs else {})},
             timeout_sec=(trial.override_verifier_timeout_sec or task.verifier.timeout_sec)
             * trial.verifier_timeout_multiplier,
         )
@@ -965,7 +1082,7 @@ async def _run_verifier(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("phase", choices=(*workspace_controller_phases(), HARNESS_SETUP_PHASE, "verify-sandbox"))
+    parser.add_argument("phase", choices=(*workspace_controller_phases(), HARNESS_SETUP_PHASE, "setup-native-compose", "verify-sandbox"))
     parser.add_argument("--workspace", required=True, type=Path)
     args = parser.parse_args()
     workspace = args.workspace
@@ -976,6 +1093,10 @@ def main() -> None:
     with (workspace / "task.toml").open("rb") as stream:
         task = normalize_steps(TaskConfig.model_validate(tomllib.load(stream)))
     original_task = task
+    if RESOLVED_VERIFIER_ENVIRONMENT in os.environ:
+        task = task.model_copy(update={"verifier": task.verifier.model_copy(update={
+            "environment": decode_resolved_task_environment(os.environ[RESOLVED_VERIFIER_ENVIRONMENT]),
+        })})
     if RESOLVED_TASK_ENVIRONMENT in os.environ:
         # The source bundle remains immutable. Only the controller's runtime
         # view adopts the environment frozen beside the prepared image grant.
@@ -983,11 +1104,12 @@ def main() -> None:
             os.environ[RESOLVED_TASK_ENVIRONMENT],
         )})
     trial = TrialConfig.model_validate_json(os.environ["LOOM_TASK_TRIAL_JSON"])
-    setup_phase = args.phase == HARNESS_SETUP_PHASE
-    agent_phase = args.phase not in {HARNESS_SETUP_PHASE, "verify-sandbox"}
+    setup_phase = args.phase in {HARNESS_SETUP_PHASE, "setup-native-compose"}
+    agent_phase = not setup_phase and args.phase != "verify-sandbox"
     if agent_phase and args.phase != _workspace_spec(trial).controller_phase:
         raise ServiceExecutionTaskError("execution phase does not match the selected agent")
-    phase = run_setup if setup_phase else run_agent if agent_phase else run_verifier
+    phase = (run_compose_setup if args.phase == "setup-native-compose" else run_setup
+             if setup_phase else run_agent if agent_phase else run_verifier)
     try:
         if agent_phase and RESOLVED_TASK_ENVIRONMENT in os.environ:
             asyncio.run(run_agent(workspace, task, trial, original_task=original_task))

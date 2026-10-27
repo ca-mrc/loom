@@ -50,6 +50,24 @@ output IDs and readback beside deployment evidence. Reinitialize from the same
 versioned backend to recover local state; do not import resources from the
 execution state or force-unlock an active operation.
 
+### Explicit CPU execution sizing
+
+`integration_platform.execution_preset` defaults to `16vcpu-64gb` and also
+accepts `32vcpu-128gb` on the existing `cpu-e2` platform. Selecting the larger
+preset changes only the integration execution node template. It does not
+activate GPU or regional pools, change the system group, or raise autoscaling
+bounds or aggregate scheduler quotas. Confirm the preset in the current
+regional provider catalog before preparing a plan.
+
+A larger preset or disk requires its own infrastructure review and saved plan;
+ordinary application rollout does not apply these inputs. Keep the existing
+min-zero lifecycle and quota ceilings. Align this environment's per-node
+`capacity_policy` ceilings and execution price with the reviewed physical
+shape, then obtain a fresh compatible Ready-node allocatable/DaemonSet sample
+before workload admission. A nominal node size alone is not usable capacity.
+The same guarded, existing-state template-update procedure below applies;
+review the plan for only the explicitly requested CPU and disk changes.
+
 ### Execution build disk performance
 
 `integration_platform.execution_disk_type` and `execution_disk_gib` select only
@@ -69,8 +87,10 @@ the disk type/region/quota and replay concurrent cold builds. See the provider's
 Apply through the existing platform state and saved-plan operator path above.
 Coordinate an idle execution window with dispatch closed through the existing
 rollout guard; do not drain active Trials or replace unrelated work. Review the
-plan for exactly the existing execution group's template update. Keep the node
-CPU/RAM shape, autoscaling bounds and system/storage/IAM resources unchanged.
+plan for exactly the existing execution group's template update. For disk-only
+changes, keep the CPU/RAM shape unchanged. An explicitly reviewed CPU sizing
+change may update the selected preset and disk; preserve min0, autoscaling
+bounds and system/storage/IAM resources.
 Do not use the application rollout as proof that Terraform has been applied.
 First install the merged collector code with the normal protected application
 rollout, retaining the existing SSD setting. Then acquire a separate owned guard

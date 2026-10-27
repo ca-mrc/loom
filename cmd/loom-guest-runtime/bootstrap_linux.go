@@ -168,7 +168,7 @@ func sandboxInit() {
 	}
 	environment := guestEnvironment(config.Environment)
 	if config.NestedDocker {
-		bootMust(startDocker(environment))
+		bootMust(startDocker())
 	}
 	binary := guestPayload + "/bin/loom-sandbox-runtime"
 	argv := []string{binary, "--guest-channel", "--max-transfer-bytes", strconv.FormatInt(config.MaxTransfer, 10), "--exec-timeout-seconds", strconv.Itoa(config.ExecTimeout)}
@@ -281,20 +281,25 @@ func guestEnvironment(original []string) []string {
 	return result
 }
 
-func startDocker(environment []string) error {
+func dockerDaemonEnvironment() []string {
+	// The daemon is a trusted guest service, not an authored task process.
+	// Inheriting host XDG_RUNTIME_DIR makes runc exec/healthcheck use paths
+	// absent in the guest; HOME/TMPDIR/DOCKER_* and loader variables can also
+	// redirect daemon state. The task runtime keeps its authored environment.
+	return []string{
+		"PATH=/loom/guest-wrappers:" + guestPayload + "/docker:" + guestPayload + "/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+		"HOME=/root", "TMPDIR=/tmp", "DOCKER_CONFIG=/loom/docker-client",
+		"HTTP_PROXY=http://10.0.2.2:18791", "HTTPS_PROXY=http://10.0.2.2:18791",
+		"NO_PROXY=localhost,127.0.0.1,::1",
+	}
+}
+
+func startDocker() error {
 	if err := os.MkdirAll("/var/run", 0755); err != nil {
 		return err
 	}
 	daemon := exec.Command(guestPayload+"/docker/dockerd", "--host=unix:///var/run/docker.sock", "--data-root=/var/lib/docker", "--exec-root=/run/docker", "--storage-driver=overlay2", "--pidfile=/run/docker.pid")
-	daemonEnvironment := guestEnvironment(environment)
-	for i, entry := range daemonEnvironment {
-		if strings.HasPrefix(entry, "PATH=") {
-			daemonEnvironment[i] = "PATH=/loom/guest-wrappers:" + guestPayload + "/docker:" + guestPayload + "/bin:" + strings.TrimPrefix(entry, "PATH=")
-		}
-	}
-	daemon.Env = append(daemonEnvironment,
-		"HTTP_PROXY=http://10.0.2.2:18791", "HTTPS_PROXY=http://10.0.2.2:18791",
-		"NO_PROXY=localhost,127.0.0.1,::1")
+	daemon.Env = dockerDaemonEnvironment()
 	daemon.Stdout, daemon.Stderr = os.Stdout, os.Stderr
 	if err := daemon.Start(); err != nil {
 		return err

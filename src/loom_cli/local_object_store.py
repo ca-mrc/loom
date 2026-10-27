@@ -155,7 +155,9 @@ class LocalDiskObjectStore:
         uri = await self.put_object_stream(bucket=bucket, key=key, body=body)
         return ObjectWriteResult(uri=uri, version_id=None)
 
-    async def stat_object(self, *, bucket: str, key: str) -> ObjectReadback:
+    async def stat_object(self, *, bucket: str, key: str, version_id: str | None = None) -> ObjectReadback:
+        if version_id is not None:
+            raise ValueError("local object store does not support versioned reads")
         path = self._path(bucket, key)
         digest = hashlib.sha256()
         with path.open("rb") as source:
@@ -173,7 +175,10 @@ class LocalDiskObjectStore:
         key: str,
         start_offset: int = 0,
         chunk_size: int = 64 * 1024 * 1024,
+        version_id: str | None = None,
     ) -> AsyncIterator[bytes]:
+        if version_id is not None:
+            raise ValueError("local object store does not support versioned reads")
         with self._path(bucket, key).open("rb") as source:
             source.seek(start_offset)
             while chunk := await asyncio.to_thread(source.read, chunk_size):

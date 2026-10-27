@@ -182,7 +182,7 @@ class LocalTrialRunner:
         from loom.errors import DriverError
         from loom.task_runtime_compatibility import task_runtime_rejections
 
-        rejections = task_runtime_rejections(self.task_config, agent_name=self.trial_config.agent_name)
+        rejections = task_runtime_rejections(self.task_config, agent_name=self.trial_config.agent_name, runtime="legacy")
         if rejections:
             raise DriverError("Unsupported task requirements: " + "; ".join(rejections))
         sandbox_bridge: SandboxBridge | None = None

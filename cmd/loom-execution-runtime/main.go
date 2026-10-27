@@ -66,6 +66,9 @@ func main() {
 		if err == nil {
 			err = broker.materializeHandoff(inputContext, p, filepath.Clean(*workspace))
 		}
+		if err == nil {
+			err = broker.materializePreparedImages(inputContext, p, "/loom/compose-images")
+		}
 		stopInput()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "materialize task input:", err)

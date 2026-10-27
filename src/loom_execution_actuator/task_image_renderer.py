@@ -42,6 +42,7 @@ class TaskImageJobConfig:
     source_secret_name: str
     registry_secret_name: str
     cache_secret_name: str | None = None
+    archive_secret_name: str | None = None
     registry_auth_kind: Literal["docker-config", "nebius"] = "docker-config"
     buildkit_image: str = BUILDKIT_IMAGE
     cpu_millis: int = 1000
@@ -60,7 +61,7 @@ class TaskImageJobConfig:
         for image in (self.service_image, self.buildkit_image):
             if not _IMAGE.fullmatch(image):
                 raise ValueError("task-image containers require an immutable image reference")
-        for secret in (self.source_secret_name, self.registry_secret_name, self.cache_secret_name):
+        for secret in (self.source_secret_name, self.registry_secret_name, self.cache_secret_name, self.archive_secret_name):
             if secret is not None and (len(secret) > 253 or not _DNS_NAME.fullmatch(secret)):
                 raise ValueError("task-image Secret name is invalid")
         for name in (
@@ -109,6 +110,7 @@ def _build_script(
     oci_export_format: Literal["archive", "directory"] = "archive",
     component_build_args: dict[str, dict[str, str]] | None = None,
     component_build_targets: dict[str, str] | None = None,
+    component_no_cache: frozenset[str] = frozenset(),
 ) -> str:
     lines = [
         "set -eu",
@@ -157,6 +159,8 @@ def _build_script(
             "--output",
             output_spec,
         ]
+        if component.name in component_no_cache:
+            argv.append("--no-cache")
         arguments = ((component_build_args or {}).get(component.name, {}) if component_build_args is not None
                      else (build_args or {}) if component.name == "task" else {})
         selected_target = ((component_build_targets or {}).get(component.name) if component_build_targets is not None
@@ -247,12 +251,27 @@ def render_task_image_job(
     values must never be placed in this ConfigMap or the shared build volume.
     """
     checked = tuple(TaskImageBuildComponentV1.model_validate(component.model_dump()) for component in components)
-    environment = TaskConfig.model_validate(claim["task_config"]).environment if "task_config" in claim else None
+    task = TaskConfig.model_validate(claim["task_config"]) if "task_config" in claim else None
+    environments = ({"task": task.environment, **({"verifier": task.verifier.environment}
+                    if task.verifier.environment is not None else {})} if task else {})
+    no_cache: set[str] = set()
+    component_args = {name: env.docker_build_args or {} for name, env in environments.items()}
+    component_targets = {name: env.docker_build_target for name, env in environments.items() if env.docker_build_target}
+    for name, env in environments.items():
+        if env.native_compose is not None:
+            prefix = "compose:" if name == "task" else "verifier-compose:"
+            for service in env.native_compose.services:
+                if service.build is not None and service.build.no_cache:
+                    no_cache.add(name if service.name == "main" else prefix + service.name)
+                if service.name != "main" and service.build is not None:
+                    component_args[prefix + service.name] = service.build.args
+                    if service.build.target is not None:
+                        component_targets[prefix + service.name] = service.build.target
     return render_native_image_job(workload="task", work_id=materialization_id, attempt=lease_epoch,
         claim=claim, components=checked, target=target, config=config,
-        build_timeout_seconds=math.ceil(environment.build_timeout_sec) if environment else config.active_deadline_seconds,
-        component_build_args={"task": environment.docker_build_args or {}} if environment else None,
-        component_build_targets={"task": environment.docker_build_target} if environment and environment.docker_build_target else None)
+        build_timeout_seconds=math.ceil(max(env.build_timeout_sec for env in environments.values())) if environments else config.active_deadline_seconds,
+        component_build_args=component_args or None, component_build_targets=component_targets or None,
+        component_no_cache=frozenset(no_cache))
 
 
 def render_native_image_job(
@@ -262,6 +281,7 @@ def render_native_image_job(
     build_timeout_seconds: int | None = None,
     component_build_args: dict[str, dict[str, str]] | None = None,
     component_build_targets: dict[str, str] | None = None,
+    component_no_cache: frozenset[str] = frozenset(),
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Shared isolated Job mechanism; typed workload adapters own the authority.
 
@@ -348,6 +368,8 @@ def render_native_image_job(
             {"name": f"{phase_name}-tmp", "mountPath": "/tmp"},
         ]
         roles = ["source"] if phase_name == "prepare" else ["registry"]
+        if phase_name == "publish" and config.archive_secret_name is not None:
+            roles.append("archive")
         if config.cache_secret_name is not None:
             roles.append("cache")
         mounts.extend(
@@ -396,6 +418,7 @@ def render_native_image_job(
                 oci_export_format=config.oci_export_format,
                 component_build_args=component_build_args,
                 component_build_targets=component_build_targets,
+                component_no_cache=component_no_cache,
             ),
         ],
         "env": [
@@ -450,6 +473,7 @@ def render_native_image_job(
     for role, secret_name in (
         ("source", config.source_secret_name),
         ("cache", config.cache_secret_name),
+        ("archive", config.archive_secret_name),
         ("registry", config.registry_secret_name),
     ):
         if secret_name is not None:
