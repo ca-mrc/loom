@@ -39,6 +39,11 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.execute("""
+        -- Removing FKs also locks their parents. Match the existing migration
+        -- guards: acquire the journal and parent locks without waiting before
+        -- checking or removing evidence; keep trials before execution_leases.
+        LOCK TABLE service_execution_live_events, trials, execution_leases,
+                   data_lifecycle_authorities IN ACCESS EXCLUSIVE MODE NOWAIT;
         DO $$ BEGIN
             IF EXISTS (SELECT 1 FROM service_execution_live_events) THEN
                 RAISE EXCEPTION 'cannot discard native live trajectory evidence';
