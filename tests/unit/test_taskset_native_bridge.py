@@ -88,7 +88,7 @@ def test_original_upload_is_admissible_and_bridge_preserves_zero_reward(tmp_path
         capture_output=True, text=True, check=False,
     )
     assert completed.returncode == 0, completed.stderr
-    assert json.loads(output.read_text())["rewards"] == {"resolved": 0.0}
+    assert json.loads(output.read_text())["rewards"] == {"reward": 0.0}
 
 
 @pytest.mark.parametrize("environment,expected", [
