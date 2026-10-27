@@ -8,6 +8,7 @@ import psycopg
 import pytest
 from sqlalchemy import text
 
+from loom.db.schema_startup import service_schema_head
 from loom.nebius_rollout_guard import LOCK_KEY, acquire, admission_open, observe, release
 from tests.integration.conftest import retained_pool_sessions
 from tests.integration.test_nebius_pool_activation_fence import read_sql
@@ -24,7 +25,7 @@ async def test_participant_guard_rejects_unaudited_schema_before_mutation(
     url = make_url(isolated_migration_postgres_url).set(drivername='postgresql').render_as_string(hide_password=False)
     owner, participant = uuid4(), uuid4()
     with psycopg.connect(url, autocommit=True) as db:
-        assert db.execute('SELECT version_num FROM alembic_version').fetchall() == [('0179',)]
+        assert db.execute('SELECT version_num FROM alembic_version').fetchall() == [(service_schema_head(),)]
         db.execute("UPDATE alembic_version SET version_num='0199'")
         with pytest.raises(psycopg.errors.RaiseException, match='pool activation schema unqualified'):
             db.execute(pool_guard_activation_sql(owner, participant, 'a' * 40, action=action), prepare=False)
@@ -32,7 +33,7 @@ async def test_participant_guard_rejects_unaudited_schema_before_mutation(
         assert db.execute('SELECT count(*) FROM nebius_rollout_guard').fetchone() == (0,)
 
 
-@pytest.mark.parametrize('schema_revision', ['0175', '0176', '0177', '0178', '0179'])
+@pytest.mark.parametrize('schema_revision', ['0175', '0176', '0177', '0178', '0179', '0180'])
 def test_participant_schema_supports_complete_handoff_and_recovery_without_upgrading_manager(
         isolated_migration_postgres_url, schema_revision):
     from scripts.ops.nebius_pool_activation_database import pool_activation_state_sql
@@ -86,7 +87,7 @@ def test_participant_schema_supports_complete_handoff_and_recovery_without_upgra
         assert db.execute('SELECT version_num FROM alembic_version').fetchall() == [(schema_revision,)]
         if schema_revision == '0175':
             assert db.execute("SELECT to_regclass('harbor_baseline_sessions')").fetchone() == (None,)
-        if schema_revision in {'0177', '0178', '0179'}:
+        if schema_revision in {'0177', '0178', '0179', '0180'}:
             assert db.execute('SELECT count(*) FROM task_source_publications').fetchone() == (0,)
         if schema_revision != '0176':
             with pytest.raises(psycopg.errors.RaiseException, match='pool activation schema unqualified'):
