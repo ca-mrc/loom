@@ -120,7 +120,7 @@ async def test_pending_default_upgrade_and_rollback_retain_accepted_rows(publica
     from alembic.migration import MigrationContext
     from alembic.operations import Operations
 
-    path = Path("database/migrations/versions/0181_benchmark_pending_default.py")
+    path = Path("database/migrations/versions/0184_benchmark_pending_default.py")
     module_spec = importlib.util.spec_from_file_location("benchmark_pending_default", path)
     migration = importlib.util.module_from_spec(module_spec)
     module_spec.loader.exec_module(migration)
@@ -208,9 +208,9 @@ async def test_cli_migration_roundtrip_retains_live_event_schema_and_accepted_ca
             env={**os.environ, "LOOM_DB_URL": postgres_url}, check=True, capture_output=True, text=True)
 
     try:
-        await migrate("downgrade", "0180")
+        await migrate("downgrade", "0183")
         async with publication_sessions() as session:
-            assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "0180"
+            assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "0183"
             assert await session.scalar(text("SELECT to_regclass('public.service_execution_live_events')")) is not None
             assert await session.scalar(text("SELECT column_default FROM information_schema.columns WHERE table_name='benchmarks' AND column_name='execution_state'")) == "'runnable'::text"
             row = await session.get(Benchmark, profile)
@@ -219,7 +219,7 @@ async def test_cli_migration_roundtrip_retains_live_event_schema_and_accepted_ca
     finally:
         await migrate("upgrade", "head")
     async with publication_sessions() as session:
-        assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "0181"
+        assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "0184"
         assert await session.scalar(text("SELECT to_regclass('public.service_execution_live_events')")) is not None
         assert await session.scalar(text("SELECT column_default FROM information_schema.columns WHERE table_name='benchmarks' AND column_name='execution_state'")) == "'pending'::text"
         assert (await session.get(Benchmark, profile)).execution_state == "runnable"

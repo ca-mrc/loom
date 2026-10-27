@@ -178,10 +178,13 @@ readback finds a selector collision, inspect its tasks/source references and
 explicitly resolve the conflicting metadata before promotion; existing aliases
 and frozen execution reads are retained.
 
-Migration `0181` changes only the insert default from runnable to pending. It
+Migration `0184` changes only the insert default from runnable to pending. It
 does not mass-demote accepted catalogs, move aliases, rewrite in-flight work or
 invent historical execution evidence. Downgrade restores only the old default;
-it cannot reactivate profiles. Before an authorized rollout, record destination
+it cannot reactivate profiles. Revision 0184 is explicitly qualified for the
+existing lease/manager read and fencing queries because their columns and grants
+are unchanged. Exact bound revisions, unknown-version rejection and table/role
+denials remain; this does not activate a runtime or broaden grants. Before an authorized rollout, record destination
 profile/alias readback, apply the additive default migration, then read back the
 same accepted rows and frozen executions. Source adoption uses the existing
 journal or existing legacy audit; unavailable sources remain blocked. Rollout,

@@ -1,7 +1,7 @@
 """New benchmark profiles require shared admission; retain existing catalogs.
 
-Revision ID: 0181
-Revises: 0180
+Revision ID: 0184
+Revises: 0183
 
 Only the insert default changes. No accepted profile, alias, Batch, Trial,
 source reference or qualification evidence is rewritten. Rollback restores
@@ -10,8 +10,8 @@ only the old insert default and does not grant admission to pending rows.
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0181"
-down_revision = "0180"
+revision = "0184"
+down_revision = "0183"
 branch_labels = None
 depends_on = None
 
