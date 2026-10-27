@@ -82,6 +82,13 @@ source/bridge metadata. Task environment variables and uploaded inputs do not
 choose those values. Canonical ATIF output and accounting repair preserve the
 Trial's selected release label; older Trials retain their previous fallback.
 
+A Trial that selects no version (`terminus-2@default`) runs the platform
+candidate's default controller image. The candidate's runtime profile records
+that image's label as `agent_image_version` (`nebius-<candidate>` unless the
+publication set `agent_version`). ATIF and accounting repair record that label
+when the attempt ran on the Batch's frozen candidate. Profiles published before
+this field, and attempts whose candidate differs, keep `service-execution-v1`.
+
 ## Refresh an upstream upgrade candidate
 
 The `Harbor upstream candidate` workflow maintains one Draft on

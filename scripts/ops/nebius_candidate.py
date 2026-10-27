@@ -227,6 +227,15 @@ def validate_runtime_metadata(metadata: dict[str, str]) -> None:
         raise ValueError("runtime image metadata is invalid")
 
 
+def _default_agent_version(document: dict[str, Any]) -> str | None:
+    """The version label built into the default Terminus image, for exports (#2054)."""
+    metadata = document.get("runtime_metadata")
+    if metadata is None:
+        return None
+    validate_runtime_metadata(metadata)
+    return str(metadata["agent_version"])
+
+
 def _runtime_release_payload(document: dict[str, Any]) -> dict[str, Any]:
     """Prepare runtime metadata without creating a partial platform candidate."""
     validate_source_identity(document)
@@ -321,6 +330,7 @@ def create_candidate(
         task_image_ref=document["images"]["service"]["image_ref"],
         runtime_image_ref=document["images"]["execution_runtime"]["image_ref"],
         agent_image_ref=document["images"]["harbor_runtime"]["image_ref"],
+        agent_image_version=_default_agent_version(document),
         runtime_binary_sha256=document["runtime_binary_sha256"],
         supports_task_web_egress=supports_task_web_egress,
         service_lifecycle_ready=service_lifecycle_ready,

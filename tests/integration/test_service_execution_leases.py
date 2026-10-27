@@ -6441,3 +6441,47 @@ async def test_cleanup_without_output_recovers_exhausted_command_at_bounded_dead
             assert current_command.state == ("dead_letter" if exhausted_command else "acknowledged")
     finally:
         await engine.dispose()
+
+
+async def test_materializer_reads_default_image_version_from_the_batch_profile(postgres_url: str) -> None:
+    # terminus-2@default ATIF records the version frozen with the Batch (#2054).
+    from loom_control_plane.service_execution_materializer import (
+        default_image_version,
+        load_batch_runtime_profile,
+    )
+
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    plan = _runtime_contract(now=now)
+    version = "nebius-" + plan.candidate_sha
+    runtime_profile = ServiceExecutionRuntimeProfileV1(
+        candidate_sha=plan.candidate_sha,
+        execution_class_id=plan.execution_class_id,
+        task_image_ref=plan.task_image_ref,
+        runtime_image_ref=plan.runtime_image_ref,
+        runtime_binary_sha256=plan.runtime_binary_sha256,
+        image_admission=plan.image_admission,
+        agent_image_ref=plan.task_image_ref,
+        agent_image_version=version,
+    )
+    try:
+        async with sessions() as session:
+            trial_id, _ = await _seed_ready_trial(session, now=now)
+            trial = await session.get(Trial, trial_id)
+            assert trial is not None
+            assert await load_batch_runtime_profile(session, trial) is None
+            batch_id = uuid4()
+            session.add(Batch(
+                id=batch_id, team_id=trial.team_id, name="default image version",
+                task_filter={}, trial_config={}, backend="nebius",
+                service_execution_runtime_profile=runtime_profile.model_dump(mode="json"),
+                state="submitted", created_by_token_prefix="test", expected_trial_count=1,
+            ))
+            trial.batch_id = batch_id
+            await session.commit()
+            profile = await load_batch_runtime_profile(session, trial)
+        assert default_image_version(profile, SimpleNamespace(candidate_sha=plan.candidate_sha)) == version
+        assert default_image_version(profile, SimpleNamespace(candidate_sha="f" * 40)) is None
+    finally:
+        await engine.dispose()

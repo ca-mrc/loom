@@ -414,6 +414,30 @@ def test_reject_invalid_build_binding(tmp_path: Path, change: str) -> None:
         )
 
 
+def test_profile_records_the_default_image_version(tmp_path: Path) -> None:
+    from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1
+
+    document, private, trust = inputs(tmp_path)
+    _, unlabelled = candidate.create_candidate(
+        document, signing_key=private, signing_key_id="publisher", keyring_json=trust,
+    )
+    assert "agent_image_version" not in unlabelled
+    document["runtime_metadata"] = runtime_metadata("nebius-" + "a" * 40)
+    _, profile = candidate.create_candidate(
+        document, signing_key=private, signing_key_id="publisher", keyring_json=trust,
+    )
+    assert profile["agent_image_version"] == "nebius-" + "a" * 40
+    assert ServiceExecutionRuntimeProfileV1.model_validate(profile).agent_image_version == "nebius-" + "a" * 40
+    without_image = {key: value for key, value in profile.items() if key != "agent_image_ref"}
+    with pytest.raises(ValueError, match="requires the default agent image"):
+        ServiceExecutionRuntimeProfileV1.model_validate(without_image)
+    document["runtime_metadata"]["agent_version"] = "bad label"
+    with pytest.raises(ValueError):
+        candidate.create_candidate(
+            document, signing_key=private, signing_key_id="publisher", keyring_json=trust,
+        )
+
+
 def test_profile_and_independent_signer_binding(tmp_path: Path) -> None:
     document, private, trust = inputs(tmp_path)
     manifest, profile = candidate.create_candidate(

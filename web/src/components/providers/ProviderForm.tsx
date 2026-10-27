@@ -8,6 +8,10 @@ import {
 import CatalogImport from "./CatalogImport";
 import ModelPriceEditor from "./ModelPriceEditor";
 import { parseDraft, toDraft } from "./modelPrices";
+import {
+  AGENT_RUN_PROVIDER_TYPES,
+  NATIVE_TYPE_NOTICE,
+} from "../../lib/providerDisplay";
 
 import { Button } from "../Button";
 import { Input, Textarea } from "../Input";
@@ -28,7 +32,14 @@ export type ProviderFormProps = {
   onSubmit: (values: ProviderFormValues) => void;
 };
 
-const PROVIDER_TYPES = ["openai-compatible", "anthropic", "google", "custom"];
+// Native types stay creatable for the features that call them directly,
+// such as Pipeline judge bindings, but are labelled for agent runs (#2054).
+const PROVIDER_TYPES = [
+  { value: "openai-compatible", label: "openai-compatible" },
+  { value: "custom", label: "custom (OpenAI protocol)" },
+  { value: "anthropic", label: "anthropic (not for agent runs)" },
+  { value: "google", label: "google (not for agent runs)" },
+];
 
 export default function ProviderForm({
   mode,
@@ -182,11 +193,16 @@ export default function ProviderForm({
           className="mt-1 block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm shadow-xs"
         >
           {PROVIDER_TYPES.map((t) => (
-            <option key={t} value={t}>
-              {t}
+            <option key={t.value} value={t.value}>
+              {t.label}
             </option>
           ))}
         </select>
+        {!AGENT_RUN_PROVIDER_TYPES.includes(type) && (
+          <p role="note" className="mt-1 text-xs text-amber-700">
+            {NATIVE_TYPE_NOTICE}
+          </p>
+        )}
       </div>
       <div>
         <label
@@ -204,8 +220,8 @@ export default function ProviderForm({
           placeholder="https://api.example.com/v1"
         />
         <p className="mt-1 text-xs text-slate-500">
-          For OpenAI-compatible servers, use the API root ending in /v1. For
-          Anthropic or Google, use the provider's documented API root.
+          For openai-compatible and custom servers, use the API root ending in
+          /v1. For Anthropic or Google, use the provider's documented API root.
         </p>
       </div>
       {mode === "create" && (
