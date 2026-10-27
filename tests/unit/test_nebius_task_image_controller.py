@@ -431,3 +431,54 @@ def test_native_diagnostic_redacts_quoted_keys_urls_and_multiline_credentials():
     encoded = json.dumps(build_observation(job))
     for secret in ("quoted-private", "token-private", "private with spaces", "user:pass", "signed-private", "bearer-private"):
         assert secret not in encoded
+
+
+@pytest.mark.parametrize(("change", "expected"), [
+    ("missing", "missing"),
+    ("replaced", "identity_changed"),
+    ("deleting", "deleting"),
+    ("autoscaler_draining", "autoscaler_draining"),
+    ("healthy", None),
+    ("cordoned", None),
+    ("not_ready", None),
+    ("transient_error", None),
+    ("forbidden", None),
+])
+async def test_bound_node_recovery_requires_definitive_current_evidence(monkeypatch, change, expected):
+    api, clients = fake_api()
+    job = clients.job
+    job["metadata"]["annotations"] = {
+        "loom.openai.com/build-node-name": "compute-1",
+        "loom.openai.com/build-node-uid": "original-uid",
+    }
+    node = {"metadata": {"name": "compute-1", "uid": "original-uid"}, "spec": {}}
+    if change == "replaced":
+        node["metadata"]["uid"] = "replacement-uid"
+    elif change == "deleting":
+        node["metadata"]["deletionTimestamp"] = "2026-10-26T22:28:00Z"
+    elif change == "autoscaler_draining":
+        node["spec"]["taints"] = [{"key": "ToBeDeletedByClusterAutoscaler", "effect": "NoSchedule"}]
+    elif change == "cordoned":
+        node["spec"]["unschedulable"] = True
+    elif change == "not_ready":
+        node["status"] = {"conditions": [{"type": "Ready", "status": "False"}]}
+
+    def read_node(name, **kwargs):
+        assert name == "compute-1" and kwargs == {"_request_timeout": 20}
+        if change in {"missing", "transient_error", "forbidden"}:
+            raise ApiException(status={"missing": 404, "transient_error": 503, "forbidden": 403}[change])
+        return node
+
+    monkeypatch.setattr(clients, "read_node", read_node, raising=False)
+    assert await api.bound_node_unavailable(job) == expected
+    assert not clients.deleted
+
+
+async def test_bootstrap_build_does_not_query_or_rebind_a_node(monkeypatch):
+    api, clients = fake_api()
+
+    def forbidden_read(*args, **kwargs):
+        pytest.fail("a bootstrap build has no frozen node to recover")
+
+    monkeypatch.setattr(clients, "read_node", forbidden_read, raising=False)
+    assert await api.bound_node_unavailable(clients.job) is None
