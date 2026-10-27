@@ -192,6 +192,10 @@ agent cutoff; external cancellation receives only ordinary termination grace.
 Compose command cancellation retires the inner process group before collection
 hooks run. A single read-only BusyBox helper provides session control without
 exposing the guest Docker socket; the authored service user and umask are preserved.
+The inner helper writes its PID privately and atomically renames the completed
+file before the controller validates it and separately releases the execution
+gate. Invalid PIDs remain fatal; cancellation and normal teardown remove any
+unpublished PID file as well as the marker and gate.
 Native independent-verifier artifact transfer preserves source
 paths and exclusions, replaces each declared directory with its collected tree,
 and rejects unsafe links and private paths. Excluded or agent-deleted files do

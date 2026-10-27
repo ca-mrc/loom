@@ -157,3 +157,60 @@ def test_oci_transport_keeps_blobs_untagged_and_bounds_conversion_scratch(tmp_pa
     with pytest.raises(DriverError, match="scratch budget"):
         _docker_transport_archive(source, target, manifest)
     assert target.stat().st_size <= 12000
+
+
+async def test_control_pid_is_published_only_after_the_complete_write(tmp_path, monkeypatch):
+    import asyncio
+    import os
+    import signal
+    from types import SimpleNamespace
+
+    from loom.driver.fake import FakeDriver
+    from loom.driver.guest_compose import GuestComposeServiceDriver
+
+    # Exercise the actual inner producer on a POSIX shell. env supplies the
+    # supervisor's ordinary mv/rm/sleep commands; session ownership is covered
+    # by the real-guest integration tests.
+    monkeypatch.setattr(GuestComposeServiceDriver, "_SUPERVISOR", "/usr/bin/env")
+    driver = GuestComposeServiceDriver(SimpleNamespace(guest=FakeDriver()), "main")
+    argv, marker = driver._controlled(["/bin/sh", "-c", 'touch "$WITNESS_RAN"'])
+    script = argv[argv.index("loom-exec") - 1]
+    entered, release, ran = (tmp_path / name for name in ("entered", "release", "ran"))
+    # Redirection opens the destination before the printf function runs. Pause
+    # there deterministically, instead of depending on the CI scheduler's race.
+    prelude = '''printf() {
+        : > "$WITNESS_ENTERED"
+        while test ! -f "$WITNESS_RELEASE"; do sleep 0.01; done
+        command printf "$@"
+    }; '''
+    process = await asyncio.create_subprocess_exec(
+        "/bin/sh", "-c", prelude + script, "loom-exec", *argv[argv.index("loom-exec") + 1:],
+        env={"PATH": os.defpath, "WITNESS_ENTERED": str(entered),
+             "WITNESS_RELEASE": str(release), "WITNESS_RAN": str(ran)},
+        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        async with asyncio.timeout(5):
+            while not entered.exists():
+                await asyncio.sleep(.01)
+        assert not Path(marker).exists(), "reader can observe a PID file before its contents exist"
+        assert not ran.exists()
+        release.touch()
+        async with asyncio.timeout(5):
+            while not Path(marker).exists():
+                await asyncio.sleep(.01)
+        assert Path(marker).read_text() == str(process.pid)
+        assert Path(marker).stat().st_mode & 0o777 == 0o600
+        assert not ran.exists(), "publication must not release the controller's activation gate"
+        Path(marker + ".go").touch()
+        assert await asyncio.wait_for(process.wait(), 5) == 0
+        assert ran.exists()
+        assert not Path(marker).exists()
+        assert not Path(marker + ".pending").exists()
+    finally:
+        if process.returncode is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            await process.wait()
+        for suffix in ("", ".go", ".pending"):
+            Path(marker + suffix).unlink(missing_ok=True)
