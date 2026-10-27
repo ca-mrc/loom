@@ -1,4 +1,4 @@
-"""Safe user-facing classification of typed image-preparation failures."""
+"""Safe user-facing classification of image-preparation and native-build failures."""
 from __future__ import annotations
 
 from typing import Any
@@ -26,9 +26,21 @@ _DETAILS = {
 
 
 def image_preparation_failure(code: str | None) -> dict[str, Any] | None:
-    if not isinstance(code, str) or code not in _DETAILS or code not in PREPARATION_ERRORS:
+    if not isinstance(code, str):
         return None
-    assert code is not None
+    # This trusted controller lifecycle reason is diagnostic only. Keep it
+    # outside PREPARATION_ERRORS: untrusted prepare receipts cannot claim node
+    # loss or obtain retry authority from this public classification.
+    if code == "build_bound_node_unavailable":
+        return {
+            "reason": code,
+            "message": "The node reserved for the image build became unavailable before startup. "
+                       "The platform must clean up the old attempt before another attempt can be scheduled.",
+            "attribution": "platform",
+            "retryable": True,
+        }
+    if code not in _DETAILS or code not in PREPARATION_ERRORS:
+        return None
     attribution, message = _DETAILS[code]
     return {"reason": code, "message": message, "attribution": attribution,
             "retryable": PREPARATION_ERRORS[code]}

@@ -1,8 +1,16 @@
 """Public build diagnostics retain useful exit details without builder secrets."""
 
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from uuid import uuid4
 
+import pytest
+
+from loom.task_image_errors import (
+    ERROR_SCHEMA,
+    PREPARATION_ERRORS,
+    preparation_failure_from_receipt,
+)
 from loom_service.task_image_preparation import preparation_response
 
 
@@ -125,3 +133,32 @@ def test_platform_preparation_incompatibility_keeps_typed_reason_without_raw_log
     assert result["attribution"] == "platform"
     assert result["retryable"] is False
     assert "secret" not in str(result) and "registry.private" not in str(result)
+
+
+@pytest.mark.parametrize("state,released", [("queued", False), ("queued", True), ("failed", True)])
+def test_bound_node_recovery_diagnostics_preserve_platform_reason_and_cleanup(state, released):
+    retry_at = datetime.now(UTC) + timedelta(seconds=30) if state == "queued" else None
+    row = materialization(state=state, failure_reason="build_bound_node_unavailable", next_attempt_at=retry_at)
+    native = {"failure_message": "password=do-not-return", "io_binding": {"node_name": "private-node"},
+              "configmap": {"data": {"claim.json": "private-claim"}}}
+    if released:
+        native["capacity_released_at"] = "2026-10-27T15:31:00Z"
+    attempt = SimpleNamespace(materialization_id=row.id, lease_epoch=row.lease_epoch, native_build=native)
+    result = preparation_response(row, attempt)
+    assert result["failure_reason"] == "build_bound_node_unavailable"
+    assert result["attribution"] == "platform" and result["retryable"] is True
+    assert "node" in result["message"].lower()
+    assert result["state"] == state and result["resources_released"] is released
+    assert result["next_attempt_at"] == (retry_at.isoformat() if retry_at else None)
+    assert not any(value in str(result) for value in ("password", "private-node", "private-claim"))
+
+
+def test_bound_node_diagnostic_classification_does_not_authorize_builder_receipt_retry():
+    from loom.task_image_failure import image_preparation_failure
+
+    assert image_preparation_failure("build_bound_node_unavailable")["retryable"] is True
+    assert "build_bound_node_unavailable" not in PREPARATION_ERRORS
+    assert preparation_failure_from_receipt({
+        "error_schema": ERROR_SCHEMA, "error_code": "build_bound_node_unavailable",
+        "retryable": True, "error": "claimed node loss from build output",
+    }) is None

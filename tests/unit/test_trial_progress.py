@@ -2,6 +2,8 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from uuid import uuid4
 
+import pytest
+
 from loom_service.monitor_placement import placement_response
 from loom_service.trial_progress import progress_response, wait_message
 
@@ -70,3 +72,23 @@ def test_wait_reasons_distinguish_quota_from_provisioning_without_echoing_text()
     assert "nodes to become ready" in wait_message("execution_capacity_provisioning_delay")
     assert wait_message("password=private") is None
     assert "password" not in wait_message("execution_capacity_password=private")
+
+
+@pytest.mark.parametrize(("reason", "message_fragment"), [
+    ("execution_capacity_native_io_feedback_pending", "disk I/O measurements"),
+    ("execution_capacity_bound_node_unavailable", "A reserved node cannot currently accept"),
+])
+def test_execution_wait_progress_explains_build_capacity_without_private_details(reason, message_fragment):
+    now = datetime.now(UTC)
+    trial = SimpleNamespace(
+        submitted_at=now - timedelta(seconds=100), finished_at=None,
+        scheduling_observation={"reason": reason, "observed_at": now.isoformat(),
+                                "node_name": "other-team-private-node", "message": "password=private"},
+    )
+    progress = progress_response(trial, "execution_wait", None, [], admin=False, now=now)
+    assert message_fragment in progress["wait_message"]
+    assert progress["stage"] == "execution_wait" and not progress["observation_stale"]
+    assert "private" not in str(progress)
+    trial.finished_at = now
+    terminal = progress_response(trial, "succeeded", None, [], admin=False, now=now)
+    assert terminal["wait_message"] is None
