@@ -96,7 +96,6 @@ def validate_environment(config: dict[str, Any]) -> None:
         "postgres_storage_gi",
         "storage_endpoint",
         "buckets",
-        "model_provider_base_url",
         "max_concurrent",
         "capacity_policy",
         "execution_price",
@@ -106,6 +105,9 @@ def validate_environment(config: dict[str, Any]) -> None:
     if (
         set(config)
         - {
+            # Fed the retired hosted `local-server` route (#2054). Existing
+            # operator configurations may still carry it; it is ignored.
+            "model_provider_base_url",
             "public_tls_bootstrap",
             "shared_ingress_enabled",
             "execution_resource_quota",
@@ -375,16 +377,17 @@ def validate_environment(config: dict[str, Any]) -> None:
                 raise ValueError
         except (ValueError, TypeError, AttributeError) as exc:
             raise NebiusPlatformError("execution price timestamps must be timezone-aware") from exc
-    provider = urlsplit(str(config.get("model_provider_base_url", "")))
-    if (
-        provider.scheme != "https"
-        or not provider.hostname
-        or provider.username
-        or provider.password
-        or provider.query
-        or provider.fragment
-    ):
-        raise NebiusPlatformError("model provider must be an HTTPS URL without credentials")
+    if "model_provider_base_url" in config:
+        provider = urlsplit(str(config["model_provider_base_url"]))
+        if (
+            provider.scheme != "https"
+            or not provider.hostname
+            or provider.username
+            or provider.password
+            or provider.query
+            or provider.fragment
+        ):
+            raise NebiusPlatformError("model provider must be an HTTPS URL without credentials")
 
     _validate_regions(config)
     if "task_image_builder" in config:
@@ -1805,9 +1808,6 @@ def _build_platform(
                     "LOOM_SVC_TEAM_REGISTRATION_OPEN": "false",
                 }
             )
-        else:
-            env += _env({"LOOM_GW_LOCAL_YIBU_BASE_URL": config["model_provider_base_url"]})
-            env += [_secret_env("LOOM_GW_LOCAL_YIBU_API_KEY", "loom-model-provider", "api-key")]
         # Settings are service-specific. Do not ship ignored source/JWT secrets
         # to the public API or imply that unsupported pool knobs are active.
         if component == "service":

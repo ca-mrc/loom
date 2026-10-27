@@ -403,12 +403,6 @@ used_by     = ["llm-gateway"]
 python_type = "SecretStr"
 secret      = { key = "together-api-key" }
 
-[service_config.huggingface_api_key]
-used_by      = ["llm-gateway"]
-python_type  = "SecretStr"
-secret       = { key = "huggingface-api-key" }
-description  = "Optional Hugging Face inference token for retained local execution through the gateway. Upstream dataset download/adaptation uses its own HF_TOKEN environment input; workers materialize datasets from internal mirrors."
-
 [service_config.rate_card_cache_ttl_sec]
 used_by     = ["llm-gateway"]
 python_type = "int"
@@ -993,21 +987,6 @@ python_type = "float"
 default     = 600.0
 description = "Additive grace on top of `effective_agent_timeout_sec * trial_hard_deadline_multiplier`. It covers task setup, verification, and artifact collection."
 
-[service_config.enable_worker_vllm]
-used_by     = ["worker"]
-python_type = "bool"
-default     = false
-
-[service_config.vllm_gpu_memory_utilization]
-used_by     = ["worker"]
-python_type = "float"
-default     = 0.90
-
-[service_config.vllm_tensor_parallel_size]
-used_by     = ["worker"]
-python_type = "int"
-default     = 1
-
 # ─── Per-trial agent install and cache ────────────────
 # Worker builds a content-addressed image per (task_image_digest,
 # install_script) combo the first time it's encountered. Cluster-wide
@@ -1278,7 +1257,7 @@ description = "Approved BYO provider egress targets as IP-or-CIDR:TCP-port entri
 [render_config.gateway_local_providers]
 python_type = "str_list"
 default     = []
-description = "OpenAI-compatible upstreams the llm-gateway exposes as `local/<name>/<model>` routes, one `<name>|<base_url>|<secret_key>` entry each, e.g. [\"yibu|https://yibuapi.com/v1|qa-relay-api-key\"]. Renders LOOM_GW_LOCAL_<NAME>_BASE_URL (literal) + LOOM_GW_LOCAL_<NAME>_API_KEY (from loom-secrets/<secret_key>, optional) onto the gateway. Env-scoped: set on environments that carry an operator relay; leave empty on production."
+description = "Retired (#2054). Must be empty; register OpenAI-compatible endpoints as Provider Connections."
 
 [render_config.trajectories_bucket]
 python_type = "str"

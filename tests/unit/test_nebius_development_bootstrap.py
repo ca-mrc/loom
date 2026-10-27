@@ -169,7 +169,7 @@ def test_private_runtime_settings_do_not_start_work(development_inputs, monkeypa
                 assert settings.service_execution_materializer_enabled is False
                 assert settings.global_pool is None
             else:
-                assert settings.local_providers == {}
+                assert not any(row["name"].startswith("LOOM_GW_LOCAL_") for row in container["env"])
 
 
 def test_private_network_peers_never_include_staging_or_execution(development_inputs):

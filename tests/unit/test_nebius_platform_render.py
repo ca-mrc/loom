@@ -462,10 +462,25 @@ def test_standalone_environment_reaches_catalog_processes_and_frontend(
     assert processes["loom-web"]["LOOM_FRONTEND_ENVIRONMENT_LABEL"] == label
 
 
+def test_retired_model_provider_key_is_optional(platform_inputs: tuple) -> None:
+    """#2054: `model_provider_base_url` fed the retired `local-server` route."""
+    config, candidate, profile = platform_inputs
+    with_key = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    del config["model_provider_base_url"]
+    without_key = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    for files in (with_key, without_key):
+        gateway = next(
+            doc for doc in files["40-services.yaml"]
+            if doc["kind"] == "Deployment" and doc["metadata"]["name"] == "loom-llm-gateway"
+        )
+        env = gateway["spec"]["template"]["spec"]["containers"][0]["env"]
+        assert not any(row["name"].startswith("LOOM_GW_LOCAL_") for row in env)
+
+
 def test_config_only_change_creates_new_jobs_and_rollout(platform_inputs: tuple) -> None:
     config, candidate, profile = platform_inputs
     first = build_platform(config, candidate, profile, {}, repo_root=ROOT)
-    changed = dict(config, model_provider_base_url="https://provider.example/v1")
+    changed = dict(config, max_concurrent=7)
     second = build_platform(changed, candidate, profile, {}, repo_root=ROOT)
     assert (
         first["50-configure.yaml"][0]["metadata"]["name"]
@@ -757,7 +772,7 @@ def test_rendered_application_settings_and_startup_factories_accept_signed_profi
         )
         with monkeypatch.context() as scoped:
             for row in deployment["spec"]["template"]["spec"]["containers"][0]["env"]:
-                if row["name"].startswith(prefix) and not row["name"].startswith("LOOM_GW_LOCAL_"):
+                if row["name"].startswith(prefix):
                     assert row["name"][len(prefix) :].lower() in model.model_fields, row["name"]
                 value = row.get("value", "synthetic-test-secret-" + "a" * 32)
                 if row["name"].endswith("_DB_URL"):
@@ -779,9 +794,9 @@ def test_rendered_application_settings_and_startup_factories_accept_signed_profi
                 assert settings.service_execution_scheduler_enabled
                 assert settings.service_execution_source_bucket == config["buckets"]["source"]
             else:
-                assert (
-                    settings.local_providers["yibu"].base_url == config["model_provider_base_url"]
-                )
+                # The hosted `local-server` route is retired (#2054).
+                assert not any(row["name"].startswith("LOOM_GW_LOCAL_") for row in deployment[
+                    "spec"]["template"]["spec"]["containers"][0]["env"])
 
 
 def test_public_tls_renewal_uses_same_candidate_and_persistent_state(
