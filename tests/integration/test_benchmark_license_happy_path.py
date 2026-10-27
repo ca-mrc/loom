@@ -32,14 +32,23 @@ from loom.trajectory.storage import FakeObjectStore
 from loom_benchmark_tool.import_cmd import run_import
 from loom_control_plane.app import create_app
 from loom_control_plane.config import ControlPlaneSettings
+from tests.system.benchmark_catalog_admission import admit_fixture_catalog, pin_fixture_adapter
 
 _FIXTURE = (
     Path(__file__).resolve().parents[2]
     / "packages/loom-benchmarks/tests/fixtures/humaneval/sample.json"
 )
-_AIME_FIXTURE = (
-    Path(__file__).resolve().parents[2] / "packages/loom-benchmarks/tests/fixtures/aime/sample.json"
-)
+
+
+def _recorded_license(postgres_url: str, task_id: str) -> str:
+    engine = create_engine(postgres_url)
+    try:
+        with engine.connect() as connection:
+            return connection.execute(
+                text("SELECT license FROM tasks WHERE id=:task_id"), {"task_id": task_id},
+            ).scalar_one()
+    finally:
+        engine.dispose()
 
 
 @pytest.fixture
@@ -75,24 +84,25 @@ def seed(postgres_url: str) -> Iterator[dict[str, object]]:
             )
         )
         s.commit()
+    profile_ids: list[str] = []
     try:
-        yield {"team_id": team_id, "token": raw}
+        yield {"team_id": team_id, "token": raw, "profile_ids": profile_ids}
     finally:
         with session_local() as s:
             from loom.db.schema import Trial
 
-            s.execute(delete(Trial))
-            s.execute(delete(Token))
-            s.execute(delete(TaskRow))
-            s.execute(delete(Benchmark))
+            s.execute(delete(Trial).where(Trial.team_id == team_id))
+            s.execute(delete(Token).where(Token.team_id == team_id))
+            s.execute(delete(TaskRow).where(TaskRow.benchmark_id.in_(profile_ids)))
+            s.execute(delete(Benchmark).where(Benchmark.id.in_(profile_ids)))
             s.execute(
                 delete(DataLifecycleAuthority).where(
                     DataLifecycleAuthority.team_id == team_id,
                 ),
             )
-            s.execute(delete(TeamQuota))
+            s.execute(delete(TeamQuota).where(TeamQuota.team_id == team_id))
             s.execute(delete(User).where(User.id == user_id))
-            s.execute(delete(Team))
+            s.execute(delete(Team).where(Team.id == team_id))
             s.commit()
         engine.dispose()
 
@@ -148,6 +158,8 @@ async def test_humaneval_mit_submits_with_license_metadata(
         lambda *a, **kw: tmp_path / "stub-source",
     )
 
+    profile_id = pin_fixture_adapter(monkeypatch, "humaneval")
+    seed["profile_ids"].append(profile_id)
     store = FakeObjectStore()
     await run_import(
         benchmark="humaneval",
@@ -159,12 +171,15 @@ async def test_humaneval_mit_submits_with_license_metadata(
         imported_by="ci",
     )
 
+    await admit_fixture_catalog(db_url=postgres_url, profile_id=profile_id, object_store=store)
+
+    assert _recorded_license(postgres_url, f"{profile_id}/HumanEval/0") == "MIT"
     with TestClient(app) as client:
         r = client.post(
             "/trials",
             headers={"Authorization": f"Bearer {seed['token']}"},
             json={
-                "task_id": "humaneval/HumanEval/0",
+                "task_id": f"{profile_id}/HumanEval/0",
                 "config": {"agent_name": "oracle", "agent_model": None},
             },
         )
@@ -220,6 +235,8 @@ async def test_lcb_cc_by_nc_submits_with_license_metadata(
         lambda *a, **kw: tmp_path / "stub-source",
     )
 
+    profile_id = pin_fixture_adapter(monkeypatch, "livecodebench")
+    seed["profile_ids"].append(profile_id)
     store = FakeObjectStore()
     await run_import(
         benchmark="livecodebench",
@@ -231,12 +248,15 @@ async def test_lcb_cc_by_nc_submits_with_license_metadata(
         imported_by="ci",
     )
 
+    await admit_fixture_catalog(db_url=postgres_url, profile_id=profile_id, object_store=store)
+
+    assert _recorded_license(postgres_url, f"{profile_id}/lcb-9001") == "CC-BY-NC-4.0"
     with TestClient(app) as client:
         r = client.post(
             "/trials",
             headers={"Authorization": f"Bearer {seed['token']}"},
             json={
-                "task_id": "livecodebench/lcb-9001",
+                "task_id": f"{profile_id}/lcb-9001",
                 "config": {"agent_name": "oracle", "agent_model": None},
             },
         )
@@ -255,30 +275,34 @@ async def test_aime_license_policy_tag_is_metadata_only(
     from loom_benchmarks.adapters import aime
     from loom_benchmarks.base import BenchmarkInstance
 
-    rec = json.loads(_AIME_FIXTURE.read_text())[0]
+    # Use the supported cohort's adapter with explicitly synthetic input;
+    # the excluded 2022 cohort must not be enabled by a license-metadata test.
+    rec = {"problem": "Compute 1 + 1.", "answer": "2", "solution": "Add the integers."}
 
     def _fake_list(
-        self: aime.AIME22Adapter,
+        self: aime.AIME24Adapter,
         *,
         source_dir: Path,
         split: str,
     ) -> Iterator[BenchmarkInstance]:
         yield BenchmarkInstance(
-            instance_id="2022-I/1",
+            instance_id="2024-I/1",
             split=split,
             raw=rec,
-            tags={"year": "2022", "exam": "I", "problem": "1"},
+            tags={"year": "2024", "exam": "I", "problem": "1"},
         )
 
-    monkeypatch.setattr(aime.AIME22Adapter, "list_instances", _fake_list)
+    monkeypatch.setattr(aime.AIME24Adapter, "list_instances", _fake_list)
     monkeypatch.setattr(
         "loom_benchmark_tool.import_cmd.fetch_upstream",
         lambda *a, **kw: tmp_path / "stub-source",
     )
 
+    profile_id = pin_fixture_adapter(monkeypatch, "aime-24")
+    seed["profile_ids"].append(profile_id)
     store = FakeObjectStore()
     await run_import(
-        benchmark="aime-22",
+        benchmark="aime-24",
         db_url=postgres_url,
         object_store=store,
         bucket="loom-benchmarks",
@@ -286,12 +310,14 @@ async def test_aime_license_policy_tag_is_metadata_only(
         imported_by="ci",
     )
 
+    await admit_fixture_catalog(db_url=postgres_url, profile_id=profile_id, object_store=store)
+
     engine = create_engine(postgres_url)
     with engine.begin() as conn:
         task_row = conn.execute(
             text(
-                "SELECT license, tags FROM tasks WHERE id='aime-22/2022-I/1'",
-            )
+                "SELECT license, tags FROM tasks WHERE id=:task_id",
+            ), {"task_id": f"{profile_id}/2024-I/1"},
         ).one()
     engine.dispose()
     assert task_row.license == "proprietary-MAA"
@@ -302,7 +328,7 @@ async def test_aime_license_policy_tag_is_metadata_only(
             "/trials",
             headers={"Authorization": f"Bearer {seed['token']}"},
             json={
-                "task_id": "aime-22/2022-I/1",
+                "task_id": f"{profile_id}/2024-I/1",
                 "config": {
                     "agent_name": "direct-completion",
                     "agent_model": {"provider": "openai", "name": "qwen"},

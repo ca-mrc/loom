@@ -1228,7 +1228,8 @@ def _cmd_activate(args: argparse.Namespace) -> int:
 
             spec = profile_spec()
             if args.benchmark != PUBLIC_ALIAS:
-                raise ValueError("legacy positional activation requires its reviewed public alias")
+                raise ValueError(f"legacy positional activation requires public alias {PUBLIC_ALIAS!r}; "
+                                 "use --descriptor and --alias for other profiles")
         else:
             raise ValueError("activate requires --descriptor or --harbor-source")
         if harbor_spec is not None:
