@@ -21,6 +21,8 @@ from pathlib import Path
 import httpx
 import pytest
 
+from loom.security.redaction import redact_text
+
 pytestmark = [pytest.mark.integration, pytest.mark.docker]
 
 
@@ -88,6 +90,9 @@ def guest(*, docker: bool = False, plugin_layout: str | None = None, wait_ready:
                     assert time.monotonic() < deadline, (directory / "console.log").read_text()
                     time.sleep(0.05)
                 yield client, process, directory
+            except BaseException:
+                _print_guest_failure_diagnostics(process, directory)
+                raise
             finally:
                 client.close()
                 if process.poll() is None:
@@ -98,6 +103,60 @@ def guest(*, docker: bool = False, plugin_layout: str | None = None, wait_ready:
                         process.kill()
                         process.wait(timeout=5)
                         pytest.fail("guest launcher did not terminate its guest on cancellation")
+
+
+def _print_guest_failure_diagnostics(process: subprocess.Popen[bytes], directory: Path) -> None:
+    """Keep bounded, redacted evidence before the owned guest is cleaned up."""
+    returncode: int | None | str = "unavailable"
+    try:
+        returncode = process.poll()
+        with (directory / "console.log").open("rb") as console:
+            start = max(0, console.seek(0, os.SEEK_END) - 16300)
+            console.seek(start)
+            raw = console.read(16300)
+        if start:
+            raw = raw.partition(b"\n")[2]  # Do not expose a partially truncated credential.
+        detail = redact_text(raw.decode("utf-8", errors="replace"))
+        detail = detail.encode("utf-8")[-16300:].decode("utf-8", errors="ignore")
+    except Exception as diagnostic_error:
+        detail = "unavailable: " + type(diagnostic_error).__name__
+    try:
+        print(f"guest launcher returncode={returncode}; console tail:\n{detail}")
+    except Exception:
+        pass  # Diagnostic output must not replace the original test failure.
+
+
+def test_ordinary_guest_diagnostics_bound_and_redact_console(tmp_path, capsys) -> None:
+    from types import SimpleNamespace
+
+    (tmp_path / "console.log").write_bytes(
+        b"old console output\n" * 2000 + b"\xff\n" * 10000
+        + b"Authorization: Bearer fixture-private-key\nguest channel lost\n")
+    _print_guest_failure_diagnostics(SimpleNamespace(poll=lambda: None), tmp_path)
+    output = capsys.readouterr().out
+    assert "returncode=None" in output and "guest channel lost" in output
+    assert "fixture-private-key" not in output and "[REDACTED:bearer]" in output
+    assert len(output.encode()) < 17000
+
+
+@pytest.mark.parametrize("original", [AssertionError("command failed"), pytest.fail.Exception("test deadline")])
+def test_ordinary_guest_diagnostics_do_not_replace_failure(tmp_path, monkeypatch, capsys, original) -> None:
+    from types import SimpleNamespace
+
+    def unavailable(*args, **kwargs):
+        raise OSError("private diagnostic error")
+
+    monkeypatch.setattr(Path, "open", unavailable)
+    with pytest.raises(type(original)) as caught:
+        try:
+            raise original
+        except BaseException:
+            _print_guest_failure_diagnostics(SimpleNamespace(poll=lambda: 7), tmp_path)
+            raise
+    assert caught.value is original
+    output = capsys.readouterr().out
+    assert "returncode=7" in output and "OSError" in output
+    assert "private diagnostic error" not in output
 
 
 def _export_image_root(image: str, root: Path) -> None:
