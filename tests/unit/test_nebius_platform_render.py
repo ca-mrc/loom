@@ -241,6 +241,9 @@ def test_resource_only_native_builds_clear_previous_namespace_cap(platform_input
     collector = next(doc for doc in docs if doc["kind"] == "ConfigMap"
                      and "LOOM_EXECUTION_CAPACITY_COLLECTOR_TARGET_ID" in doc["data"])
     assert "LOOM_EXECUTION_CAPACITY_COLLECTOR_BUILD_CONCURRENCY_LIMIT" not in collector["data"]
+    from loom.nebius_platform_render import _task_image_builder_settings
+    settings = _task_image_builder_settings(config, service_image=candidate["images"]["service"]["image_ref"])
+    assert settings.archive_secret_name == settings.source_secret_name == "loom-task-build-source"
     actuator = next(doc for doc in docs if doc["kind"] == "Deployment")
     env = {row["name"]: row.get("value")
            for row in actuator["spec"]["template"]["spec"]["containers"][0]["env"]}
@@ -255,6 +258,7 @@ def test_native_builds_share_the_actuator_but_have_an_isolated_namespace(
     config["task_image_builder"] = {
         "registry_repository": "cr.eu-north1.nebius.cloud/test/task-images",
         "max_concurrent": concurrency,
+        "archive_secret_name": "loom-task-image-archive-writer",
     }
     files = build_platform(config, candidate, profile, {}, repo_root=ROOT)
     namespaces = {doc["metadata"]["name"]: doc for doc in files["00-namespaces.yaml"]}
@@ -278,6 +282,9 @@ def test_native_builds_share_the_actuator_but_have_an_isolated_namespace(
     settings = json.loads(env["LOOM_EXECUTION_ACTUATOR_TASK_IMAGE_BUILDER"])
     assert settings["namespace"] == build_ns
     assert settings["source_bucket"] == config["buckets"]["artifacts"]
+    assert settings["archive_secret_name"] == "loom-task-image-archive-writer"
+    assert env["LOOM_ENV"] == config["environment"]
+    assert env["LOOM_NAMESPACE"] == config["namespace"]
     assert settings["service_image"] == candidate["images"]["service"]["image_ref"]
     assert settings["cache_secret_name"] is None
     assert len([doc for doc in docs if doc["kind"] == "Deployment"]) == 1

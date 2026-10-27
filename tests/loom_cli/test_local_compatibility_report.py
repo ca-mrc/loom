@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -399,5 +400,52 @@ def test_harbor_projection_cannot_hide_timeouts_capabilities_or_artifact_require
     assert rc == 1
     report = payload["compatibility_report"]["tasks"][0]
     codes = {diagnostic["code"] for diagnostic in report["diagnostics"]}
-    assert {"structured_artifact_collection_runtime_unavailable", "agent_capabilities_unsupported"} <= codes
+    assert {"structured_artifact_service_runtime_unavailable", "agent_capabilities_unsupported"} <= codes
+    assert report["original_requirements"]["agent"]["timeout_sec"] == 17
+    assert report["original_requirements"]["artifacts"] == ["/var/log/task.log"]
+    projected_steps = next(change["after"] for change in report["changes"] if change["field"] == "steps")
+    assert projected_steps[0]["artifact_sources"] == [{"source": "/var/log/task.log"}]
     assert "unmapped_artifact_requirement" not in codes
+    assert "artifact_requirements_changed" not in codes
+
+
+@pytest.mark.parametrize("mutation", ["source", "service", "destination", "exclude", "remove", "glob", "required"])
+def test_report_rejects_changed_artifact_semantics(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, mutation: str,
+) -> None:
+    from loom_cli import local_compatibility_report as compatibility
+
+    bundle = _write_bundle(tmp_path, "artifact-change")
+    config = tomllib.loads((bundle / "task.toml").read_text())
+    config["steps"][0].update({
+        "artifact_sources": [{"source": "/var/log/task.log", "service": "main",
+                              "destination": "logs/task", "exclude": ["private.log"]}],
+    })
+    (bundle / "task.toml").write_text(tomli_w.dumps(config))
+    original = compatibility.adapt_bundle_for_nebius_terminus
+
+    def change_artifact(*args: Any, **kwargs: Any) -> Any:
+        adapted, details = original(*args, **kwargs)
+        step = adapted["steps"][0]
+        if mutation == "remove":
+            step["artifact_sources"] = []
+        elif mutation == "glob":
+            step["artifacts"] = ["results/*.txt"]
+        elif mutation == "required":
+            step["required_artifacts"] = ["results/final.json"]
+        else:
+            replacements = {"source": "/var/log/other.log", "service": "sidecar",
+                            "destination": "other", "exclude": ["all.log"]}
+            step["artifact_sources"][0][mutation] = replacements[mutation]
+        return adapted, details
+
+    _, unchanged = _report(tmp_path, capsys)
+    assert "artifact_requirements_changed" not in {
+        item["code"] for item in unchanged["compatibility_report"]["tasks"][0]["diagnostics"]
+    }
+    monkeypatch.setattr(compatibility, "adapt_bundle_for_nebius_terminus", change_artifact)
+    rc, changed = _report(tmp_path, capsys)
+    assert rc == 1
+    assert "artifact_requirements_changed" in {
+        item["code"] for item in changed["compatibility_report"]["tasks"][0]["diagnostics"]
+    }

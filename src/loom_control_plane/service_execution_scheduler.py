@@ -165,7 +165,7 @@ def _deadline(
     now: datetime,
     maximum_seconds: int,
 ) -> datetime:
-    phase_seconds = sum(item.timeout_seconds for item in plan.setup) + plan.main.timeout_seconds
+    phase_seconds = sum(item.timeout_seconds for item in plan.setup) + plan.main.timeout_seconds + plan.main.finalization_timeout_seconds
     if plan.verifier is not None:
         phase_seconds += plan.verifier.timeout_seconds
     requested_seconds = phase_seconds + plan.termination_grace_seconds + 600
@@ -657,6 +657,18 @@ async def _reserve_verifier_candidate(
     plan, deadline_at = await compile_verifier_candidate(session, parent=parent, trial=trial,
         maximum_deadline_seconds=maximum_deadline_seconds, current_time=current_time)
     assert parent.target_id is not None
+    from loom.task_environment_handoff import (
+        RESOLVED_VERIFIER_ENVIRONMENT,
+        decode_resolved_task_environment,
+    )
+    from loom.verifier_runtime import verifier_execution_task
+    requirements = WorkloadRequirementsV1.model_validate(parent.workload_requirements_json)
+    if RESOLVED_VERIFIER_ENVIRONMENT in plan.main.environment:
+        snapshot = await resolve_service_execution_task_snapshot(session, lease=parent, trial=trial)
+        task = TaskConfig.model_validate(snapshot.config)
+        task = task.model_copy(update={"verifier": task.verifier.model_copy(update={"environment":
+            decode_resolved_task_environment(plan.main.environment[RESOLVED_VERIFIER_ENVIRONMENT])})})
+        requirements = workload_requirements_from_task(verifier_execution_task(task), TrialConfig.model_validate(trial.config))
     retry = verifier_retries(trial)
     request: dict[str, object] = {
         "schema_version": "loom.service-execution-verifier-request.v1",
@@ -665,21 +677,41 @@ async def _reserve_verifier_candidate(
     }
     if retry:
         request["verifier_retry"] = retry
-    return await reserve_trial_execution(
-        session,
-        request_id=canonical_uuid5(_RESERVATION_REQUEST_NAMESPACE, request),
-        trial_id=trial.id,
-        execution_class_id=plan.execution_class_id,
-        target_id=parent.target_id,
-        requirements=WorkloadRequirementsV1.model_validate(parent.workload_requirements_json),
-        runtime_contract=plan,
-        image_admission_keyring=image_admission_keyring,
-        routing_reason=ExecutionRoutingReason.PREEXISTING_ASSIGNMENT,
-        parent_lease_id=parent.id,
-        verifier_retry=retry,
-        deadline_at=deadline_at,
-        now=current_time,
-    )
+    target_ids = [parent.target_id]
+    independent = RESOLVED_VERIFIER_ENVIRONMENT in plan.main.environment
+    if independent:
+        parent_target = await session.get(ServiceExecutionTarget, parent.target_id)
+        if parent_target is None:
+            raise ServiceExecutionConflict("verifier parent target is unavailable")
+        targets = await _ready_targets(session, environment=parent_target.environment,
+            pool_id=parent_target.logical_pool_id, execution_class_id=plan.execution_class_id, now=current_time)
+        target_ids = [target.id for target in targets
+                      if requirements.data_residency is None or target.data_residency == requirements.data_residency]
+    blocked = None
+    for target_id in target_ids:
+        try:
+            async with session.begin_nested():
+                return await reserve_trial_execution(
+                    session,
+                    request_id=canonical_uuid5(_RESERVATION_REQUEST_NAMESPACE, {**request, **({"target_id": target_id} if independent else {})}),
+                    trial_id=trial.id,
+                    execution_class_id=plan.execution_class_id,
+                    target_id=target_id,
+                    requirements=requirements,
+                    runtime_contract=plan,
+                    image_admission_keyring=image_admission_keyring,
+                    routing_reason=ExecutionRoutingReason.PREEXISTING_ASSIGNMENT,
+                    parent_lease_id=parent.id,
+                    verifier_retry=retry,
+                    deadline_at=deadline_at,
+                    now=current_time,
+                )
+        except (ExecutionProvisioningBlockedError, ServiceExecutionConflict) as exc:
+            blocked = exc
+    if blocked is not None:
+        raise blocked
+    raise ServiceExecutionConflict("independent verifier has no ready execution target")
+
 
 
 async def run_service_execution_scheduler_loop(

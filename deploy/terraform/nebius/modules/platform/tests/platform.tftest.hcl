@@ -307,3 +307,40 @@ run "catalog_metadata_is_artifacts_scoped" {
     error_message = "Bucket metadata access must preserve existing canonical object permissions and the native builder's cache-only write scope."
   }
 }
+
+run "larger_cpu_execution_is_explicit_and_preserves_scaling" {
+  command = plan
+  variables {
+    integration_platform = {
+      bucket_prefix       = "loom-platform-test"
+      execution_preset    = "32vcpu-128gb"
+      execution_disk_type = "NETWORK_SSD_NON_REPLICATED"
+      execution_disk_gib  = 279
+    }
+  }
+  assert {
+    condition = (
+      nebius_mk8s_v1_node_group.integration["execution"].template.resources.platform == "cpu-e2" &&
+      nebius_mk8s_v1_node_group.integration["execution"].template.resources.preset == "32vcpu-128gb" &&
+      nebius_mk8s_v1_node_group.integration["execution"].template.boot_disk.type == "NETWORK_SSD_NON_REPLICATED" &&
+      nebius_mk8s_v1_node_group.integration["execution"].template.boot_disk.size_gibibytes == 279 &&
+      nebius_mk8s_v1_node_group.integration["execution"].autoscaling.min_node_count == 0 &&
+      nebius_mk8s_v1_node_group.integration["execution"].autoscaling.max_node_count == 100 &&
+      nebius_mk8s_v1_node_group.integration["system"].template.resources.preset == "4vcpu-16gb" &&
+      nebius_mk8s_v1_node_group.integration["system"].template.boot_disk.size_gibibytes == 80 &&
+      nebius_mk8s_v1_node_group.integration["execution"].strategy.max_surge.count == 0 &&
+      nebius_mk8s_v1_node_group.integration["execution"].strategy.max_unavailable.count == 1
+    )
+    error_message = "A larger CPU execution shape must preserve min0, the operator ceiling, replacement strategy, and all system defaults."
+  }
+}
+run "reject_unqualified_execution_preset" {
+  command = plan
+  variables { integration_platform = { bucket_prefix = "loom-platform-test", execution_preset = "64vcpu-256gb" } }
+  expect_failures = [var.integration_platform]
+}
+run "reject_gpu_execution_preset" {
+  command = plan
+  variables { integration_platform = { bucket_prefix = "loom-platform-test", execution_preset = "1gpu-16vcpu-200gb" } }
+  expect_failures = [var.integration_platform]
+}

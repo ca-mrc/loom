@@ -4,6 +4,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import sysconfig
 from pathlib import Path
 
 from loom.dockerfile_instructions import dockerfile_instructions
@@ -134,6 +135,7 @@ import pathlib
 import sys
 source = pathlib.Path(sys.argv[1]).resolve()
 sys.path.insert(0, str(source))
+sys.path.extend(sys.argv[2:])
 class PackagedSourceOnly(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
         if fullname.split('.')[0] in {
@@ -147,16 +149,28 @@ class PackagedSourceOnly(importlib.abc.MetaPathFinder):
 sys.meta_path.insert(0, PackagedSourceOnly())
 import loom_execution_actuator.__main__
 import loom_execution_capacity_collector.__main__
+import loom_control_plane.task_image_archive_retention
 from loom_control_plane.execution_capacity_wait import (
     execution_target_fingerprint,
     read_execution_capacity_waits,
 )
 """
-    # -I still executes site-package .pth hooks. The image import probe must
-    # not inherit pytest-cov startup and collect this disposable source copy as
-    # current-checkout coverage after pytest removes it.
+    smoke = re.search(r"RUN python - <<'PY'\n(.*?)\nPY", (ROOT / "deploy/Dockerfile.execution-actuator").read_text(), re.DOTALL)
+    assert smoke is not None
+    script += "\n" + smoke.group(1)
+    # -S prevents editable .pth/meta-path hooks from importing checkout files.
+    # Add only dependency package directories; the finder confines Loom imports
+    # to the exact Dockerfile COPY inputs, including lazy admission validators.
     env = {key: value for key, value in os.environ.items()
         if not key.startswith("COV_CORE_") and key != "COVERAGE_PROCESS_START"}
-    result = subprocess.run([sys.executable, "-I", "-c", script, str(tmp_path / "src")],
+    result = subprocess.run([sys.executable, "-I", "-S", "-c", script, str(tmp_path / "src"),
+                             sysconfig.get_path("purelib"), sysconfig.get_path("platlib")],
                             cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
+    # A copied input missing from the thin image must never resolve through
+    # an editable checkout, even though this test's own interpreter has one.
+    (tmp_path / "src/loom/artifact_contract.py").unlink()
+    missing = subprocess.run(result.args, cwd=tmp_path, env=env,
+                             capture_output=True, text=True, timeout=30)
+    assert missing.returncode != 0
+    assert "missing image dependency: loom.artifact_contract" in missing.stderr

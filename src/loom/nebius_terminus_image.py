@@ -544,7 +544,7 @@ def _alpine_package_install(packages: tuple[str, ...]) -> str:
 
 def _classify_terminus_base(original: str) -> tuple[str, bool, bool, tuple[Any, ...]]:
     classified = classify_terminus_image(original)
-    return classified.base_image, classified.package_manager == "pacman", classified.package_manager == "apk", classified.instructions
+    return classified.base_image.split("@", 1)[0].removeprefix("docker.io/").removeprefix("library/"), classified.package_manager == "pacman", classified.package_manager == "apk", classified.instructions
 
 
 def _suse_package_install() -> str:
@@ -624,9 +624,16 @@ def _run_instruction(command: str, *, custom_shell: bool) -> str:
     return "RUN " + command + "\n"
 
 
+def _fedora_package_install() -> str:
+    """Install only missing harness packages; exclude every authored RPM from changes."""
+    return r'''loom_prep_cache=$(mktemp -d /tmp/loom-fedora-preparation.XXXXXX) &&     trap 'rm -rf "$loom_prep_cache"' EXIT &&     rpm -qa --queryformat '%{NAME}\n' > "$loom_prep_cache/installed" &&     loom_missing='' &&     for loom_package in bash ca-certificates curl tmux asciinema shadow-utils python3 tar; do         if ! rpm -q "$loom_package" >/dev/null 2>&1; then loom_missing="$loom_missing $loom_package"; fi;     done &&     if [ -n "$loom_missing" ]; then         loom_excluded=$(paste -sd, "$loom_prep_cache/installed") &&         dnf --setopt=install_weak_deps=False --setopt=cachedir="$loom_prep_cache/cache"             --exclude="$loom_excluded" install -y $loom_missing;     fi'''
+
+
 def _terminus_package_install(
-    *, arch: bool, alpine: bool, apt_packages: set[str], apk_packages: set[str], suse: bool = False,
+    *, arch: bool, alpine: bool, apt_packages: set[str], apk_packages: set[str], suse: bool = False, fedora: bool = False,
 ) -> str:
+    if fedora:
+        return _fedora_package_install()
     if suse:
         return f"{_suse_package_install()} && {_SUSE_TMUX_RUNTIME_SETUP}"
     if arch:
@@ -647,15 +654,16 @@ def append_terminus_runtime_tools(dockerfile: str) -> str:
     """
     final_base, arch, alpine, instructions = _classify_terminus_base(dockerfile)
     suse = final_base == "opensuse/leap:15.5"
+    fedora = final_base == "fedora:42"
     custom_shell = _dockerfile_custom_shell(instructions)
     install = _terminus_package_install(
         arch=arch,
         alpine=alpine,
         apt_packages=set(_TERMINUS_APT_PACKAGES),
         apk_packages=set(_TERMINUS_APK_PACKAGES),
-        suse=suse,
+        suse=suse, fedora=fedora,
     )
-    cleanup = "true" if arch or alpine or suse else "rm -rf /var/lib/apt/lists/*"
+    cleanup = "true" if arch or alpine or suse or fedora else "rm -rf /var/lib/apt/lists/*"
     prepared = (
         dockerfile.rstrip()
         + "\n\n# Loom: terminus runtime tools; original task above.\n"
@@ -686,7 +694,8 @@ def _preparation_dockerfile(
     original = _without_packaged_openhands_runtime(original)
     final_base, arch, alpine, instructions = _classify_terminus_base(original)
     suse = final_base == "opensuse/leap:15.5"
-    if (arch or alpine or suse) and (bootstrap.apt_packages or bootstrap.uses_apt):
+    fedora = final_base == "fedora:42"
+    if (arch or alpine or suse or fedora) and (bootstrap.apt_packages or bootstrap.uses_apt):
         raise ValueError(
             f"nebius-terminus: {'Arch Linux' if arch else 'openSUSE' if suse else 'Alpine'} images cannot use a Debian package bootstrap; "
             "provide an explicitly reviewed verifier dependency preparation"
@@ -758,9 +767,9 @@ def _preparation_dockerfile(
         alpine=alpine,
         apt_packages=set(packages),
         apk_packages=set(alpine_packages),
-        suse=suse,
+        suse=suse, fedora=fedora,
     )
-    package_cleanup = "true" if arch or alpine or suse else "rm -rf /var/lib/apt/lists/*"
+    package_cleanup = "true" if arch or alpine or suse or fedora else "rm -rf /var/lib/apt/lists/*"
     preparation = run(f"""export UV_NO_CACHE=1 && {package_install} && \\
     {python_setup} && \\
     loom-nebius-uv pip freeze --python /opt/verifier/bin/python > /opt/verifier/resolved-requirements.txt && \\

@@ -38,6 +38,37 @@ def prepare_harbor_bundle(bundle: Path, config: dict[str, Any]) -> None:
     if compose:
         environment["compose_files"] = compose
         project_single_service_compose(bundle, environment)
+        if environment.get("single_service_compose") is None:
+            from loom.guest_compose import compile_native_compose
+
+            try:
+                projected = compile_native_compose(bundle, environment)
+            except ValueError:
+                # Unsupported declarations remain intact and explicitly blocked.
+                # Merely finding a Compose file never grants runtime support.
+                pass
+            else:
+                from loom.models.compose import ComposeBuild
+
+                services = []
+                for service in projected.services:
+                    if service.build is None:
+                        context = f".loom-build/compose-{service.name}"
+                        generated = bundle / context / "Dockerfile"
+                        if generated.exists() or generated.is_symlink():
+                            raise ValueError("native package collides with managed Compose image build")
+                        generated.parent.mkdir(parents=True, exist_ok=True)
+                        generated.write_text(f"FROM {service.image}\n")
+                        service = service.model_copy(update={"build": ComposeBuild(
+                            context=context, dockerfile=f"{context}/Dockerfile",
+                        )})
+                    services.append(service)
+                projected = projected.model_copy(update={"services": tuple(services)})
+                environment["native_compose"] = projected.model_dump(mode="json")
+                main = next(service for service in projected.services if service.name == "main")
+                if main.build is not None:
+                    environment.update(dockerfile=main.build.dockerfile, docker_build_context=main.build.context,
+                                       docker_build_args=main.build.args, docker_build_target=main.build.target)
         environment.pop("image_workdir", None)
     else:
         # Harbor runs as the image USER (root when the image omits USER) and
@@ -49,6 +80,7 @@ def prepare_harbor_bundle(bundle: Path, config: dict[str, Any]) -> None:
         env.pop("docker_image", None)
         env.pop("compose_files", None)
         env.pop("single_service_compose", None)
+        env.pop("native_compose", None)
         env.update(dockerfile="tests/Dockerfile", docker_build_context="tests")
         verifier["environment"] = env
         verifier.setdefault("env_mode", "separate")

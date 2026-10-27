@@ -112,7 +112,7 @@ def test_projection_is_pure_and_preserves_independent_requirements():
     assert restored == task
     assert (
         "verifier.environment: independent_verifier_environment_runtime_unavailable"
-        in task_runtime_rejections(restored)
+        in task_runtime_rejections(restored, runtime="legacy")
     )
 
 
@@ -348,7 +348,7 @@ def test_catalog_api_and_cli_share_runtime_blockers():
     assert item.blocker_reason == "task_requirements_unsupported"
     fields = readiness_display_fields(item)
     assert fields["selectable"] is False
-    assert "verifier.environment" in fields["readiness_message"]
+    assert "verifier.collect" in fields["readiness_message"]
     assert json.loads(render_readiness_json([item]))["items"][0]["runtime_blockers"] == list(
         item.runtime_blockers
     )
@@ -410,7 +410,7 @@ def test_healthcheck_start_interval_remains_a_durable_runtime_requirement():
     assert task.environment.healthcheck.start_interval_sec == 2
     assert (
         "environment.healthcheck.start_interval_sec: healthcheck_start_interval_runtime_unavailable"
-        in task_runtime_rejections(task)
+        not in task_runtime_rejections(task)
     )
 
 

@@ -43,6 +43,7 @@ from loom.service_execution_materialization import (
     verifier_handoff_input,
     verifier_handoff_path,
 )
+from loom.task_image_archives import PreparedImageArchiveV1
 from loom.trajectory.storage import ObjectStore
 from loom_control_plane.service_execution import (
     VerifierHandoffUnavailableError,
@@ -195,6 +196,49 @@ async def resolve_service_execution_input(
         bucket=source_bucket,
         prefix=source_prefix,
     )
+
+
+async def resolve_service_execution_image_archives(session: AsyncSession, *, lease: ServiceExecutionLease,
+                                                   artifacts_bucket: str) -> dict[str, PreparedImageArchiveV1]:
+    """Authorize only exact prepared images belonging to this live attempt's grant."""
+    from loom.compose_image_inputs import compose_image_inputs
+    from loom.task_image_archives import compose_archive_components
+    from loom.task_image_materialization import (
+        resolve_prepared_task,
+    )
+    from loom.verifier_runtime import validate_prepared_sandbox_images
+    plan = _runtime_plan(lease)
+    images = compose_image_inputs(plan)
+    if not images or lease.execution_role != "attempt":
+        raise ServiceExecutionBrokerError("prepared_image_input_unavailable")
+    from loom.db.schema import ServiceExecutionClass
+    from loom.execution_contract import ExecutionClassV1
+    execution_class = await session.get(ServiceExecutionClass, plan.execution_class_id)
+    if execution_class is None:
+        raise ServiceExecutionBrokerError("prepared_image_input_class_unavailable")
+    architecture = ExecutionClassV1.model_validate(execution_class.spec_json).cpu_architecture
+    from loom_control_plane.service_execution_task_snapshot import (
+        resolve_service_execution_image_grant,
+    )
+    try:
+        grant = await resolve_service_execution_image_grant(session, lease=lease, cpu_arch=architecture)
+    except ValueError as exc:
+        raise ServiceExecutionBrokerError("prepared_image_input_grant_drift") from exc
+    if grant is None or grant.materialization_id != plan.task_image_materialization_id:
+        raise ServiceExecutionBrokerError("prepared_image_input_grant_drift")
+    from loom.models.task import TaskConfig
+    try:
+        prepared = resolve_prepared_task(TaskConfig.model_validate(grant.task_config), grant)
+        validate_prepared_sandbox_images(plan, prepared)
+        components = compose_archive_components(grant.task_config)
+        archives = {name: grant.image_archives[components[name]] for name in images}
+        if (sum(item.object.size_bytes for item in archives.values()) > plan.compose_archive_storage_mib() * 1024**2
+                or any(item.image_ref != images[name] or item.object.bucket != artifacts_bucket
+                       for name, item in archives.items())):
+            raise ValueError("archive binding differs")
+    except (KeyError, ValueError) as exc:
+        raise ServiceExecutionBrokerError("prepared_image_input_grant_drift") from exc
+    return archives
 
 
 @dataclass(frozen=True)

@@ -51,7 +51,9 @@ def allocate_node_resources(
     payload["workspace_mib"] = max(plan.workspace_mib, task.ephemeral_storage_mib)
     for sidecar in payload["sidecars"]:
         if sidecar["private_sandbox"]:
-            sidecar["resources"] = task.model_dump()
+            sidecar["resources"] = {
+                field: max(getattr(task, field), sidecar["resources"][field]) for field in fields
+            } if sidecar["role_name"] == "verifier-sandbox" and plan.execution_role != "verifier" else task.model_dump()
     if private:
         # Keep the independently configured controller envelope, including its
         # CPU limit. Scheduling CPU requests need not equal throttling limits.
@@ -66,7 +68,8 @@ def allocate_node_resources(
                 else {"task_sandbox": task.model_dump()}
             ),
             **(
-                {"verifier_sandbox": task.model_dump()}
+                {"verifier_sandbox": next(sidecar["resources"] for sidecar in payload["sidecars"]
+                                           if sidecar["role_name"] == "verifier-sandbox")}
                 if any(sidecar.role_name == "verifier-sandbox" for sidecar in private)
                 and plan.execution_role != "verifier"
                 else {}

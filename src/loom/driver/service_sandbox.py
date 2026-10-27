@@ -23,6 +23,7 @@ from uuid import uuid4
 import httpx
 
 from loom.driver.base import DriverResourceSnapshot, ExecHandle, StartOptions
+from loom.driver.healthcheck import run_command_healthcheck
 from loom.errors import (
     DriverAlreadyStartedError,
     DriverError,
@@ -654,11 +655,4 @@ class ServiceSandboxDriver:
         if hc is None:
             await self._request("GET", "/health")
             return
-        await asyncio.sleep(hc.start_period_sec)
-        for attempt in range(hc.retries + 1):
-            result = await self.exec(hc.command, timeout_sec=hc.timeout_sec)
-            if result.return_code == 0:
-                return
-            if attempt < hc.retries:
-                await asyncio.sleep(hc.interval_sec)
-        raise DriverError("sandbox healthcheck failed")
+        await run_command_healthcheck(self, hc)

@@ -268,6 +268,10 @@ def create_app(
             background_tasks.append(service_execution_scheduler_task)
         service_execution_materializer_task: asyncio.Task[None] | None = None
         if settings.service_execution_materializer_enabled:
+            from loom_control_plane.task_image_archive_retention import NativeImageArchiveRetention
+            archive_retention = NativeImageArchiveRetention(
+                sessions=session_factory, client=minio_client, bucket=settings.artifacts_bucket,
+            )
             service_execution_materializer_stop_event = asyncio.Event()
             service_execution_materializer_task = asyncio.create_task(
                 run_service_execution_materializer_loop(
@@ -284,6 +288,7 @@ def create_app(
                     interval_seconds=settings.service_execution_materializer_interval_sec,
                     concurrency=settings.service_execution_materializer_concurrency,
                     stop_event=service_execution_materializer_stop_event,
+                    image_archive_cleanup=archive_retention.run_once,
                 ),
                 name="loom-cp-service-execution-materializer",
             )

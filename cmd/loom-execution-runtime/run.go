@@ -293,6 +293,7 @@ func runPhase(
 	// process startup reset the agent's full task-owned allowance.
 	environment["LOOM_EXECUTION_PHASE_DEADLINE"] = strconv.FormatFloat(float64(deadline.UnixNano())/1e9, 'f', 9, 64)
 	environment["LOOM_EXECUTION_TERMINATION_GRACE_SECONDS"] = strconv.FormatFloat(terminationGrace.Seconds(), 'f', -1, 64)
+	environment["LOOM_EXECUTION_FINALIZATION_TIMEOUT_SECONDS"] = strconv.FormatInt(item.FinalizationTimeoutSeconds, 10)
 	names := make([]string, 0, len(environment))
 	for name := range environment {
 		names = append(names, name)
@@ -322,7 +323,11 @@ func runPhase(
 		case err = <-waited:
 		case <-phaseCtx.Done():
 			_ = syscall.Kill(-command.Process.Pid, syscall.SIGTERM)
-			timer := time.NewTimer(terminationGrace)
+			cleanupBudget := terminationGrace
+			if parent.Err() == nil && errors.Is(context.Cause(phaseCtx), context.DeadlineExceeded) {
+				cleanupBudget += time.Duration(item.FinalizationTimeoutSeconds) * time.Second
+			}
+			timer := time.NewTimer(cleanupBudget)
 			select {
 			case <-waited:
 				if !timer.Stop() {

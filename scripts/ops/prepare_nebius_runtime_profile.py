@@ -314,6 +314,7 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
         supports_task_web_egress=getattr(args, "supports_task_web_egress", False),
         service_lifecycle_ready=getattr(args, "service_lifecycle_ready", False),
         supports_task_identity=getattr(args, "supports_task_identity", False),
+        supports_native_compose=getattr(args, "supports_native_compose", False),
         terminus2_multi_model_policies=(
             HOSTED_TERMINUS2_MULTI_MODEL_POLICIES
             if getattr(args, "supports_terminus2_multi_model", False) else frozenset()
@@ -372,6 +373,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--supports-task-web-egress", action="store_true")
     parser.add_argument("--service-lifecycle-ready", action="store_true")
     parser.add_argument("--supports-task-identity", action="store_true")
+    parser.add_argument("--supports-native-compose", action="store_true")
     parser.add_argument("--supports-terminus2-multi-model", action="store_true")
     parser.add_argument("--guest-runtime", choices=("qemu-tcg-v1",))
     parser.add_argument("--supports-emulated-pkcs11", action="store_true")
