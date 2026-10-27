@@ -623,6 +623,11 @@ class NativeTaskImageController:
                 )
                 if donor is not None:
                     claim["cache_import_materialization_key"] = donor
+            from loom.task_image_archives import archive_write_intents, compose_archive_components
+            if compose_archive_components(row.task_config):
+                if self.settings.archive_secret_name is None:
+                    raise ValueError("native Compose requires prepared archive publication")
+                claim["archive_write_intents"] = archive_write_intents(claim)
             components = derive_task_image_build_components(row.task_config)
             cm, job = render_task_image_job(materialization_id=row.id, lease_epoch=row.lease_epoch,
                                            claim=claim, components=components, target=self.target,
@@ -885,7 +890,26 @@ async def record_native_build_result(session: AsyncSession, row: TaskImageMateri
             environment = row.task_config.get("environment", {})
             if (environment.get("user") == "image" or environment.get("image_entrypoint") or environment.get("image_workdir")) and "task" not in metadata:
                 raise ValueError("required task OCI runtime metadata is missing")
-            attempt.native_build = {**native, "image_runtime_metadata": metadata}
+            from loom.task_image_archives import (
+                compose_archive_components,
+                validate_archive_receipt,
+            )
+            archive_payload = receipt.get("image_archives", {})
+            if not isinstance(archive_payload, dict):
+                raise ValueError("publication receipt has invalid prepared archives")
+            if compose_archive_components(row.task_config):
+                # Compose must match its issued archive writes. Ordinary pool
+                # builds retain manager identity rather than a local ConfigMap.
+                claim = json.loads(native["configmap"]["data"]["claim.json"])
+                archives = validate_archive_receipt(claim, images, archive_payload)
+            elif archive_payload:
+                raise ValueError("ordinary build has unissued prepared archives")
+            else:
+                archives = {}
+            attempt.native_build = {**native, "image_runtime_metadata": metadata,
+                                    **({"image_archives": {key:value.model_dump(mode="json") for key,value in archives.items()}} if archives else {})}
+            from loom_control_plane.task_image_archive_retention import register_archive_objects
+            await register_archive_objects(session, attempt, archives)
             await complete_task_image_materialization(session, materialization_id=row.id,
                 builder_id=builder_id, lease_epoch=attempt.lease_epoch, registry_images=images)
             return

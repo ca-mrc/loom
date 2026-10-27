@@ -82,6 +82,16 @@ source/bridge metadata. Task environment variables and uploaded inputs do not
 choose those values. Canonical ATIF output and accounting repair preserve the
 Trial's selected release label; older Trials retain their previous fallback.
 
+Historical `raw-harbor-tb2-v2` downloads validate an explicitly selected version
+against the Batch's frozen runtime binding, without consulting the mutable
+catalog. A missing or mismatched binding fails closed. Older default runs did
+not freeze a Harbor source revision; their v2 serialized format remains supported
+for the previously qualified 0.18 source
+`527d50deb63a5d279e8c20593c18a2cbc7f61f9e` and the active source only. Unknown
+or mixed source revisions still fail, as do legacy streams, invalid joins and
+artifact integrity failures. This download compatibility does not make an old
+runtime available for new execution or change any Batch binding.
+
 A Trial that selects no version (`terminus-2@default`) runs the platform
 candidate's default controller image. The candidate's runtime profile records
 that image's label as `agent_image_version` (`nebius-<candidate>` unless the

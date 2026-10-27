@@ -202,6 +202,7 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
     default_task_resource_requests: ExecutionResourceRequestsV1 | None = None
     task_resource_requests: dict[str, TaskExecutionResourceRequestsV1] = Field(default_factory=dict)
     supports_task_identity: bool = False
+    supports_native_compose: bool = Field(default=False, exclude_if=lambda value: not value)
     guest_runtime: Literal["qemu-tcg-v1"] | None = Field(default=None, exclude_if=lambda value: value is None)
     supports_emulated_pkcs11: bool = Field(default=False, exclude_if=lambda value: not value)
     supports_shared_guest: bool = Field(default=False, exclude_if=lambda value: not value)
@@ -269,7 +270,7 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
     def consistent_execution_class(self) -> ServiceExecutionRuntimeProfileV1:
         if self.guest_runtime is None and (
             self.guest_runtime_volume_mib is not None or self.guest_max_artifact_bytes is not None
-            or self.supports_emulated_pkcs11 or self.supports_shared_guest
+            or self.supports_emulated_pkcs11 or self.supports_shared_guest or self.supports_native_compose
         ):
             raise ValueError("guest budgets require an explicit guest runtime")
         execution_class = nebius_cpu_execution_class(
@@ -320,6 +321,7 @@ def build_nebius_runtime_profile(
     service_lifecycle_ready: bool = False,
     terminus2_multi_model_policies: frozenset[MixPolicy] = frozenset(),
     supports_task_identity: bool = False,
+    supports_native_compose: bool = False,
     guest_runtime: Literal["qemu-tcg-v1"] | None = None,
     supports_emulated_pkcs11: bool = False,
     supports_shared_guest: bool = False,
@@ -351,6 +353,7 @@ def build_nebius_runtime_profile(
         terminus2_multi_model_policies=terminus2_multi_model_policies,
         supports_task_artifact_inputs=supports_task_artifact_inputs,
         supports_task_identity=supports_task_identity,
+        supports_native_compose=supports_native_compose,
         guest_runtime=guest_runtime,
         supports_emulated_pkcs11=supports_emulated_pkcs11,
         supports_shared_guest=supports_shared_guest,
@@ -465,6 +468,8 @@ def automatic_service_execution_rejections(
 
     task = normalize_steps(task)
     declared_rejections = task_runtime_rejections(task, agent_name=trial.agent_name)
+    from loom.verifier_runtime import independent_verifier_rejections
+    declared_rejections += independent_verifier_rejections(task, trial, allow_image_preparation=allow_task_image_preparation)
     env = task.environment
     # A skipped trial never starts the verifier sandbox, so only the agent identity is checked.
     identity_users = (
@@ -491,11 +496,11 @@ def automatic_service_execution_rejections(
     reasons.extend(item.code for item in execution_requirement_diagnostics(
         env.execution_requirements, supported_capabilities=supported_capabilities,
     ))
-    if trial.isolation == "container" and guest_capabilities(task):
+    if trial.isolation == "container" and (guest_capabilities(task) or env.native_compose is not None):
         # A task that needs a guest kernel cannot run safely in a shared kernel.
         reasons.append("isolation_container_unsatisfiable")
     if effective_guest_capabilities(task, trial) is not None:
-        if env.image_entrypoint or env.entrypoint:
+        if env.native_compose is None and (env.image_entrypoint or env.entrypoint):
             reasons.append("guest_image_entrypoint_unsupported")
         if not controller:
             reasons.append("isolation_guest_response_only" if trial.isolation == "guest"
@@ -1022,6 +1027,8 @@ def runtime_profile_rejections(
         reasons.append("network_policy_override_not_supported")
         effective_network_policy = task.environment.baseline_network_policy
     guest = effective_guest_capabilities(task, trial) is not None
+    if task.environment.native_compose is not None and not profile.supports_native_compose:
+        reasons.append("native_compose_runtime_unqualified")
     if guest:
         if profile.guest_runtime is None:
             reasons.append("guest_runtime_unavailable")
@@ -1115,7 +1122,7 @@ def verifier_handoff_path(committed_path: str) -> str | None:
     The verifier reads these beside its private controller state; `.loom/` is
     never copied into the graded sandbox.
     """
-    if committed_path in {"artifacts/workspace.tar", "artifacts/workspace-references.json"}:
+    if committed_path in {"artifacts/workspace.tar", "artifacts/workspace-references.json", "artifacts/structured-artifacts.tar"}:
         return ".loom/" + committed_path.removeprefix("artifacts/")
     if committed_path.startswith("artifacts/mutable-paths/"):
         return ".loom/" + committed_path.removeprefix("artifacts/")

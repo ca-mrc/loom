@@ -746,7 +746,9 @@ async def reserve_trial_execution(
     if grant is not None:
         if (
             runtime_contract.task_image_materialization_id != grant.materialization_id
-            or runtime_contract.task_image_ref != grant.registry_images.get("task")
+            or runtime_contract.task_image_ref != grant.registry_images.get(
+                "verifier" if runtime_contract.execution_role == "verifier"
+                and TaskConfig.model_validate(grant.task_config).verifier.environment is not None else "task")
             or runtime_contract.task_revision_sha256 != "sha256:" + grant.task_checksum
         ):
             raise ServiceExecutionConflict("runtime plan does not match the trial's prepared image")
@@ -754,7 +756,9 @@ async def reserve_trial_execution(
 
         frozen_task = TaskConfig.model_validate(grant.task_config)
         prepared_task = resolve_prepared_task(frozen_task, grant)
+        from loom.verifier_runtime import validate_prepared_sandbox_images, verifier_execution_task
         try:
+            validate_prepared_sandbox_images(runtime_contract, prepared_task)
             validate_prepared_fixtures(
                 runtime_contract, frozen_task=frozen_task, prepared_task=prepared_task,
             )
@@ -762,7 +766,9 @@ async def reserve_trial_execution(
             raise ServiceExecutionConflict(str(exc)) from exc
         effective_trial = (TrialConfig.model_validate(trial.config)
                            if prepared_task.service_execution is None else None)
-        if requirements != workload_requirements_from_task(prepared_task, effective_trial):
+        requirement_task = (verifier_execution_task(prepared_task)
+                            if runtime_contract.execution_role == "verifier" else prepared_task)
+        if requirements != workload_requirements_from_task(requirement_task, effective_trial):
             raise ServiceExecutionConflict("requirements do not match the prepared task")
     elif runtime_contract.task_image_materialization_id is not None:
         raise ServiceExecutionConflict("prepared image is not associated with this trial")

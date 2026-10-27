@@ -20,6 +20,7 @@ from pydantic import (
 )
 
 from loom.execution_requirements import TaskExecutionRequirementsV1
+from loom.models.compose import NativeComposeSpec
 from loom.models.harbor import (
     ArtifactSource,
     HarborConversion,
@@ -170,8 +171,13 @@ class EnvironmentConfig(BaseModel):
     gpus: int = Field(default=0, ge=0)
     gpu_types: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
     compose_files: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
+    native_compose: NativeComposeSpec | None = Field(default=None, exclude_if=lambda value: value is None)
     single_service_compose: SingleServiceCompose | None = Field(default=None, exclude_if=lambda value: value is None)
     sidecars: list[TaskSidecarConfig] = []
+
+    @field_serializer("native_compose")
+    def _compact_compose(self, value: NativeComposeSpec | None) -> dict[str, Any] | None:
+        return value.model_dump(mode="json", exclude_defaults=True) if value is not None else None
 
     @field_validator("supplementary_groups")
     @classmethod
@@ -196,6 +202,10 @@ class EnvironmentConfig(BaseModel):
                 or self.user not in {"root", "0", "0:0"}
             ):
                 raise ValueError("privileged Compose requires a root sandbox with an isolated guest kernel")
+        if self.native_compose is not None and (
+            self.single_service_compose is not None or self.compose_files != (self.native_compose.source,)
+        ):
+            raise ValueError("native Compose must cover its retained source without another projection")
         return self
 
     @model_serializer(mode="wrap")

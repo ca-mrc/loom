@@ -25,6 +25,13 @@ from loom_worker import main_loop as ml
 from loom_worker.runner_pool import RunnerPool
 
 
+@pytest.fixture(autouse=True)
+def _fake_execution_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    # These mocked worker lifecycles exercise a supported x86 worker, regardless
+    # of the developer host. Real host admission retains its architecture guard.
+    monkeypatch.setattr(ml, "_host_cpu_arch", lambda: "x86_64")
+
+
 @pytest.mark.parametrize("stage", ["store", "buckets"])
 async def test_worker_storage_startup_preserves_failure_and_closes_acquired_resources(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str,

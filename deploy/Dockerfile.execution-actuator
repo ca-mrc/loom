@@ -11,18 +11,20 @@ COPY src/loom/__init__.py src/loom/dockerfile_instructions.py src/loom/nebius_te
     src/loom/execution_contract.py src/loom/execution_architecture.py \
     src/loom/execution_image_admission.py src/loom/execution_runtime_contract.py \
     src/loom/execution_diagnosis_store.py src/loom/execution_failure_diagnosis.py \
+    src/loom/data_lifecycle.py src/loom/data_lifecycle_registry.py src/loom/data_lifecycle_capacity.py \
+    src/loom/data_lifecycle_capacity_sql.py src/loom/data_lifecycle_gc.py src/loom/staging_mutation_epoch.py \
     src/loom/execution_requirements.py src/loom/mutable_paths.py src/loom/sandbox_identity.py src/loom/task_fixtures.py \
     src/loom/task_image_materialization.py src/loom/task_image_build_plan.py \
     src/loom/task_image_compatibility.py src/loom/task_image_errors.py src/loom/task_image_failure.py \
-    src/loom/task_image_metadata.py src/loom/task_environment_handoff.py src/loom/runtime_environment.py \
+    src/loom/task_image_metadata.py src/loom/task_image_archives.py src/loom/task_environment_handoff.py src/loom/runtime_environment.py src/loom/compose_image_inputs.py \
     src/loom/nebius_rollout_guard.py src/loom/nebius_kubernetes.py src/loom/startup_retry.py src/loom/terminal_result_semantics.py src/loom/resource_usage_store.py ./src/loom/
 COPY src/loom/agent_runtime.py src/loom/request_params.py src/loom/service_execution_materialization.py \
     src/loom/prebuilt_task_images.py \
-    src/loom/verifier_runtime.py src/loom/hosted_harness.py src/loom/task_sandbox_planner.py \
+    src/loom/verifier_runtime.py src/loom/harbor_verifier_script.py src/loom/guest_compose.py src/loom/hosted_harness.py src/loom/task_sandbox_planner.py \
     src/loom/task_bundle_registration.py src/loom/task_bundle_source.py \
     src/loom/task_bundle_source_journal.py src/loom/task_bundle_source_storage.py \
     src/loom/task_image_bundle_manifest.py src/loom/terminal_bench_normalize.py \
-    src/loom/harbor_task_import.py src/loom/task_runtime_compatibility.py ./src/loom/
+    src/loom/harbor_task_import.py src/loom/task_runtime_compatibility.py src/loom/artifact_contract.py ./src/loom/
 COPY src/loom/nebius_pool_allocation.py src/loom/nebius_pool_contract.py \
     src/loom/nebius_pool_execution_runtime.py src/loom/nebius_pool_lifecycle.py \
     src/loom/nebius_pool_native_runtime.py src/loom/nebius_pool_priority.py \
@@ -42,13 +44,14 @@ COPY src/loom/security ./src/loom/security
 COPY src/loom/models/__init__.py src/loom/models/healthcheck.py src/loom/models/mcp.py \
     src/loom/models/networking.py src/loom/models/skill.py src/loom/models/task.py \
     src/loom/models/types.py src/loom/models/trial.py src/loom/models/resource_usage.py \
-    src/loom/models/harbor.py src/loom/models/task_compatibility.py ./src/loom/models/
+    src/loom/models/harbor.py src/loom/models/compose.py src/loom/models/task_compatibility.py ./src/loom/models/
 COPY src/loom/pipeline/__init__.py src/loom/pipeline/keys.py ./src/loom/pipeline/
 COPY src/loom_control_plane/__init__.py src/loom_control_plane/execution_admission.py \
     src/loom_control_plane/execution_capacity.py src/loom_control_plane/execution_finance.py \
     src/loom_control_plane/execution_capacity_targets.py src/loom_control_plane/execution_capacity_wait.py \
     src/loom_control_plane/execution_placement.py \
     src/loom_control_plane/task_image_materializations.py src/loom_control_plane/task_image_capacity.py \
+    src/loom_control_plane/task_image_archive_retention.py \
     src/loom_control_plane/task_image_capacity_wait.py src/loom_control_plane/task_image_io_capacity.py \
     src/loom_control_plane/metrics.py src/loom_control_plane/service_execution.py \
     src/loom_control_plane/service_execution_scheduler.py \
@@ -66,6 +69,7 @@ import loom_execution_actuator.__main__
 import loom_execution_capacity_collector.__main__
 import loom.task_bundle_source_journal
 import loom.execution_diagnosis_store
+import loom_control_plane.task_image_archive_retention
 from loom.models.task import EnvironmentConfig, TaskSidecarConfig, TaskConfig
 from loom.harbor_task_import import project_harbor_task
 from loom.task_runtime_compatibility import task_runtime_rejections
@@ -89,6 +93,14 @@ native = TaskConfig.model_validate(project_harbor_task({
     "environment": {"gpus": 1, "gpu_types": ["H100"]},
 }))
 assert "environment.gpu_types: exact_gpu_model_runtime_unavailable" in task_runtime_rejections(native)
+public = TaskConfig.model_validate(project_harbor_task({
+    "task": {"name": "artifact-import-check"}, "artifacts": ["/logs/artifacts"],
+}))
+assert task_runtime_rejections(public) == ()
+private = TaskConfig.model_validate(project_harbor_task({
+    "task": {"name": "protected-artifact-check"}, "artifacts": ["/tests/private"],
+}))
+assert "artifact_sources.0.source: protected_artifact_path" in task_runtime_rejections(private)
 PY
 EXPOSE 8093
 CMD ["python", "-m", "loom_execution_actuator"]

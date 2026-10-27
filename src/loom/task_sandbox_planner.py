@@ -42,8 +42,14 @@ from loom.hosted_harness import (
     SANDBOX_CONTROLLER_MODULE,
     HostedHarnessSpec,
 )
-from loom.models.networking import NetworkPolicy, WebAllowlist, WebDestination, hosted_http_egress
-from loom.models.task import TaskConfig
+from loom.models.networking import (
+    NetworkPolicy,
+    WebAllowlist,
+    WebDestination,
+    hosted_http_egress,
+    resolve_effective_network_policy,
+)
+from loom.models.task import EnvironmentConfig, TaskConfig
 from loom.models.trial import TrialConfig
 from loom.sandbox_identity import (
     groups_for_guest_user,
@@ -53,6 +59,7 @@ from loom.sandbox_identity import (
 )
 from loom.task_environment_handoff import (
     RESOLVED_TASK_ENVIRONMENT,
+    RESOLVED_VERIFIER_ENVIRONMENT,
     decode_resolved_task_environment,
     encode_resolved_task_environment,
 )
@@ -127,6 +134,7 @@ class _Topology:
     guest_execution: GuestExecutionV1 | None
     shared: bool
     retained_services: bool
+    deferred_independent_verifier: bool = False
     shared_guest: bool = False
     skipped: bool = False
 
@@ -136,7 +144,7 @@ class _Topology:
         # cannot survive the agent pod, so their verifier also grades beside
         # them. Separate grading otherwise defers the verifier until the agent
         # pod is gone (#2212). Skip launches neither verifier.
-        if self.skipped:
+        if self.skipped or self.deferred_independent_verifier:
             return False
         return self.shared or self.guest_execution is not None or self.retained_services
 
@@ -150,7 +158,7 @@ class _Topology:
     def sandbox_roles(self) -> tuple[str, ...]:
         if self.skipped:
             return (TASK_SANDBOX,)
-        fresh_verifier = (self.guest_execution is not None and not self.in_place_verifier) or (self.colocated_verifier and not self.shared)
+        fresh_verifier = self.colocated_verifier and (not self.shared or not self.in_place_verifier)
         return (TASK_SANDBOX, VERIFIER_SANDBOX) if fresh_verifier else (TASK_SANDBOX,)
 
     @property
@@ -168,6 +176,8 @@ def _topology(task: TaskConfig, trial: TrialConfig, *, shared_guest: bool = Fals
                          if capabilities is not None else None),
         shared=False if skipped else resolve_verifier_env_mode(task, trial) == "shared",
         retained_services=task.environment.service_lifecycle is not None,
+        deferred_independent_verifier=(task.environment.native_compose is not None
+                                       and task.verifier.environment is not None),
         shared_guest=shared_guest,
         skipped=skipped,
     )
@@ -178,6 +188,13 @@ def _timeouts(task: TaskConfig, trial: TrialConfig) -> tuple[float, float]:
     verifier = ((trial.override_verifier_timeout_sec or task.verifier.timeout_sec)
                 * trial.verifier_timeout_multiplier)
     return agent, verifier
+
+
+def _environment_resources(env: EnvironmentConfig) -> ContainerResourcesV1:
+    if env.cpus is None or env.memory_mb is None or env.storage_mb is None:
+        raise ValueError("independent verifier requires explicit CPU, memory and storage")
+    return ContainerResourcesV1(cpu_millis=round(env.cpus * 1000), memory_mib=env.memory_mb,
+                                ephemeral_storage_mib=env.storage_mb)
 
 
 def _sandbox_sidecars(
@@ -191,10 +208,14 @@ def _sandbox_sidecars(
     agent_timeout, verifier_timeout = _timeouts(task, request.trial)
     if topology.skipped:
         verifier_timeout = 0
-    setup_timeout = request.spec.setup.timeout_seconds if request.spec.setup is not None else 0
+    setup_timeout: float = request.spec.setup.timeout_seconds if request.spec.setup is not None else 0
+    if env.native_compose is not None:
+        setup_timeout = max(setup_timeout, env.build_timeout_sec)
     exec_limit = str(math.ceil(max(_MIN_SANDBOX_EXEC_LIMIT_SECONDS, agent_timeout, verifier_timeout, setup_timeout)))
     sidecars = list(fixture_sidecars(task))
     for role in topology.sandbox_roles:
+        env = task.verifier.environment if role == VERIFIER_SANDBOX and task.verifier.environment is not None else task.environment
+        role_resources = (_environment_resources(env) if env is not task.environment else resources)
         socket = f"/loom/sandboxes/{role}/sandbox.sock"
         probe = ProbeV1(kind="exec", argv=(SANDBOX_RUNTIME_BINARY, "--check-socket", socket))
         startup_probe = (probe.model_copy(update={"failure_threshold": _GUEST_STARTUP_FAILURE_THRESHOLD})
@@ -208,10 +229,14 @@ def _sandbox_sidecars(
         guest_identity = None
         if topology.guest_execution is not None:
             identity = resolve_sandbox_identity("root")
+            if role == TASK_SANDBOX and env.native_compose is not None:
+                # This identity belongs only to the trusted guest Docker
+                # controller; agent commands run under the inner image USER.
+                user, home = "root", None
             guest_identity = resolve_guest_task_identity(
                 user, home, default_uid=profile.run_as_user, default_gid=profile.run_as_group,
                 supplementary_groups=groups_for_guest_user(
-                    user, env.user, home, env.supplementary_groups,
+                    user, env.user, home, (() if env.native_compose is not None else env.supplementary_groups),
                     default_uid=profile.run_as_user, default_gid=profile.run_as_group,
                 ),
             )
@@ -221,9 +246,11 @@ def _sandbox_sidecars(
             )
         sidecars.append(SidecarContainerV1(
             role_name=role, image_ref=env.docker_image,
-            argv=(*env.entrypoint, SANDBOX_RUNTIME_BINARY, "--socket", socket, "--exec-timeout-seconds", exec_limit),
+            argv=(*(env.entrypoint if env.native_compose is None else ()),
+                  SANDBOX_RUNTIME_BINARY, "--socket", socket, "--exec-timeout-seconds", exec_limit),
             environment={key: value for key, value in env.environment.items() if key != "HOME"},
-            resources=resources, startup_probe=startup_probe, readiness_probe=probe, private_sandbox=True,
+            task_image_component=("verifier" if role == VERIFIER_SANDBOX and task.verifier.environment is not None else None),
+            resources=role_resources, startup_probe=startup_probe, readiness_probe=probe, private_sandbox=True,
             identity=identity, guest_task_identity=guest_identity,
             guest_execution=topology.guest_execution,
         ))
@@ -233,10 +260,17 @@ def _sandbox_sidecars(
 def _output_declarations(request: TaskSandboxPlanRequest, topology: _Topology) -> tuple[RuntimeOutputDeclarationV1, ...]:
     task = request.task
     env = task.environment
+    from loom.verifier_runtime import native_independent_verifier_handoff
+    diagnostic_workspace = topology.in_place_verifier or native_independent_verifier_handoff(task)
     outputs = [RuntimeOutputDeclarationV1(
         source_path=f".loom/collected/{path}", relative_path=f"artifacts/{path}",
         kind="task_artifact", required=path in task.steps[0].required_artifacts,
     ) for path in request.output_paths]
+    if task.steps[0].artifact_sources or task.verifier.collect or native_independent_verifier_handoff(task):
+        outputs.append(RuntimeOutputDeclarationV1(
+            source_path=".loom/structured-artifacts.tar",
+            relative_path="artifacts/structured-artifacts.tar", kind="task_artifact", required=True,
+        ))
     native = tuple(
         (item.source_path, item.relative_path, item.kind, item.required) for item in request.spec.native_outputs
     )
@@ -250,19 +284,19 @@ def _output_declarations(request: TaskSandboxPlanRequest, topology: _Topology) -
             )
         ),
         *((("setup/exception.json", "diagnostics/setup-exception.json", "agent_native", False),)
-          if request.spec.setup is not None else ()),
+          if request.spec.setup is not None or env.native_compose is not None else ()),
         *((("harness-cache/outcome.json", "diagnostics/harness-cache.json", "agent_native", False),)
           if request.spec.setup is not None and request.spec.setup.cacheable else ()),
         *native,
         # An in-place verifier grades the live workdir; the archive is only
         # debugging evidence there, and its capture failure is recorded (#2589).
-        ("workspace.tar", "artifacts/workspace.tar", "task_artifact", not topology.in_place_verifier),
+        ("workspace.tar", "artifacts/workspace.tar", "task_artifact", not diagnostic_workspace),
         *((("workspace-archive.json", "diagnostics/workspace-archive.json", "diagnostic", False),)
-          if topology.in_place_verifier else ()),
+          if diagnostic_workspace else ()),
         # A fresh verifier restores the archive against this manifest and
         # reports the links it omitted beside its result.
         *((("workspace-references.json", "artifacts/workspace-references.json", "task_artifact", True),)
-          if not topology.in_place_verifier else ()),
+          if not diagnostic_workspace else ()),
         *((("verifier/workspace-handoff.json", "diagnostics/workspace-handoff.json", "diagnostic", False),)
           if not topology.in_place_verifier and not topology.skipped else ()),
         *(
@@ -296,7 +330,7 @@ def _controller_envelope(
     request: TaskSandboxPlanRequest, topology: _Topology, resources: ContainerResourcesV1,
     runtime_volume_mib: int,
 ) -> tuple[ContainerResourcesV1 | None, ExecutionResourceRequestsV1 | None]:
-    profile, storage = request.profile, request.task.environment.storage_mb
+    profile, storage = request.profile, resources.ephemeral_storage_mib
     assert storage is not None
     controller = (ContainerResourcesV1(
         cpu_millis=profile.controller_resources.cpu_millis,
@@ -304,17 +338,38 @@ def _controller_envelope(
         ephemeral_storage_mib=storage,
     ) if profile.controller_resources is not None else None)
     requests = request.resource_requests
+    if requests is not None and request.task.environment.native_compose is not None:
+        env = request.task.environment
+        assert env.cpus is not None and env.memory_mb is not None and env.storage_mb is not None
+        additions = {
+            "cpu_millis": resources.cpu_millis - round(env.cpus * 1000),
+            "memory_mib": resources.memory_mib - env.memory_mb,
+            "ephemeral_storage_mib": storage - env.storage_mb,
+        }
+        updates = {}
+        if requests.task_sandbox is not None:
+            updates["task_sandbox"] = requests.task_sandbox.model_copy(update={
+                field: getattr(requests.task_sandbox, field) + extra for field, extra in additions.items()
+            })
+        if requests.controller is not None:
+            updates["controller"] = requests.controller.model_copy(update={
+                "ephemeral_storage_mib": requests.controller.ephemeral_storage_mib + additions["ephemeral_storage_mib"],
+            })
+        requests = requests.model_copy(update=updates)
     if topology.guest_execution is None:
         return controller, requests
-    # The shared runtime payload occupies Pod ephemeral storage in addition to
-    # both guest disks. Reserve it exactly once, in the controller envelope, so
-    # rendering, finance and node-share placement use the same total.
+    # Runtime payload and prepared Compose OCI inputs remain beside the guest
+    # disk throughout the attempt. Reserve their volumes in the controller so
+    # rendering, finance and node-share placement use the same storage total.
+    from loom.task_image_archives import MAX_ARCHIVE_BYTES
+    input_storage = ((request.task.environment.storage_mb or 0) + MAX_ARCHIVE_BYTES // 1024**2
+                     if request.task.environment.native_compose is not None else 0)
     controller = ContainerResourcesV1.model_validate({
-        **(controller or resources).model_dump(), "ephemeral_storage_mib": storage + runtime_volume_mib,
+        **(controller or resources).model_dump(), "ephemeral_storage_mib": storage + runtime_volume_mib + input_storage,
     })
     if requests is not None and requests.controller is not None:
         requests = requests.model_copy(update={"controller": requests.controller.model_copy(update={
-            "ephemeral_storage_mib": requests.controller.ephemeral_storage_mib + runtime_volume_mib,
+            "ephemeral_storage_mib": requests.controller.ephemeral_storage_mib + runtime_volume_mib + input_storage,
         })})
     return controller, requests
 
@@ -344,8 +399,15 @@ def compile_task_sandbox_plan(request: TaskSandboxPlanRequest) -> ExecutionRunti
     assert env.docker_image and env.cpus and env.memory_mb and env.storage_mb
     topology = _topology(task, trial, shared_guest=profile.supports_shared_guest)
     guest = topology.guest_execution
+    cpus, memory_mb, storage_mb = env.cpus, env.memory_mb, env.storage_mb
+    if env.native_compose is not None:
+        from loom.guest_compose import compose_resource_envelope
+        envelope = compose_resource_envelope(
+            env.native_compose, main_cpus=cpus, main_memory_mb=memory_mb, main_storage_mb=storage_mb,
+        )
+        cpus, memory_mb, storage_mb = envelope.cpus, envelope.memory_mb, envelope.storage_mb
     resources = ContainerResourcesV1(
-        cpu_millis=round(env.cpus * 1000), memory_mib=env.memory_mb, ephemeral_storage_mib=env.storage_mb,
+        cpu_millis=round(cpus * 1000), memory_mib=memory_mb, ephemeral_storage_mib=storage_mb,
     )
     runtime_volume_mib = (profile.guest_runtime_volume_mib or profile.runtime_volume_mib
                           if guest is not None else profile.runtime_volume_mib)
@@ -358,10 +420,13 @@ def compile_task_sandbox_plan(request: TaskSandboxPlanRequest) -> ExecutionRunti
             request.effective_network_policy.model_dump(mode="json"), sort_keys=True, separators=(",", ":"),
         ),
     }
-    if request.has_resolved_task_environment:
+    if request.has_resolved_task_environment or env.native_compose is not None:
         if request.controller_image != profile.agent_image_ref:
             raise ValueError("resolved_task_environment_controller_unavailable")
         phase_env[RESOLVED_TASK_ENVIRONMENT] = encode_resolved_task_environment(env)
+    if task.verifier.environment is not None:
+        phase_env[RESOLVED_VERIFIER_ENVIRONMENT] = encode_resolved_task_environment(task.verifier.environment)
+        phase_env["LOOM_VERIFIER_EXECUTION_CLASS_ID"] = profile.execution_class_id
     # A frozen agent release may select an older controller than the candidate
     # qualified by the profile. Do not send that image a new input contract.
     if (profile.supports_task_artifact_inputs and request.controller_image == profile.agent_image_ref
@@ -373,6 +438,8 @@ def compile_task_sandbox_plan(request: TaskSandboxPlanRequest) -> ExecutionRunti
         return ProcessPhaseV1(
             role=role, argv=sandbox_phase_argv(mode, spec.controller_module),
             working_directory="/app", timeout_seconds=round(timeout), environment=phase_env,
+            finalization_timeout_seconds=(math.ceil(sum(hook.timeout_sec for hook in task.verifier.collect) + 120)
+                if role == "agent" and (task.steps[0].artifact_sources or task.verifier.collect) else 0),
         )
 
     published_refs: set[str | None] = {request.controller_image, profile.runtime_image_ref}
@@ -396,7 +463,7 @@ def compile_task_sandbox_plan(request: TaskSandboxPlanRequest) -> ExecutionRunti
         task_resources=resources,
         resource_requests=resource_requests,
         controller_resources=controller_resources,
-        workspace_mib=env.storage_mb,
+        workspace_mib=storage_mb,
         runtime_volume_mib=runtime_volume_mib,
         termination_grace_seconds=profile.termination_grace_seconds,
         task_input=RuntimeTaskInputV1(
@@ -406,7 +473,8 @@ def compile_task_sandbox_plan(request: TaskSandboxPlanRequest) -> ExecutionRunti
         output_declarations=_output_declarations(request, topology),
         sidecars=tuple(_sandbox_sidecars(request, topology, resources)),
         setup=(
-            (phase("setup", HARNESS_SETUP_PHASE, spec.setup.timeout_seconds),) if spec.setup is not None else ()
+            ((phase("setup", "setup-native-compose", env.build_timeout_sec),) if env.native_compose is not None else ())
+            + ((phase("setup", HARNESS_SETUP_PHASE, spec.setup.timeout_seconds),) if spec.setup is not None else ())
         ),
         setup_egress=_setup_egress(spec),
         setup_cache=_setup_cache(spec),
@@ -442,16 +510,22 @@ def compile_deferred_verifier_plan(
         task = task.model_copy(update={"environment": decode_resolved_task_environment(
             agent_plan.main.environment[RESOLVED_TASK_ENVIRONMENT],
         )})
+    if RESOLVED_VERIFIER_ENVIRONMENT in agent_plan.main.environment:
+        task = task.model_copy(update={"verifier": task.verifier.model_copy(update={
+            "environment": decode_resolved_task_environment(agent_plan.main.environment[RESOLVED_VERIFIER_ENVIRONMENT]),
+        })})
     task_sandbox = next(sidecar for sidecar in agent_plan.sidecars if sidecar.role_name == TASK_SANDBOX)
-    user = inherited_sandbox_user(task.environment.user, task.verifier.user)
-    home = task.environment.environment.get("HOME")
+    env = task.verifier.environment or task.environment
+    independent = task.verifier.environment is not None
+    user = inherited_sandbox_user(env.user, task.verifier.user)
+    home = env.environment.get("HOME")
     guest_identity = None
-    if task_sandbox.guest_execution is not None:
+    if task_sandbox.guest_execution is not None and not independent:
         identity = resolve_sandbox_identity("root")
         guest_identity = resolve_guest_task_identity(
             user, home, default_uid=agent_plan.run_as_user, default_gid=agent_plan.run_as_group,
             supplementary_groups=groups_for_guest_user(
-                user, task.environment.user, home, task.environment.supplementary_groups,
+                user, env.user, home, env.supplementary_groups,
                 default_uid=agent_plan.run_as_user, default_gid=agent_plan.run_as_group,
             ),
         )
@@ -468,9 +542,18 @@ def compile_deferred_verifier_plan(
 
     # The renderer derives the mounted socket from role_name. Retarget the
     # runtime and both probes together while preserving the frozen attempt.
+    resources = _environment_resources(env) if independent else task_sandbox.resources
     verifier_sandbox = task_sandbox.model_copy(update={
+        **({"image_ref": env.docker_image, "resources": resources,
+             "task_image_component": "verifier",
+             "environment": {key: value for key, value in env.environment.items() if key != "HOME"}}
+           if independent else {}),
         "role_name": VERIFIER_SANDBOX, "identity": identity, "guest_task_identity": guest_identity,
-        "argv": verifier_argv(task_sandbox.argv),
+        "guest_execution": None if independent else task_sandbox.guest_execution,
+        "argv": ((*env.entrypoint, SANDBOX_RUNTIME_BINARY, "--socket",
+                  f"/loom/sandboxes/{VERIFIER_SANDBOX}/sandbox.sock", "--exec-timeout-seconds",
+                  str(max(_MIN_SANDBOX_EXEC_LIMIT_SECONDS, verifier_timeout_seconds)))
+                 if independent else verifier_argv(task_sandbox.argv)),
         "startup_probe": task_sandbox.startup_probe.model_copy(update={
             "argv": verifier_argv(task_sandbox.startup_probe.argv),
         }),
@@ -492,11 +575,35 @@ def compile_deferred_verifier_plan(
         requests = (ExecutionResourceRequestsV1(
             controller=requests.controller, verifier_sandbox=requests.task_sandbox,
         ) if requests.controller is not None or requests.task_sandbox is not None else None)
+    if independent:
+        requests = (ExecutionResourceRequestsV1(
+            controller=(agent_plan.container_request("execution").model_copy(update={
+                "ephemeral_storage_mib": resources.ephemeral_storage_mib,
+            }).model_dump()), verifier_sandbox=resources.model_dump(),
+        ) if agent_plan.controller_resources is not None else None)
     # Keep the attempt's trusted controller module; the phase is fixed.
     argv = agent_plan.main.argv
     module = argv[3] if argv[:3] == ("python", "-I", "-m") and len(argv) > 3 else SANDBOX_CONTROLLER_MODULE
+    verifier_policy = agent_plan.effective_network_policy
+    main_environment = dict(agent_plan.main.environment)
+    if independent:
+        trial = TrialConfig.model_validate_json(main_environment["LOOM_TASK_TRIAL_JSON"])
+        verifier_policy = resolve_effective_network_policy(baseline=env.baseline_network_policy,
+                                                           override=trial.baseline_network_policy_override)
+        main_environment["LOOM_EFFECTIVE_NETWORK_POLICY_JSON"] = verifier_policy.model_dump_json()
+    verifier_egress = hosted_http_egress(verifier_policy) if verifier_policy is not None else None
+    if independent and verifier_egress is not None and TASK_EGRESS_OUTPUT not in outputs:
+        outputs.append(TASK_EGRESS_OUTPUT)
     deferred = agent_plan.model_copy(update={
         "execution_role": "verifier",
+        **({"execution_class_id": main_environment["LOOM_VERIFIER_EXECUTION_CLASS_ID"],
+             "effective_network_policy": verifier_policy, "task_egress": verifier_egress}
+           if independent else {}),
+        **({"task_image_ref": env.docker_image, "task_resources": resources,
+             "workspace_mib": resources.ephemeral_storage_mib, "node_resource_allocation": None,
+             "controller_resources": (agent_plan.controller_resources.model_copy(update={
+                 "ephemeral_storage_mib": resources.ephemeral_storage_mib,
+             }) if agent_plan.controller_resources is not None else None)} if independent else {}),
         # Harness installation belongs to the agent's task-sandbox. This pod
         # grades the committed workspace in verifier-sandbox; it neither runs
         # the agent CLI nor owns the task-sandbox socket used by its setup.
@@ -512,9 +619,10 @@ def compile_deferred_verifier_plan(
             verifier_sandbox,
         ),
         "main": agent_plan.main.model_copy(update={
-            "role": "verifier",
+            "role": "verifier", "environment": main_environment,
             "argv": sandbox_phase_argv(VERIFY_SANDBOX_PHASE, module),
             "timeout_seconds": verifier_timeout_seconds,
+            "finalization_timeout_seconds": 0,
         }),
         "output_declarations": tuple(outputs),
         "resource_requests": requests,

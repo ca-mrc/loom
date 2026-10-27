@@ -319,6 +319,8 @@ def secret_requirements(
         result[namespace, "loom-task-build-registry"] = {"credentials.json"}
         if builder.get("cache_bucket"):
             result[namespace, "loom-task-build-cache"] = {"access-key", "secret-key"}
+        if builder.get("archive_secret_name"):
+            result[namespace, builder["archive_secret_name"]] = {"access-key", "secret-key"}
     return result
 
 

@@ -59,6 +59,7 @@ class OracleAgent:
 
     solution_dir: PurePosixPath | None = None
     execution_cwd: PurePosixPath | None = None
+    solution_environment: dict[str, str] = field(default_factory=dict)
 
     async def run(
         self,
@@ -84,7 +85,7 @@ class OracleAgent:
         execution_cwd = self.execution_cwd or solution_dir
         remote_solve = shlex.quote((solution_dir / _SOLVE_SCRIPT_NAME).as_posix())
         cmd = f"chmod +x {remote_solve} && {remote_solve}"
-        result: ExecResult = await env.exec(cmd, cwd=execution_cwd)
+        result: ExecResult = await env.exec(cmd, cwd=execution_cwd, env=self.solution_environment or None)
 
         await trajectory.append(EnvExecEvent(
             emitted_at=datetime.now(UTC),

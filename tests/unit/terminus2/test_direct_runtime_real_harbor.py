@@ -166,7 +166,10 @@ async def test_real_harbor_direct_provider_and_usage(
 
     assert Terminus2.__module__ == "harbor.agents.terminus_2.terminus_2"
     distribution = importlib.metadata.distribution("harbor")
-    assert distribution.version == "0.18.0"
+    expected = json.loads(
+        (Path(__file__).resolve().parents[3] / "config/harbor-runtime.json").read_text(),
+    )
+    assert distribution.version == expected["version"]
     direct_url = distribution.read_text("direct_url.json")
     if direct_url is not None:
         assert json.loads(direct_url).get("vcs_info", {}).get("commit_id") == HARBOR_COMPAT_SHA

@@ -156,14 +156,20 @@ def test_explicit_pytest_verifier_is_not_treated_as_native_script(tmp_path):
 
 
 def test_compose_requirement_is_not_silently_discarded(tmp_path):
-    result, _, _ = materialize(
+    result, store, files = materialize(
         tmp_path, extra_files={"environment/compose.yaml": b"services: {}\n"},
     )
     assert result.status == "ready", result.error_summary
     row = result.task_rows[0]
-    assert "environment.compose_files: native_compose_runtime_unavailable" in (
+    task = TaskConfig.model_validate(row.config)
+    topology = task.environment.native_compose
+    assert topology is not None and str(topology.source) == "environment/compose.yaml"
+    assert [service.name for service in topology.services] == ["main"]
+    prefix = row.source.removeprefix("s3://artifacts/")
+    assert store.objects[prefix + "environment/compose.yaml"] == files["environment/compose.yaml"]
+    assert "environment.compose_files: independent_verifier_required" in (
         automatic_service_execution_rejections(
-            TaskConfig.model_validate(row.config), TrialConfig(agent_name="oracle", agent_model=None),
+            task, TrialConfig(agent_name="oracle", agent_model=None),
             source_provenance=row.source_provenance, allow_task_image_preparation=True,
         )
     )
@@ -244,7 +250,7 @@ def test_single_service_compose_preserves_source_and_requires_guest_for_privileg
 
 
 @pytest.mark.parametrize("extra", ["volumes: ['/etc:/host']", "network_mode: host",
-                                    "devices: ['/dev/kvm']", "command: echo changed"])
+                                    "devices: ['/dev/kvm']"])
 def test_unsupported_compose_semantics_remain_blocked(tmp_path, extra):
     result, _, _ = materialize(tmp_path, extra_files={
         "environment/compose.yaml": f"services:\n  app:\n    build: .\n    {extra}\n".encode(),
@@ -255,6 +261,26 @@ def test_unsupported_compose_semantics_remain_blocked(tmp_path, extra):
         TaskConfig.model_validate(row.config), TrialConfig(agent_name="oracle", agent_model=None),
         source_provenance=row.source_provenance, allow_task_image_preparation=True,
         supports_shared_guest=True)
+
+
+def test_native_compose_command_is_preserved_but_needs_independent_verifier(tmp_path):
+    compose = b"services:\n  app:\n    build: .\n    command: echo changed\n"
+    result, store, _ = materialize(tmp_path, extra_files={"environment/compose.yaml": compose})
+    assert result.status == "ready", result.error_summary
+    row = result.task_rows[0]
+    task = TaskConfig.model_validate(row.config)
+    topology = task.environment.native_compose
+    assert topology is not None
+    app = next(service for service in topology.services if service.name == "app")
+    assert app.command == ("echo", "changed")
+    assert app.build is not None
+    prefix = row.source.removeprefix("s3://artifacts/")
+    assert store.objects[prefix + "environment/compose.yaml"] == compose
+    reasons = automatic_service_execution_rejections(
+        task, TrialConfig(agent_name="oracle", agent_model=None),
+        source_provenance=row.source_provenance, allow_task_image_preparation=True,
+        supports_shared_guest=True)
+    assert "environment.compose_files: independent_verifier_required" in reasons
 
 
 def test_compose_build_path_overrides_only_inferred_harbor_defaults(tmp_path):

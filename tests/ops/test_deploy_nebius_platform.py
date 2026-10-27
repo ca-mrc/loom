@@ -262,6 +262,7 @@ def test_on_demand_build_secret_preflight_and_namespace(
     config["task_image_builder"] = {
         "registry_repository": "cr.eu-north1.nebius.cloud/test/task-images",
         "cache_bucket": config["buckets"]["artifacts"],
+        "archive_secret_name": "loom-task-image-archive-writer",
     }
     files = build_platform(config, candidate, profile, {}, repo_root=deploy.ROOT)
     write_platform(files, config, candidate, tmp_path)
@@ -272,6 +273,7 @@ def test_on_demand_build_secret_preflight_and_namespace(
     assert requirements[namespace, "loom-task-build-source"] == {"access-key", "secret-key"}
     assert requirements[namespace, "loom-task-build-registry"] == {"credentials.json"}
     assert requirements[namespace, "loom-task-build-cache"] == {"access-key", "secret-key"}
+    assert requirements[namespace, "loom-task-image-archive-writer"] == {"access-key", "secret-key"}
 
 
 @pytest.mark.parametrize("cache_enabled", [False, True])

@@ -18,6 +18,7 @@ from sqlalchemy import create_engine, delete, func, insert, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
+from loom.agent.terminus2.provenance import HARBOR_COMPAT_SHA
 from loom.db.schema import (
     Artifact,
     ArtifactLineageEdge,
@@ -1747,6 +1748,7 @@ def _tb2_v2_events_jsonl(
     trial_id: UUID,
     artifact_hash: str,
     terminal_state: str = "succeeded",
+    harbor_compat_sha: str = HARBOR_COMPAT_SHA,
 ) -> bytes:
     emitted_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     common = {
@@ -1762,7 +1764,7 @@ def _tb2_v2_events_jsonl(
             "parser_name": "json",
             "prompt_hash": "abc",
             "template_hashes": {},
-            "harbor_compat_sha": "527d50deb63a5d279e8c20593c18a2cbc7f61f9e",
+            "harbor_compat_sha": harbor_compat_sha,
             "benchmark_provenance": None,
             "loom_runtime_revision": "1.0",
             "terminal_image_digest": None,
@@ -1867,6 +1869,8 @@ def _seed_tb2_v2_trial(
     task_id: str,
     terminal_state: str = "succeeded",
     atif_final_state: str = "succeeded",
+    harbor_compat_sha: str = HARBOR_COMPAT_SHA,
+    agent_version: str | None = None,
 ) -> bytes:
     native = json.dumps(
         {
@@ -1901,6 +1905,7 @@ def _seed_tb2_v2_trial(
             trial_id=trial_id,
             artifact_hash=artifact_hash,
             terminal_state=terminal_state,
+            harbor_compat_sha=harbor_compat_sha,
         )
     )
     fake_s3.objects[(settings.trajectories_bucket, f"{prefix}/atif.json")] = json.dumps(
@@ -1929,6 +1934,7 @@ def _seed_tb2_v2_trial(
             config={
                 "agent_name": "terminus-2",
                 "agent_model": {"provider": "yibu", "name": "glm-5.1-thinking"},
+                **({"agent_version": agent_version} if agent_version is not None else {}),
             },
             trajectory_index={
                 "trajectory_uri": (f"s3://{settings.trajectories_bucket}/{prefix}/events.jsonl"),
@@ -1975,6 +1981,124 @@ def _seed_tb2_v2_trial(
     return native
 
 
+# The deployment default before #2403; historical serialized data stays readable.
+_HISTORICAL_HARBOR_018_SOURCE = "527d50deb63a5d279e8c20593c18a2cbc7f61f9e"
+
+
+@pytest.mark.parametrize(
+    ("runtime_case", "error_code"),
+    [
+        ("legacy-unbound", None),
+        ("legacy-default-profile", None),
+        ("frozen-old", None),
+        ("foreign-source", "mixed_provenance"),
+        ("mixed-default", "mixed_provenance"),
+        ("mixed-frozen", "mixed_provenance"),
+        ("mismatch-frozen", "mixed_provenance"),
+        ("missing-binding", "invalid_runtime_binding"),
+        ("other-version-binding", "invalid_runtime_binding"),
+        ("duplicate-binding", "invalid_runtime_binding"),
+        ("malformed-binding", "invalid_runtime_binding"),
+        ("legacy-benchmark", "legacy_benchmark_provenance"),
+    ],
+)
+async def test_raw_harbor_tb2_v2_historical_runtime_compatibility(
+    delivery_setup: dict[str, object],
+    postgres_url: str,
+    runtime_case: str,
+    error_code: str | None,
+) -> None:
+    from tests.integration.test_service_batches_crud import _service_execution_runtime_profile
+    from tests.support.agent_runtime import release
+
+    selected_trials: dict[str, UUID] = delivery_setup["selected_trials"]  # type: ignore[assignment]
+    settings: LoomServiceSettings = delivery_setup["settings"]  # type: ignore[assignment]
+    fake_s3: _FakeS3Client = delivery_setup["fake_s3"]  # type: ignore[assignment]
+    team_id: UUID = delivery_setup["team_id"]  # type: ignore[assignment]
+    source = _HISTORICAL_HARBOR_018_SOURCE
+    if runtime_case == "foreign-source":
+        source = "c" * 40
+    elif runtime_case == "mismatch-frozen":
+        source = HARBOR_COMPAT_SHA
+    explicit_version = runtime_case in {
+        "frozen-old", "mixed-frozen", "mismatch-frozen", "missing-binding",
+        "other-version-binding", "duplicate-binding", "malformed-binding",
+    }
+    agent_version = "frozen-harbor-018" if explicit_version else None
+    profile = None
+    if runtime_case == "legacy-default-profile":
+        default = _service_execution_runtime_profile()
+        # Predates both the version label and explicit runtime bindings.
+        profile = default.model_copy(update={"agent_image_ref": default.task_image_ref}).model_dump(mode="json")
+        profile.pop("agent_runtime_bindings")
+    elif explicit_version and runtime_case != "missing-binding":
+        binding = release(agent_version).binding().model_copy(update={
+            "harbor_source_revision": _HISTORICAL_HARBOR_018_SOURCE,
+        })
+        if runtime_case == "other-version-binding":
+            binding = binding.model_copy(update={"agent_version": "another-release"})
+        bindings = [binding.model_dump(mode="json")]
+        if runtime_case == "duplicate-binding":
+            bindings.append(dict(bindings[0]))
+        elif runtime_case == "malformed-binding":
+            bindings[0]["harbor_source_revision"] = "not-a-sha"
+        profile = _service_execution_runtime_profile().model_dump(mode="json")
+        profile["agent_runtime_bindings"] = bindings
+
+    sync_engine = create_engine(postgres_url)
+    try:
+        with sync_engine.begin() as conn:
+            conn.execute(update(Batch).where(Batch.id.in_([
+                delivery_setup["main_batch_id"], delivery_setup["supplemental_batch_id"],
+                delivery_setup["targeted_batch_id"],
+            ])).values(service_execution_runtime_profile=profile, backend="nebius"))
+            for task_id, trial_id in selected_trials.items():
+                _seed_tb2_v2_trial(
+                    conn=conn, fake_s3=fake_s3, settings=settings, team_id=team_id,
+                    trial_id=trial_id, task_id=task_id,
+                    harbor_compat_sha=source, agent_version=agent_version,
+                )
+                if runtime_case in {"mixed-default", "mixed-frozen", "legacy-benchmark"}:
+                    key = (settings.trajectories_bucket, f"{team_id}/{trial_id}/events.jsonl")
+                    rows = [json.loads(line) for line in fake_s3.objects[key].splitlines()]
+                    duplicate = dict(rows[0])
+                    duplicate["seq"] = len(rows) + 1
+                    if runtime_case == "legacy-benchmark":
+                        duplicate["benchmark_provenance"] = {"source_revision": "91e10457"}
+                    else:
+                        duplicate["harbor_compat_sha"] = HARBOR_COMPAT_SHA
+                    rows.append(duplicate)
+                    fake_s3.objects[key] = b"".join((json.dumps(row) + "\n").encode() for row in rows)
+    finally:
+        sync_engine.dispose()
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=delivery_setup["app"]), base_url="http://svc",  # type: ignore[arg-type]
+    ) as client:
+        response = await client.post(
+            f"/api/v1/batches/{delivery_setup['main_batch_id']}/delivery-export",
+            headers={"Authorization": f"Bearer {delivery_setup['raw']}"},
+            json={"mode": "raw-harbor-tb2-v2", "supplemental_batch_ids": [
+                str(delivery_setup["supplemental_batch_id"]), str(delivery_setup["targeted_batch_id"]),
+            ]},
+        )
+    if error_code is not None:
+        assert response.status_code == 409, response.text
+        assert response.json()["detail"]["code"] == error_code
+        return
+    assert response.status_code == 201, response.text
+    body = response.json()
+    archive_bytes = fake_s3.objects[(body["storage"]["bucket"], body["storage"]["key"])]
+    with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as tar:
+        _assert_complete_payload_checksums(tar)
+        for task_id, trial_id in selected_trials.items():
+            provenance = json.load(tar.extractfile(  # type: ignore[arg-type]
+                f"agent_runs/{task_id}/{trial_id}/export_provenance.json",
+            ))
+            assert provenance["harbor_compat_sha"] == _HISTORICAL_HARBOR_018_SOURCE
+            assert tar.extractfile(f"agent_runs/{task_id}/{trial_id}/native/harbor_trajectory.json").read()  # type: ignore[union-attr]
+
+
 async def test_raw_harbor_tb2_v2_export_rejects_legacy_runtime_stream(
     delivery_setup: dict[str, object],
     postgres_url: str,
@@ -2005,7 +2129,7 @@ async def test_raw_harbor_tb2_v2_export_rejects_legacy_runtime_stream(
                             "parser_name": "json",
                             "prompt_hash": "abc",
                             "template_hashes": {},
-                            "harbor_compat_sha": ("527d50deb63a5d279e8c20593c18a2cbc7f61f9e"),
+                            "harbor_compat_sha": HARBOR_COMPAT_SHA,
                             "benchmark_provenance": None,
                             "loom_runtime_revision": "1.0",
                         }

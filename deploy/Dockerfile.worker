@@ -2,7 +2,10 @@ FROM python:3.12-slim
 # Retry transient package-index timeouts during image builds.
 ENV PIP_RETRIES=10 PIP_DEFAULT_TIMEOUT=60
 # Pinned Harbor Terminus2 runtime for the built-in terminus-2 agent.
-ARG HARBOR_COMPAT_SHA=527d50deb63a5d279e8c20593c18a2cbc7f61f9e
+ARG HARBOR_COMPAT_SHA=2de4605b9404eada7d341388291e6e469c90330b
+# Ordinary builds retain the recorded third-party graph. Explicit maintenance
+# refreshes regenerate this same evidence from newly resolved dependencies.
+ARG WORKER_REFRESH_DEPENDENCIES=false
 WORKDIR /app
 # Worker uses the Docker SDK for Python (the `docker` PyPI package
 # already in pyproject.toml deps) to talk to the host daemon over the
@@ -10,10 +13,18 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src ./src
 COPY packages ./packages
+COPY deploy/worker-image.lock /tmp/worker-image.lock
 COPY deploy/patches/harbor-current-user-tool-probes.patch /tmp/harbor-current-user-tool-probes.patch
 # git resolves the pinned Harbor source; patch applies our current-user tool probes.
 # Purging them in the same layer removes Git's unused Perl runtime.
-RUN apt-get update -qq && \
+RUN awk '/^[[:alnum:]][[:alnum:]_.-]*==[^=[:space:]]+$/ && tolower($0) !~ /^harbor==/' \
+      /tmp/worker-image.lock > /tmp/worker-constraints.txt && \
+    case "${WORKER_REFRESH_DEPENDENCIES}" in \
+      false) test -s /tmp/worker-constraints.txt && export PIP_CONSTRAINT=/tmp/worker-constraints.txt ;; \
+      true) : ;; \
+      *) echo 'WORKER_REFRESH_DEPENDENCIES must be true or false' >&2; exit 2 ;; \
+    esac && \
+    apt-get update -qq && \
     apt-get install -y --no-install-recommends perl-base=5.40.1-6+deb13u1 git patch && \
     pip install --no-cache-dir -e ./packages/loom-bundle-checksum && \
     pip install --no-cache-dir -e . && \
@@ -25,5 +36,6 @@ RUN apt-get update -qq && \
     rm /tmp/harbor-current-user-tool-probes.patch && \
     apt-get purge -y --auto-remove git patch && \
     rm -rf /var/lib/apt/lists/* && \
-    pip check
+    pip check && \
+    rm /tmp/worker-image.lock /tmp/worker-constraints.txt
 CMD ["python", "-m", "loom_worker"]

@@ -294,6 +294,7 @@ class ObjectReadback:
 
     content_length: int
     checksum_sha256: str | None
+    version_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -414,7 +415,7 @@ class ObjectStore(Protocol):
         """Stream bounded requests and return the completed write's exact version."""
         ...
 
-    async def stat_object(self, *, bucket: str, key: str) -> ObjectReadback: ...
+    async def stat_object(self, *, bucket: str, key: str, version_id: str | None = None) -> ObjectReadback: ...
 
     def stream_object(
         self,
@@ -423,6 +424,7 @@ class ObjectStore(Protocol):
         key: str,
         start_offset: int = 0,
         chunk_size: int = 64 * 1024 * 1024,
+        version_id: str | None = None,
     ) -> AsyncIterator[bytes]: ...
 
     async def delete_object(self, *, bucket: str, key: str) -> None: ...
@@ -582,7 +584,9 @@ class FakeObjectStore:
             chunks.extend(chunk)
         return await self.put_object(bucket=bucket, key=key, body=bytes(chunks))
 
-    async def stat_object(self, *, bucket: str, key: str) -> ObjectReadback:
+    async def stat_object(self, *, bucket: str, key: str, version_id: str | None = None) -> ObjectReadback:
+        if version_id is not None:
+            raise ValueError("fake object store does not support immutable versions")
         payload = self.objects[(bucket, key)]
         return ObjectReadback(
             content_length=len(payload),
@@ -602,7 +606,10 @@ class FakeObjectStore:
         key: str,
         start_offset: int = 0,
         chunk_size: int = 64 * 1024 * 1024,
+        version_id: str | None = None,
     ) -> AsyncIterator[bytes]:
+        if version_id is not None:
+            raise ValueError("fake object store does not support immutable versions")
         payload = self.objects[(bucket, key)]
         for offset in range(start_offset, len(payload), chunk_size):
             yield payload[offset : offset + chunk_size]
@@ -1233,9 +1240,15 @@ class MinioObjectStore:
                     await self.abort_multipart_upload(upload)
             raise
 
-    async def stat_object(self, *, bucket: str, key: str) -> ObjectReadback:
+    async def stat_object(self, *, bucket: str, key: str, version_id: str | None = None) -> ObjectReadback:
         def _do(client: Any) -> ObjectReadback:
-            response = client.head_object(Bucket=bucket, Key=key, ChecksumMode="ENABLED")
+            if version_id is not None:
+                from loom.trajectory.immutable_object import validate_object_version_id
+                validate_object_version_id(version_id)
+            response = client.head_object(Bucket=bucket, Key=key, ChecksumMode="ENABLED",
+                                          **({"VersionId": version_id} if version_id is not None else {}))
+            if version_id is not None and response.get("VersionId") != version_id:
+                raise ValueError("object version readback drift")
             encoded = response.get("ChecksumSHA256")
             checksum: str | None = None
             if isinstance(encoded, str):
@@ -1249,7 +1262,7 @@ class MinioObjectStore:
                     checksum = f"sha256:{raw.hex()}"
             return ObjectReadback(
                 content_length=int(response["ContentLength"]),
-                checksum_sha256=checksum,
+                checksum_sha256=checksum, version_id=response.get("VersionId"),
             )
 
         return await self._run_client_call("stat_object", _do)
@@ -1261,12 +1274,21 @@ class MinioObjectStore:
         key: str,
         start_offset: int = 0,
         chunk_size: int = 64 * 1024 * 1024,
+        version_id: str | None = None,
     ) -> AsyncIterator[bytes]:
         def _open(client: Any) -> Any:
             kwargs: dict[str, Any] = {"Bucket": bucket, "Key": key}
             if start_offset:
                 kwargs["Range"] = f"bytes={start_offset}-"
-            return client.get_object(**kwargs)["Body"]
+            if version_id is not None:
+                from loom.trajectory.immutable_object import validate_object_version_id
+                validate_object_version_id(version_id)
+                kwargs["VersionId"] = version_id
+            response = client.get_object(**kwargs)
+            if version_id is not None and response.get("VersionId") != version_id:
+                response["Body"].close()
+                raise ValueError("object version stream drift")
+            return response["Body"]
 
         stream = await self._run_client_call("stream_object_open", _open)
         try:

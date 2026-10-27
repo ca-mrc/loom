@@ -12,7 +12,7 @@ import asyncio
 import hashlib
 import json
 import logging
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
@@ -2045,6 +2045,7 @@ async def run_service_execution_materializer_loop(
     interval_seconds: float,
     concurrency: int = 1,
     stop_event: asyncio.Event | None = None,
+    image_archive_cleanup: Callable[[], Awaitable[bool]] | None = None,
 ) -> None:
     stop = stop_event or asyncio.Event()
 
@@ -2064,6 +2065,8 @@ async def run_service_execution_materializer_loop(
                 if stop.is_set():
                     return
                 if index == 0:
+                    if image_archive_cleanup is not None:
+                        cleaned = await image_archive_cleanup() or cleaned
                     await materializer.refresh_metrics()
                     processed = await materializer.reconcile_accounting_once() or processed
             except asyncio.CancelledError:

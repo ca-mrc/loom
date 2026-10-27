@@ -26,7 +26,7 @@ OAuth authorization server; Loom uses the client path. OAuthlib is absent from
 the default root install but present in `cluster`, which the service image also
 selects. Treat image contents separately from default package contents.
 
-Pinned Harbor 0.18.0 needs Python >=3.12 and its Supabase/Realtime dependencies
+The Harbor revision pinned in `config/harbor-runtime.json` needs Python >=3.12 and its Supabase/Realtime dependencies
 require websockets below 16. The root lock currently selects websockets 16.1,
 so it is not itself a complete Harbor runtime environment. Qualify Harbor in
 the worker image or a separate Python 3.12 environment with the pinned Harbor
@@ -39,6 +39,24 @@ runs the native provider, usage, retry and cancellation regressions in a
 disposable Python 3.12 image. It preserves the root's provider SDK pins, permits
 Harbor's websockets constraint, checks installed dependencies and disables the
 container network during the tests. CI assigns this test to `integration-docker`.
+
+## Worker dependency evidence
+
+The legacy worker has its own Python 3.12 graph. Ordinary production builds use
+`deploy/worker-image.lock` as constraints for its recorded third-party package
+versions, keeping a Harbor source update from implicitly refreshing unrelated
+SDK, database or data-processing dependencies. Editable first-party installs
+remain driven by their current project metadata; Harbor's source revision is
+selected only by the Dockerfile's synchronized `HARBOR_COMPAT_SHA`.
+
+Run `scripts/ops/update_worker_image_lock.sh` to build the real worker and
+regenerate the same freeze/wheel evidence. The output must match the installed
+source and dependencies; do not hand-edit it to claim a build result. For a
+deliberate broader maintenance update, set
+`LOOM_WORKER_REFRESH_DEPENDENCIES=true` on that command, review the resolved
+differences and qualify the new image. Then a normal default build should
+reproduce the regenerated package graph. This does not replace the root lock or
+make it a complete Harbor graph.
 
 ## Optional GPU graph
 

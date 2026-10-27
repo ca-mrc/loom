@@ -1006,3 +1006,13 @@ def test_task_dockerfile_gains_terminus_runtime_tools() -> None:
 def test_task_dockerfile_fails_closed_when_the_base_cannot_be_prepared() -> None:
     with pytest.raises(ValueError, match="image preparation supports"):
         append_terminus_runtime_tools("FROM scratch\n")
+
+
+def test_fedora_runtime_tools_preserve_user_and_prohibit_package_upgrades():
+    authored = 'FROM fedora:42\nUSER agent\n'
+    prepared = append_terminus_runtime_tools(authored)
+    assert prepared.startswith(authored)
+    assert 'rpm -qa' in prepared and '--exclude="$loom_excluded"' in prepared
+    assert 'dnf ' in prepared and 'apt-get' not in prepared
+    assert prepared.rstrip().endswith('USER agent')
+    assert 'command -v tmux' in prepared

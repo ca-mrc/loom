@@ -54,6 +54,9 @@ COMMON_EXECUTION_TABLES = (
 # Keep the Gateway's inventory independent: it may read task-image readiness,
 # but never acquires builder leases or writes publication evidence.
 ACTUATOR_TASK_IMAGE_WRITES = {
+    # Prepared archive registration is append-only; retirement belongs to CP.
+    "data_lifecycle_authorities": ("INSERT",),
+    "data_lifecycle_objects": ("INSERT",),
     "task_image_capacity_waits": ("INSERT", "UPDATE", "DELETE"),
     "task_image_materializations": ("UPDATE",),
     "task_image_materialization_attempts": ("INSERT", "UPDATE"),
@@ -89,6 +92,7 @@ GATEWAY_TABLES = (
     "secrets",
     "tasks",
     "task_image_materializations",
+    "task_image_materialization_attempts",
     "trial_task_image_materializations",
     "data_lifecycle_authorities",
     "admin_audit_events",
@@ -275,6 +279,7 @@ def _bootstrap_database(
                         "task_image_publication_evidence",
                         "trial_task_image_materializations",
                         "data_lifecycle_authorities",
+                        "data_lifecycle_objects",
                         "gateway_dispatch_receipts",
                         "provider_connections",
                         "price_catalogs",

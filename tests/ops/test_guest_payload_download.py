@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 import hashlib
+import http.server
 import importlib.util
 import io
 import json
 import re
+import socket
 import ssl
+import threading
 import time
+from http.client import IncompleteRead, RemoteDisconnected
 from pathlib import Path
 from types import ModuleType
 from urllib.error import HTTPError, URLError
 from urllib.parse import unquote
+from urllib.request import urlopen
 
 import pytest
 
@@ -163,14 +168,24 @@ def test_content_mismatch_after_retry_is_not_retried_or_cached(
 
 
 @pytest.mark.parametrize("failures", [1, 2, 3])
-@pytest.mark.parametrize("phase", ["body", "connection", "wrapped-connection"])
-def test_transport_timeouts_restart_within_the_existing_attempt_budget(
-    payload_builder, locked_archive, tmp_path, monkeypatch, capsys, failures, phase,
+@pytest.mark.parametrize("phase", ["body", "wrapped-body", "connection", "wrapped-connection"])
+@pytest.mark.parametrize("error_type", [TimeoutError, ConnectionResetError, RemoteDisconnected, ssl.SSLEOFError])
+def test_transport_interruptions_restart_within_the_existing_attempt_budget(
+    payload_builder, locked_archive, tmp_path, monkeypatch, capsys, failures, phase, error_type,
 ):
+    errors = []
+
+    def interruption():
+        error = error_type("private transfer interrupted")
+        if phase.startswith("wrapped-"):
+            error = URLError(error)
+        errors.append(error)
+        return error
+
     class InterruptedBody(io.BytesIO):
         def read(self, size=-1):
             if self.tell():
-                raise TimeoutError("body transfer interrupted")
+                raise interruption()
             return super().read(size)
 
     requests = []
@@ -179,9 +194,8 @@ def test_transport_timeouts_restart_within_the_existing_attempt_budget(
 
     def open_archive(url, *, timeout):
         requests.append((url, timeout))
-        if phase != "body" and len(requests) <= failures:
-            error = TimeoutError("private connection transfer interrupted")
-            raise URLError(error) if phase == "wrapped-connection" else error
+        if phase.endswith("connection") and len(requests) <= failures:
+            raise interruption()
         body = (InterruptedBody(b"partial") if len(requests) <= failures
                 else io.BytesIO(PAYLOAD))
         bodies.append(body)
@@ -190,9 +204,10 @@ def test_transport_timeouts_restart_within_the_existing_attempt_budget(
     monkeypatch.setattr(payload_builder, "urlopen", open_archive)
     monkeypatch.setattr(time, "sleep", sleeps.append)
     if failures == 3:
-        with pytest.raises(URLError if phase == "wrapped-connection" else TimeoutError,
-                           match="transfer interrupted"):
+        with pytest.raises(URLError if phase.startswith("wrapped-") else error_type,
+                           match="transfer interrupted") as failure:
             payload_builder.download(locked_archive, tmp_path)
+        assert failure.value is errors[-1]
         assert not list(tmp_path.iterdir())
     else:
         destination = payload_builder.download(locked_archive, tmp_path)
@@ -203,19 +218,61 @@ def test_transport_timeouts_restart_within_the_existing_attempt_budget(
     assert sleeps == list(range(1, min(failures, 2) + 1))
     assert all(body.closed for body in bodies)
     diagnostic = capsys.readouterr().err
-    assert ("body timeout" if phase == "body" else "connection timeout") in diagnostic
+    category = "body" if phase.endswith("body") else "connection"
+    assert f"{category} {'timeout' if error_type is TimeoutError else 'interrupted'}" in diagnostic
     assert "1/3" in diagnostic
     assert str(locked_archive["sha256"]) in diagnostic
     assert "do-not-log" not in diagnostic and "transfer interrupted" not in diagnostic
 
 
+@pytest.mark.parametrize("failures", [1, 2, 3])
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_incomplete_body_restarts_without_using_the_fallback(
+    payload_builder, locked_archive, tmp_path, monkeypatch, failures, wrapped,
+):
+    requests, sleeps, bodies, errors = [], [], [], []
+
+    class InterruptedBody(io.BytesIO):
+        def read(self, size=-1):
+            if self.tell():
+                error = IncompleteRead(b"private partial bytes", 10)
+                if wrapped:
+                    error = URLError(error)
+                errors.append(error)
+                raise error
+            return super().read(size)
+
+    def open_archive(url, *, timeout):
+        requests.append((url, timeout))
+        body = InterruptedBody(b"partial") if len(requests) <= failures else io.BytesIO(PAYLOAD)
+        bodies.append(body)
+        return body
+
+    monkeypatch.setattr(payload_builder, "urlopen", open_archive)
+    monkeypatch.setattr(time, "sleep", sleeps.append)
+    item = {**locked_archive, "fallback_url": FALLBACK}
+    if failures == 3:
+        with pytest.raises(URLError if wrapped else IncompleteRead) as failure:
+            payload_builder.download(item, tmp_path)
+        assert failure.value is errors[-1] and not list(tmp_path.iterdir())
+    else:
+        destination = payload_builder.download(item, tmp_path)
+        assert destination.read_bytes() == PAYLOAD
+        assert list(tmp_path.iterdir()) == [destination]
+    assert requests == [(URL, 120)] * min(failures + 1, 3)
+    assert sleeps == list(range(1, min(failures, 2) + 1))
+    assert all(body.closed for body in bodies)
+
+
 @pytest.mark.parametrize("phase", ["body", "connection"])
-def test_http_and_transport_timeouts_share_one_attempt_budget(
-    payload_builder, locked_archive, tmp_path, monkeypatch, phase,
+@pytest.mark.parametrize("error_type", [TimeoutError, ConnectionResetError, RemoteDisconnected, ssl.SSLEOFError])
+@pytest.mark.parametrize("recover", [False, True])
+def test_http_and_transport_interruptions_share_one_attempt_budget(
+    payload_builder, locked_archive, tmp_path, monkeypatch, phase, error_type, recover,
 ):
     class InterruptedBody(io.BytesIO):
         def read(self, size=-1):
-            raise TimeoutError("body transfer interrupted")
+            raise error_type("body transfer interrupted")
 
     requests = []
     sleeps = []
@@ -227,30 +284,46 @@ def test_http_and_transport_timeouts_share_one_attempt_budget(
             body = io.BytesIO()
             bodies.append(body)
             raise HTTPError(url, 503, "private upstream response", {}, body)
-        if len(requests) == 2 and phase == "connection":
-            raise URLError(TimeoutError("private handshake timeout"))
-        body = InterruptedBody() if len(requests) == 2 else io.BytesIO(PAYLOAD)
+        interrupted = len(requests) == 2 or not recover
+        if interrupted and phase == "connection":
+            raise URLError(error_type("private handshake interrupted"))
+        body = InterruptedBody() if interrupted else io.BytesIO(PAYLOAD)
         bodies.append(body)
         return body
 
     monkeypatch.setattr(payload_builder, "urlopen", open_archive)
     monkeypatch.setattr(time, "sleep", sleeps.append)
-    destination = payload_builder.download(locked_archive, tmp_path)
-    assert destination.read_bytes() == PAYLOAD
+    if recover:
+        destination = payload_builder.download(locked_archive, tmp_path)
+        assert destination.read_bytes() == PAYLOAD
+        assert list(tmp_path.iterdir()) == [destination]
+    else:
+        with pytest.raises(URLError if phase == "connection" else error_type):
+            payload_builder.download(locked_archive, tmp_path)
+        assert not list(tmp_path.iterdir())
     assert requests == [(URL, 120)] * 3 and sleeps == [1, 2]
     assert all(body.closed for body in bodies)
-    assert list(tmp_path.iterdir()) == [destination]
 
 
-@pytest.mark.parametrize("reason", ["connection failed", ssl.SSLCertVerificationError("certificate rejected")])
+@pytest.mark.parametrize("reason", [
+    "connection failed", ssl.SSLCertVerificationError("certificate rejected"),
+    ssl.SSLError("TLS configuration rejected"),
+])
+@pytest.mark.parametrize("phase", ["connection", "body"])
 def test_other_transport_error_is_not_retried(
-    payload_builder, locked_archive, tmp_path, monkeypatch, reason,
+    payload_builder, locked_archive, tmp_path, monkeypatch, reason, phase,
 ):
     requests = []
     sleeps = []
 
+    class RejectedBody(io.BytesIO):
+        def read(self, size=-1):
+            raise URLError(reason)
+
     def open_archive(url, *, timeout):
         requests.append((url, timeout))
+        if phase == "body":
+            return RejectedBody()
         raise URLError(reason)
 
     monkeypatch.setattr(payload_builder, "urlopen", open_archive)
@@ -261,7 +334,80 @@ def test_other_transport_error_is_not_retried(
     assert not list(tmp_path.iterdir())
 
 
-@pytest.mark.parametrize("error_type", [PermissionError, TimeoutError])
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_incomplete_read_at_connection_is_not_retried(
+    payload_builder, locked_archive, tmp_path, monkeypatch, wrapped,
+):
+    requests, sleeps = [], []
+    error = IncompleteRead(b"unexpected before response", 10)
+    if wrapped:
+        error = URLError(error)
+
+    def open_archive(url, *, timeout):
+        requests.append((url, timeout))
+        raise error
+
+    monkeypatch.setattr(payload_builder, "urlopen", open_archive)
+    monkeypatch.setattr(time, "sleep", sleeps.append)
+    with pytest.raises(type(error)) as failure:
+        payload_builder.download({**locked_archive, "fallback_url": FALLBACK}, tmp_path)
+    assert failure.value is error
+    assert requests == [(URL, 120)] and sleeps == []
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("phase", ["connection", "body", "wrapped-body"])
+@pytest.mark.parametrize("error_type", [ssl.SSLCertVerificationError, ssl.SSLError])
+def test_fatal_tls_errors_are_not_retried_or_sent_to_fallback(
+    payload_builder, locked_archive, tmp_path, monkeypatch, phase, error_type,
+):
+    requests, sleeps, bodies = [], [], []
+    error = error_type("private TLS rejection")
+    if phase == "wrapped-body":
+        error = URLError(error)
+
+    class RejectedBody(io.BytesIO):
+        def read(self, size=-1):
+            raise error
+
+    def open_archive(url, *, timeout):
+        requests.append((url, timeout))
+        if phase == "connection":
+            raise error
+        body = RejectedBody()
+        bodies.append(body)
+        return body
+
+    monkeypatch.setattr(payload_builder, "urlopen", open_archive)
+    monkeypatch.setattr(time, "sleep", sleeps.append)
+    with pytest.raises(type(error)) as failure:
+        payload_builder.download({**locked_archive, "fallback_url": FALLBACK}, tmp_path)
+    assert failure.value is error
+    assert requests == [(URL, 120)] and sleeps == []
+    assert all(body.closed for body in bodies) and not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("error_type", [ConnectionResetError, RemoteDisconnected, ssl.SSLEOFError])
+def test_exhausted_connection_interruptions_do_not_use_the_fallback(
+    payload_builder, locked_archive, tmp_path, monkeypatch, error_type,
+):
+    requests, sleeps = [], []
+    error = error_type("private interrupted connection")
+
+    def open_archive(url, *, timeout):
+        requests.append((url, timeout))
+        raise error
+
+    monkeypatch.setattr(payload_builder, "urlopen", open_archive)
+    monkeypatch.setattr(time, "sleep", sleeps.append)
+    with pytest.raises(error_type) as failure:
+        payload_builder.download({**locked_archive, "fallback_url": FALLBACK}, tmp_path)
+    assert failure.value is error
+    assert requests == [(URL, 120)] * 3 and sleeps == [1, 2]
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("error_type", [PermissionError, TimeoutError, ConnectionResetError, ssl.SSLEOFError])
 @pytest.mark.parametrize("stage", ["open", "write", "close"])
 def test_local_cache_error_is_not_retried(
     payload_builder, locked_archive, tmp_path, monkeypatch, error_type, stage,
@@ -414,3 +560,50 @@ def test_locked_packages_pair_the_mirror_with_a_permanent_launchpad_file():
         assert mirror is not None and unquote(mirror.group(1)) == filename, package["url"]
         fallback = re.fullmatch(r"https://launchpadlibrarian\.net/[0-9]+/([^/]+)", str(package.get("fallback_url")))
         assert fallback is not None and fallback.group(1) == filename, package.get("fallback_url")
+
+
+def test_actual_http_peer_disconnect_recovers_verified_archive(
+    payload_builder, locked_archive, tmp_path, monkeypatch,
+):
+    requests = []
+    sleeps = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            requests.append(self.path)
+            if len(requests) < 3:
+                self.connection.shutdown(socket.SHUT_RDWR)
+                self.connection.close()
+                return
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(PAYLOAD)))
+            self.end_headers()
+            self.wfile.write(PAYLOAD)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    def open_loopback_fixture(url, *, timeout):
+        assert url == URL
+        # Keep the public HTTPS source contract; only the fixture's transport
+        # is replaced with a real local HTTP peer that closes before headers.
+        return urlopen(f"http://127.0.0.1:{server.server_port}/archive", timeout=timeout)
+
+    monkeypatch.setattr(payload_builder, "urlopen", open_loopback_fixture)
+    monkeypatch.setattr(time, "sleep", sleeps.append)
+    try:
+        destination = payload_builder.download(locked_archive, tmp_path)
+        assert destination.read_bytes() == PAYLOAD
+        assert destination.name == locked_archive["sha256"]
+        assert list(tmp_path.iterdir()) == [destination]
+        assert requests == ["/archive"] * 3
+        assert sleeps == [1, 2]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+        assert not thread.is_alive()

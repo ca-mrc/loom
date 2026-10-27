@@ -25,7 +25,7 @@ from loom.execution_requirements import (
     TaskExecutionRequirementsV1,
     execution_requirement_diagnostics,
 )
-from loom.models.task import EnvironmentConfig, TaskConfig
+from loom.models.task import EnvironmentConfig, StepConfig, TaskConfig
 from loom.models.task_checksum import task_checksum
 from loom.mutable_paths import validate_task_workdir
 from loom.nebius_terminus_ingest import (
@@ -124,7 +124,7 @@ def _inspect_task(path: Path, report: TaskCompatibilityReport, *, execution_prof
         return
     from loom.task_runtime_compatibility import task_runtime_rejections
 
-    for rejection in task_runtime_rejections(task):
+    for rejection in task_runtime_rejections(task, runtime="legacy"):
         field, _, code = rejection.partition(": ")
         report.add("runtime_capability", code, "Declared task requirement is retained but its runtime is unavailable.",
                    "Qualify this capability through #2282; do not drop the declaration.",
@@ -144,7 +144,8 @@ def _inspect_task(path: Path, report: TaskCompatibilityReport, *, execution_prof
         with tempfile.TemporaryDirectory(prefix="loom-compatibility-") as stage_root:
             staged = Path(stage_root) / "bundle"
             shutil.copytree(path.parent, staged, symlinks=False)
-            adapted, _ = adapt_bundle_for_nebius_terminus(staged, normalized)
+            # Keep the comparison input independent of nested adapter mutations.
+            adapted, _ = adapt_bundle_for_nebius_terminus(staged, deepcopy(normalized))
             _record_changes(normalized, adapted, raw, report)
             discard_staged_bundle_file_metadata(staged)
             _, provenance = prepare_service_execution_input_manifest(
@@ -669,6 +670,22 @@ def _dropped_environment_requirements(
                    source=f"{report.source_location}#environment.{key}")
 
 
+def _artifact_requirements(document: dict[str, Any]) -> list[dict[str, Any]]:
+    """Compare collection semantics, including defaults omitted by serialization."""
+    requirements = []
+    for index, value in enumerate(document.get("steps", [])):
+        step = StepConfig.model_validate(value)
+        if step.artifacts or step.required_artifacts or step.artifact_sources:
+            requirements.append({
+                "step_index": index,
+                "step_name": step.name,
+                "artifacts": step.artifacts,
+                "required_artifacts": step.required_artifacts,
+                "artifact_sources": [source.model_dump(mode="json") for source in step.artifact_sources],
+            })
+    return requirements
+
+
 def _record_changes(
     normalized: dict[str, Any], adapted: dict[str, Any], raw: dict[str, Any],
     report: TaskCompatibilityReport,
@@ -693,9 +710,10 @@ def _record_changes(
             "field": "steps", "before": normalized.get("steps"), "after": adapted.get("steps"),
             "category": "profile_conversion",
         })
-        if "steps" in raw or raw.get("artifacts"):
+        if (("steps" in raw or raw.get("artifacts"))
+                and _artifact_requirements(normalized) != _artifact_requirements(adapted)):
             report.add("unsupported_conversion", "artifact_requirements_changed",
-                       "Profile removes declared artifact paths or patterns.",
+                       "Profile changes declared artifact collection requirements.",
                        "Preserve artifact requirements through an explicit supported collection contract.")
 
 
