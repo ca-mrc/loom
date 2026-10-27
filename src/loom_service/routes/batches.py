@@ -62,6 +62,7 @@ from loom.models.networking import (
 from loom.models.task import TaskConfig
 from loom.models.types import ModelSpec
 from loom.pipeline.keys import canonical_digest
+from loom.models.harbor_config import apply_harbor_config_dict
 from loom.request_params import sanitize_request_extras
 from loom.resource_usage_store import resource_usage_response
 from loom.security.redaction import redact_mapping, redact_text
@@ -454,6 +455,15 @@ def _sanitize_trial_config(config: dict[str, Any]) -> dict[str, Any]:
     out = dict(config)
     if "request_params" in out:
         out["request_params"] = sanitize_request_extras(out.get("request_params"))
+    if out.get("harbor_config") is not None:
+        try:
+            out = apply_harbor_config_dict(out)
+        except (ValidationError, ValueError) as exc:
+            reject_submission(
+                reason="invalid_harbor_config",
+                status_code=400,
+                detail=str(exc),
+            )
     return out
 
 

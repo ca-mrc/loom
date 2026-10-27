@@ -384,6 +384,7 @@ async def run_terminus2(
         max_turns=max_turns,
         continue_until_timeout=task_config.agent.continue_until_timeout,
         request_params=dict(trial_config.request_params),
+        harbor_config=trial_config.harbor_config,
         multi_model=multi_model,
         model_switch_plan=model_switch_plan,
         local_artifact_sink=retain_native_artifacts,

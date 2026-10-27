@@ -1010,6 +1010,53 @@ def test_batch_create_with_task_set_shortcut(
     assert body["task_filter"] == {"task_set_id": task_set_id}
 
 
+def test_batch_create_harbor_config_is_stored_on_trial_config(
+    tmp_path: Path,
+    mock_server: MockServer,
+) -> None:
+    _stub_connection_lookup(mock_server)
+    mock_server.canned[("POST", "/api/v1/batches")] = httpx.Response(
+        201,
+        json={
+            "batch_id": _BATCH_ID,
+            "expected_trial_count": 178,
+            "n_per_task": 2,
+            "backend": "docker",
+            "combinations": [],
+            "state": "submitted",
+            "created_at": "2026-06-16T00:00:00Z",
+        },
+    )
+    config = tmp_path / "harbor.json"
+    config.write_text(
+        json.dumps({
+            "max_turns": 128,
+            "agent_timeout_sec": 7200,
+            "max_input_tokens": 262144,
+            "temperature": 1,
+            "top_p": 0.9,
+            "max_tokens": 16384,
+        }),
+        encoding="utf-8",
+    )
+    rc = main([
+        "eval", "batch", "create",
+        "--purpose", "trajectory_generation",
+        "--provider", "openai-prod",
+        "--model", "gpt-4o",
+        "--agent", "terminus-2",
+        "--task-set", "ts/team/terminal-bench-2-1",
+        "--n-per-task", "2",
+        "--harbor-config", f"@{config}",
+    ])
+    assert rc == 0
+    body = json.loads(mock_server[1].content)
+    assert body["n_per_task"] == 2
+    assert body["trial_config"]["harbor_config"]["max_turns"] == 128
+    assert body["trial_config"]["harbor_config"]["max_input_tokens"] == 262144
+    assert body["trial_config"]["agent_name"] == "terminus-2"
+
+
 def test_batch_create_refuses_stopped_storage_preflight_without_override(
     tmp_path: Path,
     mock_server: MockServer,

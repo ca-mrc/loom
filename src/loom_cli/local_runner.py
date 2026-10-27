@@ -88,6 +88,7 @@ class LocalRunner:
             raise AgentError("local subprocess request_params require an agent-native configuration; gateway controls are unsupported")
         if isinstance(agent, LoomTerminus2Runtime):
             agent.request_params = dict(cfg.request_params)
+            agent.harbor_config = cfg.harbor_config
         verifier = task_verifier_factory(self.task_config)()
         driver = self.driver_factory()
 
