@@ -979,8 +979,10 @@ if the source used several connections, submit a new batch instead. Batches
 accepted under older rules stay readable and their accepted work is unaffected.
 
 The hosted `local-server` and HuggingFace sources are retired: register the
-endpoint as an OpenAI-compatible Provider Connection instead. The standalone
-`loom run` paths below are unchanged.
+endpoint as an OpenAI-compatible Provider Connection instead. Work submitted
+on those sources is not migrated; resubmit it on a connection. See the
+[retirement record](historical/hosted-model-source-retirement-2026-10.md). The
+standalone `loom run` paths below are unchanged.
 
 ### Local LLMs (vLLM, ollama, llama.cpp, lm-studio)
 
