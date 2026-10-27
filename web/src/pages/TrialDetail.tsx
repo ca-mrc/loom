@@ -629,7 +629,7 @@ function Trajectory({ trialId, terminal }: { trialId: string; terminal: boolean 
   // SSE and fallback polling share the Postgres-first sequence-cursor
   // source, including its stored-object fallback for legacy trials.
   const stream = useTrialEventStream(trialId);
-  const events = stream.events as TrajEvent[];
+  const events = stream.canonicalEvents as TrajEvent[];
 
   const useFallback = stream.status === "error";
 
@@ -645,10 +645,18 @@ function Trajectory({ trialId, terminal }: { trialId: string; terminal: boolean 
     queryKey: queryKeys["trajectory-fallback"](trialId, terminal),
     queryFn: async ({ signal }) => {
       const cursor = fallbackCursor.current;
-      const result = await api.getTrialEvents(trialId, cursor, 200, signal);
+      const before = stream.preview;
+      const result = await api.getTrialEvents(trialId, cursor, 200, signal, {
+        source: before?.source, afterSeq: before?.next_after_seq ?? -1,
+      });
       if (signal.aborted) throw new DOMException("Trajectory request cancelled", "AbortError");
-      const hasMore = result.next_after_seq !== null && result.next_after_seq > cursor;
-      if (hasMore) fallbackCursor.current = result.next_after_seq!;
+      const canonicalHasMore = result.next_after_seq !== null && result.next_after_seq > cursor;
+      if (canonicalHasMore) fallbackCursor.current = result.next_after_seq!;
+      const preview = result.preview;
+      const previewHasMore = preview != null && preview.next_after_seq !== null
+        && (preview.source !== before?.source || preview.next_after_seq > (before?.next_after_seq ?? -1));
+      if (preview !== undefined) stream.acceptPreview(preview);
+      const hasMore = canonicalHasMore || previewHasMore;
       setFallbackEvents((previous) => mergeTrajectoryEvents(previous, result.events));
       setFallbackHasMore(hasMore);
       setFallbackDone(terminal && !hasMore);
@@ -659,9 +667,16 @@ function Trajectory({ trialId, terminal }: { trialId: string; terminal: boolean 
     refetchInterval: useFallback && !terminal ? polling.refetchInterval : false,
   });
 
-  const renderedEvents = mergeTrajectoryEvents(fallbackEvents, events);
+  const canonicalEvents = mergeTrajectoryEvents(fallbackEvents, events);
+  const preview = stream.preview;
+  const showingPreview = canonicalEvents.length === 0 && (preview?.events.length ?? 0) > 0;
+  const renderedEvents = canonicalEvents.length ? canonicalEvents : (preview?.events ?? []);
 
   const liveBadge = (() => {
+    if (showingPreview) {
+      if (stream.status === "complete" || (useFallback && fallbackDone)) return "execution ended · partial preview";
+      return useFallback ? "live preview · polling" : "live preview";
+    }
     if (useFallback) return fallbackDone ? "complete" : "fallback polling";
     if (stream.status === "open") return "live";
     if (stream.status === "connecting") return "connecting…";
@@ -677,6 +692,7 @@ function Trajectory({ trialId, terminal }: { trialId: string; terminal: boolean 
         description={`${renderedEvents.length} events · ${liveBadge}`}
       />
       <Card.Body className="stack-y-3">
+        {showingPreview ? <p className="text-xs text-slate-600">Live progress. The final trajectory replaces this preview after archival.</p> : null}
         {!useFallback && stream.status === "connecting" && events.length === 0 ? (
           <LoadingState />
         ) : null}

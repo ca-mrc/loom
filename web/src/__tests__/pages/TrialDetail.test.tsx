@@ -299,6 +299,73 @@ describe("TrialDetail trajectory section", () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it("polls native progress with its own cursor and replaces it at canonical handoff", async () => {
+    vi.stubGlobal("EventSource", undefined);
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    let stage = 0;
+    const queries: URLSearchParams[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = new URL(String(input), "http://localhost");
+      if (url.pathname.endsWith("/events")) {
+        queries.push(url.searchParams);
+        const events = stage === 2 && url.searchParams.get("after_seq") === "-1"
+          ? [{ seq: 0, kind: "trial_start" }, { seq: 1, kind: "trial_end", final_state: "succeeded" }] : [];
+        const source = stage === 0 ? "lease-a:1" : "lease-b:1";
+        const preview = stage === 2 ? null : { source, events: [
+          { seq: 0, kind: "step_start", step_id: stage === 0 ? "first-attempt" : "second-attempt" },
+        ], next_after_seq: 0 };
+        return new Response(JSON.stringify({ events, next_after_seq: events.at(-1)?.seq ?? null, preview }));
+      }
+      return new Response(JSON.stringify({ ...TRIAL_BODY, state: stage === 2 ? "succeeded" : "running" }));
+    });
+    try {
+      renderWithProviders(<Routes><Route path="/trials/:trialId" element={<TrialDetail />} /></Routes>, { route: `/trials/${TRIAL_ID}` });
+      await screen.findByText("Step first-attempt started");
+      expect(screen.getByText("1 events · live preview · polling")).toBeInTheDocument();
+      stage = 1;
+      await act(async () => { await vi.advanceTimersByTimeAsync(4_000); });
+      await screen.findByText("Step second-attempt started");
+      expect(screen.queryByText("Step first-attempt started")).not.toBeInTheDocument();
+      expect(queries.some((q) => q.get("preview_source") === "lease-a:1" && q.get("preview_after_seq") === "0")).toBe(true);
+      expect(queries.every((q) => q.get("after_seq") === "-1")).toBe(true);
+      expect(queries.every((q) => q.get("include_preview") === "true")).toBe(true);
+      stage = 2;
+      await act(async () => { await vi.advanceTimersByTimeAsync(4_000); });
+      await screen.findByText("Trial started");
+      expect(screen.queryByText("Step second-attempt started")).not.toBeInTheDocument();
+      const loadMore = screen.queryByRole("button", { name: "Load more" });
+      if (loadMore) await userEvent.click(loadMore);
+      await screen.findByText("2 events · complete");
+      expect(screen.queryByText(/Live progress/)).not.toBeInTheDocument();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("clears cached SSE progress when fallback reports the source is gone", async () => {
+    const sources: TrialEventSource[] = [];
+    class TrialEventSource extends EventTarget {
+      onopen: (() => void) | null = null;
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      onerror: (() => void) | null = null;
+      constructor(readonly url: string) { super(); sources.push(this); }
+      close(): void { /* no browser resources in this test */ }
+    }
+    vi.stubGlobal("EventSource", TrialEventSource);
+    fetchSpy({ ok: true, body: { events: [], next_after_seq: null, preview: null } }, { ...TRIAL_BODY, state: "running" });
+    renderWithProviders(<Routes><Route path="/trials/:trialId" element={<TrialDetail />} /></Routes>, { route: `/trials/${TRIAL_ID}` });
+    await waitFor(() => expect(sources).toHaveLength(1));
+    act(() => {
+      sources[0].onopen?.();
+      sources[0].dispatchEvent(new MessageEvent("preview", { data: JSON.stringify({ source: "retired:1", events: [
+        { seq: 0, kind: "step_start", step_id: "retired-attempt" },
+      ], next_after_seq: 0 }) }));
+    });
+    expect(await screen.findByText("Step retired-attempt started")).toBeInTheDocument();
+    act(() => sources[0].onerror?.());
+    await screen.findByText("0 events · fallback polling");
+    expect(screen.queryByText("Step retired-attempt started")).not.toBeInTheDocument();
+  });
+
   it("discards an old fallback response after navigating to another trial", async () => {
     vi.stubGlobal("EventSource", undefined);
     let oldSignal: AbortSignal | null | undefined;

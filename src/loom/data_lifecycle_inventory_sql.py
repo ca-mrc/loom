@@ -21,6 +21,7 @@ _EXECUTION_TABLES = (
     "trials",
     "llm_calls",
     "trial_events",
+    "service_execution_live_events",
     "trial_resource_usage",
     "artifacts",
 )

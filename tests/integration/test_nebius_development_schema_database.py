@@ -110,19 +110,26 @@ def test_real_retained_schema_upgrades_preserving_identity_and_granting_new_tabl
     except module.DevelopmentSchemaDatabaseError as error:
         raise AssertionError('disposable upgrade failed qualification') from error.__context__
     assert receipt['status'] == 'complete'
-    assert receipt['revision'] == '0179'
+    assert receipt['revision'] == '0180'
     assert module.read_database_upgrade(installed['url'], request) == receipt
     assert module.upgrade_database(installed['url'], request,
         application_manager_password=installed['password'] if installed['mode'] == 'shared' else None) == receipt
     with psycopg.connect(installed['url'], autocommit=True) as db:
         assert authority(db) == before
-        assert db.execute('SELECT version_num FROM alembic_version').fetchall() == [('0179',)]
+        assert db.execute('SELECT version_num FROM alembic_version').fetchall() == [('0180',)]
         assert db.execute('SELECT name FROM teams WHERE id=%s', (installed['data'],)).fetchone() == ('retained-schema-test',)
         roles = ['loom_service'] + (['loom_control_plane', 'loom_app_runtime_' + installed['data'].hex] if installed['mode'] == 'shared' else [])
         for role in roles:
             assert db.execute("SELECT has_table_privilege(%s,'task_source_publications','SELECT,INSERT,UPDATE,DELETE'), "
                 "has_table_privilege(%s,'nebius_pool_participant_catalogs','SELECT,INSERT,UPDATE,DELETE'), "
                 "has_table_privilege(%s,'alembic_version','INSERT,UPDATE,DELETE')", (role, role, role)).fetchone() == (True, True, False)
+            for privilege in ('SELECT', 'INSERT', 'UPDATE', 'DELETE'):
+                assert db.execute("SELECT has_table_privilege(%s,'service_execution_live_events',%s)",
+                    (role, privilege)).fetchone() == (True,)
+        if installed['mode'] == 'shared':
+            for role in ('loom_actuator', 'loom_gateway', 'loom_app_manager_' + installed['data'].hex):
+                assert db.execute("SELECT has_table_privilege(%s,'service_execution_live_events',"
+                    "'SELECT,INSERT,UPDATE,DELETE')", (role,)).fetchone() == (False,)
     login = make_url(installed['url']).set(username='loom_service', password=installed['password']).render_as_string(hide_password=False)
     with psycopg.connect(login) as db:
         assert db.execute('SELECT count(*) FROM nebius_pool_lifecycle_operations').fetchone() == (0,)
@@ -135,7 +142,7 @@ def test_real_retained_schema_upgrades_preserving_identity_and_granting_new_tabl
         with psycopg.connect(manager_url, autocommit=True) as db:
             access = ApplicationDatabaseAccess(db, installed['data'])
             app, incarnation = uuid4(), uuid4()
-            role = access.grant(app, incarnation, 1, token_urlsafe(48), schema_revision='0179')
+            role = access.grant(app, incarnation, 1, token_urlsafe(48), schema_revision='0180')
             installed['roles'].append(role)
             # Normal successor application admission does not invalidate the
             # retained migration proof for fixed platform credential identities.
@@ -182,7 +189,7 @@ def test_interrupted_migration_is_never_automatically_reissued(installed, monkey
             application_manager_password=installed['password'] if installed['mode'] == 'shared' else None)
     with psycopg.connect(installed['url'], autocommit=True) as db:
         assert db.execute('SELECT version_num FROM alembic_version').fetchone() == (
-            '0179' if position == 'after' else installed['revision'],)
+            '0180' if position == 'after' else installed['revision'],)
 
 
 @pytest.mark.parametrize('installed', ['shared'], indirect=True)
