@@ -53,6 +53,7 @@ from loom.execution_selection import execution_selection_readback, reported_veri
 from loom.hosted_harness import harnesses_supporting, hosted_harness
 from loom.models.batch import Combination
 from loom.models.cancellation import CancellationRequest
+from loom.models.harbor_config import apply_harbor_config_dict
 from loom.models.networking import (
     NetworkPolicy,
     UnsupportedNetworkPolicyOverrideError,
@@ -62,7 +63,6 @@ from loom.models.networking import (
 from loom.models.task import TaskConfig
 from loom.models.types import ModelSpec
 from loom.pipeline.keys import canonical_digest
-from loom.models.harbor_config import apply_harbor_config_dict
 from loom.request_params import sanitize_request_extras
 from loom.resource_usage_store import resource_usage_response
 from loom.security.redaction import redact_mapping, redact_text

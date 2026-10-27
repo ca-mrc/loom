@@ -15,7 +15,6 @@ from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID
 
 from loom.agent.direct_provider import DirectCallLedger, DirectProviderConnection
-from loom.models.harbor_config import HarborConfig
 from loom.agent.terminus2.checkpoint_bridge import HarborCheckpointBridge
 from loom.agent.terminus2.dispatch_checkpoint import install_dispatch_checkpoint
 from loom.agent.terminus2.gateway_ledger import CheckpointBridgeError
@@ -34,6 +33,7 @@ from loom.agent.terminus2.provenance import HARBOR_COMPAT_SHA, LOOM_BRIDGE_REVIS
 from loom.attempt_deadline import AttemptDeadline, AttemptDeadlineExceededError
 from loom.driver.base import Driver
 from loom.errors import AgentContinuationError, AgentError, exception_info
+from loom.models.harbor_config import HarborConfig
 from loom.models.mcp import MCPConnection
 from loom.models.trajectory import (
     Terminus2EpisodeCheckpointEvent,

@@ -19,15 +19,17 @@ def _trial(**kwargs: object) -> TrialConfig:
 
 
 def test_harbor_config_merges_deadline_and_completion_params() -> None:
-    trial = _trial(harbor_config={
-        "max_turns": 128,
-        "agent_timeout_sec": 7200,
-        "max_input_tokens": 262144,
-        "enable_summarize": False,
-        "temperature": 1,
-        "top_p": 0.9,
-        "max_tokens": 16384,
-    })
+    trial = _trial(
+        harbor_config={
+            "max_turns": 128,
+            "agent_timeout_sec": 7200,
+            "max_input_tokens": 262144,
+            "enable_summarize": False,
+            "temperature": 1,
+            "top_p": 0.9,
+            "max_tokens": 16384,
+        }
+    )
     assert trial.override_agent_timeout_sec == 7200
     assert trial.request_params == {"temperature": 1, "top_p": 0.9, "max_tokens": 16384}
     assert trial.harbor_config is not None
@@ -54,16 +56,21 @@ def test_harbor_config_rejects_conflicting_timeout_and_sampling() -> None:
 
 
 def test_apply_harbor_config_dict_is_idempotent() -> None:
-    once = apply_harbor_config_dict({
-        "harbor_config": {"agent_timeout_sec": 7200, "top_p": 0.9},
-    })
+    once = apply_harbor_config_dict(
+        {
+            "harbor_config": {"agent_timeout_sec": 7200, "top_p": 0.9},
+        }
+    )
     twice = apply_harbor_config_dict(once)
     assert twice["override_agent_timeout_sec"] == 7200
     assert twice["request_params"] == {"top_p": 0.9}
 
 
 def test_stale_running_reads_harbor_agent_timeout() -> None:
-    assert effective_agent_timeout_sec(
-        task_config={"agent": {"timeout_sec": 900}},
-        trial_config={"harbor_config": {"agent_timeout_sec": 7200}},
-    ) == 7200
+    assert (
+        effective_agent_timeout_sec(
+            task_config={"agent": {"timeout_sec": 900}},
+            trial_config={"harbor_config": {"agent_timeout_sec": 7200}},
+        )
+        == 7200
+    )

@@ -14,7 +14,14 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 ReasoningEffort = Literal[
-    "none", "minimal", "low", "medium", "high", "xhigh", "max", "default",
+    "none",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+    "default",
 ]
 
 # Standard chat parameters Harbor forwards for an ``openai/`` model.
