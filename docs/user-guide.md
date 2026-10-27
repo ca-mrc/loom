@@ -953,8 +953,11 @@ loom tasksets submit /tmp/ts-2054-ws
 Every model-backed selection needs an explicitly selected, authorized
 OpenAI-compatible Provider Connection (`openai-compatible` or `custom`), owned by
 or shared with your team. There is no fallback to platform credentials, and
-native Anthropic/Google connections are not accepted for agents. The service
-resolves each selection once at submission:
+native Anthropic/Google connections are not accepted for agents. You can still
+create those types for features that call them natively, such as Pipeline judge
+bindings; the connection form, list and `loom providers create` label them as
+not usable for agent runs. The service resolves each selection once at
+submission:
 
 - The model that runs is `agent_model.name`. `provider_model_id` may be omitted;
   when given (on the combination or inherited from the batch) it must name the

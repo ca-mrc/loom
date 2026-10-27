@@ -12,7 +12,11 @@ import { api } from "../api";
 import { Card } from "../components/Card";
 import LoadingState from "../components/LoadingState";
 import { StatusPill } from "../components/StatusPill";
-import { providerStatusSummary, providerTestAge } from "../lib/providerDisplay";
+import {
+  AGENT_RUN_PROVIDER_TYPES,
+  providerStatusSummary,
+  providerTestAge,
+} from "../lib/providerDisplay";
 
 type Conn = {
   id: string;
@@ -112,7 +116,12 @@ export default function ProvidersList(): JSX.Element {
                       {c.name}
                     </Link>
                   </td>
-                  <td className="px-4 py-3 text-sm text-slate-600">{c.type}</td>
+                  <td className="px-4 py-3 text-sm text-slate-600">
+                    {c.type}
+                    {!AGENT_RUN_PROVIDER_TYPES.includes(c.type) && (
+                      <p className="mt-1 text-xs text-amber-700">Not for agent runs</p>
+                    )}
+                  </td>
                   <td className="px-4 py-3">
                     <StatusPill variant={status.variant} title={status.description}>
                       {status.label}

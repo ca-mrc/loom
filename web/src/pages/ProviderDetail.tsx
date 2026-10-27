@@ -29,7 +29,9 @@ import {
   useTestConnection,
 } from "../hooks/providers";
 import {
+  AGENT_RUN_PROVIDER_TYPES,
   allowedModelsSummary,
+  NATIVE_TYPE_NOTICE,
   providerStatusSummary,
   providerTestAge,
 } from "../lib/providerDisplay";
@@ -117,6 +119,11 @@ export default function ProviderDetail(): JSX.Element {
       <header>
         <h1 className="text-2xl font-bold text-slate-900">{conn.name}</h1>
         <p className="text-sm text-slate-500">{conn.type}</p>
+        {!AGENT_RUN_PROVIDER_TYPES.includes(conn.type) && (
+          <p role="note" className="mt-1 text-xs text-amber-700">
+            {NATIVE_TYPE_NOTICE}
+          </p>
+        )}
       </header>
       <Tabs
         items={TAB_ITEMS}
