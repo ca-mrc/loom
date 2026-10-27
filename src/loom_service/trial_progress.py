@@ -100,6 +100,10 @@ def wait_message(reason: object) -> str | None:
         "execution_capacity_observation_missing": "Waiting for a capacity observation.",
         "execution_capacity_placement_unavailable": "Waiting for node placement information.",
         "execution_capacity_native_lease_stale": "Waiting for the image build reservation to refresh.",
+        "execution_capacity_native_io_feedback_pending": (
+            "Waiting for disk I/O measurements from an earlier image build before admitting more work."),
+        "execution_capacity_bound_node_unavailable": (
+            "A reserved node cannot currently accept this workload. Waiting for capacity recovery."),
         "unschedulable": "Kubernetes has not found a suitable node for this workload.",
         "Unschedulable": "Kubernetes has not found a suitable node for this workload.",
         "execution_target_unavailable": "Waiting for a healthy execution target.",

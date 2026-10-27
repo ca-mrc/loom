@@ -66,6 +66,17 @@ results keep their existing lifecycle and publication validation. After a node-l
 read, a fresh Job/Pod observation rechecks identity and progress before failure,
 so scheduling or publication during that read is preserved.
 
+Trial detail and list progress expose fixed, safe messages for image-build I/O
+feedback waits and unavailable reserved-node capacity. These descriptions do not
+claim that a node was deleted or that a particular recovery will succeed.
+`build_bound_node_unavailable` retains its reason, platform attribution and
+retryable classification in current preparation diagnostics and terminal failure
+snapshots. Retryability describes a transient cause; automatic attempts still
+obey the existing retry limit, and a terminal retry uses the existing operator
+approval flow. Cleanup confirmation and the next-attempt time remain separate
+fields. This public classification does not admit the lifecycle code in untrusted
+prepare receipts. Unknown codes and arbitrary builder logs remain private.
+
 Recovery uses the existing fenced deletion path: the old affinity stays immutable
 and capacity remains charged until Job, owned Pods and ConfigMap deletion is
 confirmed. Only then can a successor attempt obtain a fresh placement. It does
