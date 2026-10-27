@@ -127,7 +127,12 @@ def test_real_retained_schema_upgrades_preserving_identity_and_granting_new_tabl
                 assert db.execute("SELECT has_table_privilege(%s,'service_execution_live_events',%s)",
                     (role, privilege)).fetchone() == (True,)
         if installed['mode'] == 'shared':
-            for role in ('loom_actuator', 'loom_gateway', 'loom_app_manager_' + installed['data'].hex):
+            for privilege in ('SELECT', 'INSERT'):
+                assert db.execute("SELECT has_table_privilege('loom_gateway','service_execution_live_events',%s)",
+                    (privilege,)).fetchone() == (True,)
+            assert db.execute("SELECT has_table_privilege('loom_gateway','service_execution_live_events',"
+                "'UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')").fetchone() == (False,)
+            for role in ('loom_actuator', 'loom_app_manager_' + installed['data'].hex):
                 assert db.execute("SELECT has_table_privilege(%s,'service_execution_live_events',"
                     "'SELECT,INSERT,UPDATE,DELETE')", (role,)).fetchone() == (False,)
     login = make_url(installed['url']).set(username='loom_service', password=installed['password']).render_as_string(hide_password=False)
