@@ -144,6 +144,15 @@ resource "nebius_storage_v1_bucket" "integration" {
   lifecycle { prevent_destroy = true }
 }
 
+# Bucket policies authorize object operations. The native catalog publisher
+# additionally reads versioning through S3, which needs a resource-scoped permit.
+resource "nebius_iam_v1_access_permit" "integration_catalog_metadata" {
+  for_each    = local.integration
+  parent_id   = nebius_iam_v1_group.integration_store["canonical"].id
+  resource_id = nebius_storage_v1_bucket.integration["artifacts"].id
+  role        = "storage.viewer"
+}
+
 resource "nebius_iam_v2_access_key" "integration_store" {
   for_each    = local.integration_identities
   parent_id   = var.project_id
