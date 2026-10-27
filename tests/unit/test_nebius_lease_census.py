@@ -36,7 +36,7 @@ def test_census_program_is_read_only_and_uses_the_rollout_predicate() -> None:
     assert "DELETE " not in _CENSUS_PROGRAM
 
 
-@pytest.mark.parametrize('schema_head', ['0175', '0176', '0177', '0178', '0179'])
+@pytest.mark.parametrize('schema_head', ['0175', '0176', '0177', '0178', '0179', '0180'])
 def test_validate_remote_accepts_exact_identity_and_command_state(schema_head: str) -> None:
     result = _remote(schema_head=schema_head)
     result["leases"][0]["commands"] = [{"state": "dead_letter"}]

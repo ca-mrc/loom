@@ -8357,6 +8357,25 @@ class TrialEvent(Base):
     )
 
 
+class ServiceExecutionLiveEvent(Base):
+    """Provisional native feed; canonical TrialEvent numbering stays independent."""
+
+    __tablename__ = "service_execution_live_events"
+    __table_args__ = (
+        CheckConstraint("resource_generation > 0 AND seq >= 0", name="service_execution_live_events_sequence_check"),
+        UniqueConstraint("lease_id", "resource_generation", "seq", name="service_execution_live_events_source_seq_uidx"),
+        Index("service_execution_live_events_trial_idx", "trial_id"),
+    )
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4, server_default=text("gen_random_uuid()"))
+    trial_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("trials.id", ondelete="CASCADE"), nullable=False)
+    lease_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("execution_leases.id", ondelete="CASCADE"), nullable=False)
+    resource_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    seq: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False)
+    lifecycle_authority_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("data_lifecycle_authorities.id", ondelete="RESTRICT"), nullable=False, index=True)
+
+
 class TrialResourceUsage(Base):
     """Durable resource counters for one trial-attempt execution container."""
 

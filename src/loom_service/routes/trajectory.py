@@ -18,6 +18,7 @@ import contextlib
 import json
 import logging
 from collections.abc import AsyncIterator
+from itertools import pairwise
 from typing import Annotated, Any, cast
 from urllib.parse import quote
 from uuid import UUID
@@ -29,6 +30,7 @@ from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import select
 
 from loom.db.schema import Trial, TrialEvent
+from loom.service_execution_live import read_live_preview
 from loom.trajectory.object_identity import resolve_trajectory_object_key
 from loom_listen.metrics import PUSH_MODE_GAUGE as _PUSH_MODE_GAUGE
 from loom_listen.self_test import notify_round_trip
@@ -338,6 +340,9 @@ async def list_events_by_seq(
     trial_id: UUID,
     after_seq: Annotated[int, Query(ge=-1)] = -1,
     limit: Annotated[int, Query(gt=0, le=1000)] = 200,
+    include_preview: bool = False,
+    preview_source: Annotated[str | None, Query(max_length=80)] = None,
+    preview_after_seq: Annotated[int, Query(ge=-1)] = -1,
 ) -> dict[str, Any]:
     """Return events with `seq > after_seq`, capped at `limit`.
 
@@ -363,7 +368,13 @@ async def list_events_by_seq(
         limit=limit,
     )
     next_after_seq = events[-1]["seq"] if events else None
-    return {"events": events, "next_after_seq": next_after_seq}
+    result: dict[str, Any] = {"events": events, "next_after_seq": next_after_seq}
+    if include_preview:
+        preview = await read_live_preview(
+            s, trial=trial, source=preview_source, after_seq=preview_after_seq, limit=limit,
+        ) if not events else {"source": None, "events": [], "next_after_seq": None}
+        result["preview"] = preview if preview["source"] is not None else None
+    return result
 
 
 def _sse_format(event_kind: str | None, data: dict[str, Any], event_id: str | None = None) -> bytes:
@@ -474,6 +485,8 @@ async def stream_events(
     sc: SessionAndCtx,
     trial_id: UUID,
     after_seq: Annotated[int, Query(ge=-1)] = -1,
+    preview_source: Annotated[str | None, Query(max_length=80)] = None,
+    preview_after_seq: Annotated[int, Query(ge=-1)] = -1,
 ) -> StreamingResponse:
     """SSE live event stream for `trial_id`, starting at `after_seq + 1`.
 
@@ -500,6 +513,11 @@ async def stream_events(
     s, ctx = sc
     require_scope(ctx, "read:own")
     trial = await _load_trial(s, trial_id, ctx)
+    stream_trial_id = trial.id
+    # Cookie verification updates UserSession.last_seen_at. Release that row
+    # lock and the authentication connection before the long-lived response;
+    # all stream reads below use their own short transactions.
+    await s.commit()
 
     session_factory = request.app.state.session_factory
     minio_client = request.app.state.minio_client
@@ -509,17 +527,17 @@ async def stream_events(
     listen_dsn = _sqla_url_to_psycopg_dsn(str(settings.db_url))
 
     async def _read_loop_chunk(
-        seq_cursor: int,
-    ) -> tuple[list[dict[str, Any]], str | None]:
+        seq_cursor: int, live_source: str | None, live_cursor: int,
+    ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any], bool]:
         """One poll iteration: read events from Postgres (with MinIO
         fallback) AND check trial state. Returning both from one
         helper keeps the per-iteration session lifetime clean."""
         async with session_factory() as fresh:
             fresh_trial = (await fresh.execute(
-                select(Trial).where(Trial.id == trial.id),
+                select(Trial).where(Trial.id == stream_trial_id),
             )).scalar_one_or_none()
             if fresh_trial is None:
-                return [], None
+                return [], None, {"source": None, "events": [], "next_after_seq": None}, False
             evts = await _read_events_with_minio_fallback(
                 fresh,
                 minio_client,
@@ -528,13 +546,19 @@ async def stream_events(
                 after_seq=seq_cursor,
                 limit=200,
             )
-            return evts, fresh_trial.state
+            canonical_available = bool(evts) or bool(await fresh.scalar(
+                select(TrialEvent.id).where(TrialEvent.trial_id == stream_trial_id).limit(1),
+            ))
+            preview = {"source": None, "events": [], "next_after_seq": None} if canonical_available else await read_live_preview(
+                fresh, trial=fresh_trial, source=live_source, after_seq=live_cursor, limit=200,
+            )
+            return evts, fresh_trial.state, preview, canonical_available
 
     async def _open_subscription() -> _ListenSubscription | None:
         """Best-effort LISTEN setup. On error (Postgres unreachable
         on autocommit, channel ACL issue) return None and let the
         loop fall back to pure-poll behavior."""
-        sub = _ListenSubscription(listen_dsn, trial.id)
+        sub = _ListenSubscription(listen_dsn, stream_trial_id)
         try:
             await sub.__aenter__()
             return sub
@@ -547,6 +571,9 @@ async def stream_events(
 
     async def event_source() -> AsyncIterator[bytes]:
         current_seq = after_seq
+        current_preview_source = preview_source
+        current_preview_seq = preview_after_seq if preview_source is not None else -1
+        canonical_available = False
         loop = asyncio.get_running_loop()
         started_at = loop.time()
         completed_state: str | None = None
@@ -567,10 +594,29 @@ async def stream_events(
                 if completed_state is not None:
                     yield _sse_format(
                         event_kind="complete",
-                        data={"final_state": completed_state, "last_seq": current_seq},
+                        data={"final_state": completed_state, "last_seq": current_seq,
+                              **({"canonical_available": False} if current_preview_source is not None and not canonical_available else {})},
                     )
                     return
-                events, current_state = await _read_loop_chunk(current_seq)
+                events, current_state, preview, canonical_available = await _read_loop_chunk(
+                    current_seq, current_preview_source, current_preview_seq,
+                )
+                if await request.is_disconnected():
+                    return
+                if loop.time() - started_at >= max_connection_sec:
+                    continue
+                if preview["source"] != current_preview_source:
+                    current_preview_source = preview["source"]
+                    current_preview_seq = -1
+                    yield _sse_format(event_kind="preview_reset", data={"source": current_preview_source})
+                if preview["events"]:
+                    seqs = [event["seq"] for event in preview["events"]]
+                    if any(type(seq) is not int for seq in seqs) or seqs[0] <= current_preview_seq or any(
+                        b <= a for a, b in pairwise(seqs)
+                    ):
+                        raise ValueError("live trajectory preview sequence did not advance")
+                    yield _sse_format(event_kind="preview", data=preview)
+                    current_preview_seq = seqs[-1]
                 for ev in events:
                     # Sending a large backlog can itself exhaust the connection
                     # budget or outlive the client; do not wait for an empty page.
@@ -592,7 +638,7 @@ async def stream_events(
                     )
                     current_seq = seq
 
-                if events:
+                if events or preview["events"]:
                     # More pages may already be available, including after a
                     # terminal transition. Drain without a polling delay, while
                     # letting timers, cancellations and other requests run.

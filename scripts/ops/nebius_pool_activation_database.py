@@ -18,18 +18,20 @@ PoolActivationState = Literal["closed", "global", "fenced"]
 # Participant databases advance independently of the retained manager. 0176
 # adds Harbor sessions, 0177 publication retention, and 0178 management
 # catalog/lifecycle tables. 0179 extends the execution-outbox guard to verifier
-# children without changing these guard/read columns or grants. Role
+# children; 0180 adds an isolated live-trajectory table and notification trigger.
+# Neither changes these guard/read columns or grants. Role
 # qualification separately denies access to the newer management tables.
 # This is an audited set, never an automatic migration head or runtime upgrade.
-PARTICIPANT_SCHEMA_REVISIONS = ("0175", "0176", "0177", "0178", "0179")
+PARTICIPANT_SCHEMA_REVISIONS = ("0175", "0176", "0177", "0178", "0179", "0180")
 # 0175 changes an Oracle archival trigger; 0176 adds Harbor sessions; 0177 adds
 # source-publication retention; 0178 adds separate catalog/lifecycle tables.
-# 0179 extends only the participant execution-outbox guard.
+# 0179 extends only the participant execution-outbox guard; 0180 adds only
+# separate live-trajectory preview storage/notifications.
 # None changes these legacy manager ledger/read predicates. A scoped-v1 binding
 # still fails the exact legacy binding comparison, regardless of schema revision.
 # A refresh must select ONE revision from its bound migration phase; this is not
 # a startup or write compatibility set and is never an automatic schema fallback.
-MANAGER_OBSERVATION_REVISIONS = ("0174", "0176", "0177", "0178", "0179")
+MANAGER_OBSERVATION_REVISIONS = ("0174", "0176", "0177", "0178", "0179", "0180")
 
 
 def _binding_hex(spec: PoolInstallation) -> str:
@@ -62,7 +64,7 @@ END $pool_activation_schema$;
 
 def _header(*, read_only: bool, manager_revision: str = '0176') -> str:
     """Exact installed revision; newer writes require an explicit bound successor."""
-    if manager_revision not in ('0176', '0177', '0178', '0179'):
+    if manager_revision not in ('0176', '0177', '0178', '0179', '0180'):
         raise ValueError('pool manager mutation revision unqualified')
     return _transaction_header(read_only=read_only,
         schema_unqualified=f"(SELECT version_num FROM public.alembic_version) IS DISTINCT FROM '{manager_revision}'")

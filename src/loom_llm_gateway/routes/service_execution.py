@@ -25,6 +25,7 @@ from loom.db.schema import (
 from loom.execution_runtime_contract import ExecutionRuntimePlanV1
 from loom.llm_call_ledger import read_service_execution_llm_calls as read_lease_calls
 from loom.pipeline.artifact_commit import ArtifactCommitError
+from loom.service_execution_live import LiveTrajectoryError, append_live_events
 from loom.task_image_archives import PreparedImageArchiveV1
 from loom.trajectory.upload_observation import UploadSpan, observe_upload
 from loom_control_plane.service_execution_output import (
@@ -63,6 +64,13 @@ class TerminusReclaimRequestV1(ServiceExecutionPeerV1):
     schema_version: Literal["loom.service-execution-terminus-reclaim.v1"] = (
         "loom.service-execution-terminus-reclaim.v1"
     )
+
+
+class TrajectoryEventsRequestV1(ServiceExecutionPeerV1):
+    schema_version: Literal["loom.service-execution-trajectory-events.v1"] = (
+        "loom.service-execution-trajectory-events.v1"
+    )
+    events: list[dict[str, Any]] = Field(min_length=1, max_length=500)
 
 
 class TerminusCheckpointRequestV1(ServiceExecutionPeerV1):
@@ -194,7 +202,8 @@ async def read_service_execution_llm_calls(
             rows = await read_lease_calls(session, lease)
             return {
                 "trial_id": str(lease.trial_id), "team_id": str(lease.team_id),
-                "step_id": "agent",
+                "step_id": "agent", "task_id": trial.task_id,
+                "agent_name": (trial.config or {}).get("agent_name"),
                 "items": rows,
             }
     except ServiceExecutionBrokerError as exc:
@@ -229,6 +238,21 @@ async def _authorized_attempt_lease(
         return lease, trial
     except ServiceExecutionBrokerError as exc:
         raise _broker_http(exc) from exc
+
+
+@router.post("/trajectory-events")
+async def append_service_execution_trajectory_events(
+    payload: TrajectoryEventsRequestV1, request: Request,
+) -> dict[str, Any]:
+    """Pod-bound, current-attempt preview; canonical events remain materializer-owned."""
+    async with request.app.state.session_factory() as session:
+        lease, trial = await _authorized_attempt_lease(request, payload, session)
+        try:
+            result = await append_live_events(session, lease=lease, trial=trial, events=payload.events)
+        except LiveTrajectoryError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.code) from exc
+        await session.commit()
+        return result
 
 
 @router.post("/terminus/reclaim")

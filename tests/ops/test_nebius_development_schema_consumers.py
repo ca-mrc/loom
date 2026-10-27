@@ -70,7 +70,7 @@ from loom_service.pool_management.installation import PoolInstallation
 
 @pytest.mark.parametrize('query', [pool_startup_closed_sql, fence_pool_activation_sql,
     pool_recovery_machine_state_sql, lambda spec, **kwargs: pool_machine_retirement_sql(spec, action='revoke', **kwargs)])
-@pytest.mark.parametrize('revision', ['0178', '0179'])
+@pytest.mark.parametrize('revision', ['0178', '0179', '0180'])
 def test_selected_manager_schema_is_exact_without_changing_legacy_default(query, revision):
     spec = PoolInstallation.model_validate(installation_document(('staging', 'development'))[0])
     original = query(spec)
@@ -80,7 +80,7 @@ def test_selected_manager_schema_is_exact_without_changing_legacy_default(query,
     assert "IS DISTINCT FROM '0176'" not in selected
     assert query(spec) == original
     with pytest.raises(ValueError):
-        query(spec, manager_revision='0180')
+        query(spec, manager_revision='0199')
 
 
 def completed_schema_successor(inputs, connection, tmp_path, *, runtime_reference=None):

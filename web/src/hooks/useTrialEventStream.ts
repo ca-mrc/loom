@@ -24,10 +24,11 @@
  * fallback for environments where `EventSource` is unavailable or
  * blocked (some corp proxies strip `text/event-stream`).
  */
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { components } from "../api/schema";
 import { getApiBase } from "../lib/frontendConfig";
+import { mergeTrajectoryPreview, type TrajectoryPreview } from "../lib/trajectoryPreview";
 
 type TrajEvent = components["schemas"]["TrajectoryEvent"];
 
@@ -60,6 +61,10 @@ export interface UseTrialEventStreamOptions {
 export interface UseTrialEventStreamResult {
   events: TrajEvent[];
   status: TrialEventStreamStatus;
+  canonicalEvents: TrajEvent[];
+  preview: TrajectoryPreview | null;
+  canonicalAvailable?: boolean;
+  acceptPreview: (value: unknown) => void;
 }
 
 const ROLLOVER_RETRY_MS = 1_000;
@@ -74,19 +79,32 @@ export function useTrialEventStream(
     trialId,
     base,
     events: [] as TrajEvent[],
+    preview: null as TrajectoryPreview | null,
+    canonicalAvailable: undefined as boolean | undefined,
     status: "connecting" as TrialEventStreamStatus,
   }));
   // Cursor ownership follows the trial and endpoint, not an individual source.
   // Same-scope disable/reenable and both kinds of reconnect retain it.
-  const cursorRef = useRef({ trialId, base, lastSeq: -1 });
+  const cursorRef = useRef({ trialId, base, lastSeq: -1, preview: null as TrajectoryPreview | null, canonicalReceived: false });
+
+  // Polling and SSE share one preview owner. An explicit clear from either
+  // transport must not resurrect an older cached attempt from the other.
+  const acceptPreview = useCallback((value: unknown): void => {
+    const cursor = cursorRef.current;
+    if (cursor.trialId !== trialId || cursor.base !== base || cursor.canonicalReceived) return;
+    const preview = value === null ? null : mergeTrajectoryPreview(cursor.preview, value);
+    cursor.preview = preview;
+    setStream((previous) => previous.trialId === trialId && previous.base === base
+      ? { ...previous, preview } : previous);
+  }, [trialId, base]);
 
   useEffect(() => {
     if (cursorRef.current.trialId !== trialId || cursorRef.current.base !== base) {
-      cursorRef.current = { trialId, base, lastSeq: -1 };
+      cursorRef.current = { trialId, base, lastSeq: -1, preview: null, canonicalReceived: false };
     }
     setStream((previous) => {
       if (previous.trialId !== trialId || previous.base !== base) {
-        return { trialId, base, events: [], status: "connecting" };
+        return { trialId, base, events: [], preview: null, canonicalAvailable: undefined, status: "connecting" };
       }
       return enabled && trialId ? { ...previous, status: "connecting" } : previous;
     });
@@ -110,7 +128,11 @@ export function useTrialEventStream(
 
     const connect = (): void => {
       if (disposed) return;
-      const url = `${base}/api/v1/trials/${trialId}/stream?after_seq=${cursorRef.current.lastSeq}`;
+      const preview = cursorRef.current.preview;
+      const previewQuery = preview
+        ? `&preview_source=${encodeURIComponent(preview.source)}&preview_after_seq=${preview.next_after_seq ?? -1}`
+        : "";
+      const url = `${base}/api/v1/trials/${trialId}/stream?after_seq=${cursorRef.current.lastSeq}${previewQuery}`;
       const source = new ctor(url, { withCredentials: true });
       current = source;
       // Closing alone does not invalidate callbacks already captured by a
@@ -133,16 +155,42 @@ export function useTrialEventStream(
           // Malformed payload — skip but don't tear down the connection.
           return;
         }
+        if (!ev || typeof ev !== "object" || typeof ev.kind !== "string") return;
         const seq = (ev as { seq?: unknown }).seq;
-        if (typeof seq !== "number" || seq <= cursorRef.current.lastSeq) return;
+        if (typeof seq !== "number" || !Number.isSafeInteger(seq) || seq < 0 || seq <= cursorRef.current.lastSeq) return;
         cursorRef.current.lastSeq = seq;
-        setStream((previous) => ({ ...previous, events: [...previous.events, ev] }));
+        cursorRef.current.canonicalReceived = true;
+        cursorRef.current.preview = null;
+        setStream((previous) => ({ ...previous, events: [...previous.events, ev], preview: null, canonicalAvailable: true }));
       };
 
-      source.addEventListener("complete", () => {
+      source.addEventListener("preview", (e: MessageEvent) => {
+        if (!ownsSubscription() || cursorRef.current.canonicalReceived) return;
+        let value: unknown;
+        try { value = JSON.parse(e.data); } catch { return; }
+        acceptPreview(value);
+      });
+      source.addEventListener("preview_reset", (e: MessageEvent) => {
+        if (!ownsSubscription() || cursorRef.current.canonicalReceived) return;
+        let value: { source?: unknown };
+        try { value = JSON.parse(e.data); } catch { return; }
+        if (!value || (value.source !== null && typeof value.source !== "string")) return;
+        if (value.source !== null && value.source === cursorRef.current.preview?.source) return;
+        const preview = typeof value.source === "string" && value.source
+          ? { source: value.source, events: [], next_after_seq: null }
+          : null;
+        cursorRef.current.preview = preview;
+        setStream((previous) => ({ ...previous, preview }));
+      });
+      source.addEventListener("complete", (e: MessageEvent) => {
         if (!ownsSubscription()) return;
+        let canonicalAvailable: boolean | undefined;
+        try {
+          const value = JSON.parse(e.data);
+          if (typeof value?.canonical_available === "boolean") canonicalAvailable = value.canonical_available;
+        } catch { /* Legacy completion can omit the body. */ }
         retire();
-        setStatus("complete");
+        setStream((previous) => ({ ...previous, status: "complete", canonicalAvailable }));
       });
 
       source.addEventListener("reconnect", () => {
@@ -170,10 +218,14 @@ export function useTrialEventStream(
       current?.close();
       current = null;
     };
-  }, [trialId, enabled, base, eventSourceCtor]);
+  }, [trialId, enabled, base, eventSourceCtor, acceptPreview]);
 
   // Hide the previous scope even on the render before effect cleanup/reset.
   return stream.trialId === trialId && stream.base === base
-    ? { events: stream.events, status: stream.status }
-    : { events: [], status: "connecting" };
+    ? {
+        events: stream.events.length ? stream.events : (stream.preview?.events ?? []),
+        canonicalEvents: stream.events, preview: stream.preview,
+        status: stream.status, canonicalAvailable: stream.canonicalAvailable, acceptPreview,
+      }
+    : { events: [], canonicalEvents: [], preview: null, status: "connecting", acceptPreview };
 }

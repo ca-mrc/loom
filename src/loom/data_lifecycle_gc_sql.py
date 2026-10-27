@@ -37,6 +37,7 @@ class ExecutionMetadataPurger:
     """Fail-closed deletion order for execution-history tables only."""
 
     _TABLES = (
+        "service_execution_live_events",
         "trial_resource_usage",
         "execution_leases",
         "trial_events",
