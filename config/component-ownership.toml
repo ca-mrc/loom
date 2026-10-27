@@ -433,6 +433,7 @@ source_paths = [
   "src/loom/models/skill.py",
   "src/loom/models/task.py",
   "src/loom/models/trial.py",
+  "src/loom/models/harbor_config.py",
   "src/loom/models/types.py",
   "src/loom/mutable_paths.py",
   "src/loom/native_image_build.py",
