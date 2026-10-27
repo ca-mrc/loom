@@ -178,7 +178,7 @@ readback finds a selector collision, inspect its tasks/source references and
 explicitly resolve the conflicting metadata before promotion; existing aliases
 and frozen execution reads are retained.
 
-Migration `0180` changes only the insert default from runnable to pending. It
+Migration `0181` changes only the insert default from runnable to pending. It
 does not mass-demote accepted catalogs, move aliases, rewrite in-flight work or
 invent historical execution evidence. Downgrade restores only the old default;
 it cannot reactivate profiles. Before an authorized rollout, record destination

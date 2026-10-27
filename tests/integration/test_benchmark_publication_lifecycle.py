@@ -120,7 +120,7 @@ async def test_pending_default_upgrade_and_rollback_retain_accepted_rows(publica
     from alembic.migration import MigrationContext
     from alembic.operations import Operations
 
-    path = Path("database/migrations/versions/0180_benchmark_pending_default.py")
+    path = Path("database/migrations/versions/0181_benchmark_pending_default.py")
     module_spec = importlib.util.spec_from_file_location("benchmark_pending_default", path)
     migration = importlib.util.module_from_spec(module_spec)
     module_spec.loader.exec_module(migration)
@@ -184,3 +184,42 @@ async def test_first_registration_can_pin_an_empty_registry_placeholder(
         assert row.execution_state == "pending"
         assert row.upstream_revision == "release-7"
         assert await session.scalar(select(Task.id).where(Task.benchmark_id == profile)) == profile + "/sample"
+
+
+async def test_cli_migration_roundtrip_retains_live_event_schema_and_accepted_catalog(
+    publication_sessions, postgres_url,
+):
+    import asyncio
+    import os
+    import subprocess
+    import sys
+
+    profile = "migration-chain@" + uuid4().hex
+    async with publication_sessions.begin() as session:
+        await session.execute(insert(Benchmark).values(
+            id=profile, display_name="accepted", upstream_kind="json", upstream_locator="fixture:chain",
+            upstream_revision="7", license_spdx="MIT", license_url="", splits=["test"],
+            execution_state="runnable", profile_provenance={"activation_audit": {"retained": True}},
+        ))
+
+    async def migrate(*arguments):
+        await asyncio.to_thread(subprocess.run,
+            [sys.executable, "-m", "alembic", "-c", "database/migrations/alembic.ini", *arguments],
+            env={**os.environ, "LOOM_DB_URL": postgres_url}, check=True, capture_output=True, text=True)
+
+    try:
+        await migrate("downgrade", "0180")
+        async with publication_sessions() as session:
+            assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "0180"
+            assert await session.scalar(text("SELECT to_regclass('public.service_execution_live_events')")) is not None
+            assert await session.scalar(text("SELECT column_default FROM information_schema.columns WHERE table_name='benchmarks' AND column_name='execution_state'")) == "'runnable'::text"
+            row = await session.get(Benchmark, profile)
+            assert row.execution_state == "runnable"
+            assert row.profile_provenance == {"activation_audit": {"retained": True}}
+    finally:
+        await migrate("upgrade", "head")
+    async with publication_sessions() as session:
+        assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "0181"
+        assert await session.scalar(text("SELECT to_regclass('public.service_execution_live_events')")) is not None
+        assert await session.scalar(text("SELECT column_default FROM information_schema.columns WHERE table_name='benchmarks' AND column_name='execution_state'")) == "'pending'::text"
+        assert (await session.get(Benchmark, profile)).execution_state == "runnable"
