@@ -1,7 +1,8 @@
 """HumanEval end-to-end smoke (Plan 16 Task 3 / spec §14.4).
 
 Brings up the full docker-compose stack, imports 2 HumanEval tasks via
-`run_import` (against the fixture, no upstream HF call), submits a
+`run_import` (against explicitly synthetic fixture provenance, no upstream
+HF call), admits the actual source bytes through the shared owner, submits a
 trial per task, waits for the worker to finish them, asserts the
 trajectory state lands at `succeeded`.
 
@@ -22,6 +23,7 @@ import pytest
 
 from loom.trajectory.storage import MinioObjectStore
 from loom_benchmark_tool.import_cmd import run_import
+from tests.system.benchmark_catalog_admission import admit_fixture_catalog, pin_fixture_adapter
 
 _FIXTURE = (
     Path(__file__).resolve().parents[2]
@@ -56,6 +58,7 @@ async def test_humaneval_end_to_end(
         lambda *a, **kw: tmp_path / "stub-source",
     )
 
+    profile_id = pin_fixture_adapter(monkeypatch, "humaneval")
     minio_store = MinioObjectStore(
         endpoint_url=compose_stack["minio"],
         access_key=compose_stack["minio_access_key"],
@@ -83,6 +86,8 @@ async def test_humaneval_end_to_end(
         imported_by="smoke",
     )
     assert stats["converted"] == len(fixture_records)
+    await admit_fixture_catalog(db_url=compose_stack["db_url"], profile_id=profile_id,
+                                object_store=minio_store)
 
     cp = compose_stack["control_plane"]
     token = compose_stack["team_token"]
@@ -93,7 +98,7 @@ async def test_humaneval_end_to_end(
             f"{cp}/trials",
             headers={"Authorization": f"Bearer {token}"},
             json={
-                "task_id": f"humaneval/HumanEval/{i}",
+                "task_id": f"{profile_id}/HumanEval/{i}",
                 "config": {"agent_name": "oracle", "agent_model": None},
             },
             timeout=10,

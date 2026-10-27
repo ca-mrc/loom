@@ -106,6 +106,9 @@ def prepare_adapter_benchmark(
         raise ValueError(f"benchmark {benchmark} selected no tasks")
     profile_provenance = _adapter_profile_provenance(adapter)
     if origin is not None:
+        profile_provenance["selected_task_ids"] = sorted(
+            item["task_id"].removeprefix(adapter.name + "/") for item in tasks.values()
+        )
         profile_provenance["compatibility"] = {
             "imported": True, "runtime_verified": False,
             "blocked_tasks": sum(item["source_provenance"]["compatibility"]["status"] == "blocked" for item in tasks.values()),

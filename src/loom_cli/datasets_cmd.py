@@ -12,7 +12,8 @@ Subcommands:
 - register <slug> [--hf-org --hf-token --db-url --revision --mirror-to-object-store --minio-*]
 - verify <slug> [--limit --minio-* --bucket --seed]
 - audit [--all | <slug>] [--db-url] [--json] [--tb21-audit-json PATH]
-- activate terminal-bench-2 --profile terminal-bench-2@tb2.1-r6 --audit-json PATH --minio-*
+- activate --profile PROFILE --descriptor PROFILE.json [--alias ALIAS --expected-current PROFILE]
+- activate terminal-bench-2 --profile terminal-bench-2@tb2.1-r6 --audit-json PATH --minio-* (legacy)
 - activate-native --harbor-source SOURCE.json [--db-url URL]
 - sync-mirror [--source-* ...] [--dest-* ...] [--prefix ...] [--dry-run]
 
@@ -254,13 +255,24 @@ def _add_audit_args(p: argparse.ArgumentParser) -> None:
 
 
 def _add_activate_args(p: argparse.ArgumentParser) -> None:
-    p.add_argument("benchmark")
+    p.add_argument("benchmark", nargs="?", help="Legacy public alias; use --alias for new callers.")
     p.add_argument("--profile", required=True)
-    p.add_argument("--audit-json", required=True, type=Path)
+    source = p.add_mutually_exclusive_group()
+    source.add_argument("--descriptor", type=Path, help="Benchmark-neutral profile descriptor JSON.")
+    source.add_argument("--harbor-source", type=Path, help="Normalize a pinned Harbor descriptor.")
+    p.add_argument("--audit-json", type=Path, help="Legacy adapter audit snapshot evidence.")
+    p.add_argument("--alias", help="Optionally promote an alias in the admission transaction.")
+    expected = p.add_mutually_exclusive_group()
+    expected.add_argument("--expected-current", help="Required current physical alias target.")
+    expected.add_argument("--expect-absent", action="store_true", help="Require that the alias is absent.")
     p.add_argument(
-        "--db-url",
-        default=_target_db_url(),
+        "--db-url", default=_target_db_url(),
         help="Postgres URL (defaults to env LOOM_DB_URL, then LOOM_SVC_DB_URL).",
+    )
+    p.add_argument(
+        "--fixtures-root", type=Path,
+        default=Path(value) if (value := os.environ.get("LOOM_WORKER_FIXTURES_ROOT")) else None,
+        help="Explicit worker fixtures root for local fixture-source validation.",
     )
     p.add_argument("--minio-endpoint", default=_target_minio_env("ENDPOINT"))
     p.add_argument("--minio-access-key", default=_target_minio_env("ACCESS_KEY"))
@@ -621,7 +633,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_activate_native_args(sub.add_parser(
         "activate-native",
-        help="Admit a published native profile for execution without claiming runtime qualification.",
+        help="Compatibility wrapper for activate --harbor-source; use activate for new callers.",
     ))
 
     _add_provision_catalog_provision_args(
@@ -1171,122 +1183,175 @@ def _cmd_audit(args: argparse.Namespace) -> int:
 
 
 def _cmd_activate_native(args: argparse.Namespace) -> int:
-    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-
+    """Deprecated syntax, normalized into the canonical activation handler."""
     from loom.models.harbor import HarborBenchmarkSpec
-    from loom_benchmark_tool.db_url import normalize_db_url
-    from loom_cli.native_benchmark_activation import activate_native_benchmark
 
-    if not args.db_url:
-        print("error: activate-native requires --db-url / env LOOM_DB_URL or LOOM_SVC_DB_URL",
-              file=sys.stderr)
-        return 2
     try:
         spec = HarborBenchmarkSpec.model_validate_json(args.harbor_source.read_text())
     except (OSError, ValueError) as exc:
         print(f"error: invalid native source descriptor: {exc}", file=sys.stderr)
         return 2
+    return _cmd_activate(argparse.Namespace(
+        profile=spec.id, descriptor=None, harbor_source=args.harbor_source,
+        benchmark=None, audit_json=None, alias=None, expected_current=None,
+        expect_absent=False, db_url=args.db_url,
+        minio_endpoint=None, minio_access_key=None, minio_secret_key=None, fixtures_root=None,
+    ))
+
+
+def _cmd_activate(args: argparse.Namespace) -> int:
+    """One operator surface for admission and optional compare-and-swap alias movement."""
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from loom.benchmark_admission import AliasPromotion, admit_benchmark_profile
+    from loom.db.schema import Benchmark, BenchmarkAlias, Task
+    from loom.models.benchmark_profile import BenchmarkProfileSpec
+    from loom_benchmark_tool.db_url import normalize_db_url
+
+    if not args.db_url:
+        print("error: activate requires --db-url / env LOOM_DB_URL or LOOM_SVC_DB_URL",
+              file=sys.stderr)
+        return 2
+    legacy_syntax = args.benchmark is not None and args.descriptor is None and args.harbor_source is None
+    harbor_spec = None
+    try:
+        if args.descriptor is not None:
+            spec = BenchmarkProfileSpec.model_validate_json(args.descriptor.read_text())
+        elif args.harbor_source is not None:
+            from loom.models.harbor import HarborBenchmarkSpec
+
+            harbor_spec = HarborBenchmarkSpec.model_validate_json(args.harbor_source.read_text())
+            spec = None
+        elif legacy_syntax:
+            from loom.benchmark_admission_legacy import PUBLIC_ALIAS, profile_spec
+
+            spec = profile_spec()
+            if args.benchmark != PUBLIC_ALIAS:
+                raise ValueError("legacy positional activation requires its reviewed public alias")
+        else:
+            raise ValueError("activate requires --descriptor or --harbor-source")
+        if harbor_spec is not None:
+            descriptor_profile = harbor_spec.id
+        else:
+            assert spec is not None
+            descriptor_profile = spec.id
+        if descriptor_profile != args.profile:
+            raise ValueError("--profile does not match the descriptor physical profile")
+        if args.benchmark is not None and not legacy_syntax:
+            raise ValueError("use --alias with a descriptor; positional alias is legacy syntax")
+        if args.benchmark is not None and args.alias is not None:
+            raise ValueError("use either positional legacy alias or --alias")
+        alias_name = args.benchmark if legacy_syntax else args.alias
+        if alias_name and not legacy_syntax and args.expected_current is None and not args.expect_absent:
+            raise ValueError("alias promotion requires --expected-current or --expect-absent")
+        if not alias_name and (args.expected_current is not None or args.expect_absent):
+            raise ValueError("expected-current options require --alias")
+        legacy = spec is not None and spec.validation_contract == "tb21.v1"
+        audit = object_store = None
+        if legacy:
+            from loom.trajectory.storage import MinioObjectStore
+            from loom_benchmark_tool.audit_cmd import AuditResult
+
+            if args.audit_json is None:
+                raise ValueError("reviewed legacy validation requires --audit-json")
+            missing = [flag for flag, value in (
+                ("--minio-endpoint", args.minio_endpoint),
+                ("--minio-access-key", args.minio_access_key),
+                ("--minio-secret-key", args.minio_secret_key),
+            ) if not value]
+            if missing:
+                raise ValueError("activate requires current object-store access: " + ", ".join(missing))
+            audit = AuditResult.from_json_file(args.audit_json)
+            object_store = MinioObjectStore(
+                endpoint_url=args.minio_endpoint, access_key=args.minio_access_key,
+                secret_key=args.minio_secret_key,
+            )
+        elif args.audit_json is not None:
+            raise ValueError("--audit-json belongs to a reviewed legacy validation contract")
+    except (OSError, ValueError) as exc:
+        print(f"error: invalid activation input: {exc}", file=sys.stderr)
+        return 2
 
     async def _activate() -> int:
+        active_store = object_store
         engine = create_async_engine(normalize_db_url(args.db_url), isolation_level="READ COMMITTED")
         try:
-            async with async_sessionmaker(engine, expire_on_commit=False).begin() as session:
-                return await activate_native_benchmark(session, spec=spec)
+            async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+                active_spec = spec
+                if harbor_spec is not None:
+                    async with session.begin():
+                        benchmark = await session.get(Benchmark, harbor_spec.id)
+                        provenance = (benchmark.profile_provenance or {}) if benchmark is not None else {}
+                        selected = tuple(provenance.get("selected_task_ids") or harbor_spec.origin.subset)
+                        if not selected:
+                            selected = tuple(
+                                identity.removeprefix(harbor_spec.id + "/")
+                                for identity in await session.scalars(
+                                    select(Task.id).where(Task.benchmark_id == harbor_spec.id).order_by(Task.id),
+                                )
+                            )
+                        active_spec = BenchmarkProfileSpec.from_harbor(harbor_spec, selected_task_ids=selected)
+                validation = None
+                expected_current = args.expected_current
+                if legacy or legacy_syntax:
+                    async with session.begin():
+                        if legacy_syntax and args.expected_current is None and not args.expect_absent:
+                            expected_current = await session.scalar(
+                                select(BenchmarkAlias.benchmark_id).where(BenchmarkAlias.alias == alias_name),
+                            )
+                        if legacy:
+                            from loom.benchmark_admission_legacy import prepare_validation
+
+                            assert active_store is not None and audit is not None
+                            observed_spec, validation, _current = await prepare_validation(
+                                session, object_store=active_store, audit_evidence=audit,
+                            )
+                            if observed_spec != active_spec:
+                                raise ValueError("descriptor does not match the reviewed legacy source contract")
+                assert active_spec is not None
+                if active_spec.validation_contract == "canonical.v1":
+                    from loom.benchmark_admission_legacy_sources import (
+                        prepare_legacy_source_validation,
+                    )
+
+                    if active_store is None and all((
+                        args.minio_endpoint, args.minio_access_key, args.minio_secret_key,
+                    )):
+                        from loom.trajectory.storage import MinioObjectStore
+
+                        active_store = MinioObjectStore(
+                            endpoint_url=args.minio_endpoint, access_key=args.minio_access_key,
+                            secret_key=args.minio_secret_key,
+                        )
+                    async with session.begin():
+                        validation = await prepare_legacy_source_validation(
+                            session, spec=active_spec, object_store=active_store,
+                            fixtures_root=getattr(args, "fixtures_root", None),
+                        )
+                async with session.begin():
+                    alias = AliasPromotion(
+                        alias=alias_name, profile_id=active_spec.id, expected_current=expected_current,
+                    ) if alias_name else None
+                    count = await admit_benchmark_profile(
+                        session, spec=active_spec, validation=validation, alias=alias,
+                    )
+                    return count
         finally:
             await engine.dispose()
 
     try:
         count = asyncio.run(_activate())
     except ValueError as exc:
-        print(f"error: native activation rejected: {exc}", file=sys.stderr)
+        print(f"error: activation rejected: {exc}", file=sys.stderr)
         return 1
-    print(f"activated {spec.id}: {count} tasks admitted; runtime qualification unchanged")
-    return 0
-
-
-def _cmd_activate(args: argparse.Namespace) -> int:
-    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-
-    from loom.trajectory.storage import MinioObjectStore
-    from loom_benchmark_tool.audit_cmd import (
-        TB21_PROFILE_ID,
-        TB21_PUBLIC_ALIAS,
-        AuditResult,
-        ProfileActivationError,
-        activate_tb21_alias,
-    )
-    from loom_benchmark_tool.db_url import normalize_db_url
-
-    if args.benchmark != TB21_PUBLIC_ALIAS:
-        print(
-            f"error: activate currently supports only {TB21_PUBLIC_ALIAS!r}",
-            file=sys.stderr,
-        )
-        return 2
-    if args.profile != TB21_PROFILE_ID:
-        print(
-            f"error: {TB21_PUBLIC_ALIAS!r} must activate {TB21_PROFILE_ID!r}",
-            file=sys.stderr,
-        )
-        return 2
-    if not args.db_url:
-        print(
-            "error: activate requires --db-url / env LOOM_DB_URL or LOOM_SVC_DB_URL",
-            file=sys.stderr,
-        )
-        return 2
-    missing_minio = [
-        flag
-        for flag, value in (
-            ("--minio-endpoint", args.minio_endpoint),
-            ("--minio-access-key", args.minio_access_key),
-            ("--minio-secret-key", args.minio_secret_key),
-        )
-        if not value
-    ]
-    if missing_minio:
-        print(
-            "error: activate requires current object-store access: " + ", ".join(missing_minio),
-            file=sys.stderr,
-        )
-        return 2
-    try:
-        audit = AuditResult.from_json_file(args.audit_json)
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        print(f"error: invalid TB2.1 audit JSON: {exc}", file=sys.stderr)
-        return 2
-
-    object_store = MinioObjectStore(
-        endpoint_url=args.minio_endpoint,
-        access_key=args.minio_access_key,
-        secret_key=args.minio_secret_key,
-    )
-
-    async def _activate() -> None:
-        engine = create_async_engine(normalize_db_url(args.db_url))
-        try:
-            async with async_sessionmaker(engine, expire_on_commit=False)() as session:
-                await activate_tb21_alias(
-                    session,
-                    object_store=object_store,
-                    audit_evidence=audit,
-                )
-        finally:
-            await engine.dispose()
-
-    try:
-        asyncio.run(_activate())
-    except ProfileActivationError as exc:
-        print(f"error: TB2.1 activation rejected: {exc}", file=sys.stderr)
-        return 1
-    except Exception as exc:
-        print(f"error: TB2.1 activation failed: {exc}", file=sys.stderr)
-        return 1
-    print(f"activated {TB21_PUBLIC_ALIAS} -> {TB21_PROFILE_ID}")
+    target = f"{alias_name} -> {args.profile}" if alias_name else args.profile
+    print(f"activated {target}: {count} tasks admitted; runtime qualification unchanged")
     return 0
 
 
 def _cmd_provision_catalog_provision(args: argparse.Namespace) -> int:
+    from loom.trajectory.storage import MinioObjectStore
     from loom_cli.catalog_provision import (
         Boto3CatalogObjectStore,
         PostgresCatalogStore,
@@ -1352,16 +1417,21 @@ def _cmd_provision_catalog_provision(args: argparse.Namespace) -> int:
         access_key=args.target_minio_access_key,
         secret_key=args.target_minio_secret_key,
     )
-    stats = asyncio.run(
-        provision_ready_benchmark_catalog(
-            source_catalog=source_catalog,
-            target_catalog=target_catalog,
-            source_objects=source_objects,
-            target_objects=target_objects,
-            target_bucket=args.target_bucket,
-            imported_by=args.imported_by,
-        )
+    versioned_destination = MinioObjectStore(
+        endpoint_url=args.target_minio_endpoint, access_key=args.target_minio_access_key,
+        secret_key=args.target_minio_secret_key,
     )
+    try:
+        stats = asyncio.run(
+            provision_ready_benchmark_catalog(
+                source_catalog=source_catalog, target_catalog=target_catalog,
+                source_objects=source_objects, target_objects=target_objects,
+                target_bucket=args.target_bucket, imported_by=args.imported_by,
+                target_source_store=versioned_destination,
+            )
+        )
+    finally:
+        versioned_destination.close()
     print(
         "staging-catalog: "
         f"ready_agents={stats.ready_agents} "
@@ -1372,7 +1442,8 @@ def _cmd_provision_catalog_provision(args: argparse.Namespace) -> int:
         f"skipped={stats.target_objects_skipped} "
         f"missing={stats.target_objects_missing} "
         f"bytes_uploaded={stats.bytes_uploaded} "
-        f"bytes_skipped={stats.bytes_skipped}",
+        f"bytes_skipped={stats.bytes_skipped} "
+        "catalog_admission=pending runtime_qualification=unknown",
     )
     if stats.target_objects_missing:
         print(

@@ -4,14 +4,9 @@ Steps per invocation:
 
 1. Resolve the adapter from REGISTRY.
 2. `fetch_upstream` populates a cached source dir.
-3. Upsert the `benchmarks` row (id = adapter.name).
-4. For each `BenchmarkInstance`:
-   - convert into a fresh tempdir (`out_dir = tempdir / instance_slug`)
-   - upload the tempdir contents to MinIO under
-     `s3://{bucket}/{benchmark}/{instance_id}/`
-   - upsert the corresponding `tasks` row with the converted
-     `task_id`, content checksum, parsed `config`, `license`, and
-     `benchmark_id`.
+3. Convert the selected instances into a fresh staging directory.
+4. Delegate immutable bundle uploads and atomic pending-profile registration
+   to the shared publisher. Existing accepted admission survives exact republish.
 
 `tasks.source` is set to the s3:// prefix so the worker's Plan 13
 `_materialize_task_dir` pulls the bundle on claim.
@@ -23,7 +18,6 @@ import copy
 import os
 import re
 import tempfile
-import tomllib
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -31,16 +25,9 @@ from typing import Any
 from loom_benchmarks.base import BenchmarkAdapter, BenchmarkInstance, UpstreamSource
 from loom_benchmarks.fetch import fetch_upstream
 from loom_benchmarks.registry import REGISTRY
-from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from loom.db.schema import Benchmark
-from loom.db.schema import Task as TaskRow
 from loom.license_policy import tags_with_license_execution_policy
-from loom.task_image_materialization import ensure_task_image_materializations
 from loom.trajectory.storage import ObjectStore
-from loom_benchmark_tool.db_url import normalize_db_url
-from loom_benchmark_tool.upload import upload_task_dir
 
 # Permissive but bounded: forward-slashes are fine (HumanEval IDs are
 # `HumanEval/0`); reject anything that could traverse out of the
@@ -81,6 +68,7 @@ def _select_instances(
     source_dir: Path,
     instance_ids: Iterable[str] | None,
     limit: int | None,
+    census: dict[str, Any] | None = None,
 ) -> list[tuple[str, BenchmarkInstance]]:
     """Return the adapter instances selected for conversion.
 
@@ -91,10 +79,16 @@ def _select_instances(
     requested = _normalize_instance_ids(instance_ids)
     selected: list[tuple[str, BenchmarkInstance]] = []
     found: set[str] = set()
+    all_ids: set[str] = set()
 
     for split in adapter.splits:
         count = 0
         for inst in adapter.list_instances(source_dir=source_dir, split=split):
+            if census is not None:
+                _validate_instance_id(inst.instance_id)
+                if inst.instance_id in all_ids:
+                    raise ValueError("duplicate upstream task identity in source census")
+                all_ids.add(inst.instance_id)
             if requested is not None:
                 if inst.instance_id not in requested:
                     continue
@@ -104,6 +98,8 @@ def _select_instances(
                 continue
 
             if limit is not None and count >= limit:
+                if census is not None:
+                    continue
                 break
             selected.append((split, inst))
             count += 1
@@ -114,6 +110,13 @@ def _select_instances(
             formatted = ", ".join(missing)
             raise ValueError(f"requested instance_id(s) not found: {formatted}")
 
+    if census is not None:
+        selected_ids = {instance.instance_id for _split, instance in selected}
+        census.update({
+            "source_task_count": len(all_ids),
+            "selected_task_ids": sorted(selected_ids),
+            "selection": "full" if selected_ids == all_ids else "subset",
+        })
     return selected
 
 
@@ -212,106 +215,79 @@ async def run_import(
         cache_root=cache_dir,
         refresh=refresh,
     )
+    census: dict[str, Any] = {}
     selected_instances = _select_instances(
         adapter,
         source_dir=source_dir,
-        instance_ids=instance_ids,
-        limit=limit,
+        instance_ids=instance_ids, limit=limit, census=census,
     )
 
-    engine = create_async_engine(normalize_db_url(db_url))
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    # Retain this import surface's adapter/remap/fetch API, then reuse the same
+    # publisher as datasets publish. Conversion and immutable storage upload
+    # finish before the shared final catalog transaction takes any row locks.
+    from loom_benchmark_tool.manifest import load_task_config_from_bundle
+    from loom_cli.benchmark_prepare import (
+        _adapter_profile_provenance,
+        _adapter_task_source_provenance,
+    )
+    from loom_cli.benchmark_types import AdapterBenchmarkEntry, PreparedAdapterBenchmark
+    from loom_cli.local_benchmark_publish import publish_local_benchmark
 
-    # Upsert benchmarks row first (A13.2: human-readable PK supports
-    # ON CONFLICT (id) DO UPDATE). Direct imports carry the same catalog
-    # grouping metadata as publish/register so platform readiness and the SPA
-    # don't lose series on fully materialized benchmark rows.
-    adapter_series = getattr(adapter, "series", None)
-    update_set: dict[str, Any] = {
-        "upstream_revision": adapter.upstream_source.revision or "",
-        "imported_by": imported_by,
-    }
-    if adapter_series is not None:
-        update_set["series"] = adapter_series
-
-    async with session_factory() as session:
-        await session.execute(
-            pg_insert(Benchmark)
-            .values(
-                id=adapter.name,
-                display_name=adapter.display_name,
-                upstream_kind=adapter.upstream_source.kind,
-                upstream_locator=adapter.upstream_source.locator,
-                upstream_revision=adapter.upstream_source.revision or "",
-                license_spdx=adapter.license_spdx,
-                license_url=adapter.license_url,
-                splits=list(adapter.splits),
-                series=adapter_series,
-                imported_by=imported_by,
-            )
-            .on_conflict_do_update(
-                index_elements=["id"],
-                set_=update_set,
-            ),
-        )
-        await session.commit()
-
-    stats = {"converted": 0, "warnings": 0}
-
-    for _split, inst in selected_instances:
-        _validate_instance_id(inst.instance_id)
-        with tempfile.TemporaryDirectory() as tmp:
-            out_dir = Path(tmp) / inst.instance_id.replace("/", "__")
-            out_dir.mkdir(parents=True, exist_ok=True)
-            converted = adapter.convert_instance(inst, out_dir=out_dir)
-            prefix = f"{adapter.name}/{inst.instance_id}/"
-            await upload_task_dir(
-                store=object_store,
-                bucket=bucket,
-                prefix=prefix,
-                task_dir=out_dir,
-            )
-
-            cfg: dict[str, Any] = tomllib.loads(
-                (out_dir / "task.toml").read_text(),
-            )
-            source_uri = f"s3://{bucket}/{prefix}"
+    with tempfile.TemporaryDirectory(prefix="loom-import-prepare-") as temporary:
+        root = Path(temporary)
+        task_tomls: list[Path] = []
+        tasks: dict[str, dict[str, Any]] = {}
+        warnings: list[str] = []
+        identities: set[str] = set()
+        for index, (split, inst) in enumerate(selected_instances):
+            _validate_instance_id(inst.instance_id)
+            relative = f"task-{index:06d}"
+            bundle = root / relative
+            bundle.mkdir()
+            converted = adapter.convert_instance(inst, out_dir=bundle)
+            if not converted.task_id.startswith(adapter.name + "/") or converted.task_id in identities:
+                raise ValueError("invalid or duplicate converted task identity")
+            _validate_instance_id(converted.task_id.removeprefix(adapter.name + "/"))
+            identities.add(converted.task_id)
+            config = load_task_config_from_bundle(bundle)
+            if config["task"]["id"] != converted.task_id:
+                raise ValueError("adapter task.toml identity differs from converted task")
             tags = tags_with_license_execution_policy(
-                inst.tags,
-                getattr(adapter, "license_execution_policy", None),
+                inst.tags, getattr(adapter, "license_execution_policy", None),
             )
-            async with session_factory() as session:
-                task_row = (
-                    await session.execute(
-                        pg_insert(TaskRow)
-                        .values(
-                            id=converted.task_id,
-                            checksum=converted.checksum,
-                            config=cfg,
-                            source=source_uri,
-                            license=converted.license_spdx,
-                            benchmark_id=adapter.name,
-                            tags=tags,
-                        )
-                        .on_conflict_do_update(
-                            index_elements=["id"],
-                            set_={
-                                "checksum": converted.checksum,
-                                "config": cfg,
-                                "source": source_uri,
-                                "license": converted.license_spdx,
-                                "benchmark_id": adapter.name,
-                                "tags": tags,
-                            },
-                        )
-                        .returning(TaskRow)
-                        .execution_options(populate_existing=True),
-                    )
-                ).scalar_one()
-                await ensure_task_image_materializations(session, task_row=task_row)
-                await session.commit()
-            stats["converted"] += 1
-            stats["warnings"] += len(converted.warnings)
-
-    await engine.dispose()
-    return stats
+            tags["split"] = split
+            tasks[relative] = {
+                "task_id": converted.task_id, "license_spdx": converted.license_spdx,
+                "tags": tags,
+                "source_provenance": _adapter_task_source_provenance(
+                    adapter, instance=inst, bundle_dir=bundle, task_config=config,
+                    checksum=converted.checksum,
+                ),
+            }
+            task_tomls.append(bundle / "task.toml")
+            warnings.extend(converted.warnings)
+        if not tasks:
+            raise ValueError("benchmark import selected no tasks")
+        manifest = {
+            "benchmark_id": adapter.name, "display_name": adapter.display_name,
+            "series": getattr(adapter, "series", None),
+            "license_spdx": adapter.license_spdx, "license_url": adapter.license_url,
+            "splits": list(adapter.splits), "upstream_kind": adapter.upstream_source.kind,
+            "upstream_locator": adapter.upstream_source.locator,
+            "upstream_revision": adapter.upstream_source.revision or "",
+            "benchmark_profile_provenance": {
+                **_adapter_profile_provenance(adapter), **census,
+                "selected_task_ids": sorted(identity.removeprefix(adapter.name + "/") for identity in identities),
+            },
+            "tasks": list(tasks.values()),
+        }
+        prepared = PreparedAdapterBenchmark(
+            AdapterBenchmarkEntry(adapter.name, adapter.display_name,
+                                  getattr(adapter, "series", None), adapter.license_spdx),
+            root, tuple(task_tomls), manifest, tasks, tuple(warnings),
+        )
+        await publish_local_benchmark(
+            root, prepared_adapter=prepared, db_url=db_url, object_store=object_store,
+            bucket=bucket, imported_by=imported_by,
+        )
+        return {"converted": len(tasks), "warnings": len(warnings)}

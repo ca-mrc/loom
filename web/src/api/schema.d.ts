@@ -3482,6 +3482,8 @@ export interface components {
             blocked_licenses?: string[];
             /** Blocker Reason */
             blocker_reason?: string | null;
+            /** Catalog Admission State */
+            catalog_admission_state?: string;
             /** Display Name */
             display_name: string;
             /** Id */
@@ -3504,6 +3506,10 @@ export interface components {
             manifest_status?: string;
             /** Materializer Status */
             materializer_status?: string;
+            /** Qualification Scope */
+            qualification_scope?: string[];
+            /** Qualification State */
+            qualification_state?: string;
             /** Raw Task Count */
             raw_task_count?: number;
             /** Readiness Label */
@@ -3512,6 +3518,8 @@ export interface components {
             readiness_message?: string | null;
             /** Readiness State */
             readiness_state?: string;
+            /** Runtime Blockers */
+            runtime_blockers?: string[];
             /** Selectable */
             selectable?: boolean;
             /** Series */
@@ -3522,6 +3530,10 @@ export interface components {
             source_schemes?: string[];
             /** Splits */
             splits: string[];
+            /** Support Policy State */
+            support_policy_state?: string;
+            /** Target Compatibility State */
+            target_compatibility_state?: string;
             /** Task Count */
             task_count: number;
             /** Upstream Kind */

@@ -177,7 +177,7 @@ async def test_publish_local_benchmark_uploads_and_registers(
             assert task.source == f"s3://loom-benchmarks/{revision_prefix}"
             assert task.license == "MIT"
             assert task.benchmark_id == "team-evals"
-            assert task.config["task"]["id"] == "alpha"
+            assert task.config["task"]["id"] == "team-evals/alpha"
             assert task.checksum == expected_checksum
             assert task.source_provenance == {
                 "bundle_file_metadata_sha256": f"sha256:{metadata_digest}",

@@ -20,6 +20,10 @@ const BENCHMARKS_RESPONSE = {
       raw_task_count: 30,
       valid_task_config_count: 30,
       invalid_task_config_count: 0,
+      catalog_admission_state: "admitted",
+      target_compatibility_state: "unknown",
+      qualification_state: "unknown",
+      qualification_scope: [],
       readiness_state: "runnable",
       readiness_label: "Ready",
       readiness_message: "30 runnable tasks are registered.",
@@ -86,6 +90,11 @@ describe("Benchmarks page", () => {
 
     expect(await screen.findByText("AIME 2025")).toBeInTheDocument();
     expect(screen.getByText("SWE-Bench Verified")).toBeInTheDocument();
+    expect(screen.getByText("Catalog")).toBeInTheDocument();
+    expect(screen.getByText("admitted")).toBeInTheDocument();
+    expect(screen.getByText("Target compatibility")).toBeInTheDocument();
+    expect(screen.getByText("Runtime qualification")).toBeInTheDocument();
+    expect(screen.getAllByText("unknown")).toHaveLength(2);
     expect(screen.getByText("Benchmark readiness guide")).toBeInTheDocument();
     expect(screen.getByText(/Missing or stale task configurations require operator attention/)).toBeInTheDocument();
     expect(screen.getByText("30 runnable tasks are registered.")).toBeInTheDocument();

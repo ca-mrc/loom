@@ -8,15 +8,13 @@ import tempfile
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from loom_benchmark_terminal_bench_2.upstream import TB21_TASK_COUNT, load_tb21_lock
+from loom_benchmark_terminal_bench_2.upstream import load_tb21_lock
 from loom_bundle_checksum import sha256_of_dir
-from sqlalchemy import func, select
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import Benchmark, BenchmarkAlias
@@ -137,43 +135,27 @@ async def activate_tb21_alias(
     object_store: ObjectStore,
     audit_evidence: AuditResult,
 ) -> AuditResult:
-    """Re-audit the current physical profile and atomically activate it.
+    """Compatibility wrapper: reviewed audit, shared admission and alias CAS.
 
-    The JSON evidence is useful as an operator-visible locator/identity for a
-    prior audit, but it cannot authorize activation.  We take row locks, read
-    the registered bundles from object storage again, bind the evidence to the
-    just-observed snapshot, and only then update the alias in the same database
-    transaction.
+    Expensive byte validation runs before the short catalog-lock transaction.
+    The shared owner rechecks every observed profile/task fact before admitting
+    and moving the alias atomically. A concurrent alias move fails the CAS.
     """
+    from loom.benchmark_admission import AliasPromotion, admit_benchmark_profile
+    from loom.benchmark_admission_legacy import prepare_validation
+
     async with session.begin():
-        current = await audit_tb21_profile(
-            session,
-            object_store=object_store,
-            lock_rows=True,
+        expected_current = await session.scalar(
+            select(BenchmarkAlias.benchmark_id).where(BenchmarkAlias.alias == TB21_PUBLIC_ALIAS),
         )
-        audit_evidence.require_current_snapshot(current)
-        current.require_exact_profile(TB21_PROFILE_ID, task_count=TB21_TASK_COUNT)
-        benchmark = await session.get(Benchmark, TB21_PROFILE_ID)
-        if benchmark is None:  # Defensive: the locked audit just observed it.
-            raise ProfileActivationError("physical TB2.1 profile disappeared during activation")
-        benchmark.execution_state = "runnable"
-        profile_provenance = dict(benchmark.profile_provenance or {})
-        profile_provenance["activation_audit"] = {
-            "schema_version": 1,
-            "snapshot_id": current.snapshot_id,
-            "verified_bundles": current.verified_bundles,
-            "verified_at": datetime.now(UTC).isoformat(),
-        }
-        benchmark.profile_provenance = profile_provenance
-        await session.execute(
-            pg_insert(BenchmarkAlias)
-            .values(alias=TB21_PUBLIC_ALIAS, benchmark_id=TB21_PROFILE_ID)
-            .on_conflict_do_update(
-                index_elements=["alias"],
-                set_={
-                    "benchmark_id": TB21_PROFILE_ID,
-                    "activated_at": func.now(),
-                },
+        spec, validation, current = await prepare_validation(
+            session, object_store=object_store, audit_evidence=audit_evidence,
+        )
+    async with session.begin():
+        await admit_benchmark_profile(
+            session, spec=spec, validation=validation,
+            alias=AliasPromotion(
+                alias=TB21_PUBLIC_ALIAS, profile_id=spec.id, expected_current=expected_current,
             ),
         )
     return current

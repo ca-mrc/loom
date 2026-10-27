@@ -5,7 +5,8 @@ image is ~5 GB and pulling 3 is a 15 GB+ disk + bandwidth cost.
 
 Uses the same monkey-patch pattern as the HumanEval smoke: the
 adapter's `list_instances` reads the local fixture instead of HF,
-import → submit → wait for terminal state.
+synthetic fixture import → shared source admission → submit → terminal state.
+This fixture is not evidence of qualification of the original upstream catalog.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ import pytest
 
 from loom.trajectory.storage import MinioObjectStore
 from loom_benchmark_tool.import_cmd import run_import
+from tests.system.benchmark_catalog_admission import admit_fixture_catalog, pin_fixture_adapter
 
 _FIXTURE = (
     Path(__file__).resolve().parents[2]
@@ -64,6 +66,7 @@ async def test_swe_bench_verified_three_instances(
         lambda *a, **kw: tmp_path / "stub-source",
     )
 
+    profile_id = pin_fixture_adapter(monkeypatch, "swe-bench-verified")
     minio_store = MinioObjectStore(
         endpoint_url=compose_stack["minio"],
         access_key=compose_stack["minio_access_key"],
@@ -80,14 +83,10 @@ async def test_swe_bench_verified_three_instances(
         }:
             raise
 
-    # PR-1 (series): the `swe-bench-verified` adapter slug is gone —
-    # verified status is now a tag on the unified `swe-bench` benchmark.
-    # The smoke imports the parent so the same code path exercises
-    # the merged-tag list_instances + convert path. We don't filter by
-    # tag here because run_import doesn't filter — it converts the
-    # first `limit` rows regardless.
+    # Exercise the supported Verified adapter; the broader swe-bench catalog
+    # remains outside the reviewed product support policy.
     stats = await run_import(
-        benchmark="swe-bench",
+        benchmark="swe-bench-verified",
         db_url=compose_stack["db_url"],
         object_store=minio_store,
         bucket="loom-benchmarks",
@@ -96,6 +95,8 @@ async def test_swe_bench_verified_three_instances(
         imported_by="smoke",
     )
     assert stats["converted"] == 3
+    await admit_fixture_catalog(db_url=compose_stack["db_url"], profile_id=profile_id,
+                                object_store=minio_store)
 
     cp = compose_stack["control_plane"]
     token = compose_stack["team_token"]
@@ -106,8 +107,8 @@ async def test_swe_bench_verified_three_instances(
             f"{cp}/trials",
             headers={"Authorization": f"Bearer {token}"},
             json={
-                "task_id": f"swe-bench-verified/smoke__smoke-{i}",
-                "config": {},
+                "task_id": f"{profile_id}/smoke__smoke-{i}",
+                "config": {"agent_name": "oracle", "agent_model": None},
             },
             timeout=10,
         )

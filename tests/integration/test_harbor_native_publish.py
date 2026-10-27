@@ -169,8 +169,11 @@ async def test_native_activation_cli_rejects_invalid_catalog(
             if damage == "origin":
                 config["upstream_origin"]["revision"] = "b" * 40
             elif damage == "config":
-                config["environment"]["gpu_types"] = ["H100"]
-                config["environment"]["gpus"] = 1
+                config["import_blockers"] = [{
+                    "code": "TASK_COMPAT_FIXTURE_BLOCKED", "severity": "error",
+                    "path": "task.toml", "line": 1, "phase": "fixture",
+                    "message": "Unsupported authored task contract", "hint": "Fix the source package",
+                }]
             elif damage == "source":
                 config["task"]["name"] = "Changed registered config"
             else:
@@ -280,7 +283,7 @@ async def test_native_publisher_persists_source_and_reuses_exact_version(
             update={"origin": spec(profile).origin.model_copy(update={"revision": "b" * 40})}
         )
         descriptor.write_text(changed.model_dump_json())
-        with pytest.raises(ValueError, match="another upstream origin"):
+        with pytest.raises(ValueError, match="profile_origin_mismatch"):
             await benchmark_publish.publish_benchmark(**options)
         async with async_sessionmaker(engine)() as session:
             task = await session.get(Task, profile + "/upstream/sample")
@@ -326,3 +329,85 @@ async def test_concurrent_first_import_cannot_rebind_profile_origin(postgres_url
                 )
     finally:
         await engine.dispose()
+
+
+async def test_native_admission_keeps_exact_accelerator_compatibility_separate(
+    native_publication, postgres_url,
+):
+    import tomllib
+
+    import tomli_w
+
+    from loom.benchmark_readiness import BenchmarkAuditSource, TaskAuditSource, build_readiness_item
+    from loom.models.task import TaskConfig
+    from loom.task_runtime_compatibility import task_runtime_rejections
+
+    profile, descriptor, sessions, options, source_task = native_publication
+    authored = tomllib.loads((source_task / "task.toml").read_text())
+    authored["environment"]["gpus"] = 1
+    authored["environment"]["gpu_types"] = ["H100"]
+    (source_task / "task.toml").write_text(tomli_w.dumps(authored))
+    await benchmark_publish.publish_benchmark(**options)
+    code, stdout, stderr = await _native_cli(descriptor, postgres_url)
+    assert code == 0 and "2 tasks admitted" in stdout, stderr
+    async with sessions() as session:
+        benchmark = await session.get(Benchmark, profile)
+        row = await session.get(Task, profile + "/upstream/sample")
+        assert benchmark.execution_state == "runnable"
+        assert any("exact_gpu_model_runtime_unavailable" in reason
+                   for reason in task_runtime_rejections(TaskConfig.model_validate(row.config)))
+        readiness = build_readiness_item(
+            BenchmarkAuditSource(id=profile, display_name=benchmark.display_name, series=benchmark.series,
+                upstream_kind=benchmark.upstream_kind, upstream_locator=benchmark.upstream_locator,
+                upstream_revision=benchmark.upstream_revision, execution_state=benchmark.execution_state),
+            tasks=[TaskAuditSource(id=row.id, config=row.config, source=row.source)],
+            registry_names={profile},
+        )
+        assert readiness.catalog_admission_state == "admitted"
+        assert readiness.target_compatibility_state == "incompatible"
+        assert readiness.readiness_state == "blocked"
+
+
+async def test_source_retirement_serializes_with_profile_admission(native_publication):
+    from loom.models.harbor import HarborBenchmarkSpec
+    from loom_cli.native_benchmark_activation import activate_native_benchmark
+
+    profile, descriptor, sessions, _, _ = native_publication
+    native_spec = HarborBenchmarkSpec.model_validate_json(descriptor.read_text())
+    async with sessions.begin() as session:
+        row = await session.get(Task, profile + "/upstream/sample")
+        source_id = hashlib.sha256(row.source.encode()).hexdigest()
+        incarnation = await session.scalar(select(TaskBundleSourceIncarnation).where(
+            TaskBundleSourceIncarnation.source_id == source_id,
+            TaskBundleSourceIncarnation.state == "available",
+        ))
+        incarnation_id = incarnation.id
+        await session.execute(delete(TaskBundleSourceReference).where(
+            TaskBundleSourceReference.source_id == source_id,
+        ))
+
+    async def admit():
+        async with sessions.begin() as session:
+            try:
+                await activate_native_benchmark(session, spec=native_spec)
+                return True
+            except ValueError as error:
+                assert "available incarnation" in str(error)
+                return False
+
+    async def retire():
+        async with sessions.begin() as session:
+            return await retire_task_bundle_source(
+                session, incarnation_id=incarnation_id, now=datetime.now(UTC),
+            )
+
+    admitted, retired = await asyncio.wait_for(asyncio.gather(admit(), retire()), timeout=10)
+    assert admitted is not retired
+    async with sessions() as session:
+        assert (await session.get(Benchmark, profile)).execution_state == (
+            "runnable" if admitted else "pending"
+        )
+        references = list(await session.scalars(select(TaskBundleSourceReference).where(
+            TaskBundleSourceReference.source_id == source_id,
+        )))
+        assert bool(references) is admitted

@@ -110,6 +110,7 @@ async def overview_setup(
             role="owner",
         ))
         s.execute(insert(Benchmark).values(
+                    execution_state="runnable",
             id="humaneval",
             display_name="HumanEval",
             upstream_kind="huggingface",
@@ -120,6 +121,7 @@ async def overview_setup(
             splits=["test"],
         ))
         s.execute(insert(Benchmark).values(
+                    execution_state="runnable",
             id="gaia",
             display_name="GAIA",
             upstream_kind="huggingface",

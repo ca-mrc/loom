@@ -1,10 +1,10 @@
 """Unified all-benchmark opt-in end-to-end smoke (issue #806).
 
-For every registered benchmark, submit 1-3 representative tasks
-through the real Loom stack (docker-compose test rig), and assert
-each trial reaches `succeeded`. Validates the adapter surface end
-to end — not scores — so a single new adapter regression will fail
-this smoke without needing per-benchmark tests.
+For supported adapters, import synthetic fixture profiles, validate their
+actual source bytes through shared admission, then submit representative tasks
+through the docker-compose rig. Excluded catalogs assert their reviewed policy
+rejection. The incomplete TB2.1 sample asserts its locked-source rejection; it
+cannot stand in for the full audited upstream profile or runtime qualification.
 
 Opt-in only. Set LOOM_RUN_ALL_BENCHMARKS_SMOKE=1 to run. Wall-clock
 budget on a warm cache is ~45-60 min; some benchmarks pull multi-GB
@@ -31,8 +31,10 @@ from pathlib import Path
 import httpx
 import pytest
 
+from loom.catalog_policy import catalog_support_policy
 from loom.trajectory.storage import MinioObjectStore
 from loom_benchmark_tool.import_cmd import run_import
+from tests.system.benchmark_catalog_admission import admit_fixture_catalog, pin_fixture_adapter
 
 _FIXTURE_ROOT = (
     Path(__file__).resolve().parents[2]
@@ -55,8 +57,9 @@ pytestmark = pytest.mark.skipif(
 class BenchmarkCase:
     """One benchmark's slot in the all-benchmark smoke.
 
-    ``benchmark_id`` is the name passed to ``run_import`` AND used as
-    the trial task_id prefix (``f"{benchmark_id}/{instance_id}"``).
+    ``benchmark_id`` is the adapter slug passed to ``run_import``. Supported
+    cases resolve to isolated synthetic profile IDs for task submission;
+    excluded cases retain the reviewed policy identity and assert rejection.
     ``adapter_import_path`` + ``adapter_class_name`` locate the class
     whose ``list_instances`` gets monkey-patched.
 
@@ -100,6 +103,7 @@ class BenchmarkCase:
     target_split: str = "test"
     timeout_sec: int = 600
     marks: tuple[pytest.MarkDecorator, ...] = field(default_factory=tuple)
+    locked_materialization_rejection: str | None = None
 
     def __post_init__(self) -> None:
         sources = [
@@ -492,6 +496,7 @@ CASES: tuple[BenchmarkCase, ...] = (
             "chess-best-move",
             "hello-world",
         ),
+        locked_materialization_rejection="Harbor materialization metadata is unavailable",
         timeout_sec=3600,
     ),
 )
@@ -579,6 +584,15 @@ async def test_benchmark_smoke(
     from loom_benchmarks.base import BenchmarkInstance
 
     adapter_cls = _load_adapter_class(case)
+    if case.locked_materialization_rejection is not None:
+        from loom_benchmark_terminal_bench_2.upstream import TB21LockError
+
+        # This old sample tree lacks the independently locked package/audit
+        # materialization. It must not stand in for full TB2.1 qualification.
+        assert case.override_source_dir is not None
+        with pytest.raises(TB21LockError, match=case.locked_materialization_rejection):
+            list(adapter_cls().list_instances(source_dir=case.override_source_dir, split=case.target_split))
+        return
 
     if case.override_source_dir is not None:
         # Real list_instances walks the pre-materialized fixture tree.
@@ -609,6 +623,10 @@ async def test_benchmark_smoke(
         lambda *a, **kw: source_dir,
     )
 
+    policy = catalog_support_policy(case.benchmark_id)
+    profile_id = pin_fixture_adapter(
+        monkeypatch, case.benchmark_id, retain_policy_identity=policy.state != "supported",
+    )
     minio_store = MinioObjectStore(
         endpoint_url=compose_stack["minio"],
         access_key=compose_stack["minio_access_key"],
@@ -644,6 +662,8 @@ async def test_benchmark_smoke(
         f"converted, got {stats}"
     )
 
+    await admit_fixture_catalog(db_url=compose_stack["db_url"], profile_id=profile_id,
+                                object_store=minio_store)
     cp = compose_stack["control_plane"]
     token = compose_stack["team_token"]
 
@@ -653,15 +673,23 @@ async def test_benchmark_smoke(
             f"{cp}/trials",
             headers={"Authorization": f"Bearer {token}"},
             json={
-                "task_id": f"{case.benchmark_id}/{instance_id}",
-                "config": {},
+                "task_id": f"{profile_id}/{instance_id}",
+                "config": {"agent_name": "oracle", "agent_model": None},
             },
             timeout=10,
         )
+        if policy.state != "supported":
+            assert r.status_code == 409, r.text
+            assert r.json()["detail"]["reason"] == policy.state
+            continue
         assert r.status_code == 201, (
             f"{case.benchmark_id}/{instance_id}: {r.status_code} {r.text}"
         )
         submitted.append(r.json()["trial_id"])
+
+    if policy.state != "supported":
+        assert submitted == []
+        return
 
     deadline = time.time() + case.timeout_sec
     pending = set(submitted)

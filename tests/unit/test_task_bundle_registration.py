@@ -241,3 +241,28 @@ print(json.dumps([value.source_provenance, config], sort_keys=True))
     copy = registered.task_config_document
     copy["required_agent_capabilities"].append("changed")
     assert registered.task_config_document == config
+
+
+def test_source_capture_can_preserve_target_architecture_for_catalog_admission(tmp_path):
+    root = tmp_path / "source"
+    root.mkdir()
+    (root / "task.toml").write_text("""schema_version = "1"
+[task]
+id = "authored"
+name = "ARM source"
+[environment]
+os = "linux"
+cpu_arch = "arm64"
+docker_image = "alpine"
+[agent]
+name = "oracle"
+[verifier]
+name = "pytest"
+[[steps]]
+name = "main"
+""")
+    registered = _module().prepare_task_bundle_registration(
+        root, task_id="bench/arm", check_target_architecture=False,
+    )
+    assert registered.task_config.environment.cpu_arch == "arm64"
+    assert registered.task_config.task.id == "bench/arm"

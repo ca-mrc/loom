@@ -506,10 +506,14 @@ async def test_run_register_mirror_writes_internal_source_and_hf_provenance(
         async def scalar(self, _statement: object) -> None:
             return None
 
+        async def scalars(self, _statement: object) -> list[object]:
+            return []
+
         async def execute(
             self, statement: FakeInsert, *_args: object
         ) -> FakeResult:
-            executed.append(statement)
+            if isinstance(statement, FakeInsert):
+                executed.append(statement)
             return FakeResult()
 
         async def commit(self) -> None:
@@ -847,9 +851,16 @@ async def test_run_register_source_object_store_writes_s3_task_rows(
         def begin(self) -> FakeSession:
             return self
 
-        async def execute(self, statement: FakeInsert) -> FakeResult:
-            executed.append(statement)
+        async def execute(self, statement: FakeInsert, *_args: object) -> FakeResult:
+            if isinstance(statement, FakeInsert):
+                executed.append(statement)
             return FakeResult()
+
+        async def scalar(self, _statement: object) -> None:
+            return None
+
+        async def scalars(self, _statement: object) -> list[object]:
+            return []
 
         async def commit(self) -> None:
             return None

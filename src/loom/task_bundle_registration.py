@@ -85,6 +85,7 @@ def prepare_task_bundle_registration(
     task_dir: Path,
     *,
     task_id: str,
+    check_target_architecture: bool = True,
 ) -> RegisteredTaskBundle:
     """Bind normalized catalog config to exactly the captured authored file.
 
@@ -104,7 +105,8 @@ def prepare_task_bundle_registration(
         tomllib.loads(payload.decode("utf-8")), task_id=catalog_id,
     )
     authored = normalize_steps(TaskConfig.model_validate(normalized))
-    execution_cpu_arch(authored.environment.cpu_arch)
+    if check_target_architecture:
+        execution_cpu_arch(authored.environment.cpu_arch)
     bundle_id = _task_id(authored.task.id)
     registered = authored.model_dump(mode="json")
     registered["task"]["id"] = catalog_id

@@ -47,15 +47,29 @@ class _TB21AuditSession:
     def __init__(self, *, benchmark: object, task_rows: list[object]) -> None:
         self._benchmark = benchmark
         self._task_rows = task_rows
+        self.executed = False
 
     async def get(self, _model: object, _key: object) -> object:
         return self._benchmark
 
-    async def execute(self, _statement: object) -> object:
+    async def execute(self, _statement: object, *_args: object) -> object:
+        self.executed = True
         return SimpleNamespace(scalar_one_or_none=lambda: self._benchmark)
 
+    async def scalar(self, statement: object) -> object:
+        return self._benchmark if statement.column_descriptions[0]["name"] == "Benchmark" else None
+
     async def scalars(self, _statement: object) -> object:
-        return SimpleNamespace(all=lambda: self._task_rows)
+        class Rows(list):
+            def all(self) -> list:
+                return self
+        return Rows(self._task_rows)
+
+    async def flush(self) -> None:
+        return None
+
+    def begin_nested(self) -> object:
+        return self.begin()
 
     def begin(self) -> object:
         class _Transaction:
@@ -127,6 +141,7 @@ def _tb21_audit_fixture(
         task_rows.append(
             SimpleNamespace(
                 id=task_id,
+                benchmark_id=profile,
                 checksum=sha256_of_dir(bundle),
                 config=config,
                 source=f"s3://loom-benchmarks/{short_name}/",
@@ -159,6 +174,8 @@ def _tb21_audit_fixture(
         )
     benchmark = SimpleNamespace(
         id=profile,
+        display_name="TB2.1",
+        series="terminal-bench",
         execution_state="pending",
         upstream_kind="harbor-package",
         upstream_locator=lock.dataset,
@@ -481,24 +498,8 @@ async def test_audit_uses_the_worker_compatibility_gate(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_activation_reaudits_current_snapshot_and_rejects_stale_evidence(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    class _Transaction:
-        async def __aenter__(self) -> None:
-            return None
-
-        async def __aexit__(self, *_args: object) -> None:
-            return None
-
-    class _Session:
-        executed = False
-
-        def begin(self) -> _Transaction:
-            return _Transaction()
-
-        async def execute(self, _statement: object) -> None:
-            self.executed = True
-
     async def current_audit(
         _session: object, *, object_store: object, **_kwargs: object
     ) -> AuditResult:
@@ -511,7 +512,7 @@ async def test_activation_reaudits_current_snapshot_and_rejects_stale_evidence(
         )
 
     current_store = object()
-    session = _Session()
+    session, _store, _rows, _bundles = _tb21_audit_fixture(tmp_path)
     monkeypatch.setattr("loom_benchmark_tool.audit_cmd.audit_tb21_profile", current_audit)
 
     with pytest.raises(ProfileActivationError, match="snapshot"):
@@ -531,24 +532,8 @@ async def test_activation_reaudits_current_snapshot_and_rejects_stale_evidence(
 
 @pytest.mark.asyncio
 async def test_activation_ignores_a_forged_clean_assertion_when_fresh_audit_is_dirty(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    class _Transaction:
-        async def __aenter__(self) -> None:
-            return None
-
-        async def __aexit__(self, *_args: object) -> None:
-            return None
-
-    class _Session:
-        executed = False
-
-        def begin(self) -> _Transaction:
-            return _Transaction()
-
-        async def execute(self, _statement: object) -> None:
-            self.executed = True
-
     async def dirty_current_audit(
         _session: object,
         *,
@@ -565,7 +550,7 @@ async def test_activation_ignores_a_forged_clean_assertion_when_fresh_audit_is_d
         )
 
     current_store = object()
-    session = _Session()
+    session, _store, _rows, _bundles = _tb21_audit_fixture(tmp_path)
     monkeypatch.setattr("loom_benchmark_tool.audit_cmd.audit_tb21_profile", dirty_current_audit)
 
     with pytest.raises(ProfileActivationError, match="89 verified bundles"):

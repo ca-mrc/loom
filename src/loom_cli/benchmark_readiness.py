@@ -159,6 +159,7 @@ async def run_readiness_audit(
                 upstream_kind=row.upstream_kind,
                 upstream_locator=row.upstream_locator,
                 upstream_revision=row.upstream_revision,
+                execution_state=row.execution_state,
             ),
             tasks=tasks_by_benchmark.get(row.id, []),
             registry_names=names,

@@ -32,7 +32,7 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import HTTPException
-from sqlalchemy import cast, false, or_
+from sqlalchemy import cast, false, or_, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -40,9 +40,11 @@ from loom.benchmark_profiles import (
     reject_non_runnable_benchmark_profiles,
     resolve_benchmark_selectors,
 )
-from loom.benchmark_readiness import CURRENTLY_UNSUPPORTED_BENCHMARK_IDS
+from loom.catalog_policy import CURRENTLY_UNSUPPORTED_BENCHMARK_IDS
 from loom.db.schema import Task, TaskSet
 from loom.db.task_set_visibility import visible_task_sets, visible_tasks
+from loom.models.task import TaskConfig
+from loom.task_runtime_compatibility import task_hardware_rejections
 
 # Recognized task_filter keys. Anything else is rejected so a typo
 # (`liscense` instead of `license`) doesn't silently match nothing.
@@ -87,6 +89,33 @@ async def resolve_task_filter(
             require_runnable=require_runnable,
         )
     ).task_ids
+
+
+async def reject_unsupported_task_hardware(session: AsyncSession, task_ids: list[str]) -> None:
+    if not task_ids:
+        return
+    rows = (await session.execute(
+        select(Task.id, Task.config).where(Task.id.in_(task_ids)).order_by(Task.id),
+    )).all()
+    reasons: dict[str, list[str]] = {}
+    for task_id, raw_config in rows:
+        try:
+            config = TaskConfig.model_validate(raw_config)
+        except ValueError:
+            # Preserve the caller's existing invalid-config diagnostic.
+            continue
+        if rejected := task_hardware_rejections(config):
+            reasons[str(task_id)] = list(rejected)
+    if reasons:
+        unsupported_architecture = any(
+            "unsupported_cpu_architecture" in reason
+            for task_reasons in reasons.values() for reason in task_reasons
+        )
+        raise HTTPException(status_code=409, detail={
+            "reason": "unsupported_cpu_architecture" if unsupported_architecture else "task_requirements_unsupported",
+            "task_ids": list(reasons),
+            "rejection_reasons": reasons,
+        })
 
 
 def _task_set_ids_from_filter(task_filter: Mapping[str, Any]) -> list[str] | None:
@@ -201,6 +230,19 @@ async def resolve_task_filter_with_diagnostics(
         )
         .order_by(Task.id.asc())
     )
+    if require_runnable and "task_ids" in task_filter:
+        # Resolve visible explicit task ownership before the broad supported-
+        # catalog predicate hides an excluded profile. This preserves the
+        # existing policy while giving the same reason as alias/profile and
+        # catalog surfaces; invisible tasks still disclose no profile facts.
+        explicit_profiles = (await session.execute(
+            visible_tasks(team_id=team_id)
+            .with_only_columns(Task.benchmark_id)
+            .where(Task.id.in_([str(value) for value in task_filter["task_ids"]]))
+        )).scalars().all()
+        await reject_non_runnable_benchmark_profiles(
+            session, [str(profile_id) for profile_id in explicit_profiles if profile_id is not None],
+        )
     if CURRENTLY_UNSUPPORTED_BENCHMARK_IDS:
         stmt = stmt.where(
             or_(
@@ -295,19 +337,21 @@ async def resolve_task_filter_with_diagnostics(
         )
     candidates = [str(task_id) for task_id, _benchmark_id in candidate_rows]
 
-    if subset_kind == "all":
+    async def selected_result(selected_ids: list[str]) -> TaskFilterResult:
+        if require_runnable:
+            await reject_unsupported_task_hardware(session, selected_ids)
         return TaskFilterResult(
-            task_ids=candidates,
+            task_ids=selected_ids,
             benchmark_selection_provenance=benchmark_selection_provenance,
         )
+
+    if subset_kind == "all":
+        return await selected_result(candidates)
     if subset_kind == "explicit":
         requested_ids = {str(task_id) for task_id in task_filter.get("task_ids", [])}
         if requested_ids != set(candidates):
             raise HTTPException(status_code=404, detail="task not found")
-        return TaskFilterResult(
-            task_ids=candidates,
-            benchmark_selection_provenance=benchmark_selection_provenance,
-        )
+        return await selected_result(candidates)
 
     n_raw = task_filter.get("n")
     try:
@@ -325,16 +369,10 @@ async def resolve_task_filter_with_diagnostics(
 
     if subset_kind == "first_n":
         selected = candidates[:n]
-        return TaskFilterResult(
-            task_ids=selected,
-            benchmark_selection_provenance=benchmark_selection_provenance,
-        )
+        return await selected_result(selected)
     if subset_kind == "last_n":
         selected = candidates[-n:] if n <= len(candidates) else candidates
-        return TaskFilterResult(
-            task_ids=selected,
-            benchmark_selection_provenance=benchmark_selection_provenance,
-        )
+        return await selected_result(selected)
     # random_n
     seed_raw = task_filter.get("seed")
     if seed_raw is None:
@@ -356,7 +394,4 @@ async def resolve_task_filter_with_diagnostics(
         selected = candidates
     else:
         selected = sorted(rng.sample(candidates, n))
-    return TaskFilterResult(
-        task_ids=selected,
-        benchmark_selection_provenance=benchmark_selection_provenance,
-    )
+    return await selected_result(selected)

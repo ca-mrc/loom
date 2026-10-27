@@ -53,7 +53,7 @@ class UpstreamOrigin(BaseModel):
 class HarborBenchmarkSpec(BaseModel):
     """Pinned native catalog identity, shared by intake and operator admission."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
     id: str = Field(pattern=r"^[a-z0-9][a-z0-9@._-]*$")
     display_name: str = Field(min_length=1)
     series: str

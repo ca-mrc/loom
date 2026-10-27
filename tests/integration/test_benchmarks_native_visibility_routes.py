@@ -127,6 +127,7 @@ async def native_visibility_setup(
                 insert(Benchmark).values(
                     id=bid,
                     display_name=dn,
+                    execution_state="runnable",
                     upstream_kind="huggingface",
                     upstream_locator=f"upstream/{bid}",
                     upstream_revision="",
@@ -256,3 +257,75 @@ async def test_soft_deleted_task_set_not_visible_to_owner(
     finally:
         await engine.dispose()
     assert f"ts/{team_a}/deleted-set" not in {row.id for row in visible}
+
+
+async def test_pending_profile_has_same_reason_in_catalog_cli_and_member_count(
+    native_visibility_setup: tuple[FastAPI, str, str, UUID, UUID],
+    postgres_url: str,
+) -> None:
+    """Neither an alias nor an explicit task selector bypasses admission."""
+    app, raw_a, _raw_b, _team_a, _team_b = native_visibility_setup
+    profile_id = "arbitrary-json-profile@revision-1"
+    task_id = f"{profile_id}/task-1"
+    config = {
+        "schema_version": "1",
+        "task": {"id": task_id, "name": "Example"},
+        "environment": {"os": "linux", "docker_image": "python:3.12-slim"},
+        "agent": {"name": "oracle"},
+        "verifier": {"name": "pytest"},
+        "steps": [{"name": "main"}],
+    }
+    sync_engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(sync_engine)() as session:
+            session.execute(insert(Benchmark).values(
+                id=profile_id, display_name="Arbitrary JSON profile",
+                upstream_kind="json", upstream_locator="example/profile.json",
+                upstream_revision="revision-1", license_spdx="MIT",
+                license_url="https://example.test/license", splits=["test"],
+                execution_state="pending",
+            ))
+            session.execute(insert(Task).values(
+                id=task_id, benchmark_id=profile_id,
+                checksum="a" * 64, config=config, source=None,
+            ))
+            # Existing selectors may point at invalidated pending profiles;
+            # readers must report admission instead of trusting the alias.
+            session.execute(insert(BenchmarkAlias).values(
+                alias="arbitrary-json-profile", benchmark_id=profile_id,
+            ))
+            session.commit()
+        transport = httpx.ASGITransport(app=app)
+        headers = {"Authorization": f"Bearer {raw_a}"}
+        async with httpx.AsyncClient(transport=transport, base_url="http://svc") as client:
+            for selector in (profile_id, "arbitrary-json-profile"):
+                response = await client.get(f"/api/v1/benchmarks/{selector}", headers=headers)
+                assert response.status_code == 200
+                projection = response.json()
+                assert projection["blocker_reason"] == "benchmark_not_runnable"
+                assert projection["catalog_admission_state"] == "pending"
+                assert projection["target_compatibility_state"] == "unknown"
+                assert projection["qualification_state"] == "unknown"
+                assert projection["qualification_scope"] == []
+                assert projection["selectable"] is False
+            for task_filter in (
+                {"benchmark_id": profile_id},
+                {"benchmark_id": "arbitrary-json-profile"},
+                {"task_ids": [task_id], "subset_kind": "explicit"},
+            ):
+                response = await client.post(
+                    "/api/v1/tasks/count", json={"task_filter": task_filter}, headers=headers,
+                )
+                assert response.status_code == 409
+                assert response.json()["detail"]["reason"] == "benchmark_not_runnable"
+        audit = await run_readiness_audit(db_url=postgres_url, benchmark=profile_id)
+        assert len(audit) == 1
+        assert audit[0].blocker_reason == "benchmark_not_runnable"
+        assert audit[0].catalog_admission_state == "pending"
+    finally:
+        with sessionmaker(sync_engine)() as session:
+            session.execute(delete(BenchmarkAlias).where(BenchmarkAlias.benchmark_id == profile_id))
+            session.execute(delete(Task).where(Task.benchmark_id == profile_id))
+            session.execute(delete(Benchmark).where(Benchmark.id == profile_id))
+            session.commit()
+        sync_engine.dispose()

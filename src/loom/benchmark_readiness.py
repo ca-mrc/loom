@@ -9,8 +9,15 @@ from typing import Any, Literal
 
 from pydantic import ValidationError
 
-from loom.execution_architecture import execution_cpu_arch
+from loom.catalog_policy import (
+    CATALOG_SUPPORT_POLICY,
+    catalog_support_policy,
+)
+from loom.catalog_policy import (
+    CURRENTLY_UNSUPPORTED_BENCHMARK_IDS as CURRENTLY_UNSUPPORTED_BENCHMARK_IDS,
+)
 from loom.models.task import TaskConfig
+from loom.task_runtime_compatibility import task_hardware_rejections, task_runtime_rejections
 
 ReadinessState = Literal["adapter_available", "registered", "runnable", "blocked"]
 
@@ -18,80 +25,27 @@ UNSUPPORTED_RUNTIME_BLOCKER_REASON = "unsupported_runtime"
 DEFERRED_SUPPORT_BLOCKER_REASON = "deferred_support"
 NON_V1_SUPPORTED_BLOCKER_REASON = "not_v1_supported"
 
+# Compatibility exports for callers that previously imported policy from this
+# projection module. The authority is the reviewed catalog policy metadata.
 V1_SUPPORTED_BENCHMARK_IDS = frozenset(
-    {
-        "aime-24",
-        "aime-25",
-        "humaneval",
-        "livecodebench",
-        "mbpp",
-        "mmlu-pro",
-        "math-500",
-        "gpqa",
-        "skillflow",
-        "skilllearnbench",
-        "swe-bench-verified",
-        "terminal-bench-2",
-        "terminal-bench-2@tb2.1-r6",
-    }
+    key for key, policy in CATALOG_SUPPORT_POLICY.items() if policy.state == "supported"
 )
-
-KNOWN_BUILTIN_BENCHMARK_IDS = V1_SUPPORTED_BENCHMARK_IDS | frozenset(
-    {
-        "aime-22",
-        "aime-23",
-        "bfcl",
-        "browsecomp",
-        "gaia",
-        "hendrycks-math",
-        "osworld",
-        "swe-bench",
-        "swe-bench-multimodal",
-        "tau2-bench",
-        "webarena",
-    }
-)
-
-UNSUPPORTED_RUNTIME_BENCHMARKS: dict[str, str] = {
-    "osworld": (
-        "OSWorld requires a UI benchmark runtime with desktop VM/DesktopEnv "
-        "support before it can be selected."
-    ),
-    "webarena": (
-        "WebArena requires a UI benchmark runtime with browser-agent control, "
-        "self-hosted sites, auth reset, and URL/HTML evaluators before it can "
-        "be selected."
-    ),
+KNOWN_BUILTIN_BENCHMARK_IDS = frozenset(CATALOG_SUPPORT_POLICY)
+UNSUPPORTED_RUNTIME_BENCHMARKS = {
+    key: policy.message for key, policy in CATALOG_SUPPORT_POLICY.items()
+    if policy.state == UNSUPPORTED_RUNTIME_BLOCKER_REASON
 }
-
-DEFERRED_SUPPORT_BENCHMARKS: dict[str, str] = {
-    "gaia": (
-        "GAIA requires a GAIA-authorized Hugging Face token and a published "
-        "staging task bundle before it can be selected."
-    ),
+DEFERRED_SUPPORT_BENCHMARKS = {
+    key: policy.message for key, policy in CATALOG_SUPPORT_POLICY.items()
+    if policy.state == DEFERRED_SUPPORT_BLOCKER_REASON
 }
-
-NON_V1_SUPPORTED_BENCHMARKS: dict[str, str] = {
-    benchmark_id: (
-        "This benchmark is outside the current v1.0 benchmark support set. "
-        "It is visible for catalog transparency but cannot be selected yet."
-    )
-    for benchmark_id in sorted(
-        KNOWN_BUILTIN_BENCHMARK_IDS
-        - V1_SUPPORTED_BENCHMARK_IDS
-        - frozenset(UNSUPPORTED_RUNTIME_BENCHMARKS)
-        - frozenset(DEFERRED_SUPPORT_BENCHMARKS)
-    )
+NON_V1_SUPPORTED_BENCHMARKS = {
+    key: policy.message for key, policy in CATALOG_SUPPORT_POLICY.items()
+    if policy.state == NON_V1_SUPPORTED_BLOCKER_REASON
 }
-
 UNSUPPORTED_RUNTIME_BENCHMARK_IDS = frozenset(UNSUPPORTED_RUNTIME_BENCHMARKS)
 DEFERRED_SUPPORT_BENCHMARK_IDS = frozenset(DEFERRED_SUPPORT_BENCHMARKS)
 NON_V1_SUPPORTED_BENCHMARK_IDS = frozenset(NON_V1_SUPPORTED_BENCHMARKS)
-CURRENTLY_UNSUPPORTED_BENCHMARK_IDS = (
-    UNSUPPORTED_RUNTIME_BENCHMARK_IDS
-    | DEFERRED_SUPPORT_BENCHMARK_IDS
-    | NON_V1_SUPPORTED_BENCHMARK_IDS
-)
 
 # `none` covers inline task rows whose validated TaskConfig is already stored in
 # Postgres and does not require fetching an external bundle before launch.
@@ -106,6 +60,8 @@ class BenchmarkAuditSource:
     upstream_kind: str
     upstream_locator: str
     upstream_revision: str
+    # None is a structural pre-admission audit; persisted projections pass state.
+    execution_state: str | None = None
 
 
 @dataclass(frozen=True)
@@ -136,6 +92,12 @@ class BenchmarkReadinessItem:
     readiness_state: ReadinessState
     blocker_reason: str | None
     runtime_blockers: tuple[str, ...] = ()
+    catalog_admission_state: str = "unknown"
+    target_compatibility_state: str = "unknown"
+    qualification_state: str = "unknown"
+    qualification_scope: tuple[str, ...] = ()
+    support_policy_state: str = "supported"
+    support_policy_message: str | None = None
 
 
 def _source_scheme(source: str | None) -> str:
@@ -176,25 +138,25 @@ def build_readiness_item(
         except ValidationError:
             continue
         valid_count += 1
-        from loom.task_runtime_compatibility import task_runtime_rejections
-
-        rejections = task_runtime_rejections(config)
+        hardware_rejections = task_hardware_rejections(config)
+        rejections = tuple(dict.fromkeys((*task_runtime_rejections(config), *hardware_rejections)))
         runtime_blockers.update(f"{task.id}: {reason}" for reason in rejections)
         if config.upstream_origin is not None:
             adapter_status = "available"
-        try:
-            execution_cpu_arch(config.environment.cpu_arch)
-            if not rejections:
-                runnable_count += 1
-        except ValueError:
-            unsupported_architectures += 1
+        unsupported_architectures += any(
+            "unsupported_cpu_architecture" in reason for reason in hardware_rejections
+        )
+        if not rejections:
+            runnable_count += 1
     invalid_count = raw_count - valid_count
-    unsupported_runtime = is_unsupported_runtime_benchmark(benchmark.id)
-    deferred_support = is_deferred_support_benchmark(benchmark.id)
-    non_v1_supported = is_non_v1_supported_benchmark(benchmark.id)
+    support_policy = catalog_support_policy(benchmark.id)
+    unsupported_runtime = support_policy.state == UNSUPPORTED_RUNTIME_BLOCKER_REASON
+    deferred_support = support_policy.state == DEFERRED_SUPPORT_BLOCKER_REASON
+    non_v1_supported = support_policy.state == NON_V1_SUPPORTED_BLOCKER_REASON
     license_allowed_count = (
         0
         if unsupported_runtime or deferred_support or non_v1_supported
+        or benchmark.execution_state not in {None, "runnable"}
         else runnable_count
     )
     license_blocked_count = 0
@@ -209,7 +171,13 @@ def build_readiness_item(
 
     blocker_reason: str | None = None
     readiness_state: ReadinessState
-    if unsupported_runtime:
+    if benchmark.execution_state is not None and benchmark.execution_state != "runnable":
+        readiness_state = "blocked"
+        blocker_reason = (
+            "benchmark_retired" if benchmark.execution_state == "historical"
+            else "benchmark_not_runnable"
+        )
+    elif unsupported_runtime:
         readiness_state = "blocked"
         blocker_reason = UNSUPPORTED_RUNTIME_BLOCKER_REASON
     elif deferred_support:
@@ -257,6 +225,18 @@ def build_readiness_item(
         readiness_state=readiness_state,
         blocker_reason=blocker_reason,
         runtime_blockers=tuple(sorted(runtime_blockers)),
+        catalog_admission_state=(
+            "admitted" if benchmark.execution_state == "runnable"
+            else benchmark.execution_state or "unknown"
+        ),
+        # A catalog-wide structural audit has no selected runtime/capacity
+        # evidence. Known unsupported requirements are incompatible; otherwise
+        # target compatibility remains unknown until selected-target preflight.
+        target_compatibility_state=(
+            "incompatible" if unsupported_architectures or runtime_blockers else "unknown"
+        ),
+        support_policy_state=support_policy.state,
+        support_policy_message=support_policy.message,
     )
 
 
@@ -271,6 +251,14 @@ def readiness_display_fields(item: BenchmarkReadinessItem) -> dict[str, Any]:
         else:
             message += " is registered."
         selectable = True
+    elif item.blocker_reason == "benchmark_not_runnable":
+        label = "Needs admission"
+        message = "This profile is pending catalog admission and cannot be selected for a new submission."
+        selectable = False
+    elif item.blocker_reason == "benchmark_retired":
+        label = "Historical"
+        message = "This profile is historical and cannot be selected for a new submission."
+        selectable = False
     elif item.blocker_reason == "task_requirements_unsupported":
         label = "Runtime support required"
         fields = sorted({reason.split(": ", 1)[-1].rsplit(": ", 1)[0] for reason in item.runtime_blockers})
@@ -313,23 +301,20 @@ def readiness_display_fields(item: BenchmarkReadinessItem) -> dict[str, Any]:
         selectable = False
     elif item.blocker_reason == UNSUPPORTED_RUNTIME_BLOCKER_REASON:
         label = "Not supported yet"
-        message = UNSUPPORTED_RUNTIME_BENCHMARKS.get(
-            item.id,
-            "This benchmark requires runtime support before it can be selected.",
+        message = item.support_policy_message or (
+            "This benchmark requires runtime support before it can be selected."
         )
         selectable = False
     elif item.blocker_reason == DEFERRED_SUPPORT_BLOCKER_REASON:
         label = "Deferred"
-        message = DEFERRED_SUPPORT_BENCHMARKS.get(
-            item.id,
-            "This benchmark is intentionally outside the current supported scope.",
+        message = item.support_policy_message or (
+            "This benchmark is intentionally outside the current supported scope."
         )
         selectable = False
     elif item.blocker_reason == NON_V1_SUPPORTED_BLOCKER_REASON:
         label = "Not in v1.0"
-        message = NON_V1_SUPPORTED_BENCHMARKS.get(
-            item.id,
-            "This benchmark is outside the current v1.0 benchmark support set.",
+        message = item.support_policy_message or (
+            "This benchmark is outside the current v1.0 benchmark support set."
         )
         selectable = False
     else:
@@ -355,6 +340,11 @@ def readiness_display_fields(item: BenchmarkReadinessItem) -> dict[str, Any]:
         "selectable": selectable,
         "blocker_reason": item.blocker_reason,
         "runtime_blockers": list(item.runtime_blockers),
+        "catalog_admission_state": item.catalog_admission_state,
+        "target_compatibility_state": item.target_compatibility_state,
+        "qualification_state": item.qualification_state,
+        "qualification_scope": list(item.qualification_scope),
+        "support_policy_state": item.support_policy_state,
     }
 
 
@@ -376,10 +366,11 @@ def render_readiness_table(items: list[BenchmarkReadinessItem]) -> str:
     valid_header = "VALID"
     schemes_header = "SCHEMES"
     blocker_header = "BLOCKER"
+    axes_header = "CATALOG / TARGET / QUALIFICATION"
     header = (
         f"{benchmark_header:<{id_w}} {readiness_header:<{state_w}} "
         f"{raw_header:>5} {valid_header:>5} {schemes_header:<12} "
-        f"{blocker_header:<{blocker_w}}"
+        f"{blocker_header:<{blocker_w}} {axes_header}"
     )
     rows = [header]
     for item in items:
@@ -389,6 +380,7 @@ def render_readiness_table(items: list[BenchmarkReadinessItem]) -> str:
             f"{item.id:<{id_w}} {item.readiness_state:<{state_w}} "
             f"{item.raw_task_count:>5} {item.valid_task_config_count:>5} "
             f"{schemes:<12} "
-            f"{blocker:<{blocker_w}}"
+            f"{blocker:<{blocker_w}} "
+            f"{item.catalog_admission_state} / {item.target_compatibility_state} / {item.qualification_state}"
         )
     return "\n".join(rows)

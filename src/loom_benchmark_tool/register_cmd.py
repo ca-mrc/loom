@@ -17,7 +17,7 @@ Two sources are supported:
   materialize them.
 
 New manifests carry validated per-task `TaskConfig` payloads, so
-registered rows are runnable immediately after this command commits.
+registered rows remain pending until shared catalog admission succeeds.
 Legacy manifests that lack `task_config` remain catalog placeholders:
 they preserve metadata and source pointers but are not counted as
 runnable until republished or backfilled.
@@ -39,6 +39,7 @@ from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from loom.benchmark_publication import prepare_profile_publication
 from loom.db.schema import Benchmark
 from loom.db.schema import Task as TaskRow
 from loom.models.task import TaskConfig
@@ -167,27 +168,17 @@ def _assert_existing_tb21_profile_is_immutable(
 ) -> None:
     """Allow exact idempotence while rejecting in-place physical-profile drift."""
     expected_benchmark = {
-        "display_name": manifest["display_name"],
         "upstream_kind": manifest["upstream_kind"],
         "upstream_locator": manifest["upstream_locator"],
         "upstream_revision": manifest.get("upstream_revision", ""),
-        "license_spdx": manifest["license_spdx"],
-        "license_url": manifest.get("license_url", ""),
-        "splits": list(manifest.get("splits", ["test"])),
-        "series": manifest.get("series"),
         "profile_provenance": _immutable_profile_provenance(
             manifest.get("benchmark_profile_provenance") or {},
         ),
     }
     observed_benchmark = {
-        "display_name": benchmark.display_name,
         "upstream_kind": benchmark.upstream_kind,
         "upstream_locator": benchmark.upstream_locator,
         "upstream_revision": benchmark.upstream_revision,
-        "license_spdx": benchmark.license_spdx,
-        "license_url": benchmark.license_url,
-        "splits": list(benchmark.splits),
-        "series": benchmark.series,
         "profile_provenance": _immutable_profile_provenance(
             benchmark.profile_provenance,
         ),
@@ -670,11 +661,11 @@ async def run_register(
 
     manifest_tasks = list(manifest["tasks"])
     profile_provenance = dict(manifest.get("benchmark_profile_provenance") or {})
-    # TB2.1 is a security-sensitive physical profile.  Registration stores its
-    # immutable bytes and provenance, but cannot itself make those bytes
-    # submit-able: only the fresh object-store audit in `datasets activate`
-    # promotes the row and its public alias together.
-    execution_state = "pending" if manifest.get("benchmark_id") == _TB21_PROFILE_ID else "runnable"
+    if manifest.get("benchmark_id") != _TB21_PROFILE_ID:
+        profile_provenance.setdefault("selected_task_ids", sorted(
+            task["task_id"].removeprefix(manifest["benchmark_id"] + "/") for task in manifest_tasks
+        ))
+        profile_provenance.setdefault("source_task_count", len(manifest_tasks))
     validate_profile_registration(
         manifest, source=source, mirror_to_object_store=mirror_to_object_store,
     )
@@ -868,10 +859,34 @@ async def run_register(
                         skipped = len(prepared_tasks)
 
                 if continue_writes:
+                    execution_state = await prepare_profile_publication(
+                        session, profile_id=manifest["benchmark_id"],
+                        profile_identity={
+                            "upstream_kind": manifest["upstream_kind"],
+                            "upstream_locator": manifest["upstream_locator"],
+                            "upstream_revision": manifest.get("upstream_revision", ""),
+                            "profile_provenance": profile_provenance,
+                        },
+                        tasks=[{
+                            "id": task.task_id, "checksum": task.checksum,
+                            "config": task.config, "source": task.source,
+                            "source_provenance": task.source_provenance,
+                            "benchmark_id": task.benchmark_id,
+                        } for task in prepared_tasks],
+                    )
+                    if execution_state == "runnable":
+                        from loom.benchmark_publication import execution_profile_provenance
+                        existing = await session.get(Benchmark, manifest["benchmark_id"])
+                        if existing is not None:
+                            semantic = execution_profile_provenance(existing.profile_provenance or {})
+                            observations = {key: value for key, value in (existing.profile_provenance or {}).items()
+                                            if key not in semantic}
+                            profile_provenance = {**profile_provenance, **observations}
                     series = manifest.get("series")
                     update_set: dict[str, Any] = {
                         "display_name": manifest["display_name"],
                         "upstream_revision": manifest.get("upstream_revision", ""),
+                        "execution_state": execution_state,
                         "imported_by": registered_by or "loom_benchmark_tool:register",
                     }
                     if series is not None:

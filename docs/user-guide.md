@@ -1932,7 +1932,19 @@ unavailable runtime support, or exclusion from the active catalog profile.
 Required public benchmarks should move from publish/repair pending states to
 `Ready`; hiding a needed benchmark is not a substitute for publishing it.
 
-Terminal-Bench 2.1 has a stricter lifecycle. Harbor Hub dataset
+All benchmark profiles use a shared admission lifecycle. New publication and
+registration create pending profiles; `loom datasets activate --profile PROFILE
+--descriptor PROFILE.json` performs admission. API, CLI and the Benchmarks page
+show catalog admission, target compatibility and runtime qualification separately.
+Missing runtime qualification does not itself prevent catalog admission. Exact
+hardware requirements and explicit support policy still block incompatible
+count/dry-run/submission before work is created. Ordinary admission never moves
+an alias; alias promotion requires an explicit expected-current comparison.
+Identical republishing and descriptive metadata edits preserve admission;
+historical profiles cannot be revived. See the
+[catalog operator lifecycle](architecture/benchmark-onboarding-pipeline.md).
+
+Terminal-Bench 2.1 retains its reviewed source-format checks. Harbor Hub dataset
 `terminal-bench/terminal-bench-2-1@6` and its 89 locked package digests are the
 execution authority. Publish/register creates the immutable physical profile
 `terminal-bench-2@tb2.1-r6` in `pending`; a fresh 89/89 bundle, provenance,

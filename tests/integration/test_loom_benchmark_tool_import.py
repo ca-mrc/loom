@@ -110,19 +110,21 @@ async def test_import_humaneval_with_fixture(
     assert bench_row.imported_by == "ci"
     assert bench_row.series == "code"
     assert task_row.license == "MIT"
-    assert task_row.source == "s3://loom-benchmarks/humaneval/HumanEval/0/"
+    assert task_row.source.startswith("s3://loom-benchmarks/humaneval/HumanEval/0/")
+    assert "/.loom-revisions-v2/" in task_row.source
+    prefix = task_row.source.removeprefix(f"s3://{bucket}/")
 
     # MinIO state: task.toml + solution + tests landed under the prefix.
     body = await store.get_object(
-        bucket=bucket, key="humaneval/HumanEval/0/task.toml",
+        bucket=bucket, key=prefix + "task.toml",
     )
     assert b"schema_version" in body
     body = await store.get_object(
-        bucket=bucket, key="humaneval/HumanEval/0/solution/solution.py",
+        bucket=bucket, key=prefix + "solution/solution.py",
     )
     assert b"NotImplementedError" in body
     body = await store.get_object(
-        bucket=bucket, key="humaneval/HumanEval/0/solution/_reference.py",
+        bucket=bucket, key=prefix + "solution/_reference.py",
     )
     assert b"has_close_elements" in body
 
@@ -178,12 +180,14 @@ async def test_import_filters_specific_instance_ids(
         task_ids = conn.execute(text(
             "SELECT id FROM tasks WHERE benchmark_id = :benchmark_id ORDER BY id",
         ), {"benchmark_id": "humaneval"}).scalars().all()
+        source = conn.execute(text("SELECT source FROM tasks WHERE id = :task_id"),
+                              {"task_id": f"humaneval/{target_id}"}).scalar_one()
     engine.dispose()
 
     assert task_ids == [f"humaneval/{target_id}"]
 
     body = await store.get_object(
-        bucket=bucket, key=f"humaneval/{target_id}/task.toml",
+        bucket=bucket, key=source.removeprefix(f"s3://{bucket}/") + "task.toml",
     )
     assert b"schema_version" in body
     with pytest.raises(KeyError):
@@ -286,7 +290,7 @@ async def test_import_backfills_series_on_existing_benchmark_row(
             "upstream_revision, license_spdx, license_url, splits, "
             "series) VALUES "
             "('humaneval', 'HumanEval', 'huggingface', 'openai/openai_humaneval', "
-            "'old-revision', 'MIT', 'https://example.test/license', "
+            "'', 'MIT', 'https://example.test/license', "
             "ARRAY['test'], NULL)",
         ))
 
@@ -310,5 +314,5 @@ async def test_import_backfills_series_on_existing_benchmark_row(
     engine.dispose()
 
     assert row.series == "code"
-    assert row.upstream_revision != "old-revision"
+    assert row.upstream_revision == ""
     assert row.imported_by == "ci"
