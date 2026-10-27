@@ -40,12 +40,14 @@ def _responses_route(row: ProviderConnection) -> str:
     """How Gateway serves a Responses request (Codex) on this connection.
 
     Mirrors loom_llm_gateway.routes.responses._resolve_responses_support:
-    `unprobed` means Gateway probes the upstream on the first call.
+    `unprobed` means Gateway probes the upstream on the first call;
+    `inconclusive` means a probe ran but neither confirmed nor ruled out
+    native Responses, so Gateway tries native and falls back to Chat.
     """
     if row.provider_type not in OPENAI_SHAPED_PROVIDER_TYPES:
         return "unsupported"
     if row.responses_api_supported is None:
-        return "unprobed"
+        return "unprobed" if row.responses_api_probed_at is None else "inconclusive"
     return "native" if row.responses_api_supported else "translated"
 
 

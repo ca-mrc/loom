@@ -1277,6 +1277,35 @@ async def update_cached_model_metadata(
     return _cache_row_to_entry(cache)
 
 
+async def run_cached_model_preflight(
+    session: AsyncSession,
+    row: ProviderConnection,
+    cache_row: ProviderModelCache,
+) -> ModelPreflightResult:
+    """Send one bounded generation request and record it on the cache row."""
+    policy_error = await _refresh_current_egress_or_error(session, row)
+    if policy_error is not None:
+        result = ModelPreflightResult(
+            status="failed",
+            http_status=None,
+            error_code="egress-policy-rejected",
+            error_message=policy_error,
+        )
+    else:
+        api_key = await _get_provider_api_key(session, row)
+        result = await preflight_model(
+            row.provider_type, row.base_url, api_key, cache_row.model_id,
+        )
+
+    cache_row.last_preflight_status = result.status
+    cache_row.last_preflight_at = datetime.now(UTC)
+    cache_row.last_preflight_http_status = result.http_status
+    cache_row.last_preflight_error_code = result.error_code
+    cache_row.last_preflight_error_message = result.error_message
+    await session.flush()
+    return result
+
+
 @router.post(
     "/provider-connections/{connection_id}/models/{model_id:path}/preflight",
     response_model=ProviderModelCacheEntry,
@@ -1299,28 +1328,7 @@ async def preflight_cached_model(
     row = await _get_active_connection(session, connection_id, ctx)
     _require_provider_owner_or_admin(ctx, row)
     cache_row = await _get_cached_model_or_404(session, row.id, model_id)
-
-    policy_error = await _refresh_current_egress_or_error(session, row)
-    if policy_error is not None:
-        result = ModelPreflightResult(
-            status="failed",
-            http_status=None,
-            error_code="egress-policy-rejected",
-            error_message=policy_error,
-        )
-    else:
-        api_key = await _get_provider_api_key(session, row)
-        result = await preflight_model(
-            row.provider_type, row.base_url, api_key, model_id,
-        )
-
-    now = datetime.now(UTC)
-    cache_row.last_preflight_status = result.status
-    cache_row.last_preflight_at = now
-    cache_row.last_preflight_http_status = result.http_status
-    cache_row.last_preflight_error_code = result.error_code
-    cache_row.last_preflight_error_message = result.error_message
-    await session.flush()
+    result = await run_cached_model_preflight(session, row, cache_row)
     await write_admin_audit_event(
         session,
         actor=_provider_audit_actor(ctx, x_loom_admin_actor),

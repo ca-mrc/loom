@@ -29,7 +29,7 @@ export interface ModelEntry {
   provider_connection_name?: string;
   provider_connection_type?: string;
   /** How Gateway serves Codex's Responses requests on this connection. */
-  responses_route?: "native" | "translated" | "unprobed" | "unsupported";
+  responses_route?: "native" | "translated" | "unprobed" | "inconclusive" | "unsupported";
   agent_capable?: boolean;
   recommended?: boolean;
   visibility?: string;

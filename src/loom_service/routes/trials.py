@@ -87,6 +87,11 @@ from loom_service.multi_model import usage_by_role
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
 from loom_service.pool_submission import prepare_trial_submission
 from loom_service.provider_connection_lookup import validate_provider_connection
+from loom_service.provider_model_gate import (
+    is_codex,
+    refresh_codex_model_preflight,
+    reject_if_known_failed_provider_model,
+)
 from loom_service.public_links import public_url_for
 from loom_service.routes.object_downloads import stream_object_response
 from loom_service.service_execution_status import service_execution_lifecycle_stage
@@ -1497,6 +1502,17 @@ async def submit_trial(
             payload.provider_connection_id,
             team_id=ctx.team_id,
             agent_submission=True,
+        )
+    if is_codex(payload.config.get("agent_name")):
+        await refresh_codex_model_preflight(
+            request.app.state.session_factory,
+            provider_connection_id=payload.provider_connection_id,
+            provider_model_id=payload.provider_model_id,
+        )
+        await reject_if_known_failed_provider_model(
+            s,
+            provider_connection_id=payload.provider_connection_id,
+            provider_model_id=payload.provider_model_id,
         )
 
     try:
