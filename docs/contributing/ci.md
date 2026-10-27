@@ -578,6 +578,13 @@ preserves the first exception as its cause, without including authored commands
 or environment values. Inspect that first failure before attributing an
 activation expiry to cancellation cleanup.
 
+The TLS rotation test prepares only its pinned Traefik and Python images on the
+host before starting K3s, using the existing Skopeo OCI fixture transport. It
+imports the original references and verifies their manifest digests in the
+disposable containerd. This avoids a nested Docker Hub token/DNS dependency;
+classic Docker archives can reconstruct manifests and change those identities.
+The existing acquisition policy and the full 240-second TLS/rotation test remain.
+
 MinIO preparation follows selected fixture imports and parent conftests. Fast
 integration normally needs only the testcontainers release; TLS storage tests
 also need the newer release. Source-built fallback images retain their pinned
