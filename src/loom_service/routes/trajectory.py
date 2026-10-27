@@ -513,6 +513,11 @@ async def stream_events(
     s, ctx = sc
     require_scope(ctx, "read:own")
     trial = await _load_trial(s, trial_id, ctx)
+    stream_trial_id = trial.id
+    # Cookie verification updates UserSession.last_seen_at. Release that row
+    # lock and the authentication connection before the long-lived response;
+    # all stream reads below use their own short transactions.
+    await s.commit()
 
     session_factory = request.app.state.session_factory
     minio_client = request.app.state.minio_client
@@ -529,7 +534,7 @@ async def stream_events(
         helper keeps the per-iteration session lifetime clean."""
         async with session_factory() as fresh:
             fresh_trial = (await fresh.execute(
-                select(Trial).where(Trial.id == trial.id),
+                select(Trial).where(Trial.id == stream_trial_id),
             )).scalar_one_or_none()
             if fresh_trial is None:
                 return [], None, {"source": None, "events": [], "next_after_seq": None}, False
@@ -542,7 +547,7 @@ async def stream_events(
                 limit=200,
             )
             canonical_available = bool(evts) or bool(await fresh.scalar(
-                select(TrialEvent.id).where(TrialEvent.trial_id == trial.id).limit(1),
+                select(TrialEvent.id).where(TrialEvent.trial_id == stream_trial_id).limit(1),
             ))
             preview = {"source": None, "events": [], "next_after_seq": None} if canonical_available else await read_live_preview(
                 fresh, trial=fresh_trial, source=live_source, after_seq=live_cursor, limit=200,
@@ -553,7 +558,7 @@ async def stream_events(
         """Best-effort LISTEN setup. On error (Postgres unreachable
         on autocommit, channel ACL issue) return None and let the
         loop fall back to pure-poll behavior."""
-        sub = _ListenSubscription(listen_dsn, trial.id)
+        sub = _ListenSubscription(listen_dsn, stream_trial_id)
         try:
             await sub.__aenter__()
             return sub

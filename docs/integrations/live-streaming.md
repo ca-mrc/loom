@@ -146,9 +146,12 @@ Postgres-first.
 Native execution now publishes **provisional live progress** through the trusted
 execution controller's existing Pod-authenticated broker. The controller reports
 real phase boundaries and tails only declared trajectory JSONL outputs. A bounded
-background uploader flushes low-rate progress on a timer, accepts exact duplicate
-retries, and stops preview delivery on persistent failure without changing the
-execution deadline or discarding the durable local output.
+background uploader flushes low-rate progress on a one-second timer, accepts exact
+duplicate retries, and stops preview delivery on persistent failure without changing
+the execution deadline or discarding durable local output. Preview delivery is
+bounded by the declared artifact budget, a 16 MiB/10,000-event preview ceiling,
+256 KiB per event and a 4 MiB pending queue. Reaching a preview bound or persistent
+delivery failure records a fixed diagnostic; the canonical output remains intact.
 
 Live progress and the canonical trajectory have different ordering. Final
 materialization still owns canonical lifecycle events and Gateway accounting
@@ -185,3 +188,8 @@ resource generation, current Trial attempt and team binding. Neither an agent no
 a task chooses another Trial, lease, credential, upstream URL, or file to tail.
 Live rows use the existing Trial-event lifecycle classification and are removed
 with that classified scope; canonical final output retains its existing policy.
+
+The SSE handler completes its initial authenticated database transaction before
+streaming. It retains the authorized Trial UUID and reads event pages in fresh
+sessions, so a browser connection does not hold the session row lock and block
+concurrent status or replay requests from the same signed-in browser.

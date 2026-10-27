@@ -31,6 +31,9 @@ async def _stream(
         async def __aexit__(self, *_args):
             pass
 
+        async def commit(self):
+            pass
+
         async def execute(self, _query):
             return SimpleNamespace(scalar_one_or_none=lambda: trial)
 
@@ -60,7 +63,7 @@ async def _stream(
         )),
         is_disconnected=disconnected or AsyncMock(return_value=False),
     )
-    response = await trajectory.stream_events(request, (None, None), trial.id)
+    response = await trajectory.stream_events(request, (Session(), None), trial.id)
     return response.body_iterator, subscription
 
 

@@ -246,3 +246,69 @@ async def test_terminal_native_failure_retains_partial_preview(live_setup) -> No
     resumed = await s.client.get(f'/api/v1/trials/{s.trial_id}/stream',
         params={'preview_source': s.source, 'preview_after_seq': 0}, headers=s.read_headers)
     assert [kind for kind, _ in _frames(resumed.text)] == ['complete']
+
+
+@pytest.mark.parametrize('expire_on_commit', [False, True])
+async def test_browser_session_stream_releases_auth_transaction_for_parallel_reads(
+    live_setup, monkeypatch, expire_on_commit: bool,
+) -> None:
+    """An open SSE must not retain the browser-session last_seen UPDATE lock."""
+    from sqlalchemy import delete
+
+    from loom.db.schema import TeamMembership, User, UserSession
+    from loom_service.session_auth import create_session_for_user
+
+    s = live_setup
+    user_id = uuid4()
+    started = asyncio.Event()
+    read_events = trajectory._read_events_with_minio_fallback
+    stream_task = None
+    original_sessions = s.app.state.session_factory
+    s.app.state.session_factory = async_sessionmaker(
+        s.sessions.kw['bind'], expire_on_commit=expire_on_commit,
+    )
+    s.app.state.settings.session_cookie_name = 'loom_session'
+    s.app.state.settings.session_audience = None
+    try:
+        async with s.sessions() as session:
+            trial = await session.get(Trial, s.trial_id)
+            user = User(id=user_id, username=f'live-cookie-{user_id}',
+                username_normalized=f'live-cookie-{user_id}', status='active')
+            session.add(user)
+            await session.flush()
+            session.add(TeamMembership(user_id=user_id, team_id=trial.team_id, role='viewer'))
+            await session.flush()
+            created = await create_session_for_user(session, user=user, session_ttl_seconds=600,
+                current_team_id=trial.team_id)
+            await session.commit()
+        s.client.cookies.set('loom_session', created.raw_session)
+
+        async def observe_real_read(*args, **kwargs):
+            events = await read_events(*args, **kwargs)
+            if kwargs['trial'].id == s.trial_id:
+                started.set()
+            return events
+
+        monkeypatch.setattr(trajectory, '_read_events_with_minio_fallback', observe_real_read)
+        stream_task = asyncio.create_task(s.client.get(f'/api/v1/trials/{s.trial_id}/stream'))
+        await asyncio.wait_for(started.wait(), 5)
+        assert not stream_task.done()
+        response = await asyncio.wait_for(
+            s.client.get(f'/api/v1/trials/{s.trial_id}/events?include_preview=true'), 2,
+        )
+        assert response.status_code == 200, response.text
+        assert not stream_task.done(), 'parallel request must finish while SSE remains open'
+        async with s.sessions() as session:
+            trial = await session.get(Trial, s.trial_id)
+            assert trial.state == 'running'
+    finally:
+        if stream_task is not None:
+            stream_task.cancel()
+            await asyncio.gather(stream_task, return_exceptions=True)
+        s.client.cookies.clear()
+        s.app.state.session_factory = original_sessions
+        async with s.sessions() as session:
+            await session.execute(delete(UserSession).where(UserSession.user_id == user_id))
+            await session.execute(delete(TeamMembership).where(TeamMembership.user_id == user_id))
+            await session.execute(delete(User).where(User.id == user_id))
+            await session.commit()
