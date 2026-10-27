@@ -228,6 +228,35 @@ This subset stays marked unqualified until image preparation, actual Oracle
 runs, bounded Terminus-2 model runs and durable result/export readback pass.
 Local tests and import census alone are not deployed benchmark acceptance.
 
+### Native Terminus task skills and MCP metadata
+
+Hosted Terminus forwards `environment.skills_dir` and `environment.mcp_servers`
+to the pinned Harbor agent constructor. Harbor 0.24's
+[Terminus2.run](https://github.com/harbor-framework/harbor/blob/2de4605b9404eada7d341388291e6e469c90330b/src/harbor/agents/terminus_2/terminus_2.py#L1774)
+adds declared MCP endpoints/commands and an `available_skills` XML section to
+the initial instruction. It does not create a host MCP client or proxy. The
+agent accesses declared endpoints from its existing task sandbox/network.
+
+Native skill discovery reads `skills_dir/*/SKILL.md` through the sandbox Driver,
+using Harbor's inherited `BaseEnvironment.is_dir` and `exec` methods. The pinned
+agent omits a missing directory and skips unreadable or malformed skill entries;
+it includes valid YAML-frontmatter names, descriptions and sandbox paths. Loom
+does not read these paths from the controller filesystem or copy task skills.
+
+The supported MCP declaration transports are `stdio`, `sse`, and `http` (mapped
+to Harbor's `streamable-http`). Stdio command vectors become the native command
+and arguments. WebSocket, nonempty MCP environment/header maps and credentials
+embedded in endpoint userinfo are rejected explicitly: the pinned Terminus
+prompt cannot convey those fields. Older installed Harbor agents lacking the
+declared metadata capabilities also reject the request instead of dropping it.
+Harbor's Oracle/nop utility-agent semantics ignore task-provided skills/MCP;
+explicit unsupported agent-level configuration remains independently rejected.
+
+The offline native-runtime regression checks actual Harbor construction and its
+initial model request with a mocked HTTP model transport, including absent and
+unreadable skills. This verifies forwarding, not endpoint availability or
+successful completion of the benchmark tasks.
+
 When a task selects a prebuilt image with no explicit build or Compose
 definition, findings in its unused default Dockerfile remain source warnings.
 They cannot establish a failure of an image that Loom does not build. Explicit

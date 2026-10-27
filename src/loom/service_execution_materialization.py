@@ -203,6 +203,7 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
     task_resource_requests: dict[str, TaskExecutionResourceRequestsV1] = Field(default_factory=dict)
     supports_task_identity: bool = False
     supports_native_compose: bool = Field(default=False, exclude_if=lambda value: not value)
+    supports_terminus_environment_metadata: bool = Field(default=False, exclude_if=lambda value: not value)
     guest_runtime: Literal["qemu-tcg-v1"] | None = Field(default=None, exclude_if=lambda value: value is None)
     supports_emulated_pkcs11: bool = Field(default=False, exclude_if=lambda value: not value)
     supports_shared_guest: bool = Field(default=False, exclude_if=lambda value: not value)
@@ -322,6 +323,7 @@ def build_nebius_runtime_profile(
     terminus2_multi_model_policies: frozenset[MixPolicy] = frozenset(),
     supports_task_identity: bool = False,
     supports_native_compose: bool = False,
+    supports_terminus_environment_metadata: bool = False,
     guest_runtime: Literal["qemu-tcg-v1"] | None = None,
     supports_emulated_pkcs11: bool = False,
     supports_shared_guest: bool = False,
@@ -354,6 +356,7 @@ def build_nebius_runtime_profile(
         supports_task_artifact_inputs=supports_task_artifact_inputs,
         supports_task_identity=supports_task_identity,
         supports_native_compose=supports_native_compose,
+        supports_terminus_environment_metadata=supports_terminus_environment_metadata,
         guest_runtime=guest_runtime,
         supports_emulated_pkcs11=supports_emulated_pkcs11,
         supports_shared_guest=supports_shared_guest,
@@ -611,11 +614,15 @@ def automatic_service_execution_rejections(
         or env.extra_hosts
         or env.dns
         or env.tmpfs
-        or env.healthcheck is not None
-        or env.skills_dir is not None
-        or env.mcp_servers
+        or (env.healthcheck is not None and not controller)
+        or ((env.skills_dir is not None or env.mcp_servers)
+            and trial.agent_name not in {"oracle", "terminus-2"})
     ):
         reasons.append("extended_environment_unsupported")
+    if trial.agent_name == "terminus-2":
+        from loom.agent.terminus2.task_metadata import terminus_task_metadata_rejections
+
+        reasons.extend(terminus_task_metadata_rejections(env.mcp_servers))
     if controller:
         try:
             ProcessPhaseV1._environment_is_nonsecret(env.environment)
@@ -1043,6 +1050,24 @@ def runtime_profile_rejections(
     if hosted_http_egress(effective_network_policy) is not None and not profile.supports_task_web_egress:
         reasons.append("task_egress_runtime_unavailable")
     spec = hosted_harness(trial.agent_name)
+    if trial.agent_name == "terminus-2" and (
+        task.environment.skills_dir is not None or task.environment.mcp_servers
+    ):
+        from loom.agent_runtime import supports_terminus_environment_metadata
+
+        if trial.agent_version is None:
+            metadata_supported = profile.supports_terminus_environment_metadata
+        else:
+            metadata_supported = any(
+                (binding.agent_name, binding.agent_version) == (trial.agent_name, trial.agent_version)
+                and supports_terminus_environment_metadata(
+                    loom_bridge_revision=binding.loom_bridge_revision,
+                    harbor_version=binding.harbor_version,
+                )
+                for binding in profile.agent_runtime_bindings
+            )
+        if not metadata_supported:
+            reasons.append("terminus_environment_metadata_runtime_unavailable")
     if trial.agent_version is not None and (
         spec is None or not spec.supports("pinned_versions")
         or controller_image_for_trial(profile, trial) is None

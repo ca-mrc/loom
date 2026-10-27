@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 from uuid import uuid4
 
 from loom.agent.gateway_client import FakeLLMGatewayClient
@@ -78,6 +79,8 @@ def test_terminus2_harbor_ctor_receives_worker_openai_base(tmp_path: Path, monke
     captured: dict[str, object] = {}
 
     class _FakeTerminus2:
+        capabilities = SimpleNamespace(skills=True, mcp_servers=True)
+
         def __init__(self, logs_dir, **kwargs: object) -> None:
             self._logs_dir = logs_dir
             captured.update(kwargs)
