@@ -35,6 +35,7 @@ from loom.db.schema import (
     Artifact,
     ArtifactUploadFile,
     ArtifactUploadSession,
+    Batch,
     DataLifecycleAuthority,
     LlmCall,
     ServiceExecutionLease,
@@ -211,14 +212,35 @@ def _trace_format(agent_name: str | None) -> TraceFormat:
     return spec.trace_format if spec is not None else "completion-calls"
 
 
-def canonical_agent_version(trial_config: TrialConfig, task_config: TaskConfig) -> str:
+def canonical_agent_version(
+    trial_config: TrialConfig, task_config: TaskConfig, *, default_image_version: str | None = None,
+) -> str:
     """The agent version canonical exports record: the Trial's selection, else
-    the version a pinned installed harness ran, else the task's (#2054)."""
+    the version a pinned installed harness ran, else the version built into
+    the deployment's default Terminus-2 image, else the task's (#2054)."""
     spec = hosted_harness(trial_config.agent_name)
     return (
         trial_config.agent_version or (spec.version if spec is not None else None)
+        or (default_image_version if trial_config.agent_name == "terminus-2" else None)
         or task_config.agent.version or "service-execution-v1"
     )
+
+
+async def load_batch_runtime_profile(session: AsyncSession, trial: Trial) -> Any:
+    if trial.batch_id is None:
+        return None
+    return await session.scalar(
+        select(Batch.service_execution_runtime_profile).where(Batch.id == trial.batch_id)
+    )
+
+
+def default_image_version(profile: Any, runtime_result: ExecutionRuntimeResultV1) -> str | None:
+    """The default agent image's version from the Batch's frozen runtime
+    profile, only when the attempt ran on that profile's candidate."""
+    if not isinstance(profile, dict) or profile.get("candidate_sha") != runtime_result.candidate_sha:
+        return None
+    version = profile.get("agent_image_version")
+    return version if isinstance(version, str) else None
 
 
 def _model_matches(source: str, trial_config: TrialConfig) -> bool:
@@ -1197,6 +1219,7 @@ class ServiceExecutionMaterializer:
             trial_config_raw = trial.config
             trial_result_raw = trial.result
             trial_task_id = trial.task_id
+            runtime_profile = await load_batch_runtime_profile(session, trial)
             task_config_raw = task.config
             lease_data = attempt_source.lease_data
             artifact_id = attempt_source.artifact_id
@@ -1317,7 +1340,10 @@ class ServiceExecutionMaterializer:
             events,
             task_id=trial_task_id,
             agent_name=trial_config.agent_name,
-            agent_version=canonical_agent_version(trial_config, task_config),
+            agent_version=canonical_agent_version(
+                trial_config, task_config,
+                default_image_version=default_image_version(runtime_profile, runtime_result),
+            ),
             codex_session=derivation_inputs.get(_CODEX_SESSION_PATH),
         )
         identity = TrajectoryObjectIdentity(

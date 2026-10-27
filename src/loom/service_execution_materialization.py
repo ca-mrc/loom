@@ -60,6 +60,7 @@ from loom.models.networking import (
 )
 from loom.models.task import TaskConfig, normalize_steps
 from loom.models.trial import HOSTED_TERMINUS2_MULTI_MODEL_POLICIES, MixPolicy, TrialConfig
+from loom.models.types import AgentVersion
 from loom.mutable_paths import validate_task_workdir
 from loom.pipeline.keys import canonical_digest
 from loom.prebuilt_task_images import resolve_prebuilt_task_image, validate_prebuilt_image_pins
@@ -190,6 +191,9 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
     execution_class_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,79}$")
     task_image_ref: str
     agent_image_ref: str | None = None
+    # The Terminus-2 version label built into `agent_image_ref`, which a
+    # Trial without an explicit version runs; exports record it (#2054).
+    agent_image_version: AgentVersion | None = Field(default=None, exclude_if=lambda value: value is None)
     agent_runtime_bindings: tuple[AgentRuntimeBindingV1, ...] = ()
     supports_task_web_egress: bool = False
     supports_task_artifact_inputs: bool = Field(default=False, exclude_if=lambda value: not value)
@@ -279,6 +283,12 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
         return self
 
     @model_validator(mode="after")
+    def default_agent_version_has_image(self) -> ServiceExecutionRuntimeProfileV1:
+        if self.agent_image_version is not None and self.agent_image_ref is None:
+            raise ValueError("a default agent version requires the default agent image")
+        return self
+
+    @model_validator(mode="after")
     def unique_agent_versions(self) -> ServiceExecutionRuntimeProfileV1:
         keys = [(item.agent_name, item.agent_version) for item in self.agent_runtime_bindings]
         if len(set(keys)) != len(keys):
@@ -303,6 +313,7 @@ def build_nebius_runtime_profile(
     runtime_binary_sha256: str,
     image_admission: ExecutionImageAdmissionBundleV1,
     agent_image_ref: str | None = None,
+    agent_image_version: str | None = None,
     controller_resources: ControllerComputeResourcesV1 | None = None,
     supports_task_web_egress: bool = False,
     supports_task_artifact_inputs: bool = False,
@@ -333,6 +344,7 @@ def build_nebius_runtime_profile(
         runtime_binary_sha256=runtime_binary_sha256,
         image_admission=image_admission,
         agent_image_ref=agent_image_ref,
+        agent_image_version=agent_image_version,
         controller_resources=controller_resources,
         supports_task_web_egress=supports_task_web_egress,
         service_lifecycle_ready=service_lifecycle_ready,
