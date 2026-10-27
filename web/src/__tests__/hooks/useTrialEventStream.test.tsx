@@ -112,6 +112,119 @@ describe("useTrialEventStream", () => {
     expect(result.current.events.length).toBe(3);
   });
 
+  it("shows native progress before completion and replaces it with canonical events", () => {
+    const { result } = renderHook(() => useTrialEventStream("trial-1", {
+      baseUrl: "http://svc", eventSourceCtor: FakeEventSource as unknown as typeof EventSource,
+    }));
+    act(() => {
+      instances[0].emitOpen();
+      instances[0].emitTyped("preview", { source: "lease-a:1", events: [
+        { seq: 0, kind: "step_start", step_id: "live-agent" },
+        { seq: 1, kind: "env_exec", step_id: "live-agent" },
+      ], next_after_seq: 1 });
+    });
+    expect(result.current.status).toBe("open");
+    expect(result.current.events.map((event) => event.kind)).toEqual(["step_start", "env_exec"]);
+    act(() => {
+      // The canonical sequence starts at zero, independently of preview cursors.
+      instances[0].emitTyped("preview_reset", { source: null });
+      instances[0].emitMessage({ seq: 0, kind: "trial_start" });
+      instances[0].emitMessage({ seq: 1, kind: "llm_call" });
+      instances[0].emitTyped("preview", { source: "lease-a:1", events: [
+        { seq: 2, kind: "step_end" },
+      ], next_after_seq: 2 });
+    });
+    expect(result.current.events.map((event) => event.kind)).toEqual(["trial_start", "llm_call"]);
+  });
+
+  it("resumes a native preview independently of the canonical sequence", () => {
+    vi.useFakeTimers();
+    const { result } = renderHook(() => useTrialEventStream("trial-1", {
+      baseUrl: "http://svc", eventSourceCtor: FakeEventSource as unknown as typeof EventSource,
+    }));
+    act(() => {
+      instances[0].emitTyped("preview", { source: "lease-a:1", events: [
+        { seq: 0, kind: "step_start" }, { seq: 1, kind: "env_exec" },
+      ], next_after_seq: 99 });
+      instances[0].emitTyped("reconnect", { last_seq: 99 });
+      vi.advanceTimersByTime(30_000);
+    });
+    const url = new URL(instances[1].url);
+    expect(url.searchParams.get("after_seq")).toBe("-1");
+    expect(url.searchParams.get("preview_source")).toBe("lease-a:1");
+    expect(url.searchParams.get("preview_after_seq")).toBe("1");
+    act(() => instances[1].emitTyped("preview", { source: "lease-a:1", events: [
+      { seq: 1, kind: "env_exec" }, { seq: 2, kind: "step_end" },
+    ], next_after_seq: 2 }));
+    expect(result.current.events.map((event) => event.seq)).toEqual([0, 1, 2]);
+  });
+
+  it("replaces a retired attempt preview without mixing its sequence space", () => {
+    const { result } = renderHook(() => useTrialEventStream("trial-1", {
+      baseUrl: "http://svc", eventSourceCtor: FakeEventSource as unknown as typeof EventSource,
+    }));
+    act(() => instances[0].emitTyped("preview", { source: "lease-a:1", events: [
+      { seq: 12, kind: "env_exec" },
+    ], next_after_seq: 12 }));
+    act(() => {
+      instances[0].emitTyped("preview_reset", { source: "lease-b:1" });
+      instances[0].emitTyped("preview", { source: "lease-b:1", events: [
+        { seq: 0, kind: "step_start" },
+      ], next_after_seq: 0 });
+    });
+    expect(result.current.events.map((event) => event.kind)).toEqual(["step_start"]);
+    expect(result.current.events.map((event) => event.seq)).toEqual([0]);
+  });
+
+  it("retains accepted progress when native transport retry announces the same source", () => {
+    const { result } = renderHook(() => useTrialEventStream("trial-1", {
+      baseUrl: "http://svc", eventSourceCtor: FakeEventSource as unknown as typeof EventSource,
+    }));
+    act(() => {
+      instances[0].emitTyped("preview", { source: "lease-a:1", events: [
+        { seq: 0, kind: "step_start" }, { seq: 1, kind: "env_exec" },
+      ], next_after_seq: 1 });
+      instances[0].emitError();
+      instances[0].emitOpen();
+      instances[0].emitTyped("preview_reset", { source: "lease-a:1" });
+    });
+    expect(result.current.events.map((event) => event.seq)).toEqual([0, 1]);
+    act(() => instances[0].emitTyped("preview", { source: "lease-a:1", events: [
+      { seq: 0, kind: "step_start" }, { seq: 1, kind: "env_exec" }, { seq: 2, kind: "step_end" },
+    ], next_after_seq: 2 }));
+    expect(result.current.events.map((event) => event.seq)).toEqual([0, 1, 2]);
+  });
+
+  it("keeps partial preview distinct when execution ends without a canonical trajectory", () => {
+    const { result } = renderHook(() => useTrialEventStream("trial-1", {
+      baseUrl: "http://svc", eventSourceCtor: FakeEventSource as unknown as typeof EventSource,
+    }));
+    act(() => {
+      instances[0].emitTyped("preview", { source: "lease-a:1", events: [
+        { seq: 0, kind: "step_start" },
+      ], next_after_seq: 0 });
+      instances[0].emitTyped("complete", { final_state: "failed", canonical_available: false });
+    });
+    expect(result.current.status).toBe("complete");
+    expect(result.current.canonicalAvailable).toBe(false);
+    expect(result.current.canonicalEvents).toEqual([]);
+    expect(result.current.events.map((event) => event.kind)).toEqual(["step_start"]);
+  });
+
+  it("ignores malformed and obsolete preview callbacks", () => {
+    const { result, rerender } = renderHook((trialId) => useTrialEventStream(trialId, {
+      baseUrl: "http://svc", eventSourceCtor: FakeEventSource as unknown as typeof EventSource,
+    }), { initialProps: "trial-1" });
+    const old = instances[0];
+    rerender("trial-2");
+    act(() => {
+      old.emitTyped("preview", { source: "lease-a:1", events: [{ seq: 0, kind: "step_start" }] });
+      instances[1].emitTyped("preview", "not JSON");
+      instances[1].emitTyped("preview", { source: "lease-b:1", events: [{ seq: "0", kind: "step_start" }] });
+    });
+    expect(result.current.events).toEqual([]);
+  });
+
   it("closes connection on 'complete' event and marks status='complete'", () => {
     const { result } = renderHook(() =>
       useTrialEventStream("trial-1", {
@@ -435,6 +548,19 @@ describe("useTrialEventStream", () => {
     act(() => instances[0].emitMessage({ seq: 0, kind: "trial_start" }));
     expect(result.current.events.length).toBe(1);
     expect(instances[0].closed).toBe(false);
+  });
+
+  it("skips null, primitive and untyped canonical messages without consuming the cursor", () => {
+    const { result } = renderHook(() => useTrialEventStream("trial-1", {
+      baseUrl: "http://svc", eventSourceCtor: FakeEventSource as unknown as typeof EventSource,
+    }));
+    act(() => {
+      instances[0].emitMessage(null);
+      instances[0].emitMessage(42);
+      instances[0].emitMessage({ seq: 0 });
+      instances[0].emitMessage({ seq: 0, kind: "trial_start" });
+    });
+    expect(result.current.events.map((event) => event.kind)).toEqual(["trial_start"]);
   });
 
   it("payload without numeric seq skipped (server-contract violation guard)", () => {

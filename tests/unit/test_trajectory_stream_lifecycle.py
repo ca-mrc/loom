@@ -34,6 +34,10 @@ async def _stream(
         async def execute(self, _query):
             return SimpleNamespace(scalar_one_or_none=lambda: trial)
 
+        async def scalar(self, _query):
+            # These lifecycle cases exercise the already-canonical event feed.
+            return trial.id
+
     class Listen:
         _push_mode = False
 

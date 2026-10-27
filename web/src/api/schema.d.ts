@@ -15035,6 +15035,9 @@ export interface operations {
             query?: {
                 after_seq?: number;
                 limit?: number;
+                include_preview?: boolean;
+                preview_source?: string | null;
+                preview_after_seq?: number;
             };
             header?: {
                 authorization?: string | null;
@@ -15107,6 +15110,8 @@ export interface operations {
         parameters: {
             query?: {
                 after_seq?: number;
+                preview_source?: string | null;
+                preview_after_seq?: number;
             };
             header?: {
                 authorization?: string | null;

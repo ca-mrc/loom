@@ -139,3 +139,49 @@ worker (`TrajectoryWriter`); the `trial_events` table receives the
 same events via the worker's `CpEventSink` batched dual-write. In
 the current path MinIO is the archive/audit-log copy and the SSE reader is
 Postgres-first.
+
+
+## Native execution progress
+
+Native execution now publishes **provisional live progress** through the trusted
+execution controller's existing Pod-authenticated broker. The controller reports
+real phase boundaries and tails only declared trajectory JSONL outputs. A bounded
+background uploader flushes low-rate progress on a timer, accepts exact duplicate
+retries, and stops preview delivery on persistent failure without changing the
+execution deadline or discarding the durable local output.
+
+Live progress and the canonical trajectory have different ordering. Final
+materialization still owns canonical lifecycle events and Gateway accounting
+reconciliation. Native preview events therefore use separate storage and never
+occupy canonical `trial_events` sequence numbers or change downloads and exports.
+
+The SSE endpoint adds named frames while canonical events are unavailable:
+
+- `preview_reset`: `{ "source": "<lease-id>:<resource-generation>" }` starts a
+  different current-attempt preview; `source: null` marks canonical takeover.
+- `preview`: `{ "source": "…", "events": [...], "next_after_seq": N }` carries
+  typed progress events in their own sequence space.
+- Default `message` frames remain canonical events with their original cursor
+  contract. Canonical events replace the displayed preview, rather than being
+  merged with it by sequence number.
+
+Clients can resume preview delivery independently with `preview_source` and
+`preview_after_seq`; `after_seq` still resumes canonical events. Resume from the
+last event actually accepted, not a control frame's advertised cursor. A changed
+lease or resource generation resets the preview source. Legacy clients that
+ignore named preview frames continue receiving the canonical stream unchanged.
+
+Polling clients opt in with `/events?include_preview=true`, plus the same preview
+cursor parameters. The existing `events` and `next_after_seq` fields remain
+canonical; the additive `preview` object carries native progress, or is `null`
+when unavailable or superseded by canonical data. An empty preview page does not
+mean the active Trial has finished. The SPA uses this same contract when SSE is
+unavailable and labels provisional progress as a live preview. If execution ends
+with only partial preview evidence, it is not presented as a complete canonical
+trajectory.
+
+The ingest route checks the existing Pod identity, primary-attempt lease,
+resource generation, current Trial attempt and team binding. Neither an agent nor
+a task chooses another Trial, lease, credential, upstream URL, or file to tail.
+Live rows use the existing Trial-event lifecycle classification and are removed
+with that classified scope; canonical final output retains its existing policy.

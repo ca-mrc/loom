@@ -133,6 +133,7 @@ func main() {
 		trustedEnvironment["no_proxy"] = "localhost,127.0.0.1,::1"
 		trustedEnvironment["NO_PROXY"] = "localhost,127.0.0.1,::1"
 	}
+	liveTrajectory := startNativeTrajectory(executionContext, broker, p, filepath.Clean(*workspace))
 	result, runErr := runPlan(
 		executionContext,
 		p,
@@ -140,7 +141,9 @@ func main() {
 		cleanOutput,
 		trustedEnvironment,
 		broker.setPhase,
+		liveTrajectory.phaseBoundary,
 	)
+	liveTrajectory.close()
 	stopTaskEgress()
 	stopMonitor()
 	runSetupCacheStep(ctx, "store", func(ctx context.Context) error {

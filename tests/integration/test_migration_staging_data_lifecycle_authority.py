@@ -118,6 +118,7 @@ def test_upgrade_adds_authority_journal_and_nullable_execution_links(
         "llm_calls",
         "trial_events",
         "trial_resource_usage",
+        "service_execution_live_events",
         "artifacts",
         "execution_leases",
     }
@@ -726,6 +727,7 @@ def test_sql_inventory_is_read_only_and_binds_unclassified_counts(
         "llm_calls": 0,
         "trial_events": 0,
         "trial_resource_usage": 0,
+        "service_execution_live_events": 0,
         "trials": 0,
     }
     assert plan.mutation_epoch == snapshot.mutation_epoch

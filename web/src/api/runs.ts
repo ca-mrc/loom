@@ -1,5 +1,6 @@
 import { apiDownload, apiFetch, qs } from "./core";
 import type { components, paths } from "./schema";
+import type { TrajectoryPreview } from "../lib/trajectoryPreview";
 
 export type TrialList = paths["/api/v1/trials"]["get"]["responses"][200]["content"]["application/json"];
 
@@ -19,6 +20,8 @@ export interface TrialEventsPage {
   events: Array<components["schemas"]["TrajectoryEvent"] & { seq: number }>;
   /** Last returned event sequence; null means an empty tail, not cursor zero. */
   next_after_seq: number | null;
+  /** Optional native progress, separate from canonical ordering. */
+  preview?: TrajectoryPreview | null;
 }
 
 export type BatchList = paths["/api/v1/batches"]["get"]["responses"][200]["content"]["application/json"];
@@ -112,8 +115,11 @@ export const runsApi = {
       method: "POST",
       body: JSON.stringify(body),
     }),
-  getTrialEvents: (id: string, afterSeq = -1, limit = 200, signal?: AbortSignal) =>
-    apiFetch<TrialEventsPage>(`/api/v1/trials/${id}/events${qs({ after_seq: afterSeq, limit })}`, { signal }),
+  getTrialEvents: (id: string, afterSeq = -1, limit = 200, signal?: AbortSignal, preview?: { source?: string; afterSeq?: number }) =>
+    apiFetch<TrialEventsPage>(`/api/v1/trials/${id}/events${qs({
+      after_seq: afterSeq, limit,
+      ...(preview ? { include_preview: true, preview_source: preview.source, preview_after_seq: preview.afterSeq ?? -1 } : {}),
+    })}`, { signal }),
   downloadATIF: (id: string) => apiDownload(`/api/v1/trials/${id}/atif`, `${id}-atif.json`),
   downloadTrajectory: (id: string) =>
     apiDownload(`/api/v1/trials/${id}/trajectory/download`, `${id}-events.jsonl`),
