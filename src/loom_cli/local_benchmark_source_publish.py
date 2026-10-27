@@ -18,7 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from loom.db.schema import Task
+from loom.db.schema import Benchmark, Task
 from loom.models.task import TaskConfig
 from loom.nebius_terminus_ingest import (
     NEBIUS_TERMINUS_PROFILE,
@@ -145,6 +145,23 @@ async def publish_versioned_local_benchmark(
         # Serialize a whole benchmark before any task/image/source lock. Upload
         # failures above leave only recovery records, never a partial catalog.
         async with sessions.begin() as session:
+            # Admission belongs to the exact catalog snapshot. Lock the parent
+            # before comparing rows, so concurrent activation/reimport cannot
+            # retain admission for changed input or revive a historical profile.
+            previous = await session.scalar(
+                select(Benchmark).where(Benchmark.id == entry.id).with_for_update(),
+            ) if native_origin is not None else None
+            if previous is not None and previous.execution_state == "historical":
+                raise ValueError("cannot republish a historical native benchmark")
+            retain_admission = bool(
+                previous is not None and previous.execution_state == "runnable"
+                and isinstance(result, PreparedAdapterBenchmark)
+                and previous.profile_provenance == result.manifest["benchmark_profile_provenance"]
+            )
+            previous_ids = set(await session.scalars(
+                select(Task.id).where(Task.benchmark_id == entry.id),
+            )) if retain_admission else set()
+            retain_admission = retain_admission and previous_ids == set(prepared)
             await _upsert_benchmark(
                 session, entry=entry, source_prefix=source_prefix, imported_by=imported_by,
                 adapter_manifest=result.manifest if isinstance(result, PreparedAdapterBenchmark) else None,
@@ -165,8 +182,10 @@ async def publish_versioned_local_benchmark(
                 )
                 if existing is None:
                     inserted += 1
+                    retain_admission = False
                 elif any(getattr(existing, key) != value for key, value in values.items()):
                     updated += 1
+                    retain_admission = False
                 else:
                     unchanged += 1
                 task = (
@@ -182,6 +201,12 @@ async def publish_versioned_local_benchmark(
                 uploads={task_id: ticket for task_id, (_, ticket) in prepared.items()},
                 now=datetime.now(UTC),
             )
+            if retain_admission:
+                # The upsert deliberately defaults every native publication to
+                # pending. Restore only the already-admitted identical snapshot.
+                benchmark = await session.get(Benchmark, entry.id, populate_existing=True)
+                assert benchmark is not None
+                benchmark.execution_state = "runnable"
     finally:
         await engine.dispose()
     return LocalBenchmarkPublishStats(

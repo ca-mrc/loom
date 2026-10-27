@@ -50,6 +50,28 @@ class UpstreamOrigin(BaseModel):
         return self
 
 
+class HarborBenchmarkSpec(BaseModel):
+    """Pinned native catalog identity, shared by intake and operator admission."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    id: str = Field(pattern=r"^[a-z0-9][a-z0-9@._-]*$")
+    display_name: str = Field(min_length=1)
+    series: str
+    license_spdx: str
+    license_url: str
+    source_subdir: str = "tasks"
+    expected_task_count: int = Field(gt=0)
+    origin: UpstreamOrigin
+
+    @model_validator(mode="after")
+    def _subset_identity(self) -> HarborBenchmarkSpec:
+        if self.origin.subset and "subset" not in self.id:
+            raise ValueError("native Harbor subsets require an explicitly named subset profile id")
+        if len(self.origin.subset) > self.expected_task_count:
+            raise ValueError("native Harbor subset exceeds the complete source task count")
+        return self
+
+
 class ArtifactSource(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
     source: str = Field(min_length=1)

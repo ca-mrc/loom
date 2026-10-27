@@ -13,6 +13,7 @@ Subcommands:
 - verify <slug> [--limit --minio-* --bucket --seed]
 - audit [--all | <slug>] [--db-url] [--json] [--tb21-audit-json PATH]
 - activate terminal-bench-2 --profile terminal-bench-2@tb2.1-r6 --audit-json PATH --minio-*
+- activate-native --harbor-source SOURCE.json [--db-url URL]
 - sync-mirror [--source-* ...] [--dest-* ...] [--prefix ...] [--dry-run]
 
 The command group is the supported operator surface for benchmark discovery,
@@ -264,6 +265,11 @@ def _add_activate_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--minio-endpoint", default=_target_minio_env("ENDPOINT"))
     p.add_argument("--minio-access-key", default=_target_minio_env("ACCESS_KEY"))
     p.add_argument("--minio-secret-key", default=_target_minio_env("SECRET_KEY"))
+
+
+def _add_activate_native_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--harbor-source", required=True, type=Path)
+    p.add_argument("--db-url", default=_target_db_url())
 
 
 def _source_env(name: str) -> str | None:
@@ -613,6 +619,10 @@ def _build_parser() -> argparse.ArgumentParser:
             help="Atomically activate a fully audited immutable benchmark profile.",
         )
     )
+    _add_activate_native_args(sub.add_parser(
+        "activate-native",
+        help="Admit a published native profile for execution without claiming runtime qualification.",
+    ))
 
     _add_provision_catalog_provision_args(
         sub.add_parser(
@@ -1157,6 +1167,40 @@ def _cmd_audit(args: argparse.Namespace) -> int:
                 print(f"  ... {bundle_report.failed - 10} additional failures omitted")
     if bundle_report is not None and bundle_report.failed > 0:
         return 1
+    return 0
+
+
+def _cmd_activate_native(args: argparse.Namespace) -> int:
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from loom.models.harbor import HarborBenchmarkSpec
+    from loom_benchmark_tool.db_url import normalize_db_url
+    from loom_cli.native_benchmark_activation import activate_native_benchmark
+
+    if not args.db_url:
+        print("error: activate-native requires --db-url / env LOOM_DB_URL or LOOM_SVC_DB_URL",
+              file=sys.stderr)
+        return 2
+    try:
+        spec = HarborBenchmarkSpec.model_validate_json(args.harbor_source.read_text())
+    except (OSError, ValueError) as exc:
+        print(f"error: invalid native source descriptor: {exc}", file=sys.stderr)
+        return 2
+
+    async def _activate() -> int:
+        engine = create_async_engine(normalize_db_url(args.db_url), isolation_level="READ COMMITTED")
+        try:
+            async with async_sessionmaker(engine, expire_on_commit=False).begin() as session:
+                return await activate_native_benchmark(session, spec=spec)
+        finally:
+            await engine.dispose()
+
+    try:
+        count = asyncio.run(_activate())
+    except ValueError as exc:
+        print(f"error: native activation rejected: {exc}", file=sys.stderr)
+        return 1
+    print(f"activated {spec.id}: {count} tasks admitted; runtime qualification unchanged")
     return 0
 
 
@@ -1722,6 +1766,7 @@ _DISPATCH: dict[str, Callable[[argparse.Namespace], int]] = {
     "verify": _cmd_verify,
     "audit": _cmd_audit,
     "activate": _cmd_activate,
+    "activate-native": _cmd_activate_native,
     "provision-catalog": _cmd_provision_catalog_provision,
     "prepare-harbor": _cmd_prepare_harbor,
     "validate-local": _cmd_validate_local,
