@@ -2,7 +2,7 @@
 
 Loom directly imports Harbor's `Terminus2`. Upstream owns prompts, parsing,
 Chat and the agent loop; Loom connects the environment, Gateway, deadlines,
-durable events and artifacts. Track remaining alignment in [#2390](https://github.com/qianyi-sun/loom/issues/2390).
+durable events and artifacts. Track remaining alignment in [#2390](https://github.com/ca-mrc/loom/issues/2390).
 
 ## Discover and prepare an upgrade
 
@@ -39,6 +39,12 @@ provenance fallbacks. It preflights every known consumer before writing. It does
 not rewrite patches, loosen dependencies or fabricate frozen build evidence.
 Rebuild and regenerate the existing worker dependency evidence with
 `scripts/ops/update_worker_image_lock.sh` before considering the candidate Ready.
+Ordinary worker builds retain the recorded third-party pins. Use
+`LOOM_WORKER_REFRESH_DEPENDENCIES=true` only for an explicit broader dependency
+maintenance update; review and qualify that graph before using its new freeze.
+After regeneration, read the pin report fields: `active_pins_match` and
+`frozen_worker.matches_pin` must be true, and `regeneration_required` false.
+The command's exit status alone does not establish frozen-worker qualification.
 
 ## Automatic candidates
 
@@ -54,16 +60,20 @@ before any branch push. The workflow maintains one Draft at
 PR. After creating/updating the Draft, it builds the candidate production image
 and runs both real-Harbor probes offline. A failed patch/build/probe leaves the
 Draft and an actionable run summary. Success still requires real worker
-dependency regeneration and runtime acceptance before Ready. Conflicts fail
-visibly. It never force-pushes, enables auto-merge or changes a deployed runtime.
+dependency regeneration and offline runtime verification before Ready. Live
+runtime acceptance is required before selecting a deployed default below.
+Conflicts fail visibly. It never force-pushes, enables auto-merge or changes a
+deployed runtime.
 
-The repository currently disables Actions-created PRs. GitHub's setting combines
-creating and approving PRs, so changing it is an operator decision; this workflow
-only creates/updates candidates. No alternative token is copied into CI.
+GitHub's setting combines creating and approving PRs, so changing it is an
+operator decision; this workflow only creates/updates candidates. An organization
+policy can prevent enabling this setting at repository level after a transfer.
+No alternative token is copied into CI.
 
 `GITHUB_TOKEN` writes do not trigger ordinary PR checks. After developer
 verification, a collaborator marks the candidate Ready, starting the existing
-four source-workflow gates, and may enable GitHub-native squash auto-merge.
+four source-workflow gates, and may enable GitHub-native squash auto-merge and
+merge-queue admission.
 This adds no branch-required context.
 
 ## Behavior and existing differences
@@ -74,9 +84,24 @@ image with networking disabled. This catches upstream API/behavior changes and
 trajectory projection loss that fake-agent tests or successful imports cannot
 detect. It reuses the image build and adds only short offline probes.
 
+Fixtures representing the current runtime should import `HARBOR_COMPAT_SHA`;
+historical runtime fixtures remain frozen. Run the delivery-export API tests too,
+including downloads from the previously qualified runtime after the active pin
+changes. A current-version fixture alone cannot establish historical export
+compatibility. Keep exact frozen release provenance checks for selected versions;
+legacy default runs need an explicit supported export-format compatibility rule.
+Do not weaken unknown/mixed provenance, legacy-stream or artifact integrity
+rejection to make an upgrade pass.
+
 New runtime provenance events record the effective `max_turns`,
 `enable_summarize`, recording, continuation and multi-model options, excluding
 credentials. Version equality and effective-configuration equality are separate.
+
+Harbor 0.24 stores constructor configuration in `agent.options`. The model
+router reads those options when creating a teacher, then replaces the trajectory
+metadata's credential dictionary without mutating the live student's authentication.
+The real-constructor probe checks credential reuse before and after redaction;
+the differential probes still check the same explicit compatibility options.
 
 These differences remain under #2390; passing conformance does not erase them:
 

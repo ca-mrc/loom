@@ -93,10 +93,12 @@ def test_pinned_harbor_direct_provider_contracts(tmp_path: Path) -> None:
         ]
         for source, package in mounts:
             args.extend(["-v", f"{source}:/usr/local/lib/python3.12/site-packages/{package}:ro"])
+        # Retain the repository layout for the probe's canonical version pin.
         args.extend([
-            "-v", f"{root / 'tests/unit/terminus2/test_direct_runtime_real_harbor.py'}:/qualification.py:ro",
+            "-v", f"{root / 'tests/unit/terminus2/test_direct_runtime_real_harbor.py'}:/qualification/tests/unit/terminus2/test_direct_runtime_real_harbor.py:ro",
+            "-v", f"{root / 'config/harbor-runtime.json'}:/qualification/config/harbor-runtime.json:ro",
             "--entrypoint", "python", image, "-I", "-B", "-m", "pytest", "-q",
-            "/qualification.py", "--basetemp=/tmp/qualification-tests",
+            "/qualification/tests/unit/terminus2/test_direct_runtime_real_harbor.py", "--basetemp=/tmp/qualification-tests",
             "-o", "cache_dir=/tmp/pytest-cache", "-o", "asyncio_mode=auto",
         ])
         result = _run(args, cwd=root, timeout=90)

@@ -47,25 +47,25 @@
              asciinema_installed = asciinema_result.return_code == 0
          else:
              asciinema_installed = True
-@@ -169,7 +191,7 @@
-                     # Verify installations
-                     if not tmux_installed:
-                         verify_tmux = await self.environment.exec(
--                            command="tmux -V", user="root"
-+                            command="tmux -V"
-                         )
-                         if verify_tmux.return_code != 0:
-                             self._logger.warning(
-@@ -179,7 +201,7 @@
+@@ -175,7 +197,7 @@
+                         # Verify installations
+                         if not tmux_installed:
+                             verify_tmux = await self.environment.exec(
+-                                command="tmux -V", user="root"
++                                command="tmux -V"
+                             )
+                             if verify_tmux.return_code != 0:
+                                 self._logger.warning(
+@@ -185,7 +207,7 @@
 
-                     if needs_asciinema and not asciinema_installed:
-                         verify_asciinema = await self.environment.exec(
--                            command="asciinema --version", user="root"
-+                            command="asciinema --version"
-                         )
-                         if verify_asciinema.return_code != 0:
-                             self._logger.warning(
-@@ -211,11 +233,10 @@
+                         if needs_asciinema and not asciinema_installed:
+                             verify_asciinema = await self.environment.exec(
+-                                command="asciinema --version", user="root"
++                                command="asciinema --version"
+                             )
+                             if verify_asciinema.return_code != 0:
+                                 self._logger.warning(
+@@ -217,11 +239,10 @@
          # Check for OS release files
          os_release_result = await self.environment.exec(
              command="cat /etc/os-release 2>/dev/null || echo 'not found'",
@@ -78,7 +78,7 @@
 
          # Detect package managers by checking if they exist
          package_managers = [
-@@ -231,7 +252,7 @@
+@@ -237,7 +258,7 @@
 
          for pm_name in package_managers:
              check_result = await self.environment.exec(
@@ -87,7 +87,7 @@
              )
              if check_result.return_code == 0:
                  system_info["package_manager"] = pm_name
-@@ -332,7 +353,7 @@
+@@ -338,7 +359,7 @@
 
              # Verify installation
              verify_result = await self.environment.exec(
@@ -96,7 +96,7 @@
              )
              if verify_result.return_code == 0:
                  self._logger.debug("tmux successfully built and installed from source")
-@@ -377,7 +398,7 @@
+@@ -383,7 +404,7 @@
                  if result.return_code == 0:
                      # Verify installation
                      verify_result = await self.environment.exec(
@@ -105,7 +105,7 @@
                      )
                      if verify_result.return_code == 0:
                          self._logger.debug("asciinema successfully installed using pip")
-@@ -519,7 +540,7 @@
+@@ -525,7 +546,7 @@
              self._logger.debug("Starting recording.")
              await self.send_keys(
                  keys=[
@@ -114,7 +114,7 @@
                      "Enter",
                  ],
                  min_timeout_sec=1.0,
-@@ -651,6 +672,12 @@
+@@ -657,6 +678,12 @@
          )
 
      async def _paste_key(self, key: str, action: str) -> None:
@@ -127,7 +127,7 @@
          """Deliver *key* to the pane via a tmux paste buffer.
 
          ``tmux send-keys`` rejects commands above its internal message size
-@@ -669,6 +696,9 @@
+@@ -675,6 +702,9 @@
          token = uuid.uuid4().hex
          quoted_path = shlex.quote(f"/tmp/.harbor-tmux-paste-{token}")
          buffer_name = f"harbor-paste-{token}"
@@ -137,7 +137,7 @@
          payload = base64.b64encode(key.encode("utf-8")).decode("ascii")
 
          async def _run(command: str) -> None:
-@@ -682,13 +712,19 @@
+@@ -688,13 +718,19 @@
                  redirect = ">>" if offset else ">"
                  await _run(f"printf %s {chunk} | base64 -d {redirect} {quoted_path}")
 

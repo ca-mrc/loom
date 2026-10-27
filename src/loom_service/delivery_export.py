@@ -2123,6 +2123,7 @@ def _add_raw_harbor_entries(
             events = trajectory_events_by_trial[item.trial.id]
             tb2_v2_bundle = build_per_trial_v2_bundle(
                 trial=item.trial,
+                batch=item.batch,
                 events=events,
                 calls=calls,
                 client=client,

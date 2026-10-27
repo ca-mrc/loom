@@ -1,8 +1,8 @@
 {
   "schema_version": "1",
   "python_version": "3.12",
-  "harbor_compat_sha": "527d50deb63a5d279e8c20593c18a2cbc7f61f9e",
-  "harbor_runtime_version": "0.18.0",
+  "harbor_compat_sha": "2de4605b9404eada7d341388291e6e469c90330b",
+  "harbor_runtime_version": "0.24.0",
   "packages": {
     "openai": {
       "version": "2.54.0",
@@ -11,7 +11,7 @@
     },
     "litellm": {
       "version": "1.106.2",
-      "wheel": "litellm-1.106.2-py3-none-any.whl",
+      "wheel": "litellm-1.106.2-cp310-abi3-manylinux_2_28_x86_64.whl",
       "sha256": "cb1a2a1e55a4a8350ae2167525dc0d06f59b078cd685fb3e0f5419f02da5420e"
     }
   },

@@ -794,6 +794,7 @@ source_paths = [
   ".dockerignore",
   "README.md",
   "deploy/Dockerfile.worker",
+  "deploy/worker-image.lock",
   "deploy/patches/**",
   "packages/**",
   "pyproject.toml",

@@ -1,5 +1,5 @@
 # Loom worker image pip freeze — regenerate via scripts/ops/update_worker_image_lock.sh
-# Image: loom-worker:pillow13-regen
+# Image: loom-worker:pr-2403-20261027-stable
 # Editable install with no version control (loom-benchmarks==0.1.0)
 # Editable install with no version control (loom-bundle-checksum==0.1.0)
 # Editable install with no version control (loom-launcher==0.1.0)
@@ -52,7 +52,7 @@ google-genai==2.32.0
 greenlet==3.5.6
 h11==0.16.0
 h2==4.4.1
-harbor @ git+https://github.com/harbor-framework/harbor.git@527d50deb63a5d279e8c20593c18a2cbc7f61f9e
+harbor @ git+https://github.com/harbor-framework/harbor.git@2de4605b9404eada7d341388291e6e469c90330b
 hf-xet==1.7.0
 hpack==4.2.0
 httpcore==1.0.9
@@ -103,6 +103,7 @@ rich==15.0.0
 rpds-py==2026.9.1
 s3transfer==0.19.3
 scantree==0.0.4
+semver==3.1.0
 shellingham==1.5.4
 shortuuid==1.0.13
 six==1.17.0

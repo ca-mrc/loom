@@ -6,13 +6,20 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 IMAGE="${LOOM_WORKER_IMAGE:-loom-worker:gate1-regen}"
 DOCKERFILE="${ROOT}/deploy/Dockerfile.worker"
+REFRESH_DEPENDENCIES="${LOOM_WORKER_REFRESH_DEPENDENCIES-false}"
+case "${REFRESH_DEPENDENCIES}" in
+  true|false) ;;
+  *) echo 'LOOM_WORKER_REFRESH_DEPENDENCIES must be true or false' >&2; exit 2 ;;
+esac
 
 cd "${ROOT}"
-docker build -f "${DOCKERFILE}" -t "${IMAGE}" .
+docker build -f "${DOCKERFILE}" -t "${IMAGE}" \
+  --build-arg "WORKER_REFRESH_DEPENDENCIES=${REFRESH_DEPENDENCIES}" .
 
 LOCK="${ROOT}/deploy/worker-image.lock"
 WHEELS="${ROOT}/deploy/worker-image.wheels.json"
 TMP_HASH="$(mktemp)"
+trap 'rm -f "${TMP_HASH}"' EXIT
 
 {
   echo "# Loom worker image pip freeze — regenerate via scripts/ops/update_worker_image_lock.sh"
@@ -29,8 +36,33 @@ docker run --rm "${IMAGE}" bash -c '
   pip hash *.whl
 ' > "${TMP_HASH}"
 
-OPENAI_HASH="$(awk '/^openai-.*\.whl:/{getline; print}' "${TMP_HASH}" | sed 's/^--hash=sha256://')"
-LITELLM_HASH="$(awk '/^litellm-.*\.whl:/{getline; print}' "${TMP_HASH}" | sed 's/^--hash=sha256://')"
+wheel_metadata() {
+  awk -v package="$1" '
+    $0 ~ ("^" package "-.*\\.whl:$") {
+      count++
+      wheel = substr($0, 1, length($0) - 1)
+      getline
+      if ($0 !~ /^--hash=sha256:[0-9a-fA-F]+$/) invalid = 1
+      hash = $0
+      sub(/^--hash=sha256:/, "", hash)
+    }
+    END {
+      if (count != 1 || invalid || length(hash) != 64) {
+        print "Expected exactly one wheel and SHA-256 hash for " package > "/dev/stderr"
+        exit 1
+      }
+      print wheel
+      print hash
+    }
+  ' "${TMP_HASH}"
+}
+
+OPENAI_METADATA="$(wheel_metadata openai)"
+LITELLM_METADATA="$(wheel_metadata litellm)"
+OPENAI_WHEEL="${OPENAI_METADATA%%$'\n'*}"
+OPENAI_HASH="${OPENAI_METADATA#*$'\n'}"
+LITELLM_WHEEL="${LITELLM_METADATA%%$'\n'*}"
+LITELLM_HASH="${LITELLM_METADATA#*$'\n'}"
 OPENAI_VER="$(docker run --rm "${IMAGE}" python -c 'import importlib.metadata as m; print(m.version("openai"))')"
 LITELLM_VER="$(docker run --rm "${IMAGE}" python -c 'import importlib.metadata as m; print(m.version("litellm"))')"
 HARBOR_SHA="$(grep '^ARG HARBOR_COMPAT_SHA=' "${DOCKERFILE}" | cut -d= -f2)"
@@ -45,12 +77,12 @@ cat > "${WHEELS}" <<EOF
   "packages": {
     "openai": {
       "version": "${OPENAI_VER}",
-      "wheel": "openai-${OPENAI_VER}-py3-none-any.whl",
+      "wheel": "${OPENAI_WHEEL}",
       "sha256": "${OPENAI_HASH}"
     },
     "litellm": {
       "version": "${LITELLM_VER}",
-      "wheel": "litellm-${LITELLM_VER}-py3-none-any.whl",
+      "wheel": "${LITELLM_WHEEL}",
       "sha256": "${LITELLM_HASH}"
     }
   },
@@ -58,6 +90,5 @@ cat > "${WHEELS}" <<EOF
 }
 EOF
 
-rm -f "${TMP_HASH}"
 echo "Updated ${LOCK} and ${WHEELS}"
 docker run --rm "${IMAGE}" pip check
