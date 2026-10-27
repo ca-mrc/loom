@@ -127,8 +127,13 @@ service materialization, worker admission before factories/model launch, and
 the Trial's driver-start boundary. Schema validity and preserved raw files do
 not grant runtime support. Hosted execution prepares independent verifier images,
 keeps their resource and environment declarations distinct, and restores declared
-artifacts before grading. The legacy worker still rejects these hosted-only
-contracts. Unsupported Compose fields and exact GPU-model placement remain
+artifacts before grading. Independent verifiers use their own image USER,
+WORKDIR and ENTRYPOINT defaults unless explicitly overridden, including when
+the agent uses Compose. When `[verifier.environment]` is declared, an omitted
+internet setting maps to hosted `public-web` independently of the agent; explicit
+offline and allowlist policies remain unchanged. Submission validates the
+independent verifier against its selected execution class before execution.
+The legacy worker still rejects these hosted-only contracts. Unsupported Compose fields and exact GPU-model placement remain
 explicit blockers.
 
 Supported native Compose topologies run inside a private software guest. The
@@ -183,18 +188,26 @@ agent cutoff; external cancellation receives only ordinary termination grace.
 Compose command cancellation retires the inner process group before collection
 hooks run. A single read-only BusyBox helper provides session control without
 exposing the guest Docker socket; the authored service user and umask are preserved.
-Structured artifact transfer preserves source
-paths and exclusions, overlays only transferred files onto the verifier image,
-and rejects unsafe links and private paths. Generic separate verification keeps
-its full-workspace handoff; a native independent verifier consumes its authored
+Native independent-verifier artifact transfer preserves source
+paths and exclusions, replaces each declared directory with its collected tree,
+and rejects unsafe links and private paths. Excluded or agent-deleted files do
+not survive from the verifier image; file artifacts retain unrelated siblings.
+Generic separate verification keeps
+its full-workspace handoff and overlays structured outputs to preserve staged
+private verifier inputs; a native independent verifier consumes its authored
 artifact declarations. Oracle solution variables apply only to the solution
 process. Health probes honor the declared startup interval.
 
 The native reward bridge runs the original `tests/test.sh`, removes stale
 reward/output files, and accepts finite numeric scalar or JSON rewards,
-including zero and fractional scores. Missing, malformed, boolean and
+including zero and fractional scores. Like Harbor, `reward.json` takes precedence
+over `reward.txt`; text-only rewards use the `reward` key. An invalid existing
+JSON reward fails instead of falling back to text. Missing, malformed, boolean and
 non-finite rewards fail explicitly. A shell timeout cannot reuse a prior
-success. This bridge does not qualify the separate verifier's execution backend.
+success. Previously generated native wrappers retain exact version recognition
+and the private-input layout; the runtime-owned bridge uses the current reward
+reader without rewriting task assets. This bridge does not qualify the separate
+verifier's execution backend.
 
 ## Development evidence and remaining acceptance
 
