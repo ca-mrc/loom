@@ -14,7 +14,8 @@ from pydantic import TypeAdapter, ValidationError
 
 from loom.agent.terminus2.mapper import Terminus2TrajectoryMapper
 from loom.agent.terminus2.provenance import HARBOR_COMPAT_SHA, LOOM_BRIDGE_REVISION
-from loom.db.schema import LlmCall, Trial
+from loom.agent_runtime import AgentRuntimeBindingV1
+from loom.db.schema import Batch, LlmCall, Trial
 from loom.models.trajectory import (
     AgentRetryEvent,
     EventKind,
@@ -29,6 +30,11 @@ from loom.terminal_result_semantics import is_scored_agent_timeout
 MAX_JSONL_BYTES = 50 * 1024 * 1024
 MAX_JSONL_LINES = 100_000
 LEGACY_BENCHMARK_SHA = "91e10457"
+# Serialized v2 exports from the qualified pre-#2403 deployment default remain
+# readable. This is a format compatibility list, not runtime execution admission.
+LEGACY_DEFAULT_HARBOR_COMPAT_SHAS = frozenset({
+    "527d50deb63a5d279e8c20593c18a2cbc7f61f9e",  # Harbor 0.18.0
+})
 NATIVE_HARBOR_TRAJECTORY = "native/harbor_trajectory.json"
 NATIVE_RECORDING_CAST = "native/recording.cast"
 SECRET_PATTERNS = (
@@ -159,7 +165,45 @@ def _normalize_hash(value: str) -> str:
     return normalized
 
 
-def validate_v2_eligibility(events: list[TrajectoryEvent], trial: Trial) -> None:
+def _expected_harbor_sources(trial: Trial, batch: Batch | None) -> frozenset[str]:
+    config = trial.config if isinstance(trial.config, dict) else {}
+    version = config.get("agent_version")
+    if batch is not None and (batch.id != trial.batch_id or batch.team_id != trial.team_id):
+        raise Tb2V2ExportError("invalid_runtime_binding", {
+            "message": "runtime binding Batch does not belong to the Trial",
+            "trial_id": str(trial.id),
+        })
+    if version is None:
+        # Older defaults have no frozen Harbor source. Accept only the known
+        # historical v2 format and the active default; never infer from an event.
+        return LEGACY_DEFAULT_HARBOR_COMPAT_SHAS | {HARBOR_COMPAT_SHA}
+
+    profile = batch.service_execution_runtime_profile if batch is not None else None
+    try:
+        bindings = TypeAdapter(list[AgentRuntimeBindingV1]).validate_python(
+            profile.get("agent_runtime_bindings", []) if isinstance(profile, dict) else [],
+        )
+    except ValidationError as exc:
+        raise Tb2V2ExportError("invalid_runtime_binding", {
+            "message": "Batch contains invalid frozen agent runtime bindings",
+            "trial_id": str(trial.id),
+        }) from exc
+    keys = [(binding.agent_name, binding.agent_version) for binding in bindings]
+    selected = [binding for binding in bindings if (
+        binding.agent_name == _agent_name_for_trial(trial) and binding.agent_version == version
+    )]
+    if len(set(keys)) != len(keys) or len(selected) != 1:
+        raise Tb2V2ExportError("invalid_runtime_binding", {
+            "message": "explicit agent version requires a unique frozen Batch runtime binding",
+            "trial_id": str(trial.id),
+            "agent_version": version,
+        })
+    return frozenset({selected[0].harbor_source_revision})
+
+
+def validate_v2_eligibility(
+    events: list[TrajectoryEvent], trial: Trial, *, batch: Batch | None = None,
+) -> None:
     agent_name = _agent_name_for_trial(trial)
     if agent_name != "terminus-2":
         raise Tb2V2ExportError(
@@ -184,30 +228,33 @@ def validate_v2_eligibility(events: list[TrajectoryEvent], trial: Trial) -> None
                 "trial_id": str(trial.id),
             },
         )
-    provenance = provenance_events[0]
-    assert isinstance(provenance, Terminus2RuntimeProvenanceEvent)
-    if provenance.harbor_compat_sha != HARBOR_COMPAT_SHA:
+    expected_sources = _expected_harbor_sources(trial, batch)
+    sources = {event.harbor_compat_sha for event in provenance_events
+               if isinstance(event, Terminus2RuntimeProvenanceEvent)}
+    if len(sources) != 1 or not sources <= expected_sources:
         raise Tb2V2ExportError(
             "mixed_provenance",
             {
-                "message": "harbor_compat_sha does not match the pinned bridge revision",
+                "message": "trajectory must contain one compatible Harbor source revision",
                 "trial_id": str(trial.id),
-                "expected": HARBOR_COMPAT_SHA,
-                "actual": provenance.harbor_compat_sha,
+                "expected": sorted(expected_sources),
+                "actual": sorted(sources),
             },
         )
 
-    benchmark = provenance.benchmark_provenance
-    if isinstance(benchmark, dict):
-        serialized = json.dumps(benchmark, sort_keys=True)
-        if LEGACY_BENCHMARK_SHA in serialized:
-            raise Tb2V2ExportError(
-                "legacy_benchmark_provenance",
-                {
-                    "message": "trajectory contains legacy benchmark provenance",
-                    "trial_id": str(trial.id),
-                },
-            )
+    for provenance in provenance_events:
+        assert isinstance(provenance, Terminus2RuntimeProvenanceEvent)
+        benchmark = provenance.benchmark_provenance
+        if isinstance(benchmark, dict):
+            serialized = json.dumps(benchmark, sort_keys=True)
+            if LEGACY_BENCHMARK_SHA in serialized:
+                raise Tb2V2ExportError(
+                    "legacy_benchmark_provenance",
+                    {
+                        "message": "trajectory contains legacy benchmark provenance",
+                        "trial_id": str(trial.id),
+                    },
+                )
 
     turn_events = [event for event in events if event.kind == EventKind.TERMINUS2_TURN]
     if not turn_events:
@@ -1160,8 +1207,9 @@ def build_per_trial_v2_bundle(
     artifacts_bucket: str,
     messages_from_raw_log: Any,
     agent_version: str = "1.0",
+    batch: Batch | None = None,
 ) -> Tb2V2TrialBundle:
-    validate_v2_eligibility(events, trial)
+    validate_v2_eligibility(events, trial, batch=batch)
     committed_native = None
     if not any(isinstance(event, Terminus2ArtifactRefEvent)
                and event.artifact_kind == "terminus_2.pane" for event in events) and is_scored_agent_timeout(

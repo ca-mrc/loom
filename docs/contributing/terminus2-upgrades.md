@@ -86,8 +86,12 @@ detect. It reuses the image build and adds only short offline probes.
 
 Fixtures representing the current runtime should import `HARBOR_COMPAT_SHA`;
 historical runtime fixtures remain frozen. Run the delivery-export API tests too,
-so an outdated fixture does not mask the intended provenance or legacy-stream
-validation path after an upgrade.
+including downloads from the previously qualified runtime after the active pin
+changes. A current-version fixture alone cannot establish historical export
+compatibility. Keep exact frozen release provenance checks for selected versions;
+legacy default runs need an explicit supported export-format compatibility rule.
+Do not weaken unknown/mixed provenance, legacy-stream or artifact integrity
+rejection to make an upgrade pass.
 
 New runtime provenance events record the effective `max_turns`,
 `enable_summarize`, recording, continuation and multi-model options, excluding
