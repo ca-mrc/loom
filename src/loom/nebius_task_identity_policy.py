@@ -93,6 +93,16 @@ def _guest_private_expression() -> str:
     )
 
 
+def _bounded_guest_disk(volume_name: str) -> str:
+    """CEL check that one guest state volume exists and is a bounded emptyDir."""
+    return (
+        "object.spec.volumes.exists(v, v.name == "
+        + json.dumps(volume_name)
+        + " && has(v.emptyDir) && has(dyn(v.emptyDir).sizeLimit) && "
+        "(!has(v.emptyDir.medium) || v.emptyDir.medium == ''))"
+    )
+
+
 def identity_policy_documents(
     namespace: str, target_id: str, *, guest_target_id: str | None = None,
     emulated_auth_target_id: str | None = None,
@@ -246,10 +256,21 @@ def identity_policy_documents(
             # The built-in OpenAPI quantity reference is absent from CEL's
             # inferred EmptyDir type. Dynamic selection preserves the runtime
             # presence check without a static undefined-field warning.
-            "expression": "!variables.isGuest || (size(variables.private) == 2 && size(variables.fixtures) == 0 && "
-            "object.spec.volumes.filter(v, v.name in ['task-sandbox-guest-state','verifier-sandbox-guest-state']).all(v, "
-            "has(v.emptyDir) && has(dyn(v.emptyDir).sizeLimit) && (!has(v.emptyDir.medium) || v.emptyDir.medium == '')))",
-            "message": "Guest targets require two private guests with bounded disk state.",
+            # `.all` on a name filter is true when that volume is absent, so
+            # each required disk is checked with `.exists`.
+            "expression": (
+                "!variables.isGuest || (size(variables.fixtures) == 0 && ("
+                "(size(variables.private) == 2 && "
+                f"{_bounded_guest_disk('task-sandbox-guest-state')} && "
+                f"{_bounded_guest_disk('verifier-sandbox-guest-state')}) || "
+                "(size(variables.private) == 1 && variables.private.all(c, c.name == 'task-sandbox') && "
+                f"{_bounded_guest_disk('task-sandbox-guest-state')} && "
+                "!object.spec.volumes.exists(v, v.name == 'verifier-sandbox-guest-state'))))"
+            ),
+            "message": (
+                "Guest targets require one resident task guest or two private guests, "
+                "each with bounded disk state."
+            ),
         })
     binding = {
         "apiVersion": "admissionregistration.k8s.io/v1", "kind": "ValidatingAdmissionPolicyBinding",
