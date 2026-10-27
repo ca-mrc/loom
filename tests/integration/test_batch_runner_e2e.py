@@ -87,6 +87,8 @@ async def runner_setup(
         s.execute(insert(Benchmark).values(
             id="runner-benchmark",
             display_name="Runner Benchmark",
+            # Runner/snapshot tests start with an already admitted catalog.
+            execution_state="runnable",
             upstream_kind="fixture",
             upstream_locator="local",
             upstream_revision="",
