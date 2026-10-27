@@ -25,6 +25,11 @@ from loom_control_plane.execution_capacity import (
     create_execution_capacity_observation,
 )
 from loom_control_plane.task_image_capacity import reserve_native_task_image_capacity
+from loom_execution_actuator.renderer import ExecutionTargetRuntime
+from loom_execution_actuator.task_image_controller import (
+    NativeTaskImageController,
+    NativeTaskImageSettings,
+)
 from tests.execution_placement_fixtures import placement_fixture
 from tests.integration.test_execution_capacity_placement import _record
 from tests.integration.test_service_execution_leases import (
@@ -581,3 +586,58 @@ async def test_native_cold_admission_reuses_history_only_for_unused_added_labels
         async with sessions() as session:
             attempt = await session.get(TaskImageMaterializationAttempt, attempt_id)
             assert attempt.native_build["capacity_reserved_at"] == decision["capacity_reserved_at"]
+
+
+async def test_retired_build_binding_unblocks_unrelated_trial_only_after_confirmed_cleanup(native_setup):
+    sessions, owned = native_setup
+    now = datetime.now(UTC)
+    at = now + timedelta(seconds=1)
+    async with sessions() as session, session.begin():
+        pair = await _seed_ready_trial(session, now=now)
+        placement = _io_placement(pair, at)
+        await _record(session, pair[1].target_id, at, placement)
+        attempt_id, materialization_id = await _io_native(session, owned, pair, now)
+        original = await reserve_native_task_image_capacity(session, attempt_id=attempt_id, now=at)
+        attempt = await session.get(TaskImageMaterializationAttempt, attempt_id)
+        attempt.native_build = {**original, "job_uid": "old-job-uid", "configmap": {"metadata": {"name": "test-build"}}}
+        # Replacement capacity is ample, but cannot satisfy the frozen UID.
+        placement["nodes"][0].update(uid="replacement-uid", name="worker-2", provider_id="test://replacement")
+        await _record(session, pair[1].target_id, at + timedelta(seconds=1), placement)
+        row = await session.get(TaskImageMaterialization, materialization_id)
+        row.state = "failed"
+        row.lease_expires_at = now - timedelta(seconds=1)
+
+    class CleanupApi:
+        allow_delete = False
+
+        async def delete(self, namespace, name, uid, *, configmap):
+            assert (namespace, name, uid) == ("builds", "test-build", "old-job-uid")
+            assert configmap["metadata"]["name"] == "test-build"
+            return self.allow_delete
+
+    kube = CleanupApi()
+    controller = NativeTaskImageController(
+        sessions=sessions, kubernetes=kube,
+        target=ExecutionTargetRuntime(target_id=pair[1].target_id, namespace="executions"),
+        settings=NativeTaskImageSettings(
+            namespace="builds", service_image="registry.example/service@sha256:" + "b" * 64,
+            storage_endpoint="https://storage.example", storage_region="eu-north1", source_bucket="tasks",
+            registry_repository="registry.example/tasks", registry_auth_kind="docker-config",
+        ),
+    )
+    for confirmed in (False, True):
+        with pytest.raises(ExecutionProvisioningBlockedError, match="bound_node_unavailable"):
+            async with sessions() as session, session.begin():
+                await _reserve(session, trial_id=pair[0], target=pair[1], now=at + timedelta(seconds=2))
+        async with sessions() as session:
+            native = dict((await session.get(TaskImageMaterializationAttempt, attempt_id)).native_build)
+            assert not native.get("capacity_released_at")
+        kube.allow_delete = confirmed
+        await controller._cleanup(attempt_id, native)
+    async with sessions() as session, session.begin():
+        released = (await session.get(TaskImageMaterializationAttempt, attempt_id)).native_build
+        assert released["capacity_released_at"]
+        assert released["io_binding"] == original["io_binding"]
+        lease = await _reserve(session, trial_id=pair[0], target=pair[1], now=at + timedelta(seconds=3))
+        assert isinstance(lease, ServiceExecutionLease)
+        assert lease.attempt == 1

@@ -45,6 +45,12 @@ class FakeKube:
         self.allow_delete = True
         self.lose_create_response = False
         self.builder_logs = {}
+        self.bound_node_reason = None
+        self.bound_node_checks = 0
+
+    async def bound_node_unavailable(self, job):
+        self.bound_node_checks += 1
+        return self.bound_node_reason
 
     async def inventory(self, namespace):
         return [copy.deepcopy(job) for job in self.jobs.values() if not job.get("job_missing")]
@@ -600,3 +606,170 @@ async def test_completed_build_is_accepted_when_reconciled_after_deadline(contro
     assert row.failure_reason is None
     await controller.run_once()
     assert (await rows(sessions, image_id))[1][0].native_build["capacity_released_at"]
+
+
+@pytest.mark.parametrize("created", [False, True])
+@pytest.mark.parametrize("reason", ["missing", "identity_changed", "deleting", "autoscaler_draining"])
+async def test_lost_bound_node_recovers_before_deadline_and_holds_capacity_until_cleanup(controller_setup, created, reason):
+    controller, sessions, team_id, kube = controller_setup
+    image_id, _ = await seed_image(sessions, team_id)
+    attempt_id = await controller._claim()
+    async with sessions() as session, session.begin():
+        attempt = await session.get(TaskImageMaterializationAttempt, attempt_id)
+        native = copy.deepcopy(attempt.native_build)
+        native["io_binding"] = {"mode": "node", "node_name": "removed-node", "node_uid": "original-uid"}
+        native["job"]["metadata"].setdefault("annotations", {}).update({
+            "loom.openai.com/build-node-name": "removed-node",
+            "loom.openai.com/build-node-uid": "original-uid",
+        })
+        attempt.native_build = native
+    if created:
+        await controller._reconcile(attempt_id)
+        job = next(iter(kube.jobs.values()))
+        job["pods"] = [{"metadata": {"name": "pending-pod", "uid": "pending-pod-uid", "ownerReferences": [
+            {"kind": "Job", "uid": job["metadata"]["uid"]},
+        ]}, "status": {"phase": "Pending", "conditions": [{
+            "type": "PodScheduled", "status": "False", "reason": "Unschedulable",
+        }]}}]
+    kube.bound_node_reason = reason
+    kube.allow_delete = False
+    await controller._reconcile(attempt_id)
+    row, attempts = await rows(sessions, image_id)
+    assert row.state == "queued" and row.failure_reason == "build_bound_node_unavailable"
+    assert reason in row.failure_message
+    native = attempts[0].native_build
+    assert datetime.fromisoformat(native["deadline_at"]) > datetime.now(UTC)
+    assert native["failure_reason"] == "build_bound_node_unavailable"
+    assert native["capacity_reserved_at"] and not native.get("capacity_released_at")
+    assert native["io_binding"]["node_uid"] == "original-uid"
+    assert native["job"]["metadata"]["annotations"]["loom.openai.com/build-node-name"] == "removed-node"
+    async with sessions() as session, session.begin():
+        row = await session.get(TaskImageMaterialization, image_id)
+        row.next_attempt_at = datetime.now(UTC) - timedelta(seconds=1)
+    assert await controller._claim() is None  # Cleanup, not retry backoff, fences the successor.
+    kube.allow_delete = True
+    await controller._reconcile(attempt_id)
+    row, attempts = await rows(sessions, image_id)
+    assert attempts[0].native_build["capacity_released_at"] and not kube.jobs
+    assert kube.ensure_calls == int(created)
+    successor = await controller._claim()
+    assert successor and successor != attempt_id
+    _, attempts = await rows(sessions, image_id)
+    assert len(attempts) == 2 and attempts[1].lease_epoch > attempts[0].lease_epoch
+    assert not attempts[1].native_build.get("io_binding")  # The allocator chooses afresh; no inherited affinity.
+
+
+@pytest.mark.parametrize("progress", ["scheduled", "running", "succeeded"])
+async def test_bound_node_change_preserves_started_work_and_successful_receipt(controller_setup, progress):
+    controller, sessions, team_id, kube = controller_setup
+    image_id, _ = await seed_image(sessions, team_id)
+    await controller.run_once()
+    _, attempts = await rows(sessions, image_id)
+    async with sessions() as session, session.begin():
+        attempt = await session.get(TaskImageMaterializationAttempt, attempts[0].id)
+        attempt.native_build = {**attempt.native_build, "io_binding": {
+            "mode": "node", "node_name": "removed-node", "node_uid": "original-uid",
+        }}
+    kube.finish()
+    job = next(iter(kube.jobs.values()))
+    if progress != "succeeded":
+        job["status"] = {"active": 1}
+        pod = job["pods"][0]
+        pod["spec"] = {"nodeName": "removed-node"}
+        pod["status"] = {"phase": "Pending" if progress == "scheduled" else "Running"}
+    kube.bound_node_reason = "deleting"
+    before = kube.bound_node_checks
+    await controller._reconcile(attempts[0].id)
+    row, attempts = await rows(sessions, image_id)
+    assert row.state == ("ready" if progress == "succeeded" else "running")
+    assert row.failure_reason is None
+    assert not attempts[0].native_build.get("capacity_released_at")
+    assert kube.bound_node_checks == before
+    assert not kube.delete_calls
+
+
+async def test_transient_bound_node_read_keeps_observation_and_heartbeat(controller_setup, monkeypatch):
+    from kubernetes.client.exceptions import ApiException
+
+    from tests.unit.test_nebius_task_image_controller import fake_api
+
+    controller, sessions, team_id, kube = controller_setup
+    image_id, _ = await seed_image(sessions, team_id)
+    attempt_id = await controller._claim()
+    old_expiry = datetime.now(UTC) + timedelta(seconds=20)
+    async with sessions() as session, session.begin():
+        attempt = await session.get(TaskImageMaterializationAttempt, attempt_id)
+        native = copy.deepcopy(attempt.native_build)
+        native["io_binding"] = {"mode": "node", "node_name": "compute-1", "node_uid": "original-uid"}
+        native["job"]["metadata"].setdefault("annotations", {}).update({
+            "loom.openai.com/build-node-name": "compute-1",
+            "loom.openai.com/build-node-uid": "original-uid",
+        })
+        attempt.native_build = native
+    await controller._reconcile(attempt_id)
+    async with sessions() as session, session.begin():
+        row = await session.get(TaskImageMaterialization, image_id)
+        row.lease_expires_at = old_expiry
+    job = next(iter(kube.jobs.values()))
+    job["pods"] = [{"metadata": {"name": "pending-pod", "uid": "pending-uid", "ownerReferences": [
+        {"kind": "Job", "uid": job["metadata"]["uid"]},
+    ]}, "status": {"phase": "Pending"}}]
+    api, clients = fake_api()
+
+    def unavailable_read(*args, **kwargs):
+        raise ApiException(status=503)
+
+    monkeypatch.setattr(clients, "read_node", unavailable_read, raising=False)
+    monkeypatch.setattr(kube, "bound_node_unavailable", api.bound_node_unavailable)
+    await controller._reconcile(attempt_id)
+    row, attempts = await rows(sessions, image_id)
+    assert row.state == "running" and row.failure_reason is None
+    assert row.lease_expires_at > old_expiry
+    assert attempts[0].native_build["pod_uid"] == "pending-uid"
+    assert not attempts[0].native_build.get("capacity_released_at")
+    assert not kube.delete_calls
+
+
+@pytest.mark.parametrize("change", ["scheduled", "succeeded", "foreign_job", "multiple_pods", "replaced_pod"])
+async def test_node_loss_read_rechecks_build_progress_and_identity(controller_setup, monkeypatch, change):
+    controller, sessions, team_id, kube = controller_setup
+    image_id, _ = await seed_image(sessions, team_id)
+    await controller.run_once()
+    _, attempts = await rows(sessions, image_id)
+    attempt_id = attempts[0].id
+    async with sessions() as session, session.begin():
+        attempt = await session.get(TaskImageMaterializationAttempt, attempt_id)
+        native = {**attempt.native_build, "io_binding": {"mode": "node"}}
+        if change == "replaced_pod":
+            native["pod_uid"] = "old-pod"
+        attempt.native_build = native
+
+    async def changed_during_node_read(job):
+        current = next(iter(kube.jobs.values()))
+        if change == "succeeded":
+            kube.finish()
+        elif change == "foreign_job":
+            current["metadata"]["uid"] = "foreign-job"
+        else:
+            pod = {"metadata": {"name": "pod", "uid": "pod-uid", "ownerReferences": [
+                {"kind": "Job", "uid": current["metadata"]["uid"]},
+            ]}, "status": {"phase": "Pending"}}
+            if change == "scheduled":
+                pod["spec"] = {"nodeName": "original-node"}
+            current["pods"] = [pod, copy.deepcopy(pod)] if change == "multiple_pods" else [pod]
+        return "deleting"
+
+    monkeypatch.setattr(kube, "bound_node_unavailable", changed_during_node_read)
+    if change == "foreign_job":
+        with pytest.raises(ValueError, match="observed build identity"):
+            await controller._reconcile(attempt_id)
+    else:
+        await controller._reconcile(attempt_id)
+    row, attempts = await rows(sessions, image_id)
+    if change in {"multiple_pods", "replaced_pod"}:
+        assert row.state == "failed" and row.failure_reason == "build_pod_identity_changed"
+    else:
+        assert row.state == ("ready" if change == "succeeded" else "running")
+        assert row.failure_reason is None
+    assert not kube.delete_calls
+    assert not attempts[0].native_build.get("capacity_released_at")

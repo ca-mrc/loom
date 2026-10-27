@@ -56,6 +56,23 @@ another start can be admitted there. This bounds unobserved starts without
 setting an active-build count or a build/execution ratio. Existing trial demand,
 older queue heads, cleanup charges and cross-pool provider quotas still apply.
 
+Before a bound build has scheduled, reconciliation checks the frozen Node name
+and UID. A confirmed missing or replaced Node, deletion timestamp, or autoscaler
+`ToBeDeletedByClusterAutoscaler` taint fails that attempt early with the retryable
+`build_bound_node_unavailable` platform reason. This also covers a reservation
+whose Job has not yet been created. Ordinary NotReady/cordoned nodes and failed
+API reads do not establish node loss. Already scheduled work and terminal build
+results keep their existing lifecycle and publication validation. After a node-loss
+read, a fresh Job/Pod observation rechecks identity and progress before failure,
+so scheduling or publication during that read is preserved.
+
+Recovery uses the existing fenced deletion path: the old affinity stays immutable
+and capacity remains charged until Job, owned Pods and ConfigMap deletion is
+confirmed. Only then can a successor attempt obtain a fresh placement. It does
+not ignore the old reservation, extend the original deadline or bypass retry
+limits. This prevents an unschedulable frozen binding from blocking unrelated
+admission until the build deadline while preserving cleanup accounting.
+
 At scale zero, or when measured nodes cannot accept the Pod, one unobserved
 bootstrap per physical capacity family can request ordinary autoscaling. Its
 affinity excludes all already observed nodes; excluded NotReady nodes cannot
