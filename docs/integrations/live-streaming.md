@@ -153,6 +153,11 @@ bounded by the declared artifact budget, a 16 MiB/10,000-event preview ceiling,
 256 KiB per event and a 4 MiB pending queue. Reaching a preview bound or persistent
 delivery failure records a fixed diagnostic; the canonical output remains intact.
 
+The Gateway owns preview ingestion. Database bootstrap and retained shared-schema
+upgrades grant its restricted role `SELECT` and `INSERT` on
+`service_execution_live_events`; it cannot update or delete these rows. The
+execution actuator receives no access to the preview table.
+
 Live progress and the canonical trajectory have different ordering. Final
 materialization still owns canonical lifecycle events and Gateway accounting
 reconciliation. Native preview events therefore use separate storage and never

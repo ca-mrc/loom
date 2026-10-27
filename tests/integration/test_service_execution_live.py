@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -13,9 +14,12 @@ import httpx
 import pytest
 from botocore.exceptions import ClientError
 from fastapi import FastAPI
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from loom import nebius_platform_bootstrap as bootstrap
 from loom.db.schema import (
     ServiceExecutionLiveEvent,
     ServiceExecutionTarget,
@@ -27,6 +31,7 @@ from loom.service_execution_live import read_live_preview
 from loom_control_plane.service_execution_output import VerifiedExecutionPod
 from loom_llm_gateway.routes import service_execution
 from loom_service.routes import trajectory
+from tests.integration.test_nebius_platform_bootstrap import platform_database  # noqa: F401
 from tests.integration.test_service_execution_leases import (
     _cleanup_service_execution_test_rows,  # noqa: F401
     _reserve,
@@ -39,8 +44,8 @@ class _MissingObjectStore:
         raise ClientError({'Error': {'Code': 'NoSuchKey'}}, 'GetObject')
 
 
-@pytest.fixture
-async def live_setup(postgres_url: str):
+@asynccontextmanager
+async def _live_app(postgres_url: str):
     now = datetime.now(UTC)
     engine = create_async_engine(postgres_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
@@ -89,6 +94,66 @@ async def live_setup(postgres_url: str):
                 await session.delete(row)
             await session.commit()
         await engine.dispose()
+
+
+@pytest.fixture
+async def live_setup(postgres_url: str):
+    async with _live_app(postgres_url) as setup:
+        yield setup
+
+
+async def test_native_preview_post_uses_restricted_gateway_role_over_tls(platform_database, monkeypatch) -> None:  # noqa: F811 -- imported shared fixture
+    password = "native-preview-role-password-" + "a" * 32
+    monkeypatch.setattr(bootstrap, "database_url", lambda _value, _namespace: platform_database)
+    monkeypatch.setenv("LOOM_DB_URL", platform_database)
+    monkeypatch.setenv("LOOM_COLLECTOR_TOKEN", "loom_ecc_" + "f" * 64)
+    monkeypatch.setenv("LOOM_BATCH_RUNNER_TOKEN", "loom_br_" + "b" * 64)
+    for role in ("SERVICE", "CONTROL_PLANE", "GATEWAY", "ACTUATOR"):
+        monkeypatch.setenv("LOOM_DB_" + role + "_PASSWORD", password)
+    bootstrap.bootstrap_database({"namespace": "loom-nebius-platform"})
+    gateway_engine = create_async_engine(make_url(platform_database).set(
+        drivername="postgresql+psycopg", username="loom_gateway", password=password))
+    gateway_sessions = async_sessionmaker(gateway_engine, expire_on_commit=False)
+    try:
+        owner_url = make_url(platform_database).set(drivername="postgresql+psycopg").render_as_string(hide_password=False)
+        async with _live_app(owner_url) as setup:
+            setup.app.state.session_factory = gateway_sessions
+            async with gateway_sessions() as session:
+                assert (await session.execute(text("SELECT current_user, ssl FROM pg_stat_ssl "
+                    "WHERE pid=pg_backend_pid()"))).one() == ("loom_gateway", True)
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=setup.app, raise_app_exceptions=False),
+                                         base_url="https://loom.example") as client:
+                peer = {"X-Loom-Execution-Lease-Id": str(setup.lease_id),
+                        "X-Loom-Execution-Generation": "1", "X-Loom-Execution-Role": "attempt"}
+                binding = await client.get("/internal/service-execution/llm-calls",
+                    headers={**setup.write_headers, **peer})
+                assert binding.status_code == 200 and binding.json()["step_id"] == "agent"
+                for expected in ({"inserted": 1, "next_after_seq": 0}, {"inserted": 0, "next_after_seq": 0}):
+                    response = await client.post("/internal/service-execution/trajectory-events",
+                        json=setup.payload, headers=setup.write_headers)
+                    assert response.status_code == 200, response.text
+                    assert response.json() == expected
+            async with setup.sessions() as session:
+                assert await session.scalar(select(func.count()).select_from(ServiceExecutionLiveEvent).where(
+                    ServiceExecutionLiveEvent.trial_id == setup.trial_id)) == 1
+                assert await session.scalar(select(func.count()).select_from(TrialEvent).where(
+                    TrialEvent.trial_id == setup.trial_id)) == 0
+                assert (await session.get(Trial, setup.trial_id)).state == "running"
+            async with gateway_sessions() as session:
+                for privilege in ("SELECT", "INSERT"):
+                    assert await session.scalar(text("SELECT has_table_privilege(current_user,"
+                        "'service_execution_live_events',:privilege)"), {"privilege": privilege})
+                assert not await session.scalar(text("SELECT has_table_privilege(current_user,"
+                    "'service_execution_live_events','UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')"))
+                assert not await session.scalar(text("SELECT has_table_privilege('loom_actuator',"
+                    "'service_execution_live_events','SELECT,INSERT,UPDATE,DELETE')"))
+                for statement in ("UPDATE service_execution_live_events SET seq=seq",
+                                  "DELETE FROM service_execution_live_events"):
+                    with pytest.raises(DBAPIError, match="permission denied"):
+                        await session.execute(text(statement))
+                    await session.rollback()
+    finally:
+        await gateway_engine.dispose()
 
 
 async def _post(setup, payload=None, *, headers=None):
