@@ -483,6 +483,7 @@ def test_active_work_is_not_a_failure_or_supplemental_target(state: str) -> None
     ("image_preparation_base_unsupported", "platform", False),
     ("image_preparation_source_unavailable", "platform", True),
     ("image_preparation_input_invalid", "unknown", False),
+    ("build_bound_node_unavailable", "platform", True),
 ])
 def test_typed_preparation_failure_is_unscored_without_invented_task_fault(reason, attribution, retryable):
     trial = _trial(task_id="synthetic/preparation", state="failed", failure_reason="task_image_build_failed",

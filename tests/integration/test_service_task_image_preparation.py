@@ -1,6 +1,6 @@
 """Ordinary trial readers can diagnose builds without an execution bundle."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import httpx
@@ -106,3 +106,56 @@ async def test_pre_execution_diagnostics_and_bundle_unavailable(trials_setup, ca
                     TaskImageMaterialization.id == materialization_id
                 )
             )
+
+
+async def test_node_loss_diagnostics_preserve_recovery_lifecycle_and_authorization(trials_setup):  # noqa: F811
+    app, token, _team_id, trial_ids = trials_setup
+    mid, aid, trial_id = uuid4(), uuid4(), uuid4()
+    retry_at = datetime.now(UTC) + timedelta(seconds=30)
+    async with app.state.session_factory() as session, session.begin():
+        seed = await session.get(Trial, trial_ids[0])
+        trial = Trial(id=trial_id, task_id=seed.task_id, team_id=seed.team_id,
+                      submitted_by_user_id=seed.submitted_by_user_id, state="queued",
+                      config=seed.config, requires_caps={"backend": "nebius"})
+        session.add(trial)
+        row = TaskImageMaterialization(
+            id=mid, materialization_key=uuid4().hex * 2, task_id=trial.task_id,
+            task_checksum="a" * 64, cpu_arch="x86_64", task_config={}, state="queued",
+            attempt_count=1, lease_epoch=2, failure_reason="build_bound_node_unavailable",
+            failure_message="secret=do-not-return private-node", next_attempt_at=retry_at,
+        )
+        session.add(row)
+        await session.flush()
+        session.add(TrialTaskImageMaterialization(trial_id=trial.id, materialization_id=mid))
+        session.add(TaskImageMaterializationAttempt(
+            id=aid, materialization_id=mid, attempt_number=1, lease_epoch=2,
+            builder_id="nebius:primary", claimed_at=datetime.now(UTC), native_build={
+                "state": "cleaning", "builder_log": "private-build-log", "io_binding": {"node_name": "private-node"},
+            },
+        ))
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://svc") as client:
+            headers = {"Authorization": f"Bearer {token}"}
+            assert (await client.get(f"/api/v1/trials/{trial_id}")).status_code in {401, 403}
+            for released in (False, True):
+                if released:
+                    async with app.state.session_factory() as session, session.begin():
+                        attempt = await session.get(TaskImageMaterializationAttempt, aid)
+                        attempt.native_build = {**attempt.native_build, "state": "released",
+                            "capacity_released_at": datetime.now(UTC).isoformat()}
+                response = await client.get(f"/api/v1/trials/{trial_id}", headers=headers)
+                assert response.status_code == 200, response.text
+                preparation = response.json()["task_environment_preparation"][0]
+                assert preparation["failure_reason"] == "build_bound_node_unavailable"
+                assert preparation["attribution"] == "platform" and preparation["retryable"] is True
+                assert preparation["state"] == "queued" and preparation["resources_released"] is released
+                assert datetime.fromisoformat(preparation["next_attempt_at"]) == retry_at
+                assert not any(value in response.text for value in ("do-not-return", "private-node", "private-build-log"))
+            unrelated = await client.get(f"/api/v1/trials/{trial_ids[1]}", headers=headers)
+            assert unrelated.json()["task_environment_preparation"] == []
+    finally:
+        async with app.state.session_factory() as session, session.begin():
+            await session.execute(delete(TrialTaskImageMaterialization).where(TrialTaskImageMaterialization.materialization_id == mid))
+            await session.execute(delete(TaskImageMaterializationAttempt).where(TaskImageMaterializationAttempt.materialization_id == mid))
+            await session.execute(delete(TaskImageMaterialization).where(TaskImageMaterialization.id == mid))
+            await session.execute(delete(Trial).where(Trial.id == trial_id))

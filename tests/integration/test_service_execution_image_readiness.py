@@ -225,7 +225,7 @@ async def test_scheduler_waits_for_x86_image_then_reserves_frozen_revision(
         await engine.dispose()
 
 
-@pytest.mark.parametrize("failure_reason", ["dockerfile_run_failed", "image_preparation_base_unsupported"])
+@pytest.mark.parametrize("failure_reason", ["dockerfile_run_failed", "image_preparation_base_unsupported", "build_bound_node_unavailable"])
 async def test_failed_x86_preparation_finishes_trial_without_an_attempt(postgres_url: str, failure_reason: str) -> None:
     engine = create_async_engine(postgres_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
@@ -251,13 +251,15 @@ async def test_failed_x86_preparation_finishes_trial_without_an_attempt(postgres
             trial = await session.get(Trial, trial_id)
             assert trial is not None and trial.state == "failed"
             assert trial.failure_reason == "task_image_build_failed"
-            if failure_reason == "image_preparation_base_unsupported":
+            if failure_reason in {"image_preparation_base_unsupported", "build_bound_node_unavailable"}:
                 from loom_service.failure_taxonomy import classify_trial_outcome
                 assert trial.result["task_image_preparation_failure"]["reason"] == failure_reason
                 classification = classify_trial_outcome(trial)
                 assert classification["attribution"] == "platform"
                 assert classification["requires_task_change"] is False
                 assert classification["score_outcome"] == "unscored"
+                if failure_reason == "build_bound_node_unavailable":
+                    assert classification["rerun_recommendation"] == "operator_approval"
             assert trial.finished_at is not None
     finally:
         async with sessions() as session:
