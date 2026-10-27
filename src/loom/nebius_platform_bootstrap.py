@@ -87,6 +87,7 @@ ACTUATOR_POLICY_UPDATES = {
 }
 GATEWAY_TABLES = (
     *COMMON_EXECUTION_TABLES,
+    "service_execution_live_events",
     "tokens",
     "users",
     "secrets",
@@ -279,6 +280,7 @@ def _bootstrap_database(
                         "task_image_publication_evidence",
                         "trial_task_image_materializations",
                         "data_lifecycle_authorities",
+                        "service_execution_live_events",
                         "data_lifecycle_objects",
                         "gateway_dispatch_receipts",
                         "provider_connections",
@@ -303,6 +305,9 @@ def _bootstrap_database(
                         )
                     )
                     if role == "loom_gateway":
+                        # The Pod-bound preview endpoint appends and replays rows;
+                        # UPDATE/DELETE remain owned by lifecycle management.
+                        cursor.execute("GRANT INSERT ON service_execution_live_events TO loom_gateway")
                         # Dispatch admission precedes upstream I/O. The Gateway
                         # records observations but cannot delete audit receipts.
                         cursor.execute(
