@@ -11,27 +11,14 @@ from typing import Any
 
 import tomli_w
 from loom_benchmarks.base import BenchmarkInstance, ConvertedTask, UpstreamSource
-from pydantic import BaseModel, ConfigDict, Field
 
 from loom.harbor_bundle import prepare_harbor_bundle
 from loom.harbor_task_import import project_harbor_task
-from loom.models.harbor import UpstreamOrigin
+from loom.models.harbor import HarborBenchmarkSpec as HarborBenchmarkSpec
 from loom.models.task import TaskConfig
 from loom.models.task_checksum import task_checksum
 from loom.task_bundle_compat import CompatibilitySeverity, collect_task_dir_compatibility_issues
 from loom.task_runtime_compatibility import task_runtime_rejections
-
-
-class HarborBenchmarkSpec(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-    id: str = Field(pattern=r"^[a-z0-9][a-z0-9@._-]*$")
-    display_name: str = Field(min_length=1)
-    series: str
-    license_spdx: str
-    license_url: str
-    source_subdir: str = "tasks"
-    expected_task_count: int = Field(gt=0)
-    origin: UpstreamOrigin
 
 
 class HarborNativeAdapter:
@@ -40,8 +27,6 @@ class HarborNativeAdapter:
     license_execution_policy = "allowlist"
 
     def __init__(self, spec: HarborBenchmarkSpec):
-        if spec.origin.subset and "subset" not in spec.id:
-            raise ValueError("native Harbor subsets require an explicitly named subset profile id")
         self._materialization: dict[str, Any] = {}
         self.spec = spec
         self.name = spec.id

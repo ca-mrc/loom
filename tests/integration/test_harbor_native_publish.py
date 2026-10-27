@@ -1,13 +1,28 @@
 """Real DB/versioned TLS storage publication and concurrent origin binding."""
 
 import asyncio
+import hashlib
+import json
+import os
+import shutil
+import sys
+from copy import deepcopy
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import text
+from fastapi import HTTPException
+from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from loom.db.schema import Benchmark, Task
+from loom.benchmark_profiles import resolve_benchmark_selectors
+from loom.db.schema import (
+    Benchmark,
+    Task,
+    TaskBundleSourceIncarnation,
+    TaskBundleSourceReference,
+)
+from loom.task_bundle_source_journal import retire_task_bundle_source
 from loom_cli import benchmark_prepare, benchmark_publish
 from loom_cli.benchmark_types import AdapterBenchmarkEntry
 from loom_cli.local_benchmark_publish import _upsert_benchmark
@@ -16,6 +31,161 @@ from tests.support.minio_tls import minio_tls as minio_tls
 from tests.unit.test_harbor_native_import import native_tree, spec
 
 pytestmark = [pytest.mark.docker, pytest.mark.timeout(120)]
+
+
+async def _native_cli(descriptor, postgres_url):
+    process = await asyncio.create_subprocess_exec(
+        sys.executable, "-m", "loom_cli", "datasets", "activate-native",
+        "--harbor-source", str(descriptor),
+        env={**os.environ, "LOOM_DB_URL": postgres_url},
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await process.communicate()
+    return process.returncode, stdout.decode(), stderr.decode()
+
+
+@pytest.fixture
+async def native_publication(postgres_url, tmp_path, monkeypatch, minio_tls):
+    import tomli_w
+
+    profile = "admission-subset@" + uuid4().hex
+    source = tmp_path / "source"
+    first = native_tree(source, raw={
+        "task": {"name": "upstream/sample"},
+        "environment": {"cpus": 1, "memory": "1G", "storage": "1G"},
+    })
+    second = first.parent / "second"
+    shutil.copytree(first, second)
+    (second / "task.toml").write_text(tomli_w.dumps({
+        "task": {"name": "upstream/second"},
+        "environment": {"cpus": 1, "memory": "1G", "storage": "1G"},
+    }))
+    monkeypatch.setattr(benchmark_prepare, "_prepare_adapter_source", lambda **kwargs: source)
+    descriptor = tmp_path / "source.json"
+    document = spec(profile).model_dump(mode="json")
+    document["expected_task_count"] = 2
+    document["display_name"] = "Native fixture (unqualified)"
+    document["origin"]["subset"] = ["upstream/sample", "upstream/second"]
+    descriptor.write_text(json.dumps(document))
+    bucket = "native-admission-" + uuid4().hex
+    admin = minio_tls[3]
+    admin.create_bucket(Bucket=bucket)
+    admin.put_bucket_versioning(Bucket=bucket, VersioningConfiguration={"Status": "Enabled"})
+    options = dict(
+        harbor_source=descriptor, db_url=postgres_url, object_store=_store(minio_tls), bucket=bucket,
+    )
+    await benchmark_publish.publish_benchmark(**options)
+    engine = create_async_engine(postgres_url)
+    try:
+        yield profile, descriptor, async_sessionmaker(engine, expire_on_commit=False), options, first
+    finally:
+        await engine.dispose()
+
+
+async def test_native_activation_cli_and_exact_reimport(native_publication, postgres_url):
+    profile, descriptor, sessions, options, source_task = native_publication
+    async with sessions() as session:
+        with pytest.raises(HTTPException) as failure:
+            await resolve_benchmark_selectors(session, [profile], require_runnable=True)
+        assert failure.value.detail["reason"] == "benchmark_not_runnable"
+        original_provenance = deepcopy((await session.get(Benchmark, profile)).profile_provenance)
+    code, stdout, stderr = await _native_cli(descriptor, postgres_url)
+    assert code == 0, stderr
+    assert "2 tasks admitted; runtime qualification unchanged" in stdout
+    async with sessions() as session:
+        resolved = await resolve_benchmark_selectors(session, [profile], require_runnable=True)
+        assert resolved.physical_ids == (profile,)
+        benchmark = await session.get(Benchmark, profile)
+        assert benchmark.display_name.endswith("(unqualified)")
+        assert benchmark.profile_provenance == original_provenance
+        assert benchmark.profile_provenance["runtime_verified"] is False
+    assert (await _native_cli(descriptor, postgres_url))[0] == 0
+    unchanged = await benchmark_publish.publish_benchmark(**options)
+    assert unchanged.unchanged == 2 and unchanged.uploaded_objects == 0
+    async with sessions() as session:
+        assert (await session.get(Benchmark, profile)).execution_state == "runnable"
+    (source_task / "instruction.md").write_text("Changed native instruction\n")
+    changed = await benchmark_publish.publish_benchmark(**options)
+    assert changed.updated == 1
+    async with sessions() as session:
+        assert (await session.get(Benchmark, profile)).execution_state == "pending"
+
+
+@pytest.mark.parametrize("damage,diagnostic", [
+    ("missing", "census"), ("origin", "identity"), ("config", "admission blocked"),
+    ("source", "frozen snapshot"), ("historical", "cannot be activated"),
+    ("subset", "exact source subset"),
+])
+async def test_native_activation_cli_rejects_invalid_catalog(
+    native_publication, postgres_url, damage, diagnostic,
+):
+    profile, descriptor, sessions, options, _ = native_publication
+    async with sessions.begin() as session:
+        benchmark = await session.get(Benchmark, profile)
+        task = await session.get(Task, profile + "/upstream/sample")
+        if damage == "missing":
+            await session.delete(task)
+        elif damage == "historical":
+            benchmark.execution_state = "historical"
+        else:
+            config = deepcopy(task.config)
+            if damage == "origin":
+                config["upstream_origin"]["revision"] = "b" * 40
+            elif damage == "config":
+                config["environment"]["gpu_types"] = ["H100"]
+                config["environment"]["gpus"] = 1
+            elif damage == "source":
+                config["task"]["name"] = "Changed registered config"
+            else:
+                document = json.loads(descriptor.read_text())
+                document["origin"]["subset"] = ["upstream/other", "upstream/second"]
+                descriptor.write_text(json.dumps(document))
+                provenance = deepcopy(benchmark.profile_provenance)
+                provenance["upstream_origin"] = document["origin"]
+                benchmark.profile_provenance = provenance
+                for row in await session.scalars(select(Task).where(Task.benchmark_id == profile)):
+                    row_config = deepcopy(row.config)
+                    row_config["upstream_origin"] = document["origin"]
+                    row.config = row_config
+                    row_provenance = deepcopy(row.source_provenance)
+                    row_provenance["upstream_origin"] = document["origin"]
+                    row.source_provenance = row_provenance
+                config["upstream_origin"] = document["origin"]
+            task.config = config
+    code, _, stderr = await _native_cli(descriptor, postgres_url)
+    assert code == 1 and diagnostic in stderr, stderr
+    async with sessions() as session:
+        assert (await session.get(Benchmark, profile)).execution_state == (
+            "historical" if damage == "historical" else "pending"
+        )
+    if damage == "historical":
+        with pytest.raises(ValueError, match="historical"):
+            await benchmark_publish.publish_benchmark(**options)
+
+
+async def test_native_activation_rolls_back_partial_source_admission(native_publication, postgres_url):
+    profile, descriptor, sessions, _, _ = native_publication
+    async with sessions.begin() as session:
+        tasks = list(await session.scalars(select(Task).where(Task.benchmark_id == profile)))
+        source_ids = sorted(hashlib.sha256(task.source.encode()).hexdigest() for task in tasks)
+        await session.execute(delete(TaskBundleSourceReference).where(
+            TaskBundleSourceReference.source_id.in_(source_ids),
+        ))
+        incarnation = await session.scalar(select(TaskBundleSourceIncarnation).where(
+            TaskBundleSourceIncarnation.source_id == source_ids[-1],
+            TaskBundleSourceIncarnation.state == "available",
+        ))
+        assert await retire_task_bundle_source(
+            session, incarnation_id=incarnation.id, now=datetime.now(UTC),
+        )
+    code, _, stderr = await _native_cli(descriptor, postgres_url)
+    assert code == 1 and "available incarnation" in stderr
+    async with sessions() as session:
+        assert (await session.get(Benchmark, profile)).execution_state == "pending"
+        references = list(await session.scalars(select(TaskBundleSourceReference).where(
+            TaskBundleSourceReference.source_id.in_(source_ids),
+        )))
+        assert references == []
 
 
 async def test_native_publisher_persists_source_and_reuses_exact_version(

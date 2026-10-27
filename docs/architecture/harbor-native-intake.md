@@ -83,6 +83,23 @@ existing native origin either. Source-upload failures/conflicts retain the
 existing journal's recovery/retirement records; they do not activate a partial
 catalog.
 
+After publication, an operator can admit the exact native profile with
+`loom datasets activate-native --harbor-source DESCRIPTOR.json --db-url DATABASE_URL`
+(or the existing `LOOM_DB_URL` / `LOOM_SVC_DB_URL` environment setting). This checks
+the pinned origin, complete source count, exact subset identities when present,
+all canonical task configurations and shared hosted-runtime compatibility, and
+the existing journal's available immutable sources in one transaction. A failed
+check leaves the profile pending. The operation reuses registered source versions;
+it does not reupload bundles or add a second object integrity chain.
+
+Admission changes only `execution_state` to `runnable`, allowing ordinary member
+selectors and execution preflight. It preserves unqualified labels and runtime
+verification metadata: successful Oracle/model runs and result/export readback
+remain separate acceptance. Identical native reimports retain prior admission;
+changed task content returns to pending. Historical native profiles cannot be
+reactivated or republished. TB2.1 continues to require its existing audited
+`datasets activate` flow.
+
 ## Field mapping and execution admission
 
 | Harbor declaration | Persistent Loom representation |
