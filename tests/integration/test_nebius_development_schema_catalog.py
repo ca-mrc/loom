@@ -21,6 +21,7 @@ from loom.auth import AuthContext
 from loom.db.nebius_application_build_schema import NebiusApplicationBuildAttempt
 from loom.db.nebius_pool_schema import NebiusPoolBinding, NebiusPoolRequest
 from loom.db.schema import Team, User
+from loom.db.schema_startup import service_schema_head
 from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1
 from loom_service.pool_management.capacity import digest
 from loom_service.pool_management.installation import PoolInstallation, register_installation
@@ -45,10 +46,11 @@ def catalog_request(build_inputs):
         runtime_image_ref=execution.runtime_image_ref, runtime_binary_sha256=execution.runtime_binary_sha256,
         image_admission=signed_image_admission_bundle((task.settings.service_image, execution.runtime_image_ref)))
     target = source.model_copy(update={'candidate_sha': '2' * 40})
+    revision = service_schema_head()
     arguments = dict(before=before, participant_id=before.participants[0].participant_id,
-        source_schema_revision='0175', target_schema_revision='0179', source_profile=source, runtime_profile=target)
+        source_schema_revision='0175', target_schema_revision=revision, source_profile=source, runtime_profile=target)
     after = _pool_successor(**arguments, operation_id=uuid4())
-    return ClosedDevelopmentCatalogRefresh(**arguments, after=after, manager_schema_revision='0179')
+    return ClosedDevelopmentCatalogRefresh(**arguments, after=after, manager_schema_revision=revision)
 
 
 @pytest.fixture
@@ -145,7 +147,7 @@ def test_closed_schema_catalog_rejects_valid_but_unrelated_contract_changes(cata
     if damage == 'neighbor':
         after['profiles']['execution'][1]['runtime_binary_sha256'] = 'sha256:' + 'd' * 64
     elif damage == 'recipe':
-        after['profiles']['application_images'][0]['recipe']['schema_revision'] = '0180'
+        after['profiles']['application_images'][0]['recipe']['schema_revision'] = '0176'
     elif damage == 'image':
         after['profiles']['task_images'][0]['settings']['service_image'] = 'registry.example/service@sha256:' + 'f' * 64
     elif damage == 'credential':
