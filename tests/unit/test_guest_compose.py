@@ -157,3 +157,229 @@ def test_oci_transport_keeps_blobs_untagged_and_bounds_conversion_scratch(tmp_pa
     with pytest.raises(DriverError, match="scratch budget"):
         _docker_transport_archive(source, target, manifest)
     assert target.stat().st_size <= 12000
+
+
+@pytest.fixture
+def shell_control(tmp_path):
+    """Execute the trusted control script without a Docker daemon or a VM."""
+    import asyncio
+    import shlex
+
+    from loom.driver.fake import FakeDriver
+    from loom.driver.guest_compose import GuestComposeRuntime
+    from loom.models.compose import ComposeServiceSpec, NativeComposeSpec
+    from loom.models.exec import ExecResult
+
+    helper = tmp_path / "busybox"
+    deny = tmp_path / "deny-touch"
+    race = tmp_path / "remove-before-cat"
+    helper.write_text(
+        "#!/bin/sh\ncommand=$1; shift\n"
+        f"if test \"$command\" = touch && test -e {deny}; then exit 9; fi\n"
+        f"if test \"$command\" = cat && test -e {race}; then rm -f -- \"$1\"; fi\n"
+        'exec "$command" "$@"\n'
+    )
+    helper.chmod(0o755)
+
+    class ShellControl(FakeDriver):
+        calls = 0
+        observed = asyncio.Event()
+        started = asyncio.Event()
+
+        async def exec(self, command, **kwargs):
+            self.calls += 1
+            argv = shlex.split(command)
+            process = await asyncio.create_subprocess_exec(
+                *argv[argv.index("f" * 64) + 1:],
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            self.started.set()
+            stdout, stderr = await process.communicate()
+            self.observed.set()
+            return ExecResult(return_code=process.returncode, stdout=stdout, stderr=stderr, duration_sec=0)
+
+    guest = ShellControl()
+    runtime = GuestComposeRuntime(guest=guest, topology=NativeComposeSpec(
+        source="compose.yaml", services=(ComposeServiceSpec(name="main", image="fixture"),)),
+        image_archives={})
+    runtime.containers["main"] = "f" * 64
+    driver = runtime.driver("main")
+    driver._SUPERVISOR = str(helper)
+    return driver, guest, tmp_path / "marker", deny, race
+
+
+async def test_activation_observes_identity_before_releasing_gate(shell_control):
+    driver, guest, marker, _, _ = shell_control
+    marker.write_text("123")
+    await driver._activate(str(marker))
+    assert marker.with_suffix(".go").is_file()
+    assert guest.calls == 2
+
+
+async def test_readiness_wait_does_not_restart_docker_for_a_late_marker(shell_control):
+    import asyncio
+
+    driver, guest, marker, _, _ = shell_control
+    activation = asyncio.create_task(driver._activate(str(marker)))
+    await guest.started.wait()
+    await asyncio.sleep(.1)
+    marker.write_text("123")
+    await activation
+    assert marker.with_suffix(".go").is_file()
+    assert guest.calls == 2
+
+
+@pytest.mark.parametrize("pid", ["", "1", "0", "2147483648", "123; touch injected"])
+async def test_activation_invalid_identity_never_releases_gate(shell_control, pid):
+    from loom.errors import DriverError
+
+    driver, _, marker, _, _ = shell_control
+    marker.write_text(pid)
+    with pytest.raises(DriverError, match="identity is invalid"):
+        await driver._activate(str(marker))
+    assert not marker.with_suffix(".go").exists()
+
+
+async def test_activation_failed_gate_is_not_retried_or_reported_ready(shell_control):
+    from loom.errors import DriverError
+
+    driver, guest, marker, deny, _ = shell_control
+    marker.write_text("123")
+    deny.touch()
+    with pytest.raises(DriverError, match="activation failed"):
+        await driver._activate(str(marker))
+    assert not marker.with_suffix(".go").exists()
+    assert guest.calls == 2
+
+
+async def test_cancelled_activation_does_not_release_a_missing_marker(shell_control):
+    import asyncio
+
+    driver, guest, marker, _, _ = shell_control
+    activation = asyncio.create_task(driver._activate(str(marker)))
+    await guest.observed.wait()
+    activation.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await activation
+    assert not marker.with_suffix(".go").exists()
+
+
+async def test_cancelled_read_probe_cannot_activate_a_late_marker_after_cleanup(shell_control, monkeypatch):
+    import asyncio
+
+    driver, guest, marker, _, _ = shell_control
+    original_exec = guest.exec
+    probe_started, release_probe = asyncio.Event(), asyncio.Event()
+    background = []
+
+    async def delayed_exec(command, **kwargs):
+        if " cat " in command and "kill -TERM" not in command:
+            async def continue_on_server():
+                await release_probe.wait()
+                return await original_exec(command, **kwargs)
+
+            # Killing a Docker client does not kill an accepted inner exec.
+            # Keep running the real control shell after its RPC is cancelled.
+            server = asyncio.create_task(continue_on_server())
+            background.append(server)
+            probe_started.set()
+            return await asyncio.shield(server)
+        return await original_exec(command, **kwargs)
+
+    monkeypatch.setattr(guest, "exec", delayed_exec)
+    activation = asyncio.create_task(driver._activate(str(marker)))
+    try:
+        await probe_started.wait()
+        activation.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await activation
+        await driver._cleanup_control(str(marker))
+        marker.write_text("123")  # The supervised exec starts after cleanup.
+        release_probe.set()
+        await asyncio.gather(*background)
+        assert not marker.with_suffix(".go").exists()
+    finally:
+        release_probe.set()
+        await asyncio.gather(*background, return_exceptions=True)
+
+
+async def test_cleanup_accepts_marker_removed_by_a_completed_supervisor(shell_control):
+    import os
+    import subprocess
+
+    driver, _, marker, _, race = shell_control
+    process = subprocess.Popen(["/bin/sh", "-c", "exit 0"], start_new_session=True)
+    assert process.wait() == 0
+    with pytest.raises(ProcessLookupError):
+        os.killpg(process.pid, 0)
+    marker.write_text(str(process.pid))
+    race.touch()  # The completed supervisor's EXIT trap wins before cat opens.
+    await driver._cleanup_control(str(marker))
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("pid", ["", "1", "0", "2147483648", "123; touch injected"])
+async def test_cleanup_rejects_an_existing_invalid_marker(shell_control, pid):
+    from loom.errors import DriverError
+
+    driver, _, marker, _, _ = shell_control
+    marker.write_text(pid)
+    with pytest.raises(DriverError, match="process group cleanup failed"):
+        await driver._cleanup_control(str(marker))
+
+
+async def test_cleanup_failure_keeps_the_original_activation_failure(shell_control, monkeypatch):
+    from loom.errors import DriverError
+
+    driver, _, _, _, _ = shell_control
+    original = TimeoutError("activation expired")
+
+    async def fail_activation(*args):
+        raise original
+
+    async def fail_cleanup(*args):
+        raise DriverError("guest Compose process group cleanup failed")
+
+    monkeypatch.setattr(driver, "_activate", fail_activation)
+    monkeypatch.setattr(driver, "_cleanup_control", fail_cleanup)
+    with pytest.raises(DriverError, match=r"activation failed.*TimeoutError.*cleanup failed") as error:
+        await driver.exec("umask")
+    assert error.value.__cause__ is original
+
+
+async def test_stream_activation_cleanup_failure_still_kills_the_outer_handle(shell_control, monkeypatch):
+    from pathlib import PurePosixPath
+
+    from loom.driver.base import ExecHandle
+    from loom.errors import DriverError
+
+    driver, guest, _, _, _ = shell_control
+    original = TimeoutError("private command text must not enter diagnostics")
+    killed = []
+
+    async def output():
+        if False:
+            yield b""
+
+    async def wait():
+        return 0
+
+    async def kill():
+        killed.append(True)
+
+    async def stream(*args, **kwargs):
+        return ExecHandle(pid=123, stdout=output(), stderr=output(), _wait=wait, _kill=kill)
+
+    async def fail_activation(*args):
+        raise original
+
+    async def fail_cleanup(*args):
+        raise DriverError("guest Compose process group cleanup failed")
+
+    monkeypatch.setattr(guest, "exec_streaming", stream)
+    monkeypatch.setattr(driver, "_activate", fail_activation)
+    monkeypatch.setattr(driver, "_cleanup_control", fail_cleanup)
+    with pytest.raises(DriverError, match=r"activation failed.*TimeoutError.*cleanup failed") as error:
+        await driver.exec_streaming(["true"], env_vars={}, cwd=PurePosixPath("/"))
+    assert error.value.__cause__ is original and killed == [True]
+    assert "private command text" not in str(error.value)

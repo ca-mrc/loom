@@ -309,12 +309,15 @@ test assigned exactly once. Adjust pins from CI timing evidence, not by omitting
 tests or extending the job budget whenever the distribution becomes uneven.
 The local commands remain serial equivalents so they are easy to reproduce.
 
-Tests using `isolated_migration_postgres_url` receive separate disposable
-databases cloned from an independently migrated, connection-disabled template.
-The template runs the full application migration history once per test session;
-each test keeps its own data and runs any requested upgrade/downgrade operations
-in its clone. Neither the shared suite database nor another test's data is used
-as the template. Clones and the template are removed during fixture teardown.
+The disposable PostgreSQL server runs the full application migration history
+once into a clean, connection-disabled session template. The ordinary
+`postgres_url` database and each `isolated_migration_postgres_url` database are
+independent clones of that template, so the first historical migration test
+does not repeat the entire initialization chain inside its setup deadline.
+Each historical test still runs its requested upgrade/downgrade operations in
+its own clone. Neither the shared suite database nor another test's data is
+used as the template. Clones and the template are removed during fixture
+teardown; the existing test deadlines and database cleanup diagnostics remain.
 
 Every non-draft PR event, including unrelated metadata changes, runs its
 path-selected validation plan and emits the four protected contexts. Draft

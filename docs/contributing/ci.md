@@ -509,6 +509,16 @@ execution test also proves that the pool lane has identical `all` and `nebius`
 module sets before exercising its 20 shards once, instead of repeating identical
 selector/subprocess coverage. Root scopes still execute independently.
 
+Ordinary pool runs can apply `default_pins` over the shared-qualification pins.
+Scheduled run 40523588535 placed the retained development module (about 671s)
+and installation (about 354s) on shard 3, while ordinary shard 8 took 39s.
+Only the retained module now moves to shard 8 when shared simulations are
+disabled. Both the matrix and execution selector use the same effective pins;
+the default set remains 102 modules, each executed once. Explicit shared
+qualification retains its original 124-module layout on every shard, including
+the census separation below. The timing sample motivates placement; it is not
+a measured end-to-end speedup of the new head.
+
 Run 39471175183 (October 20) exhausted shard 8's budget after its handoff module
 alone took 2445 seconds. Activation, cutover, gateway retirement and recovery
 release now use two existing lightly loaded shards (288 and 280 seconds in that
@@ -555,6 +565,18 @@ Docker integration uses two non-overlapping file shards, with duration-based
 pins separating the guest runtime and build-cache tests. Guest payloads are built
 only when the selected files consume them. Every required gate still waits for
 all selected shards. Required platform tests are retained.
+
+Guest Compose retains its two-phase handshake: a bounded read-only probe waits
+for the supervised process identity, then the controller validates the returned
+PID before a separate request releases the command gate. A cancelled Docker CLI
+does not retire its container's inner exec, so a late probe must never release
+that gate. The 5-second request and 30-second activation limits remain. Cleanup
+reads the marker once so a supervisor's normal EXIT removal cannot race a
+separate existence check; an existing invalid marker still fails. If activation
+or execution fails and cleanup also fails, the diagnostic names both phases and
+preserves the first exception as its cause, without including authored commands
+or environment values. Inspect that first failure before attributing an
+activation expiry to cancellation cleanup.
 
 MinIO preparation follows selected fixture imports and parent conftests. Fast
 integration normally needs only the testcontainers release; TLS storage tests

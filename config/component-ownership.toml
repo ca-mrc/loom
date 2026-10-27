@@ -216,6 +216,12 @@ pins = [
   { path = "tests/ops/test_nebius_pool_participant_delivery_completion.py", shard_index = 3 },
   { path = "tests/ops/test_nebius_development_pool_retained_runtime_stages.py", shard_index = 11 },
 ]
+# Scheduled run 40523588535: retained (671s) shared shard 3 with installation
+# (354s), while default shard 8 took 39s. Move only the ordinary retained module;
+# explicit shared qualification keeps every original pin and census separation.
+default_pins = [
+  { path = "tests/ops/test_nebius_development_pool_retained.py", shard_index = 7 },
+]
 
 [[test_sharding]]
 lane = "integration"
