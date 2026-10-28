@@ -405,7 +405,10 @@ class ExecutionRuntimePlanV1(_Strict):
     task_resources: ContainerResourcesV1
     effective_network_policy: NetworkPolicy | None = None
     task_egress: TaskHttpEgress | None = None
-    mainland_proxy_profile: MainlandNetworkProfileV1 | None = None
+    # Preserve default-off plans across all serialization entry points.
+    mainland_proxy_profile: MainlandNetworkProfileV1 | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
     # Install sources reachable only during setup phases (#2310). Never part of
     # the task's own network policy; the agent and verifier cannot reach them.
     setup_egress: WebAllowlist | None = None
@@ -694,8 +697,6 @@ class ExecutionRuntimePlanV1(_Strict):
         payload = self.model_dump(mode="json")
         if self.effective_network_policy is None:
             payload.pop("effective_network_policy")
-        if self.mainland_proxy_profile is None:
-            payload.pop("mainland_proxy_profile")
         if self.task_egress is None:
             payload.pop("task_egress")
         if self.setup_egress is None:

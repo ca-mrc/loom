@@ -41,6 +41,9 @@ def test_off_keeps_published_plan_and_requirements_compatible() -> None:
     task, trial, profile = _inputs()
     plan = compile_service_execution_plan(task=task, trial=trial, profile=profile, source_provenance=_provenance(), task_revision_sha256=_REVISION)
     assert "mainland_proxy_profile" not in plan.canonical_payload()
+    assert "mainland_proxy_profile" not in plan.model_dump()
+    assert "mainland_proxy_profile" not in plan.model_dump(mode="json")
+    assert "mainland_proxy_profile" not in json.loads(plan.model_dump_json())
     assert "mainland_proxy" not in workload_requirements_from_task(task, trial).model_dump(mode="json")
     assert "supports_mainland_proxy" not in profile.model_dump(mode="json")
 
@@ -55,6 +58,8 @@ def test_mainland_profile_freezes_rules_not_local_paths_and_survives_verifier(tm
     assert frozen.gfw_suffixes == ("github.com",)
     assert frozen.gfw_hosts == ("exact.example.org",)
     assert frozen.greatfire_hosts == ("gitlab.com",)
+    assert plan.model_dump(mode="json")["mainland_proxy_profile"] == frozen.model_dump(mode="json")
+    assert ExecutionRuntimePlanV1.model_validate_json(plan.model_dump_json()) == plan
     assert str(tmp_path) not in json.dumps(plan.canonical_payload())
     requirements = workload_requirements_from_task(task, trial)
     validate_runtime_plan_requirements(plan, requirements)
