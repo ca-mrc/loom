@@ -43,7 +43,7 @@ RUN VITE_BUILD_REVISION="${LOOM_BUILD_SHA}" \
 # Stock Caddy supplies the Nebius TLS sidecar from this same published image.
 # v2.11.4's released binary has CVE-2026-56854 in x/crypto v0.52.0.
 # Remove the x/crypto override when the next Caddy release includes the fix.
-FROM --platform=$BUILDPLATFORM golang:1.26.8-alpine AS public-tls
+FROM --platform=$BUILDPLATFORM golang:1.26.10-alpine@sha256:a2012b4a1d1f9f7e9f44e0d39b805a901e856b1dd80b4e6ee4338db547050308 AS public-tls
 WORKDIR /build
 RUN go mod init caddy \
     && go mod download github.com/caddyserver/caddy/v2@v2.11.4 \
