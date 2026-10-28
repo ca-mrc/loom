@@ -851,6 +851,39 @@ def test_publisher_records_registry_digest_with_optional_cache(
     assert any(key.endswith(f"/blobs/{digest}") for _, key, _ in cache.uploads)
 
 
+@pytest.mark.parametrize("cache_budget", [4, 4 * 1024**3])
+@pytest.mark.parametrize("oversized", [False, True])
+@pytest.mark.parametrize("runtime_metadata", [False, True])
+def test_publication_oci_budget_is_independent_of_cache_budget(
+    source_bundle, tmp_path, publisher, monkeypatch, cache_budget, oversized, runtime_metadata,
+) -> None:
+    claim, _ = source_bundle
+    cache, calls = publisher
+    monkeypatch.setattr(runtime, "_CACHE_BYTES", cache_budget)
+    if runtime_metadata:
+        claim["task_config"]["environment"]["user"] = "image"
+    work = tmp_path / "work"
+    (work / "oci").mkdir(parents=True)
+    archive = work / "oci/0000.tar"
+    _write_native_oci(archive, runtime_config={"Env": ["HOME=/root"], "WorkingDir": "/app"})
+    # Extend a real OCI archive sparsely: check the actual 3 GiB boundary
+    # without allocating its padding or mocking either owning validator.
+    with archive.open("r+b") as output:
+        output.truncate(3 * 1024**3 + oversized)
+    receipt_path = tmp_path / "receipt.json"
+    if oversized:
+        with pytest.raises(ValueError):
+            runtime.publish(claim, work, tmp_path / "secrets", receipt_path=receipt_path)
+        assert calls == [] and not receipt_path.exists()
+    else:
+        receipt = runtime.publish(claim, work, tmp_path / "secrets", receipt_path=receipt_path)
+        assert len(calls) == 1
+        assert receipt == json.loads(receipt_path.read_text())
+        assert set(receipt["registry_images"]) == {"task"}
+        assert ("image_runtime_metadata" in receipt) is runtime_metadata
+    assert cache.closed and not cache.uploads
+
+
 @pytest.mark.parametrize("failure", [None, "secret", "workdir", "private_workdir", "budget"])
 def test_publisher_binds_final_oci_defaults_and_rejects_unusable_metadata_before_push(
     source_bundle, tmp_path, publisher, failure,
