@@ -63,6 +63,14 @@ PASSWD = b"root:x:0:0:root:/root:/bin/sh\nworker:x:1001:1002::/home/worker:/bin/
 GROUP = b"root:x:0:\nworkers:x:1002:\nother:x:1003:\n"
 
 
+@pytest.mark.parametrize("workdir", ["//tests", "/tests\x00hidden", "/" + "x" * 4096],
+                         ids=["double-leading-slash", "nul-byte", "overlong"])
+def test_rejects_unsafe_oci_workdir_before_runtime_execution(tmp_path, workdir):
+    image = _image(tmp_path / "image", [], {"WorkingDir": workdir, "Env": ["HOME=/root"]})
+    with pytest.raises(ValueError, match="OCI runtime metadata unsupported"):
+        read_task_image_runtime_metadata(image)
+
+
 @pytest.mark.parametrize("directory", [False, True])
 @pytest.mark.parametrize("compression", ["", "gzip", "zstd"])
 @pytest.mark.parametrize("user,uid,gid", [("", 0, 0), ("root", 0, 0), ("worker", 1001, 1002),

@@ -129,8 +129,14 @@ not grant runtime support. Hosted execution prepares independent verifier images
 keeps their resource and environment declarations distinct, and restores declared
 artifacts before grading. Independent verifiers use their own image USER,
 WORKDIR and ENTRYPOINT defaults unless explicitly overridden, including when
-the agent uses Compose. When `[verifier.environment]` is declared, an omitted
-internet setting maps to hosted `public-web` independently of the agent; explicit
+the agent uses Compose. An empty OCI working directory resolves to `/`.
+An isolated verifier may also use
+private paths such as `/tests`; the agent's writable-workspace restrictions do
+not apply to the grader. Both roles still require a bounded canonical absolute
+image working directory without NUL bytes or ambiguous path components, and
+agent images remain unable to select private verifier/runtime roots.
+When `[verifier.environment]` is declared, an omitted internet setting maps to
+hosted `public-web` independently of the agent; explicit
 offline and allowlist policies remain unchanged. Submission validates the
 independent verifier against its selected execution class before execution.
 An independent tests image does not inherit the agent workbench's readiness
