@@ -72,6 +72,11 @@ ACTUATOR_TABLES = (
     # before the separate global-pool participant grants are installed.
     "nebius_pool_build_outbox",
     "trial_task_image_materializations",
+    # Native claims validate retained registered source facts and pin the exact
+    # source before acquiring a build attempt. Publication stays with its owner.
+    "task_bundle_sources",
+    "task_bundle_source_incarnations",
+    "task_bundle_source_references",
     *ACTUATOR_TASK_IMAGE_WRITES,
 )
 # PostgreSQL row locks require UPDATE on at least one column. Capacity settings
@@ -279,6 +284,9 @@ def _bootstrap_database(
                         "task_image_materialization_attempts",
                         "task_image_publication_evidence",
                         "trial_task_image_materializations",
+                        "task_bundle_sources",
+                        "task_bundle_source_incarnations",
+                        "task_bundle_source_references",
                         "data_lifecycle_authorities",
                         "service_execution_live_events",
                         "data_lifecycle_objects",
@@ -321,6 +329,11 @@ def _bootstrap_database(
                             "GRANT UPDATE (last_used_at, last_seen_at) ON tokens TO loom_gateway"
                         )
                     if role == "loom_actuator":
+                        # Source journal row locks need UPDATE on one column;
+                        # claims only append retained references, never publish
+                        # sources, retire incarnations or delete references.
+                        cursor.execute("GRANT UPDATE (created_at) ON task_bundle_sources TO loom_actuator")
+                        cursor.execute("GRANT INSERT ON task_bundle_source_references TO loom_actuator")
                         # Large lifecycle events retain their payloads in the
                         # exact owning Artifact. Finalization reads that identity
                         # and changes metadata only, never storage or ownership.
