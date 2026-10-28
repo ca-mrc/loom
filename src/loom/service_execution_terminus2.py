@@ -403,7 +403,7 @@ async def run_terminus2(
             instruction=instruction,
             env=protected_driver,
             trajectory=cast("TrajectoryWriter", trajectory),
-            mcp=[],
-            skills_dir=None,
+            mcp=task_config.environment.mcp_servers,
+            skills_dir=task_config.environment.skills_dir,
             step_id="agent",
         )

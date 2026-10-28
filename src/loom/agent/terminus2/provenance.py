@@ -12,7 +12,7 @@ try:
     HARBOR_RUNTIME_VERSION = version("harbor")
 except PackageNotFoundError:
     HARBOR_RUNTIME_VERSION = "0.24.0"
-LOOM_BRIDGE_REVISION = os.environ.get("LOOM_BRIDGE_REVISION", "1.0")
+LOOM_BRIDGE_REVISION = os.environ.get("LOOM_BRIDGE_REVISION", "1.1")
 
 
 def harbor_template_hashes() -> dict[str, str]:

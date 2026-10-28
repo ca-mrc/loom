@@ -851,7 +851,7 @@ def test_publisher_records_registry_digest_with_optional_cache(
     assert any(key.endswith(f"/blobs/{digest}") for _, key, _ in cache.uploads)
 
 
-@pytest.mark.parametrize("failure", [None, "secret", "workdir", "budget"])
+@pytest.mark.parametrize("failure", [None, "secret", "workdir", "private_workdir", "budget"])
 def test_publisher_binds_final_oci_defaults_and_rejects_unusable_metadata_before_push(
     source_bundle, tmp_path, publisher, failure,
 ):
@@ -864,6 +864,8 @@ def test_publisher_binds_final_oci_defaults_and_rejects_unusable_metadata_before
         config["Env"].append("PROVIDER_API_KEY=private-value")
     elif failure == "workdir":
         config["WorkingDir"] = "/"
+    elif failure == "private_workdir":
+        config["WorkingDir"] = "/tests"
     elif failure == "budget":
         config["Env"].append("PUBLIC_DATA=" + "x" * 3980)
     work = tmp_path / "work"
@@ -1720,7 +1722,8 @@ def test_prepare_fails_closed_when_the_base_cannot_be_prepared(tmp_path, monkeyp
         runtime.prepare(claim, tmp_path / "work", tmp_path / "secrets")
 
 
-def test_publisher_resolves_independent_verifier_oci_metadata(source_bundle, tmp_path, publisher):
+@pytest.mark.parametrize("workdir", [None, "/", "/tests", "/opt/verifier", "/grading"])
+def test_publisher_resolves_independent_verifier_oci_metadata(source_bundle, tmp_path, publisher, workdir):
     claim, _ = source_bundle
     claim['task_config']['verifier']['environment'] = {
         'os':'linux','cpu_arch':'x86_64','dockerfile':'tests/Dockerfile','docker_build_context':'tests',
@@ -1729,11 +1732,12 @@ def test_publisher_resolves_independent_verifier_oci_metadata(source_bundle, tmp
     work=tmp_path/'work'
     (work/'oci').mkdir(parents=True)
     _write_native_oci(work/'oci/0000.tar')
-    _write_native_oci(work/'oci/0001.tar',runtime_config={
-        'User':'0:0','WorkingDir':'/grading','Entrypoint':['/grading-init'],'Env':['HOME=/root'],
-    })
+    config = {'User':'0:0','Entrypoint':['/grading-init'],'Env':['HOME=/root']}
+    if workdir is not None:
+        config['WorkingDir'] = workdir
+    _write_native_oci(work/'oci/0001.tar',runtime_config=config)
     receipt=runtime.publish(claim,work,tmp_path/'secrets',receipt_path=tmp_path/'receipt.json')
     assert set(receipt['registry_images'])=={'task','verifier'}
     metadata=receipt['image_runtime_metadata']['verifier']
     assert metadata['image_ref']==receipt['registry_images']['verifier']
-    assert metadata['workdir']=='/grading' and metadata['entrypoint']==['/grading-init']
+    assert metadata['workdir']==(workdir or '/') and metadata['entrypoint']==['/grading-init']

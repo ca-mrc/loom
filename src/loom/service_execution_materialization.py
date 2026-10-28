@@ -79,7 +79,7 @@ from loom.task_sandbox_planner import (
     plan_admissions,
 )
 from loom.trajectory.storage import BUNDLE_FILE_METADATA_NAME
-from loom.verifier_runtime import resolve_verifier_env_mode
+from loom.verifier_runtime import resolve_verifier_env_mode, verifier_execution_task
 
 
 def uses_runner_task_image(task: TaskConfig, trial: TrialConfig) -> bool:
@@ -203,6 +203,7 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
     task_resource_requests: dict[str, TaskExecutionResourceRequestsV1] = Field(default_factory=dict)
     supports_task_identity: bool = False
     supports_native_compose: bool = Field(default=False, exclude_if=lambda value: not value)
+    supports_terminus_environment_metadata: bool = Field(default=False, exclude_if=lambda value: not value)
     guest_runtime: Literal["qemu-tcg-v1"] | None = Field(default=None, exclude_if=lambda value: value is None)
     supports_emulated_pkcs11: bool = Field(default=False, exclude_if=lambda value: not value)
     supports_shared_guest: bool = Field(default=False, exclude_if=lambda value: not value)
@@ -322,6 +323,7 @@ def build_nebius_runtime_profile(
     terminus2_multi_model_policies: frozenset[MixPolicy] = frozenset(),
     supports_task_identity: bool = False,
     supports_native_compose: bool = False,
+    supports_terminus_environment_metadata: bool = False,
     guest_runtime: Literal["qemu-tcg-v1"] | None = None,
     supports_emulated_pkcs11: bool = False,
     supports_shared_guest: bool = False,
@@ -354,6 +356,7 @@ def build_nebius_runtime_profile(
         supports_task_artifact_inputs=supports_task_artifact_inputs,
         supports_task_identity=supports_task_identity,
         supports_native_compose=supports_native_compose,
+        supports_terminus_environment_metadata=supports_terminus_environment_metadata,
         guest_runtime=guest_runtime,
         supports_emulated_pkcs11=supports_emulated_pkcs11,
         supports_shared_guest=supports_shared_guest,
@@ -611,11 +614,15 @@ def automatic_service_execution_rejections(
         or env.extra_hosts
         or env.dns
         or env.tmpfs
-        or env.healthcheck is not None
-        or env.skills_dir is not None
-        or env.mcp_servers
+        or (env.healthcheck is not None and not controller)
+        or ((env.skills_dir is not None or env.mcp_servers)
+            and trial.agent_name not in {"oracle", "terminus-2"})
     ):
         reasons.append("extended_environment_unsupported")
+    if trial.agent_name == "terminus-2":
+        from loom.agent.terminus2.task_metadata import terminus_task_metadata_rejections
+
+        reasons.extend(terminus_task_metadata_rejections(env.mcp_servers))
     if controller:
         try:
             ProcessPhaseV1._environment_is_nonsecret(env.environment)
@@ -1001,9 +1008,50 @@ def freeze_agent_runtime_releases(
     })
 
 
-def _requires_task_identity(task: TaskConfig) -> bool:
-    return (task.environment.user != "agent" or task.environment.image_entrypoint or bool(task.environment.entrypoint) or "HOME" in task.environment.environment
-            or task.verifier.user is not None)
+def _requires_task_identity(task: TaskConfig, trial: TrialConfig) -> bool:
+    environments = [task.environment]
+    if not trial.skip_verifier and task.verifier.environment is not None:
+        environments.append(task.verifier.environment)
+    return any(
+        env.user != "agent" or env.image_entrypoint or bool(env.entrypoint) or "HOME" in env.environment
+        for env in environments
+    ) or (not trial.skip_verifier and task.verifier.user is not None)
+
+
+def _independent_verifier_class_rejections(
+    task: TaskConfig, trial: TrialConfig, profile: ServiceExecutionRuntimeProfileV1,
+    *, allow_task_image_preparation: bool,
+) -> tuple[str, ...]:
+    env = task.verifier.environment
+    if env is None or trial.skip_verifier:
+        return ()
+    # Independent grading uses the ordinary class frozen by the planner, even
+    # when the agent executes a Compose topology inside a guest. Validate its
+    # own requirements now rather than discovering unsupported egress at lease
+    # admission after the agent has finished.
+    try:
+        requirements = workload_requirements_from_task(verifier_execution_task(task), trial)
+    except UnsupportedNetworkPolicyOverrideError:
+        return ("verifier.environment: network_policy_override_not_supported",)
+    admission = evaluate_execution_admission(
+        requirements,
+        nebius_cpu_execution_class(supports_task_web_egress=profile.supports_task_web_egress),
+    )
+    reasons = []
+    if any(value is not None and value > maximum for value, maximum in (
+        (env.cpus, 128), (env.memory_mb, 1_048_576), (env.storage_mb, 1_048_576),
+    )):
+        reasons.append("verifier.environment: resource_limits_out_of_range")
+    preparing = allow_task_image_preparation and env.dockerfile is not None
+    reasons.extend(
+        f"verifier.environment: {reason.code}"
+        for reason in admission.reasons
+        # Publication prepares Dockerfile inputs before execution. Its existing
+        # immutable image grant remains required by compilation; mutable image
+        # tags and every non-image incompatibility are still rejected here.
+        if not (preparing and reason.code in {"task_image_build_unsupported", "immutable_image_required"})
+    )
+    return tuple(reasons)
 
 
 def runtime_profile_rejections(
@@ -1043,6 +1091,24 @@ def runtime_profile_rejections(
     if hosted_http_egress(effective_network_policy) is not None and not profile.supports_task_web_egress:
         reasons.append("task_egress_runtime_unavailable")
     spec = hosted_harness(trial.agent_name)
+    if trial.agent_name == "terminus-2" and (
+        task.environment.skills_dir is not None or task.environment.mcp_servers
+    ):
+        from loom.agent_runtime import supports_terminus_environment_metadata
+
+        if trial.agent_version is None:
+            metadata_supported = profile.supports_terminus_environment_metadata
+        else:
+            metadata_supported = any(
+                (binding.agent_name, binding.agent_version) == (trial.agent_name, trial.agent_version)
+                and supports_terminus_environment_metadata(
+                    loom_bridge_revision=binding.loom_bridge_revision,
+                    harbor_version=binding.harbor_version,
+                )
+                for binding in profile.agent_runtime_bindings
+            )
+        if not metadata_supported:
+            reasons.append("terminus_environment_metadata_runtime_unavailable")
     if trial.agent_version is not None and (
         spec is None or not spec.supports("pinned_versions")
         or controller_image_for_trial(profile, trial) is None
@@ -1066,7 +1132,10 @@ def runtime_profile_rejections(
         if not (uses_runner_task_image(task, trial) or task.environment.docker_image == profile.task_image_ref):
             reasons.append("task_image_not_in_runtime_profile")
         return tuple(dict.fromkeys(reasons))
-    if _requires_task_identity(task) and not profile.supports_task_identity:
+    reasons.extend(_independent_verifier_class_rejections(
+        task, trial, profile, allow_task_image_preparation=allow_task_image_preparation,
+    ))
+    if _requires_task_identity(task, trial) and not profile.supports_task_identity:
         reasons.append("task_identity_runtime_unavailable")
     if (task.environment.service_lifecycle is not None or task.environment.sidecars) and not profile.service_lifecycle_ready:
         reasons.append("service_lifecycle_runtime_unavailable")

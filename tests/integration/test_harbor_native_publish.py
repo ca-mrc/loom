@@ -111,6 +111,43 @@ async def test_native_activation_cli_and_exact_reimport(native_publication, post
         assert (await session.get(Benchmark, profile)).execution_state == "pending"
 
 
+async def test_native_published_solver_controls_oracle_admission(native_publication, postgres_url):
+    from loom_service.submission_compat import (
+        AgentTaskIncompatibilityError,
+        validate_submission_agent_task_compatibility,
+    )
+
+    profile, descriptor, sessions, options, source_task = native_publication
+    solution = source_task / "solution"
+    solution.mkdir()
+    (solution / "solve.sh").write_text("#!/bin/sh\necho reference\n")
+    published = await benchmark_publish.publish_benchmark(**options)
+    assert published.updated == 1 and published.unchanged == 1
+    code, _, stderr = await _native_cli(descriptor, postgres_url)
+    assert code == 0, stderr
+    async with sessions() as session:
+        with_solver = await session.get(Task, profile + "/upstream/sample")
+        without_solver = await session.get(Task, profile + "/upstream/second")
+        assert with_solver.tags["oracle_eligible"] == "true"
+        assert without_solver.tags["oracle_eligible"] == "false"
+        await validate_submission_agent_task_compatibility(
+            session, team_id=None, task_ids=[with_solver.id],
+            trial_config={"agent_name": "oracle"},
+        )
+        with pytest.raises(AgentTaskIncompatibilityError, match="solution_solve_sh"):
+            await validate_submission_agent_task_compatibility(
+                session, team_id=None, task_ids=[without_solver.id],
+                trial_config={"agent_name": "oracle"},
+            )
+        admitted = (with_solver.source, with_solver.checksum)
+    repeated = await benchmark_publish.publish_benchmark(**options)
+    assert repeated.unchanged == 2 and repeated.uploaded_objects == 0
+    async with sessions() as session:
+        task = await session.get(Task, profile + "/upstream/sample")
+        assert (task.source, task.checksum) == admitted
+        assert (await session.get(Benchmark, profile)).execution_state == "runnable"
+
+
 @pytest.mark.parametrize("damage,diagnostic", [
     ("missing", "census"), ("origin", "identity"), ("config", "admission blocked"),
     ("source", "frozen snapshot"), ("historical", "cannot be activated"),

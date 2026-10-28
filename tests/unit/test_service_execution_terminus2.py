@@ -81,6 +81,35 @@ async def test_hosted_terminus_passes_frozen_sts_plan_and_control_identity(
 
 
 @pytest.mark.asyncio
+async def test_hosted_terminus_forwards_native_task_metadata(tmp_path, monkeypatch):
+    task, trial = _config()
+    task = TaskConfig.model_validate({**task.model_dump(mode="json"), "environment": {
+        **task.environment.model_dump(mode="json"), "skills_dir": "/app/.agents/skills",
+        "mcp_servers": [{"name": "browser", "transport": "sse", "url": "http://browser:3080/sse"}],
+    }})
+    captured = {}
+
+    class Runtime:
+        def __init__(self, **kwargs):
+            pass
+
+        def begin_attempt(self, deadline):
+            pass
+
+        async def run(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr("loom.service_execution_terminus2.LoomTerminus2Runtime", Runtime)
+    monkeypatch.setenv("LOOM_TERMINUS_CONTROL_TOKEN", "bound-control-token")
+    driver = FakeDriver()
+    await driver.start()
+    await run_terminus2(driver=driver, workspace=tmp_path, task_config=task, trial_config=trial,
+        trial_id=uuid4(), team_id=uuid4(), gateway_url="http://127.0.0.1:9000", instruction="Use browser.")
+    assert captured["mcp"] == task.environment.mcp_servers
+    assert captured["skills_dir"] == task.environment.skills_dir
+
+
+@pytest.mark.asyncio
 async def test_hosted_control_client_reclaims_and_checkpoints_bound_trial(monkeypatch: Any) -> None:
     trial_id, team_id = uuid4(), uuid4()
     execution_id, attempt_id = uuid4(), uuid4()

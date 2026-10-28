@@ -24,11 +24,7 @@ def prepare_harbor_bundle(bundle: Path, config: dict[str, Any]) -> None:
         raise ValueError("native package collides with reserved verifier/run.sh")
 
     environment = config["environment"]
-    if "baseline_network_policy" not in environment and "network_policies_supported" not in environment:
-        # Harbor enables internet unless the task declares otherwise. Use the
-        # same hosted policy as allow_internet=true; retain offline/allowlists.
-        environment["baseline_network_policy"] = {"kind": "public-web"}
-        environment["network_policies_supported"] = ["public-web"]
+    _hosted_network_default(environment)
 
     compose = [
         f"environment/{name}"
@@ -76,20 +72,45 @@ def prepare_harbor_bundle(bundle: Path, config: dict[str, Any]) -> None:
         environment.setdefault("user", "image")
         environment.setdefault("image_entrypoint", "entrypoint" not in environment)
     if (bundle / "tests/Dockerfile").is_file():
-        env = dict(verifier.get("environment") or environment)
+        declared = verifier.get("environment")
+        env = dict(declared or environment)
+        if declared is None:
+            # The tests image owns its runtime defaults, independently of the
+            # agent image or Compose workbench's user/workdir/entrypoint.
+            env["user"] = "image"
+            env["image_workdir"] = True
+            env.pop("entrypoint", None)
+            env["image_entrypoint"] = True
         env.pop("docker_image", None)
         env.pop("compose_files", None)
         env.pop("single_service_compose", None)
         env.pop("native_compose", None)
+        # A separate tests image does not start the agent's services. Its
+        # readiness must be explicit, rather than inherited from that workbench.
+        if not isinstance(declared, dict) or "healthcheck" not in declared:
+            env.pop("healthcheck", None)
         env.update(dockerfile="tests/Dockerfile", docker_build_context="tests")
         verifier["environment"] = env
         verifier.setdefault("env_mode", "separate")
     if verifier.get("environment") is not None:
+        env = verifier["environment"]
+        env.setdefault("user", "image")
+        env.setdefault("image_entrypoint", "entrypoint" not in env)
+        _hosted_network_default(env)
         verifier.setdefault("env_mode", "separate")
     verifier.setdefault("env_mode", "shared")
-    if environment.get("single_service_compose", {}).get("privileged"):
+    if (verifier.get("environment") is None
+            and environment.get("single_service_compose", {}).get("privileged")):
         verifier.setdefault("user", "root")
     bridge.parent.mkdir(exist_ok=True)
     bridge.write_bytes(native_verifier_run_sh_bytes())
     bridge.chmod(0o755)
     verifier["args"]["script_path"] = VERIFIER_SCRIPT_PATH
+
+
+def _hosted_network_default(environment: dict[str, Any]) -> None:
+    # Harbor enables internet unless the environment declares otherwise. The
+    # independent verifier has its own default; retain authored offline/allowlists.
+    if "baseline_network_policy" not in environment and "network_policies_supported" not in environment:
+        environment["baseline_network_policy"] = {"kind": "public-web"}
+        environment["network_policies_supported"] = ["public-web"]

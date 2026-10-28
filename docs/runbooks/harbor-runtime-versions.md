@@ -50,6 +50,16 @@ through an ordinary-member exact-version submission with real agent calls,
 independent verifier output, canonical download, and resource cleanup.
 Publishing/registering an image alone does not establish that acceptance.
 
+Task environment MCP servers and skills require the qualified combination of
+Harbor `0.24.0` and Loom bridge `1.1`. The publisher derives the deployment
+default's capability from the controller image's existing runtime labels;
+explicit version selections use their frozen release metadata. Unknown
+combinations and older bridges cannot run tasks requiring these fields, while
+remaining eligible for ordinary tasks subject to the existing compatibility
+checks. A catalog `ready` status does not imply support for every task feature.
+Oracle follows the upstream utility behavior and ignores these task metadata
+fields. Historical release JSON and signatures are not rewritten.
+
 ## Register a release
 
 Publish the controller image and retain the publisher's

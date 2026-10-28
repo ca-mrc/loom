@@ -577,6 +577,68 @@ async def _can_reselect_unstarted_execution(
     return True
 
 
+async def _bind_verifier_execution_route(
+    session: AsyncSession, *, trial: Trial, parent: ServiceExecutionLease,
+    target: ServiceExecutionTarget, runtime: ExecutionRuntimePlanV1,
+    requirements: WorkloadRequirementsV1, current_time: datetime,
+) -> tuple[ExecutionRoutingDecisionV1, str]:
+    """Keep the agent's route lineage; bind grading demands on the child lease.
+
+    A route chooses the attempt's authority, not the independent grader image.
+    Its digest must still validate against the original parent's complete demands.
+    The child's complete demands are separately frozen on its lease and admitted
+    against its own class, target, prepared-image grant and runtime plan.
+    """
+    from loom.task_environment_handoff import (
+        RESOLVED_VERIFIER_ENVIRONMENT,
+        decode_resolved_task_environment,
+    )
+    parent_runtime = ExecutionRuntimePlanV1.model_validate(parent.runtime_contract_json)
+    parent_requirements = WorkloadRequirementsV1.model_validate(parent.workload_requirements_json)
+    parent_target = await session.get(ServiceExecutionTarget, parent.target_id)
+    if parent_target is None or trial.execution_route_json is None:
+        raise ServiceExecutionConflict("verifier parent route is unavailable")
+    decision, digest = _bind_kubernetes_execution_route(
+        trial=trial, target=parent_target, execution_class_id=parent.execution_class_id,
+        requirements_digest=parent.workload_requirements_sha256,
+        routing_reason=ExecutionRoutingReason.PREEXISTING_ASSIGNMENT, current_time=current_time,
+    )
+    if (parent.routing_generation != decision.generation
+            or parent.selected_pool_id != decision.selected_pool_id
+            or parent.routing_decision_sha256 != digest):
+        raise ServiceExecutionConflict("verifier parent lease binds a different execution route")
+    parent_env = parent_runtime.main.environment
+    raw_verifier = parent_env.get(RESOLVED_VERIFIER_ENVIRONMENT)
+    if raw_verifier is None:
+        if requirements != parent_requirements or target.id != parent.target_id:
+            raise ServiceExecutionConflict("verifier differs from its shared parent environment")
+        expected_class: str | None = parent.execution_class_id
+    else:
+        if (runtime.main.environment.get(RESOLVED_VERIFIER_ENVIRONMENT) != raw_verifier
+                or runtime.main.environment.get("LOOM_TASK_TRIAL_JSON") != parent_env.get("LOOM_TASK_TRIAL_JSON")):
+            raise ServiceExecutionConflict("verifier differs from its frozen parent environment")
+        frozen_trial = TrialConfig.model_validate_json(parent_env["LOOM_TASK_TRIAL_JSON"])
+        # Requirements consume only this environment and the already frozen
+        # separate topology/harness. Do not consult a mutable catalog Task.
+        grading_environment = decode_resolved_task_environment(raw_verifier).model_dump(mode="json")
+        grading_task = TaskConfig.model_validate({
+            "task": {"id": trial.task_id, "name": trial.task_id},
+            "environment": grading_environment,
+            "agent": {"name": frozen_trial.agent_name},
+            "verifier": {"name": "script", "env_mode": "separate", "environment": grading_environment},
+        })
+        if requirements != workload_requirements_from_task(grading_task, frozen_trial):
+            raise ServiceExecutionConflict("verifier requirements differ from its frozen environment")
+        expected_class = parent_env.get("LOOM_VERIFIER_EXECUTION_CLASS_ID")
+    if (runtime.execution_class_id != expected_class
+            or target.logical_pool_id != parent_target.logical_pool_id
+            or target.environment != parent_target.environment
+            or target.region != parent_target.region
+            or target.data_residency != parent_target.data_residency):
+        raise ServiceExecutionConflict("verifier target differs from its parent execution authority")
+    return decision, digest
+
+
 async def reserve_trial_execution(
     session: AsyncSession,
     *,
@@ -681,13 +743,22 @@ async def reserve_trial_execution(
             raise ServiceExecutionConflict("verifier parent lease contract is invalid") from exc
         if (
             parent_lease.trial_id != trial.id
+            or parent_lease.team_id != trial.team_id
             or parent_lease.execution_role != "attempt"
             or parent_contract.execution_role != "attempt"
+            or parent_contract.execution_class_id != parent_lease.execution_class_id
             or parent_contract.verifier_execution != "separate_execution"
             or parent_contract.candidate_sha != runtime_contract.candidate_sha
             or parent_contract.task_revision_sha256 != runtime_contract.task_revision_sha256
         ):
             raise ServiceExecutionConflict("verifier parent lease is not eligible")
+        if (
+            canonical_digest(parent_lease.runtime_contract_json) != parent_lease.runtime_contract_sha256
+            or canonical_digest(parent_lease.workload_requirements_json) != parent_lease.workload_requirements_sha256
+            or (parent_contract.task_input is not None and parent_contract.task_input != runtime_contract.task_input)
+            or parent_contract.task_image_materialization_id != runtime_contract.task_image_materialization_id
+        ):
+            raise ServiceExecutionConflict("verifier parent frozen identity drift")
         if (
             parent_lease.output_commit_state != "committed"
             or parent_lease.finalized_at is None
@@ -759,6 +830,8 @@ async def reserve_trial_execution(
         from loom.verifier_runtime import validate_prepared_sandbox_images, verifier_execution_task
         try:
             validate_prepared_sandbox_images(runtime_contract, prepared_task)
+            if parent_lease is not None:
+                validate_prepared_sandbox_images(parent_contract, prepared_task)
             validate_prepared_fixtures(
                 runtime_contract, frozen_task=frozen_task, prepared_task=prepared_task,
             )
@@ -816,21 +889,17 @@ async def reserve_trial_execution(
         allow_target_reselection = await _can_reselect_unstarted_execution(
             session, trial=trial, previous=previous_lease, target=target
         )
-    routing_decision, routing_decision_digest = _bind_kubernetes_execution_route(
-        trial=trial,
-        target=target,
-        execution_class_id=execution_class_id,
-        requirements_digest=requirements_digest,
-        routing_reason=routing_reason,
-        current_time=current_time,
-        allow_target_reselection=allow_target_reselection,
-    )
-    if parent_lease is not None and (
-        parent_lease.routing_generation != routing_decision.generation
-        or parent_lease.selected_pool_id != routing_decision.selected_pool_id
-        or parent_lease.routing_decision_sha256 != routing_decision_digest
-    ):
-        raise ServiceExecutionConflict("verifier parent lease binds a different execution route")
+    if parent_lease is not None:
+        routing_decision, routing_decision_digest = await _bind_verifier_execution_route(
+            session, trial=trial, parent=parent_lease, target=target,
+            runtime=runtime_contract, requirements=requirements, current_time=current_time,
+        )
+    else:
+        routing_decision, routing_decision_digest = _bind_kubernetes_execution_route(
+            trial=trial, target=target, execution_class_id=execution_class_id,
+            requirements_digest=requirements_digest, routing_reason=routing_reason,
+            current_time=current_time, allow_target_reselection=allow_target_reselection,
+        )
 
     generation = 1
     lease_id = global_identity[0] if global_identity is not None else uuid4()

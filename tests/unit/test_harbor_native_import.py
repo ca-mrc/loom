@@ -14,7 +14,10 @@ from pydantic import ValidationError
 
 from loom.errors import DriverError
 from loom.harbor_task_import import project_harbor_task
-from loom.harbor_verifier_script import native_verifier_run_sh_bytes
+from loom.harbor_verifier_script import (
+    native_verifier_run_sh_bytes,
+    native_verifier_workdir_run_sh_bytes,
+)
 from loom.models.harbor import ArtifactSource, UpstreamOrigin
 from loom.models.task import TaskConfig
 from loom.task_bundle_registration import prepare_task_bundle_registration
@@ -80,6 +83,32 @@ def native_tree(root, raw=None):
     (task / "tests/test.sh").write_text("echo 0 > /logs/verifier/reward.txt\n")
     (task / "task.toml").write_text(tomli_w.dumps(raw or source_task()))
     return task
+
+
+@pytest.mark.parametrize("solver_kind", ["file", "missing", "empty", "directory", "symlink"])
+def test_native_oracle_marker_comes_from_the_actual_reference_script(tmp_path, solver_kind):
+    from loom_service.task_compat import task_provides_capability
+
+    source = tmp_path / "source"
+    task = native_tree(source)
+    solution = task / "solution"
+    solution.mkdir()
+    script = solution / "solve.sh"
+    if solver_kind == "file":
+        script.write_text("#!/bin/sh\necho reference\n")
+    elif solver_kind == "empty":
+        script.touch()
+    elif solver_kind == "directory":
+        script.mkdir()
+    elif solver_kind == "symlink":
+        (task / "reference.sh").write_text("#!/bin/sh\necho reference\n")
+        script.symlink_to("../reference.sh")
+    instance, = HarborNativeAdapter(spec()).list_instances(source_dir=source, split="test")
+    expected = solver_kind == "file"
+    assert instance.tags.get("oracle_eligible") == str(expected).lower()
+    assert task_provides_capability(
+        {"verifier": {"name": "script"}}, "solution_solve_sh", tags=instance.tags,
+    ) is expected
 
 
 def test_projection_is_pure_and_preserves_independent_requirements():
@@ -233,16 +262,27 @@ async def test_worker_rejects_before_factories_or_model_launch(tmp_path):
 @pytest.mark.parametrize(
     "body,rewards",
     [
-        ('echo 0 > "$LOOM_HARBOR_LOG_DIR/reward.txt"; exit 1', {"resolved": 0.0}),
-        ('echo .25 > "$LOOM_HARBOR_LOG_DIR/reward.txt"', {"resolved": 0.25}),
+        ('echo 0 > "$LOOM_HARBOR_LOG_DIR/reward.txt"; exit 1', {"reward": 0.0}),
+        ('echo .25 > "$LOOM_HARBOR_LOG_DIR/reward.txt"', {"reward": 0.25}),
         (
             'echo \'{"score": 0, "partial": 0.5}\' > "$LOOM_HARBOR_LOG_DIR/reward.json"',
             {"score": 0, "partial": 0.5},
         ),
+        (
+            'echo .3 > "$LOOM_HARBOR_LOG_DIR/reward.txt"; '
+            'echo \'{"reward": 0.345}\' > "$LOOM_HARBOR_LOG_DIR/reward.json"',
+            {"reward": 0.345},
+        ),
+        (
+            'echo garbage > "$LOOM_HARBOR_LOG_DIR/reward.txt"; '
+            'echo \'{"reward": 0}\' > "$LOOM_HARBOR_LOG_DIR/reward.json"',
+            {"reward": 0},
+        ),
     ],
 )
-def test_native_reward_bridge_preserves_numeric_rewards(tmp_path, body, rewards):
-    result, output = run_bridge(tmp_path, body)
+@pytest.mark.parametrize("workdir_bridge", [False, True])
+def test_native_reward_bridge_preserves_numeric_rewards(tmp_path, body, rewards, workdir_bridge):
+    result, output = run_bridge(tmp_path, body, workdir_bridge=workdir_bridge)
     assert result.returncode == 0, result.stderr
     assert json.loads(output.read_text())["rewards"] == rewards
 
@@ -255,15 +295,20 @@ def test_native_reward_bridge_preserves_numeric_rewards(tmp_path, body, rewards)
         'echo garbage > "$LOOM_HARBOR_LOG_DIR/reward.txt"',
         'echo \'{"score": true}\' > "$LOOM_HARBOR_LOG_DIR/reward.json"',
         'echo 1 > "$LOOM_HARBOR_LOG_DIR/reward.txt"; exit 124',
+        'echo 1 > "$LOOM_HARBOR_LOG_DIR/reward.txt"; '
+        'echo garbage > "$LOOM_HARBOR_LOG_DIR/reward.json"',
+        'echo 1 > "$LOOM_HARBOR_LOG_DIR/reward.txt"; '
+        'echo \'{"reward": null}\' > "$LOOM_HARBOR_LOG_DIR/reward.json"',
     ],
 )
-def test_native_reward_failure_cannot_reuse_stale_success(tmp_path, body):
-    result, output = run_bridge(tmp_path, body)
+@pytest.mark.parametrize("workdir_bridge", [False, True])
+def test_native_reward_failure_cannot_reuse_stale_success(tmp_path, body, workdir_bridge):
+    result, output = run_bridge(tmp_path, body, workdir_bridge=workdir_bridge)
     assert result.returncode != 0
     assert not output.exists()
 
 
-def run_bridge(root: Path, body: str):
+def run_bridge(root: Path, body: str, *, workdir_bridge: bool = False):
     tests, logs = root / "tests", root / "logs"
     tests.mkdir()
     logs.mkdir()
@@ -272,7 +317,9 @@ def run_bridge(root: Path, body: str):
     output = root / "result.json"
     output.write_text('{"rewards":{"resolved":1}}')
     script = root / "run.sh"
-    script.write_bytes(native_verifier_run_sh_bytes())
+    script.write_bytes(
+        native_verifier_workdir_run_sh_bytes() if workdir_bridge else native_verifier_run_sh_bytes()
+    )
     result = subprocess.run(
         ["sh", str(script)],
         capture_output=True,

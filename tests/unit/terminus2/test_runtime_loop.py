@@ -79,6 +79,8 @@ def _patch_harbor(
     constructed: list[dict[str, object]] | None = None,
 ) -> None:
     class _FakeTerminus2:
+        capabilities = SimpleNamespace(skills=True, mcp_servers=True)
+
         def __init__(self, logs_dir, **kwargs: object) -> None:
             self._logs_dir = logs_dir
             if constructed is not None:
@@ -469,6 +471,8 @@ async def test_runtime_cleanup_leaves_process_env_unchanged_on_failure(
         pass
 
     class _FailingTerminus2:
+        capabilities = SimpleNamespace(skills=True, mcp_servers=True)
+
         def __init__(self, logs_dir, **kwargs: object) -> None:
             self._logs_dir = logs_dir
 
@@ -568,6 +572,8 @@ async def test_runtime_wraps_tmux_no_server_runtime_error_as_agent_error(
     )
 
     class _FailingTerminus2:
+        capabilities = SimpleNamespace(skills=True, mcp_servers=True)
+
         def __init__(self, logs_dir, **kwargs: object) -> None:
             self._logs_dir = logs_dir
 

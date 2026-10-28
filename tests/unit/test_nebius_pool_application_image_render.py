@@ -63,7 +63,8 @@ def test_personal_pool_job_keeps_real_claim_isolation_absolute_deadline_and_reso
     assert first.job["metadata"]["name"] == first.configmap["metadata"]["name"] == "loom-pool-aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa"
     pod = first.job["spec"]["template"]["spec"]
     assert pod["volumes"][0]["configMap"]["name"] == first.configmap["metadata"]["name"]
-    assert {row["name"] for row in pod["initContainers"][1]["volumeMounts"]} == {"build", "builder-tmp", "deadline-runtime"}
+    assert next(v for v in pod["volumes"] if v["name"] == "builder-subids")["configMap"]["name"] == first.configmap["metadata"]["name"]
+    assert {row["name"] for row in pod["initContainers"][1]["volumeMounts"]} == {"build", "builder-tmp", "builder-subids", "deadline-runtime"}
     assert pod["automountServiceAccountToken"] is False
     for phase in [*pod["initContainers"], *pod["containers"]]:
         assert phase["command"][0].endswith("/loom-build-deadline")
