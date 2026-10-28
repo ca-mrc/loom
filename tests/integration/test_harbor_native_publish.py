@@ -19,6 +19,7 @@ from loom.benchmark_profiles import resolve_benchmark_selectors
 from loom.db.schema import (
     Benchmark,
     Task,
+    TaskBundleSource,
     TaskBundleSourceIncarnation,
     TaskBundleSourceReference,
 )
@@ -45,8 +46,15 @@ async def _native_cli(descriptor, postgres_url):
 
 
 @pytest.fixture
-async def native_publication(postgres_url, tmp_path, monkeypatch, minio_tls):
+async def native_publication(postgres_url, tmp_path, monkeypatch, minio_tls, request):
     import tomli_w
+
+    if getattr(request, "param", None) == "published-v1":
+        from loom import harbor_bundle
+        from loom.harbor_verifier_script import native_verifier_run_sh_templates
+
+        legacy_bridge = native_verifier_run_sh_templates()[1]
+        monkeypatch.setattr(harbor_bundle, "native_verifier_run_sh_bytes", lambda: legacy_bridge)
 
     profile = "admission-subset@" + uuid4().hex
     source = tmp_path / "source"
@@ -146,6 +154,117 @@ async def test_native_published_solver_controls_oracle_admission(native_publicat
         task = await session.get(Task, profile + "/upstream/sample")
         assert (task.source, task.checksum) == admitted
         assert (await session.get(Benchmark, profile)).execution_state == "runnable"
+
+
+@pytest.mark.parametrize("native_publication", ["published-v1"], indirect=True)
+async def test_native_converter_upgrade_preserves_old_sources_and_invalidates_admission(
+    native_publication, postgres_url, monkeypatch,
+):
+    from loom import harbor_bundle
+    from loom.harbor_verifier_script import (
+        VERIFIER_SCRIPT_PATH,
+        native_verifier_run_sh_bytes,
+        native_verifier_run_sh_templates,
+    )
+
+    profile, descriptor, sessions, options, source_task = native_publication
+    upstream_bytes = (source_task / "task.toml").read_bytes()
+    descriptor_bytes = descriptor.read_bytes()
+    async with sessions() as session:
+        old_tasks = {
+            row.id: (row.checksum, deepcopy(row.config), row.source, deepcopy(row.source_provenance))
+            for row in await session.scalars(select(Task).where(Task.benchmark_id == profile))
+        }
+        source_ids = tuple(await session.scalars(select(TaskBundleSource.id).where(
+            TaskBundleSource.source_uri.in_(facts[2] for facts in old_tasks.values()),
+        )))
+    assert len(source_ids) == 2
+
+    async def retained_sources():
+        async with sessions() as session:
+            sources = {row.id: deepcopy(row.spec_json) for row in await session.scalars(
+                select(TaskBundleSource).where(TaskBundleSource.id.in_(source_ids)),
+            )}
+            incarnations = {row.id: (row.source_id, row.state) for row in await session.scalars(
+                select(TaskBundleSourceIncarnation).where(
+                    TaskBundleSourceIncarnation.source_id.in_(source_ids),
+                ),
+            )}
+        return sources, incarnations
+
+    async def activate():
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "loom_cli", "datasets", "activate", "--profile", profile,
+            "--harbor-source", str(descriptor),
+            env={**os.environ, "LOOM_DB_URL": postgres_url},
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate()
+        assert process.returncode == 0, stderr.decode()
+        assert "2 tasks admitted; runtime qualification unchanged" in stdout.decode()
+
+    before = await retained_sources()
+    assert len(before[1]) == 2 and all(state == "available" for _, state in before[1].values())
+    old_source = old_tasks[profile + "/upstream/sample"][2]
+    old_key = old_source.split(options["bucket"] + "/", 1)[1] + VERIFIER_SCRIPT_PATH
+    store = options["object_store"]._client
+    response = store.get_object(Bucket=options["bucket"], Key=old_key)
+    try:
+        assert response["Body"].read() == native_verifier_run_sh_templates()[1]
+        old_version = response["VersionId"]
+    finally:
+        response["Body"].close()
+    assert old_version not in {None, "null"}
+
+    # The current canonical operator admits the already published V1 bytes;
+    # it must not rerun today's converter or rewrite their source authority.
+    await activate()
+    async with sessions() as session:
+        benchmark = await session.get(Benchmark, profile)
+        assert benchmark.execution_state == "runnable"
+        assert benchmark.profile_provenance["runtime_verified"] is False
+        assert old_tasks == {
+            row.id: (row.checksum, row.config, row.source, row.source_provenance)
+            for row in await session.scalars(select(Task).where(Task.benchmark_id == profile))
+        }
+    assert await retained_sources() == before
+    assert store.head_object(Bucket=options["bucket"], Key=old_key)["VersionId"] == old_version
+
+    monkeypatch.setattr(harbor_bundle, "native_verifier_run_sh_bytes", native_verifier_run_sh_bytes)
+    changed = await benchmark_publish.publish_benchmark(**options)
+    assert changed.updated == 2 and changed.inserted == 0 and changed.uploaded_objects > 0
+    assert descriptor.read_bytes() == descriptor_bytes
+    assert (source_task / "task.toml").read_bytes() == upstream_bytes
+    async with sessions() as session:
+        benchmark = await session.get(Benchmark, profile)
+        assert benchmark.execution_state == "pending"
+        assert benchmark.profile_provenance["runtime_verified"] is False
+        current_tasks = {row.id: (row.checksum, row.source) for row in await session.scalars(
+            select(Task).where(Task.benchmark_id == profile),
+        )}
+        assert all(checksum != old_tasks[identity][0] and source != old_tasks[identity][2]
+                   for identity, (checksum, source) in current_tasks.items())
+        with pytest.raises(HTTPException) as failure:
+            await resolve_benchmark_selectors(session, [profile], require_runnable=True)
+        assert failure.value.detail["reason"] == "benchmark_not_runnable"
+    assert await retained_sources() == before
+    response = store.get_object(Bucket=options["bucket"], Key=old_key, VersionId=old_version)
+    try:
+        assert response["Body"].read() == native_verifier_run_sh_templates()[1]
+    finally:
+        response["Body"].close()
+
+    await activate()
+    repeated = await benchmark_publish.publish_benchmark(**options)
+    assert repeated.unchanged == 2 and repeated.uploaded_objects == 0
+    async with sessions() as session:
+        benchmark = await session.get(Benchmark, profile)
+        assert benchmark.execution_state == "runnable"
+        assert benchmark.profile_provenance["runtime_verified"] is False
+        assert current_tasks == {row.id: (row.checksum, row.source) for row in await session.scalars(
+            select(Task).where(Task.benchmark_id == profile),
+        )}
+    assert await retained_sources() == before
 
 
 @pytest.mark.parametrize("damage,diagnostic", [
