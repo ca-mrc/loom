@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -392,6 +393,144 @@ async def test_local_no_card_usage_is_unknown_across_read_apis(
                 )
             ).one()
             assert tuple(row) == ("local-server-no-card", {})
+    finally:
+        with engine.begin() as db:
+            db.execute(delete(RateCard).where(RateCard.id == card.id))
+        engine.dispose()
+
+
+async def test_price_snapshots_read_only_trial_scoped_price_bases(
+    usage_setup: tuple[FastAPI, str, str, str, str],
+    postgres_url: str,
+) -> None:
+    """Frozen prices come from the Trials' own calls, never whole raw logs (#2687)."""
+    from sqlalchemy import event
+
+    from loom_service.usage_accounting import (
+        price_snapshots_for_trial_sets,
+        price_snapshots_for_trials,
+    )
+
+    app, _raw, _admin_raw, team_str, task_id = usage_setup
+    team_id, batch_id = UUID(team_str), uuid4()
+    ts = datetime(2026, 6, 3, 12, tzinfo=UTC)
+    card = RateCardTable.model_validate(
+        {
+            "id": "snapshot-card-" + uuid4().hex,
+            "captured_at": ts,
+            "provider": "openai",
+            "entries": [
+                {
+                    "provider": "openai",
+                    "model": "gpt-4o",
+                    "input_per_mtok": 2.5,
+                    "output_per_mtok": 10,
+                    "cache_read_per_mtok": 0,
+                    "cache_write_per_mtok": 0,
+                }
+            ],
+        }
+    )
+    card_hash = hash_table(card)
+
+    def basis(revision: int, input_price: float) -> tuple[str, dict]:
+        value = {
+            "mode": "catalog", "model": "gpt-4o", "currency": "USD",
+            "unit": "usd_per_1m_tokens", "catalog_id": "catalog-1",
+            "supplier_id": "supplier-1", "revision": revision,
+            "prices": {"input_usd_per_1m": input_price, "output_usd_per_1m": 15},
+        }
+        return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest(), value
+
+    hash_r1, basis_r1 = basis(1, 5)
+    hash_r2, basis_r2 = basis(2, 6)
+    original, rerun, unrelated = uuid4(), uuid4(), uuid4()
+    raw_log = {"raw_response": "x" * 4096, "provider_request_id": "req-1"}
+    calls = [
+        (original, hash_r1, {**raw_log, "_loom_price_basis": basis_r1}),
+        (original, hash_r1, {**raw_log, "_loom_price_basis": basis_r1}),
+        (original, card_hash, {"_loom_cost_source": "rate-card"}),
+        (original, "failed-upstream", {}),
+        (original, "facade:tokens-only", {}),
+        (rerun, hash_r2, {**raw_log, "_loom_price_basis": basis_r2}),
+        # Another Trial's call must never supply this Batch's snapshot.
+        (unrelated, hash_r1, {"_loom_price_basis": {**basis_r1, "revision": 99}}),
+    ]
+    engine = create_engine(postgres_url)
+    with engine.begin() as db:
+        db.execute(
+            insert(RateCard).values(id=card.id, captured_at=ts, table=card.model_dump(mode="json"))
+        )
+        db.execute(
+            insert(Batch).values(
+                id=batch_id, team_id=team_id, name="price snapshots",
+                task_filter={"task_ids": [task_id], "subset_kind": "explicit"},
+                trial_config={}, state="finished", created_by_token_prefix="pricing",
+                expected_trial_count=3, combinations=[],
+            )
+        )
+        for index, trial_id in enumerate((original, rerun, unrelated)):
+            db.execute(
+                insert(Trial).values(
+                    id=trial_id, task_id=task_id, team_id=team_id, batch_id=batch_id,
+                    state="succeeded", config={}, requires_caps={}, submitted_at=ts,
+                    finished_at=ts, combination_idx=0, sample_idx=index,
+                    result={"aggregate_reward": 1.0},
+                )
+            )
+        for trial_id, rate_hash, extras in calls:
+            db.execute(
+                insert(LlmCall).values(
+                    id=uuid4(), trial_id=trial_id, team_id=team_id, step_id="main",
+                    model="openai/gpt-4o", dialect="openai_chat", input_tokens=10,
+                    output_tokens=2, provider_extras=extras, cost_usd=Decimal("0.01"),
+                    rate_card_hash=rate_hash, captured_at=ts,
+                )
+            )
+
+    statements: list[str] = []
+    try:
+        async with app.state.session_factory() as session:
+            sync_engine = session.bind.sync_engine
+
+            def capture(_conn, _cursor, statement, *_args) -> None:
+                statements.append(statement)
+
+            event.listen(sync_engine, "before_cursor_execute", capture)
+            try:
+                original_snapshots, effective_snapshots = await price_snapshots_for_trial_sets(
+                    session, {original}, {original, rerun},
+                )
+            finally:
+                event.remove(sync_engine, "before_cursor_execute", capture)
+            assert original_snapshots == await price_snapshots_for_trials(session, [original])
+            assert await price_snapshots_for_trials(session, []) == []
+
+        by_hash = {row["rate_card_hash"]: row for row in effective_snapshots}
+        assert [row["rate_card_hash"] for row in original_snapshots] == sorted(
+            [hash_r1, card_hash, "failed-upstream"]
+        )
+        assert [row["rate_card_hash"] for row in effective_snapshots] == sorted(
+            [hash_r1, hash_r2, card_hash, "failed-upstream"]
+        )
+        assert by_hash[hash_r1]["resolved"] is True
+        assert by_hash[hash_r1]["pricing_version"] == "1"
+        assert by_hash[hash_r1]["prices"]["input_usd_per_1m"] == 5
+        assert by_hash[hash_r1]["rate_card_id"] == "catalog-1"
+        assert by_hash[hash_r1]["provider"] == "supplier-1"
+        assert by_hash[hash_r2]["pricing_version"] == "2"
+        assert by_hash[hash_r2]["prices"]["input_usd_per_1m"] == 6
+        assert by_hash[card_hash]["resolved"] is True
+        assert by_hash[card_hash]["rate_card_id"] == card.id
+        assert by_hash["failed-upstream"]["resolved"] is False
+        assert "raw_response" not in json.dumps(effective_snapshots)
+
+        call_reads = [sql for sql in statements if "FROM llm_calls" in sql]
+        assert call_reads
+        for sql in call_reads:
+            assert "llm_calls.trial_id IN" in sql
+            assert "llm_calls.provider_extras," not in sql
+            assert "DISTINCT" not in sql or "provider_extras" not in sql
     finally:
         with engine.begin() as db:
             db.execute(delete(RateCard).where(RateCard.id == card.id))

@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import case, func, select
+from sqlalchemy import Text, case, column, func, select, true, values
 
 from loom.db.schema import LlmCall, ProviderConnection, RateCard, Trial
 from loom.models.types import ModelSpec
@@ -906,19 +906,16 @@ def _rate_card_snapshot(
     }
 
 
-async def price_snapshots_for_hashes(
-    session: Any,
-    hashes: list[str] | set[str] | tuple[str, ...],
-) -> list[dict[str, Any]]:
-    """Resolve persisted LLM-call rate-card hashes to source snapshots.
+_PRICE_BASIS_KEY = "_loom_price_basis"
+# Rate-card and provider-price hashes are SHA-256 digests; anything else
+# (for example `failed-upstream`) can never carry a frozen price basis.
+_PRICE_DIGEST = re.compile(r"[0-9a-f]{64}")
 
-    Facade pseudo-hashes such as `facade:tokens-only` are cost-status signals,
-    not immutable hosted-pricing snapshots, so they are intentionally omitted.
-    """
 
-    wanted = sorted(
+def _wanted_price_hashes(hashes: Iterable[object]) -> list[str]:
+    return sorted(
         {
-            str(value)
+            value
             for value in hashes
             if isinstance(value, str)
             and value
@@ -926,9 +923,9 @@ async def price_snapshots_for_hashes(
             and not _is_facade_rate_card_hash(value)
         }
     )
-    if not wanted:
-        return []
 
+
+async def _rate_card_tables_by_hash(session: Any, wanted: set[str]) -> dict[str, RateCardTable]:
     tables_by_hash: dict[str, RateCardTable] = {}
     rows = (await session.execute(select(RateCard))).scalars().all()
     for row in rows:
@@ -942,43 +939,111 @@ async def price_snapshots_for_hashes(
         table_hash = hash_table(table)
         if table_hash in wanted:
             tables_by_hash[table_hash] = table
+    return tables_by_hash
 
-    frozen: dict[str, dict[str, Any]] = {}
-    calls = (await session.execute(select(LlmCall.rate_card_hash, LlmCall.provider_extras)
-        .where(LlmCall.rate_card_hash.in_(wanted), LlmCall.provider_extras.has_key("_loom_price_basis"))
-        .distinct())).all()
-    for digest, extras in calls:
-        basis = extras.get("_loom_price_basis")
-        if isinstance(basis, dict):
-            frozen[digest] = {
-                **_rate_card_snapshot(rate_card_hash=digest, table=None), **basis,
-                "rate_card_id": basis.get("catalog_id"), "resolved": True,
-                "provider": basis.get("supplier_id"),
-                "pricing_version": str(basis["revision"]) if "revision" in basis else None,
-                "last_checked_at": basis.get("updated_at"),
-            }
 
-    return [
-        frozen.get(rate_card_hash) or _rate_card_snapshot(
-            rate_card_hash=rate_card_hash,
-            table=tables_by_hash.get(rate_card_hash),
+async def _frozen_price_bases(
+    session: Any,
+    hashes: Sequence[str],
+    trial_ids: Sequence[UUID],
+) -> dict[str, dict[str, Any]]:
+    """Read one frozen price basis per hash from the given Trials' calls.
+
+    A provider-price hash is the digest of its basis, so any one call with
+    the hash carries the same basis. Only the basis key is extracted, never
+    the full raw-log JSON, and the lookup stays inside the Trials' calls (#2687).
+    """
+    if not hashes or not trial_ids:
+        return {}
+    wanted = values(column("rate_card_hash", Text), name="wanted_hashes").data(
+        [(digest,) for digest in hashes],
+    )
+    call = (
+        select(LlmCall.provider_extras[_PRICE_BASIS_KEY].label("basis"))
+        .where(
+            LlmCall.trial_id.in_(list(trial_ids)),
+            LlmCall.rate_card_hash == wanted.c.rate_card_hash,
+            LlmCall.provider_extras.has_key(_PRICE_BASIS_KEY),
         )
-        for rate_card_hash in wanted
+        .limit(1)
+        .lateral("priced_call")
+    )
+    rows = (
+        await session.execute(
+            select(wanted.c.rate_card_hash, call.c.basis).select_from(
+                wanted.join(call, true()),
+            ),
+        )
+    ).all()
+    return {digest: basis for digest, basis in rows if isinstance(basis, dict)}
+
+
+def _frozen_snapshot(digest: str, basis: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **_rate_card_snapshot(rate_card_hash=digest, table=None), **basis,
+        "rate_card_id": basis.get("catalog_id"), "resolved": True,
+        "provider": basis.get("supplier_id"),
+        "pricing_version": str(basis["revision"]) if "revision" in basis else None,
+        "last_checked_at": basis.get("updated_at"),
+    }
+
+
+async def price_snapshots_for_trial_sets(
+    session: Any,
+    *trial_id_sets: Iterable[UUID],
+) -> list[list[dict[str, Any]]]:
+    """Resolve price snapshots for several Trial sets with one shared lookup.
+
+    Returns one snapshot list per input set, in input order. Facade
+    pseudo-hashes such as `facade:tokens-only` are cost-status signals, not
+    immutable hosted-pricing snapshots, so they are intentionally omitted.
+    """
+
+    id_sets = [frozenset(ids) for ids in trial_id_sets]
+    hashes_by_set: dict[frozenset[UUID], list[str]] = {}
+    for ids in id_sets:
+        if ids and ids not in hashes_by_set:
+            hashes_by_set[ids] = _wanted_price_hashes(
+                (
+                    await session.execute(
+                        select(LlmCall.rate_card_hash)
+                        .where(LlmCall.trial_id.in_(list(ids)))
+                        .distinct(),
+                    )
+                ).scalars(),
+            )
+    wanted = set().union(*hashes_by_set.values()) if hashes_by_set else set()
+    if not wanted:
+        return [[] for _ in id_sets]
+
+    tables_by_hash = await _rate_card_tables_by_hash(session, wanted)
+    frozen = await _frozen_price_bases(
+        session,
+        sorted(
+            digest for digest in wanted
+            if digest not in tables_by_hash and _PRICE_DIGEST.fullmatch(digest)
+        ),
+        sorted(set().union(*hashes_by_set)),
+    )
+    snapshots = {
+        digest: (
+            _frozen_snapshot(digest, frozen[digest]) if digest in frozen
+            else _rate_card_snapshot(rate_card_hash=digest, table=tables_by_hash.get(digest))
+        )
+        for digest in wanted
+    }
+    return [
+        [snapshots[digest] for digest in hashes_by_set.get(ids, [])]
+        for ids in id_sets
     ]
 
 
 async def price_snapshots_for_trials(
     session: Any,
-    trial_ids: list[UUID] | tuple[UUID, ...] | set[UUID],
+    trial_ids: Iterable[UUID],
 ) -> list[dict[str, Any]]:
-    if not trial_ids:
-        return []
-    hashes = (
-        await session.execute(
-            select(LlmCall.rate_card_hash).where(LlmCall.trial_id.in_(list(trial_ids))).distinct(),
-        )
-    ).scalars()
-    return await price_snapshots_for_hashes(session, set(hashes))
+    (snapshots,) = await price_snapshots_for_trial_sets(session, trial_ids)
+    return snapshots
 
 
 def _priced_call_filter() -> Any:

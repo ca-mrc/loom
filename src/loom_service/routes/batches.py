@@ -167,7 +167,7 @@ from loom_service.usage_accounting import (
     _priced_call_filter,
     empty_usage_projection,
     estimate_pre_run_batch_budget,
-    price_snapshots_for_trials,
+    price_snapshots_for_trial_sets,
     project_batch_budget,
     summarize_llm_evidence_for_trials,
     summarize_usage_counts,
@@ -2506,10 +2506,6 @@ async def get_batch(
     summary = _summary_from_trials(original_trials)
     avg_reward = _rollup_from_trials(original_trials)
     usage = await _usage_totals_for_trials(s, original_trials)
-    price_snapshots = await price_snapshots_for_trials(
-        s,
-        {trial.id for trial in original_trials},
-    )
     llm_call_counts = await _llm_call_counts_for_trials(s, original_trials)
     llm_evidence = summarize_llm_evidence_for_trials(
         original_trials,
@@ -2571,8 +2567,9 @@ async def get_batch(
         effective_trials,
         llm_call_counts=effective_llm_call_counts,
     )
-    effective_price_snapshots = await price_snapshots_for_trials(
+    price_snapshots, effective_price_snapshots = await price_snapshots_for_trial_sets(
         s,
+        {trial.id for trial in original_trials},
         {trial.id for trial in effective_trials},
     )
     service_execution_summary = (
