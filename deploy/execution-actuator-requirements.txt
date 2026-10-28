@@ -9,6 +9,7 @@ prometheus-client>=0.19,<1.0
 psycopg[binary]>=3.2,<4.0
 pydantic>=2.6,<3.0
 pydantic-settings>=2.2,<3.0
+pyyaml>=6.0,<7
 rfc8785>=0.1.4,<0.2
 # Match uv.lock; the actuator requires SQLAlchemy's greenlet-backed async bridge.
 sqlalchemy[asyncio]==2.0.51
