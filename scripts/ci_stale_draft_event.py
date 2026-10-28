@@ -5,8 +5,10 @@ A Draft `synchronize` delivered in the same second as `ready_for_review` can get
 a newer suite than the Ready run. Filtered, it would hide that run's required
 contexts and block auto-merge on a green head. That stale event runs the full
 gate instead, but only when the live PR is Ready on the same head and its
-newest full suite is older than this run. API failures keep the event filtered,
-which cannot authorize a merge.
+newest full suite is older than this run. GitHub can also drop the Ready run
+entirely (#2677); when no full suite appears on a Ready head, this run is the
+only one left to publish the required contexts and runs the full gate too.
+API failures keep the event filtered, which cannot authorize a merge.
 """
 
 from __future__ import annotations
@@ -103,7 +105,9 @@ def classify(
             if max(full) > own_suite:
                 return "filtered", "a newer full suite exists on this head"
             return "full", "stale draft event is newer than the Ready full suite on this head"
-    return "filtered", "no full suite on this head yet"
+    # Ready on this head with no Ready run: GitHub dropped it. If it arrives
+    # later its newer suite still wins; the cost is one extra full run.
+    return "full", "live pull request is Ready on this head and has no full suite"
 
 
 def main() -> int:
